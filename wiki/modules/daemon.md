@@ -27,6 +27,15 @@ store produces a bounded failed event while the remaining project ports continue
 Patrol Fix otherwise uses the standard task/status contracts and adds no daemon
 operational projection.
 
+Each Patrol Fix admission scan uses one non-creating managed-directory read
+session. It validates the complete bounded filename inventory before streaming
+the caller-validated record names through one opened parent directory;
+canonical record and descriptor/name-binding validation stay per record.
+Directory traversal is therefore constant as the record count rises, while
+bounded record reads and validation remain linear. Reads remain lock-free and
+do not create an absent store. This changes no migration, watcher, cache,
+schema, scheduler policy, capacity, or task materialization behavior.
+
 Daemon and bot startup never run storage migrations. Operators perform every
 global and project cutover explicitly through `hive migrate` or
 `hive migrate --all` while those processes are stopped. Startup opens only the
@@ -760,6 +769,19 @@ the ordinary retry action available instead of inventing a request. Terminal
 recovery receipts remain durable for history, while filesystem pruning is
 throttled to one pass per hour so a five-second dispatcher loop does not
 rescan and rewrite retention state continuously.
+
+Recovery generation checks also share one immutable dependency-admission
+context per queue scan. The dispatcher creates it lazily only when a recovery
+request reaches the coordinator, then reuses its global project/task indexes
+and verdict cache for every later request in that scan. Each request still
+re-resolves its canonical task and reads that task's state file under the task
+lock. Empty request queues skip all global-index setup. A context-build failure
+is retained for the rest of the scan and blocks each affected request as
+`admission_context_unavailable`, without repeating the fleet traversal or
+misclassifying the failure as a spawn error. A project-registry read failure is
+likewise read once and blocks project-scoped requests as
+`project_registry_unavailable`; recovery requests remain queued without
+dispatch-failure pacing.
 
 ```
 :dispatch_request_observed   request_id=… project=… slug=…

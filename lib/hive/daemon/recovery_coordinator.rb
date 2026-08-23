@@ -606,7 +606,7 @@ module Hive
       # daemon immediately before ordinary attempt admission. It can recover a
       # crash after the marker rewrite because the expected markerless
       # fingerprint was persisted before mutation.
-      def resume(request:, row:, now: Time.now.utc)
+      def resume(request:, row:, now: Time.now.utc, admission_context: nil)
         now = now.utc
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
@@ -663,7 +663,9 @@ module Hive
               )
             end
 
-            generation = generation_for_current(locked_task, current_request)
+            generation = generation_for_current(
+              locked_task, current_request, admission_context: admission_context
+            )
             if recovery["phase"] == "admitted"
               if admission_failure_recovery?(recovery)
                 return block_request(
@@ -685,11 +687,11 @@ module Hive
                   expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
 
                 markerless = Hive::Markers.without_markers(File.binread(locked_task.state_file))
-                predicted = @generation_resolver.call(
-                  locked_task,
-                  project: current_request.project,
+                predicted = call_generation_resolver(
+                  locked_task, project: current_request.project,
                   intended_stage: current_request.expected_stage,
-                  state_file_content: markerless
+                  state_file_content: markerless,
+                  admission_context: admission_context
                 )
                 return block_request(
                   current_request, "generation_conflict",
@@ -705,7 +707,9 @@ module Hive
                   current_request, "generation_conflict",
                   owner: "operator", request_locked: true
                 ) unless cleared
-                generation = generation_for_current(locked_task, current_request)
+                generation = generation_for_current(
+                  locked_task, current_request, admission_context: admission_context
+                )
                 return block_request(
                   current_request, "generation_conflict",
                   owner: "operator", request_locked: true
@@ -1273,9 +1277,11 @@ module Hive
         Hive::TaskResolver.new(target, project_filter: project, stage_filter: stage).resolve
       end
 
-      def resolve_generation(task, project:, intended_stage:, state_file_content:)
+      def resolve_generation(task, project:, intended_stage:, state_file_content:,
+                             admission_context: nil)
         progress = Hive::Attempts::Generation.artifact_token(
-          task, state_file_content: state_file_content
+          task, state_file_content: state_file_content,
+          admission_context: admission_context
         )
         Hive::Attempts::Generation.resolve(
           task: task,
@@ -1285,13 +1291,24 @@ module Hive
         )
       end
 
-      def generation_for_current(task, request)
-        @generation_resolver.call(
-          task,
-          project: request.project,
+      def generation_for_current(task, request, admission_context: nil)
+        call_generation_resolver(
+          task, project: request.project,
           intended_stage: request.expected_stage,
-          state_file_content: File.binread(task.state_file)
+          state_file_content: File.binread(task.state_file),
+          admission_context: admission_context
         )
+      end
+
+      def call_generation_resolver(task, project:, intended_stage:, state_file_content:,
+                                   admission_context: nil)
+        options = {
+          project: project,
+          intended_stage: intended_stage,
+          state_file_content: state_file_content
+        }
+        options[:admission_context] = admission_context if admission_context
+        @generation_resolver.call(task, **options)
       end
 
       def generation_matches?(generation, recovery)

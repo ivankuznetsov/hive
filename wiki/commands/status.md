@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-23
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -23,6 +23,7 @@ table.
 | `hive status --operational` | Explicit alias for the same concise human view. |
 | `hive status --operational --json` | `hive-operational-status.v4` agent document. V4 adds a required nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
 | `hive status --json` | Complete `hive-status.v7` graph for daemon, bot, TUI, and current consumers. |
+| `hive status --json --daemon-task PROJECT:SLUG ...` | Internal daemon fast-tick surface. Emits `partial: true`, reads only the named task folders across bounded stage paths, and holds dependency-bearing rows until the next full graph scan. |
 | `hive status --full` | Former grouped detailed human table. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
 

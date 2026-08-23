@@ -149,6 +149,18 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_includes result.error, "project_load_failed"
     end
 
+    wrong_project = make_envelope(projects: [ {
+      "name" => "other", "tasks" => []
+    } ]).merge("partial" => true)
+    with_fake_status(JSON.generate(wrong_project), expected_args: expected) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+        [ [ "p", "changed" ] ]
+      )
+
+      refute result.ok
+      assert_includes result.error, "projects do not match"
+    end
+
     extra = make_envelope(projects: [ {
       "name" => "p", "tasks" => [ task_row(slug: "other") ]
     } ]).merge("partial" => true)

@@ -36,6 +36,31 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_daemon_task_call_emits_the_partial_envelope
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260823-abcd"
+      write_status_task(
+        hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING"
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{slug}" ]
+      )
+
+      output, error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ project ] }
+      ) do
+        capture_io { command.call }
+      end
+
+      payload = JSON.parse(output)
+      assert_equal true, payload.fetch("partial")
+      assert_equal [ slug ], payload.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+      assert_equal "", error
+    end
+  end
+
   def test_daemon_task_payload_holds_dependencies_for_the_authoritative_full_scan
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -64,6 +89,33 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "dependency_validation_failed",
                    row.dig("admission_error", "reason_code")
       assert_includes row.dig("admission_error", "safe_correction"), "full dependency scan"
+    end
+  end
+
+  def test_daemon_task_payload_fails_closed_when_dependency_projection_raises
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260823-cdef"
+      write_status_task(
+        hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{slug}" ]
+      )
+      command.define_singleton_method(:apply_dependency_verdict) do |*|
+        raise "synthetic dependency failure"
+      end
+
+      payload = nil
+      _output, error = capture_io do
+        payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      end
+      row = payload.dig("projects", 0, "tasks", 0)
+
+      assert_equal true, row.fetch("blocked")
+      assert_equal "dependency_validation_failed",
+                   row.dig("admission_error", "reason_code")
+      assert_includes error, "holding changed rows until the next full scan"
     end
   end
 

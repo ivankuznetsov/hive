@@ -4044,6 +4044,27 @@ def test_run_forever_refreshes_only_changed_tasks_when_the_fast_probe_detects_ch
   assert events_include?(logger, :dispatched)
 end
 
+def test_run_forever_runs_a_full_tick_for_an_ancillary_probe_change
+  dispatcher, = make_dispatcher(rows: [])
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:recover_dispatch_claims) { |now:| nil }
+  dispatcher.define_singleton_method(:full_tick_due?) { |_now| false }
+  dispatcher.define_singleton_method(:cheap_probe) do |now:|
+    Hive::Daemon::Dispatcher::FastProbe.new(task_keys: [], full_tick: true)
+  end
+  ticks = 0
+  dispatcher.define_singleton_method(:tick) do |now:|
+    ticks += 1
+    request_shutdown!
+    true
+  end
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+  dispatcher.run_forever
+
+  assert_equal 1, ticks
+end
+
 def test_run_forever_skips_changed_task_tick_when_shutdown_requested_mid_probe
   rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
   dispatcher, supervisor, _ctrl, _logger, _mw = make_dispatcher(rows: rows)
@@ -4355,6 +4376,20 @@ def test_incremental_row_removal_does_not_leave_a_dead_probe_slot
   refute_includes members, removed_key
 end
 
+def test_incremental_row_removal_resets_an_empty_probe_cursor
+  status_row = row(slug: "only-task", state_file: "/tmp/hive-only-probe.md")
+  dispatcher, = make_dispatcher(rows: [ status_row ])
+  dispatcher.send(:refresh_status_index, [ status_row ])
+  dispatcher.instance_variable_set(:@tracked_state_file_cursor, 1)
+
+  dispatcher.send(
+    :replace_incremental_status_rows, [ [ "p1", "only-task" ] ], []
+  )
+
+  assert_empty dispatcher.instance_variable_get(:@tracked_state_file_order)
+  assert_equal 0, dispatcher.instance_variable_get(:@tracked_state_file_cursor)
+end
+
 def test_changed_task_ticks_do_not_delay_the_periodic_full_repair_scan
   status_row = row(action: nil, command: nil)
   dispatcher, = make_dispatcher(rows: [ status_row ])
@@ -4459,6 +4494,49 @@ def test_live_heartbeat_tick_does_not_reconcile_attempt_history
   assert dispatcher.tick_changed(
     task_keys: [ [ "p1", "external" ] ], now: T0 + 1
   )
+end
+
+def test_changed_task_tick_stops_when_attempt_reconciliation_fails
+  ready = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
+  reconciler = Object.new
+  reconciler.define_singleton_method(:reconcile) do |now:|
+    raise "synthetic attempt reconciliation failure"
+  end
+  dispatcher, supervisor, _controller, logger = make_dispatcher(
+    rows: [ ready ], attempt_reconciler: reconciler
+  )
+
+  refute dispatcher.tick_changed(
+    task_keys: [ [ "p1", "s1" ] ], now: T0 + 1
+  )
+  assert_empty supervisor.spawned
+  assert logger.events.any? { |name, attrs|
+    name == :tick_end && attrs[:action] == "incremental_attempt_reconciliation_failed"
+  }
+end
+
+def test_changed_task_tick_contains_per_task_collaborator_failures
+  status_row = row(action: nil, command: nil)
+  dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [ status_row ])
+  task_ids = Object.new
+  task_ids.define_singleton_method(:backfill) { |*, **| raise "task id boom" }
+  healer = Object.new
+  healer.define_singleton_method(:heal) { |*, **| raise "healer boom" }
+  names = Object.new
+  names.define_singleton_method(:backfill) { |*, **| raise "name boom" }
+  dispatcher.instance_variable_set(:@task_id_backfiller, task_ids)
+  dispatcher.instance_variable_set(:@stale_agent_healer, healer)
+  dispatcher.instance_variable_set(:@display_name_backfiller, names)
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "s1" ] ], now: T0 + 1
+  )
+  messages = logger.events.filter_map do |name, attrs|
+    attrs[:message] if name == :fatal
+  end
+  assert messages.any? { |message| message.include?("task_id_backfiller raised") }
+  assert messages.any? { |message| message.include?("stale_agent_healer raised") }
+  assert messages.any? { |message| message.include?("display_name_backfiller raised") }
 end
 
 def test_request_methods_flip_lifecycle_flags

@@ -685,6 +685,13 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
 
         assert_equal 4, parse_calls,
                      "a bounded full scan should retain its cached subset without churn"
+
+        reader.prepare_decision!(
+          "bounded-cache-1", candidates: [], current_head: "2" * 40, now: NOW + 2
+        )
+
+        assert_equal [ "bounded-cache-1" ],
+                     reader.instance_variable_get(:@record_cache).keys
       end
     end
   end

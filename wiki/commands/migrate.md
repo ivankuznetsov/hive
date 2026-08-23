@@ -1,10 +1,10 @@
 ---
 title: hive migrate
 type: command
-source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
+source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/patrol_fix/admission_store.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-13
-tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage]
+updated: 2026-08-23
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage, patrol]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
@@ -117,6 +117,31 @@ post-feature task from deleting its task-local review root and using a raw
 folder move as a legacy bypass. Non-coding workflows are untouched.
 
 After the locked id/config/stage migration finishes, `hive migrate` also backfills missing/null `display_name` values for every canonical task folder using `Hive::DisplayName::Generator`, the same agent-backed pipeline as `hive generate-name <target>`. Generation runs outside the commit lock because agent naming can take seconds per task; successful names are committed in a separate `.hive-state` commit. Existing display names are skipped, including patrol handoff names such as `Patrol: <finding title>`. A generation failure is fail-soft: that task keeps its null display name and can be retried by rerunning `hive migrate` or `hive generate-name`.
+
+## Patrol Fix admission index cutover
+
+`hive migrate` scans an existing project-local Patrol Fix admission inventory
+once and writes its compact pending index. The index contains occurrence ids
+and their immediate or time-based eligibility only; full admission records
+remain authoritative. A successful rebuild reports the indexed and total
+record counts and is byte-idempotent on a rerun. If an old daemon is running,
+the command synchronously restarts it and performs one final index pass. That
+second pass closes the finite window in which the old process could have
+written without maintaining the new index. Fleet migration performs this
+cutover at most once and otherwise retains its single final restart. If Hive
+cannot replace a running daemon automatically, migration fails with exact
+stop, rerun, and start commands. Projects without an admission inventory are
+not materialized.
+
+Runtime `AdmissionStore#pending` reads the index once and opens at most twice
+its requested record limit when repairing crash residue; a clean tick opens
+only the records it returns. Inventory-lock contention skips one scheduler tick
+instead of stalling the daemon. An existing record inventory with a missing or
+invalid index fails closed with a `hive migrate` remediation instead of
+rebuilding during a daemon tick. There is no periodic migration, full-scan
+repair watcher, or compatibility reader. Normal writers maintain the
+projection, and bounded read-time repair corrects only selected stale entries
+after an interrupted record/index transition.
 
 ## Recovery marker identity cutover
 
@@ -245,6 +270,10 @@ A rerun after successful migration prints that there is nothing to move and keep
   backfill, managed semantic-stage generation/configuration migration,
   repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
+- `test/unit/patrol_fix/admission_store_test.rb` and
+  `test/integration/migrate_test.rb` cover bounded pending-record reads,
+  explicit index construction, stale selected-entry repair, idempotency, and
+  the daemon restart request.
 - `test/unit/workflow_package/task_migrator_test.rb` covers semantic stage
   moves, same-position repins, removed-stage refusal, lock contention, cleanup,
   and idempotency.

@@ -19,12 +19,19 @@ module Hive
       MAX_CANDIDATE_CONTEXT_BYTES = 192 * 1024
       MAX_EVIDENCE = 64
       INVENTORY_LOCK = "inventory.lock".freeze
+      PENDING_INDEX_FILE = "pending-index.json".freeze
+      PENDING_INDEX_SCHEMA = "hive-patrol-fix-pending-index".freeze
+      PENDING_INDEX_SCHEMA_VERSION = 1
+      MAX_PENDING_INDEX_BYTES = 2 * 1024 * 1024
       OCCURRENCE_ID = /\A[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}\z/
       DIGEST = /\A[0-9a-f]{64}\z/
       REVISION = /\A[0-9a-f]{40}\z/
       STATUSES = %w[pending deciding decided blocked materializing bound acknowledged retry_wait].freeze
       DECISIONS = %w[same_root distinct insufficient_evidence].freeze
       CANDIDATE_KINDS = %w[task coding_task pull_request issue].freeze
+      IMMEDIATE_STATUSES = %w[pending decided materializing bound].freeze
+      UNINDEXED = Object.new.freeze
+      private_constant :UNINDEXED
 
       class Error < Hive::Error; end
       class Conflict < Error; end
@@ -42,7 +49,7 @@ module Hive
         id = occurrence_id!(occurrence_id)
         source = snapshot.is_a?(SourceSnapshot) ? snapshot : SourceSnapshot.parse(snapshot)
         @directory.prepare!
-        @directory.with_lock(INVENTORY_LOCK) do
+        with_inventory_lock do
           if (existing = fetch(id))
             unless existing.fetch("source_digest") == source.digest &&
                    existing.fetch("source") == source.to_h
@@ -52,7 +59,7 @@ module Hive
           end
 
           compact_acknowledged_for_capacity!
-          mutate(id, create: true) do |record|
+          mutate_locked(id, create: true) do |record|
             if record
               unless record.fetch("source_digest") == source.digest &&
                      record.fetch("source") == source.to_h
@@ -340,17 +347,66 @@ module Hive
       def pending(now: Time.now.utc, limit: 64)
         max = Integer(limit)
         raise ArgumentError, "admission limit must be between 1 and 64" unless (1..64).cover?(max)
-        each_record.select do |record|
-          status = record.fetch("status")
-          if status == "deciding"
-            expires_at = record.dig("decision_reservation", "expires_at")
-            next expires_at && Time.iso8601(expires_at) <= now
-          end
-          next true if %w[pending decided materializing bound].include?(status)
+        return [].freeze unless pending_inventory_exists?
 
-          retry_at = record.dig("retry", "retry_at")
-          status == "retry_wait" && retry_at && Time.iso8601(retry_at) <= now
-        end.first(max).freeze
+        instant = now.utc
+        result = with_inventory_lock(nonblock: true) do
+          index, original = read_pending_index
+          # One interrupted transition can leave one safe-early index entry.
+          # Give repair an equally bounded allowance so that residue does not
+          # consume the complete scheduler batch and hide ready work.
+          ids = index.fetch("entries").filter_map do |id, eligible_at|
+            id if pending_index_due?(eligible_at, instant)
+          end.min(max * 2)
+          changed = false
+          records = []
+          ids.each do |id|
+            break if records.length == max
+
+            record = fetch(id)
+            actual = record ? pending_index_entry(record) : UNINDEXED
+            indexed = index.fetch("entries").fetch(id)
+            unless indexed == actual
+              set_pending_index_entry(index, id, actual)
+              changed = true
+            end
+            if record && actual != UNINDEXED && pending_index_due?(actual, instant)
+              records << record
+            end
+          end
+          write_pending_index(index, previous_bytes: original) if changed
+          records.freeze
+        end
+        result || [].freeze
+      end
+
+      # Explicit project migration. Runtime readers never rebuild the complete
+      # projection: an existing record inventory without this index is blocked
+      # until `hive migrate` calls this method.
+      def rebuild_pending_index!
+        return { changed: false, records: 0, indexed: 0 }.freeze unless
+          @directory.entry_type("records", missing: true) == :directory
+
+        with_inventory_lock do
+          records = each_record
+          index = empty_pending_index
+          records.each do |record|
+            set_pending_index_entry(
+              index, record.fetch("occurrence_id"), pending_index_entry(record)
+            )
+          end
+          original = @directory.read(
+            PENDING_INDEX_FILE, max_bytes: MAX_PENDING_INDEX_BYTES, missing: true
+          )
+          changed = pending_index_bytes(index) != original
+          write_pending_index(index, previous_bytes: original) if changed
+          {
+            changed: changed, records: records.length,
+            indexed: index.fetch("entries").length
+          }.freeze
+        end
+      rescue Hive::ManagedDirectory::UnsafeError => e
+        corrupt!(e.message)
       end
 
       def candidate_digest(candidates, current_head:, inventory: nil)
@@ -389,7 +445,13 @@ module Hive
         if removable.length < required
           conflict!("admission capacity contains active work")
         end
-        removable.first(required).each do |_acknowledged_at, _created_at, name, bytes|
+        selected = removable.first(required)
+        index, index_bytes = read_pending_index
+        selected.each do |_acknowledged_at, _created_at, name, _bytes|
+          set_pending_index_entry(index, name.delete_suffix(".json"), UNINDEXED)
+        end
+        write_pending_index(index, previous_bytes: index_bytes)
+        selected.each do |_acknowledged_at, _created_at, name, bytes|
           @directory.unlink(
             File.join("records", name),
             expected_digest: Digest::SHA256.hexdigest(bytes), max_bytes: MAX_RECORD_BYTES
@@ -424,15 +486,7 @@ module Hive
 
       def each_record
         @directory.with_read_session(missing: true) do
-          records = []
-          @directory.each_child("records", missing: true) do |name|
-            next if name.end_with?(".lock")
-            match = /\A(.+)\.json\z/.match(name)
-            corrupt!("admission inventory contains an unknown entry") unless match
-            records << match[1]
-            corrupt!("admission inventory exceeds the bounded limit") if records.length > MAX_RECORDS
-          end
-          names = records.sort.map { |id| "#{occurrence_id!(id)}.json" }
+          names = record_ids_in_session.map { |id| "#{id}.json" }
           @directory.read_children(
             "records", names: names,
             max_bytes: MAX_RECORD_BYTES, missing: true
@@ -443,7 +497,27 @@ module Hive
         end || []
       end
 
-      def mutate(occurrence_id, create: false)
+      def record_ids
+        @directory.with_read_session(missing: true) { record_ids_in_session } || []
+      end
+
+      def record_ids_in_session
+        records = []
+        @directory.each_child("records", missing: true) do |name|
+          next if name.end_with?(".lock")
+          match = /\A(.+)\.json\z/.match(name)
+          corrupt!("admission inventory contains an unknown entry") unless match
+          records << occurrence_id!(match[1])
+          corrupt!("admission inventory exceeds the bounded limit") if records.length > MAX_RECORDS
+        end
+        records.sort
+      end
+
+      def mutate(occurrence_id, create: false, &block)
+        with_inventory_lock { mutate_locked(occurrence_id, create: create, &block) }
+      end
+
+      def mutate_locked(occurrence_id, create: false)
         id = occurrence_id!(occurrence_id)
         @directory.with_lock(File.join("records", "#{id}.lock")) do
           relative = record_path(id)
@@ -454,16 +528,150 @@ module Hive
           validate_record!(replacement, expected_id: id)
           bytes = PatrolFix.canonical_json(replacement)
           corrupt!("admission record exceeds the size limit") if bytes.bytesize > MAX_RECORD_BYTES
-          next replacement if bytes == original
+          index, index_bytes = read_pending_index
+          indexed = index.fetch("entries").fetch(id, UNINDEXED)
+          previous = record ? pending_index_entry(record) : UNINDEXED
+          if pending_index_order(indexed) > pending_index_order(previous)
+            corrupt!("pending admission index is inconsistent; run `hive migrate`")
+          end
+          replacement_entry = pending_index_entry(replacement)
+          moves_earlier = pending_index_order(replacement_entry) < pending_index_order(previous)
+
+          if bytes == original
+            set_pending_index_entry(index, id, replacement_entry)
+            write_pending_index(index, previous_bytes: index_bytes)
+            next replacement
+          end
+
+          if moves_earlier
+            set_pending_index_entry(index, id, replacement_entry)
+            index_bytes = write_pending_index(index, previous_bytes: index_bytes)
+          end
           @directory.atomic_write(
             relative, bytes, mode: 0o600,
             expected_digest: original && Digest::SHA256.hexdigest(original),
             max_existing_bytes: MAX_RECORD_BYTES
           )
+          unless moves_earlier
+            set_pending_index_entry(index, id, replacement_entry)
+            write_pending_index(index, previous_bytes: index_bytes)
+          end
           PatrolFix.deep_freeze(replacement)
         end
       rescue Hive::ManagedDirectory::UnsafeError => e
         corrupt!(e.message)
+      end
+
+      def with_inventory_lock(nonblock: false, &block)
+        @directory.with_lock(INVENTORY_LOCK, nonblock: nonblock, &block)
+      rescue Hive::ManagedDirectory::UnsafeError => e
+        corrupt!(e.message)
+      end
+
+      def pending_inventory_exists?
+        @directory.entry_type(PENDING_INDEX_FILE, missing: true) ||
+          @directory.entry_type("records", missing: true)
+      rescue Hive::ManagedDirectory::UnsafeError => e
+        corrupt!(e.message)
+      end
+
+      def read_pending_index
+        bytes = @directory.read(
+          PENDING_INDEX_FILE, max_bytes: MAX_PENDING_INDEX_BYTES, missing: true
+        )
+        unless bytes
+          return [ empty_pending_index, nil ] if record_ids.empty?
+
+          corrupt!("pending admission index is missing; run `hive migrate`")
+        end
+        [ parse_pending_index(bytes), bytes ]
+      end
+
+      def parse_pending_index(bytes)
+        index = JSON.parse(bytes)
+        corrupt!("pending admission index is not canonical") unless
+          pending_index_bytes(index).b == bytes.b
+        unless index.is_a?(Hash) && index.keys.sort == %w[entries schema schema_version] &&
+               index["schema"] == PENDING_INDEX_SCHEMA &&
+               index["schema_version"] == PENDING_INDEX_SCHEMA_VERSION &&
+               index["entries"].is_a?(Hash) && index["entries"].length <= MAX_RECORDS
+          corrupt!("pending admission index fields are invalid")
+        end
+        index.fetch("entries").each do |id, eligible_at|
+          corrupt!("pending admission index occurrence identity is invalid") unless
+            id.is_a?(String) && id.match?(OCCURRENCE_ID)
+          unless eligible_at.nil? || eligible_at.is_a?(String)
+            corrupt!("pending admission eligibility is invalid")
+          end
+          timestamp_value!(eligible_at, "pending admission eligibility") if eligible_at
+        end
+        index
+      rescue JSON::ParserError, EncodingError
+        corrupt!("pending admission index is malformed")
+      end
+
+      def empty_pending_index
+        {
+          "schema" => PENDING_INDEX_SCHEMA,
+          "schema_version" => PENDING_INDEX_SCHEMA_VERSION,
+          "entries" => {}
+        }
+      end
+
+      def pending_index_entry(record)
+        status = record.fetch("status")
+        return nil if IMMEDIATE_STATUSES.include?(status)
+        if status == "deciding"
+          return record.dig("decision_reservation", "expires_at") ||
+            corrupt!("deciding admission lacks indexed expiry")
+        end
+        if status == "retry_wait"
+          return record.dig("retry", "retry_at") ||
+            corrupt!("retrying admission lacks indexed retry time")
+        end
+
+        UNINDEXED
+      end
+
+      def set_pending_index_entry(index, id, eligible_at)
+        entries = index.fetch("entries")
+        if eligible_at.equal?(UNINDEXED)
+          entries.delete(id)
+        else
+          entries[id] = eligible_at
+        end
+        corrupt!("pending admission index exceeds the bounded limit") if entries.length > MAX_RECORDS
+        index
+      end
+
+      def pending_index_due?(eligible_at, now)
+        eligible_at.nil? || Time.iso8601(eligible_at) <= now
+      end
+
+      def pending_index_order(eligible_at)
+        return Float::INFINITY if eligible_at.equal?(UNINDEXED)
+        return -Float::INFINITY if eligible_at.nil?
+
+        Time.iso8601(eligible_at).to_f
+      end
+
+      def pending_index_bytes(index)
+        bytes = PatrolFix.canonical_json(index)
+        corrupt!("pending admission index exceeds its byte limit") if
+          bytes.bytesize > MAX_PENDING_INDEX_BYTES
+        bytes
+      end
+
+      def write_pending_index(index, previous_bytes:)
+        bytes = pending_index_bytes(index)
+        return previous_bytes if bytes == previous_bytes
+
+        @directory.atomic_write(
+          PENDING_INDEX_FILE, bytes, mode: 0o600,
+          expected_digest: previous_bytes && Digest::SHA256.hexdigest(previous_bytes),
+          max_existing_bytes: MAX_PENDING_INDEX_BYTES
+        )
+        bytes
       end
 
       def parse_record(bytes, expected_id:)

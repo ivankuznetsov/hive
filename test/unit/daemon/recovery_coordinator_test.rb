@@ -566,6 +566,21 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "admitted",
                    Q.fetch(request.request_id, state_home: state_home)
                      .recovery.fetch("phase")
+
+      # A safety block is not inert: the sweep must re-inspect the task
+      # instead of parking it, because an operator cleaning the credential
+      # out of the state file should free the retry without a manual nudge.
+      # Re-inspecting must still be write-idempotent while the reason holds.
+      blocked_path = Q.fetch(request.request_id, state_home: state_home).path
+      blocked_inode = File.stat(blocked_path).ino
+
+      replayed = coordinator.resume(request: request, row: row)
+
+      assert_equal "blocked", replayed.status
+      assert_equal "safety_blocked", replayed.reason
+      assert_equal "operator", replayed.owner
+      assert_equal blocked_inode, File.stat(blocked_path).ino,
+                   "an unchanged safety block must not rewrite the queue file"
     end
   end
 

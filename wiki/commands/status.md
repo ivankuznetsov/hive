@@ -1,7 +1,7 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
 updated: 2026-08-23
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
@@ -378,6 +378,17 @@ process-global, so a later scan still observes fresh durable attempt data. The
 internal `--daemon-task` fast-tick scan shares one store and one reader the
 same way, across every requested project, so a bounded daemon tick never
 rebuilds them per project.
+
+Each task row first reads its bounded projection checkpoint instead of hashing
+and replaying the task's complete journal. A checkpoint is usable for exact
+status only when it is current, its journal identity/size/metadata and bounded
+head/tail anchors still match, and every durable attempt identity still
+matches. Mutable attempt state is refreshed through the scan-scoped attempt
+reader and reprojected from checkpoint seed facts, so a terminal or lost
+attempt is visible without replaying old journal history. A journal append,
+missing/stale/partial checkpoint, invalid attempt identity, or any bounded-read
+failure falls back to the authoritative full-journal `read`; status never
+publishes the partial workspace projection as exact task state.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 

@@ -1383,7 +1383,7 @@ class CommandsStatusTest < Minitest::Test
       task = Hive::Task.new(folder)
       marker = Hive::Markers.current(task.state_file)
       broken_store = Object.new
-      broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
+      broken_store.define_singleton_method(:read_cached) { |**| raise Errno::EACCES, "blocked" }
 
       _out, err = capture_io do
         with_replaced_singleton_method(

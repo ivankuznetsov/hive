@@ -14,6 +14,22 @@ class CliVersionTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_source_bin_prefers_the_checkout_agent_cli_runtime_component
+    script = <<~'RUBY'
+      at_exit do
+        parameters = AgentCliRuntime::OpenCodePreparationRequest
+          .instance_method(:initialize).parameters
+        puts "source-agent-cli-runtime=#{parameters.include?([:key, :bash_patterns])}"
+      end
+      ARGV.replace(["--version"])
+      load File.expand_path("bin/hive", Dir.pwd)
+    RUBY
+
+    out = run!(RbConfig.ruby, "-e", script)
+
+    assert_includes out, "source-agent-cli-runtime=true\n"
+  end
+
   def test_strict_no_write_routes_skip_scheduler_reconciliation
     with_tmp_global_config do |home|
       with_tmp_git_repo do |project_root|

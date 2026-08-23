@@ -764,7 +764,10 @@ re-resolves its canonical task and reads that task's state file under the task
 lock. Empty request queues skip all global-index setup. A context-build failure
 is retained for the rest of the scan and blocks each affected request as
 `admission_context_unavailable`, without repeating the fleet traversal or
-misclassifying the failure as a spawn error.
+misclassifying the failure as a spawn error. A project-registry read failure is
+likewise read once and blocks project-scoped requests as
+`project_registry_unavailable`; recovery requests remain queued without
+dispatch-failure pacing.
 
 ```
 :dispatch_request_observed   request_id=… project=… slug=…

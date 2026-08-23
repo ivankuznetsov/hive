@@ -14,7 +14,9 @@ cached for that scan so an unhealthy fleet cannot restore the N+1 path; affected
 requests remain queued with an `admission_context_unavailable` block instead of
 being paced as spawn failures. Empty queues skip index setup entirely, and the
 context path preserves zero/duplicate project-enrollment fingerprints through
-its existing path index.
+its existing path index. A failed project-registry read is also cached once per
+scan and blocks project-scoped requests as `project_registry_unavailable`
+without pacing recoveries as failed spawns.
 
 On the live local corpus, 92 recovery requests shared a 1.657-second context;
 resolving and hashing the 68 still-present tasks took 3.075 seconds total. The

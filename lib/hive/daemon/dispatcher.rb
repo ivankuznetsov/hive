@@ -2496,10 +2496,20 @@ module Hive
           return
         end
 
-        project = if project_lookup
-          project_lookup.call(req.project.to_s)
-        else
-          Hive::Config.find_project(req.project)
+        project = begin
+          if project_lookup
+            project_lookup.call(req.project.to_s)
+          else
+            Hive::Config.find_project(req.project)
+          end
+        rescue StandardError => e
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "project_registry_unavailable",
+            error: "#{e.class}: #{e.message[0, 200]}"
+          )
+          return
         end
         unless project
           if req.recovery.is_a?(Hash)

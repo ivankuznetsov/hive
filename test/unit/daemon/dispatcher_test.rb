@@ -838,6 +838,40 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
   end
 
+  def test_dispatch_request_scan_caches_registry_failure_without_pacing_recoveries
+    coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], recovery_coordinator: coordinator
+    )
+    requests = recovery_scan_requests("s1", "s2")
+    rows = recovery_scan_rows("s1", "s2")
+    registry_reads = 0
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        lambda do
+          registry_reads += 1
+          raise "project registry unavailable"
+        end
+      ) do
+        dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+      end
+    end
+
+    assert_equal 1, registry_reads
+    assert_empty coordinator.resumes
+    assert_empty coordinator.deferred
+    blocked = logger.events.filter_map do |name, attributes|
+      next unless name == :dispatch_request_blocked
+      next unless attributes[:reason] == "project_registry_unavailable"
+
+      attributes[:request_id]
+    end
+    assert_equal %w[recovery-s1 recovery-s2], blocked
+    refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
+  end
+
   def test_recovery_request_waits_when_the_status_observation_is_missing
     coordinator = FakeRecoveryCoordinator.new(status: "queued")
     dispatcher, supervisor, _controller, logger = make_dispatcher(

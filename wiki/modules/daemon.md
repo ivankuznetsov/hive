@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-21
+updated: 2026-08-23
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -45,7 +45,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and the brainstorm `answers_pending` / `answers_complete` signals. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed visible rows including `workflow`, canonical `pr_url`, structured `admission_error`, project information, and the summed `hidden_archived_task_count`. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps ordinary full `hive status --json` reads and internal bounded `--daemon-task project:slug` reads. Both return typed visible rows including `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry project information and the summed `hidden_archived_task_count`. Bounded responses must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
 | `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery, then retains that flag on `started`, `failed`, revalidated `complete`, and shutdown records. Tick completion includes the final aggregate hidden-archive count; SIGHUP recalculates validity from the reloaded poll interval, and recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. `Store` atomically persists records under owner-private path/inode checks; the ordinary `Reader` accepts only live-generation complete observations and degrades every other condition to explicit unavailable/stale/invalid evidence. |
 | `Hive::Daemon::PatrolFixCandidateInventory` | `lib/hive/daemon/patrol_fix_candidate_inventory.rb` | Opens only exact `patrol-fix-manifest.json` files under workflow stage/task owners. It binds every owned manifest's canonical bytes into one full inventory count/digest, fails on owned corruption, ignores unrelated task metadata, and selects one deterministic relevance-ranked context of at most 64 rows and 192 KiB. Exact source identity, alias, and semantic-lineage overlap rank before path/lexical fallback; each selected row carries bounded secret-scanned remediation evidence and its own context digest. |
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
@@ -117,11 +117,21 @@ lineage/audit evidence, not an exhaustion budget; lost-attempt successors keep
 retrying until one is durably dispatched.
 
 `run_forever` wakes at `daemon.fast_poll_sec` (default 1s) for a cheap
-probe: non-blocking child reap plus mtime stats of state files and stage
-directories seen on the last full status scan. A child exit or mtime
-change triggers a full `tick` immediately; otherwise
-`daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
-cadence for changes the cheap probe cannot see.
+probe: non-blocking child reap plus a rotating batch of at most 64 state-file
+mtime stats from the last full status scan. A child exit identifies its exact
+tracked task; an mtime change identifies the task owning that file. The daemon
+then asks status for only those project/slug rows and applies only their
+per-task heal/dispatch path. Every refreshed row with a dependency fails closed
+until authoritative dependency admission runs, so the incremental path does not
+build or traverse a dependency graph. Pure live-agent heartbeat refreshes reuse
+the last full attempt snapshot; a row that could heal or dispatch reconciles
+attempt ownership before policy runs. An ancillary child exit that has no task
+row triggers an immediate full tick so Patrol and digest follow-up keeps its
+existing wake behavior. `daemon.poll_interval_sec`
+(default 30s) remains the full-scan repair cadence for fleet schedulers, new or
+removed tasks, metadata/config changes, dependency release, archive counts,
+and operational snapshot publication. Incremental ticks do not move that
+deadline, so continuous edits cannot starve repair.
 
 On graceful shutdown, the supervisor snapshots each ancillary child's verified
 descendant tree and original process group before sending TERM, then escalates

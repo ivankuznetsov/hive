@@ -24,6 +24,8 @@ module Hive
     OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
+    OPENCODE_EXPORT_CAPTURE_BYTES =
+      AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
     TOKEN_LIMIT_REASON = "token_limit".freeze
     TURN_LIMIT_REASON = "turn_limit".freeze
     MODEL_OUTPUT_LIMIT_REASON = "model_output_limit".freeze
@@ -907,8 +909,9 @@ module Hive
       end
     end
 
-    def wait_for_opencode_process(pid, pgid)
-      deadline = Time.now + @timeout_sec
+    def wait_for_opencode_process(pid, pgid, timeout_sec: @timeout_sec,
+                                  poll_interval: 0.1)
+      deadline = Time.now + timeout_sec
       loop do
         remaining = deadline - Time.now
         if remaining <= 0
@@ -924,75 +927,55 @@ module Hive
         captured = Process.wait2(pid, Process::WNOHANG)
         return [ false, captured.last ] if captured
 
-        sleep [ remaining, 0.1 ].min
+        sleep [ remaining, poll_interval ].min
       end
     end
 
     def capture_opencode_inspection(inspection)
-      stdout_reader, stdout_writer = IO.pipe
-      stderr_reader, stderr_writer = IO.pipe
-      stdout_capture = { data: +"", truncated: false }
-      stderr_capture = { data: +"", truncated: false }
-      stdout_thread = capture_bounded_stream(
-        stdout_reader, stdout_capture,
-        AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
-      )
-      stderr_thread = capture_bounded_stream(
-        stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
-      )
-      pid = Process.spawn(
-        inspection.environment_for(env: opencode_preparation_environment)
-          .merge(selected_base_environment),
-        *inspection.argv,
-        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
-        unsetenv_others: true
-      )
-      stdout_writer.close
-      stderr_writer.close
-      pgid = begin
-        Process.getpgid(pid)
-      rescue Errno::ESRCH
-        pid
-      end
-      deadline = Time.now + OPENCODE_INSPECTION_TIMEOUT_SECONDS
-      status = nil
-      until status
-        captured = Process.wait2(pid, Process::WNOHANG)
-        status = captured.last if captured
-        break if status
-        if Time.now >= deadline
-          kill_group(pgid)
-          sleep_grace_then_kill(pgid, pid)
-          status = begin
-            Process.wait2(pid).last
-          rescue Errno::ECHILD
-            nil
+      Tempfile.create([ "hive-opencode-export-", ".json" ]) do |stdout_file|
+        Tempfile.create([ "hive-opencode-export-", ".stderr" ]) do |stderr_file|
+          capture_limit = OPENCODE_EXPORT_CAPTURE_BYTES
+          pid = Process.spawn(
+            opencode_child_environment(inspection),
+            *inspection.argv,
+            chdir: @cwd, pgroup: true, out: stdout_file, err: stderr_file,
+            unsetenv_others: true,
+            rlimit_fsize: [ capture_limit, capture_limit ]
+          )
+          pgid = begin
+            Process.getpgid(pid)
+          rescue Errno::ESRCH
+            pid
           end
-          break
+          _, status = wait_for_opencode_process(
+            pid, pgid,
+            timeout_sec: OPENCODE_INSPECTION_TIMEOUT_SECONDS,
+            poll_interval: 0.05
+          )
+
+          stdout_file.rewind
+          stdout = stdout_file.read(capture_limit).to_s
+          stdout_oversized =
+            stdout.bytesize >= capture_limit || !stdout_file.eof?
+          stderr_oversized = stderr_file.size >= capture_limit
+          stderr_file.rewind
+          stderr = stderr_file.read(FINAL_MESSAGE_TAIL_BYTES).to_s
+          oversized_stream =
+            stdout_oversized ? "stdout" : ("stderr" if stderr_oversized)
+          success = status&.success? == true && !oversized_stream
+          diagnostic = unless success
+            message = if oversized_stream
+              "OpenCode sanitized export inspection #{oversized_stream} " \
+                "exceeded #{capture_limit - 1} bytes"
+            elsif stderr.empty?
+              "OpenCode sanitized export inspection failed"
+            else
+              stderr
+            end
+            AgentCliRuntime::Redactor.diagnostic(message)
+          end
+          return { success:, stdout:, diagnostic: }
         end
-        sleep 0.05
-      end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
-      success = status&.success? == true && !stdout_capture.fetch(:truncated)
-      diagnostic = unless success
-        AgentCliRuntime::Redactor.diagnostic(
-          stderr_capture.fetch(:data).empty? ?
-            "OpenCode sanitized export inspection failed" :
-            stderr_capture.fetch(:data)
-        )
-      end
-      {
-        success: success,
-        stdout: stdout_capture.fetch(:data),
-        diagnostic: diagnostic
-      }
-    ensure
-      close_opencode_ios(
-        stdout_writer, stderr_writer, stdout_reader, stderr_reader
-      )
-      [ stdout_thread, stderr_thread ].each do |thread|
-        thread.kill if thread&.alive?
       end
     end
 

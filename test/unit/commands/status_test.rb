@@ -70,6 +70,36 @@ class CommandsStatusTest < Minitest::Test
     assert_equal "", error
   end
 
+  def test_default_human_call_explains_incomplete_status
+    command = Hive::Commands::Status.new
+    payload = {
+      "daemon" => { "running" => false },
+      "complete" => false,
+      "omitted_count" => 2,
+      "source" => {
+        "scan_truncated" => true,
+        "projects_unavailable" => 2,
+        "malformed_locks" => 3,
+        "transition_skips" => 4
+      },
+      "tasks" => []
+    }
+
+    output, = capture_io { command.send(:render_running, payload) }
+
+    assert_includes output,
+                    "STATUS PARTIAL — scan limit reached; 2 projects unavailable; " \
+                    "3 malformed locks; 4 transitions skipped; 2 live rows omitted"
+
+    output, = capture_io do
+      command.send(
+        :render_running,
+        payload.merge("omitted_count" => 0, "source" => {})
+      )
+    end
+    assert_includes output, "STATUS PARTIAL — source incomplete"
+  end
+
   def test_internal_task_graph_is_explicit_and_status_modes_remain_disjoint
     Hive::Commands::Status.new(json: true, full: true).send(:validate_mode_combinations!)
 

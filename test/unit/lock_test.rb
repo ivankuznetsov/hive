@@ -397,4 +397,24 @@ class LockTest < Minitest::Test
       assert_nil Hive::Lock.ps_lstart_start_time(12_345)
     end
   end
+
+  def test_process_cleanup_tolerates_a_child_that_already_exited_and_was_reaped
+    calls = []
+    kill = lambda do |signal, pid|
+      calls << [ :kill, signal, pid ]
+      raise Errno::ESRCH
+    end
+    detach = lambda do |pid|
+      calls << [ :detach, pid ]
+      raise Errno::ECHILD
+    end
+
+    with_replaced_singleton_method(Process, :kill, kill) do
+      with_replaced_singleton_method(Process, :detach, detach) do
+        assert_nil Hive::Lock.send(:terminate_and_detach, 12_345)
+      end
+    end
+
+    assert_equal [ [ :kill, "KILL", 12_345 ], [ :detach, 12_345 ] ], calls
+  end
 end

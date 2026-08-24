@@ -579,6 +579,11 @@ module Hive
         event_task = task_after_controller_move(task, result)
         if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
           enforce_outcome = enforce_clean_exit!(event_task, cfg, stage)
+          if enforce_outcome.is_a?(Hash) && enforce_outcome[:status] == :auto_committed
+            result = reconcile_auto_committed_execute_residue(
+              event_task, cfg, stage, result
+            )
+          end
           # When CleanExit overwrites the runner's marker to
           # `:error reason=ensure_clean_on_exit_failed`, the stage's own
           # `result[:commit]` (e.g. "review_complete") is now stale —
@@ -611,6 +616,30 @@ module Hive
       rescue StandardError => e
         emit_rescue_close(task_after_controller_exception(task), stage, "#{e.class}: #{e.message}")
         raise
+      end
+
+      # Execute deliberately records ERROR reason=dirty_worktree before the
+      # generic stage-exit invariant runs. When that invariant safely commits
+      # the residue, leaving the error marker behind would make a clean,
+      # descendant implementation require a second harness pass merely to
+      # observe the commit. Reuse Execute's guarded recovery boundary so only
+      # an owned 4-execute worktree on the expected branch can be promoted.
+      def reconcile_auto_committed_execute_residue(task, cfg, stage, result)
+        return result unless stage == "4-execute" # coding-scoped: execute residue recovery
+
+        marker = Hive::Markers.current(task.state_file)
+        return result unless marker.name == :error && marker.attrs["reason"] == "dirty_worktree"
+        return result if Hive::Stages::Execute.research_execution?(task)
+
+        worktree_path = read_worktree_path(task)
+        return result unless worktree_path
+
+        Hive::Stages::Execute.recover_committed_residue!(
+          task, cfg, worktree_path
+        )
+      rescue Hive::WorktreeError => e
+        warn "[hive] execute residue auto-commit could not complete the stage: #{e.message}"
+        result
       end
 
       # Patrol Fix is the one controller workflow whose route action can move

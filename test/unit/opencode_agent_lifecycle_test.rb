@@ -45,6 +45,65 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_tool_only_terminal_step_is_a_completed_run
+    with_fixture(mode: :tool_only) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "tool-only-260812-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-tool-only")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal "", result.fetch(:final_message)
+      assert result.fetch(:output_completed)
+    end
+  end
+
+  def test_sanitized_export_uses_a_regular_file_to_avoid_lost_stdout_tails
+    with_fixture(mode: :inspection_requires_regular_file) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-file-260821-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-file")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 1, calls.count { |line| line.start_with?("export ses_") }
+    end
+  end
+
+  def test_oversized_sanitized_export_is_rejected_with_a_bounded_diagnostic
+    with_fixture(mode: :oversized_export) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-oversized-260822-aaaa")
+      result = with_runtime_constant(
+        AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
+      ) do
+        with_agent_constant(:OPENCODE_EXPORT_CAPTURE_BYTES, 4096) do
+          with_agent_constant(:OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0) do
+            with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+              build_agent(
+                task, fixture,
+                invocation_root: File.join(fixture.fetch(:dir), "invocation-oversized")
+              ).run!
+            end
+          end
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :malformed_output, result.fetch(:normalized_outcome_kind)
+      assert_match(/sanitized export inspection stdout exceeded 4095 bytes/,
+                   result.fetch(:inspection_diagnostic))
+    end
+  end
+
   def test_implementation_sized_prompt_is_piped_without_crossing_exec_argument_limit
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "large-prompt-260812-aaaa")
@@ -97,6 +156,49 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         assert_equal export_count,
                      calls.count { |line| line.start_with?("export ses_") }, mode
       end
+    end
+  end
+
+  def test_malformed_sanitized_export_is_retried_before_failing_the_run
+    with_fixture(mode: :inspection_malformed_once) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-retry-260821-aaaa")
+      result = with_agent_constant(
+        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture,
+            invocation_root: File.join(fixture.fetch(:dir), "invocation-retry")
+          ).run!
+        end
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 2, calls.count { |line| line.start_with?("export ses_") }
+    end
+
+    with_fixture(mode: :inspection_malformed) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-malformed-260821-aaaa")
+      result = with_agent_constant(
+        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture,
+            invocation_root: File.join(fixture.fetch(:dir), "invocation-malformed")
+          ).run!
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :malformed_output, result.fetch(:normalized_outcome_kind)
+      assert_match(/remained malformed after 3 attempts/,
+                   result.fetch(:inspection_diagnostic))
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal Hive::Agent::OPENCODE_INSPECTION_JSON_ATTEMPTS,
+                   calls.count { |line| line.start_with?("export ses_") }
     end
   end
 
@@ -303,17 +405,20 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       )
       joins = []
       killed = false
+      capture = { data: +"", truncated: false }
       thread = Object.new
       thread.define_singleton_method(:join) { |seconds| joins << seconds }
       thread.define_singleton_method(:alive?) { true }
       thread.define_singleton_method(:kill) { killed = true }
       io = StringIO.new
 
-      agent.send(:finish_capture_thread, thread, io)
+      agent.send(:finish_capture_thread, thread, io, capture: capture)
 
-      assert_equal [ 2, 0.2 ], joins
+      assert_equal [ Hive::Agent::OPENCODE_CAPTURE_DRAIN_SECONDS, 0.2 ], joins
       assert_predicate io, :closed?
       assert killed
+      assert capture.fetch(:truncated),
+             "a forced reader shutdown must invalidate the partial capture"
 
       rescue_killed = false
       failing_thread = Object.new
@@ -350,8 +455,10 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/sanitized export inspection failed/,
+      assert_match(/sanitized export inspection timed out after 0.05 seconds/,
                    result.fetch(:inspection_diagnostic))
+      assert_match(/sanitized export inspection timed out after 0.05 seconds/,
+                   result.fetch(:error_message))
     end
 
     with_fixture(mode: :inspection_empty_failure) do |fixture|
@@ -364,6 +471,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
       assert_match(/sanitized export inspection failed/,
                    result.fetch(:inspection_diagnostic))
+      assert_match(/sanitized export inspection failed/,
+                   result.fetch(:error_message))
     end
   end
 
@@ -596,6 +705,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       mode == :malformed ? "run-malformed-json.jsonl" :
         (mode == :auth_failure ? "run-auth-error.jsonl" : "run-one-step.jsonl")
     ))
+    run_output = run_output.sub('"text":"Done."', '"text":""') if mode == :tool_only
     export_output = File.read(File.join(
       source_root_for_fixtures, "session-export-matching.json"
     ))
@@ -647,6 +757,19 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             warn "export unavailable"
             exit 1
           end
+          if #{mode == :inspection_requires_regular_file} &&
+             !STDOUT.stat.file?
+            print #{export_output.byteslice(0, export_output.bytesize / 2).dump}
+            exit 0
+          end
+          export_calls = File.readlines(#{calls.dump}).count do |line|
+            line.start_with?("export ses_")
+          end
+          if #{mode == :inspection_malformed} ||
+             (#{mode == :inspection_malformed_once} && export_calls == 1)
+            print #{export_output.byteslice(0, export_output.bytesize / 2).dump}
+            exit 0
+          end
           if #{mode == :large_export}
             export = JSON.parse(#{export_output.dump})
             export["bounded_test_padding"] = "x" * (5 * 1024 * 1024)
@@ -692,13 +815,16 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   end
 
   def with_agent_constant(name, replacement)
-    original = Hive::Agent.const_get(name)
-    Hive::Agent.send(:remove_const, name)
-    Hive::Agent.const_set(name, replacement)
+    with_runtime_constant(Hive::Agent, name, replacement) { yield }
+  end
+
+  def with_runtime_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
     yield
   ensure
-    Hive::Agent.send(:remove_const, name) if
-      Hive::Agent.const_defined?(name, false)
-    Hive::Agent.const_set(name, original)
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
   end
 end

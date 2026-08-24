@@ -181,6 +181,114 @@ class HiveCommandsWorktreeTest < Minitest::Test
                  `git -C #{@worktree} log -1 --pretty=%s`.strip
   end
 
+  def test_commit_residue_accepts_error_dirty_worktree_from_execute
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-1", attempt_id: "attempt-1"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "wiki"))
+    File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
+
+    payload = run_command("commit-residue")
+
+    assert_equal "commit-residue", payload.fetch("action")
+    assert_equal [ "wiki/residue.md" ], payload.fetch("committed_paths")
+    assert payload.fetch("clean")
+    marker = Hive::Markers.current(@task.state_file)
+    assert_equal :error, marker.name
+    assert_equal "dirty_worktree", marker.attrs.fetch("reason")
+    assert_equal "execute-dirty-1", marker.attrs.fetch("marker_id")
+  end
+
+  def test_commit_residue_can_complete_validated_execute_recovery
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-2", attempt_id: "attempt-2"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "wiki"))
+    File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
+    recovered = nil
+    recovery = lambda do |task, cfg, worktree_path|
+      recovered = [ task, cfg, worktree_path ]
+      Hive::Markers.set(task.state_file, :execute_complete)
+      { commit: "execute_complete", status: :execute_complete }
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Stages::Execute, :recover_committed_residue!, recovery
+    ) do
+      run_command("commit-residue", complete_execute: true)
+    end
+
+    assert_equal [ @task, Hive::Config::DEFAULTS, @worktree ], recovered
+    assert payload.fetch("execute_completed")
+    assert payload.fetch("clean")
+    assert_equal :execute_complete, Hive::Markers.current(@task.state_file).name
+  end
+
+  def test_complete_execute_requires_the_dirty_worktree_error_marker
+    @task.stage_index = 4
+    @task.stage_name = "execute"
+    Hive::Markers.set(@task.state_file, :error, reason: "ensure_clean_on_exit_failed")
+    FileUtils.mkdir_p(File.join(@worktree, "wiki"))
+    File.write(File.join(@worktree, "wiki", "residue.md"), "residue\n")
+
+    out, error = run_command_error("commit-residue", complete_execute: true)
+
+    payload = JSON.parse(out)
+    assert_instance_of Hive::WorktreeError, error
+    assert_equal "worktree_error", payload.fetch("error_kind")
+    assert_match(/requires ERROR reason=dirty_worktree/, payload.fetch("message"))
+  end
+
+  def test_complete_execute_recovery_preserves_out_of_scope_implementation_paths
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-scope", attempt_id: "attempt-scope"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "web", "config"))
+    File.write(File.join(@worktree, "web", "config", "routes.rb"), "# planned route\n")
+    recovery = lambda do |task, _cfg, _worktree_path|
+      Hive::Markers.set(task.state_file, :execute_complete)
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Stages::Execute, :recover_committed_residue!, recovery
+    ) do
+      run_command("commit-residue", complete_execute: true)
+    end
+
+    assert_equal [ "web/config/routes.rb" ], payload.fetch("committed_paths")
+    assert payload.fetch("execute_completed")
+    body = `git -C #{@worktree} log -1 --pretty=%B`
+    assert_includes body, "Hive-Auto-Commit-Reason: execute_residue_recovery"
+  end
+
+  def test_complete_execute_recovery_keeps_secret_content_gate
+    Hive::Markers.set(
+      @task.state_file, :error,
+      reason: "dirty_worktree", marker_id: "execute-dirty-secret", attempt_id: "attempt-secret"
+    )
+    FileUtils.mkdir_p(File.join(@worktree, "web", "config"))
+    secret = "AKIAABCDEFGHIJKLMNOP"
+    File.write(File.join(@worktree, "web", "config", "routes.rb"), "#{secret}\n")
+    recovered = false
+    recovery = ->(*) { recovered = true }
+
+    out, error = with_replaced_singleton_method(
+      Hive::Stages::Execute, :recover_committed_residue!, recovery
+    ) do
+      run_command_error("commit-residue", complete_execute: true)
+    end
+
+    payload = JSON.parse(out)
+    assert_instance_of Hive::WorktreeError, error
+    assert_equal "worktree_error", payload.fetch("error_kind")
+    refute_includes payload.fetch("message"), secret
+    refute recovered
+    assert_equal "seed", `git -C #{@worktree} log -1 --pretty=%s`.strip
+  end
+
   def test_commit_residue_rejects_secret_content_without_committing_or_leaking_it
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     secret = "AKIAABCDEFGHIJKLMNOP"
@@ -587,6 +695,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
       [ "status", { paths: [ "wiki/a.md" ] }, /status does not accept/ ],
       [ "commit-residue", { strategy: "commit" }, /strategy applies only/ ],
       [ "commit-residue", { paths: [ "wiki/a.md" ] }, /paths applies only/ ],
+      [ "discard-residue", { complete_execute: true }, /complete-execute applies only/ ],
       [ "discard-residue", { message: "commit this" }, /message applies only/ ]
     ]
 

@@ -219,37 +219,54 @@ credentials or agent output.
 entries, residue paths, branch, HEAD, and untracked count. Paths remain exact
 for internal recovery operations, while every JSON, text, and diagnostic
 surface bounds and redacts secret-shaped path text. The
-mutating verbs are admitted only while the task carries either `ERROR
-reason=ensure_clean_on_exit_failed` or `EXECUTE_WAITING
+mutating verbs are admitted only while the task carries `ERROR
+reason=ensure_clean_on_exit_failed`, the current execute contract's `ERROR
+reason=dirty_worktree`, or the historical `EXECUTE_WAITING
 reason=dirty_worktree`, and they run under the task lock:
 
 ```text
 hive worktree commit-residue <slug> [--message "one line"] [--json]
+hive worktree commit-residue <slug> --complete-execute [--json]
 hive worktree discard-residue <slug> [--paths path [path ...]] [--json]
 hive worktree repair <slug> --strategy commit|discard [--json]
 ```
 
-Commit recovery reuses the full CleanExit scope, symlink, secret-content, and
-signing policy gates. Discard recovery accepts only normalized paths that are
-currently dirty; without `--paths` it uses the marker's complete inline path
-payload or an integrity-checked task-local sidecar. Oversized lists keep only a
-bounded display summary, count, and SHA-256 identity in the marker so they
-cannot exceed the marker reader's tail window; if the sidecar is unavailable,
-an unchanged current residue set can satisfy the same count and digest. Legacy
-comma-delimited markers remain supported. CleanExit keeps diagnostic paths
-separate from this recovery identity: secret-shaped filenames are redacted in
-the marker and forced into the owner-private sidecar, while signing,
-configuration, and Git failures retain the exact known-dirty path set for
-recovery. Git failure detail is redacted before it enters the durable marker,
-and full diagnostic paths are redacted before their display byte bound is
-applied so a detector match cannot be cut into a near-complete credential.
-The recovery-specific path validator accepts literal POSIX backslashes and
-whitespace bytes because every Git mutation uses `--literal-pathspecs`; it
-still rejects NUL, absolute paths, dot traversal, and platform path separators.
-Discard restores tracked paths from
-`HEAD` and cleans only the named untracked paths. Neither mutation clears the marker: the returned
-`next_action` requires a fresh `hive status --json`, followed by that
-snapshot's generation-guarded `workflow.retry` action.
+Ordinary commit recovery reuses the full CleanExit scope, symlink,
+secret-content, and signing policy gates. Owned-pointer validation resolves the
+expected worktree root from the task's project root and its already-loaded
+configuration; it never feeds an already-resolved worktree directory back into
+the project-root configuration resolver. Discard recovery accepts only
+normalized paths that are currently dirty; without `--paths` it uses the
+marker's complete inline path payload or an integrity-checked task-local
+sidecar. Oversized lists keep only a bounded display summary, count, and SHA-256
+identity in the marker so they cannot exceed the marker reader's tail window;
+if the sidecar is unavailable, an unchanged current residue set can satisfy the
+same count and digest. Legacy comma-delimited markers remain supported.
+CleanExit keeps diagnostic paths separate from this recovery identity:
+secret-shaped filenames are redacted in the marker and forced into the
+owner-private sidecar, while signing, configuration, and Git failures retain
+the exact known-dirty path set for recovery. Git failure detail is redacted
+before it enters the durable marker, and full diagnostic paths are redacted
+before their display byte bound is applied so a detector match cannot be cut
+into a near-complete credential. The recovery-specific path validator accepts
+literal POSIX backslashes and whitespace bytes because every Git mutation uses
+`--literal-pathspecs`; it still rejects NUL, absolute paths, dot traversal, and
+platform path separators. Discard restores tracked paths from `HEAD` and cleans
+only the named untracked paths. Ordinary commit/discard mutation does not clear
+the marker: the returned `next_action` requires a fresh `hive status --json`,
+followed by that snapshot's generation-guarded `workflow.retry` action.
+
+`--complete-execute` is narrower than ordinary residue commit: it requires the
+current `4-execute` `ERROR reason=dirty_worktree`, a now-clean task-owned
+worktree on its expected branch, and a new `HEAD` descending from the saved
+`execute_base_head`. It then applies Execute's normal completion boundary and
+writes `EXECUTE_COMPLETE` without launching the implementation model again.
+This preserves the already-produced candidate and avoids a recovery loop where
+a shell-less model makes another edit solely because it was relaunched. Because
+this boundary snapshots the whole already-produced implementation, it bypasses
+the review-fix filename allowlist like the pre-fix residue snapshot does; the
+staged-symlink, secret-content, signing, owned-pointer, branch, ancestry, and
+cleanliness gates remain mandatory.
 
 CleanExit rejection markers also carry `failure_kind=<scope_violation|
 safety_violation|git_failed>`. A rejection from Review's pre-fix snapshot adds

@@ -495,7 +495,7 @@ class HiveCliTest < Minitest::Test
         {
           project: "proj", stage: "review", json: true,
           paths: [ "wiki/a.md", "wiki/b.md" ],
-          message: "preserve residue", strategy: "commit"
+          message: "preserve residue", complete_execute: false, strategy: "commit"
         },
         calls.first.fetch(:kwargs)
       )

@@ -35,7 +35,7 @@ module Hive
       #   { status: :git_failed, message: }
       #
       # `reason` is :stage_exit (default), :pre_fix_dirty_worktree,
-      # or :finalize_entry_backstop. It feeds the
+      # :execute_residue_recovery, or :finalize_entry_backstop. It feeds the
       # Hive-Auto-Commit-Reason trailer so a reader scanning
       # `git log` can tell which hook produced the residue commit.
       def run!(worktree_path:, stage:, task:, cfg:, reason: :stage_exit, subject: nil)
@@ -273,7 +273,7 @@ module Hive
       #   Hive-Task-Slug: <slug>
       #   Hive-Stage: <stage>
       #   Hive-Auto-Commit: residue
-      #   Hive-Auto-Commit-Reason: <:stage_exit | :pre_fix_dirty_worktree | :finalize_entry_backstop>
+      #   Hive-Auto-Commit-Reason: <:stage_exit | :pre_fix_dirty_worktree | :execute_residue_recovery | :finalize_entry_backstop>
       def commit_message(task:, stage:, reason:, subject: nil)
         subject ||= commit_subject(stage)
         slug = task.respond_to?(:slug) ? task.slug.to_s : ""
@@ -314,7 +314,7 @@ module Hive
       end
 
       def scope_check_required?(cfg, reason)
-        return false if reason.to_sym == :pre_fix_dirty_worktree
+        return false if %i[pre_fix_dirty_worktree execute_residue_recovery].include?(reason.to_sym)
 
         AutoCommit.auto_commit_scope_check_enabled?(cfg)
       end

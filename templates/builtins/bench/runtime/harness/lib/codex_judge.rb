@@ -33,9 +33,9 @@ module HiveBench
                  timeout_s: DEFAULT_TIMEOUT)
       lambda do |prompt:, seed:|
         _ = seed
-        argv = ["timeout", timeout_s.to_s, bin, "exec", "--skip-git-repo-check"]
-        argv += ["-m", model] if model
-        argv += ["--config", "model_reasoning_effort=#{effort}"] if effort
+        argv = [ "timeout", timeout_s.to_s, bin, "exec", "--skip-git-repo-check" ]
+        argv += [ "-m", model ] if model
+        argv += [ "--config", "model_reasoning_effort=#{effort}" ] if effort
         argv << "-"
         out, err, status = Open3.capture3(*argv, stdin_data: prompt.to_s)
         raise Error, "codex judge timed out after #{timeout_s}s" if status.exitstatus == 124
@@ -44,8 +44,8 @@ module HiveBench
           # Codex prints a long CLI banner (and sometimes the prompt) before the
           # provider error. Classify the complete stream before truncating it so
           # rejudge's short warning still carries a machine-readable limit marker.
-          limit = AgentLimit.limit_hit?(err) ? "limits_reached: " : ""
-          raise Error, "#{limit}codex judge exited #{status.exitstatus}: #{err.strip[0, 300]}"
+          error_class = AgentLimit.limit_hit?(err) ? ProviderLimitError : Error
+          raise error_class, "codex judge exited #{status.exitstatus}: #{err.strip[0, 300]}"
         end
 
         JudgeOutput.parse_score(out)

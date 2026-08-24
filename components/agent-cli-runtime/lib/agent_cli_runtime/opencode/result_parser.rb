@@ -93,8 +93,6 @@ module AgentCliRuntime
         message = texts.filter_map do |message_id, text|
           text if message_id == terminal.fetch(:message_id)
         end.join
-        malformed!("OpenCode terminal assistant message is empty") if message.empty?
-
         final_message_truncated = message.bytesize > MAX_FINAL_MESSAGE_BYTES
         ParsedRun.new(
           session_id: session_id,

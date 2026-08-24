@@ -72,6 +72,21 @@ inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
 inspection as appropriate.
 
+OpenCode's streamed run JSON is drained for up to 30 seconds after the owned
+process exits. If that bounded drain expires, Hive marks the capture truncated
+before closing and terminating the thread, so normalization fails explicitly
+instead of treating partial JSON as a provider response. The post-run sanitized
+export uses an unlinked, private regular temporary file rather than a pipe.
+OpenCode 1.18.18 emits the entire export through one unawaited stdout write;
+under a pipe, large live exports could exit zero after writing only a valid
+prefix. A regular file makes the write synchronous, after which Hive reads at
+most the parser's four-MiB limit and deletes the data when inspection returns.
+The local probe still checks OpenCode's exact model inventory first. When a
+dynamic route is absent there but the selected, non-secret overlay config
+explicitly declares that exact provider/model and its variants, that declaration
+is sufficient route evidence. The requested variant must still be present; an
+undeclared route or variant remains a fail-closed preflight error.
+
 Cleanup runs from the process owner's `ensure` path after preparation, spawn,
 inspection, or normalization failures. Only the prepared invocation's owned
 paths are eligible for removal; worktrees, task folders, selected config, and
@@ -134,7 +149,7 @@ constructs a package profile from them. Every profile freezes after init.
 | Method | Behavior |
 |--------|----------|
 | `bin` | Resolved binary path; env override > `bin_default`. |
-| `check_version!` | Delegates the bounded process-group version probe to the package and caches its result per `(bin, min_version)` pair. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, timeout, or version below minimum. |
+| `check_version!` | Delegates the bounded 120-second process-group version probe to the package and caches its result per `(bin, min_version)` pair. The deadline tolerates cold CLI startup on a heavily loaded parallel runner while remaining finite. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, timeout, or version below minimum. |
 | `preflight!` | Calls the user-supplied `preflight:` Proc (if any). May raise `Hive::AgentError`. |
 | `verify_skill(invocation, project_root: nil)` | Delegates to the profile's `Hive::SkillCheck::*` verifier. Returns `[:present, path] / [:missing, hint] / [:not_applicable, why]`. |
 | `format_skill_invocation(skill)` | Renders a configured skill name through the profile's `skill_syntax_format`. Accepts slash-prefixed stage form (`/plan`, `/plug:name`), bare reviewer form (`ce-code-review`), and legacy Compound Engineering namespace form (`/compound-engineering:ce-code-review`). Legacy `compound-engineering:ce-*` inputs normalize to the current bare CE skill before profile formatting, so Claude/Codex render `/ce-*` and Pi renders `/skill:ce-*`. Other slash-prefixed inputs round-trip unchanged for profiles whose syntax is the default `"/%{skill}"`; profiles with a non-default syntax strip the leading `/` and any plugin namespace before formatting. Used uniformly by `Stages::Brainstorm`, `Stages::Plan`, `Reviewers::Agent`, `Stages::Review::BrowserTest`, and `Hive::Commands::Doctor` so the slash invocation that reaches the agent CLI matches doctor's verification target. |
@@ -243,9 +258,13 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   models and variants declared in the selected provider configuration are
   combined with that inventory: this keeps a new operator-pinned route usable
   when the fetch-disabled bundled catalog is stale, while an undeclared route
-  missing from the CLI inventory still fails closed. A successful run is
-  complete only after its terminal message correlates with sanitized session
-  export. That export is captured in owner-private temporary files rather than
+  missing from the CLI inventory still fails closed. A route accepted on that
+  declaration alone also records `configured_model_route` evidence. A successful
+  run is complete only after its terminal assistant record correlates with
+  sanitized session export. The correlated terminal record may have empty prose
+  when a tool-only turn already produced the required artifact; the finish
+  reason, route, usage, session, and message identity remain mandatory. The
+  export is captured in owner-private temporary files rather than
   a timed pipe-drain thread. The export child receives a 64 MiB file-size limit
   for both stdout and stderr before it starts, and Hive reads through the same
   bound after it exits. Long review and implementation sessions carry every

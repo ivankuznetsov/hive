@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/stages/base"
+require "hive/stages/execute"
 require "hive/task"
 require "hive/markers"
 require "hive/worktree"
@@ -317,6 +318,36 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal "review_complete", result[:commit],
                  "result[:commit] must be preserved when CleanExit auto-commits residue"
     assert_equal :complete, result[:status]
+  end
+
+  def test_execute_auto_commit_warns_and_preserves_result_when_promotion_is_rejected
+    root, task, worktree = make_task_and_worktree("4-execute")
+    remember(root, worktree)
+    original_result = { commit: "execute_failed", status: :error }
+    rejected = lambda do |*_args|
+      raise Hive::WorktreeError, "synthetic recovery rejection"
+    end
+
+    result = nil
+    _out, err = capture_io do
+      with_replaced_singleton_method(
+        Hive::Stages::Execute, :recover_committed_residue!, rejected
+      ) do
+        result = Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+          FileUtils.mkdir_p(File.join(worktree, "wiki"))
+          File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+          Hive::Markers.set(task.state_file, :error, reason: "dirty_worktree")
+          original_result
+        end
+      end
+    end
+
+    assert_equal original_result, result
+    assert_includes err, "execute residue auto-commit could not complete the stage"
+    assert_includes err, "synthetic recovery rejection"
+    marker = Hive::Markers.current(task.state_file)
+    assert_equal :error, marker.name
+    assert_equal "dirty_worktree", marker.attrs.fetch("reason")
   end
 
   private

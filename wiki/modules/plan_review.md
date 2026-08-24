@@ -234,6 +234,16 @@ receipt under the task lock immediately before movement. `StageAction`,
 missing, corrupt, blocked, or changed observation raises a typed
 `PlanReview::TransitionBlocked`; `--force` does not bypass it.
 
+The benchmark-only configuration grant documented in [[modules/config]] also
+disables this transition boundary. With the grant and `enabled: false`, plan to
+execute returns without initializing the orchestrator, requiring an
+observation, or creating execute-entry adoption evidence. This exception is
+unreachable to ordinary project loads because configuration validation rejects
+the disabled value without the process-local benchmark grant.
+Task-action and stage-action `next_action` projections honor the same disabled
+boundary, so a benchmark plan cannot appear blocked on evidence the transition
+will not read.
+
 ## Automation and operator actions
 
 `hive plan-review-run TARGET` is the non-authority automation entrypoint used by

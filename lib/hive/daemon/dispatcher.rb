@@ -525,6 +525,7 @@ module Hive
         publish_complete_operational_snapshot(
           rows: result.rows,
           hidden_archived_task_count: result.hidden_archived_task_count,
+          status_payload: result.status_payload,
           now: now
         )
 
@@ -1858,7 +1859,8 @@ module Hive
         log_operational_snapshot_failure(phase: "observe", error: e)
       end
 
-      def publish_complete_operational_snapshot(rows:, hidden_archived_task_count: 0, now:)
+      def publish_complete_operational_snapshot(rows:, hidden_archived_task_count: 0,
+                                                status_payload: nil, now:)
         return unless @operational_snapshot
 
         completed_at = operational_snapshot_now
@@ -1868,6 +1870,7 @@ module Hive
           phase: "complete",
           rows: rows,
           hidden_archived_task_count: hidden_archived_task_count,
+          status_payload: status_payload,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),

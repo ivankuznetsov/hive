@@ -230,8 +230,13 @@ module Hive
         summary = payload.fetch("summary")
         completeness = %w[complete partial unknown].include?(payload["completeness"]) ?
           payload.fetch("completeness") : "unknown"
-        puts "SNAPSHOT #{completeness.upcase} — " \
-             "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
+        heading = "SNAPSHOT #{completeness.upcase} — " \
+                  "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
+        task_graph = payload.dig("source", "task_graph") || {}
+        if task_graph["provenance"] == "daemon_cache"
+          heading += " · task graph cached #{task_graph.fetch('age_seconds').round}s ago"
+        end
+        puts heading
         hidden_count = summary.fetch("hidden_archived_task_count", 0)
         render_archived_hidden_summary(hidden_count) if hidden_count.positive?
         render_operational_issues(payload.fetch("issues"))
@@ -374,24 +379,64 @@ module Hive
       end
 
       def operational_status(projects, scheduler_snapshot:, status_payload:, now: Time.now.utc)
-        workflow_generations = capture_workflow_generations(projects) unless status_payload
-        source = status_payload || json_payload(
+        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
+          scheduler_snapshot = Hive::Daemon::OperationalSnapshot::Reader.new.read(now: now)
+        end
+        cache = status_payload ? nil : current_status_cache(
+          projects, scheduler_snapshot, now: now
+        )
+        source = status_payload || cache&.fetch("payload", nil)
+        workflow_generations = capture_workflow_generations(projects) unless source
+        source ||= json_payload(
           projects, now: now, workflow_generations: workflow_generations
         )
         project_context = operational_project_context(
           projects, workflow_generations: workflow_generations
         )
-        if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
-          scheduler_snapshot = if project_context.any? { |_name, context| context["daemon_enabled"] == true }
-            Hive::Daemon::OperationalSnapshot::Reader.new.read(now: now)
-          end
-        end
         Hive::OperationalStatus.new(
           status_payload: source,
           project_context: project_context,
           scheduler_snapshot: scheduler_snapshot,
+          status_payload_tick_sequence: cache&.fetch("tick_sequence", nil),
           now: now
         )
+      end
+
+      def current_status_cache(projects, snapshot, now:)
+        return unless snapshot.is_a?(Hash)
+        return unless %w[current unavailable].include?(snapshot["status"])
+
+        cache = status_cache_record(snapshot, now: now)
+        return unless cache.is_a?(Hash)
+        sequence = cache["tick_sequence"]
+        snapshot_sequence = snapshot["tick_sequence"]
+        return unless sequence.is_a?(Integer) && sequence.positive? &&
+                      snapshot_sequence.is_a?(Integer) && sequence <= snapshot_sequence
+        return if Time.iso8601(cache.fetch("valid_until")) < now
+
+        payload = cache.fetch("payload")
+        current_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+        return unless payload.is_a?(Hash) && payload["schema"] == "hive-status" &&
+                      payload["schema_version"] == current_version && payload["ok"] == true &&
+                      payload["projects"].is_a?(Array)
+        Time.iso8601(payload.fetch("generated_at"))
+        return unless project_identities(payload.fetch("projects")) == project_identities(projects)
+
+        cache
+      rescue ArgumentError, TypeError, KeyError
+        nil
+      end
+
+      def status_cache_record(snapshot, now:)
+        Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new.read(
+          snapshot: snapshot, now: now
+        )
+      end
+
+      def project_identities(projects)
+        Array(projects).map do |project|
+          [ project.fetch("name").to_s, File.expand_path(project.fetch("path").to_s) ]
+        end.sort
       end
 
       # Stable schema for agent / wrapper consumption. Adding new keys is

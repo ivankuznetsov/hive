@@ -503,6 +503,32 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "unavailable", result.dig("tasks", 0, "freshness", "scheduler_status")
   end
 
+  def test_status_cache_from_the_same_tick_accepts_its_scheduler_dispositions
+    source_task = task(action: "ready_to_plan", slug: "cached-task-graph")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:59Z",
+      "completed_at" => "2026-07-20T10:00:01Z"
+    }
+    cached_payload = status_payload(source_task)
+
+    result = Hive::OperationalStatus.new(
+      status_payload: cached_payload,
+      status_payload_tick_sequence: snapshot.fetch("tick_sequence"),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).to_h
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("scheduler", "status")
+    assert_equal "global_cap", result.dig("tasks", 0, "reasons", 0, "code")
+  end
+
   def test_task_graph_sampled_after_snapshot_completion_accepts_scheduler_dispositions
     source_task = task(action: "ready_to_plan", slug: "newer-task-graph")
     snapshot = scheduler_snapshot_for(

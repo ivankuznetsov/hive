@@ -58,9 +58,12 @@ module Hive
       # status command, so it never reaches this channel.)
       # Surfacing it here makes those breadcrumbs observable in daemon.log
       # instead of being silently discarded. nil on a clean fetch.
+      # Full reads also retain the validated source payload so the daemon can
+      # publish the graph it already paid to collect; bounded reads leave it
+      # nil because they are not an authoritative fleet snapshot.
       Result = Struct.new(
         :ok, :rows, :projects, :error, :warning,
-        :hidden_archived_task_count,
+        :hidden_archived_task_count, :status_payload,
         keyword_init: true
       ) do
         def initialize(
@@ -69,7 +72,8 @@ module Hive
           projects: [],
           error: nil,
           warning: nil,
-          hidden_archived_task_count: 0
+          hidden_archived_task_count: 0,
+          status_payload: nil
         )
           super
         end
@@ -158,7 +162,8 @@ module Hive
         Result.new(
           ok: true, rows: rows, projects: projects, error: nil,
           warning: success_warning(skew, doc, err),
-          hidden_archived_task_count: projects.sum(&:hidden_archived_task_count)
+          hidden_archived_task_count: projects.sum(&:hidden_archived_task_count),
+          status_payload: require_partial ? nil : doc
         )
       rescue JSON::ParserError => e
         Result.new(

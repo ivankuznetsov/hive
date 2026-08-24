@@ -28,10 +28,12 @@ module Hive
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
 
-    def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil, now: Time.now.utc)
+    def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
+                   status_payload_tick_sequence: nil, now: Time.now.utc)
       @status_payload = status_payload
       @project_context = project_context
       @scheduler_snapshot = scheduler_snapshot
+      @status_payload_tick_sequence = status_payload_tick_sequence
       @now = now.utc
     end
 
@@ -71,6 +73,8 @@ module Hive
             "schema" => @status_payload.fetch("schema"),
             "schema_version" => @status_payload.fetch("schema_version"),
             "generated_at" => @status_payload.fetch("generated_at"),
+            "provenance" => @status_payload_tick_sequence ? "daemon_cache" : "fresh_scan",
+            "age_seconds" => task_graph_age_seconds,
             "status" => task_source_status,
             "projects_total" => projects.size,
             "projects_healthy" => projects.count { |project| project["error"].nil? }
@@ -127,6 +131,10 @@ module Hive
     end
 
     private
+
+    def task_graph_age_seconds
+      [ @now - Time.iso8601(@status_payload.fetch("generated_at")), 0 ].max.round(3)
+    end
 
     def validate_source!
       current_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
@@ -296,12 +304,20 @@ module Hive
     end
 
     def task_graph_predates_snapshot?(snapshot)
+      return false if task_graph_bound_to_snapshot?(snapshot)
+
       completed_at = snapshot.dig("source_window", "completed_at")
       return true if completed_at.to_s.empty?
 
       Time.iso8601(@status_payload.fetch("generated_at")) < Time.iso8601(completed_at)
     rescue ArgumentError, TypeError, KeyError
       true
+    end
+
+    def task_graph_bound_to_snapshot?(snapshot)
+      sequence = @status_payload_tick_sequence
+      sequence.is_a?(Integer) &&
+        sequence == snapshot["tick_sequence"]
     end
 
     def daemon_payload(projects, scheduler, attempt_storage:)

@@ -1078,6 +1078,46 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_review_keeps_legacy_dirty_error_for_unexpected_cleanup_status
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        File.write(File.join(worktree, "preexisting-manual.txt"), "manual before fix agent\n")
+        agent_ran_file = File.join(worktree, "test", "fix-agent-ran.txt")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          mkdir -p "$(dirname '#{agent_ran_file}')"
+          printf 'fix agent should not run\n' > "#{agent_ran_file}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        with_replaced_singleton_method(Hive::Stages::CleanExit, :run!, lambda { |**_kwargs|
+          { status: :unexpected }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs.fetch("phase")
+        assert_equal "fix_dirty_worktree", marker.attrs.fetch("reason")
+        refute File.exist?(agent_ran_file)
+      end
+    end
+  end
+
   # --- PE1: fix prompt_template path-escape is ConfigError -------------
 
   def test_path_escape_in_fix_prompt_template_raises_config_error

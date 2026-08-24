@@ -422,6 +422,28 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, '"retry_after" => ARGV.fetch(1)'
   end
 
+  def test_generate_starts_every_unbought_cell_before_reaping_results
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    launch = instruction.index('(cd "$REPO_ROOT" && bash -c "$command" </dev/null) 2>"$err_path" &')
+    record_pid = instruction.index('generate_pids+=("$!")')
+    launch_loop_end = instruction.index("done <.generate-commands", record_pid)
+    wait_loop = instruction.index('for index in "${!generate_pids[@]}"', launch_loop_end)
+    reap = instruction.index('wait "${generate_pids[$index]}"', wait_loop)
+
+    refute_nil launch
+    refute_nil record_pid
+    refute_nil launch_loop_end
+    refute_nil wait_loop
+    refute_nil reap
+    assert_operator launch, :<, launch_loop_end
+    assert_operator record_pid, :<, launch_loop_end
+    assert_operator launch_loop_end, :<, wait_loop
+    assert_operator wait_loop, :<, reap
+    assert_includes instruction, 'err_path=".generate-cmd-${generate_index}.err"'
+    assert_includes instruction, "trap 'rm -f .generate-validate.out"
+    assert_includes instruction, ".generate-cmd-*.err"
+  end
+
   def test_generate_quota_marker_has_canonical_recovery_identity
     instruction = File.read(stages_by_name.fetch("generate").instruction)
     function = instruction.match(

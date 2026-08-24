@@ -75,8 +75,10 @@ module Hive
       return :legacy     if payload["_legacy"]
 
       recorded = payload["process_start_time"]
+      return :unverified if recorded.nil?
+
       live = Hive::Lock.process_start_time(pid)
-      return :unverified if recorded.nil? || live.nil?
+      return :unverified if live.nil?
 
       recorded == live ? :verified : :reused
     end
@@ -97,7 +99,11 @@ module Hive
       raw = max_bytes ? read_bounded_pid_file(max_bytes) : File.read(pid_file)
       return nil unless raw
 
-      parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
+      parsed = begin
+        YAML.safe_load(raw, permitted_classes: [ Time ])
+      rescue Psych::Exception, SystemStackError, NoMemoryError
+        nil
+      end
       return parsed if parsed.is_a?(Hash) && parsed["pid"]
 
       if raw.strip =~ /\A\d+\z/

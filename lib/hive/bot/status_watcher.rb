@@ -105,10 +105,9 @@ module Hive
       # supervisor prepends a one-line banner to the rendered `/status`
       # reply when present. nil on a clean fetch. Mirrors the daemon's
       # StatusConsumer::Result#warning.
-      Result = Data.define(:ok, :rows, :legacy_stage_dirs,
-                           :error, :envelope, :warning) do
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :warning) do
         def initialize(ok:, rows: [], legacy_stage_dirs: [],
-                       error: nil, envelope: nil, warning: nil)
+                       error: nil, warning: nil)
           super
         end
       end
@@ -124,7 +123,9 @@ module Hive
       end
 
       def fetch(now: Time.now)
-        out, err, status = Open3.capture3(@extra_env, @hive_bin, "status", "--json")
+        out, err, status = Open3.capture3(
+          @extra_env, @hive_bin, "status", "--internal-task-graph", "--json"
+        )
         unless status.success?
           message = "hive status exited #{status.exitstatus}: #{err.strip}"
           @logger&.event(:poll_failure, source: "status", message: message)
@@ -170,7 +171,6 @@ module Hive
           rows: rows,
           legacy_stage_dirs: legacy_stage_dirs,
           error: nil,
-          envelope: doc,
           warning: (skew == :newer ? forward_skew_warning(doc) : nil)
         )
       rescue JSON::ParserError => e

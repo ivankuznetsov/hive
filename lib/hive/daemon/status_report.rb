@@ -34,17 +34,23 @@ module Hive
       end
 
       # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
-      def running_state(max_pid_bytes: nil)
+      def running_state(max_pid_bytes: nil, require_start_time: false)
         running = false
         pid = nil
         uptime_sec = nil
         if File.exist?(pid_file)
           payload = read_pid_file_payload(max_bytes: max_pid_bytes)
           pid = payload && payload["pid"]
-          if pid.is_a?(Integer) && pid.positive? &&
-              pid_alive?(pid) && pid_owned_by_us?(payload, pid)
-            running = true
-            uptime_sec = (Time.now - File.stat(pid_file).mtime).to_i
+          if pid.is_a?(Integer) && pid.positive? && pid_alive?(pid)
+            owned = if require_start_time
+              pid_ownership(payload, pid) == :verified
+            else
+              pid_owned_by_us?(payload, pid)
+            end
+            if owned
+              running = true
+              uptime_sec = (Time.now - File.stat(pid_file).mtime).to_i
+            end
           end
         end
         { running: running, pid: pid, uptime_sec: uptime_sec }

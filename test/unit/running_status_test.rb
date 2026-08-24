@@ -283,6 +283,35 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
+  def test_deeply_nested_lock_is_omitted_and_counted
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "1-inbox", "nested-lock-task")
+      File.write(File.join(folder, ".lock"), "pid: #{deeply_nested_flow_yaml}\n")
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_equal [], payload.fetch("tasks")
+      assert_equal 1, payload.dig("source", "malformed_locks")
+      assert_equal false, payload.fetch("complete")
+      assert_schema_valid(payload)
+    end
+  end
+
+  def test_deeply_nested_metadata_keeps_live_task_with_invalid_metadata
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "1-inbox", "nested-meta-task")
+      write_lock(folder, "pid" => Process.pid, "lock_id" => "nested-meta")
+      File.write(File.join(folder, "meta.yml"), "display_name: #{deeply_nested_flow_yaml}\n")
+
+      payload = status.payload([ project ], now: NOW)
+      row = payload.fetch("tasks").fetch(0)
+
+      assert_equal "invalid", row.fetch("metadata_status")
+      assert_equal true, row.dig("liveness", "running")
+      assert_schema_valid(payload)
+    end
+  end
+
   def test_symlink_lock_is_never_followed
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "symlink-lock-task")
@@ -478,6 +507,19 @@ class RunningStatusTest < Minitest::Test
     assert_schema_valid(stopped)
   end
 
+  def test_daemon_liveness_rejects_legacy_pid_only_identity
+    with_tmp_dir do |hive_home|
+      File.write(File.join(hive_home, ".daemon.pid"), Process.pid.to_s)
+      report = Hive::Daemon::StatusReport.new(hive_home: hive_home)
+
+      payload = Hive::RunningStatus.new(daemon_report: report).payload([], now: NOW)
+
+      assert_equal false, payload.dig("daemon", "running")
+      assert_nil payload.dig("daemon", "pid")
+      assert_schema_valid(payload)
+    end
+  end
+
   def test_daemon_pid_probe_rejects_fifo_and_oversized_files_without_blocking
     with_tmp_dir do |hive_home|
       pid_path = File.join(hive_home, ".daemon.pid")
@@ -493,6 +535,22 @@ class RunningStatusTest < Minitest::Test
       oversized_payload = running_status.payload([], now: NOW)
       assert_equal false, oversized_payload.dig("daemon", "running")
       assert_schema_valid(oversized_payload)
+    end
+  end
+
+  def test_daemon_pid_probe_rejects_deeply_nested_yaml
+    with_tmp_dir do |hive_home|
+      File.write(
+        File.join(hive_home, ".daemon.pid"),
+        "pid: #{deeply_nested_flow_yaml}\n"
+      )
+      report = Hive::Daemon::StatusReport.new(hive_home: hive_home)
+
+      payload = Hive::RunningStatus.new(daemon_report: report).payload([], now: NOW)
+
+      assert_equal false, payload.dig("daemon", "running")
+      assert_nil payload.dig("daemon", "pid")
+      assert_schema_valid(payload)
     end
   end
 
@@ -541,6 +599,10 @@ class RunningStatusTest < Minitest::Test
 
   def live_start_time
     Hive::Lock.process_start_time(Process.pid) || raise("process start time unavailable")
+  end
+
+  def deeply_nested_flow_yaml
+    ("[" * 1_500) + "1" + ("]" * 1_500)
   end
 
   def assert_schema_valid(payload)

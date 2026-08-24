@@ -6,7 +6,7 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
-  def test_running_call_uses_compact_producer_without_building_full_graph
+  def test_default_json_call_uses_compact_producer_without_building_full_graph
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       folder = write_status_task(
@@ -25,7 +25,7 @@ class CommandsStatusTest < Minitest::Test
         def json_payload(*) = raise("full graph must not be built")
         def operational_payload(*) = raise("operational graph must not be built")
       end
-      command = command_class.new(json: true, running: true)
+      command = command_class.new(json: true)
       project = status_project(project_root, hive_state)
 
       output, error = with_replaced_singleton_method(
@@ -43,18 +43,43 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_running_mode_requires_json_and_rejects_other_status_modes
-    error = assert_raises(Hive::InvalidTaskPath) do
-      Hive::Commands::Status.new(running: true).send(:validate_mode_combinations!)
+  def test_default_human_call_uses_compact_producer_without_building_full_graph
+    command_class = Class.new(Hive::Commands::Status) do
+      def json_payload(*) = raise("full graph must not be built")
+      def operational_payload(*) = raise("operational graph must not be built")
+      def running_payload(*)
+        {
+          "daemon" => { "running" => true, "pid" => 42, "uptime_sec" => 12 },
+          "complete" => true,
+          "count" => 1,
+          "truncated" => false,
+          "source" => {},
+          "tasks" => [ {
+            "project" => "demo", "slug" => "live-task", "display_name" => "Live task",
+            "stage" => "4-execute", "liveness" => { "source" => "task_lock" }
+          } ]
+        }
+      end
     end
-    assert_includes error.message, "--running requires --json"
+
+    output, error = capture_io { command_class.new.call }
+
+    assert_includes output, "DAEMON RUNNING"
+    assert_includes output, "demo:live-task (Live task)"
+    assert_includes output, "4-execute"
+    assert_equal "", error
+  end
+
+  def test_internal_task_graph_is_explicit_and_status_modes_remain_disjoint
+    Hive::Commands::Status.new(json: true, full: true).send(:validate_mode_combinations!)
 
     error = assert_raises(Hive::InvalidTaskPath) do
       Hive::Commands::Status.new(
-        json: true, running: true, operational: true
+        json: true, full: true, operational: true
       ).send(:validate_mode_combinations!)
     end
-    assert_includes error.message, "--running cannot be combined"
+    assert_includes error.message,
+                    "--internal-task-graph cannot be combined with --operational"
   end
 
   def test_status_payloads_preserve_subsecond_generation_time
@@ -104,7 +129,7 @@ class CommandsStatusTest < Minitest::Test
       )
       project = status_project(project_root, hive_state)
       command = Hive::Commands::Status.new(
-        json: true, daemon_tasks: [ "demo:#{slug}" ]
+        json: true, full: true, daemon_tasks: [ "demo:#{slug}" ]
       )
 
       output, error = with_replaced_singleton_method(
@@ -183,7 +208,7 @@ class CommandsStatusTest < Minitest::Test
     error = assert_raises(Hive::InvalidTaskPath) do
       command.send(:validate_mode_combinations!)
     end
-    assert_includes error.message, "requires plain --json"
+    assert_includes error.message, "requires --internal-task-graph --json"
 
     invalid = Hive::Commands::Status.new(
       json: true, daemon_tasks: [ "missing:task-260823-abcd" ]

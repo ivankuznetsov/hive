@@ -230,7 +230,7 @@ currently dirty; without `--paths` it uses the marker's losslessly encoded,
 bounded residue-path array (with legacy comma-delimited fallback). It restores
 tracked paths from `HEAD` and cleans only the named untracked paths. Ordinary
 commit/discard mutation does not clear the marker: the returned `next_action`
-requires a fresh `hive status --json`, followed by that snapshot's
+requires a fresh `hive status --operational --json`, followed by that snapshot's
 generation-guarded `workflow.retry` action.
 
 `--complete-execute` is narrower than ordinary residue commit: it requires the

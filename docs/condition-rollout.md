@@ -39,15 +39,21 @@ supervised attempt supplies the durable attempt ID and numeric input epoch.
 
 ## Inspecting a task
 
-Use the public status contract:
+Use the public operational projection to find the task's condition warning,
+owner, reasons, and guarded action, then inspect that task's semantic workspace:
 
 ```bash
-hive status --json | jq '.projects[].tasks[] |
-  select(.stage == "4-execute") |
-  {slug, action, marker, condition_task_generation, commit_generation,
-   current_attempt, condition_gate, condition_migration,
-   condition_warning, shadow_audit}'
+hive status --operational --json |
+  jq '.tasks[] | select(.identity.project == "PROJECT" and .identity.slug == "SLUG") |
+  {identity, position, state, blocker_owner, reasons,
+   condition_warning: .evidence.condition_warning, action}'
+hive task SLUG --project PROJECT --json
 ```
+
+Detailed condition arrays and generation joins remain scheduler internals; do
+not script them through Hive's hidden task-graph transport. If they need to
+become an operator contract, add them to a bounded, versioned task-local
+projection first.
 
 `condition_gate.status` is `eligible`, `blocked`, or `reconcile_required`.
 Diagnostics distinguish `pending`, `unsatisfied`, and `unverifiable` facts.

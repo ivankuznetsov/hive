@@ -10,7 +10,7 @@ tags: [command, daemon, automation, plan-review, json]
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
 auto-advancing dispatcher (ADR-024). One long-running process wakes
 every 1s for bounded child-exit/state-mtime probes, refreshes only the changed
-task rows, and runs a full `hive status --json` scan every 30s as repair. It dispatches
+task rows, and runs an internal full task-graph scan every 30s as repair. It dispatches
 workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
 `artifacts` / `finalize`) on tasks ready to advance, and
 auto-archives safely delivered coding tasks from any PR-bearing stage 5–8
@@ -52,8 +52,8 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 
 ## What the daemon dispatches
 
-Per `Hive::Daemon::Policy.decide`, the daemon classifies each `hive
-status --json` task row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
+Per `Hive::Daemon::Policy.decide`, the daemon classifies each internal
+task-graph row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
 value) and routes. `Hive::Daemon::StaleAgentHealer` runs before this policy
 step and submits eligible `ERROR` / `REVIEW_ERROR` observations to
 `Hive::Daemon::RecoveryCoordinator`. The coordinator waits for the shared

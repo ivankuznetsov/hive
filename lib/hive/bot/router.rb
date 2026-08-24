@@ -63,7 +63,7 @@ module Hive
 
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                           :project, :slug, :stage, :question_n, :binding, :answer_text, :mode,
-                          :intent, :alert_reset, :clear_keyboard, :format,
+                          :intent, :alert_reset, :clear_keyboard,
                           :attachment, :recovery, keyword_init: true)
 
       ALLOWED_ACTIONS = %i[

@@ -101,7 +101,7 @@ module Hive
       ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false, running: false, daemon_tasks: nil)
+                     operational: false, full: false, daemon_tasks: nil)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -111,7 +111,6 @@ module Hive
         @archive = archive
         @operational = operational
         @full = full
-        @running = running
         @daemon_tasks = Array(daemon_tasks).compact
         @next_retention_boundary = nil
       end
@@ -142,29 +141,26 @@ module Hive
       # `--diagnose` routes through diagnose_call which emits the
       # `hive-status-diagnose` envelope on success; the top-level rescue
       # must match the same schema so consumers can validate either
-      # branch against `urn:hive:schema:status-diagnose:v1`. Plain
-      # `hive status --json` stays on `hive-status`.
+      # branch against `urn:hive:schema:status-diagnose:v1`. Explicit
+      # operational and internal task-graph modes retain their own contracts; plain
+      # `hive status --json` is the bounded running-status document.
       def status_schema_for_call
         return "hive-status-diagnose" if @diagnose
-        return "hive-running-status" if @running
+        return "hive-operational-status" if @operational
+        return "hive-status" if @full || @archive || daemon_task_mode?
 
-        @operational ? "hive-operational-status" : "hive-status"
+        "hive-running-status"
       end
 
       def do_call
         projects = Hive::Config.registered_projects
         refresh_now = Time.now.utc
-        if @running
-          puts JSON.generate(running_payload(projects, now: refresh_now))
-          @stdout_written = true
-          return
-        end
         if daemon_task_mode?
           puts JSON.generate(daemon_task_payload(projects, now: refresh_now))
           @stdout_written = true
           return
         end
-        if concise_operational_mode?
+        if @operational
           payload = operational_payload(projects, now: refresh_now)
           if @json
             puts JSON.generate(payload)
@@ -174,12 +170,26 @@ module Hive
           end
           return
         end
-        if @json
-          puts JSON.generate(json_payload(projects, now: refresh_now))
-          @stdout_written = true
+        if @full || @archive
+          if @json
+            puts JSON.generate(json_payload(projects, now: refresh_now))
+            @stdout_written = true
+          else
+            render_full(projects, now: refresh_now)
+          end
           return
         end
 
+        payload = running_payload(projects, now: refresh_now)
+        if @json
+          puts JSON.generate(payload)
+          @stdout_written = true
+        else
+          render_running(payload)
+        end
+      end
+
+      def render_full(projects, now:)
         if projects.empty?
           puts "(no projects registered; run `hive init <path>`)"
           return
@@ -194,7 +204,7 @@ module Hive
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
-            admission_context: admission_context, now: refresh_now,
+            admission_context: admission_context, now: now,
             workflow_generation: workflow_generation_for(project, workflow_generations),
             archive_backfiller: archive_backfiller
           )
@@ -226,6 +236,50 @@ module Hive
       def running_payload(projects, now: Time.now.utc)
         require "hive/running_status"
         Hive::RunningStatus.new.payload(projects, now: now)
+      end
+
+      def render_running(payload)
+        daemon = payload.fetch("daemon")
+        if daemon.fetch("running")
+          details = []
+          details << "pid=#{daemon['pid']}" if daemon["pid"]
+          details << "uptime=#{daemon['uptime_sec']}s" if daemon["uptime_sec"]
+          suffix = details.empty? ? "" : " · #{details.join(' · ')}"
+          puts "DAEMON RUNNING#{suffix}"
+        else
+          puts "DAEMON STOPPED"
+        end
+
+        rows = payload.fetch("tasks")
+        if rows.empty?
+          puts "NO RUNNING TASKS"
+        else
+          puts "RUNNING #{rows.length}"
+          rows.each { |row| puts running_row_line(row) }
+        end
+
+        return if payload.fetch("complete")
+
+        source = payload.fetch("source")
+        reasons = []
+        reasons << "scan limit reached" if source["scan_truncated"]
+        reasons << "#{source['projects_unavailable']} projects unavailable" if source["projects_unavailable"].to_i.positive?
+        reasons << "#{source['malformed_locks']} malformed locks" if source["malformed_locks"].to_i.positive?
+        reasons << "#{source['transition_skips']} transitions skipped" if source["transition_skips"].to_i.positive?
+        reasons << "#{payload['omitted_count']} live rows omitted" if payload["omitted_count"].to_i.positive?
+        reasons << "source incomplete" if reasons.empty?
+        puts "STATUS PARTIAL — #{reasons.join('; ')}"
+      end
+
+      def running_row_line(row)
+        project = terminal_safe(row["project"])
+        slug = terminal_safe(row["slug"])
+        display_name = terminal_safe(row["display_name"])
+        identity = "#{project}:#{slug}"
+        identity = "#{identity} (#{display_name})" unless display_name.empty? || display_name == slug
+        stage = terminal_safe(row["stage"])
+        source = terminal_safe(row.dig("liveness", "source") || "verified_process")
+        "  #{identity} · #{stage} · #{source}"
       end
 
       # Canonical recovery receipts for adapters that already hold a current
@@ -269,39 +323,25 @@ module Hive
           puts label
           rows.first(OPERATIONAL_BAND_LIMIT).each { |row| puts operational_row_line(row) }
           overflow = rows.size - OPERATIONAL_BAND_LIMIT
-          puts "  +#{overflow} more — run `hive status --full`" if overflow.positive?
+          puts "  +#{overflow} more — run `hive tui`" if overflow.positive?
         end
       end
 
       def validate_mode_combinations!
-        if @running && !@json
-          raise Hive::InvalidTaskPath, "--running requires --json"
-        end
-        if @running && (@diagnose || @project || @stage || @write || @force || @archive ||
-                        @operational || @full || daemon_task_mode?)
+        if daemon_task_mode? && (!@json || !@full || @diagnose || @project || @stage || @write || @force ||
+                                 @archive || @operational)
           raise Hive::InvalidTaskPath,
-                "--running cannot be combined with other status modes or filters"
-        end
-        if daemon_task_mode? && (!@json || @diagnose || @project || @stage || @write || @force ||
-                                 @archive || @operational || @full || @running)
-          raise Hive::InvalidTaskPath,
-                "--daemon-task is internal and requires plain --json status mode"
-        end
-        if @full && @json
-          raise Hive::InvalidTaskPath, "--full cannot be combined with --json; omit --full for hive-status.v7"
+                "--daemon-task is internal and requires --internal-task-graph --json"
         end
         if @full && @operational
-          raise Hive::InvalidTaskPath, "--full cannot be combined with --operational"
+          raise Hive::InvalidTaskPath,
+                "--internal-task-graph cannot be combined with --operational"
         end
         if (@full || @operational) && (@diagnose || @write || @force)
-          mode = @full ? "--full" : "--operational"
+          mode = @full ? "--internal-task-graph" : "--operational"
           raise Hive::InvalidTaskPath,
                 "#{mode} cannot be combined with --diagnose, --write, or --force"
         end
-      end
-
-      def concise_operational_mode?
-        @operational || (!@full && !@json && !@archive)
       end
 
       def daemon_task_mode?
@@ -330,7 +370,7 @@ module Hive
         elsif summary.fetch("archived").positive?
           puts "ARCHIVE ONLY — #{summary.fetch('archived')} archived task" \
                "#{summary.fetch('archived') == 1 ? '' : 's'}"
-          puts "  run `hive status --full` to inspect archived task details"
+          puts "  run `hive archive` to inspect archived task details"
         else
           puts "IDLE — no active work"
         end
@@ -535,7 +575,7 @@ module Hive
 
       # Isolate per-project failures. A single project with a malformed
       # config.yml (e.g. an invalid `dependency_gate_stage`) used to raise
-      # out of `project_payload` and abort the entire `hive status --json`;
+      # out of `project_payload` and abort the daemon's internal task graph;
       # the daemon's StatusConsumer then reads `ok:false` and skips the
       # whole tick, freezing auto-advance fleet-wide. Degrade the offending
       # project to an empty task list (with a stderr breadcrumb in
@@ -901,7 +941,7 @@ module Hive
 
       # Liveness inputs for TaskAction. Mirrors the per-row computation
       # in collect_rows so the diagnose surface classifies stale
-      # AGENT_WORKING the same way `hive status --json` and the TUI do.
+      # AGENT_WORKING the same way the internal task graph and the TUI do.
       # Otherwise stale rows hit via `--diagnose <slug>` would report
       # diagnostic=nil and the `--write` path would refuse with "not
       # in a red recovery state."

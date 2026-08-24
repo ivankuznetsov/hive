@@ -124,6 +124,35 @@ class HivePidFileModuleTest < Minitest::Test
     end
   end
 
+  def test_bounded_reader_fallback_rejects_path_replaced_after_open
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      replacement_path = File.join(dir, "replacement.pid")
+      File.write(path, { "pid" => 4242 }.to_yaml)
+      File.write(replacement_path, { "pid" => 9999 }.to_yaml)
+      reader = BoundedReader.new(path)
+      original_const_defined = File.method(:const_defined?)
+      original_open = File.method(:open)
+
+      payload = with_replaced_singleton_method(
+        File, :const_defined?,
+        ->(name, *args) { name == :NOFOLLOW ? false : original_const_defined.call(name, *args) }
+      ) do
+        with_replaced_singleton_method(File, :open, lambda { |*args, &block|
+          original_open.call(*args) do |opened|
+            File.unlink(path)
+            File.symlink(replacement_path, path)
+            block.call(opened)
+          end
+        }) do
+          reader.read_pid_file_payload(max_bytes: 1024)
+        end
+      end
+
+      assert_nil payload
+    end
+  end
+
   def test_bounded_reader_fails_closed_when_open_races_with_the_probe
     Dir.mktmpdir("hive-pid-file") do |dir|
       path = File.join(dir, "daemon.pid")

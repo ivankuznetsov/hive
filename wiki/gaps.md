@@ -1173,9 +1173,16 @@ itself is closed.
 
 ## Compact running status is not yet installed-plugin-smoked (2026-08-24)
 
-`hive status --running --json` has focused source coverage and has been run from
+`hive status --json` has focused source coverage and has been run from
 the source checkout against the live Hivebox registry. That proves the compact
 producer over current task data, but not the final installed dogfood binary plus
 authenticated Omarchy plugin invocation. Keep this gap open until the feature
-PR is deployed and the plugin consumes `hive-running-status.v1` below its 1 MiB
-capture limit without falling back to full `hive-status.v7`.
+PR is deployed and the plugin's unchanged bare status command consumes
+`hive-running-status.v1` below its 1 MiB capture limit.
+
+The public fleet-wide v7 status mode is removed, but daemon, bot, TUI, and web
+still share parts of its in-process producer. Daemon and bot temporarily reach
+it through a hidden internal transport. Separate consumer-specific projection
+PRs must remove those fields and then delete the v7 schema/producer entirely;
+this PR deliberately does not combine those independent scheduler and UI
+optimizations.

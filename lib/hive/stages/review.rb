@@ -808,7 +808,7 @@ module Hive
         close_phase_event!(task) if @open_phase_event
       end
 
-      # Marker attr values are scanned by `hive status --json` and read by
+      # Marker attr values are scanned by the internal task graph and read by
       # the TUI; an unbounded multi-kilobyte tail in a single attr would
       # break the line-oriented marker format. 500 bytes is the same cap
       # `prepare_claude_session!` uses for its own tail capture.
@@ -1204,7 +1204,7 @@ module Hive
       # attribute. The reason attr carries the coarse closed-enum class; this
       # preserves the condensed cause (a tmux session death, an "expected
       # output missing" timeout, a CLI crash) so `status.md`,
-      # `hive status --json`, and the web diagnostic card show something
+      # the internal task graph, and the web diagnostic card show something
       # actionable even when the class falls back to `unknown`. nil/blank
       # collapses to no attr (Markers.set compacts nil values); multi-line /
       # quote / comment-marker content is sanitized downstream by

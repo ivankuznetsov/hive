@@ -156,7 +156,7 @@ module Hive
         "workflow" => bounded_nullable_string(metadata["workflow"]),
         "status" => "running",
         "marker" => nil,
-        "action" => "agent_running",
+        "action" => Hive::Schemas::TaskActionKind::AGENT_RUNNING,
         "metadata_status" => metadata_status,
         "liveness" => {
           "state" => "running",
@@ -176,7 +176,7 @@ module Hive
       raise MalformedLock unless lock.is_a?(Hash)
 
       lock
-    rescue Psych::Exception
+    rescue Psych::Exception, SystemStackError, NoMemoryError
       raise MalformedLock
     end
 
@@ -198,7 +198,7 @@ module Hive
       [ "too_large", {} ]
     rescue MalformedLock
       [ "unreadable", {} ]
-    rescue Psych::Exception
+    rescue Psych::Exception, SystemStackError, NoMemoryError
       [ "invalid", {} ]
     rescue Errno::ENOENT
       raise unless real_directory?(task_folder)
@@ -265,7 +265,10 @@ module Hive
     end
 
     def daemon_payload
-      state = @daemon_state || daemon_report.running_state(max_pid_bytes: MAX_DAEMON_PID_BYTES)
+      state = @daemon_state || daemon_report.running_state(
+        max_pid_bytes: MAX_DAEMON_PID_BYTES,
+        require_start_time: true
+      )
       running = state.fetch(:running) == true
       {
         "running" => running,

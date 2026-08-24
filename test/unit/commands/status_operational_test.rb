@@ -121,7 +121,7 @@ class CommandsStatusOperationalTest < Minitest::Test
     command = Hive::Commands::Status.new(json: true, operational: true)
 
     assert_equal "hive-operational-status", command.status_schema_for_call
-    assert_equal "hive-status", Hive::Commands::Status.new(json: true).status_schema_for_call
+    assert_equal "hive-running-status", Hive::Commands::Status.new(json: true).status_schema_for_call
   end
 
   def test_degraded_attempt_storage_renders_one_concise_warning

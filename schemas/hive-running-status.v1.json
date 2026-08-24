@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hive:schema:running-status:v1",
   "title": "Bounded Hive running-task status (v1)",
-  "description": "Stable compact contract emitted by `hive status --running --json`. Only tasks with a verified live runner lock or live recorded agent process are returned.",
+  "description": "Stable compact contract emitted by `hive status --json`. Only tasks with a verified live runner lock or live recorded agent process are returned.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }

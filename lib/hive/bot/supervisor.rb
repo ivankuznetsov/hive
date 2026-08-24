@@ -1008,19 +1008,6 @@ module Hive
           "data may be incomplete — restart the bot."
       end
 
-      def render_status_json(envelope, project_filter)
-        return "{}" if envelope.nil?
-
-        if project_filter && !project_filter.to_s.empty?
-          filtered = envelope.merge(
-            "projects" => Array(envelope["projects"]).select { |p| p["name"] == project_filter }
-          )
-          ::JSON.pretty_generate(filtered)
-        else
-          ::JSON.pretty_generate(envelope)
-        end
-      end
-
       def project_filter_miss_text(project, rows, legacy_stage_dirs = [])
         registered = registered_project_names
         active = (Array(rows) + Array(legacy_stage_dirs)).map { |row| row.project.to_s }.uniq
@@ -1085,12 +1072,6 @@ module Hive
           # normal status with no hint, so prepend a one-line advisory.
           if status_fetch_warning(fetch_result)
             safe_send_message(chat_id: update.chat_id, text: status_skew_banner)
-          end
-
-          if result.respond_to?(:format) && result.format == :json
-            safe_send_message(chat_id: update.chat_id,
-                              text: render_status_json(fetch_result.envelope, result.project))
-            return nil
           end
 
           rows = fetch_result.rows
@@ -1579,7 +1560,7 @@ module Hive
       def inferred_success_slug(verb, argv)
         case verb
         when "status"
-          # Any plain `hive status --json` is rendered in-process by
+          # The bot's status sentinel is rendered in-process by
           # render_details and never reaches success-text inference; a
           # `--diagnose` child short-circuits via diagnose_reply_for_child. So a
           # status child here carries no inferable slug.

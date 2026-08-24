@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/markers"
 require "hive/stages/auto_commit"
 require "hive/stages/clean_exit"
+require "hive/stages/execute"
 require "hive/task_resolver"
 require "hive/worktree"
 
@@ -24,7 +25,8 @@ module Hive
       REPAIR_STRATEGIES = %w[commit discard].freeze
 
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
-                     paths: nil, message: nil, strategy: nil, pointer_resolver: nil)
+                     paths: nil, message: nil, strategy: nil, complete_execute: false,
+                     pointer_resolver: nil)
         @subcommand = subcommand.to_s
         @target = target
         @project_filter = project
@@ -33,6 +35,7 @@ module Hive
         @paths = paths
         @message = message
         @strategy = strategy
+        @complete_execute = complete_execute == true
         @pointer_resolver = pointer_resolver
       end
 
@@ -100,6 +103,9 @@ module Hive
         if effective_action == "discard-residue" && !@message.to_s.empty?
           raise Hive::UsageError, "--message applies only to commit-residue recovery"
         end
+        if @complete_execute && effective_action != "commit-residue"
+          raise Hive::UsageError, "--complete-execute applies only to commit-residue recovery"
+        end
         validate_subject! unless @message.to_s.empty?
       end
 
@@ -124,9 +130,7 @@ module Hive
       def owned_worktree_path(task, cfg)
         return @pointer_resolver.call(task, cfg) if @pointer_resolver
 
-        expected_root = Hive::Worktree.canonical_root(
-          cfg["worktree_root"] || Hive::Worktree.default_worktree_root(task.project_name)
-        )
+        expected_root = Hive::Worktree.canonical_root(task.project_root)
         pointer = Hive::Worktree.read_owned_pointer(
           task.folder,
           project_root: task.project_root,
@@ -139,7 +143,7 @@ module Hive
       def recovery_marker!(task)
         marker = Hive::Markers.current(task.state_file)
         reason = marker.attrs["reason"].to_s
-        eligible = (marker.name == :error && reason == "ensure_clean_on_exit_failed") ||
+        eligible = (marker.name == :error && %w[ensure_clean_on_exit_failed dirty_worktree].include?(reason)) ||
                    (marker.name == :execute_waiting && reason == "dirty_worktree")
         return marker if eligible
 
@@ -158,22 +162,35 @@ module Hive
       end
 
       def commit_residue(task, cfg, worktree_path)
+        reason = @complete_execute ? :execute_residue_recovery : :operator_recovery
         result = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
           stage: "#{task.stage_index}-#{task.stage_name}",
           task: task,
           cfg: cfg,
-          reason: :operator_recovery,
+          reason: reason,
           subject: (@message unless @message.to_s.empty?)
         )
         unless %i[clean auto_committed].include?(result[:status])
           raise Hive::WorktreeError, display_message(result[:message])
         end
 
+        execute_completed = false
+        if @complete_execute
+          marker = Hive::Markers.current(task.state_file)
+          unless marker.name == :error && marker.attrs["reason"].to_s == "dirty_worktree"
+            raise Hive::WorktreeError,
+                  "--complete-execute requires ERROR reason=dirty_worktree"
+          end
+          Hive::Stages::Execute.recover_committed_residue!(task, cfg, worktree_path)
+          execute_completed = true
+        end
+
         status_payload(task, worktree_path, action: "commit-residue").merge(
           "commit" => result[:head],
           "committed_paths" => display_paths(result[:paths]),
-          "commit_subject" => result[:commit_subject]
+          "commit_subject" => result[:commit_subject],
+          "execute_completed" => execute_completed
         )
       end
 

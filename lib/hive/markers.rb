@@ -82,10 +82,11 @@ module Hive
     # write (ENOSPC, crash mid-write) leaves the original state file intact.
     # The lock file (a sidecar) serialises concurrent writers; the data file
     # itself is replaced atomically.
-    def set(state_file_path, name, attrs = {})
+    def set(state_file_path, name, attrs = nil, at_end: false, **keyword_attrs)
       marker_name = name.to_s.upcase
       raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
 
+      attrs = (attrs || {}).to_h.merge(keyword_attrs)
       attrs = attrs_with_recovery_marker_id(marker_name, attrs)
               .to_h
               .merge(Hive::Attempts::Context.projection)
@@ -96,12 +97,12 @@ module Hive
         # never be opened while the controller owns the task lock. Treat such
         # nodes as an empty artifact and replace the directory entry atomically.
         body = read_regular_body(state_file_path) || "".b
-        replaced, count = replace_last_marker(body, new_marker)
-        body = if count.positive?
-                 replaced
+        body = if at_end
+                 without_last, = replace_last_marker(body, "")
+                 append_marker(without_last, new_marker)
         else
-                 separator = body.empty? || body.end_with?("\n") ? "" : "\n"
-                 "#{body}#{separator}#{new_marker}\n"
+                 replaced, count = replace_last_marker(body, new_marker)
+                 count.positive? ? replaced : append_marker(body, new_marker)
         end
         write_atomic(state_file_path, body)
       end
@@ -326,6 +327,12 @@ module Hive
       last = matches.last
       [ binary_body[0...last.begin(0)] + new_marker.b + binary_body[last.end(0)..], 1 ]
     end
+
+    def append_marker(body, marker)
+      separator = body.empty? || body.end_with?("\n") ? "" : "\n"
+      "#{body}#{separator}#{marker}\n"
+    end
+    private_class_method :append_marker
 
     def remove_marker(state_file_path, raw_marker)
       return if raw_marker.to_s.empty?

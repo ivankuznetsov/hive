@@ -21,7 +21,10 @@ module Hive
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
     TERMINATION_GRACE_SECONDS = 3
     COMPLETION_EVENT_GRACE_SECONDS = 3
-    OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
+    OPENCODE_INSPECTION_TIMEOUT_SECONDS = 60
+    OPENCODE_INSPECTION_JSON_ATTEMPTS = 3
+    OPENCODE_INSPECTION_RETRY_DELAY_SECONDS = 0.5
+    OPENCODE_CAPTURE_DRAIN_SECONDS = 30
     OPENCODE_CAPTURE_BYTES =
       AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
     OPENCODE_EXPORT_CAPTURE_BYTES =
@@ -655,8 +658,8 @@ module Hive
         trap("INT", old_int || "DEFAULT")
         trap("TERM", old_term || "DEFAULT")
       end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
+      finish_capture_thread(stdout_thread, stdout_reader, capture: stdout_capture)
+      finish_capture_thread(stderr_thread, stderr_reader, capture: stderr_capture)
       write_opencode_capture_log(
         log_file, stdout_capture.fetch(:data), stderr_capture.fetch(:data)
       )
@@ -883,12 +886,20 @@ module Hive
       end
     end
 
-    def finish_capture_thread(thread, io)
+    def finish_capture_thread(thread, io, capture: nil)
       return unless thread
 
-      thread.join(2)
+      # The child has exited and the parent's writer is already closed, so the
+      # reader normally reaches EOF. Large OpenCode runs and sanitized exports
+      # can still need several seconds to drain on a loaded host. The former
+      # two-second cutoff silently killed that reader and handed the strict JSON
+      # parser a successful-process prefix, producing misleading malformed JSON
+      # and empty-terminal-message errors. Keep a finite bound for descendants
+      # that inherited the pipe, but invalidate any capture we must cut short.
+      thread.join(OPENCODE_CAPTURE_DRAIN_SECONDS)
       return unless thread.alive?
 
+      capture[:truncated] = true if capture
       io.close unless io.closed?
       thread.join(0.2)
       thread.kill if thread.alive?
@@ -932,6 +943,30 @@ module Hive
     end
 
     def capture_opencode_inspection(inspection)
+      OPENCODE_INSPECTION_JSON_ATTEMPTS.times do |attempt|
+        captured = capture_opencode_inspection_once(inspection)
+        return captured unless captured.fetch(:success)
+
+        begin
+          JSON.parse(captured.fetch(:stdout))
+          return captured
+        rescue JSON::ParserError => e
+          if attempt + 1 == OPENCODE_INSPECTION_JSON_ATTEMPTS
+            return captured.merge(
+              success: false,
+              diagnostic: AgentCliRuntime::Redactor.diagnostic(
+                "OpenCode sanitized export remained malformed after " \
+                "#{OPENCODE_INSPECTION_JSON_ATTEMPTS} attempts: #{e.message}"
+              )
+            )
+          end
+
+          sleep(OPENCODE_INSPECTION_RETRY_DELAY_SECONDS * (attempt + 1))
+        end
+      end
+    end
+
+    def capture_opencode_inspection_once(inspection)
       Tempfile.create([ "hive-opencode-export-", ".json" ]) do |stdout_file|
         Tempfile.create([ "hive-opencode-export-", ".stderr" ]) do |stderr_file|
           capture_limit = OPENCODE_EXPORT_CAPTURE_BYTES
@@ -947,7 +982,7 @@ module Hive
           rescue Errno::ESRCH
             pid
           end
-          _, status = wait_for_opencode_process(
+          timed_out, status = wait_for_opencode_process(
             pid, pgid,
             timeout_sec: OPENCODE_INSPECTION_TIMEOUT_SECONDS,
             poll_interval: 0.05
@@ -964,7 +999,10 @@ module Hive
             stdout_oversized ? "stdout" : ("stderr" if stderr_oversized)
           success = status&.success? == true && !oversized_stream
           diagnostic = unless success
-            message = if oversized_stream
+            message = if timed_out
+              "OpenCode sanitized export inspection timed out after " \
+                "#{OPENCODE_INSPECTION_TIMEOUT_SECONDS} seconds"
+            elsif oversized_stream
               "OpenCode sanitized export inspection #{oversized_stream} " \
                 "exceeded #{capture_limit - 1} bytes"
             elsif stderr.empty?
@@ -1308,17 +1346,18 @@ module Hive
           return
         end
 
+        diagnostic = result[:inspection_diagnostic] || normalized.diagnostic
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(
             @task.state_file,
             :error,
             reason: normalized.kind.to_s,
-            message: normalized.diagnostic.to_s.byteslice(0, 200)
+            message: diagnostic.to_s.byteslice(0, 200)
           )
         end
         result[:status] = :error
         result[:error_reason] = normalized.kind.to_s
-        result[:error_message] = normalized.diagnostic
+        result[:error_message] = diagnostic
         return
       end
 

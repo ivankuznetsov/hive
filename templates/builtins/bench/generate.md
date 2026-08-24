@@ -11,7 +11,11 @@ Execute the `<!-- bench-stage-script -->` bash block below verbatim with
 reimplement its steps, improvise around failing commands, or hand-write a
 `<!-- WAITING -->`/`<!-- ERROR -->`/`<!-- COMPLETE -->` marker yourself —
 every guard in this stage lives in the script, and the script ends every path
-with exactly one marker.
+with exactly one marker. Do not end the stage while the script is running. If
+the command tool reports `Script running with cell ID ...`, call
+`functions.wait` and keep waiting until it completes; if it returns a session
+id, use the matching session wait operation until exit. A yielded shell is not
+a completed benchmark stage.
 
 <!-- bench-stage-script -->
 ```bash
@@ -22,7 +26,7 @@ STATE_FILE="generate.md"
 # Scratch outputs are folded into the state file below; never leave them behind
 # to be swept into hive-state commits (.generate-commands carries absolute
 # source paths).
-trap 'rm -f .generate-validate.out .generate-validate.err .generate-campaign.out .generate-campaign.err .generate-commands .generate-commands.err .generate-cmd.err .generate-run.err .generate-outcome.out .generate-outcome.err .generate-merge.out .generate-merge.err' EXIT
+trap 'rm -f .generate-validate.out .generate-validate.err .generate-campaign.out .generate-campaign.err .generate-commands .generate-commands.err .generate-cmd-*.err .generate-run.err .generate-outcome.out .generate-outcome.err .generate-merge.out .generate-merge.err' EXIT
 
 write_waiting() {
   {
@@ -289,22 +293,40 @@ fi
 
 generate_status=0
 : >.generate-run.err
+generate_pids=()
+generate_errs=()
+generate_commands=()
+generate_index=0
 while IFS= read -r command; do
-  set +e
+  generate_index=$((generate_index + 1))
+  err_path=".generate-cmd-${generate_index}.err"
+  generate_errs+=("$err_path")
+  generate_commands+=("$command")
   # </dev/null: a stdin-reading descendant must not swallow queued command lines.
   # bash -c, not -lc: the stage exports everything the harness needs, and a
   # login profile would feed unattributable noise/failures into per-cell status.
-  # stderr is captured per command so a pre-spend abort (e.g. a missing judge
+  # Stderr is captured per cell so a pre-spend abort (e.g. a missing judge
   # key) can be surfaced next to the "missing" cell it caused.
-  (cd "$REPO_ROOT" && bash -c "$command" </dev/null) 2>.generate-cmd.err
+  (cd "$REPO_ROOT" && bash -c "$command" </dev/null) 2>"$err_path" &
+  generate_pids+=("$!")
+done <.generate-commands
+
+# Start the complete matrix before waiting so independent benchmark cells use
+# the provider allowance concurrently. Still reap every child and retain each
+# cell's diagnostics before classifying the campaign result.
+for index in "${!generate_pids[@]}"; do
+  set +e
+  wait "${generate_pids[$index]}"
   status=$?
   set -e
-  cat .generate-cmd.err >&2
-  { printf -- '--- exit %s: %s\n' "$status" "$command"; tail -n 5 .generate-cmd.err; } >>.generate-run.err
+  err_path="${generate_errs[$index]}"
+  command="${generate_commands[$index]}"
+  cat "$err_path" >&2
+  { printf -- '--- exit %s: %s\n' "$status" "$command"; tail -n 5 "$err_path"; } >>.generate-run.err
   if [ "$status" -ne 0 ]; then
     generate_status="$status"
   fi
-done <.generate-commands
+done
 
 run_note=""
 if [ "$generate_status" -ne 0 ]; then

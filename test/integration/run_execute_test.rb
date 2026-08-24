@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "open3"
 require "hive/commands/init"
 require "hive/commands/run"
 
@@ -46,6 +47,7 @@ class RunExecuteTest < Minitest::Test
       HIVE_EXEC_DRIVER_SKIP_COMMIT
       HIVE_EXEC_DRIVER_OUTPUT
       HIVE_EXEC_DRIVER_DIRTY
+      HIVE_EXEC_DRIVER_DIRTY_PATH
       HIVE_EXEC_DRIVER_CLEAN_DIRTY
       HIVE_EXEC_DRIVER_WRONG_BRANCH
     ].each { |k| ENV.delete(k) }
@@ -80,7 +82,9 @@ class RunExecuteTest < Minitest::Test
       end
 
       if ENV["HIVE_EXEC_DRIVER_DIRTY"]
-        File.write("dirty.txt", "left behind\\n")
+        dirty_path = ENV.fetch("HIVE_EXEC_DRIVER_DIRTY_PATH", "dirty.txt")
+        FileUtils.mkdir_p(File.dirname(dirty_path))
+        File.write(dirty_path, "left behind\\n")
       end
 
       output = ENV["HIVE_EXEC_DRIVER_OUTPUT"].to_s
@@ -303,6 +307,63 @@ class RunExecuteTest < Minitest::Test
         assert_equal :execute_complete, marker.name
       ensure
         wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_in_scope_execute_residue_auto_commit_completes_without_a_retry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_DIRTY"] = "1"
+        ENV["HIVE_EXEC_DRIVER_DIRTY_PATH"] = "lib/hive/execute_residue.rb"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "Committed implementation and left in-scope residue."
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_complete, marker.name
+
+        wt_path = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        refute Hive::GitOps.new(wt_path).dirty?
+        residue_commit, git_err, git_status = Open3.capture3(
+          "git", "-C", wt_path, "log", "-1", "--format=%B"
+        )
+        assert git_status.success?, git_err
+        assert_includes residue_commit, "Hive-Auto-Commit-Reason: stage_exit"
+        assert File.exist?(File.join(wt_path, "lib/hive/execute_residue.rb"))
+      ensure
+        wt_path = YAML.safe_load_file(File.join(folder, "worktree.yml"))["path"] if defined?(folder) && File.exist?(File.join(folder, "worktree.yml"))
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_in_scope_research_residue_does_not_bypass_research_evidence
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
+          ---
+          execution_mode: research
+          ---
+        YAML
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+        ENV["HIVE_EXEC_DRIVER_DIRTY"] = "1"
+        ENV["HIVE_EXEC_DRIVER_DIRTY_PATH"] = "lib/hive/research_residue.rb"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "Research output."
+
+        assert_raises(Hive::TaskInErrorState) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :error, marker.name
+        assert_equal "dirty_worktree", marker.attrs["reason"]
+      ensure
+        wt_path = YAML.safe_load_file(File.join(folder, "worktree.yml"))["path"] if defined?(folder) && File.exist?(File.join(folder, "worktree.yml"))
         FileUtils.rm_rf(wt_path) if wt_path
       end
     end

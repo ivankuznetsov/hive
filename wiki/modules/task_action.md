@@ -147,6 +147,12 @@ For built-in coding tasks at plan, `TaskAction` loads the one
 `PlanReview::Projection` and checks its plan/generation/config freshness. It
 maps lifecycle state without reimplementing policy:
 
+When the explicit benchmark grant admits `plan_review.enabled: false`, the
+classifier ignores any absent, stale, or previously materialized plan-review
+projection. Its ordinary marker action therefore matches `TransitionGuard`:
+a complete plan is `ready_to_develop`, never a misleading
+`plan_review_blocked` row.
+
 | Review state | Action | Command/owner |
 |---|---|---|
 | absent/uninitialized/reviewing/revising/verifying | `plan_reviewing` | `hive plan-review-run ...`; agent/scheduler |

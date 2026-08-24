@@ -263,7 +263,14 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   run is complete only after its terminal assistant record correlates with
   sanitized session export. The correlated terminal record may have empty prose
   when a tool-only turn already produced the required artifact; the finish
-  reason, route, usage, session, and message identity remain mandatory.
+  reason, route, usage, session, and message identity remain mandatory. The
+  export is captured in owner-private temporary files rather than
+  a timed pipe-drain thread. The export child receives a 64 MiB file-size limit
+  for both stdout and stderr before it starts, and Hive reads through the same
+  bound after it exits. Long review and implementation sessions carry every
+  tool result and legitimately exceed the former 4 MiB short-session ceiling,
+  while malformed or larger evidence still fails closed without unbounded
+  temporary-file growth.
   `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected

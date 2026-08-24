@@ -36,6 +36,29 @@ module Hive
         }
       end
 
+      def daemon_identity_matches?(actual, expected)
+        return false unless actual.is_a?(Hash) && expected.is_a?(Hash)
+
+        %w[generation pid process_start_time].all? do |key|
+          actual[key].to_s == expected[key].to_s
+        end
+      end
+
+      def validate_read_path!(path, label: "snapshot")
+        parent_stat = File.lstat(File.dirname(path))
+        raise SecurityError, "#{label} directory is a symlink" if parent_stat.symlink?
+        raise SecurityError, "#{label} parent is not a directory" unless parent_stat.directory?
+        raise SecurityError, "#{label} directory has unsafe ownership" unless parent_stat.uid == Process.uid
+        raise SecurityError, "#{label} directory is not owner-private" unless (parent_stat.mode & 0o077).zero?
+
+        stat = File.lstat(path)
+        raise SecurityError, "#{label} file is a symlink" if stat.symlink?
+        raise SecurityError, "#{label} path is not a regular file" unless stat.file?
+        raise SecurityError, "#{label} file has multiple hard links" unless stat.nlink == 1
+        raise SecurityError, "#{label} file has unsafe ownership" unless stat.uid == Process.uid
+        raise SecurityError, "#{label} file is not owner-private" unless (stat.mode & 0o077).zero?
+      end
+
       # Owner-private atomic persistence. The dedicated parent directory and
       # final inode are both checked before and after replacement so a symlink
       # or permissive path never becomes an authority source.
@@ -95,6 +118,91 @@ module Hive
         end
       end
 
+      # Large full-graph cache published once per successful daemon scan.
+      # It is deliberately separate from the scheduler snapshot: web/watch
+      # consumers read the small snapshot, while concise status opts into this
+      # file and joins it only to a generation-bound scheduler record.
+      module StatusCache
+        SCHEMA = "hive-daemon-status-cache".freeze
+        SCHEMA_VERSION = 1
+
+        class Store < OperationalSnapshot::Store
+          def initialize(path: Hive::Paths.operational_status_cache_path)
+            super
+          end
+        end
+
+        class Reader
+          def initialize(path: Hive::Paths.operational_status_cache_path)
+            @path = File.expand_path(path)
+          end
+
+          def read(snapshot:, now: Time.now.utc)
+            return unless eligible_snapshot?(snapshot, now)
+
+            OperationalSnapshot.validate_read_path!(@path, label: "cache")
+            record = JSON.parse(File.read(@path))
+            validate_record!(record)
+            return unless OperationalSnapshot.daemon_identity_matches?(
+              record.fetch("daemon"), snapshot.fetch("daemon")
+            )
+            return unless record.fetch("tick_sequence") <= snapshot.fetch("tick_sequence")
+
+            deadline = effective_deadline(record, snapshot)
+            return if deadline < now
+
+            record.merge("valid_until" => deadline.iso8601(6))
+          rescue Errno::ENOENT, SecurityError, JSON::ParserError, ArgumentError,
+                 TypeError, KeyError, SystemCallError, IOError
+            nil
+          end
+
+          private
+
+          def eligible_snapshot?(snapshot, now)
+            return false unless snapshot.is_a?(Hash)
+            return false unless %w[current unavailable].include?(snapshot["status"])
+            return false if snapshot["shutdown"].is_a?(Hash)
+            return false unless snapshot["tick_sequence"].is_a?(Integer)
+            return false unless snapshot["daemon"].is_a?(Hash)
+
+            Time.iso8601(snapshot.fetch("valid_until")) >= now
+          rescue ArgumentError, TypeError, KeyError
+            false
+          end
+
+          def validate_record!(record)
+            raise ArgumentError, "cache must be an object" unless record.is_a?(Hash)
+            raise ArgumentError, "wrong cache schema" unless record["schema"] == SCHEMA
+            raise ArgumentError, "unsupported cache schema version" unless
+              record["schema_version"] == SCHEMA_VERSION
+            raise ArgumentError, "invalid cache daemon" unless record["daemon"].is_a?(Hash)
+            raise ArgumentError, "invalid cache tick" unless
+              record["tick_sequence"].is_a?(Integer) && record["tick_sequence"].positive?
+
+            Time.iso8601(record.fetch("published_at"))
+            Time.iso8601(record.fetch("valid_until"))
+            payload = record.fetch("payload")
+            unless payload.is_a?(Hash) && payload["schema"] == "hive-status" &&
+                   payload["ok"] == true && payload["schema_version"].is_a?(Integer) &&
+                   payload["projects"].is_a?(Array)
+              raise ArgumentError, "invalid cache payload"
+            end
+            Time.iso8601(payload.fetch("generated_at"))
+          end
+
+          def effective_deadline(record, snapshot)
+            cache_deadline = Time.iso8601(record.fetch("valid_until"))
+            published_at = Time.iso8601(record.fetch("published_at"))
+            snapshot_validity = Time.iso8601(snapshot.fetch("valid_until")) -
+              Time.iso8601(snapshot.fetch("observed_at"))
+            raise ArgumentError, "invalid snapshot validity" unless snapshot_validity.positive?
+
+            [ cache_deadline, published_at + snapshot_validity ].min
+          end
+        end
+      end
+
       # Builds one coherent tick record. Decisions are captured in memory as
       # the dispatcher evaluates one authoritative status frame. Operational
       # consumers accept them only from task graphs sampled after completion
@@ -102,8 +210,9 @@ module Hive
       class Assembler
         attr_reader :tick_sequence
 
-        def initialize(store:, daemon_identity:, poll_interval_sec:)
+        def initialize(store:, daemon_identity:, poll_interval_sec:, status_cache_store: nil)
           @store = store
+          @status_cache_store = status_cache_store
           @daemon_identity = stringify_keys(daemon_identity)
           reconfigure(poll_interval_sec: poll_interval_sec)
           @tick_sequence = 0
@@ -169,6 +278,7 @@ module Hive
 
         def complete(rows:, controller:, queue:, recoveries:,
                      hidden_archived_task_count: 0,
+                     status_payload: nil,
                      now: Time.now.utc)
           rows = Array(rows)
           validate_hidden_count!(
@@ -187,17 +297,17 @@ module Hive
           holds = provider_holds(rows)
           overlay_provider_dispositions!(task_index, holds)
           overlay_recovery_dispositions!(task_index, recoveries || {})
-          @store.write(
-            base_record(phase: "complete", now: now).merge(
-              "reason" => nil,
-              "hidden_archived_task_count" => hidden_archived_task_count,
-              "capacity" => controller || {},
-              "queue" => queue || {},
-              "provider_holds" => holds,
-              "recoveries" => recoveries || {},
-              "tasks" => tasks
-            )
+          publish_status_cache(status_payload, now: now)
+          record = base_record(phase: "complete", now: now).merge(
+            "reason" => nil,
+            "hidden_archived_task_count" => hidden_archived_task_count,
+            "capacity" => controller || {},
+            "queue" => queue || {},
+            "provider_holds" => holds,
+            "recoveries" => recoveries || {},
+            "tasks" => tasks
           )
+          @store.write(record)
         end
 
         # Written only by Dispatcher after it has stopped admitting work and
@@ -239,6 +349,34 @@ module Hive
             "hidden_archived_task_count" => nil,
             "attempt_storage" => @attempt_storage
           }
+        end
+
+        def publish_status_cache(payload, now:)
+          return unless @status_cache_store && valid_status_cache_payload?(payload)
+
+          instant = now.utc
+          @status_cache_store.write(
+            "schema" => StatusCache::SCHEMA,
+            "schema_version" => StatusCache::SCHEMA_VERSION,
+            "daemon" => @daemon_identity,
+            "tick_sequence" => tick_sequence,
+            "published_at" => instant.iso8601(6),
+            "valid_until" => (instant + @validity_sec).iso8601(6),
+            "payload" => payload
+          )
+        rescue StandardError
+          nil
+        end
+
+        def valid_status_cache_payload?(payload)
+          return false unless payload.is_a?(Hash) && payload["schema"] == "hive-status" &&
+                              payload["ok"] == true && payload["schema_version"].is_a?(Integer) &&
+                              payload["projects"].is_a?(Array)
+
+          Time.iso8601(payload.fetch("generated_at"))
+          true
+        rescue ArgumentError, TypeError, KeyError
+          false
         end
 
         def validate_hidden_count!(value, label:)
@@ -471,10 +609,11 @@ module Hive
           expected = expected_daemon
           return unavailable("daemon_not_running") if expected == :unavailable
 
-          validate_path!
+          OperationalSnapshot.validate_read_path!(@path)
           record = JSON.parse(File.read(@path))
           validate_record!(record)
-          return invalid("daemon_generation_mismatch", record) unless daemon_matches?(record, expected)
+          return invalid("daemon_generation_mismatch", record) unless
+            OperationalSnapshot.daemon_identity_matches?(record.fetch("daemon"), expected)
           return unavailable(record["reason"] || "tick_#{record.fetch('phase')}", record) unless
             record["phase"] == "complete"
           return stale("snapshot_expired", record) if Time.parse(record.fetch("valid_until")) < now
@@ -494,10 +633,12 @@ module Hive
         # expected generation is captured from the verified live PID before
         # shutdown, so a stale receipt cannot authorize package replacement.
         def shutdown_acknowledgement(expected_daemon:, now: Time.now.utc)
-          validate_path!
+          OperationalSnapshot.validate_read_path!(@path)
           record = JSON.parse(File.read(@path))
           validate_record!(record)
-          return nil unless daemon_matches?(record, expected_daemon)
+          return nil unless OperationalSnapshot.daemon_identity_matches?(
+            record.fetch("daemon"), expected_daemon
+          )
           return nil unless record["phase"] == "complete"
           return nil if Time.parse(record.fetch("valid_until")) < now
 
@@ -540,22 +681,6 @@ module Hive
           :unavailable
         end
 
-        def validate_path!
-          parent = File.dirname(@path)
-          parent_stat = File.lstat(parent)
-          raise SecurityError, "snapshot directory is a symlink" if parent_stat.symlink?
-          raise SecurityError, "snapshot parent is not a directory" unless parent_stat.directory?
-          raise SecurityError, "snapshot directory has unsafe ownership" unless parent_stat.uid == Process.uid
-          raise SecurityError, "snapshot directory is not owner-private" unless (parent_stat.mode & 0o077).zero?
-
-          stat = File.lstat(@path)
-          raise SecurityError, "snapshot file is a symlink" if stat.symlink?
-          raise SecurityError, "snapshot path is not a regular file" unless stat.file?
-          raise SecurityError, "snapshot file has multiple hard links" unless stat.nlink == 1
-          raise SecurityError, "snapshot file has unsafe ownership" unless stat.uid == Process.uid
-          raise SecurityError, "snapshot file is not owner-private" unless (stat.mode & 0o077).zero?
-        end
-
         def validate_record!(record)
           raise ArgumentError, "record must be an object" unless record.is_a?(Hash)
           raise ArgumentError, "wrong snapshot schema" unless record["schema"] == SCHEMA
@@ -573,14 +698,6 @@ module Hive
             raise ArgumentError, "invalid source window" unless window["completed_at"].nil?
           else
             Time.parse(window.fetch("completed_at"))
-          end
-        end
-
-        def daemon_matches?(record, expected)
-          return false unless expected.is_a?(Hash)
-
-          %w[generation pid process_start_time].all? do |key|
-            record.dig("daemon", key).to_s == expected[key].to_s
           end
         end
 

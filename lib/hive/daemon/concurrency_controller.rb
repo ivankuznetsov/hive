@@ -210,8 +210,9 @@ module Hive
       # `:record_baseline` on a first-sight `kind: edit` row, the
       # dispatcher seeds the controller with the current mtime so the
       # next tick has something to compare against; (b) when durable
-      # admission returns a successful terminal replay, the dispatcher
-      # records the generation's consumed mtime; (c) post-child-completion,
+      # admission accepts a run or returns a successful terminal replay, the
+      # dispatcher records the generation's consumed mtime; (c)
+      # post-child-completion,
       # the dispatcher refreshes the recorded mtime to the
       # current state-file mtime so the agent's own `_WAITING`-marker
       # write (which moves mtime past the at-dispatch value) doesn't

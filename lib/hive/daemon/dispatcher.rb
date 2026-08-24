@@ -1486,12 +1486,19 @@ module Hive
         baseline_mtime = @controller.last_dispatched_state_file_mtime_for(
           project: row.project, slug: row.slug
         )
-        if brainstorm_answers.fetch(:complete) &&
-           @controller.restored_dispatch_baseline_for?(project: row.project, slug: row.slug)
-          # Older daemons could persist a fully answered brainstorm as the
-          # first-sight baseline and strand it forever. Treat a restored,
-          # uncorroborated baseline as first sight exactly once; a successful
-          # dispatch records it in this process and restores the normal brake.
+        restored_baseline = @controller.restored_dispatch_baseline_for?(
+          project: row.project, slug: row.slug
+        )
+        restored_generic_run = row.action == "ready_to_run" &&
+                               row.state_file_mtime && baseline_mtime &&
+                               row.state_file_mtime < baseline_mtime
+        if restored_baseline &&
+           (brainstorm_answers.fetch(:complete) || restored_generic_run)
+          # A baseline loaded from disk may describe an older daemon's
+          # first-sight observation or a replaced workflow state file. Treat
+          # only that uncorroborated baseline as first sight exactly once.
+          # Same-process observations clear restored provenance, so a newer
+          # sibling artifact can never re-arm an unchanged markerless run.
           baseline_mtime = nil
         end
         decision = Policy.decide(
@@ -1753,14 +1760,14 @@ module Hive
         )
         remember_routing_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
-        if outcome == :attempt_terminal_replay
-          # A successful durable attempt already consumed this exact task
-          # generation. Refresh the edit/run baseline just as a locally
-          # reaped child would, so an unchanged waiting marker does not ask
-          # the attempts layer for the same terminal receipt every tick.
-          # The baseline is persisted by the controller, making the brake
-          # survive daemon restarts while a genuine later edit (newer mtime)
-          # remains eligible for dispatch.
+        if dispatch_result.is_a?(Hive::Attempts::DispatchResult) &&
+           (dispatch_result.accepted? || dispatch_result.status == :terminal_replay)
+          # Durable attempts never enter ChildSupervisor, so consume their
+          # state-file mtime here just as record_dispatch does for a local
+          # child. Acceptance immediately replaces a stale restored baseline;
+          # terminal replay covers a daemon that missed that acceptance. The
+          # persisted brake survives restart while a genuine later edit stays
+          # eligible.
           @controller.observe_state_file_mtime(
             project: row.project, slug: row.slug, mtime: row.state_file_mtime
           )

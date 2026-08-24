@@ -5,7 +5,13 @@ require "hive/pid_file"
 # Covers the stateless module-level helpers Hive::PidFile.alive? / .read
 # (the mixin instance methods are exercised via the daemon/babysit commands).
 class HivePidFileModuleTest < Minitest::Test
+  include HiveTestHelper
+
   PF = Hive::PidFile
+
+  BoundedReader = Struct.new(:pid_file) do
+    include Hive::PidFile
+  end
 
   AliveProcess = Struct.new(:behaviour) do
     def kill(_signal, _pid)
@@ -97,6 +103,40 @@ class HivePidFileModuleTest < Minitest::Test
       File.write(path, "pid: [")
 
       assert_raises(Psych::Exception) { PF.read(path) }
+    end
+  end
+
+  def test_bounded_reader_uses_inode_checked_fallback_without_o_nofollow
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, { "pid" => 4242 }.to_yaml)
+      reader = BoundedReader.new(path)
+      original = File.method(:const_defined?)
+      replacement = lambda do |name, *args|
+        name == :NOFOLLOW ? false : original.call(name, *args)
+      end
+
+      payload = with_replaced_singleton_method(File, :const_defined?, replacement) do
+        reader.read_pid_file_payload(max_bytes: 1024)
+      end
+
+      assert_equal({ "pid" => 4242 }, payload)
+    end
+  end
+
+  def test_bounded_reader_fails_closed_when_open_races_with_the_probe
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, { "pid" => 4242 }.to_yaml)
+      reader = BoundedReader.new(path)
+
+      payload = with_replaced_singleton_method(
+        File, :open, ->(*) { raise Errno::EIO, "pid file became unreadable" }
+      ) do
+        reader.read_pid_file_payload(max_bytes: 1024)
+      end
+
+      assert_nil payload
     end
   end
 end

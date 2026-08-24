@@ -35,6 +35,39 @@ class RunningStatusTest < Minitest::Test
     assert_equal false, payload.fetch("complete")
   end
 
+  def test_missing_stages_root_marks_project_unavailable
+    with_tmp_dir do |project_root|
+      project = {
+        "name" => "missing-stages",
+        "path" => project_root,
+        "hive_state_path" => File.join(project_root, ".hive-state")
+      }
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_equal [], payload.fetch("tasks")
+      assert_equal 1, payload.dig("source", "projects_unavailable")
+      assert_equal false, payload.fetch("complete")
+    end
+  end
+
+  def test_project_scan_failure_marks_only_that_project_unavailable
+    failing_status = Class.new(Hive::RunningStatus) do
+      private
+
+      def real_directory?(_path)
+        raise Errno::EIO, "project became unreadable"
+      end
+    end.new(daemon_state: daemon_state)
+    project = { "name" => "unreadable", "hive_state_path" => "/unreadable" }
+
+    payload = failing_status.payload([ project ], now: NOW)
+
+    assert_equal [], payload.fetch("tasks")
+    assert_equal 1, payload.dig("source", "projects_unavailable")
+    assert_equal false, payload.fetch("complete")
+  end
+
   def test_live_task_lock_without_agent_pid_is_running
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "lock-only-task")
@@ -119,6 +152,24 @@ class RunningStatusTest < Minitest::Test
       assert_equal true, row.dig("liveness", "agent_pid_alive")
       assert_equal Process.pid, row.dig("liveness", "runner_pid")
       assert_equal Process.pid, row.dig("liveness", "agent_pid")
+    end
+  end
+
+  def test_invalid_agent_pid_is_reported_dead_without_hiding_live_runner
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "4-execute", "invalid-agent-pid")
+      write_lock(
+        folder,
+        "pid" => Process.pid,
+        "claude_pid" => "not-an-integer",
+        "lock_id" => "invalid-agent"
+      )
+
+      row = status.payload([ project ], now: NOW).fetch("tasks").fetch(0)
+
+      assert_equal true, row.dig("liveness", "task_lock_alive")
+      assert_equal false, row.dig("liveness", "agent_pid_alive")
+      assert_nil row.dig("liveness", "agent_pid")
     end
   end
 
@@ -290,6 +341,44 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
+  def test_metadata_filesystem_error_keeps_live_row_with_unreadable_status
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "1-inbox", "unreadable-meta-task")
+      write_lock(folder, "pid" => Process.pid, "lock_id" => "unreadable-meta")
+      failing_status = Class.new(Hive::RunningStatus) do
+        private
+
+        def bounded_file_read(path, max_bytes)
+          raise Errno::EIO, "metadata became unreadable" if File.basename(path) == "meta.yml"
+
+          super
+        end
+      end.new(daemon_state: daemon_state)
+
+      row = failing_status.payload([ project ], now: NOW).fetch("tasks").fetch(0)
+
+      assert_equal "unreadable", row.fetch("metadata_status")
+      assert_equal true, row.dig("liveness", "running")
+    end
+  end
+
+  def test_bounded_reader_uses_inode_checked_fallback_without_o_nofollow
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "1-inbox", "portable-lock-reader")
+      write_lock(folder, "pid" => Process.pid, "lock_id" => "portable-reader")
+      original = File.method(:const_defined?)
+      replacement = lambda do |name, *args|
+        name == :NOFOLLOW ? false : original.call(name, *args)
+      end
+
+      payload = with_replaced_singleton_method(File, :const_defined?, replacement) do
+        status.payload([ project ], now: NOW)
+      end
+
+      assert_equal true, payload.dig("tasks", 0, "liveness", "running")
+    end
+  end
+
   def test_rows_strings_and_final_document_are_hard_bounded
     with_project(name: "p" * 1_000) do |project, hive_state|
       (Hive::RunningStatus::MAX_TASKS + 3).times do |index|
@@ -318,6 +407,25 @@ class RunningStatusTest < Minitest::Test
       assert_operator encoded.bytesize, :<=, Hive::RunningStatus::MAX_OUTPUT_BYTES
       assert_schema_valid(payload)
     end
+  end
+
+  def test_final_document_bound_drops_rows_that_exceed_the_byte_budget
+    document = {
+      "tasks" => [ { "padding" => "x" * Hive::RunningStatus::MAX_OUTPUT_BYTES } ],
+      "count" => 1,
+      "observed_count" => 1,
+      "omitted_count" => 0,
+      "truncated" => false,
+      "complete" => true
+    }
+
+    status.send(:fit_output_bound!, document)
+
+    assert_equal [], document.fetch("tasks")
+    assert_equal 0, document.fetch("count")
+    assert_equal 1, document.fetch("omitted_count")
+    assert_equal true, document.fetch("truncated")
+    assert_equal false, document.fetch("complete")
   end
 
   def test_filesystem_entry_budget_stops_scan_and_marks_counts_inexact

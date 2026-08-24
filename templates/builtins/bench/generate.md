@@ -368,7 +368,15 @@ ruby -ryaml -rjson -e '
         quota_only = false
         next
       end
-      unless Dir.glob(File.join(dir, "*", "*", "target", "candidate.patch")).empty?
+      patches = Dir.glob(File.join(dir, "*", "*", "target", "candidate.patch"))
+      if cell && pending.empty? && failed.empty? && patches.any? { |path| File.size?(path) }
+        # The generation outcome remains honest (for example execute_failed),
+        # but a non-empty paid diff is sufficient input for the judge stage.
+        # Merge it into the campaign root below; judge will backfill the exact
+        # configured slate without re-running the candidate.
+        next
+      end
+      unless patches.empty?
         # Applies to every bucket a walled cell can land in (pending, failed,
         # or a non-terminal cells[] record): the diff is paid for either way.
         status = "judges_pending (was: #{status}) — diff already captured; do NOT regenerate. Backfill judges with harness/rejudge.rb against the campaign-root runs/#{data.fetch("campaign_id")}/results.json only — never point rejudge --out at this cell'"'"'s results.json (that erases pending[] and re-arms regeneration)"
@@ -419,5 +427,5 @@ fi
   exit 0
 }
 
-write_complete "${run_note}Every non-excluded campaign cell has a per-cell \`run_status\` of \`generated\` or \`empty_diff\` with empty pending/failed buckets; merged campaign results written to \`runs/$CAMPAIGN_ID/results.json\`."
+write_complete "${run_note}Every non-excluded campaign cell is terminal or has a preserved non-empty candidate patch, with empty pending/failed buckets; merged campaign results written to \`runs/$CAMPAIGN_ID/results.json\` for judge backfill."
 ```

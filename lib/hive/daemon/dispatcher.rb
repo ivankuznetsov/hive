@@ -197,6 +197,7 @@ module Hive
         @tracked_state_file_order_members = Set.new
         @tracked_state_file_cursor = 0
         @known_rows_by_key = {}
+        @advance_rows_by_key = {}
         @dispatched_today = 0
         reset_active_agent_snapshot
         # Per-tick enable cache. Populated lazily within one tick so
@@ -439,13 +440,34 @@ module Hive
                         keeping_previous: true)
         end
 
-        # 3b. Dispatch-request queue (plan 2026-05-28-002). Process
-        # bot-written request files BEFORE the per-row scan so a slug
-        # whose request just spawned is already in-flight in the
-        # controller and the row scan's gate keeps the status-row loop
-        # from double-dispatching. Single-writer invariant: only the
-        # daemon spawns `hive run`-class verbs.
-        process_dispatch_requests(now: now, rows: result.rows)
+        # 3b. Preserve the row priority order across auxiliary dispatch
+        # lanes. Dispatch the prefix ending at the last advance-ready row
+        # before queued requests, admissions, or discovery can claim a scarce
+        # slot. The prefix also contains every later-stage row, preserving the
+        # pipeline-drain policy; rows after it are necessarily lower-priority
+        # fresh work. A queued request for the exact same priority-row slug is
+        # still handled first so its explicit command wins and the row's
+        # in-flight gate suppresses a duplicate.
+        ordered_rows = dispatch_priority_order(result.rows)
+        priority_rows, remaining_rows = dispatch_priority_partitions(ordered_rows)
+        pending_requests = pending_dispatch_requests
+        priority_keys = priority_rows.to_h do |row|
+          [ [ row.project.to_s, row.slug.to_s ], true ]
+        end
+        priority_requests, remaining_requests = pending_requests.partition do |request|
+          priority_keys.key?([ request.project.to_s, request.slug.to_s ])
+        end
+        process_dispatch_requests(
+          now: now, rows: result.rows, requests: priority_requests
+        )
+        dispatch_status_rows(priority_rows, now: now)
+        return unless admission_open?
+
+        # Dispatch-request queue (plan 2026-05-28-002). Single-writer
+        # invariant: only the daemon spawns `hive run`-class verbs.
+        process_dispatch_requests(
+          now: now, rows: result.rows, requests: remaining_requests
+        )
 
         # Accepted-source admission is an independent control lane. It is
         # intentionally ticked before discovery scheduling and never enters
@@ -500,11 +522,7 @@ module Hive
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
         # ahead of newer earlier-stage work when slots are scarce.
-        dispatch_priority_order(result.rows).each do |row|
-          break unless admission_open?
-
-          handle_row(row, now: now)
-        end
+        dispatch_status_rows(remaining_rows, now: now)
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -568,7 +586,8 @@ module Hive
         # Reuse the last full attempt snapshot for them. Any row that could
         # heal or dispatch refreshes attempt ownership first, preserving the
         # capacity gate without scanning attempt history on every heartbeat.
-        if result.rows.any? { |row| !active_agent_row?(row) } && !reconcile_attempts(now: now)
+        dispatchable_change = result.rows.any? { |row| !active_agent_row?(row) }
+        if dispatchable_change && !reconcile_attempts(now: now)
           @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                    action: "incremental_attempt_reconciliation_failed")
           return false
@@ -605,11 +624,12 @@ module Hive
                         keeping_previous: true)
         end
 
-        dispatch_priority_order(result.rows).each do |row|
-          break unless admission_open?
-
-          handle_row(row, now: now)
+        dispatch_rows = if dispatchable_change
+          incremental_dispatch_rows(result.rows)
+        else
+          result.rows
         end
+        dispatch_status_rows(dispatch_rows, now: now)
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
                                  in_flight: @controller.in_flight_count,
@@ -1252,6 +1272,9 @@ module Hive
           previous_cursor % @tracked_state_file_order.length
         end
         @known_rows_by_key = rows.to_h { |row| [ task_key(row), row ] }
+        @advance_rows_by_key = rows.filter_map do |row|
+          [ task_key(row), row ] if Hive::Daemon::Policy.advance?(row.action)
+        end.to_h
       end
 
       def tracked_state_file_changes
@@ -1277,6 +1300,12 @@ module Hive
         keys = task_keys.map { |project, slug| [ project.to_s, slug.to_s ] }.uniq
         keys.each { |key| @known_rows_by_key.delete(key) }
         rows.each { |row| @known_rows_by_key[task_key(row)] = row }
+        keys.each { |key| @advance_rows_by_key.delete(key) }
+        rows.each do |row|
+          next unless Hive::Daemon::Policy.advance?(row.action)
+
+          @advance_rows_by_key[task_key(row)] = row
+        end
 
         keys.each { |key| @tracked_state_files.delete(key) }
         rows.each do |row|
@@ -2051,15 +2080,55 @@ module Hive
 
       # Order rows so tasks closer to the end of the pipeline dispatch
       # first: a 7-artifacts row before a 6-review row, an 8-finalize
-      # before both. When concurrency slots are scarce this drains work
-      # nearest completion ahead of newer earlier-stage work (a WIP-limit
-      # — don't start a fresh review while finalizes wait on a slot).
-      # Stable within a stage (original status order preserved), and
-      # unranked/unknown stages sort last.
+      # before both. Within one stage, drain terminal advance actions before
+      # starting another agent. This matters for controller workflows whose
+      # completed and fresh work share a stage directory: otherwise a large
+      # inbox can consume every slot before an accepted task moves forward.
+      # The original status order remains stable within each stage/action
+      # class, and unranked/unknown stages sort last.
       def dispatch_priority_order(rows)
         rows.each_with_index
-            .sort_by { |row, idx| [ -stage_rank(row.stage), idx ] }
+            .sort_by do |row, idx|
+              [ -stage_rank(row.stage), dispatch_action_rank(row.action), idx ]
+            end
             .map(&:first)
+      end
+
+      def dispatch_action_rank(action)
+        Hive::Daemon::Policy.advance?(action) ? 0 : 1
+      end
+
+      # Split an already-prioritized status snapshot around its final
+      # advance-ready row. Processing the prefix before auxiliary dispatch
+      # lanes keeps same-stage fresh work from bypassing accepted work while
+      # retaining later-stage-first ordering.
+      def dispatch_priority_partitions(rows)
+        cutoff = rows.rindex do |row|
+          Hive::Daemon::Policy.advance?(row.action)
+        end
+        return [ [], rows ] unless cutoff
+
+        [ rows.take(cutoff + 1), rows.drop(cutoff + 1) ]
+      end
+
+      def dispatch_status_rows(rows, now:)
+        rows.each do |row|
+          break unless admission_open?
+
+          handle_row(row, now: now)
+        end
+      end
+
+      # A bounded status refresh may contain only a newly-ready run row while
+      # an unchanged accepted row remains in the last full-scan cache. Merge
+      # those cached advance contenders with the changed non-advance rows so
+      # the same ordering applies without reading another task file or
+      # rebuilding the complete status graph.
+      def incremental_dispatch_rows(changed_rows)
+        fresh_rows = changed_rows.reject do |row|
+          Hive::Daemon::Policy.advance?(row.action)
+        end
+        dispatch_priority_order(@advance_rows_by_key.values + fresh_rows)
       end
 
       # Pipeline position of a stage dir (higher = closer to done); -1 for
@@ -2399,7 +2468,7 @@ module Hive
       #   8. Spawn via `dispatch_command`, threading `request_id`
       #      through the supervisor so `reap_completed` can unlink the
       #      file and log `:dispatch_request_completed`.
-      def process_dispatch_requests(now:, rows:)
+      def pending_dispatch_requests
         pending = Hive::Daemon::DispatchRequestQueue.pending(
           state_home: dispatch_request_state_home,
           bad_handler: ->(path:, reason:) {
@@ -2414,6 +2483,11 @@ module Hive
         @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
           !current_request_ids.key?(request_id)
         end
+        pending
+      end
+
+      def process_dispatch_requests(now:, rows:, requests: nil)
+        pending = requests || pending_dispatch_requests
         return if pending.empty?
 
         begin

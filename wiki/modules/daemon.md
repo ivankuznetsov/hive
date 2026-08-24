@@ -418,6 +418,22 @@ wait context and never spawns for either hold. The coding
 `workflow == "coding"` (nil workflow remains coding for old test doubles), so a
 generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
 
+Dispatcher priority is later-stage-first. Within one stage directory it drains
+terminal `ready_to_*` advance actions before fresh `ready_to_run` work, while
+preserving status order within each action class. This is a WIP limit for
+controller workflows such as Patrol Fix: an accepted inbox decision advances
+before another inbox investigation can consume the last project slot. A full
+tick applies that order before unrelated queued requests, admission schedulers,
+or discovery scans. A queued request for the same high-priority task still runs
+first and suppresses the snapshot row through the ordinary in-flight gate.
+
+Changed-task ticks retain the same policy without rebuilding the complete
+status graph. The authoritative full scan maintains an in-memory index of
+advance-ready rows; when a bounded refresh exposes dispatchable work, the
+dispatcher combines those cached contenders with the changed non-advance rows
+and sorts the small projections together. Heartbeat-only refreshes remain
+task-local and do not reconcile attempts or dispatch cached work.
+
 ## Plan-review automation boundary
 
 Coding `3-plan` rows carry the shared [[modules/plan_review]] projection from

@@ -697,6 +697,7 @@ module Hive
       outcome = AgentRuntime.normalize(
         @profile, captured, requested_route: prepared.requested_route
       )
+      provider_error = opencode_provider_error(stdout_capture.fetch(:data))
       usage = opencode_usage(outcome)
       result = {
         pid: pid,
@@ -708,7 +709,8 @@ module Hive
         final_message: outcome.final_message,
         final_message_source: :opencode_terminal_message,
         final_message_truncated: outcome.final_message_truncated,
-        limit_text: nil,
+        limit_text: provider_error && provider_limit_status?(provider_error) ?
+          provider_error[:message].to_s : nil,
         usage: usage,
         model: outcome.identity.actual&.to_s,
         requested_opencode_route: outcome.identity.requested.to_s,
@@ -721,6 +723,7 @@ module Hive
         resource_exhaustion: nil,
         output_completed: outcome.completed?,
         provider_signal: nil,
+        provider_error: provider_error,
         status: nil,
         invocation_root: prepared.invocation_root
       }
@@ -1074,6 +1077,17 @@ module Hive
           log.write("\n") unless line.end_with?("\n")
         end
       end
+    end
+
+    def opencode_provider_error(stdout)
+      stdout.each_line do |line|
+        event = parse_json_line(line)
+        next unless event
+
+        error = AgentRuntime.extract_provider_error(@profile, event)
+        return error if error
+      end
+      nil
     end
 
     def opencode?

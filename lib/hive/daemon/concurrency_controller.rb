@@ -98,7 +98,7 @@ module Hive
       # Predicate: can the daemon spawn a child for (project, slug) now?
       #
       # `external_*_count` is the dispatcher's per-tick snapshot of
-      # active agent rows already visible in `hive status --json` but not
+      # active agent rows already visible in the internal task graph but not
       # owned by this controller. That lets a daemon restart respect
       # work already in flight while keeping waiting rows (`needs_input`,
       # recovery states, etc.) out of the cap.

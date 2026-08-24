@@ -388,7 +388,7 @@ module Hive
         "max_wall_clock_sec" => 28_800
       },
       # Hive daemon settings (ADR-024). The daemon polls
-      # `hive status --json`, dispatches workflow verbs on tasks the
+      # Hive's internal task graph, dispatches workflow verbs on tasks the
       # classifier marks safe, and stops only at human-input gates.
       #
       # Per-project `daemon.enabled` is rendered into a project's
@@ -1188,7 +1188,7 @@ module Hive
     # Surface a misconfigured HIVE_HOME loudly on READ paths only.
     # When ENV["HIVE_HOME"] is explicitly set to a path that doesn't exist
     # (e.g., a user typo), `registered_projects` returning [] silently hid
-    # the typo and made `hive status --json | jq .ok` falsely report `true`
+    # the typo and made the internal task graph falsely report `ok: true`
     # under nonexistent-HIVE_HOME smoke runs. Fire only when explicitly set
     # AND missing — leave the default unset path lazy-creatable by
     # `register_project` (which does its own mkdir_p), and accept the

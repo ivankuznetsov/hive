@@ -701,6 +701,20 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal 1234, payload.fetch("pid")
   end
 
+  def test_running_state_bounds_filesystem_probe_failures_only_for_bounded_callers
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
+    write_pid_payload(pid: 1234)
+    report.define_singleton_method(:read_pid_file_payload) do |**|
+      raise Errno::EIO, "pid file became unreadable"
+    end
+
+    assert_equal(
+      { running: false, pid: nil, uptime_sec: nil },
+      report.running_state(max_pid_bytes: 4 * 1024)
+    )
+    assert_raises(Errno::EIO) { report.running_state }
+  end
+
   # A probe failure must degrade to a minimal not-running hash rather than
   # raising out of the web render path.
   def test_safe_payload_degrades_to_not_running_hash_on_probe_failure

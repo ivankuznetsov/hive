@@ -1,5 +1,6 @@
 require "application_system_test_case"
 require "open3"
+require "hive/stages/open_pr"
 
 # The Hive web golden path, end to end, in a real browser — deliberately NOT
 # named *_test.rb so the default suites skip it; run it explicitly:
@@ -151,6 +152,16 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # replacing "Ready to open PR" while the task remains at the same gate.
     assert_selector ".stage-badge.stage-5", text: "open-pr", wait: 90
 
+    # The fake agent must satisfy the same bounded authoring contract as a real
+    # open-PR agent. Otherwise the daemon immediately enters authoring recovery
+    # and the browser assertion above only passes when it catches stage 5 in a
+    # transient pre-error window.
+    draft_path = wait_for_pr_draft!(slug)
+    draft = JSON.parse(File.binread(draft_path))
+    assert_equal "Golden path sample implementation", draft.fetch("title")
+    assert_equal "Created by the golden-path E2E.", draft.fetch("body")
+    assert_operator File.size(draft_path), :<=, Hive::Stages::OpenPr::MAX_AUTHORING_BYTES
+
     # The implementation commit is real and lives in a real worktree.
     worktrees = Dir[File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees", "*")]
     assert worktrees.any?, "execute must have created a worktree"
@@ -252,6 +263,23 @@ class GoldenPathE2E < ApplicationSystemTestCase
       end
 
       sleep 0.1
+    end
+  end
+
+  def wait_for_pr_draft!(slug, timeout: 10)
+    path_glob = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", @project,
+                          ".hive-state", "stages", "*", slug,
+                          Hive::Stages::OpenPr::AUTHORING_FILE)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      path = Dir[path_glob].first
+      return path if path
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        flunk "open-PR fixture never authored #{Hive::Stages::OpenPr::AUTHORING_FILE}"
+      end
+
+      sleep 0.05
     end
   end
 

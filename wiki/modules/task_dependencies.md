@@ -206,7 +206,7 @@ bounded relationship set. See [[modules/task_workspace]].
 
 ## Recovery
 
-Inspect `hive status --json` or the TUI's admission text, then repair the named
+Inspect `hive status --operational --json` or the TUI's admission text, then repair the named
 `meta.yml`, `plan.md`, project enrollment, remote, workflow, or gate. Do not
 delete dependency metadata merely to clear the row unless removing the edge is
 the intended model change. For corrupt state that must move out of a forward

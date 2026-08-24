@@ -68,7 +68,7 @@ steps:
   - kind: cli
     args: [archive, "{slug}", --from, 8-finalize]
   - kind: json_assert
-    args: [status, --json]
-    schema: hive-status
-    pick: [projects, 0, tasks, 0, stage]
+    args: [task, "{slug}", --project, "{project}", --json]
+    schema: hive-task-workspace
+    pick: [task, stage]
     equals: 9-done

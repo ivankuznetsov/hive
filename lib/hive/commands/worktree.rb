@@ -279,7 +279,7 @@ module Hive
           "porcelain" => display_entries,
           "next_action" => {
             "kind" => "refresh_status",
-            "command" => "hive status --json",
+            "command" => "hive status --operational --json",
             "instructions" => "refresh status, then use its generation-guarded workflow.retry action"
           }
         }

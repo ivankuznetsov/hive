@@ -746,13 +746,14 @@ module Hive
     def prepare_opencode_invocation
       validate_opencode_launch_channels!
       model, effort = opencode_route_and_effort
+      executable = isolated_executable(@runtime_policy&.executable || @profile.bin)
       request = AgentCliRuntime::Request.new(
         profile: @profile.runtime_profile,
         prompt: @prompt,
         permission_mode: @permission_mode,
         model: model,
         effort: effort,
-        executable: @runtime_policy&.executable || @profile.bin,
+        executable: executable,
         command_prefix: @runtime_policy&.command_prefix || []
       )
       root = @opencode_invocation_root || File.join(

@@ -153,6 +153,13 @@ to reproduce, test, and commit the repair. This full-shell grant has the
 authority of the Hive OS user; artifact custody and Git validation remain the
 outcome boundary.
 
+Every managed Patrol Fix agent is also told to return its report as the exact
+final JSON object. If the agent exits successfully without creating the report,
+the controller may materialize only that exact, untruncated JSON object before
+Artifact Firewall validation. Prose, arrays, truncated output, and any existing
+path are not accepted; in particular, a dangling report symlink remains a
+custody violation rather than being replaced by the fallback.
+
 `Hive::GithubPublication` is the single PR-publication mechanism used by
 Patrol Fix and the normal coding open-PR path. It owns durable push/create
 intent, remote reconciliation, expected-absence leases, and exact hosted

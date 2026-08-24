@@ -31,6 +31,8 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal :exit_code_only, captured.fetch(:status_mode)
       assert_includes captured.fetch(:add_dirs), task.project_root
       assert_includes captured.fetch(:add_dirs), task.folder
+      assert_includes captured.fetch(:prompt),
+                      "Return that same JSON object as your complete final response"
     end
   end
 
@@ -48,6 +50,52 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal :ok, result.fetch(:status)
       assert_equal :invalid_output, result.fetch(:custody)
       assert_includes result.fetch(:diagnostic), "required output"
+    end
+  end
+
+  def test_launch_agent_materializes_an_exact_final_json_report_before_validation
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      report = {
+        "schema" => "hive-patrol-fix-inbox-report",
+        "schema_version" => 1,
+        "route" => "reject"
+      }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :ok,
+            final_message: JSON.generate(report),
+            final_message_truncated: false
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :clean, result.fetch(:custody)
+      assert_equal report, JSON.parse(File.read(output))
+    end
+  end
+
+  def test_launch_agent_does_not_replace_a_dangling_report_symlink_from_final_json
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          File.symlink(File.join(task.folder, "missing-target"), output)
+          { status: :ok, final_message: "{}", final_message_truncated: false }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :invalid_output, result.fetch(:custody)
+      assert File.symlink?(output)
     end
   end
 

@@ -193,6 +193,44 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_prepared_opencode_resolves_tool_manager_launcher_before_hermetic_spawn
+    with_tmp_dir do |dir|
+      launcher_dir = File.join(dir, "launchers")
+      concrete_dir = File.join(dir, "concrete")
+      FileUtils.mkdir_p([ launcher_dir, concrete_dir ])
+      launcher = File.join(launcher_dir, "opencode")
+      concrete = File.join(concrete_dir, "opencode")
+      File.write(launcher, <<~SH)
+        #!/bin/sh
+        printf '%s\n' 'tool-manager startup noise'
+        exec mise x opencode -- opencode "$@"
+      SH
+      File.write(concrete, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, [ launcher, concrete ])
+
+      captured = nil
+      with_env(
+        "PATH" => [ launcher_dir, concrete_dir ].join(File::PATH_SEPARATOR),
+        "HIVE_OPENCODE_BIN" => "opencode"
+      ) do
+        profile = Hive::AgentProfiles.lookup(:opencode)
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
+          timeout_sec: 5, profile: profile, status_mode: :exit_code_only
+        )
+        replacement = lambda do |request, **|
+          captured = request
+          :prepared
+        end
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, replacement) do
+          agent.send(:prepare_opencode_invocation)
+        end
+      end
+
+      assert_equal concrete, captured.request.executable
+    end
+  end
+
   def test_isolated_executable_fails_closed_on_unreadable_launcher_candidates
     with_tmp_dir do |dir|
       launcher_dir = File.join(dir, "launchers")

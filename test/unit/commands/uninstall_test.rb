@@ -353,7 +353,28 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
-  def test_stop_foreground_daemon_terms_nonzero_pid
+  def test_stop_foreground_daemon_terms_pid_from_owner_payload
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(
+        File.join(Hive::Paths.state_home, ".daemon.pid"),
+        { "pid" => 123, "process_start_time" => nil, "started_at" => Time.now.utc.iso8601 }.to_yaml
+      )
+      signals = []
+
+      # Regression: Uninstall must read through Hive::PidFile.read_pid. The
+      # lifecycle owner writes a YAML mapping here; the retired local
+      # `File.read.strip.to_i` parsed this doc as PID 0 and silently
+      # skipped the shutdown.
+      with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_daemon)
+      end
+
+      assert_equal [ [ "TERM", 123 ] ], signals
+    end
+  end
+
+  def test_stop_foreground_daemon_still_terms_legacy_bare_integer_pid
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)
       File.write(File.join(Hive::Paths.state_home, ".daemon.pid"), "123\n")
@@ -370,9 +391,20 @@ class UninstallCommandTest < Minitest::Test
   def test_stop_foreground_daemon_ignores_zero_pid
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)
-      File.write(File.join(Hive::Paths.state_home, ".daemon.pid"), "0\n")
+      File.write(File.join(Hive::Paths.state_home, ".daemon.pid"), { "pid" => 0 }.to_yaml)
 
       with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise "should not kill zero pid" }) do
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_daemon)
+      end
+    end
+  end
+
+  def test_stop_foreground_daemon_ignores_corrupt_pid_file
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".daemon.pid"), "this is not a PID payload\n")
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise "should not kill on corrupt pid file" }) do
         Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_daemon)
       end
     end

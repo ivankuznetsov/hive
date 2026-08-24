@@ -118,7 +118,7 @@ module Hive
         return unless File.exist?(pid_file)
 
         # The bot's pid file is a YAML Hash payload ({pid:, started_at:}),
-        # unlike the daemon's bare-integer .daemon.pid. Guard is_a?(Hash)
+        # like the daemon's .daemon.pid payload. Guard is_a?(Hash)
         # before indexing: a corrupt/legacy bare scalar is still valid YAML
         # (e.g. "12345" parses to an Integer), and Integer#[] would raise an
         # unrescued TypeError that aborts the entire uninstall after only the
@@ -301,13 +301,15 @@ module Hive
 
       # Best-effort: find a running foreground daemon writing under
       # state_home and TERM it before purge would yank the floor.
-      # No-ops if the daemon isn't running.
+      # No-ops if the daemon isn't running. The pid is read through the
+      # daemon lifecycle boundary (Hive::PidFile.read_pid), never parsed
+      # locally: the owner writes a YAML payload, and a bare-integer
+      # parse of that doc yields PID 0 (a silent no-op shutdown).
       def stop_foreground_daemon
-        pid_file = File.join(Hive::Paths.state_home, ".daemon.pid")
-        return unless File.exist?(pid_file)
-
-        pid = File.read(pid_file).strip.to_i
-        return if pid.zero?
+        pid = Hive::PidFile.read_pid(
+          File.join(Hive::Paths.state_home, ".daemon.pid")
+        )
+        return if pid.nil?
 
         Process.kill("TERM", pid)
       rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT

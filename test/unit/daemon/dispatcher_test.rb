@@ -1417,9 +1417,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_operational_snapshot_publishes_started_disposition_and_revalidated_complete
     observed = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
     snapshot = FakeOperationalSnapshot.new
+    status_payload = {
+      "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+      "generated_at" => T0.iso8601(6), "projects" => []
+    }
     with_tmp_dir do |state_home|
       dispatcher, = make_dispatcher(
-        rows: [ observed ], operational_snapshot: snapshot,
+        operational_snapshot: snapshot,
+        status_result: Hive::Daemon::StatusConsumer::Result.new(
+          ok: true, rows: [ observed ], status_payload: status_payload
+        ),
         dispatch_request_state_home: state_home
       )
       completed_at = T0 + 5
@@ -1432,6 +1439,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal "dispatched", snapshot.calls[1][1].fetch(:decision).to_s
       complete = snapshot.calls.last.last
       assert_equal [ observed ], complete.fetch(:rows)
+      assert_equal status_payload, complete.fetch(:status_payload)
       assert_equal "current", complete.dig(:queue, "status")
       assert_equal completed_at, complete.fetch(:now)
     end

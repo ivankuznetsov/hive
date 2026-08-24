@@ -295,6 +295,9 @@ module Hive
           store: Hive::Daemon::OperationalSnapshot::Store.new(
             path: Hive::Paths.operational_snapshot_path(@hive_home)
           ),
+          status_cache_store: Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
+            path: Hive::Paths.operational_status_cache_path(@hive_home)
+          ),
           daemon_identity: Hive::Daemon::OperationalSnapshot.daemon_identity(
             pid: Process.pid, process_start_time: own_start_time
           ),

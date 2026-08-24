@@ -94,6 +94,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
       assert_equal plan_review, row.plan_review
+      assert_equal payload, result.status_payload
       assert_equal 3, result.hidden_archived_task_count
       assert_equal 3, result.projects.first.hidden_archived_task_count
     end
@@ -113,6 +114,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
 
       assert result.ok
       assert_equal [ "changed" ], result.rows.map(&:slug)
+      assert_nil result.status_payload,
+                 "bounded task reads must not replace the daemon's authoritative full graph"
     end
 
     without_partial = payload.reject { |key, _value| key == "partial" }

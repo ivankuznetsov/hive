@@ -2799,6 +2799,27 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_operational_heading_exposes_cached_graph_age
+    payload = {
+      "completeness" => "complete",
+      "source" => {
+        "task_graph" => { "provenance" => "daemon_cache", "age_seconds" => 31.6 }
+      },
+      "summary" => {
+        "projects_total" => 0, "active" => 0, "archived" => 0,
+        "hidden_archived_task_count" => 0
+      },
+      "issues" => [], "tasks" => []
+    }
+
+    output, = capture_io do
+      Hive::Commands::Status.new.send(:render_operational, payload)
+    end
+
+    assert_includes output,
+                    "SNAPSHOT COMPLETE — 0 active · 0 archived · task graph cached 32s ago"
+  end
+
   def test_operational_project_context_fails_closed_when_config_is_unreadable
     project = { "name" => "demo", "path" => "/tmp/unreadable-hive-project" }
     context = with_replaced_singleton_method(
@@ -2839,6 +2860,203 @@ class CommandsStatusTest < Minitest::Test
       assert_equal 1, config_loads,
                    "a full operational scan must parse each project config once"
     end
+  end
+
+  def test_operational_payload_reuses_the_daemon_full_status_cache_without_rescanning_tasks
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true,
+      "generated_at" => (now - 2).iso8601(6),
+      "projects" => [ {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state",
+        "legacy_stage_dirs" => [], "hidden_archived_task_count" => 0,
+        "tasks" => []
+      } ]
+    }
+    snapshot = {
+      "status" => "current", "phase" => "complete", "tick_sequence" => 9,
+      "observed_at" => (now - 1).iso8601(6),
+      "valid_until" => (now + 60).iso8601(6),
+      "source_window" => {
+        "started_at" => (now - 3).iso8601(6),
+        "completed_at" => (now - 1).iso8601(6)
+      },
+      "capacity" => {}, "queue" => {}, "provider_holds" => [], "tasks" => [],
+      "status_cache" => {
+        "tick_sequence" => 9,
+        "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    project = { "name" => "demo", "path" => "/tmp/demo" }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    command.define_singleton_method(:json_payload) do |*|
+      raise "concise status must not rescan task folders when the daemon cache is current"
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { { "daemon" => { "enabled" => true } } }
+    ) do
+      command.operational_payload(
+        [ project ], scheduler_snapshot: snapshot, now: now
+      )
+    end
+
+    assert_equal "complete", payload.fetch("completeness")
+    assert_equal "current", payload.dig("scheduler", "status")
+    assert_equal cached_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+    assert_equal "daemon_cache", payload.dig("source", "task_graph", "provenance")
+    assert_equal 2.0, payload.dig("source", "task_graph", "age_seconds")
+  end
+
+  def test_operational_payload_falls_back_to_a_fresh_scan_after_the_daemon_cache_expires
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    snapshot = {
+      "status" => "stale", "reason" => "snapshot_expired",
+      "status_cache" => {
+        "tick_sequence" => 8,
+        "valid_until" => (now - 1).iso8601(6),
+        "payload" => { "schema" => "hive-status", "ok" => true }
+      }
+    }
+    fresh_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => now.iso8601(6), "projects" => []
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload([], scheduler_snapshot: snapshot, now: now)
+
+    assert_equal 1, scans
+    assert_equal fresh_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+  end
+
+  def test_operational_payload_rejects_a_cache_from_an_invalid_snapshot
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 2).iso8601(6), "projects" => []
+    }
+    snapshot = {
+      "status" => "invalid", "reason" => "snapshot_invalid",
+      "tick_sequence" => 1,
+      "status_cache" => {
+        "tick_sequence" => 2,
+        "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    fresh_payload = cached_payload.merge("generated_at" => now.iso8601(6))
+    command = Hive::Commands::Status.new(operational: true)
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload([], scheduler_snapshot: snapshot, now: now)
+
+    assert_equal 1, scans
+    assert_equal fresh_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+  end
+
+  def test_operational_payload_uses_the_prior_cache_while_the_next_tick_is_running
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 31).iso8601(6),
+      "projects" => [ {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state",
+        "legacy_stage_dirs" => [], "hidden_archived_task_count" => 0,
+        "tasks" => []
+      } ]
+    }
+    snapshot = {
+      "status" => "unavailable", "reason" => "tick_started",
+      "phase" => "started", "tick_sequence" => 10,
+      "status_cache" => {
+        "tick_sequence" => 9,
+        "valid_until" => (now + 59).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    command.define_singleton_method(:json_payload) do |*|
+      raise "a valid prior graph must remain cheap during the next full scan"
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { { "daemon" => { "enabled" => true } } }
+    ) do
+      command.operational_payload(
+        [ { "name" => "demo", "path" => "/tmp/demo" } ],
+        scheduler_snapshot: snapshot, now: now
+      )
+    end
+
+    assert_equal cached_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+    assert_equal "unavailable", payload.dig("scheduler", "status")
+  end
+
+  def test_operational_payload_falls_back_when_cached_projects_do_not_match_the_registry
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 2).iso8601(6),
+      "projects" => [ { "name" => "old", "path" => "/tmp/old", "tasks" => [] } ]
+    }
+    snapshot = {
+      "status" => "current", "tick_sequence" => 9,
+      "status_cache" => {
+        "tick_sequence" => 9, "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    fresh_payload = cached_payload.merge(
+      "generated_at" => now.iso8601(6),
+      "projects" => [ { "name" => "new", "path" => "/tmp/new", "tasks" => [] } ]
+    )
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload(
+      [ { "name" => "new", "path" => "/tmp/new" } ],
+      scheduler_snapshot: snapshot, now: now
+    )
+
+    assert_equal 1, scans
+    assert_equal "fresh_scan", payload.dig("source", "task_graph", "provenance")
+    assert_equal 1, payload.dig("summary", "projects_total")
   end
 
   def test_operational_payload_falls_back_to_config_after_generation_capture_failure

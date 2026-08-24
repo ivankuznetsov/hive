@@ -161,6 +161,11 @@ Artifact Firewall validation. Prose, arrays, truncated output, and any existing
 path are not accepted; in particular, a dangling report symlink remains a
 custody violation rather than being replaced by the fallback.
 
+Independent review hashes the bounded Git diff as raw bytes, then validates and
+labels a copy as UTF-8 before placing it in the canonical prompt context. Valid
+non-ASCII patch text therefore remains reviewable without changing its evidence
+digest; malformed diff bytes fail closed before an agent launches.
+
 `Hive::GithubPublication` is the single PR-publication mechanism used by
 Patrol Fix and the normal coding open-PR path. It owns durable push/create
 intent, remote reconciliation, expected-absence leases, and exact hosted

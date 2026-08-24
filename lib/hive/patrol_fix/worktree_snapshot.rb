@@ -71,9 +71,13 @@ module Hive
             "reviewed diff changed before publication"
           raise Hive::StageError, message
         end
+        review_diff = diff.stdout.dup.force_encoding(Encoding::UTF_8)
+        unless review_diff.valid_encoding?
+          raise Hive::StageError, "#{phase} diff is not valid UTF-8"
+        end
         {
           "owner" => owner, "worktree" => owner.fetch("worktree"),
-          "head_revision" => head, "diff_digest" => digest, "diff" => diff.stdout
+          "head_revision" => head, "diff_digest" => digest, "diff" => review_diff
         }
       rescue Hive::PatrolFix::WorktreeReceipt::InvalidWorktree => e
         raise Hive::StageError, e.message

@@ -317,7 +317,7 @@ module Hive
           end
 
           Hive::AtomicFile.write(path, "#{JSON.pretty_generate(manifest)}\n", mode: 0o600)
-          File.open(root, File::RDONLY) { |dir| dir.fsync }
+          Hive::AtomicFile.fsync_directory(root)
         end
         manifest
       end
@@ -337,7 +337,7 @@ module Hive
           "candidate_manifest" => manifest
         }
         Hive::AtomicFile.write(path, "#{JSON.pretty_generate(evidence)}\n", mode: 0o600)
-        File.open(directory, File::RDONLY) { |dir| dir.fsync }
+        Hive::AtomicFile.fsync_directory(directory)
         path
       end
     end

@@ -140,10 +140,23 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
-  def test_opencode_review_can_write_only_its_report_without_shell
+  def test_review_does_not_inherit_a_distinct_fix_agent
     with_task do |task|
       output = File.join(task.folder, "patrol-fix-inbox-report.json")
       captured = capture_launch(task, output, cfg: opencode_config)
+
+      assert_equal :codex, captured.fetch(:profile).name
+    end
+  end
+
+  def test_opencode_review_can_write_only_its_report_without_shell
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      cfg = opencode_config
+      cfg.fetch("patrol")["agent"] = "opencode"
+      cfg.fetch("patrol")["model"] = "openrouter/stealth/ox-alpha"
+      cfg.fetch("patrol")["effort"] = "high"
+      captured = capture_launch(task, output, cfg: cfg)
 
       assert_equal "workspace-write", captured.fetch(:permission_mode)
       assert_equal :opencode, captured.fetch(:profile).name

@@ -29,9 +29,16 @@ module Hive
         fix = cfg.dig("patrol", "fix")
         fix = {} unless fix.is_a?(Hash)
         fix_agent = fix["agent"]
+        fixing = actor == "patrol_fix"
         profile = Hive::Stages::Base.stage_profile(
-          cfg, "patrol", explicit_agent: fix_agent
+          cfg, "patrol", explicit_agent: fixing ? fix_agent : nil
         )
+        model_actor = fixing ? "patrol_fix" : actor
+        model_current = if fixing
+          fix_model_routing_current(cfg, fix, fix_agent)
+        else
+          Hive::Stages::Base.model_routing_current(cfg["patrol"])
+        end
         prompt = <<~PROMPT
           #{prompt.rstrip}
 
@@ -69,8 +76,7 @@ module Hive
           ),
           log_label: log_label, profile: profile,
           **Hive::Stages::Base.model_launch_arguments(
-            cfg, "patrol_fix", profile,
-            current: fix_model_routing_current(cfg, fix, fix_agent)
+            cfg, model_actor, profile, current: model_current
           ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only, cfg: cfg, agent_custody: custody

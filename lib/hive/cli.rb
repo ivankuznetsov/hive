@@ -1244,6 +1244,13 @@ module Hive
       the task (e.g. "coding"); omitted on older/synthetic producers, where
       consumers should default to "coding".
 
+      --running --json: emit the bounded `hive-running-status` v1 liveness
+      document. It contains daemon health and only tasks with a verified live
+      task lock or recorded live agent PID. This mode does not build the full
+      workflow graph, is capped at 32 rows and 64 KiB, and reports truncation
+      explicitly. Use it for widgets and polling clients that only need work
+      running now.
+
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v1) and emit the diagnostic for a single task. Useful
       for agents that want to inspect one row without paying the
@@ -1277,6 +1284,8 @@ module Hive
                          desc: "emit the agent-first operational status view (combine with --json for its v1 envelope)"
     option :full, type: :boolean, default: false,
                   desc: "show the detailed human task table (cannot be combined with --json or --operational)"
+    option :running, type: :boolean, default: false,
+                     desc: "with --json, emit bounded daemon and currently-running task liveness (v1)"
     option :daemon_task, type: :array,
                          desc: "internal: emit bounded project:slug rows for a daemon fast tick"
     def status
@@ -1290,6 +1299,7 @@ module Hive
         force: options[:force],
         operational: options[:operational],
         full: options[:full],
+        running: options[:running],
         daemon_tasks: options[:daemon_task]
       ).call
     end

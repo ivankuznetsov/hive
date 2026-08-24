@@ -48,6 +48,16 @@ all three values losslessly even though its renderer currently uses only the
 derived `live_task_lock` flag, so the status/TUI schema boundary remains
 additive and future recovery actions can use the same generation identity.
 
+`hive status --running --json` is the compact polling boundary. It validates
+the runner and child process identities directly from bounded `.lock` reads
+and returns only rows where at least one is alive. A live child remains visible
+when the runner lock is stale; a stale lock with no live child is omitted. The
+contract exposes a closed `liveness.source` plus `liveness.running: true`, so
+clients do not infer activity from full-status attempt or marker internals.
+Unlike legacy full-status observation, the compact contract fails closed when
+the recorded process start identity is absent; this prevents a reused PID from
+becoming a false running row.
+
 ## Stale-lock detection (`stale_lock?`)
 
 1. Read `.lock`; YAML-parse safely. Unparseable → treat as stale.

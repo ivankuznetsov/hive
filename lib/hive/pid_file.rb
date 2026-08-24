@@ -17,10 +17,23 @@ module Hive
     def self.alive?(pid, process: Process)
       process.kill(0, pid)
       true
-    rescue Errno::ESRCH
+    rescue Errno::ESRCH, RangeError
       false
     rescue Errno::EPERM
       true
+    end
+
+    # Identity-aware liveness for observations that must not mistake a reused
+    # PID for the process recorded on disk. Legacy callers retain PID-only
+    # behavior by default; strict contracts pass require_start_time: true.
+    def self.identity_alive?(pid, recorded_start_time: nil, require_start_time: false,
+                             process: Process,
+                             start_time_reader: Hive::Lock.method(:process_start_time))
+      return false unless pid.is_a?(Integer) && pid.positive?
+      return false unless alive?(pid, process: process)
+      return !require_start_time if recorded_start_time.nil?
+
+      start_time_reader.call(pid) == recorded_start_time
     end
 
     # Parse a YAML PID file into a Hash. Returns {} when the file is absent
@@ -78,10 +91,12 @@ module Hive
     # it returns nil (not {}) when the file is absent, swallows parse errors to
     # nil instead of propagating them, and still accepts a legacy bare-integer
     # PID file. Collapsing it into `self.read` would shift all three behaviors.
-    def read_pid_file_payload
+    def read_pid_file_payload(max_bytes: nil)
       return nil unless File.exist?(pid_file)
 
-      raw = File.read(pid_file)
+      raw = max_bytes ? read_bounded_pid_file(max_bytes) : File.read(pid_file)
+      return nil unless raw
+
       parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
       return parsed if parsed.is_a?(Hash) && parsed["pid"]
 
@@ -91,6 +106,29 @@ module Hive
 
       nil
     end
+
+    def read_bounded_pid_file(max_bytes)
+      flags = File::RDONLY
+      nofollow = File.const_defined?(:NOFOLLOW)
+      flags |= File::NOFOLLOW if nofollow
+      flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
+
+      File.open(pid_file, flags) do |file|
+        opened = file.stat
+        return nil unless opened.file? && opened.size <= max_bytes
+
+        unless nofollow
+          entry = File.lstat(pid_file)
+          return nil if entry.symlink? || entry.dev != opened.dev || entry.ino != opened.ino
+        end
+
+        raw = file.read(max_bytes + 1)
+        raw if raw.bytesize <= max_bytes
+      end
+    rescue SystemCallError, IOError
+      nil
+    end
+    private :read_bounded_pid_file
 
     def pid_file_payload(pid, start_time = nil)
       start_time ||= Hive::Lock.process_start_time(pid)

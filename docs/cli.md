@@ -11,6 +11,7 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive web status [--json]` | Observe installed, enabled, running, and readiness state without mutation. | `hive web status --json` |
 | `hive web install [--force] [--json]` | Install or explicitly repair the managed per-user web service. | `hive web install --force` |
 | `hive status` | See active tasks grouped by next action. | `hive status` |
+| `hive status --running --json` | Poll bounded daemon health and identity-verified live tasks through `hive-running-status.v1`; scan/output truncation is explicit. | `hive status --running --json` |
 | `hive new PROJECT [--workflow ID] [--idempotency-key KEY] [--json] TEXT` | Capture an idea in the workflow entry stage; optional idempotency makes agent retries return the existing task. | `hive new xbookmark --workflow editorial --idempotency-key creator:42 --json "draft a launch post"` |
 | `hive brainstorm TARGET` | Promote inbox to brainstorm or re-run brainstorm. | `hive brainstorm <slug>` |
 | `hive plan TARGET` | Promote completed brainstorm to plan or re-run plan. | `hive plan <slug> --from 2-brainstorm` |

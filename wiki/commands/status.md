@@ -1,7 +1,7 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
 updated: 2026-08-24
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
@@ -12,6 +12,9 @@ humans: closed state bands, counts, exact blocker ownership/reasons, and at
 most five representative rows per band. `hive status --operational --json`
 emits the agent contract `hive-operational-status.v4`. The complete task graph
 is available as `hive status --json` (`hive-status.v7`), and
+`hive status --running --json` emits the bounded live-task contract
+`hive-running-status.v1`. The running projection does not build the complete
+task graph. It is intended for authenticated widgets and polling clients.
 `hive status --full` keeps the former detailed human
 table.
 
@@ -22,13 +25,61 @@ table.
 | `hive status` | Concise human operational snapshot. |
 | `hive status --operational` | Explicit alias for the same concise human view. |
 | `hive status --operational --json` | `hive-operational-status.v4` agent document. V4 adds a required nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
+| `hive status --running --json` | `hive-running-status.v1`: daemon health plus only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. |
 | `hive status --json` | Complete `hive-status.v7` graph for daemon, bot, TUI, and current consumers. |
 | `hive status --json --daemon-task PROJECT:SLUG ...` | Internal daemon fast-tick surface. Emits `partial: true`, reads only the named task folders across bounded stage paths, and holds dependency-bearing rows until the next full graph scan. |
 | `hive status --full` | Former grouped detailed human table. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
 
-`--full` cannot be combined with `--json` or `--operational`. Archive mode and
-diagnosis retain their established contracts.
+`--running` requires `--json` and cannot be combined with any other status mode
+or filter. `--full` cannot be combined with `--json` or `--operational`.
+Archive mode and diagnosis retain their established contracts.
+
+## Bounded running-task contract
+
+`Hive::RunningStatus` scans at most 256 registered projects and 10,000 stage/task
+directory entries without materializing complete directory listings. It
+performs only small task-local reads: at most 16 KiB from a candidate `.lock`,
+then at most 64 KiB of `meta.yml` only after a live process is established.
+Task and daemon PID files are opened nonblocking and no-follow; daemon health
+reads at most 4 KiB through `Hive::Daemon::StatusReport#running_state`. The
+producer does not instantiate `Task`, open the attempts store, read conditions
+or history, project actions, inspect git, build `hive-status.v7`, or run daemon
+service/binary-drift subprocess probes.
+
+A row is running when either:
+
+- the task lock's runner PID is alive and its recorded process start time still
+  matches, or
+- the lock's recorded agent child PID is alive and its child process start time
+  still matches. This keeps an orphaned live agent visible for recovery even
+  when its runner died.
+
+A live lock without a child PID is therefore a valid running row. A stale lock
+with no live child is counted under `source.stale_locks` and omitted. A lock
+without the recorded start identity required by this compact contract also
+fails closed as stale; legacy full-status consumers retain their existing
+PID-only compatibility. Malformed
+locks and task folders that move during observation do not abort the fleet
+response: they are counted under `source.malformed_locks` or
+`source.transition_skips`, and `complete` becomes false because liveness could
+not be proven. Malformed, absent, unreadable, or oversized metadata does not
+hide a live task; the row falls back to its bounded folder identity and reports
+`metadata_status`.
+
+Every returned task has `status: "running"`, `action: "agent_running"`, and
+`liveness.running: true`; `liveness.source` says which process observation
+proved it. V1 deliberately emits `marker: null` rather than reading state
+files. It does not expose or reinterpret the full graph's `current_attempt`
+string. Clients must use the explicit liveness object.
+
+The producer returns at most 32 rows and guarantees that the encoded document,
+including its trailing newline, is at most 65,536 bytes. `count` is the number
+returned. `observed_count` and `omitted_count` are exact when their paired
+`*_exact` flags are true; after a scan cap they are lower-bound/known-observed
+counts and `source.scan_truncated`, `truncated`, and `complete: false` make that
+omission explicit. `limits` publishes every row, byte, project, and directory
+entry cap. The normal complete graph remains unchanged.
 
 Concise status does not rescan every task when the live daemon already has an
 authoritative full graph. Each completed full daemon tick publishes that exact

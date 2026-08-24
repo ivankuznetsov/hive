@@ -25,6 +25,7 @@ require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
+require "hive/pid_file"
 require "hive/operational_action"
 require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
@@ -100,7 +101,7 @@ module Hive
       ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false, daemon_tasks: nil)
+                     operational: false, full: false, running: false, daemon_tasks: nil)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -110,6 +111,7 @@ module Hive
         @archive = archive
         @operational = operational
         @full = full
+        @running = running
         @daemon_tasks = Array(daemon_tasks).compact
         @next_retention_boundary = nil
       end
@@ -144,6 +146,7 @@ module Hive
       # `hive status --json` stays on `hive-status`.
       def status_schema_for_call
         return "hive-status-diagnose" if @diagnose
+        return "hive-running-status" if @running
 
         @operational ? "hive-operational-status" : "hive-status"
       end
@@ -151,6 +154,11 @@ module Hive
       def do_call
         projects = Hive::Config.registered_projects
         refresh_now = Time.now.utc
+        if @running
+          puts JSON.generate(running_payload(projects, now: refresh_now))
+          @stdout_written = true
+          return
+        end
         if daemon_task_mode?
           puts JSON.generate(daemon_task_payload(projects, now: refresh_now))
           @stdout_written = true
@@ -215,6 +223,11 @@ module Hive
         ).to_h
       end
 
+      def running_payload(projects, now: Time.now.utc)
+        require "hive/running_status"
+        Hive::RunningStatus.new.payload(projects, now: now)
+      end
+
       # Canonical recovery receipts for adapters that already hold a current
       # status graph. Unlike #operational_payload, this does not build task
       # classifications, reasons, actions, summaries, or archive metadata.
@@ -261,8 +274,16 @@ module Hive
       end
 
       def validate_mode_combinations!
+        if @running && !@json
+          raise Hive::InvalidTaskPath, "--running requires --json"
+        end
+        if @running && (@diagnose || @project || @stage || @write || @force || @archive ||
+                        @operational || @full || daemon_task_mode?)
+          raise Hive::InvalidTaskPath,
+                "--running cannot be combined with other status modes or filters"
+        end
         if daemon_task_mode? && (!@json || @diagnose || @project || @stage || @write || @force ||
-                                 @archive || @operational || @full)
+                                 @archive || @operational || @full || @running)
           raise Hive::InvalidTaskPath,
                 "--daemon-task is internal and requires plain --json status mode"
         end
@@ -2028,22 +2049,9 @@ module Hive
         return nil unless holder.is_a?(Hash)
 
         pid = holder["pid"]
-        return nil unless pid.is_a?(Integer) && pid_alive?(pid)
-
-        recorded = holder["process_start_time"]
-        live = Hive::Lock.process_start_time(pid)
-        # PID-reuse defense: when the lock recorded a start time and the
-        # live counterpart differs (or cannot be read at all), assume the
-        # original process is gone and the PID may have been recycled.
-        # We deliberately lose liveness signal in environments where both
-        # /proc and `ps -o lstart=` are unreadable (e.g. heavily-sandboxed
-        # containers) — see `Hive::Lock.process_start_time` (lib/hive/lock.rb:128-134)
-        # for the nil-return contract. A phantom-live row masking a
-        # recycled PID is the worse failure mode than under-reporting
-        # liveness, so we err toward "stale". Regression coverage:
-        # `test_live_task_lock_with_recorded_but_unreadable_live_start_time_is_stale`
-        # and `test_live_task_lock_with_mismatched_process_start_time_is_treated_as_stale`.
-        return nil if recorded && live != recorded
+        return nil unless Hive::PidFile.identity_alive?(
+          pid, recorded_start_time: holder["process_start_time"]
+        )
 
         holder
       rescue StandardError => e

@@ -133,6 +133,19 @@ class CliUsageErrorJsonTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal "hive-status-diagnose", payload.fetch("schema")
       assert_match(/--operational cannot be combined/, payload.fetch("message"))
+
+      out, _err, status = run_hive(
+        home, "status", "--running", "--operational", "--json"
+      )
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-running-status", payload.fetch("schema")
+      assert_equal 1, payload.fetch("schema_version")
+      assert_match(/--running cannot be combined/, payload.fetch("message"))
+      schemer = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-running-status")))
+      )
+      assert_empty schemer.validate(payload).to_a
     end
   end
 

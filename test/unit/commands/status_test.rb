@@ -6,6 +6,57 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_running_call_uses_compact_producer_without_building_full_graph
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "1-inbox", "running-task-260824-abcd",
+        state_file: "idea.md", marker: "WAITING"
+      )
+      File.write(
+        File.join(folder, ".lock"),
+        {
+          "pid" => Process.pid,
+          "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+          "lock_id" => "compact-status"
+        }.to_yaml
+      )
+      command_class = Class.new(Hive::Commands::Status) do
+        def json_payload(*) = raise("full graph must not be built")
+        def operational_payload(*) = raise("operational graph must not be built")
+      end
+      command = command_class.new(json: true, running: true)
+      project = status_project(project_root, hive_state)
+
+      output, error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ project ] }
+      ) do
+        capture_io { command.call }
+      end
+      payload = JSON.parse(output)
+
+      assert_equal "hive-running-status", payload.fetch("schema")
+      assert_equal [ "running-task-260824-abcd" ], payload.fetch("tasks").map { |row| row.fetch("slug") }
+      assert_equal true, payload.dig("tasks", 0, "liveness", "running")
+      assert_equal "", error
+    end
+  end
+
+  def test_running_mode_requires_json_and_rejects_other_status_modes
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Status.new(running: true).send(:validate_mode_combinations!)
+    end
+    assert_includes error.message, "--running requires --json"
+
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Status.new(
+        json: true, running: true, operational: true
+      ).send(:validate_mode_combinations!)
+    end
+    assert_includes error.message, "--running cannot be combined"
+  end
+
   def test_status_payloads_preserve_subsecond_generation_time
     now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
     command = Hive::Commands::Status.new(json: true, daemon_tasks: [])
@@ -2570,8 +2621,7 @@ class CommandsStatusTest < Minitest::Test
       assert_equal true, cmd.send(:pid_alive?, 12_345)
     end
 
-    holder = { "pid" => 12_345, "process_start_time" => "recorded" }
-    cmd.define_singleton_method(:pid_alive?) { |_pid| true }
+    holder = { "pid" => Process.pid, "process_start_time" => "recorded" }
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise RuntimeError, "blocked" }) do
       _out, err = capture_io do
         assert_nil cmd.send(:live_task_lock_holder, holder)

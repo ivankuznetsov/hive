@@ -12,6 +12,7 @@ class HivePidFileModuleTest < Minitest::Test
       case behaviour
       when :esrch then raise Errno::ESRCH
       when :eperm then raise Errno::EPERM
+      when :range then raise RangeError, "pid out of range"
       else true
       end
     end
@@ -28,6 +29,42 @@ class HivePidFileModuleTest < Minitest::Test
   def test_alive_true_when_owned_by_another_user
     assert PF.alive?(4242, process: AliveProcess.new(:eperm)),
            "EPERM means the process exists but is foreign — still alive"
+  end
+
+  def test_alive_false_when_pid_is_out_of_native_range
+    refute PF.alive?(10**100, process: AliveProcess.new(:range))
+  end
+
+  def test_identity_alive_preserves_legacy_pid_only_records
+    assert PF.identity_alive?(
+      4242,
+      process: AliveProcess.new(:ok),
+      start_time_reader: ->(_pid) { raise "legacy identity reader must not run" }
+    )
+  end
+
+  def test_identity_alive_can_require_a_recorded_start_time
+    refute PF.identity_alive?(
+      4242,
+      require_start_time: true,
+      process: AliveProcess.new(:ok),
+      start_time_reader: ->(_pid) { raise "missing identity must fail closed" }
+    )
+  end
+
+  def test_identity_alive_requires_recorded_start_time_to_match
+    assert PF.identity_alive?(
+      4242, recorded_start_time: "live", process: AliveProcess.new(:ok),
+      start_time_reader: ->(_pid) { "live" }
+    )
+    refute PF.identity_alive?(
+      4242, recorded_start_time: "recorded", process: AliveProcess.new(:ok),
+      start_time_reader: ->(_pid) { "different" }
+    )
+    refute PF.identity_alive?(
+      4242, recorded_start_time: "recorded", process: AliveProcess.new(:ok),
+      start_time_reader: ->(_pid) { nil }
+    )
   end
 
   def test_read_returns_empty_hash_for_missing_file

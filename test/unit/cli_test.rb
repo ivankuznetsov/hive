@@ -803,7 +803,7 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
       assert_equal({
         json: true, diagnose: "slug", project: "proj", stage: "2-gather",
-        write: true, force: true, operational: false, full: false,
+        write: true, force: true, operational: false, full: false, running: false,
         daemon_tasks: nil
       }, calls.first.fetch(:kwargs))
     end
@@ -825,6 +825,11 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--full" ])
       assert_equal true, calls.first.dig(:kwargs, :full)
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "status", "--running", "--json" ])
+      assert_equal true, calls.first.dig(:kwargs, :running)
     end
 
     with_command_new_stub(Hive::Commands::Act) do |calls|
@@ -906,12 +911,14 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_status_help_documents_concise_full_and_operational_modes
+  def test_status_help_documents_concise_full_operational_and_running_modes
     out, = capture_io { Hive::CLI.start([ "help", "status" ]) }
 
     assert_match(/concise operational snapshot/, out)
     assert_match(/--full/, out)
     assert_match(/--operational/, out)
+    assert_match(/--running/, out)
+    assert_match(/hive-running-status/, out)
   end
 
   def test_watch_passes_bounded_stream_options_and_documents_json_lines

@@ -1170,3 +1170,12 @@ pending rows, or failed rows. Focused coverage continues to pin that disabled
 review bypasses prepare, locked verification, and execute entry as well as
 policy dispatch. Keep the exception benchmark-local; the parity-evidence gap
 itself is closed.
+
+## Compact running status is not yet installed-plugin-smoked (2026-08-24)
+
+`hive status --running --json` has focused source coverage and has been run from
+the source checkout against the live Hivebox registry. That proves the compact
+producer over current task data, but not the final installed dogfood binary plus
+authenticated Omarchy plugin invocation. Keep this gap open until the feature
+PR is deployed and the plugin consumes `hive-running-status.v1` below its 1 MiB
+capture limit without falling back to full `hive-status.v7`.

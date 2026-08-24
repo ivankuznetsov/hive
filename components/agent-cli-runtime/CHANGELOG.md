@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-- Read OpenCode's structured `error.data.message` provider failures through
-  its profile extractor so upstream rate limits reach callers as
-  `rate_limited` instead of an untyped CLI failure.
-
 ## 0.2.3 - 2026-08-21
 
 - Classify extracted provider failures once at the runtime boundary as

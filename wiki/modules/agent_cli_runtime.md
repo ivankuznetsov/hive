@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-22
+updated: 2026-08-24
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -103,6 +103,11 @@ Nonzero OpenCode runs that carry an upstream idle-timeout/504 diagnostic are
 normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
 use marker-owned stages record the ordinary transient `timeout` reason while
 preserving any partial artifact bytes for scheduler-owned retry.
+OpenCode's profile-specific provider-error extractor reads only dedicated
+`error` events and their nested `error.data.message` payload. A structured
+upstream rate-limit refusal therefore reaches Hive as a typed `rate_limited`
+signal and writes the normal cooldown-retry marker, while identical prose in
+ordinary model output cannot forge a retryable provider wall.
 When OpenCode exits zero with an empty terminal assistant message after writing
 a current terminal stage artifact, Hive trusts that controller-scoped artifact;
 the strict malformed transcript remains a failure whenever the artifact itself

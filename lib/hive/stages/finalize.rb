@@ -10,8 +10,6 @@ require "hive/claude_launcher"
 require "hive/stages"
 require "hive/stages/base"
 require "hive/stages/clean_exit"
-require "base64"
-require "json"
 require "hive/worktree"
 
 module Hive
@@ -298,15 +296,7 @@ module Hive
             # Fall through to the push / pushed? logic below — the
             # residue is now part of the branch history.
           when :scope_violation, :safety_violation, :git_failed
-            attrs = {
-              reason: "ensure_clean_on_exit_failed",
-              detail: result[:message].to_s[0, 200]
-            }
-            if result[:paths]
-              paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
-              attrs[:residue_paths] = paths.join(",")[0, 200]
-              attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
-            end
+            attrs = Hive::Stages::CleanExit.failure_marker_attrs(result, task_folder: task.folder)
             Hive::Markers.set(task.state_file, :error, **attrs)
             return { commit: "finalize_dirty_worktree", status: :error }
           when :clean

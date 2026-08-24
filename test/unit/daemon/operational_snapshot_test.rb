@@ -40,13 +40,27 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
   def build(path)
     store = Hive::Daemon::OperationalSnapshot::Store.new(path: path)
+    cache_path = "#{path}.status-cache"
     assembler = Hive::Daemon::OperationalSnapshot::Assembler.new(
-      store: store, daemon_identity: IDENTITY, poll_interval_sec: 30
+      store: store,
+      status_cache_store: Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
+        path: cache_path
+      ),
+      daemon_identity: IDENTITY, poll_interval_sec: 30
     )
     reader = Hive::Daemon::OperationalSnapshot::Reader.new(
       path: path, expected_daemon: IDENTITY
     )
-    [ store, assembler, reader ]
+    cache_reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(
+      path: cache_path
+    )
+    [ store, assembler, reader, cache_reader ]
+  end
+
+  def cache_store(path)
+    Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
+      path: "#{path}.status-cache"
+    )
   end
 
   def test_complete_record_is_private_atomic_and_current
@@ -119,6 +133,175 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       snapshot = reader.read(now: T0 + 2)
       assert_equal "current", snapshot.fetch("status")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")
+    end
+  end
+
+  def test_full_status_cache_is_bound_to_the_completed_tick_and_retained_while_the_next_tick_runs
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      payload = {
+        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => []
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [], controller: {}, queue: {}, recoveries: {},
+        status_payload: payload, now: T0 + 1
+      )
+
+      complete = reader.read(now: T0 + 2)
+      cache = cache_reader.read(snapshot: complete, now: T0 + 2)
+      refute complete.key?("status_cache")
+      assert_equal payload, cache.fetch("payload")
+      assert_equal 1, cache.fetch("tick_sequence")
+      assert_equal (T0 + 91).iso8601(6), cache.fetch("valid_until")
+
+      assembler.begin_tick(now: T0 + 31)
+      started = reader.read(now: T0 + 32)
+      retained = cache_reader.read(snapshot: started, now: T0 + 32)
+      assert_equal "unavailable", started.fetch("status")
+      assert_equal "tick_started", started.fetch("reason")
+      refute started.key?("status_cache")
+      assert_equal payload, retained.fetch("payload")
+      assert_equal 1, retained.fetch("tick_sequence")
+      assert_equal 2, started.fetch("tick_sequence")
+    end
+  end
+
+  def test_reader_rejects_a_malformed_status_cache
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.complete(rows: [], controller: {}, queue: {}, recoveries: {}, now: T0 + 1)
+      cache_store(path).write(
+        "schema" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA,
+        "schema_version" => 1,
+        "daemon" => IDENTITY,
+        "tick_sequence" => 1,
+        "published_at" => (T0 + 1).iso8601(6),
+        "valid_until" => (T0 + 90).iso8601(6),
+        "payload" => { "schema" => "wrong", "ok" => true }
+      )
+
+      snapshot = reader.read(now: T0 + 1)
+
+      assert_equal "current", snapshot.fetch("status")
+      assert_nil cache_reader.read(snapshot: snapshot, now: T0 + 1)
+    end
+  end
+
+  def test_reader_rejects_a_status_cache_from_a_future_tick
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.complete(rows: [], controller: {}, queue: {}, recoveries: {}, now: T0 + 1)
+      cache_store(path).write(
+        "schema" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA,
+        "schema_version" => 1,
+        "daemon" => IDENTITY,
+        "tick_sequence" => 2,
+        "published_at" => (T0 + 1).iso8601(6),
+        "valid_until" => (T0 + 90).iso8601(6),
+        "payload" => {
+          "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+          "generated_at" => T0.iso8601(6), "projects" => []
+        }
+      )
+
+      snapshot = reader.read(now: T0 + 1)
+
+      assert_equal "current", snapshot.fetch("status")
+      assert_nil cache_reader.read(snapshot: snapshot, now: T0 + 1)
+    end
+  end
+
+  def test_malformed_status_payload_does_not_prevent_the_scheduler_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      assembler.begin_tick(now: T0)
+
+      assembler.complete(
+        rows: [], controller: {}, queue: {}, recoveries: {},
+        status_payload: {
+          "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+          "generated_at" => "not-a-time", "projects" => []
+        },
+        now: T0 + 1
+      )
+
+      snapshot = reader.read(now: T0 + 2)
+      assert_equal "current", snapshot.fetch("status")
+      assert_nil cache_reader.read(snapshot: snapshot, now: T0 + 2)
+    end
+  end
+
+  def test_status_cache_write_failure_does_not_prevent_the_scheduler_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      store = Hive::Daemon::OperationalSnapshot::Store.new(path: path)
+      failing_cache_store = Object.new
+      failing_cache_store.define_singleton_method(:write) { |_record| raise Errno::EIO, "full" }
+      assembler = Hive::Daemon::OperationalSnapshot::Assembler.new(
+        store: store, status_cache_store: failing_cache_store,
+        daemon_identity: IDENTITY, poll_interval_sec: 30
+      )
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: path, expected_daemon: IDENTITY
+      )
+      payload = {
+        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => []
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [], controller: {}, queue: {}, recoveries: {},
+        status_payload: payload, now: T0 + 1
+      )
+
+      assert_equal "current", reader.read(now: T0 + 2).fetch("status")
+    end
+  end
+
+  def test_status_cache_reader_rejects_malformed_snapshot_deadline
+    with_tmp_dir do |dir|
+      cache_reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(
+        path: File.join(dir, "missing-cache.json")
+      )
+      snapshot = {
+        "status" => "current", "tick_sequence" => 1, "daemon" => IDENTITY,
+        "observed_at" => T0.iso8601(6), "valid_until" => "not-a-time"
+      }
+
+      assert_nil cache_reader.read(snapshot: snapshot, now: T0)
+    end
+  end
+
+  def test_current_snapshot_validity_clamps_a_cache_created_before_reconfigure
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      payload = {
+        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => []
+      }
+      assembler.reconfigure(poll_interval_sec: 300)
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [], controller: {}, queue: {}, recoveries: {},
+        status_payload: payload, now: T0 + 1
+      )
+      assembler.reconfigure(poll_interval_sec: 30)
+      assembler.begin_tick(now: T0 + 61)
+
+      started = reader.read(now: T0 + 92)
+      assert_equal "unavailable", started.fetch("status")
+      assert_nil cache_reader.read(snapshot: started, now: T0 + 92)
     end
   end
 

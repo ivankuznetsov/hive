@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -29,6 +29,31 @@ table.
 
 `--full` cannot be combined with `--json` or `--operational`. Archive mode and
 diagnosis retain their established contracts.
+
+Concise status does not rescan every task when the live daemon already has an
+authoritative full graph. Each completed full daemon tick publishes that exact
+`hive-status` payload once in a dedicated owner-private atomic cache, separate
+from the small operational scheduler snapshot. Bare status and `--operational`
+are the only readers that opt into the large cache. They accept it only when
+its daemon generation, tick, deadline, schema, and registered project identities
+match the live scheduler observation and registry. An absent, invalid, expired,
+or mismatched cache falls back to the ordinary fresh graph scan. `--json`,
+`--full`, archive, diagnosis, and the internal `--daemon-task` surface keep
+their existing fresh-read contracts; the daemon's own `hive status --json`
+therefore remains the cache producer and cannot consume its own cache
+recursively.
+
+The cache is a bounded freshness optimization, not a second source of truth.
+When it belongs to the same completed tick as the scheduler record, the shared
+tick sequence proves that it is the graph on which those scheduler decisions
+were made. A retained cache from the previous tick can still provide cheap
+task visibility while a new tick is running, but scheduler completeness
+remains unavailable until that tick completes. Independently supplied status
+graphs still pass the timestamp and per-task scheduler-join fences.
+The concise human heading reports the cached graph's age. Run `hive status
+--full` when an operator needs to force an immediate fresh human read after a
+task mutation. The JSON task-graph source reports `provenance` (`fresh_scan` or
+`daemon_cache`) and `age_seconds` separately from the projection timestamp.
 
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,

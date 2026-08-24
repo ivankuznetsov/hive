@@ -28,11 +28,13 @@
         "task_graph": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schema", "schema_version", "generated_at", "status", "projects_total", "projects_healthy"],
+          "required": ["schema", "schema_version", "generated_at", "provenance", "age_seconds", "status", "projects_total", "projects_healthy"],
           "properties": {
             "schema": { "const": "hive-status" },
             "schema_version": { "type": "integer", "minimum": 1 },
             "generated_at": { "type": "string", "format": "date-time" },
+            "provenance": { "type": "string", "enum": ["fresh_scan", "daemon_cache"] },
+            "age_seconds": { "type": "number", "minimum": 0 },
             "status": { "$ref": "#/$defs/Completeness" },
             "projects_total": { "type": "integer", "minimum": 0 },
             "projects_healthy": { "type": "integer", "minimum": 0 }

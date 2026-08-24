@@ -444,6 +444,75 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, ".generate-cmd-*.err"
   end
 
+  def test_generate_hands_a_preserved_nonterminal_patch_to_judge_without_regeneration
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    validator = instruction.match(
+      /set \+e\nruby -ryaml -rjson -e '\n(?<code>.*?)\n' "\$REPO_ROOT" >\.generate-outcome\.out/m
+    )
+    refute_nil validator, "generate instruction must expose its outcome validator"
+    validator_code = validator[:code].gsub(%q('"'"'), "'")
+
+    Dir.mktmpdir("hive-bench-paid-patch") do |root|
+      task_dir = File.join(root, "task")
+      run_dir = File.join(root, "runs", "paid-patch", "candidate-one--task-one")
+      patch_dir = File.join(run_dir, "task-one", "candidate_one", "target")
+      FileUtils.mkdir_p([ task_dir, patch_dir ])
+      File.write(
+        File.join(task_dir, "campaign.yml"),
+        {
+          "campaign_id" => "paid-patch",
+          "tasks" => [ "task-one" ],
+          "candidates" => [ "candidate-one" ],
+          "exclusions" => []
+        }.to_yaml
+      )
+      result = {
+        "cells" => [ {
+          "task_id" => "task-one",
+          "agent_id" => "candidate-one",
+          "run_status" => "execute_failed",
+          "judges" => {}
+        } ],
+        "pending" => [],
+        "failed" => []
+      }
+      results_path = File.join(run_dir, "results.json")
+      File.write(results_path, JSON.generate(result))
+      patch_path = File.join(patch_dir, "candidate.patch")
+      File.write(patch_path, "diff --git a/file b/file\n")
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", validator_code, root,
+        chdir: task_dir
+      )
+
+      assert status.success?, out + err
+      assert_empty out
+      assert_empty err
+
+      File.write(patch_path, "")
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", validator_code, root,
+        chdir: task_dir
+      )
+
+      assert_equal 2, status.exitstatus, out + err
+      assert_includes out, "UNFINISHED candidate-one/task-one: judges_pending"
+      assert_empty err
+
+      File.write(patch_path, "diff --git a/file b/file\n")
+      File.write(results_path, JSON.generate(result.merge("failed" => [ { "reason" => "agent failed" } ])))
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", validator_code, root,
+        chdir: task_dir
+      )
+
+      assert_equal 2, status.exitstatus, out + err
+      assert_includes out, "agent failed"
+      assert_empty err
+    end
+  end
+
   def test_generate_quota_marker_has_canonical_recovery_identity
     instruction = File.read(stages_by_name.fetch("generate").instruction)
     function = instruction.match(

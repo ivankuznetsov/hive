@@ -38,6 +38,28 @@ module Hive
       data.is_a?(Hash) ? data : {}
     end
 
+    # Stateless positive-Integer boundary over any hive-owned PID file.
+    # Returns the PID when the file parses to the payload the lifecycle
+    # owner writes (`{pid:, process_start_time:, started_at:}`) or to a
+    # legacy bare-integer doc; nil for a missing, unreadable, corrupt, or
+    # non-positive payload. Consumers that only need the pid (e.g.
+    # `hive uninstall` signalling a foreground daemon) must go through
+    # here instead of re-implementing the on-disk format — the earlier
+    # `File.read.strip.to_i` in Uninstall parsed the YAML doc as PID 0
+    # and silently skipped the shutdown.
+    def self.read_pid(path)
+      return nil unless File.exist?(path)
+
+      raw = File.read(path)
+      parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
+      pid = parsed.is_a?(Hash) ? parsed["pid"] : parsed
+      return nil unless pid.is_a?(Integer) && pid.positive?
+
+      pid
+    rescue SystemCallError, IOError
+      nil
+    end
+
     def read_live_pid
       return nil unless File.exist?(pid_file)
 

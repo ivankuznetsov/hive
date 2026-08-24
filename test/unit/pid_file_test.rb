@@ -54,6 +54,65 @@ class HivePidFileModuleTest < Minitest::Test
     end
   end
 
+  def test_read_pid_returns_nil_for_missing_file
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      assert_nil PF.read_pid(File.join(dir, "absent.pid"))
+    end
+  end
+
+  def test_read_pid_parses_the_owner_yaml_payload
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, { "pid" => 4242, "process_start_time" => nil }.to_yaml)
+
+      assert_equal 4242, PF.read_pid(path)
+    end
+  end
+
+  def test_read_pid_accepts_legacy_bare_integer_doc
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, "4242\n")
+
+      assert_equal 4242, PF.read_pid(path)
+    end
+  end
+
+  def test_read_pid_rejects_non_positive_pids
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      zero = File.join(dir, "zero.pid")
+      File.write(zero, { "pid" => 0 }.to_yaml)
+      negative = File.join(dir, "negative.pid")
+      File.write(negative, { "pid" => -1 }.to_yaml)
+
+      assert_nil PF.read_pid(zero)
+      assert_nil PF.read_pid(negative)
+    end
+  end
+
+  def test_read_pid_rejects_non_integer_pid_field
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, { "pid" => "not-a-pid" }.to_yaml)
+
+      assert_nil PF.read_pid(path)
+    end
+  end
+
+  def test_read_pid_returns_nil_for_corrupt_or_unreadable_docs
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      corrupt = File.join(dir, "corrupt.pid")
+      File.write(corrupt, "pid: [")
+
+      assert_nil PF.read_pid(corrupt)
+
+      scalar = File.join(dir, "scalar.pid")
+      File.write(scalar, "just-a-string")
+
+      assert_nil PF.read_pid(scalar)
+    end
+  end
+
   def test_read_propagates_parse_errors_for_the_caller_to_handle
     Dir.mktmpdir("hive-pid-file") do |dir|
       path = File.join(dir, "corrupt.pid")

@@ -1,6 +1,5 @@
 require "json"
 require "open3"
-require "base64"
 require "hive"
 require "hive/config"
 require "hive/events"
@@ -130,7 +129,7 @@ module Hive
       def owned_worktree_path(task, cfg)
         return @pointer_resolver.call(task, cfg) if @pointer_resolver
 
-        expected_root = Hive::Worktree.canonical_root(task.project_root)
+        expected_root = Hive::Worktree.canonical_root(task.project_root, config: cfg)
         pointer = Hive::Worktree.read_owned_pointer(
           task.folder,
           project_root: task.project_root,
@@ -196,8 +195,8 @@ module Hive
 
       def discard_residue(task, worktree_path, marker)
         before = worktree_status(worktree_path)
-        requested = discard_paths(marker)
         dirty_paths = before.fetch("entries").map { |entry| entry.fetch("path") }
+        requested = discard_paths(task, marker, dirty_paths)
         unknown = requested - dirty_paths
         unless unknown.empty?
           raise Hive::UsageError,
@@ -210,32 +209,31 @@ module Hive
         )
       end
 
-      def discard_paths(marker)
+      def discard_paths(task, marker, current_paths)
         paths = if Array(@paths).empty?
-          marker_residue_paths(marker)
+          marker_residue_paths(task, marker, current_paths)
         else
           Array(@paths).map(&:to_s)
         end
         paths = paths.reject(&:empty?).uniq
         raise Hive::UsageError, "no residue paths supplied or recorded on the marker" if paths.empty?
 
-        normalized = paths.map { |path| Hive::Stages::AutoCommit.normalize_staged_path(path) }
+        normalized = paths.map { |path| Hive::Stages::AutoCommit.normalize_recovery_path(path) }
         if normalized.any?(&:nil?)
           raise Hive::UsageError, "--paths must contain only normalized repository-relative paths"
         end
         normalized
       end
 
-      def marker_residue_paths(marker)
-        encoded = marker.attrs["residue_paths_b64"].to_s
-        unless encoded.empty?
-          decoded = JSON.parse(Base64.strict_decode64(encoded))
-          return decoded if decoded.is_a?(Array) && decoded.all? { |path| path.is_a?(String) }
+      def marker_residue_paths(task, marker, current_paths)
+        if marker.attrs["residue_paths_b64"] || marker.attrs["residue_paths_file"] ||
+           marker.attrs["residue_paths_sha256"]
+          return Hive::Stages::CleanExit.recovery_paths(
+            marker.attrs, task_folder: task.folder, current_paths: current_paths
+          )
         end
 
         marker.attrs["residue_paths"].to_s.split(",").map(&:strip)
-      rescue ArgumentError, JSON::ParserError
-        raise Hive::WorktreeError, "residue marker contains invalid encoded paths"
       end
 
       def restore_paths!(worktree_path, paths)

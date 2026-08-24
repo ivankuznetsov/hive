@@ -104,6 +104,7 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     marker = Hive::Markers.current(task.state_file)
     assert_equal :error, marker.name
     assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
+    assert_equal "scope_violation", marker.attrs["failure_kind"]
     assert_includes marker.attrs["residue_paths"].to_s, "unrelated/path.txt"
   end
 
@@ -246,10 +247,10 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
   end
 
   # `Hive::ConfigError` (e.g. invalid `sign_policy`) is a programmer/
-  # operator misconfiguration, not a transient I/O blip — the generic
-  # `rescue StandardError` warn-and-continue path would silently
-  # swallow it, hiding the bad config from the operator. The dedicated
-  # rescue must surface it as `:error reason=ensure_clean_on_exit_failed`.
+  # operator misconfiguration, not a transient I/O blip. CleanExit
+  # normalizes this supported failure into a typed git_failed envelope
+  # with exact known-dirty recovery paths; Base then surfaces it as
+  # `:error reason=ensure_clean_on_exit_failed`.
   def test_with_stage_events_surfaces_config_error_as_clean_exit_failure
     root, task, worktree = make_task_and_worktree("6-review")
     remember(root, worktree)
@@ -270,7 +271,7 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     marker = Hive::Markers.current(task.state_file)
     assert_equal :error, marker.name
     assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
-    assert_match(/invalid sign_policy config/, marker.attrs["detail"].to_s)
+    assert_match(/invalid auto-commit config/, marker.attrs["detail"].to_s)
   end
 
   def test_with_stage_events_ignores_clean_exit_event_logging_failure

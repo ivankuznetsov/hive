@@ -692,6 +692,15 @@ AND prune — so there is no batched loss window for the critical value. A termi
 durable attempts layer already completed that exact task generation; recording
 the observed state-file mtime prevents the unchanged waiting marker from being
 readmitted on every daemon tick, while a later edit still becomes eligible.
+Generic `ready_to_run` stages also recover when their current state-file mtime
+is older than a baseline restored from the persisted store. The controller
+tracks that uncorroborated provenance in memory, so Dispatcher can admit the
+row once without treating timestamp direction as state-file identity. Any
+same-process observation clears restored provenance; a newer sibling artifact
+therefore cannot re-arm an unchanged markerless run. Durable-attempt acceptance
+consumes the current mtime immediately (matching a local child dispatch), and
+terminal replay covers a daemon that missed the acceptance; an unchanged
+current mtime is then braked normally as `markerless_stalled`.
 Mtimes are stored at microsecond resolution and
 `hive status --json` emits task `mtime` / `folder_mtime` with matching
 microsecond precision. Do not truncate status JSON mtimes: an operator

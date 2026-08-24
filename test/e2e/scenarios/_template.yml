@@ -66,13 +66,13 @@ steps:
 
   # json_assert — run a `bin/hive` subprocess, parse stdout as JSON, validate
   # against a published schema, and optionally assert a JSONPath-ish value.
-  # Required: args (array), schema (e.g. "hive-status")
+  # Required: args (array), schema (e.g. "hive-operational-status")
   # Optional: pick (array of keys / integer indices), equals (expected value),
   #           plus all keys from `cli` (expect_exit, env, cwd, timeout)
   - kind: json_assert
-    args: [status, --json]
-    schema: hive-status
-    pick: [projects, 0, tasks, 0, slug]
+    args: [status, --operational, --json]
+    schema: hive-operational-status
+    pick: [tasks, 0, identity, slug]
     equals: template-task
 
   # write_file — write a literal file inside the sandbox (absolute paths

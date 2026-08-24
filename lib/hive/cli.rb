@@ -731,7 +731,7 @@ module Hive
 
       Mutation is admitted only for `ensure_clean_on_exit_failed` or
       `dirty_worktree` recovery markers and is serialized by the task lock.
-      It never clears the marker directly: refresh `hive status --json`, then
+      It never clears the marker directly: refresh `hive status --operational --json`, then
       invoke the emitted generation-guarded workflow.retry action.
     DESC
     option :project, type: :string, desc: "scope slug lookup to one registered project"
@@ -1230,24 +1230,21 @@ module Hive
       ).call
     end
 
-    desc "status", "Show all active tasks across registered projects"
+    desc "status", "Show daemon health and currently running tasks"
     long_desc <<~DESC
-      Default: prints a concise operational snapshot with counts, exact active
-      tasks, blocker ownership, and reasons. Use --full for the former grouped
-      table of every task ordered by stage. Combine with --json to emit the
-      `hive-status` envelope (schema v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")}); every row carries a required
-      nullable `diagnostic` field — null for green rows, populated with
-      a bounded summary + artifact tail + marker signature for red
-      recovery/error rows, plus a nullable `pr_url` field — null until a
-      PR exists, then the pull-request URL once one is opened. Each row also
-      carries an optional `workflow` field — the descriptor id that resolved
-      the task (e.g. "coding"); omitted on older/synthetic producers, where
-      consumers should default to "coding".
+      Default: prints a bounded daemon-health and currently-running-task
+      snapshot without building the complete workflow graph. Combine with
+      --json to emit `hive-running-status` v1; the document is capped at 32
+      rows and 64 KiB and reports truncation explicitly.
+
+      Use --operational for the broader active-work snapshot with blocker
+      ownership and recovery actions. Inspect one task in depth with
+      `hive task TARGET --json`; use `hive archive --json` for terminal history.
 
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
-      (schema v1) and emit the diagnostic for a single task. Useful
+      (schema v2) and emit the diagnostic for a single task. Useful
       for agents that want to inspect one row without paying the
-      full snapshot cost. Pair with --project / --stage to disambiguate
+      fleet-scan cost. Pair with --project / --stage to disambiguate
       when the same slug exists across multiple projects or stages.
 
       --diagnose <slug> --write: spawn the project's configured execute
@@ -1274,10 +1271,11 @@ module Hive
     option :force, type: :boolean, default: false,
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     option :operational, type: :boolean, default: false,
-                         desc: "emit the agent-first operational status view (combine with --json for its v1 envelope)"
-    option :full, type: :boolean, default: false,
-                  desc: "show the detailed human task table (cannot be combined with --json or --operational)"
+                         desc: "emit the agent-first operational status view (combine with --json for its v4 envelope)"
+    option :internal_task_graph, type: :boolean, default: false, hide: true,
+                                 desc: "internal: emit the scheduler task graph"
     option :daemon_task, type: :array,
+                         hide: true,
                          desc: "internal: emit bounded project:slug rows for a daemon fast tick"
     def status
       require "hive/commands/status"
@@ -1289,7 +1287,7 @@ module Hive
         write: options[:write],
         force: options[:force],
         operational: options[:operational],
-        full: options[:full],
+        full: options[:internal_task_graph],
         daemon_tasks: options[:daemon_task]
       ).call
     end
@@ -1299,7 +1297,7 @@ module Hive
       Resolves one exact task from registered projects and emits the same
       hive-task-workspace v2 semantic document as the authenticated Web
       workspace route. This command is read-only and does not expand the
-      fleet-wide `hive status --json` contract.
+      internal fleet task graph.
 
       Example:
         hive task TASK-SLUG --project PROJECT --json
@@ -1724,7 +1722,7 @@ module Hive
                                           files. --json emits
                                           hive-daemon-queue.v1.
 
-      The daemon polls `hive status --json` periodically and dispatches
+      The daemon polls an internal task-graph projection periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
       ready to advance, plus auto-archives the finalize stage after PR merge (gated on
       `gh pr view --json state`). Stops at human-input gates (waiting
@@ -2114,7 +2112,8 @@ module Hive
       if options[:json]
         require "json"
         message = "hive tui has no JSON output (it is human-only). " \
-                  "Use 'hive status --json' for the same data."
+                  "Use 'hive status --json' for current liveness or " \
+                  "'hive status --operational --json' for workflow state."
         # TUI does not have a registered hive-* schema; emit an envelope with the
         # standard error fields except `schema` so JSON consumers see structured
         # error data without a SCHEMA_VERSIONS bump.

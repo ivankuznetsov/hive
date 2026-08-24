@@ -246,7 +246,7 @@ script installs a published release into an isolated XDG/HIVE_HOME/HOME
 tmp prefix, authenticates the managed web bundle, and runs consent-approved
 managed `hive setup --no-init --yes --json` from that exact digest-pinned
 archive before walking the remaining command surface (`hive --version`, `hive doctor`,
-`hive init`, `hive new`, `hive status --json`, `hive daemon install
+`hive init`, `hive new`, `hive status --operational --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
 the published schemas, and asserts no state leaks outside the prefix. It also
 prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten

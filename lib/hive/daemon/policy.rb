@@ -2,7 +2,7 @@ require "hive/workflows"
 
 module Hive
   module Daemon
-    # Pure decision module: maps a `hive status --json` task row's
+    # Pure decision module: maps an internal task-graph row's
     # `action` field (a `Hive::Schemas::TaskActionKind` value) plus
     # state-file mtime and dependency context to one of these outcomes
     # (authoritative list: the `@return` tag on `decide` below):

@@ -51,7 +51,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_equal "status", payload.fetch("action")
     assert_equal [ "wiki/residue.md" ], payload.fetch("residue_paths")
     assert_equal 1, payload.fetch("untracked_count")
-    assert_equal "hive status --json", payload.dig("next_action", "command")
+    assert_equal "hive status --operational --json", payload.dig("next_action", "command")
   end
 
   def test_status_renders_human_readable_recovery_details
@@ -69,7 +69,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
     assert_includes out, "branch: main"
     assert_match(/head: [0-9a-f]+/, out)
     assert_includes out, "residue: (clean)"
-    assert_includes out, "next: hive status --json"
+    assert_includes out, "next: hive status --operational --json"
   end
 
   def test_status_resolves_the_strict_owned_pointer_by_default

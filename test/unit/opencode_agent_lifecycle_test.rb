@@ -367,6 +367,55 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_long_session_export_larger_than_the_old_four_megabyte_cap_completes
+    with_fixture(mode: :large_export) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "large-export-260822-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-large-export")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+    end
+  end
+
+  def test_export_inspection_caps_oversized_stdout_and_stderr
+    capture_limit = 4 * 1024
+    {
+      oversized_export: [ "stdout", "stderr" ],
+      oversized_export_stderr: [ "stderr", "stdout" ]
+    }.each do |mode, (oversized_stream, bounded_stream)|
+      with_fixture(mode:) do |fixture|
+        task = make_task(
+          fixture.fetch(:dir), slug: "#{mode.to_s.tr('_', '-')}-260824-aaaa"
+        )
+        result = with_agent_constant(
+          :OPENCODE_EXPORT_CAPTURE_BYTES, capture_limit
+        ) do
+          with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            build_agent(
+              task, fixture,
+              invocation_root: File.join(
+                fixture.fetch(:dir), "invocation-#{mode}"
+              )
+            ).run!
+          end
+        end
+
+        assert_equal :error, result.fetch(:status), mode
+        sizes = JSON.parse(File.read(fixture.fetch(:capture_sizes)))
+        assert_equal capture_limit, sizes.fetch(oversized_stream), mode
+        assert_operator sizes.fetch(bounded_stream), :<, capture_limit, mode
+        assert_match(/#{oversized_stream} exceeded #{capture_limit - 1} bytes/,
+                     result.fetch(:inspection_diagnostic), mode)
+      end
+    end
+  end
+
   def test_process_status_fallbacks_and_marker_failure_diagnostic
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "status-fallback-260812-aaaa")
@@ -516,6 +565,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       calls = File.join(dir, "calls.log")
       stdin = File.join(dir, "stdin.log")
       environment = File.join(dir, "environment.json")
+      capture_sizes = File.join(dir, "capture-sizes.json")
       configuration = File.join(dir, "selected-config.json")
       selected_config = {
         "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
@@ -524,14 +574,18 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       File.write(configuration, JSON.generate(selected_config))
       bin = File.join(dir, "opencode")
       File.write(bin, fixture_script(
-        mode:, calls:, stdin:, environment:, source_root: dir
+        mode:, calls:, stdin:, environment:, capture_sizes:, source_root: dir
       ))
       File.chmod(0o755, bin)
-      yield({ dir:, work:, calls:, stdin:, environment:, configuration:, bin: })
+      yield({
+        dir:, work:, calls:, stdin:, environment:, capture_sizes:,
+        configuration:, bin:
+      })
     end
   end
 
-  def fixture_script(mode:, calls:, stdin:, environment:, source_root:)
+  def fixture_script(mode:, calls:, stdin:, environment:, capture_sizes:,
+                     source_root:)
     run_help = File.read(File.join(
       source_root_for_fixtures,
       "run-help.txt"
@@ -548,6 +602,12 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     <<~RUBY
       #!/usr/bin/ruby --disable-gems
       require "json"
+      def record_capture_sizes(path)
+        File.write(path, JSON.generate({
+          "stdout" => STDOUT.stat.size, "stderr" => STDERR.stat.size
+        }))
+      end
+
       File.open(#{calls.dump}, "a") { |file| file.puts(ARGV.join(" ")) }
       case ARGV
       when ["--version"]
@@ -587,7 +647,35 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             warn "export unavailable"
             exit 1
           end
-          print #{export_output.dump}
+          if #{mode == :large_export}
+            export = JSON.parse(#{export_output.dump})
+            export["bounded_test_padding"] = "x" * (5 * 1024 * 1024)
+            print JSON.generate(export)
+          elsif #{mode == :oversized_export}
+            Signal.trap("XFSZ", "IGNORE") if Signal.list.key?("XFSZ")
+            export = JSON.parse(#{export_output.dump})
+            export["bounded_test_padding"] = "x" * (8 * 1024)
+            begin
+              print JSON.generate(export)
+            rescue Errno::EFBIG
+              nil
+            end
+            STDOUT.flush
+            record_capture_sizes(#{capture_sizes.dump})
+          elsif #{mode == :oversized_export_stderr}
+            Signal.trap("XFSZ", "IGNORE") if Signal.list.key?("XFSZ")
+            begin
+              STDERR.write("x" * (8 * 1024))
+            rescue Errno::EFBIG
+              nil
+            end
+            print #{export_output.dump}
+            STDOUT.flush
+            STDERR.flush
+            record_capture_sizes(#{capture_sizes.dump})
+          else
+            print #{export_output.dump}
+          end
         else
           warn "unexpected argv: #{ARGV.inspect}"
           exit 64

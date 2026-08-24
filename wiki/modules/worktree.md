@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-24
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -43,6 +43,17 @@ If passed explicitly, that's used. Otherwise:
 2. Fallback: `<base>/<project_name>.worktrees`, computed by `Hive::Worktree.default_worktree_root(project_name)`. The `<base>` is `Hive::Worktree.worktree_base`, which reads `ENV["HIVE_WORKTREE_BASE"]` and defaults to `~/Dev`.
 
 `File.expand_path`-ed so `~` works.
+
+`Hive::Worktree.canonical_root` accepts a **project repository root**, plus an
+optional already-loaded `config:`, and returns the resolved worktree root.
+Callers that
+already have a `Hive::Task` pass `task.project_root`; they must not pass an
+already-resolved `cfg["worktree_root"]` back through this project-root API.
+Doing so would load config relative to the worktree container and append the
+default `.worktrees` suffix a second time. The `hive worktree` recovery command
+uses the same project-root contract as the owning stages before validating
+`worktree.yml`. Supplying the command's already-loaded config preserves this
+single resolution rule without reading the project config twice.
 
 ### `HIVE_WORKTREE_BASE` override
 
@@ -220,11 +231,32 @@ hive worktree repair <slug> --strategy commit|discard [--json]
 
 Commit recovery reuses the full CleanExit scope, symlink, secret-content, and
 signing policy gates. Discard recovery accepts only normalized paths that are
-currently dirty; without `--paths` it uses the marker's losslessly encoded,
-bounded residue-path array (with legacy comma-delimited fallback). It restores
-tracked paths from `HEAD` and cleans only the named untracked paths. Neither mutation clears the marker: the returned
+currently dirty; without `--paths` it uses the marker's complete inline path
+payload or an integrity-checked task-local sidecar. Oversized lists keep only a
+bounded display summary, count, and SHA-256 identity in the marker so they
+cannot exceed the marker reader's tail window; if the sidecar is unavailable,
+an unchanged current residue set can satisfy the same count and digest. Legacy
+comma-delimited markers remain supported. CleanExit keeps diagnostic paths
+separate from this recovery identity: secret-shaped filenames are redacted in
+the marker and forced into the owner-private sidecar, while signing,
+configuration, and Git failures retain the exact known-dirty path set for
+recovery. Git failure detail is redacted before it enters the durable marker,
+and full diagnostic paths are redacted before their display byte bound is
+applied so a detector match cannot be cut into a near-complete credential.
+The recovery-specific path validator accepts literal POSIX backslashes and
+whitespace bytes because every Git mutation uses `--literal-pathspecs`; it
+still rejects NUL, absolute paths, dot traversal, and platform path separators.
+Discard restores tracked paths from
+`HEAD` and cleans only the named untracked paths. Neither mutation clears the marker: the returned
 `next_action` requires a fresh `hive status --json`, followed by that
 snapshot's generation-guarded `workflow.retry` action.
+
+CleanExit rejection markers also carry `failure_kind=<scope_violation|
+safety_violation|git_failed>`. A rejection from Review's pre-fix snapshot adds
+`origin=review_pre_fix`, `phase=fix`, and `pass=N`; it uses the same canonical
+`ERROR reason=ensure_clean_on_exit_failed` admission path as a stage-exit
+failure. This lets an operator discard only a rejected generated artifact and
+then commit the remaining meaningful residue with the native verbs above.
 
 ## Path-prefix validation
 

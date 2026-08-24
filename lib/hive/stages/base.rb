@@ -817,15 +817,7 @@ module Hive
         existing_marker ||= safe_current_marker(task)
         return false if existing_marker && error_marker?(existing_marker.name)
 
-        attrs = {
-          reason: "ensure_clean_on_exit_failed",
-          detail: result[:message].to_s[0, 200]
-        }
-        if result[:paths]
-          paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
-          attrs[:residue_paths] = paths.join(",")[0, 200]
-          attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
-        end
+        attrs = Hive::Stages::CleanExit.failure_marker_attrs(result, task_folder: task.folder)
         Hive::Markers.set(task.state_file, :error, **attrs)
         true
       end

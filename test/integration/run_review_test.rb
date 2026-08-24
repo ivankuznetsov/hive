@@ -1,4 +1,5 @@
 require "test_helper"
+require "base64"
 require "json"
 require "time"
 require "hive/commands/init"
@@ -1035,7 +1036,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_review_marks_dirty_when_pre_fix_cleanup_cannot_snapshot_residue
+  def test_review_marks_recoverable_residue_when_pre_fix_cleanup_cannot_snapshot_it
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
@@ -1065,9 +1066,13 @@ class RunReviewTest < Minitest::Test
         end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_error, marker.name
+        assert_equal :error, marker.name
         assert_equal "fix", marker.attrs["phase"]
-        assert_equal "fix_dirty_worktree", marker.attrs["reason"]
+        assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
+        assert_equal "review_pre_fix", marker.attrs["origin"]
+        assert_equal "scope_violation", marker.attrs["failure_kind"]
+        assert_equal [ "preexisting-manual.txt" ],
+                     JSON.parse(Base64.strict_decode64(marker.attrs.fetch("residue_paths_b64")))
         refute File.exist?(File.join(worktree, "test", "fix-agent-ran.txt"))
       end
     end

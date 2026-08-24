@@ -2976,6 +2976,41 @@ class CommandsStatusTest < Minitest::Test
                  payload.dig("source", "task_graph", "generated_at")
   end
 
+  def test_operational_payload_falls_back_when_cache_metadata_is_malformed
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    snapshot = {
+      "status" => "current", "tick_sequence" => 1,
+      "status_cache" => {
+        "tick_sequence" => 1, "valid_until" => (now + 60).iso8601(6),
+        "payload" => {
+          "schema" => "hive-status",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+          "ok" => true, "generated_at" => "not-a-time", "projects" => []
+        }
+      }
+    }
+    fresh_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => now.iso8601(6), "projects" => []
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload([], scheduler_snapshot: snapshot, now: now)
+
+    assert_equal 1, scans
+    assert_equal fresh_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+  end
+
   def test_operational_payload_uses_the_prior_cache_while_the_next_tick_is_running
     now = Time.utc(2026, 8, 24, 10, 0, 2)
     cached_payload = {

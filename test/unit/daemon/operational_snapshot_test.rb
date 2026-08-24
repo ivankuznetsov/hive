@@ -227,13 +227,58 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       assembler.complete(
         rows: [], controller: {}, queue: {}, recoveries: {},
-        status_payload: { "schema" => "hive-status", "ok" => true },
+        status_payload: {
+          "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+          "generated_at" => "not-a-time", "projects" => []
+        },
         now: T0 + 1
       )
 
       snapshot = reader.read(now: T0 + 2)
       assert_equal "current", snapshot.fetch("status")
       assert_nil cache_reader.read(snapshot: snapshot, now: T0 + 2)
+    end
+  end
+
+  def test_status_cache_write_failure_does_not_prevent_the_scheduler_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      store = Hive::Daemon::OperationalSnapshot::Store.new(path: path)
+      failing_cache_store = Object.new
+      failing_cache_store.define_singleton_method(:write) { |_record| raise Errno::EIO, "full" }
+      assembler = Hive::Daemon::OperationalSnapshot::Assembler.new(
+        store: store, status_cache_store: failing_cache_store,
+        daemon_identity: IDENTITY, poll_interval_sec: 30
+      )
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: path, expected_daemon: IDENTITY
+      )
+      payload = {
+        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => []
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [], controller: {}, queue: {}, recoveries: {},
+        status_payload: payload, now: T0 + 1
+      )
+
+      assert_equal "current", reader.read(now: T0 + 2).fetch("status")
+    end
+  end
+
+  def test_status_cache_reader_rejects_malformed_snapshot_deadline
+    with_tmp_dir do |dir|
+      cache_reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(
+        path: File.join(dir, "missing-cache.json")
+      )
+      snapshot = {
+        "status" => "current", "tick_sequence" => 1, "daemon" => IDENTITY,
+        "observed_at" => T0.iso8601(6), "valid_until" => "not-a-time"
+      }
+
+      assert_nil cache_reader.read(snapshot: snapshot, now: T0)
     end
   end
 

@@ -29,7 +29,7 @@ module HiveDaemonE2EHarness
   end
 
   # Status-consumer double that defers to a fetch lambda each tick, letting the
-  # test feed the dispatcher a live `hive status --json` snapshot.
+  # test feed the dispatcher a live internal task-graph snapshot.
   class LiveStatusConsumer
     def initialize(fetch:)
       @fetch = fetch
@@ -121,10 +121,10 @@ module HiveDaemonE2EHarness
     requested_folders
   end
 
-  # Build a StatusConsumer::Result from a live `hive status --json` snapshot —
+  # Build a StatusConsumer::Result from a live internal task-graph snapshot —
   # the dispatcher's per-tick view of the queue.
   def status_snapshot
-    out, = capture_io { Hive::CLI.start([ "status", "--json" ]) }
+    out, = capture_io { Hive::CLI.start([ "status", "--internal-task-graph", "--json" ]) }
     doc = JSON.parse(out)
     mapper = Hive::Daemon::StatusConsumer.new
     Hive::Daemon::StatusConsumer::Result.new(

@@ -73,7 +73,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and the brainstorm `answers_pending` / `answers_complete` signals. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps ordinary full `hive status --json` reads and internal bounded `--daemon-task project:slug` reads. Both return typed visible rows including `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry the validated source payload, project information, and the summed `hidden_archived_task_count`. Bounded responses never carry a fleet payload: they must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps the hidden internal task-graph transport and bounded `--daemon-task project:slug` reads. Both return typed visible rows including `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry the validated source payload, project information, and the summed `hidden_archived_task_count`. Bounded responses never carry a fleet payload: they must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
 | `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery, then retains that flag on `started`, `failed`, revalidated `complete`, and shutdown records. Tick completion includes the final aggregate hidden-archive count. The large source `hive-status` graph is published once in a separate `StatusCache` file, so the ordinary scheduler `Reader`, web, and watch never parse or retain it; concise status explicitly reads and generation/tick/deadline-validates the cache. SIGHUP recalculates validity from the reloaded poll interval, and recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. Both stores atomically persist owner-private records. |
 | `Hive::Daemon::PatrolFixCandidateInventory` | `lib/hive/daemon/patrol_fix_candidate_inventory.rb` | Opens only exact `patrol-fix-manifest.json` files under workflow stage/task owners. It binds every owned manifest's canonical bytes into one full inventory count/digest, fails on owned corruption, ignores unrelated task metadata, and selects one deterministic relevance-ranked context of at most 64 rows and 192 KiB. Exact source identity, alias, and semantic-lineage overlap rank before path/lexical fallback; each selected row carries bounded secret-scanned remediation evidence and its own context digest. |
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
@@ -118,7 +118,7 @@ hive daemon start
             ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
-            ├─ Hive::Daemon::StatusConsumer      (Open3.capture3 hive status --json)
+            ├─ Hive::Daemon::StatusConsumer      (hidden internal task graph)
             ├─ Hive::Daemon::OperationalSnapshot (atomic scheduler observation)
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::RecoveryCoordinator  (durable guarded recovery)
@@ -659,9 +659,8 @@ The fix gates the resume on whether any questions are still unanswered:
   baseline. A fresh complete write still debounces, and incomplete or
   structurally unknown rows still seed the normal baseline.
 - The dispatcher logs the hold as `:skipped reason=answers_pending`, and
-  `hive status --json` carries an `unanswered_questions` count for the
-  row (issue #270) so the hold is observable without tailing the log —
-  see [[commands/status]]. A held brainstorm whose question has no
+  the internal row carries `unanswered_questions`; operators inspect exact
+  slots with `hive answer TARGET --json` or the TUI (issue #270). A held brainstorm whose question has no
   fillable `### A` slot is no longer a dead-end: `BrainstormAnswerWriter`
   now creates the slot on answer (issue #269), so the operator can always
   clear the hold (see [[modules/bot]]).
@@ -697,9 +696,18 @@ AND prune — so there is no batched loss window for the critical value. A termi
 durable attempts layer already completed that exact task generation; recording
 the observed state-file mtime prevents the unchanged waiting marker from being
 readmitted on every daemon tick, while a later edit still becomes eligible.
+Generic `ready_to_run` stages also recover when their current state-file mtime
+is older than a baseline restored from the persisted store. The controller
+tracks that uncorroborated provenance in memory, so Dispatcher can admit the
+row once without treating timestamp direction as state-file identity. Any
+same-process observation clears restored provenance; a newer sibling artifact
+therefore cannot re-arm an unchanged markerless run. Durable-attempt acceptance
+consumes the current mtime immediately (matching a local child dispatch), and
+terminal replay covers a daemon that missed the acceptance; an unchanged
+current mtime is then braked normally as `markerless_stalled`.
 Mtimes are stored at microsecond resolution and
-`hive status --json` emits task `mtime` / `folder_mtime` with matching
-microsecond precision. Do not truncate status JSON mtimes: an operator
+the internal task graph emits task `mtime` / `folder_mtime` with matching
+microsecond precision. Do not truncate scheduler mtimes: an operator
 answer can land in the same wall-clock second as the daemon baseline, and
 whole-second JSON makes the newer answer compare as older or equal. The
 comparison stays mtime-to-mtime, never wall-clock — no clock-skew

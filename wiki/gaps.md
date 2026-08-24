@@ -55,7 +55,7 @@ with an exact PR and zero duplicate replay.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## OpenCode live validation (updated 2026-08-15)
+## OpenCode live validation (updated 2026-08-21)
 
 OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
 offline smoke, fake-CLI Hive execute and native Compound Engineering plan
@@ -67,6 +67,19 @@ on an explicit backend/model, selected config, credential environment key, and
 operator opt-in. Until that gate is supplied, real model transport and live
 provider permission behavior remain unverified; an offline inventory check is
 not equivalent to a model request.
+
+The Ox Alpha benchmark now supplies authenticated live OpenRouter transport and
+has exercised OpenCode `1.18.18` with the Compound Engineering plugin under
+parallel load. Repeated exports ending near the same JSON position were traced
+to OpenCode issuing one unawaited large stdout write: a controlled reproduction
+wrote only 245,760 of 983,152 bytes through a pipe, while regular-file stdout
+produced complete parseable JSON. Hive now sends sanitized export stdout to an
+unlinked private regular file, enforces the parser's four-MiB bound while
+reading it, and still fails closed on malformed evidence. Exports retain a
+60-second process deadline, and an inspection failure remains the surfaced task
+diagnostic instead of degrading to a generic missing-evidence message. Final
+six-task generation and dual-judge completion remain open until the benchmark
+artifacts are assembled and validated.
 
 Invocation-token custody now cleans ordinary inherited descendants even after
 `setsid` and reparenting, which is the leak observed during live Webmail
@@ -1153,3 +1166,31 @@ kept the consolidated engine description, so the custody anchor set, the
 late terminal execute observation are no longer described on the page even
 though the behaviour still exists in `lib/hive/stages/open_pr.rb`. Re-document
 those steps against the consolidated engine.
+
+## Benchmark-only plan-review opt-out live parity proven (2026-08-22)
+
+The local benchmark runtime can now grant an explicit process-local exception
+for projects that serialize `plan_review.enabled: false`; ordinary Hive loads
+still reject that configuration. The completed Ox Alpha campaign proved the
+grant and replacement transition live across six Pi cells and six OpenCode
+cells: all 12 reached generated terminal results without plan-review dispatch,
+pending rows, or failed rows. Focused coverage continues to pin that disabled
+review bypasses prepare, locked verification, and execute entry as well as
+policy dispatch. Keep the exception benchmark-local; the parity-evidence gap
+itself is closed.
+
+## Compact running status is not yet installed-plugin-smoked (2026-08-24)
+
+`hive status --json` has focused source coverage and has been run from
+the source checkout against the live Hivebox registry. That proves the compact
+producer over current task data, but not the final installed dogfood binary plus
+authenticated Omarchy plugin invocation. Keep this gap open until the feature
+PR is deployed and the plugin's unchanged bare status command consumes
+`hive-running-status.v1` below its 1 MiB capture limit.
+
+The public fleet-wide v7 status mode is removed, but daemon, bot, TUI, and web
+still share parts of its in-process producer. Daemon and bot temporarily reach
+it through a hidden internal transport. Separate consumer-specific projection
+PRs must remove those fields and then delete the v7 schema/producer entirely;
+this PR deliberately does not combine those independent scheduler and UI
+optimizations.

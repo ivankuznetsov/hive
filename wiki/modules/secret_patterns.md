@@ -24,7 +24,7 @@ Hive::SecretPatterns.redact(text) # → String with each match replaced by "[RED
 
 `scan` snippets are truncated to 80 characters. Callers that only need a
 publication gate use `match?` so credential-dense input cannot allocate a match
-record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes replaced (so a binary log tail with `\xff` bytes never raises `Encoding::CompatibilityError` when gsubbed against the UTF-8 PATTERNS regexes — the failure path that previously aborted the entire `hive status --json` snapshot, PR #84 review finding #4).
+record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes replaced (so a binary log tail with `\xff` bytes never raises `Encoding::CompatibilityError` when gsubbed against the UTF-8 PATTERNS regexes — the failure path that previously aborted the old full status snapshot, PR #84 review finding #4).
 
 ## Pattern catalogue
 

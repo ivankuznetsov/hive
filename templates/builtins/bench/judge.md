@@ -20,7 +20,7 @@ STATE_FILE="judge.md"
 
 # Scratch outputs are folded into the state file below; never leave them behind
 # to be swept into hive-state commits.
-trap 'rm -f .judge-campaign.out .judge-campaign.err .judge-args.out .judge-args.err .judge-precheck.out .judge-precheck.err .judge-rejudge.out .judge-rejudge.err .judge-delibskip.json .judge-delibskip.out .judge-delibskip.err .judge-deliberate.out .judge-deliberate.err .judge-delibmerge.out .judge-delibmerge.err .judge-validate.out .judge-validate.err' EXIT
+trap 'rm -f .judge-campaign.out .judge-campaign.err .judge-args.out .judge-args.err .judge-precheck.out .judge-precheck.err .judge-rejudge.out .judge-rejudge.err .judge-slate.out .judge-slate.err .judge-delibskip.json .judge-delibskip.out .judge-delibskip.err .judge-deliberate.out .judge-deliberate.err .judge-delibmerge.out .judge-delibmerge.err .judge-validate.out .judge-validate.err' EXIT
 
 write_waiting() {
   {
@@ -29,6 +29,27 @@ write_waiting() {
     printf 'Retry: fix the condition above, then run `touch %s` after hive daemon debounce has elapsed.\n\n' "$STATE_FILE"
     printf '<!-- WAITING -->\n'
   } >>"$STATE_FILE"
+}
+
+write_limits_reached() {
+  retry_after="$(ruby -rhive/agent_limit -e 'puts Hive::AgentLimit.retry_after')"
+  {
+    printf '\n## Status\n\n'
+    printf '%s\n\n' "$1"
+    printf 'Hive will retry this stage after the provider cooldown at %s.\n\n' "$retry_after"
+  } >>"$STATE_FILE"
+  ruby -rhive/markers -e '
+    Hive::Markers.set(
+      ARGV.fetch(0),
+      :error,
+      {
+        "reason" => "limits_reached",
+        "message" => "benchmark judge hit provider quota",
+        "retry_after" => ARGV.fetch(1)
+      },
+      at_end: true
+    )
+  ' "$STATE_FILE" "$retry_after"
 }
 
 write_complete() {
@@ -47,8 +68,21 @@ REPO_ROOT="$(cd ../../../.. && pwd)" || {
 }
 BENCH_ROOT="$REPO_ROOT/.hive-state/bench-runtime"
 
-if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
-  write_waiting "ERROR: the packaged bench runtime is missing at $BENCH_ROOT. Re-run hive init --workflow bench to install it."
+require_bench_judge_runtime() {
+  if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
+    write_waiting "ERROR: the packaged bench runtime is missing at $BENCH_ROOT. Re-run hive init . --workflow bench to install it."
+    return 1
+  fi
+
+  if ! ruby -I"$BENCH_ROOT/harness" -rrejudge -e '
+    exit(HiveBench::Rejudge::FAILURE_EVENT_VERSION == 1 ? 0 : 1)
+  ' >/dev/null 2>&1; then
+    write_waiting "ERROR: the installed bench runtime at $BENCH_ROOT predates automatic judge retries. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
+    return 1
+  fi
+}
+
+if ! require_bench_judge_runtime; then
   exit 0
 fi
 
@@ -189,6 +223,40 @@ fi
 # OpenRouter call 403ing) can be reported next to the MISSING_JUDGES lines.
 REJUDGE_ERR_TAIL="$(tail -n 15 .judge-rejudge.err)" || REJUDGE_ERR_TAIL=""
 
+# A complete configured judge slate is the admission gate for deliberation.
+# Rejudge fails soft per judge, so its zero exit status does not prove that the
+# backfill succeeded. Classify an otherwise-retryable missing/undersampled
+# slate as provider-limited only when the preserved stderr contains the
+# harness's conservative quota signal; structural and non-quota failures stay
+# operator-owned WAITING. This gate must remain before deliberate.rb so a
+# partial slate cannot spend on or create a partial deliberation transcript.
+set +e
+ruby -I"$BENCH_ROOT/harness" -ryaml -rjson -rlib/judge_slate -e '
+  data = JSON.parse(File.read(ARGV.fetch(0)))
+  campaign = YAML.safe_load_file("campaign.yml")
+  validation = HiveBench::JudgeSlate.validate(data: data, campaign: campaign)
+  unless validation.problems.empty?
+    validation.problems.each { |line| puts line }
+    failures = HiveBench::JudgeSlate.failure_limits(File.read(ARGV.fetch(1)))
+    quota_only = validation.manual.empty? && HiveBench::JudgeSlate.quota_only?(validation, failures)
+    exit(quota_only ? 75 : 2)
+  end
+' "$REPO_ROOT/$RESULTS" .judge-rejudge.err >.judge-slate.out 2>.judge-slate.err
+slate_status=$?
+set -e
+if [ "$slate_status" -ne 0 ]; then
+  slate_message="$(cat .judge-slate.err .judge-slate.out)"
+  if [ -n "$REJUDGE_ERR_TAIL" ]; then
+    slate_message="${slate_message}$(printf '\n\nrejudge stderr tail (per-judge failures are soft; this is the only record of their cause):\n%s' "$REJUDGE_ERR_TAIL")"
+  fi
+  if [ "$slate_status" -eq 75 ]; then
+    write_limits_reached "$slate_message"
+  else
+    write_waiting "$slate_message"
+  fi
+  exit 0
+fi
+
 # Build the retry skip-set from COMPLETE transcripts only. Deliberation records
 # a round-two provider failure as final:null so the evidence survives, but mere
 # cell presence must not make that incomplete verdict permanently un-runnable.
@@ -264,50 +332,24 @@ ruby -rjson -e '
 }
 rm -f "$REPO_ROOT/$DELIB.next"
 
-ruby -ryaml -rjson -e '
+ruby -I"$BENCH_ROOT/harness" -ryaml -rjson -rlib/judge_slate -e '
   data = JSON.parse(File.read(ARGV.fetch(0)))
   delib = File.file?(ARGV.fetch(1)) ? JSON.parse(File.read(ARGV.fetch(1))) : { "cells" => [] }
   campaign = YAML.safe_load_file("campaign.yml")
-  exclusions = campaign.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
-  expected = campaign.fetch("tasks").flat_map { |task| campaign.fetch("candidates").map { |candidate| [task.to_s, candidate.to_s] } } - exclusions
-  cells = data.fetch("cells", [])
-  by_key = cells.to_h { |cell| [[cell["task_id"].to_s, cell["agent_id"].to_s], cell] }
-  # The campaign judge slate, validated BY NAME (the harness dual-judge
-  # defaults: run_all.rb judges() and the rejudge.rb CLI both derive these keys
-  # from the pinned judge models). Counting judges instead would let stale keys
-  # from a results file spanning a slate change pass for the current slate.
-  # Judges fail soft per cell during generation, so a partial-slate cell is a
-  # routine backfill target, not a success.
-  judge_configs = campaign.fetch("judges").reject { |_backend, config| config.nil? || config == false }
-  judge_slate = judge_configs.map do |backend, config|
-    backend == "claude" ? config.fetch("model").sub(/\Aclaude-/, "") : config.fetch("model").split("/").last
-  end
-  expected_efforts = judge_configs.to_h do |backend, config|
-    name = backend == "claude" ? config.fetch("model").sub(/\Aclaude-/, "") : config.fetch("model").split("/").last
-    [name, backend == "codex" ? config.fetch("reasoning_effort") : "unspecified"]
-  end
+  validation = HiveBench::JudgeSlate.validate(data: data, campaign: campaign)
+  expected = validation.expected
+  by_key = validation.by_key
+  judge_slate = validation.judge_slate
+  expected_efforts = validation.expected_efforts
+  incomplete_cells = validation.incomplete_keys.to_h { |task, candidate, _judge| [[task, candidate], true] }
   deliberated = delib.fetch("cells", []).to_a.to_h { |t| [[t["task_id"].to_s, t["agent_id"].to_s], t] }
-  problems = []
+  problems = validation.problems.dup
   expected.each do |task, candidate|
     cell = by_key[[task, candidate]]
-    if cell.nil?
-      problems << "MISSING_CELL #{candidate} #{task}"
-      next
-    end
+    next if cell.nil?
     next if cell["run_status"] == "empty_diff"
-    missing_judges = judge_slate - cell.fetch("judges", {}).keys
-    unless missing_judges.empty?
-      problems << "MISSING_JUDGES #{candidate} #{task} (missing: #{missing_judges.join(",")}; have: #{cell.fetch("judges", {}).keys.sort.join(",")})"
-      next
-    end
-    judge_slate.each do |judge|
-      record = cell.fetch("judges").fetch(judge)
-      samples = record["sample_count"] || Array(record["scores"]).size
-      samples = 1 if samples.to_i.zero? && record.key?("mean")
-      problems << "UNDERSAMPLED_JUDGE #{candidate} #{task} #{judge} (have #{samples}, need #{campaign.fetch("seeds")})" if samples.to_i < campaign.fetch("seeds")
-      effort = record.fetch("reasoning_effort", "unspecified")
-      problems << "JUDGE_EFFORT_MISMATCH #{candidate} #{task} #{judge} (have #{effort}, need #{expected_efforts.fetch(judge)})" unless effort == expected_efforts.fetch(judge)
-    end
+    next if incomplete_cells.key?([task, candidate])
+
     # deliberate.rb silently drops cells it cannot resolve (e.g. a task_id
     # missing from the corpus); COMPLETE must not claim transcript coverage it
     # does not have.
@@ -331,13 +373,6 @@ ruby -ryaml -rjson -e '
         problems << "INCOMPLETE_DELIBERATION #{candidate} #{task} #{judge} (final must be a number from 0 to 10; got #{final.inspect})"
       end
     end
-  end
-  # A results cell outside the pre-registered matrix means campaign.yml was
-  # amended mid-campaign (matrix shrunk or exclusions grown after generation);
-  # refuse to pass de-registered paid cells silently into publish.
-  by_key.each_key do |task, candidate|
-    next if expected.include?([task, candidate])
-    problems << "UNEXPECTED_CELL #{candidate} #{task} (not in the pre-registered campaign matrix)"
   end
   unless problems.empty?
     problems.each { |line| puts line }

@@ -50,10 +50,9 @@ path creates no lock and writes no file. It is therefore a preview, not a
 lease: a caller must pass the returned binding to the write form, which
 revalidates current state under the task lock.
 
-`hive status --json` remains the authority for deterministic cross-project
-and cross-task traversal order. Its aggregate `unanswered_questions` value can
-lag a concurrent edit; this inventory's parsed slots are the answer truth for
-the selected task.
+`hive answer TARGET --json` is the authority for the selected task's question
+inventory. Its parsed slots are the answer truth; fleet status is not a
+question-detail API.
 
 ## Bound literal write
 
@@ -144,7 +143,8 @@ equivalent rewording fails closed.
 Completing the final slot changes only `brainstorm.md`. The command does not
 set a completion marker, invoke `hive run`, move the folder, or authorize
 `hive approve`. After every write attempt, take a fresh
-`hive status --json` snapshot. Normal Hive/daemon policy remains responsible
+`hive answer TARGET --json` inventory and `hive status --operational --json`
+workflow snapshot. Normal Hive/daemon policy remains responsible
 for recognizing that no slots remain, resuming the brainstorm agent if
 required, and advancing only through its existing completion gate.
 

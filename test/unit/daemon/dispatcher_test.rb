@@ -2141,6 +2141,94 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute events_include?(logger, :dispatched)
   end
 
+  def test_generic_ready_to_run_does_not_treat_same_process_newer_baseline_as_replacement
+    current_mtime = T0 - 600
+    rows = [ row(slug: "g1", stage: "1-inbox", workflow: "patrol-fix",
+                 action: "ready_to_run", command: "hive run g1",
+                 marker: "none", mtime: current_mtime) ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    ctrl.observe_state_file_mtime(project: "p1", slug: "g1", mtime: T0 - 60)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned,
+                 "a newer sibling observed by this daemon must not re-arm the task"
+    assert_equal T0 - 60,
+                 ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "g1")
+    assert events_include?(logger, :markerless_stalled)
+    refute events_include?(logger, :dispatched)
+  end
+
+  def test_generic_ready_to_run_replaces_a_newer_restored_dispatch_baseline
+    Dir.mktmpdir("restored-generic-run-baseline") do |dir|
+      path = File.join(dir, "baselines.json")
+      current_mtime = T0 - 600
+      Hive::Daemon::DispatchBaselines.new(path: path).write(
+        { [ "p1", "g1" ] => T0 - 60 }
+      )
+      rows = [ row(slug: "g1", stage: "1-inbox", workflow: "patrol-fix",
+                   action: "ready_to_run", command: "hive run g1",
+                   marker: "none", mtime: current_mtime) ]
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(
+        rows: rows,
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_equal 1, sup.spawned.size,
+                   "an older state file may recover once from a baseline restored from disk"
+      assert_equal current_mtime,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "g1")
+      refute ctrl.restored_dispatch_baseline_for?(project: "p1", slug: "g1")
+      assert events_include?(logger, :dispatched)
+      refute events_include?(logger, :markerless_stalled)
+    end
+  end
+
+  def test_durable_ready_to_run_replaces_a_newer_stale_dispatch_baseline_on_acceptance
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-1", "generation-1", "running")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil
+    )
+    dispatch_calls = 0
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **_options|
+      dispatch_calls += 1
+      result
+    end
+    Dir.mktmpdir("restored-durable-run-baseline") do |dir|
+      path = File.join(dir, "baselines.json")
+      current_mtime = T0 - 600
+      Hive::Daemon::DispatchBaselines.new(path: path).write(
+        { [ "p1", "g1" ] => T0 - 60 }
+      )
+      rows = [ row(slug: "g1", stage: "1-inbox", workflow: "patrol-fix",
+                   action: "ready_to_run", command: "hive run g1 --json",
+                   marker: "none", mtime: current_mtime) ]
+      dispatcher, _sup, ctrl, logger, _mw = make_dispatcher(
+        rows: rows, attempt_dispatcher: attempt_dispatcher,
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_equal current_mtime,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "g1"),
+                   "durable acceptance must consume the restored baseline"
+      assert events_include?(logger, :attempt_accepted)
+      assert events_include?(logger, :dispatched)
+
+      dispatcher.tick(now: T0 + 30)
+
+      assert_equal 1, dispatch_calls,
+                   "the consumed baseline must brake the unchanged row on the next tick"
+      assert_equal 1, logger.events.count { |name, _attrs| name == :dispatched }
+    end
+  end
+
   # High #1 regression: after a generic `hive approve` moves a task into a
   # non-coding dir (research's `2-gather`), the post-completion refresh must
   # locate it through the runtime union (`Workflows.all_stage_dirs`), NOT the

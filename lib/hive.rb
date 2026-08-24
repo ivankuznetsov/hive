@@ -21,6 +21,7 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 7,
+      "hive-running-status" => 1,
       "hive-operational-status" => 4,
       "hive-circuits" => 1,
       "hive-watch-event" => 1,
@@ -234,7 +235,7 @@ module Hive
     end
 
     # Closed enum of `tasks[].action` (and `tasks[].action_label` lookup
-    # keys) emitted by `hive status --json`. Same self-derived ALL pattern
+    # keys) emitted by the internal task graph. Same self-derived ALL pattern
     # as NextActionKind so adding a new bucket without updating ALL is
     # impossible. Adding a new value is non-breaking by contract; renaming
     # or removing a value bumps SCHEMA_VERSIONS["hive-status"] — the one
@@ -307,8 +308,8 @@ module Hive
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
-    # Closed enum of `error_kind` values emitted by `hive status --json`
-    # when an error envelope is produced. `hive status`'s producer surface
+    # Closed enum of `error_kind` values emitted by status commands when an
+    # error envelope is produced. The status producer surface
     # is much narrower than `hive run`'s — only ConfigError / InternalError
     # and the generic fallback. Same self-derived ALL pattern.
     module StatusErrorKind

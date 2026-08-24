@@ -196,6 +196,12 @@ customizations; unrelated Claude launches do not receive it. Discovery still
 uses Claude's positional prompt, while Codex's normal and workspace-write
 launches send the prompt through stdin with `-` in argv.
 
+Prepared OpenCode launches resolve a bare executable to the concrete installed
+binary before building the hermetic overlay. Tool-manager shims are not allowed
+to sit on this JSONL protocol boundary: startup notices written by a shim to
+stdout would otherwise turn an otherwise valid OpenCode event stream into a
+typed `malformed_output` failure.
+
 ## `spawn_and_wait` (the long part)
 
 1. Open an owner-private (`0600`), no-follow logfile (`<task.log_dir>/<label>-<UTC-ts>.log`). Append only bounded launch metadata (`cwd`, profile, executable basename, argv count); never serialize argv because positional profiles carry the complete prompt there. Event messages pass through the same shared secret redactor before persistence.

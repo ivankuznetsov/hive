@@ -4,11 +4,8 @@ module AgentCliRuntime
   module OpenCode
     module ResultParser
       MAX_RUN_BYTES = 4 * 1024 * 1024
-      # Sanitized exports contain the complete session, including every tool
-      # result. A real hour-long review crossed the original 4 MiB ceiling even
-      # though its run event stream and terminal message were both valid. Keep
-      # the input bounded, but size that bound for implementation sessions
-      # rather than short capability fixtures.
+      # Sanitized exports contain the complete session and every tool result,
+      # so their bounded limit must accommodate long implementation sessions.
       MAX_EXPORT_BYTES = 64 * 1024 * 1024
       MAX_FINAL_MESSAGE_BYTES = 1024 * 1024
       MAX_EVENTS = 10_000
@@ -96,8 +93,6 @@ module AgentCliRuntime
         message = texts.filter_map do |message_id, text|
           text if message_id == terminal.fetch(:message_id)
         end.join
-        malformed!("OpenCode terminal assistant message is empty") if message.empty?
-
         final_message_truncated = message.bytesize > MAX_FINAL_MESSAGE_BYTES
         ParsedRun.new(
           session_id: session_id,
@@ -174,18 +169,21 @@ module AgentCliRuntime
         messages = export["messages"]
         malformed!("OpenCode sanitized export messages must be an array") unless
           messages.is_a?(Array)
-        matches = messages.filter_map do |message|
+        assistant = nil
+        messages.each do |message|
           next unless message.is_a?(Hash) && message["info"].is_a?(Hash)
 
           record = message.fetch("info")
           next unless record["id"] == message_id
 
-          record
+          if assistant
+            malformed!("OpenCode sanitized export must contain one terminal assistant record")
+          end
+          assistant = record
         end
-        unless matches.one?
+        unless assistant
           malformed!("OpenCode sanitized export must contain one terminal assistant record")
         end
-        assistant = matches.fetch(0)
         unless assistant["role"] == "assistant" &&
                assistant["sessionID"] == session_id
           malformed!("OpenCode sanitized export terminal record is not correlated")

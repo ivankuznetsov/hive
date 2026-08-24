@@ -507,6 +507,28 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_failure_marker_redacts_secret_from_failed_git_hook
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "lib"))
+      File.write(File.join(worktree, "lib", "hook.rb"), "change\n")
+      hook = File.join(worktree, ".git", "hooks", "pre-commit")
+      File.write(hook, "#!/bin/sh\necho AKIAABCDEFGHIJKLMNOP >&2\nexit 1\n")
+      File.chmod(0o755, hook)
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+      attrs = Hive::Stages::CleanExit.failure_marker_attrs(result)
+
+      assert_equal :git_failed, result.fetch(:status)
+      assert_includes result.fetch(:message), "AKIAABCDEFGHIJKLMNOP"
+      refute_includes attrs.fetch(:detail), "AKIAABCDEFGHIJKLMNOP"
+      assert_includes attrs.fetch(:detail), "[REDACTED:aws_access_key]"
+    end
+  end
+
   def test_residue_with_disabled_scope_check_still_auto_commits
     with_tmp_dir do |worktree|
       init_git(worktree)

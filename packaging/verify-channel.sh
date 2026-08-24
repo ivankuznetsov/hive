@@ -175,7 +175,7 @@ else
   fail "doctor crashed (no signature header)"
 fi
 
-# 5. scratch project: init → new → status --json
+# 5. scratch project: init → new → compact status
 project="$(mktemp -d)/scratch"
 mkdir -p "$project"
 ( cd "$project" \
@@ -187,10 +187,10 @@ if "$HIVE_BIN" init "$project" >/dev/null 2>&1; then ok "hive init exited 0"; el
 if [[ -d "$project/.hive-state/stages/1-inbox" ]]; then ok ".hive-state/stages/1-inbox created"; else fail "init did not scaffold .hive-state"; fi
 if "$HIVE_BIN" new "$(basename "$project")" "channel verify smoke" >/dev/null 2>&1; then ok "hive new exited 0"; else fail "hive new failed"; fi
 status_json="$("$HIVE_BIN" status --json 2>/dev/null || true)"
-if printf '%s' "$status_json" | grep -q '"schema":"hive-status"'; then
-  ok "status --json emits hive-status envelope"
+if printf '%s' "$status_json" | grep -q '"schema":"hive-running-status"'; then
+  ok "status --json emits hive-running-status envelope"
 else
-  fail "status --json did not emit a hive-status envelope"
+  fail "status --json did not emit a hive-running-status envelope"
 fi
 
 log "summary: ${PASS} passed, ${FAIL} failed"

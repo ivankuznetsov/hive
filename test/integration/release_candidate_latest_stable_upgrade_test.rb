@@ -379,7 +379,6 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
       "channel_sidecars" => { "channel" => "linux-bash" },
       "managed_web_data" => { "database" => "keep" },
       "service_definitions" => { "hive-web" => "inert" },
-      "status_json" => { "schema" => "hive-status", "tasks" => 1 },
       "doctor_json" => { "schema" => "hive-doctor", "healthy" => true },
       "install_identity" => { "gem_sha256" => "a" * 64 }
     }

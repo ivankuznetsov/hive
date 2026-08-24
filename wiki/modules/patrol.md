@@ -142,16 +142,29 @@ Patrol Fix owns the repair workflow:
 4. Review records an independent route decision.
 5. Publish uses `Hive::GithubPublication`.
 
-`patrol.fix` is the one coherent identity for every unified Patrol Fix stage;
-ordinary and Architecture Patrol discovery continue to use their own agents.
-For example, `agent: opencode`, `model: openrouter/stealth/ox-alpha`, and
-`effort: high` select OpenCode only for repair work. The controller supplies
-the bounded OpenCode permission policy directly. Inbox/review may write only
-their exact report and receive no shell permission. Fix may edit the owned
-worktree and its exact report and receives the explicit `Bash(*)` grant needed
-to reproduce, test, and commit the repair. This full-shell grant has the
-authority of the Hive OS user; artifact custody and Git validation remain the
-outcome boundary.
+Inbox and review use the independent `patrol.agent` identity and the
+`models.patrol_review` route. Only the fix stage uses `patrol.fix.agent` and the
+`models.patrol_fix` route. For example, `patrol.fix.agent: opencode` with
+`model: openrouter/stealth/ox-alpha` and `effort: high` selects OpenCode only
+after a finding is admitted for repair. The controller supplies the bounded
+OpenCode permission policy directly. Inbox/review may write only their exact
+report and receive no shell permission when OpenCode is deliberately selected
+as the Patrol review agent. Fix may edit the owned worktree and its exact report
+and receives the explicit `Bash(*)` grant needed to reproduce, test, and commit
+the repair. This full-shell grant has the authority of the Hive OS user;
+artifact custody and Git validation remain the outcome boundary.
+
+Every managed Patrol Fix agent is also told to return its report as the exact
+final JSON object. If the agent exits successfully without creating the report,
+the controller may materialize only that exact, untruncated JSON object before
+Artifact Firewall validation. Prose, arrays, truncated output, and any existing
+path are not accepted; in particular, a dangling report symlink remains a
+custody violation rather than being replaced by the fallback.
+
+Independent review hashes the bounded Git diff as raw bytes, then validates and
+labels a copy as UTF-8 before placing it in the canonical prompt context. Valid
+non-ASCII patch text therefore remains reviewable without changing its evidence
+digest; malformed diff bytes fail closed before an agent launches.
 
 `Hive::GithubPublication` is the single PR-publication mechanism used by
 Patrol Fix and the normal coding open-PR path. It owns durable push/create

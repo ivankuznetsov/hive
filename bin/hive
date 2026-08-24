@@ -118,7 +118,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
     extras: { "operation" => "reject" }
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
-  "status" => { schema: "hive-status", error_kind: "error" },
+  "status" => { schema: "hive-running-status", error_kind: "error" },
   "circuits" => { schema: "hive-circuits", error_kind: "usage" },
   "act" => { schema: "hive-act", error_kind: "usage" },
   "prune" => { schema: "hive-prune", error_kind: "usage" },
@@ -231,6 +231,14 @@ def json_usage_error_contract(argv)
       arg.valid_encoding? && (arg == "--operational" || arg.start_with?("--operational="))
     end
     return { schema: "hive-operational-status", error_kind: "error" } if operational
+    internal_task_graph = option_argv.any? do |arg|
+      arg.valid_encoding? &&
+        (arg == "--internal-task-graph" || arg.start_with?("--internal-task-graph="))
+    end
+    daemon_task = option_argv.any? do |arg|
+      arg.valid_encoding? && (arg == "--daemon-task" || arg.start_with?("--daemon-task="))
+    end
+    return { schema: "hive-status", error_kind: "error" } if internal_task_graph || daemon_task
   when "web"
     subcommand = json_usage_subcommand(argv, command_index, value_options: %w[--bind --port])
     return unless %w[install status].include?(subcommand)

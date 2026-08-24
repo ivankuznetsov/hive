@@ -5,7 +5,7 @@ require "hive/dependency_admission"
 
 module Hive
   module Daemon
-    # Wraps `hive status --json` invocation. Returns a typed array of
+    # Wraps Hive's internal task-graph invocation. Returns a typed array of
     # task rows the daemon's dispatcher consumes. Surfaces parse failures
     # as a structured `{ok: false}` rather than raising, so a transient
     # status hiccup doesn't crash the daemon.
@@ -50,7 +50,7 @@ module Hive
       # `warning` carries a non-fatal advisory the dispatcher logs once per
       # tick. Two sources feed it: (1) a forward schema-version skew that was
       # tolerated and parsed best-effort, and (2) any non-empty stderr from an
-      # otherwise-successful (exit-0) `hive status --json` fetch. In JSON mode
+      # otherwise-successful (exit-0) internal task-graph fetch. In JSON mode
       # stdout carries the payload and stderr is empty on a healthy run, so
       # non-empty stderr is the status command's own degradation breadcrumbs
       # (fail-open dependency gate, dropped depends_on). (The collapsed-stack
@@ -86,7 +86,7 @@ module Hive
       end
 
       def fetch
-        fetch_command("status", "--json")
+        fetch_command("status", "--internal-task-graph", "--json")
       end
 
       def fetch_tasks(task_keys)
@@ -97,7 +97,7 @@ module Hive
         return Result.new(ok: true) if references.empty?
 
         fetch_command(
-          "status", "--json", "--daemon-task", *references,
+          "status", "--internal-task-graph", "--json", "--daemon-task", *references,
           require_partial: true, expected_task_keys: keys
         )
       end
@@ -382,7 +382,7 @@ module Hive
       end
 
       def parse_mtime(iso_string, state_file_path)
-        # `hive status --json` serializes mtimes at whole-second ISO8601
+        # The internal task graph serializes mtimes at whole-second ISO8601
         # precision for the public payload, but the daemon's edit-resume
         # baseline is captured from File.mtime with subsecond precision.
         # Prefer the local stat when the path is available so an operator

@@ -120,7 +120,7 @@ atomic write. Normal task execution never mutates that source config. A
 missing/stale plugin or a higher-precedence project/user CE skill that shadows
 the selected plugin fails readiness before any model process starts.
 
-`hive status --json` keeps the Hive provider as `opencode`, retains the
+`hive task TARGET --json` keeps the Hive provider as `opencode`, retains the
 requested nested route, and appends sanitized-export-observed backend/model,
 resolution status, outcome, and nullable usage after an implementation
 attempt. A requested alias is never copied into the actual field without
@@ -172,7 +172,7 @@ Hive moves the task to `3-plan/`, writes `plan.md`, and pauses for edits if the 
 
 `hive new` wrote an `idea.md` file. `hive brainstorm` and `hive plan` moved the task directory between stage folders and ran the stage agents. The current marker at the bottom of each stage file tells Hive whether the next action is human input, another run, or promotion to the next stage.
 
-When the task reaches execute, Hive durably captures its concrete provider and model before spawning the implementation process. Later PR-opening and repair stages follow that owner automatically unless you explicitly configure a stage override. Run `hive status --json` for full provenance, or press `I` on the task in `hive tui` to inspect execute, PR-opening, review-fix, and CI-fix ownership without changing task state.
+When the task reaches execute, Hive durably captures its concrete provider and model before spawning the implementation process. Later PR-opening and repair stages follow that owner automatically unless you explicitly configure a stage override. Run `hive task TARGET --json` for task-local provenance, or press `I` on the task in `hive tui` to inspect execute, PR-opening, review-fix, and CI-fix ownership without changing task state.
 
 ## Artefacts
 

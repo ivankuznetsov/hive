@@ -97,7 +97,7 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "YOLO requires explicit opt-in"
     assert_includes text, "Status-only discovery is read-only"
     assert_includes text, "fresh inventory before every write"
-    assert_includes text, "original full-status order remains the traversal authority"
+    assert_includes text, "original operational-status order remains the traversal authority"
     assert_includes text, "bare `approve` or `continue`"
     assert_includes text, "explicit `continue` may resume the same paused YOLO run"
     assert_includes text, "Never dispatch a stage from this answer flow"

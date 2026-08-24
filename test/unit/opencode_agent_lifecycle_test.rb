@@ -159,6 +159,30 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_structured_provider_rate_limit_writes_a_retryable_limit_marker
+    with_fixture(mode: :rate_limited) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "rate-limited-260824-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-rate-limited"),
+          profile_status: :state_file_marker
+        ).run!
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "limits_reached", result.fetch(:error_reason)
+      assert_equal :rate_limited, result.dig(:provider_error, :kind)
+      assert_includes result.fetch(:limit_text), "temporarily rate-limited upstream"
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      refute_nil marker.attrs["retry_after"]
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 0, calls.count { |line| line.start_with?("export ses_") }
+    end
+  end
+
   def test_malformed_sanitized_export_is_retried_before_failing_the_run
     with_fixture(mode: :inspection_malformed_once) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "inspection-retry-260821-aaaa")
@@ -705,6 +729,18 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       mode == :malformed ? "run-malformed-json.jsonl" :
         (mode == :auth_failure ? "run-auth-error.jsonl" : "run-one-step.jsonl")
     ))
+    if mode == :rate_limited
+      run_output = JSON.generate(
+        "type" => "error",
+        "sessionID" => "ses_rate_limit",
+        "error" => {
+          "name" => "APIError",
+          "data" => {
+            "message" => "[Stealth] stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly."
+          }
+        }
+      ) + "\n"
+    end
     run_output = run_output.sub('"text":"Done."', '"text":""') if mode == :tool_only
     export_output = File.read(File.join(
       source_root_for_fixtures, "session-export-matching.json"
@@ -749,7 +785,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           sleep 10 if #{%i[timeout cancelled].include?(mode)}
           print #{run_output.dump}
           warn "authentication failed" if #{mode == :auth_failure}
-          exit(#{mode == :auth_failure ? 1 : 0})
+          exit(#{%i[auth_failure rate_limited].include?(mode) ? 1 : 0})
         elsif ARGV.first == "export"
           sleep 10 if #{mode == :inspection_timeout}
           exit 1 if #{mode == :inspection_empty_failure}

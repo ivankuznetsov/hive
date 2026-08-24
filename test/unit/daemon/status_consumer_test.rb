@@ -3,14 +3,14 @@ require "json"
 require "tmpdir"
 require "hive/daemon/status_consumer"
 
-# Pin StatusConsumer's parsing of `hive status --json` output. We
+# Pin StatusConsumer's parsing of Hive's internal task-graph output. We
 # stand in a tiny ruby script that emits a controlled JSON envelope on
 # stdout, since calling the real binary would couple this test to the
 # whole status implementation.
 class HiveDaemonStatusConsumerTest < Minitest::Test
   include HiveTestHelper
 
-  def with_fake_status(payload, exit_code: 0, stderr_text: "", expected_args: %w[status --json])
+  def with_fake_status(payload, exit_code: 0, stderr_text: "", expected_args: %w[status --internal-task-graph --json])
     with_tmp_dir do |dir|
       script = File.join(dir, "fake-hive")
       File.write(script, <<~RUBY)
@@ -105,7 +105,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [ task_row(slug: "changed") ]
     } ]).merge("partial" => true)
-    expected = %w[status --json --daemon-task p:changed p:other]
+    expected = %w[status --internal-task-graph --json --daemon-task p:changed p:other]
 
     with_fake_status(JSON.generate(payload), expected_args: expected) do |bin|
       result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
@@ -139,7 +139,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
   end
 
   def test_fetch_tasks_rejects_project_errors_and_unrequested_rows
-    expected = %w[status --json --daemon-task p:changed]
+    expected = %w[status --internal-task-graph --json --daemon-task p:changed]
     failed = make_envelope(projects: [ {
       "name" => "p", "error" => "project_load_failed", "tasks" => []
     } ]).merge("partial" => true)

@@ -823,7 +823,7 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::Status) do |calls|
-      Hive::CLI.start([ "status", "--full" ])
+      Hive::CLI.start([ "status", "--internal-task-graph", "--json" ])
       assert_equal true, calls.first.dig(:kwargs, :full)
     end
 
@@ -906,12 +906,16 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_status_help_documents_concise_full_and_operational_modes
+  def test_status_help_documents_bounded_default_and_operational_mode
     out, = capture_io { Hive::CLI.start([ "help", "status" ]) }
 
-    assert_match(/concise operational snapshot/, out)
-    assert_match(/--full/, out)
+    assert_match(/bounded.*running/i, out)
+    refute_match(/--full/, out)
+    refute_match(/--internal-task-graph/, out)
+    refute_match(/--daemon-task/, out)
     assert_match(/--operational/, out)
+    refute_match(/--running/, out)
+    assert_match(/hive-running-status/, out)
   end
 
   def test_watch_passes_bounded_stream_options_and_documents_json_lines

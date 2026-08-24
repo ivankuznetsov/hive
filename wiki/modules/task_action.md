@@ -32,13 +32,13 @@ daemon dispatch-request queue.
 
 The payload is the local-extraction fallback. When a fresh agent-written `<task.folder>/diagnostics/red-status.md` exists (frontmatter `marker_signature` matches the current marker's SHA256 and `generated_by` is in `Hive::Schemas::DIAGNOSTIC_GENERATORS`), `diagnostic_generated_by` returns the producing generator name (`claude`/`codex`/`pi`/`grok`) and the artifact body becomes the source of truth. Otherwise it bounds the output via `DIAGNOSTIC_SUMMARY_MAX` (120 chars), `DIAGNOSTIC_DETAIL_MAX` (4000 chars), and `ARTIFACT_PATHS_MAX` (20 paths). All summary/detail text passes through `redact` (using `Hive::SecretPatterns`) before emission.
 
-Diagnostic artifacts are resolved with `File.realpath` and accepted only when they remain inside the project-controlled task/log roots, so a symlink under `reviews/`, `logs/`, or `diagnostics/` cannot make `hive status --json` tail arbitrary host files.
+Diagnostic artifacts are resolved with `File.realpath` and accepted only when they remain inside the project-controlled task/log roots, so a symlink under `reviews/`, `logs/`, or `diagnostics/` cannot make an internal task projection or `hive status --diagnose` tail arbitrary host files.
 
 `marker_signature` is the SHA256 hex of `marker.name + sorted(attrs)` joined by newline. It's the freshness key shared with `Hive::DiagnosisAgent` (which validates it pre-write) and the TUI live-update gate (`Hive::Tui::Update#red_status_marker_signature`); producer + both consumers compute identical bytes.
 
 `suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers with the guarded agent action `hive act workflow.retry PROJECT:SLUG --observation TOKEN`. The token binds the complete current observation, including marker occurrence; direct `markers clear && run` recipes are intentionally not published because they bypass the durable lifecycle. For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-passes `:review_stale`, the value reports `kind: manual_fix` with `command: nil` — the operator must edit or inspect findings before retry.
 
-EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non-nil `diagnostic` even though `Hive::Tui::KeyMap#red_detail_row?` does not yet open the detail view for them; bot/daemon/external-agent consumers of `hive status --json` rely on the field to explain why an EXECUTE_STALE task is stuck.
+EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non-nil `diagnostic` even though `Hive::Tui::KeyMap#red_detail_row?` does not yet open the detail view for them; bot/daemon consumers rely on the internal field, while external agents use `hive status --diagnose` or `hive task TARGET --json`.
 
 ## Action map (`Hive::TaskAction::ACTIONS`)
 
@@ -201,7 +201,7 @@ and visit-specific decision ID.
 
 The slug is `Shellwords.shelljoin`-escaped so a slug containing shell metacharacters can't break the suggested command.
 
-`EXECUTE_WAITING` rows with no pending findings delegate their structured `next_action` to `Hive::ExecuteWaitingAction`. That keeps `hive status --json`, `hive run --json`, and TUI Enter behavior aligned for `dirty_worktree`, `branch_mismatch`, `head_not_descendant`, `no_worktree_changes`, and `missing_research_output`.
+`EXECUTE_WAITING` rows with no pending findings delegate their structured `next_action` to `Hive::ExecuteWaitingAction`. That keeps internal projections, `hive run --json`, and TUI Enter behavior aligned for `dirty_worktree`, `branch_mismatch`, `head_not_descendant`, `no_worktree_changes`, and `missing_research_output`.
 
 For execute, `TaskAction` now receives the canonical task projection plus the
 migration selection. Marker and shadow modes retain the legacy action (shadow

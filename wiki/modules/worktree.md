@@ -253,8 +253,9 @@ literal POSIX backslashes and whitespace bytes because every Git mutation uses
 `--literal-pathspecs`; it still rejects NUL, absolute paths, dot traversal, and
 platform path separators. Discard restores tracked paths from `HEAD` and cleans
 only the named untracked paths. Ordinary commit/discard mutation does not clear
-the marker: the returned `next_action` requires a fresh `hive status --json`,
-followed by that snapshot's generation-guarded `workflow.retry` action.
+the marker: the returned `next_action` requires a fresh
+`hive status --operational --json`, followed by that snapshot's
+generation-guarded `workflow.retry` action.
 
 `--complete-execute` is narrower than ordinary residue commit: it requires the
 current `4-execute` `ERROR reason=dirty_worktree`, a now-clean task-owned

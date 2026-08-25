@@ -27,30 +27,17 @@ module Hive
     def self.parse(value)
       return unless value.is_a?(Hash) && value.keys.all? { |key| key.is_a?(String) }
       return unless value.keys.sort == FIELDS.sort
+      return unless valid_version_string?(value["release_version"])
 
-      channel = value["channel"]
-      release_version = value["release_version"]
-      display_version = value["display_version"]
-      build_sha = value["build_sha"]
-      deployment_id = value["deployment_id"]
-      return unless CHANNELS.include?(channel) || channel == "unknown"
-      return unless valid_version_string?(release_version) && valid_version_string?(display_version)
-
-      expected_display = case channel
-      when "release"
-        return unless build_sha.nil? && deployment_id.nil?
-
-        release_version
-      when "dogfood"
-        return unless valid_sha?(build_sha) && valid_deployment_id?(deployment_id)
-
-        "#{release_version}+dogfood.#{build_sha[0, 9]}"
-      when "unknown"
-        return unless build_sha.nil? && deployment_id.nil?
-
-        "#{release_version}+unknown"
-      end
-      return unless display_version == expected_display
+      expected = new(
+        environment: {
+          CHANNEL_ENV => value["channel"],
+          BUILD_SHA_ENV => value["build_sha"],
+          DEPLOYMENT_ID_ENV => value["deployment_id"]
+        },
+        release_version: value["release_version"]
+      ).to_h
+      return unless value == expected
 
       FIELDS.to_h { |field| [ field, value[field] ] }
     end
@@ -59,15 +46,7 @@ module Hive
       value.is_a?(String) && value.valid_encoding? && VERSION_PATTERN.match?(value)
     end
 
-    def self.valid_sha?(value)
-      value.is_a?(String) && value.valid_encoding? && SHA_PATTERN.match?(value)
-    end
-
-    def self.valid_deployment_id?(value)
-      value.is_a?(String) && value.valid_encoding? && DEPLOYMENT_ID_PATTERN.match?(value)
-    end
-
-    private_class_method :valid_version_string?, :valid_sha?, :valid_deployment_id?
+    private_class_method :valid_version_string?
 
     def initialize(environment: ENV, release_version: Hive::VERSION)
       @environment = environment

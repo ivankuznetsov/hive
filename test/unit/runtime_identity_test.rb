@@ -100,8 +100,18 @@ class RuntimeIdentityTest < Minitest::Test
     identity = Hive::RuntimeIdentity.new(environment: {}).to_h
 
     assert_nil Hive::RuntimeIdentity.parse(identity.merge("build_sha" => DOGFOOD_SHA))
+    assert_nil Hive::RuntimeIdentity.parse(identity.merge("display_version" => "#{Hive::VERSION}+unknown"))
+    assert_nil Hive::RuntimeIdentity.parse(
+      identity.merge("release_version" => "not a version", "display_version" => "not a version")
+    )
     assert_nil Hive::RuntimeIdentity.parse(identity.merge("unexpected" => true))
     assert_nil Hive::RuntimeIdentity.parse(channel: "release")
     assert_equal identity, Hive::RuntimeIdentity.parse(identity.to_a.reverse.to_h)
+  end
+
+  def test_parse_accepts_unknown_process_identity_without_provenance
+    identity = Hive::RuntimeIdentity.unknown
+
+    assert_equal identity, Hive::RuntimeIdentity.parse(identity)
   end
 end

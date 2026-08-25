@@ -274,6 +274,43 @@ class HivePatrolValidatorTest < Minitest::Test
     assert_equal [ [ "TERM", -12_345 ], [ "KILL", -12_345 ] ], signals
   end
 
+  # Leader liveness is not proof of an empty process group: a shell whose
+  # wait builtin is interrupted by TERM can exit while members that trap
+  # TERM survive, so the grace-period join must not suppress escalation.
+  def test_termination_still_escalates_to_kill_when_the_leader_exits_during_grace
+    waiter = Struct.new(:pid) do
+      def join(*) = true
+    end.new(12_345)
+    signals = []
+
+    with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+      Hive::Patrol::Validator.new.send(:terminate, waiter)
+    end
+
+    assert_equal [ [ "TERM", -12_345 ], [ "KILL", -12_345 ] ], signals
+  end
+
+  def test_timeout_kill_reaches_group_members_that_outlive_the_shell
+    with_tmp_dir do |dir|
+      # The group leader (outer shell) has no TERM trap, so its wait is
+      # interrupted and it exits during the grace period; the inner member
+      # ignores TERM and can only die through the KILL escalation.
+      validator = Hive::Patrol::Validator.new(
+        { "test" => "bash -c 'echo $$ > pid; trap \"\" TERM; sleep 300' & wait" },
+        timeout_sec: 0.5
+      )
+
+      result = validator.validate(dir)
+      command = result["commands"].first
+
+      assert_equal true, command["timed_out"]
+      child_pid = File.read(File.join(dir, "pid")).to_i
+      refute_equal 0, child_pid
+      sleep 0.1
+      assert_raises(Errno::ESRCH) { Process.kill(0, child_pid) }
+    end
+  end
+
   def test_termination_tolerates_process_disappearing
     waiter = Struct.new(:pid).new(12_345)
 

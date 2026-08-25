@@ -1113,8 +1113,11 @@ rejects every envelope (historically: 8,946 `got 2, want 1` events
 were logged between PR #78 on 2026-05-15 and the next restart on
 2026-05-20).
 
-At startup the dispatcher captures a SHA-256 fingerprint of `lib/hive.rb`
-(the file holding `SCHEMA_VERSIONS`). On every **full** tick (the
+At startup the dispatcher captures a SHA-256 fingerprint of the file
+that owns `Hive::Schemas` (resolved via
+`Hive::Schemas.method(:schema_path).source_location`, currently
+`lib/hive/schemas.rb` — the file holding `SCHEMA_VERSIONS`), so the
+fingerprint follows the namespace wherever it lives. On every **full** tick (the
 `poll_interval_sec` ~30s cadence, not the `fast_poll_sec` ~1s cheap
 probe) it rehashes the file and compares — gating the hash behind
 `full_tick_due?` keeps the per-second idle path to cheap waitpid + stat

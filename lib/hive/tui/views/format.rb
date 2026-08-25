@@ -1,5 +1,7 @@
 require "unicode/display_width"
 
+require "hive/tui/text"
+
 module Hive
   module Tui
     module Views
@@ -18,6 +20,21 @@ module Hive
       # through `.to_s`, so a nil label is treated as the empty string
       # rather than raising.
       module Format
+        # Reuse Text's ECMA-48 CSI matcher: SGR styling (Lipgloss `render`)
+        # and cursor/erase sequences must never be measured or cut as
+        # visible cells.
+        CSI_PATTERN = Hive::Tui::Text::ANSI_CSI_PATTERN
+
+        # SGR-specific shape of a CSI sequence (final byte `m`) plus the
+        # canonical reset, used to track whether a cut strands an open
+        # style that then needs a trailing reset re-appended.
+        SGR_SEQUENCE = /\A\e\[[\d;?]*[ -\/]*m\z/.freeze
+        RESET_SEQUENCE = "\e[0m".freeze
+
+        # Token stream for cell cutting: one whole CSI sequence, one run
+        # of non-ESC bytes, or a lone ESC that never formed a sequence.
+        TOKEN_PATTERN = /#{CSI_PATTERN}|[^\e]+|\e/.freeze
+
         module_function
 
         # Single-place humaniser; matches `hive status` text output so
@@ -35,6 +52,9 @@ module Hive
         # ellipsis (U+2026) when truncation occurs. `max_width < 2`
         # falls back to a hard cut without ellipsis (no room for the
         # suffix). Used by pane/table renderers for column fitting.
+        # Truncation is ANSI-aware: escape sequences carry zero visible
+        # width and survive cuts intact (a stranded SGR opener gets its
+        # reset re-appended), so styled lines can be truncated safely.
         def truncate(label, max_width)
           return "" if max_width <= 0
 
@@ -85,8 +105,15 @@ module Hive
           selected < capacity ? 0 : [ selected - capacity + 1, total - capacity ].min
         end
 
+        # Visible terminal cells only — ANSI CSI escapes are stripped
+        # before measuring, so a styled string reports its on-screen
+        # width rather than its byte-inflated one.
         def display_width(label)
-          Unicode::DisplayWidth.of(label.to_s)
+          Unicode::DisplayWidth.of(strip_ansi(label.to_s))
+        end
+
+        def strip_ansi(text)
+          text.to_s.gsub(CSI_PATTERN, "")
         end
 
         def wrap_line(line, width)
@@ -112,15 +139,31 @@ module Hive
 
         # Internal primitive: a raw cell-bounded cut with no ellipsis.
         # Private so callers can't bypass `truncate`'s ellipsis contract.
+        # Escape sequences are preserved free-of-charge even past the cut
+        # point — most importantly a trailing SGR reset — so a truncated
+        # styled line cannot bleed reverse video / colour into later
+        # output. A cut that strands an open SGR style gets a reset
+        # appended before returning.
         def take_cells(label, max_width)
           remaining = max_width
-          label.to_s.each_grapheme_cluster.with_object(+"") do |cluster, result|
-            width = display_width(cluster)
-            break result if width > remaining
+          result = +""
+          style_open = false
+          label.to_s.scan(TOKEN_PATTERN) do |token|
+            if token.start_with?("\e")
+              result << token
+              style_open = token != RESET_SEQUENCE if token.match?(SGR_SEQUENCE)
+            else
+              token.each_grapheme_cluster do |cluster|
+                width = display_width(cluster)
+                break if width > remaining
 
-            result << cluster
-            remaining -= width
+                result << cluster
+                remaining -= width
+              end
+            end
           end
+          result << RESET_SEQUENCE if style_open
+          result
         end
         private_class_method :take_cells
       end

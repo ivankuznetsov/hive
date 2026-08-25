@@ -1,13 +1,13 @@
 ---
 title: Hive::Reviewers
 type: module
-source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,codex_review,synthetic_task,plan_context}.rb
+source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,runtime,synthetic_task,plan_context}.rb, lib/hive/agent_support/codex/reviewer.rb
 created: 2026-04-26
 updated: 2026-07-18
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
-**TLDR**: Reviewer adapter layer for the 6-review stage's Phase 2. `Hive::Reviewers.dispatch(spec, ctx)` returns an adapter keyed by the spec's `kind`: `"agent"` (default → `Reviewers::Agent`, spawns an LLM CLI with the configured CE skill+prompt; the agent writes the findings file itself) or `"codex_review"` (→ `Reviewers::CodexReview`, runs codex's native single-pass `codex review` and CAPTURES its stdout into the findings file — the cheap patrol default). Either way findings land in `reviews/<output_basename>-<pass>.md` in the GFM-checkbox format the triage/fix loop consumes. `Reviewers::Context` carries per-spawn fields; `Reviewers::Result` is the return shape; `Reviewers::SyntheticTask` is the task-shaped facade `spawn_agent` requires for headless sub-spawns inside the review stage. `Reviewers::PlanContext` renders the task's `plan.md` into an authoritative-on-scope block embedded in every reviewer system prompt, so reviewers stop flagging plan-deferred scope as defects. Tool-specific linters are NOT a reviewer kind — they belong in `review.ci.command` per ADR-014. References ADR-014 / ADR-015.
+**TLDR**: Reviewer adapter layer for the 6-review stage's Phase 2. `Hive::Reviewers.dispatch(spec, ctx)` returns an adapter keyed by the spec's `kind`: `"agent"` (default → `Reviewers::Agent`, spawns an LLM CLI with the configured CE skill+prompt; the agent writes the findings file itself) or `"codex_review"` (→ `AgentSupport::Codex::Reviewer`, runs codex's native single-pass `codex review` and CAPTURES its stdout into the findings file — the cheap patrol default). Either way findings land in `reviews/<output_basename>-<pass>.md` in the GFM-checkbox format the triage/fix loop consumes. `Reviewers::Context` carries per-spawn fields; `Reviewers::Result` is the return shape; `Reviewers::SyntheticTask` is the task-shaped facade `spawn_agent` requires for headless sub-spawns inside the review stage. `Reviewers::PlanContext` renders the task's `plan.md` into an authoritative-on-scope block embedded in every reviewer system prompt, so reviewers stop flagging plan-deferred scope as defects. Tool-specific linters are NOT a reviewer kind — they belong in `review.ci.command` per ADR-014. References ADR-014 / ADR-015.
 
 ## Public API
 
@@ -19,9 +19,9 @@ Hive::Reviewers::Result.new(name:, output_path:, status:, error_message:)
 Hive::Reviewers.synthetic_task_for(ctx)        # → SyntheticTask facade
 ```
 
-`dispatch`'s `kind` discriminator defaults to `"agent"`; `"codex_review"` selects `Reviewers::CodexReview`. An explicit `kind: "linter"` raises `UnknownKindError` (exit code `CONFIG = 78`) with a message pointing the user at `review.ci.command` rather than silently ignoring the request. Any other value also raises `UnknownKindError`.
+`dispatch`'s `kind` discriminator defaults to `"agent"`; `"codex_review"` lazily selects `AgentSupport::Codex::Reviewer`. An explicit `kind: "linter"` raises `UnknownKindError` (exit code `CONFIG = 78`) with a message pointing the user at `review.ci.command` rather than silently ignoring the request. Any other value also raises `UnknownKindError`.
 
-`backoff_seconds_for(failed_attempt)` is the shared capped exponential retry formula: 1s, 2s, 4s, 8s, then 8s for later failed attempts. `Reviewers::Agent#backoff_seconds_for`, `Reviewers::CodexReview#backoff_seconds_for`, and `Stages::Review#triage_retry_backoff` delegate to this helper while keeping their thin wrappers as test seams. This keeps Phase 2 reviewer retries and Phase 3 transient-triage retries on the same delay contract.
+`backoff_seconds_for(failed_attempt)` is the shared capped exponential retry formula: 1s, 2s, 4s, 8s, then 8s for later failed attempts. `Reviewers::Agent#backoff_seconds_for`, `AgentSupport::Codex::Reviewer#backoff_seconds_for`, and `Stages::Review#triage_retry_backoff` delegate to this helper while keeping their thin wrappers as test seams. This keeps Phase 2 reviewer retries and Phase 3 transient-triage retries on the same delay contract.
 
 ## `Reviewers::Base`
 
@@ -50,9 +50,16 @@ When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive:
 
 `status_mode: :output_file_exists` is critical: reviewer spawns own a per-pass output file, not the task marker — the orchestrator's `REVIEW_WORKING` marker must persist across each reviewer's spawn (per ADR-021).
 
-## `Reviewers::CodexReview`
+## `AgentSupport::Codex::Reviewer`
 
 Native-`codex review` adapter (added 2026-06-10). The **patrol-default** reviewer: one cheap, tuned, read-only `codex review` pass instead of the multi-persona `ce-code-review` fan-out (6–18 subagents). `run!`:
+
+Provider code owns Codex argv, prompt, transcript parsing, findings
+normalization, and retry decisions. `Hive::Reviewers::Runtime` owns the generic
+bounded combined-output process, timeout TERM/KILL/reap lifecycle, UTF-8
+normalization, and findings-file write/delete operations. This keeps process
+and authoritative artifact authority in core while a Codex parsing bug remains
+local to the selected provider.
 
 1. Resolves the codex profile via `AgentProfiles.lookup(spec["agent"])` and calls `check_version!` (preflight; missing binary → `:error "preflight failed: …"`).
 2. Renders `templates/reviewer_codex_native_review.md.erb` (no `skill_invocation` binding — codex review takes no CE skill).

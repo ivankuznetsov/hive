@@ -1,5 +1,8 @@
 require "test_helper"
 require "hive/agent/message_extractor"
+require "hive/agent_profile"
+require "hive/agent_support/grok"
+require "hive/agent_support/pi"
 
 class AgentMessageExtractorTest < Minitest::Test
   def test_extracts_claude_result_message
@@ -52,11 +55,13 @@ class AgentMessageExtractorTest < Minitest::Test
     refute Hive::Agent::MessageExtractor.sensitive_payload_event?(event)
     assert_equal(
       JSON.generate(event.fetch("structuredOutput")),
-      Hive::Agent::MessageExtractor.extract(event, structured_output_protocol: :grok_end)
+      Hive::Agent::MessageExtractor.extract(
+        event, structured_output_protocol: Hive::AgentSupport::Grok
+      )
     )
     assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
       event,
-      structured_output_protocol: :grok_end
+      structured_output_protocol: Hive::AgentSupport::Grok
     )
   end
 
@@ -80,18 +85,48 @@ class AgentMessageExtractorTest < Minitest::Test
     refute Hive::Agent::MessageExtractor.sensitive_payload_event?(event)
     assert_equal(
       '{"files":{"result.md":"done\\n"}}',
-      Hive::Agent::MessageExtractor.extract(event, structured_output_protocol: :pi_agent_end)
+      Hive::Agent::MessageExtractor.extract(
+        event,
+        structured_output_protocol: Hive::AgentSupport::Pi
+      )
     )
     assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
       event,
+      structured_output_protocol: Hive::AgentSupport::Pi
+    )
+  end
+
+  def test_custom_profile_resolves_the_pi_terminal_protocol
+    profile = Hive::AgentProfile.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
       structured_output_protocol: :pi_agent_end
+    )
+    event = {
+      "type" => "agent_end",
+      "messages" => [
+        {
+          "role" => "assistant",
+          "content" => [ { "type" => "text", "text" => "done" } ]
+        }
+      ]
+    }
+
+    support = Hive::AgentSupport.for_protocol(profile.structured_output_protocol)
+
+    assert_same Hive::AgentSupport::Pi, support
+    assert_equal "done", Hive::Agent::MessageExtractor.extract(
+      event, structured_output_protocol: support
     )
   end
 
   def test_strict_pi_terminal_output_invalidates_a_missing_assistant_message
     accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
       max_bytes: 256,
-      structured_output_protocol: :pi_agent_end,
+      structured_output_protocol: Hive::AgentSupport::Pi,
       require_terminal_structured_output: true
     )
 
@@ -104,7 +139,7 @@ class AgentMessageExtractorTest < Minitest::Test
   def test_strict_grok_terminal_output_invalidates_the_preceding_stream
     accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
       max_bytes: 256,
-      structured_output_protocol: :grok_end,
+      structured_output_protocol: Hive::AgentSupport::Grok,
       require_terminal_structured_output: true
     )
     accumulator.observe({
@@ -191,7 +226,7 @@ class AgentMessageExtractorTest < Minitest::Test
   end
 
   def test_budget_failure_omits_an_invalid_observed_cost
-    failure = Hive::Agent::MessageExtractor.extract_failure(
+    failure = Hive::AgentSupport.for(:claude)::Stream.failure(
       "type" => "result",
       "subtype" => "error_max_budget_usd",
       "total_cost_usd" => "not-a-number"

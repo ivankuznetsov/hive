@@ -174,6 +174,57 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_trips_on_pure_rename_into_github_workflows
+    # A pure rename with no content change emits NO ---/+++ headers in
+    # the diff — git prints only `rename from` / `rename to` extended
+    # headers (rename detection is on by default). Pre-fix, scan_diff
+    # extracted paths solely from ---/+++ pairs, so a fix agent could
+    # `git mv docs/template.yml .github/workflows/deploy.yml` and the
+    # guardrail returned :clean. The rename target must trip
+    # ci_workflow_edit just like an edited workflow would.
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, "docs"))
+      File.write(File.join(dir, "docs", "template.yml"), "name: template\n")
+      run!("git", "-C", dir, "add", "docs/template.yml")
+      run!("git", "-C", dir, "commit", "-m", "add template", "--quiet")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      run!("git", "-C", dir, "mv", "docs/template.yml", ".github/workflows/deploy.yml")
+      run!("git", "-C", dir, "commit", "-m", "move template into workflows", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "pure rename into .github/workflows/ must trip ci_workflow_edit (not return :clean)"
+      assert(result.matches.any? { |m| m.pattern_name == "ci_workflow_edit" },
+             "expected a ci_workflow_edit match for the renamed workflow path")
+    end
+  end
+
+  def test_scan_diff_evaluates_file_path_patterns_on_rename_headers
+    # Direct scan_diff coverage for the rename/copy extended-header
+    # path: both sides are scanned and current_file is tracked.
+    diff = <<~DIFF
+      diff --git a/docs/template.yml b/.github/workflows/deploy.yml
+      similarity index 100%
+      rename from docs/template.yml
+      rename to .github/workflows/deploy.yml
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(cfg)
+    )
+
+    trip = matches.find { |m| m.pattern_name == "ci_workflow_edit" }
+    refute_nil trip, "rename to .github/workflows/deploy.yml must trip ci_workflow_edit"
+    assert_equal ".github/workflows/deploy.yml", trip.file
+    assert_nil trip.line
+  end
+
   def test_trips_on_jenkinsfile_edit
     with_two_commits(file: "Jenkinsfile",
                      content: "pipeline { agent any }\n") do |dir, base, head|

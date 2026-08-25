@@ -338,4 +338,57 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal 1, esc_messages.size, "expected exactly one KEY_ESC"
     assert_empty enter_messages, "trailing LF must be absorbed, not promoted to KEY_ENTER"
   end
+  # ---- Fix 12: unmapped escape sequences decode atomically ----
+
+  def test_modified_csi_sequence_is_swallowed_whole
+    # Ctrl+Left (`\e[1;5D`) is one atomic terminal event. Pre-fix it
+    # decoded as KEY_ESC + RawTextInput("[1;5D"), so in :new_idea the
+    # leaked ESC cancelled the composer and discarded the typed buffer.
+    assert_empty Hive::Tui::InputDecoder.new.drain("\e[1;5D".b)
+  end
+
+  def test_modified_csi_sequence_does_not_leak_esc_or_payload_before_text
+    messages = Hive::Tui::InputDecoder.new.drain("\e[1;5D".b + "hello")
+    text_messages = messages.select { |m| m.is_a?(Hive::Tui::Messages::RawTextInput) }
+    assert_equal [ "hello" ], text_messages.map(&:text)
+    esc = messages.find { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_ESC }
+    assert_nil esc
+  end
+
+  def test_alt_chord_sequence_does_not_leak_esc_and_rune
+    # `\eb` must not decode as KEY_ESC + KEY_RUNES('b'): in :grid the
+    # leaked rune dispatched :brainstorm.
+    messages = Hive::Tui::InputDecoder.new.drain("\eb".b)
+    assert_empty messages.select { |m| m.is_a?(Bubbletea::KeyMessage) }
+    assert_empty messages.select { |m| m.is_a?(Hive::Tui::Messages::RawTextInput) }
+  end
+
+  def test_alt_chord_leaves_trailing_input_decodable
+    messages = Hive::Tui::InputDecoder.new.drain("\eb".b + "x")
+    runes = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_RUNES }
+    assert_equal [ "x" ], runes.map(&:char)
+  end
+
+  def test_unmapped_ss3_sequence_is_swallowed_whole
+    # `\eOP` (F1 in application keypad mode) is not in SEQUENCES but
+    # is still one atomic SS3 event.
+    assert_empty Hive::Tui::InputDecoder.new.drain("\eOP".b)
+  end
+
+  def test_partial_generic_csi_sequence_waits_across_chunks
+    decoder = Hive::Tui::InputDecoder.new
+    assert_empty decoder.drain("\e[1;".b)
+    assert_empty decoder.drain("5")
+    assert_empty decoder.drain("D".b)
+    assert_empty decoder.flush
+  end
+
+  def test_esc_then_control_byte_still_routes_through_lone_esc_fallback
+    # The generic grammars must not absorb ESC + C0 combos: ESC then
+    # Ctrl+C stays KEY_ESC + KEY_CTRL_C.
+    messages = Hive::Tui::InputDecoder.new.drain("\e\x03".b)
+    key_types = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) }.map(&:key_type)
+    assert_equal [ Bubbletea::KeyMessage::KEY_ESC, Bubbletea::KeyMessage::KEY_CTRL_C ], key_types
+  end
+
 end

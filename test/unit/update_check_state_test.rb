@@ -212,6 +212,30 @@ class UpdateCheckStateTest < Minitest::Test
     state.send(:release_lock, bad) # must not raise
   end
 
+  def test_flock_failure_closes_the_already_open_lock_fd
+    opened = nil
+    original_open = File.method(:open)
+    failing_open = lambda do |*args, **kwargs, &blk|
+      handle = original_open.call(*args, **kwargs, &blk)
+      if args.first.to_s.end_with?(".lock")
+        opened = handle
+        def handle.flock(_mode)
+          raise Errno::ENOLCK # open succeeded; acquiring the lock failed
+        end
+      end
+      handle
+    end
+    logger = RecordingLogger.new
+    s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
+    with_replaced_singleton_method(File, :open, failing_open) do
+      s.record_check!(@now) # must degrade to best-effort, not raise
+    end
+    assert opened, "the lock file was opened before flock raised"
+    assert_predicate opened, :closed?,
+                     "a failed flock must close the fd it already opened — no leak per op"
+    assert(logger.events.any? { |name, _| name == :update_check_state_lock_error })
+  end
+
   def test_fsync_dir_swallows_errors
     state.send(:fsync_dir, File.join(@dir, "does-not-exist")) # Dir.open raises → nil
   end

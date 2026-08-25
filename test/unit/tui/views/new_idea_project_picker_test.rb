@@ -76,4 +76,22 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     assert_equal line, Hive::Tui::Views::NewIdeaProjectPicker.truncate(line, 0)
     assert_equal line, Hive::Tui::Views::NewIdeaProjectPicker.truncate(line, -5)
   end
+
+  # Regression: the cursor row is styled (reverse video) before the final
+  # `rows.map { truncate(line, width) }` pass, so truncation has to handle
+  # a line that already contains ANSI escapes — measuring only its visible
+  # cells and keeping the trailing reset intact. Hand-rolled SGR escapes
+  # stand in for Styles::CURSOR_HIGHLIGHT.render, which Lipgloss strips in
+  # non-tty test environments.
+  def test_truncate_keeps_styled_cursor_row_within_width_and_reset_intact
+    styled = "\e[7m> #{'hive-project-' * 5}\e[0m"
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.truncate(styled, 30)
+
+    assert_equal 30, Hive::Tui::Views::Format.display_width(out)
+    assert out.end_with?("…"), "expected ellipsis after truncation"
+    assert_includes out, "\e[0m",
+      "truncation must not slice off the style's reset sequence"
+    assert_includes out, "> hive-pro", "visible prefix must survive the cut"
+  end
 end

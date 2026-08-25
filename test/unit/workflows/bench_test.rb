@@ -89,14 +89,20 @@ class WorkflowsBenchTest < Minitest::Test
 
     Dir.mktmpdir("hive-bench-codex-provider") do |root|
       argv_log = File.join(root, "argv.json")
+      path_log = File.join(root, "path.txt")
       fake_codex = File.join(root, "codex")
-      File.write(fake_codex, <<~RUBY)
-        #!/usr/bin/env ruby
+      fake_codex_ruby = File.join(root, "codex.rb")
+      File.write(fake_codex_ruby, <<~RUBY)
         require "json"
         File.write(ENV.fetch("ARGV_LOG"), JSON.generate(ARGV))
         STDIN.read
         puts JSON.generate(score: 7.5, reason: "routed")
       RUBY
+      File.write(fake_codex, <<~'SH')
+        #!/bin/sh
+        printf '%s' "$PATH" >"$PATH_LOG"
+        exec ruby "$FAKE_CODEX_RUBY" "$@"
+      SH
       FileUtils.chmod(0o755, fake_codex)
 
       script = <<~RUBY
@@ -129,12 +135,18 @@ class WorkflowsBenchTest < Minitest::Test
           "judge_provider_model" => "openai/gpt-5.6-sol"
         }
       RUBY
-      env = { "ARGV_LOG" => argv_log, "OPENROUTER_API_KEY" => "secret-canary" }
+      env = {
+        "ARGV_LOG" => argv_log,
+        "PATH_LOG" => path_log,
+        "FAKE_CODEX_RUBY" => fake_codex_ruby,
+        "OPENROUTER_API_KEY" => "secret-canary"
+      }
 
       _out, err, status = Open3.capture3(env, RbConfig.ruby, "-e", script)
 
       assert status.success?, err
       argv = JSON.parse(File.read(argv_log))
+      assert_equal root, File.read(path_log).split(File::PATH_SEPARATOR).first
       assert_equal "openai/gpt-5.6-sol", argv.fetch(argv.index("-m") + 1)
       assert_includes argv, 'model_provider="openrouter"'
       assert_includes argv, 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"'

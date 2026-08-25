@@ -8,13 +8,24 @@ class ConditionsValueTest < Minitest::Test
       valid_record.merge("occurred_at" => "not-a-time"),
       valid_record.merge("provenance" => {}),
       valid_record.merge("evidence" => []),
-      valid_record.merge("payload" => { "condition" => "Unknown", "state" => "satisfied" })
+      valid_record.merge("payload" => { "condition" => "Unknown", "state" => "satisfied" }),
+      valid_record.merge("payload" => nil),
+      valid_record.merge("payload" => [])
     ]
 
     variants.each do |record|
       assert_raises(Hive::Conditions::InvalidCondition) do
         Hive::Conditions::Value.validate_observation!(record)
       end
+    end
+  end
+
+  def test_observation_rejects_non_hash_payload_without_crashing
+    [nil, [], "AgentHealthy", 42].each do |payload|
+      error = assert_raises(Hive::Conditions::InvalidCondition) do
+        Hive::Conditions::Value.validate_observation!(valid_record.merge("payload" => payload))
+      end
+      assert_match(/payload must be a hash/, error.message)
     end
   end
 

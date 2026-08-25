@@ -176,10 +176,14 @@ terminal stage (`9-done` for coding) has no `next:`.
 
 ## Stage routing
 
-`Hive::Stages::Resolver` is name-first for coding compatibility: any registered
-coding stage name resolves to its bespoke runner, even when the descriptor says
-`kind: :agent` for `brainstorm` or `plan`. Descriptor `kind: :agent` only selects
-the generic [[stages/agent]] runner for non-coding stage names.
+`Hive::Stages::Resolver` dispatches on each stage descriptor's internal
+EXECUTION STRATEGY key (`Hive::Workflow::Stage#execution_strategy`) — never on
+workflow identity or a global stage-name table. Coding pins its bespoke runners
+with an explicit `runner:` key per stage in `Workflows::Coding::DESCRIPTOR`;
+every other active stage derives its generic strategy from `kind` (`:agent`,
+`:council`, or, for controller-owned workflows, `:controller`). A non-coding
+stage that shares a NAME with a coding stage (e.g. content's terminal `done`
+agent) resolves by its own declaration.
 
 | Stage name | Runner | Page |
 |-----------|--------|------|

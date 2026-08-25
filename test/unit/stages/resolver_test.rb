@@ -3,6 +3,7 @@ require "open3"
 require "hive/commands/run"
 require "hive/stages/resolver"
 require "hive/workflow"
+require "hive/workflows"
 require "hive/workflows/coding"
 
 class StagesResolverTest < Minitest::Test
@@ -148,12 +149,48 @@ class StagesResolverTest < Minitest::Test
     assert_equal "no runner for stage mystery", error.message
   end
 
-  def test_coding_runner_keys_are_a_subset_of_descriptor_stage_names
-    descriptor_names = Hive::Workflows::Coding::DESCRIPTOR.stages.map(&:name)
-    drifted = Hive::Stages::Resolver::CODING_RUNNERS.keys - descriptor_names
+  def test_kind_wins_over_name_table_even_under_a_coding_id
+    # Regression pin for the resolver's old name-first dispatch: a descriptor
+    # whose id passes Hive::Workflows.coding_id? used to have its kind: :agent
+    # stage hijacked to the bespoke runner whenever the stage NAME collided
+    # with the hard-coded coding table. Dispatch now reads only the resolved
+    # stage's own execution strategy, so the declaration wins.
+    descriptor = Hive::Workflow.new(
+      id: "coding",
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "done",
+          index: 1,
+          state_file: "task.md",
+          kind: :agent
+        )
+      ]
+    )
+
+    runner = Hive::Stages::Resolver.resolve(task("done", workflow: descriptor), descriptor: descriptor)
+
+    assert_equal Hive::Stages::Agent.method(:run!), runner
+  end
+
+  def test_runner_keys_are_declared_by_some_descriptor_execution_strategy
+    declared = (
+      Hive::Workflows::Registry.all.flat_map { |descriptor|
+        descriptor.stages.map(&:execution_strategy)
+      } + Hive::Workflow::GENERIC_KIND_STRATEGIES.values
+    ).compact.uniq
+    drifted = Hive::Stages::Resolver::RUNNERS.keys - declared
 
     assert_empty drifted,
-                 "every CODING_RUNNERS key must name a stage in Coding::DESCRIPTOR; drifted: #{drifted.inspect}"
+                 "every RUNNERS key must be an execution strategy declared by some " \
+                 "stage descriptor; drifted: #{drifted.inspect}"
+  end
+
+  def test_every_coding_stage_pins_an_explicit_runner_strategy
+    unpinned = Hive::Workflows::Coding::DESCRIPTOR.stages.reject(&:runner).map(&:name)
+
+    assert_empty unpinned,
+                 "every coding stage must pin its bespoke runner via the internal " \
+                 "runner: key; unpinned: #{unpinned.inspect}"
   end
 
   def test_resolving_one_bespoke_stage_does_not_eager_load_other_runners

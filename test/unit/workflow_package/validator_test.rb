@@ -179,6 +179,15 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
+  def test_linux_dynamic_loader_input_name_family_is_rejected
+    %w[
+      LD_AUDIT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_LIBRARY_PATH
+      LD_PRELOAD LD_PROFILE LD_SHOW_AUXV LD_USE_LOAD_BIAS
+    ].each do |name|
+      refute Hive::WorkflowPackage::InputName.valid?(name), name
+    end
+  end
+
   def test_registry_actor_contract_diagnostics_cover_nested_permissions_and_identity
     reviewer = Hive::Workflow::Reviewer.new(
       name: "reviewer", agent: "claude",

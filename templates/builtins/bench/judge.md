@@ -74,8 +74,9 @@ require_bench_judge_runtime() {
     return 1
   fi
 
-  if ! ruby -I"$BENCH_ROOT/harness" -rrejudge -e '
+  if ! ruby -I"$BENCH_ROOT/harness" -rrejudge -rlib/deliberation -e '
     supported = HiveBench::Rejudge::FAILURE_EVENT_VERSION == 1 &&
+                HiveBench::Deliberation::FAILURE_EVENT_VERSION == 1 &&
                 HiveBench::CodexJudge::PROVIDER_ROUTE_VERSION == 1
     exit(supported ? 0 : 1)
   ' >/dev/null 2>&1; then
@@ -305,6 +306,7 @@ ruby -ryaml -rjson -e '
   write_waiting "$(cat .judge-deliberate.err .judge-deliberate.out)"
   exit 0
 }
+DELIBERATE_ERR_TAIL="$(tail -n 15 .judge-deliberate.err)" || DELIBERATE_ERR_TAIL=""
 
 # Union old+new transcript cells by [task_id, agent_id] and replace via tmp+mv;
 # the summary is recomputed over the union (mirrors DeliberateCli.summary —
@@ -346,6 +348,7 @@ ruby -rjson -e '
 }
 rm -f "$REPO_ROOT/$DELIB.next"
 
+set +e
 ruby -I"$BENCH_ROOT/harness" -ryaml -rjson -rlib/judge_slate -e '
   data = JSON.parse(File.read(ARGV.fetch(0)))
   delib = File.file?(ARGV.fetch(1)) ? JSON.parse(File.read(ARGV.fetch(1))) : { "cells" => [] }
@@ -355,51 +358,85 @@ ruby -I"$BENCH_ROOT/harness" -ryaml -rjson -rlib/judge_slate -e '
   by_key = validation.by_key
   judge_slate = validation.judge_slate
   expected_efforts = validation.expected_efforts
-  incomplete_cells = validation.incomplete_keys.to_h { |task, candidate, _judge| [[task, candidate], true] }
+  incomplete_result_cells = validation.incomplete_keys.to_h { |task, candidate, _judge| [[task, candidate], true] }
   deliberated = delib.fetch("cells", []).to_a.to_h { |t| [[t["task_id"].to_s, t["agent_id"].to_s], t] }
-  problems = validation.problems.dup
+  manual = validation.problems.dup
+  retryable = []
+  incomplete_judges = []
+  incomplete_deliberation_cells = []
   expected.each do |task, candidate|
     cell = by_key[[task, candidate]]
     next if cell.nil?
     next if cell["run_status"] == "empty_diff"
-    next if incomplete_cells.key?([task, candidate])
+    next if incomplete_result_cells.key?([task, candidate])
 
     # deliberate.rb silently drops cells it cannot resolve (e.g. a task_id
     # missing from the corpus); COMPLETE must not claim transcript coverage it
     # does not have.
     transcript = deliberated[[task, candidate]]
     unless transcript
-      problems << "MISSING_DELIBERATION #{candidate} #{task} (dual-judged but absent from #{ARGV.fetch(1)})"
+      retryable << "MISSING_DELIBERATION #{candidate} #{task} (dual-judged but absent from #{ARGV.fetch(1)})"
+      incomplete_deliberation_cells << [task, candidate]
       next
     end
     missing_deliberation_judges = judge_slate - transcript.fetch("judges", {}).keys
     unless missing_deliberation_judges.empty?
-      problems << "MISSING_DELIBERATION_JUDGES #{candidate} #{task} (missing: #{missing_deliberation_judges.join(",")})"
+      retryable << "MISSING_DELIBERATION_JUDGES #{candidate} #{task} (missing: #{missing_deliberation_judges.join(",")})"
+      missing_deliberation_judges.each { |judge| incomplete_judges << [task, candidate, judge] }
     end
     judge_slate.each do |judge|
       next unless transcript.fetch("judges", {}).key?(judge)
 
       record = transcript.fetch("judges").fetch(judge)
       effort = record["reasoning_effort"] || "unspecified"
-      problems << "DELIBERATION_EFFORT_MISMATCH #{candidate} #{task} #{judge} (have #{effort}, need #{expected_efforts.fetch(judge)})" unless effort == expected_efforts.fetch(judge)
+      manual << "DELIBERATION_EFFORT_MISMATCH #{candidate} #{task} #{judge} (have #{effort}, need #{expected_efforts.fetch(judge)})" unless effort == expected_efforts.fetch(judge)
       final = record["final"]
       unless final.is_a?(Numeric) && final.between?(0, 10)
-        problems << "INCOMPLETE_DELIBERATION #{candidate} #{task} #{judge} (final must be a number from 0 to 10; got #{final.inspect})"
+        retryable << "INCOMPLETE_DELIBERATION #{candidate} #{task} #{judge} (final must be a number from 0 to 10; got #{final.inspect})"
+        incomplete_judges << [task, candidate, judge]
       end
     end
   end
+  problems = manual + retryable
   unless problems.empty?
     problems.each { |line| puts line }
-    exit 2
+    failures = HiveBench::JudgeSlate.failure_limits(File.read(ARGV.fetch(2)))
+    failures_by_cell = Hash.new { |hash, key| hash[key] = [] }
+    failures.each do |(task, candidate, _judge), limits|
+      failures_by_cell[[task, candidate]].concat(limits)
+    end
+    judges_quota_backed = incomplete_judges.uniq.all? do |key|
+      limits = failures.fetch(key, [])
+      !limits.empty? && limits.all?
+    end
+    retried_cells = incomplete_judges.map { |task, candidate, _judge| [task, candidate] }
+                                      .concat(incomplete_deliberation_cells)
+                                      .uniq
+    cells_quota_backed = retried_cells.all? do |task, candidate|
+      limits = failures_by_cell.fetch([task, candidate], [])
+      !limits.empty? && limits.all?
+    end
+    quota_only = manual.empty? && !retryable.empty? && judges_quota_backed && cells_quota_backed
+    exit(quota_only ? 75 : 2)
   end
-' "$REPO_ROOT/$RESULTS" "$REPO_ROOT/$DELIB" >.judge-validate.out 2>.judge-validate.err || {
+' "$REPO_ROOT/$RESULTS" "$REPO_ROOT/$DELIB" .judge-deliberate.err >.judge-validate.out 2>.judge-validate.err
+validate_status=$?
+set -e
+if [ "$validate_status" -ne 0 ]; then
   err_tail=""
   if [ -n "$REJUDGE_ERR_TAIL" ]; then
     err_tail="$(printf '\n\nrejudge stderr tail (per-judge failures are soft; this is the only record of their cause):\n%s' "$REJUDGE_ERR_TAIL")"
   fi
-  write_waiting "$(cat .judge-validate.err .judge-validate.out)${err_tail}"
+  if [ -n "$DELIBERATE_ERR_TAIL" ]; then
+    err_tail="${err_tail}$(printf '\n\ndeliberate stderr tail (round failures are soft; this is the only record of their cause):\n%s' "$DELIBERATE_ERR_TAIL")"
+  fi
+  if [ "$validate_status" -eq 75 ]; then
+    write_limits_reached "$(cat .judge-validate.err .judge-validate.out)${err_tail}"
+  else
+    write_waiting "$(cat .judge-validate.err .judge-validate.out)${err_tail}"
+  fi
   exit 0
-}
+fi
 
 write_complete
 ```

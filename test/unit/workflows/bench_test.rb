@@ -112,6 +112,7 @@ class WorkflowsBenchTest < Minitest::Test
       script = <<~RUBY
         $LOAD_PATH.unshift(#{harness.inspect})
         require "lib/codex_judge"
+        abort("wrong default timeout") unless HiveBench::CodexJudge::DEFAULT_TIMEOUT == 3600
         judge = HiveBench::CodexJudge.judge_fn(
           bin: #{fake_codex.inspect},
           model: "gpt-5.6-sol",
@@ -1035,7 +1036,7 @@ class WorkflowsBenchTest < Minitest::Test
                  "model-authored quota prose must not forge retry evidence"
   end
 
-  def test_claude_judge_types_only_stderr_quota_evidence
+  def test_claude_judge_types_trusted_cli_quota_evidence_without_trusting_model_prose
     harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
     script = <<~'RUBY'
       require "lib/claude_judge"
@@ -1044,24 +1045,84 @@ class WorkflowsBenchTest < Minitest::Test
       end.new(1)
       responses = [
         [ "partial answer", "you've hit your usage limit", status ],
+        [ "mise ~/.config/mise/config.toml tools: claude@2.1.233\n" \
+          "You've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
+        [ "analysis\nYou've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
         [ "the candidate handles HTTP 429 rate limit exceeded", "", status ]
       ]
       Open3.define_singleton_method(:capture3) { |*| responses.shift }
       judge = HiveBench::ClaudeJudge.judge_fn
-      errors = 2.times.map do
+      errors = 4.times.map do
         judge.call(prompt: "prompt", seed: 1)
       rescue StandardError => e
         [ e.class.name, e.message ]
       end
       abort errors.inspect unless errors.map(&:first) == [
-        "HiveBench::ProviderLimitError", "HiveBench::JudgeOutput::Error"
+        "HiveBench::ProviderLimitError", "HiveBench::ProviderLimitError",
+        "HiveBench::JudgeOutput::Error",
+        "HiveBench::JudgeOutput::Error"
       ]
-      abort errors.inspect unless errors.first.last.start_with?("limits_reached: ")
+      abort errors.inspect unless errors.first(2).all? { |error| error.last.start_with?("limits_reached: ") }
     RUBY
 
     out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
 
     assert status.success?, out + err
+  end
+
+  def test_deliberation_emits_typed_provider_limit_evidence_for_each_round
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "lib/deliberation"
+      calls = Hash.new(0)
+      fable = lambda do |**|
+        calls[:fable] += 1
+        raise HiveBench::ProviderLimitError, "provider usage limit" if calls[:fable] == 2
+
+        { score: 7.0, reason: "initial" }
+      end
+      sol = ->(**) { { score: 4.0, reason: "strict", discussion: "checked" } }
+      deliberation = HiveBench::Deliberation.new(
+        judge_fns: { "fable-5" => fable, "gpt-5.6-sol" => sol },
+        judge_template: "{{PLAN}}\n{{CANDIDATE}}\n{{REFERENCE_SECTION}}",
+        deliberate_template: "{{PLAN}}\n{{CANDIDATE}}\n{{REFERENCE_SECTION}}\n{{OWN_SCORE}}\n{{OWN_REASON}}\n{{OTHER_VERDICTS}}"
+      )
+      verdicts = deliberation.call(
+        plan: "plan", candidate_diff: "diff", reference: nil,
+        task_id: "task-one", agent_id: "candidate-one"
+      )
+      abort verdicts.inspect unless verdicts.fetch("fable-5").final.nil?
+
+      round_one_limit = ->(**) { raise HiveBench::ProviderLimitError, "provider usage limit" }
+      round_one = HiveBench::Deliberation.new(
+        judge_fns: { "fable-5" => round_one_limit, "gpt-5.6-sol" => sol },
+        judge_template: "{{PLAN}}\n{{CANDIDATE}}\n{{REFERENCE_SECTION}}",
+        deliberate_template: "{{PLAN}}\n{{CANDIDATE}}\n{{REFERENCE_SECTION}}\n{{OWN_SCORE}}\n{{OWN_REASON}}\n{{OTHER_VERDICTS}}"
+      )
+      verdicts = round_one.call(
+        plan: "plan", candidate_diff: "diff", reference: nil,
+        task_id: "task-two", agent_id: "candidate-one"
+      )
+      abort verdicts.inspect unless verdicts.empty?
+    RUBY
+
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
+
+    assert status.success?, out + err
+    events = err.lines.filter_map do |line|
+      next unless line.start_with?("HIVE_BENCH_JUDGE_FAILURE ")
+
+      JSON.parse(line.delete_prefix("HIVE_BENCH_JUDGE_FAILURE "))
+    end.to_h { |event| [ event.fetch("task_id"), event ] }
+    assert_equal %w[task-one task-two], events.keys.sort
+    assert_equal "candidate-one", events.fetch("task-one").fetch("agent_id")
+    assert_equal "fable-5", events.fetch("task-one").fetch("judge")
+    assert_equal true, events.fetch("task-one").fetch("limits_reached")
+    assert_match(/round 2/, events.fetch("task-one").fetch("detail"))
+    assert_equal "candidate-one", events.fetch("task-two").fetch("agent_id")
+    assert_equal "fable-5", events.fetch("task-two").fetch("judge")
+    assert_equal true, events.fetch("task-two").fetch("limits_reached")
+    assert_match(/round 1/, events.fetch("task-two").fetch("detail"))
   end
 
   def test_judge_validation_rejects_a_missing_round_two_verdict
@@ -1075,7 +1136,7 @@ class WorkflowsBenchTest < Minitest::Test
     )
     refute_nil validator_start, "judge instruction must expose its final artifact validator"
     validator = instruction[validator_start..].match(
-      /ruby -I"\$BENCH_ROOT\/harness" -ryaml -rjson -rlib\/judge_slate -e '\n(?<code>.*?)\n' "\$REPO_ROOT\/\$RESULTS" "\$REPO_ROOT\/\$DELIB"/m
+      /ruby -I"\$BENCH_ROOT\/harness" -ryaml -rjson -rlib\/judge_slate -e '\n(?<code>.*?)\n' "\$REPO_ROOT\/\$RESULTS" "\$REPO_ROOT\/\$DELIB" \.judge-deliberate\.err/m
     )
     refute_nil validator, "judge instruction must expose its final artifact validator"
 
@@ -1126,10 +1187,12 @@ class WorkflowsBenchTest < Minitest::Test
       campaign_path = File.join(root, "campaign.yml")
       results_path = File.join(root, "results.json")
       deliberation_path = File.join(root, "deliberation.json")
+      stderr_path = File.join(root, "deliberate.err")
       runtime_harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
       File.write(campaign_path, campaign.to_yaml)
       File.write(results_path, JSON.generate(results))
       File.write(deliberation_path, JSON.generate(deliberation))
+      File.write(stderr_path, "")
 
       skip_path = File.join(root, "skip.json")
       _out, err, status = Open3.capture3(
@@ -1140,7 +1203,7 @@ class WorkflowsBenchTest < Minitest::Test
       assert_equal 1, JSON.parse(File.read(skip_path)).fetch("cells").size
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
-        "-e", validator[:code], results_path, deliberation_path,
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
         chdir: root
       )
       assert status.success?, "complete deliberation should validate: #{out}#{err}"
@@ -1157,7 +1220,7 @@ class WorkflowsBenchTest < Minitest::Test
 
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
-        "-e", validator[:code], results_path, deliberation_path,
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
         chdir: root
       )
 
@@ -1165,6 +1228,85 @@ class WorkflowsBenchTest < Minitest::Test
       assert_empty err
       assert_includes out, "INCOMPLETE_DELIBERATION candidate-one task-one gpt-5.6-sol"
       assert_includes out, "final"
+
+      failure_event = lambda do |judge, limits_reached|
+        "HIVE_BENCH_JUDGE_FAILURE #{JSON.generate(
+          "task_id" => "task-one",
+          "agent_id" => "candidate-one",
+          "judge" => judge,
+          "limits_reached" => limits_reached,
+          "detail" => "round 2 provider failure"
+        )}\n"
+      end
+      File.write(stderr_path, failure_event.call("gpt-5.6-sol", true))
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 75, status.exitstatus, "matching quota evidence must schedule retry: #{out}#{err}"
+
+      File.write(stderr_path, failure_event.call("gpt-5.6-sol", false))
+      _out, _err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 2, status.exitstatus, "non-quota round failure must remain manual"
+
+      File.write(
+        stderr_path,
+        failure_event.call("gpt-5.6-sol", true) + failure_event.call("gpt-5.6-sol", false)
+      )
+      _out, _err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 2, status.exitstatus, "mixed same-judge failures must remain manual"
+
+      File.write(stderr_path, "HIVE_BENCH_JUDGE_FAILURE {malformed\n")
+      _out, _err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 2, status.exitstatus, "malformed failure evidence must remain manual"
+
+      deliberation.dig("cells", 0, "judges", "gpt-5.6-sol")["reasoning_effort"] = "high"
+      File.write(deliberation_path, JSON.generate(deliberation))
+      File.write(stderr_path, failure_event.call("gpt-5.6-sol", true))
+      _out, _err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 2, status.exitstatus, "effort mismatch must remain manual"
+      deliberation.dig("cells", 0, "judges", "gpt-5.6-sol")["reasoning_effort"] = "ultra"
+      File.write(deliberation_path, JSON.generate(deliberation))
+
+      File.write(
+        stderr_path,
+        failure_event.call("gpt-5.6-sol", true) + failure_event.call("fable-5", false)
+      )
+      _out, _err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 2, status.exitstatus,
+                   "a non-quota failure from the previously complete judge must make the retry manual"
+
+      deliberation["cells"] = []
+      File.write(deliberation_path, JSON.generate(deliberation))
+      File.write(stderr_path, failure_event.call("fable-5", true))
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path,
+        chdir: root
+      )
+      assert_equal 75, status.exitstatus,
+                   "a missing transcript caused by one typed quota failure must retry: #{out}#{err}"
     end
   end
 

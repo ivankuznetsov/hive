@@ -51,26 +51,80 @@ module Hive
       data.is_a?(Hash) ? data : {}
     end
 
-    # Stateless positive-Integer boundary over any hive-owned PID file.
-    # Returns the PID when the file parses to the payload the lifecycle
-    # owner writes (`{pid:, process_start_time:, started_at:}`) or to a
-    # legacy bare-integer doc; nil for a missing, unreadable, corrupt, or
-    # non-positive payload. Consumers that only need the pid (e.g.
-    # `hive uninstall` signalling a foreground daemon) must go through
-    # here instead of re-implementing the on-disk format — the earlier
-    # `File.read.strip.to_i` in Uninstall parsed the YAML doc as PID 0
-    # and silently skipped the shutdown.
-    def self.read_pid(path)
-      return nil unless File.exist?(path)
-
-      raw = File.read(path)
+    # Parse raw PID-file bytes into a lifecycle payload Hash: either the
+    # mapping the lifecycle owner writes (`{pid:, process_start_time:,
+    # started_at:}`) or a legacy bare-integer doc wrapped as `{pid:,
+    # process_start_time: nil, "_legacy" => true}`. Returns nil when the
+    # document is corrupt or not a payload the owner could have written.
+    def self.parse_payload(raw)
       parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
-      pid = parsed.is_a?(Hash) ? parsed["pid"] : parsed
-      return nil unless pid.is_a?(Integer) && pid.positive?
+      return parsed if parsed.is_a?(Hash) && parsed["pid"]
 
-      pid
-    rescue SystemCallError, IOError
+      if raw.strip =~ /\A\d+\z/
+        return { "pid" => raw.strip.to_i, "process_start_time" => nil, "_legacy" => true }
+      end
+
       nil
+    end
+
+    # Tri-state ownership policy over a parsed payload, shared by every
+    # signalling caller so PID-reuse defense lives in exactly one place:
+    #   :verified   → recorded start time matches the live process
+    #   :legacy     → pre-identity bare-integer doc (best effort)
+    #   :reused     → start time mismatch; the PID now names another process
+    #   :unverified → no recorded/live start time; identity cannot be proven
+    def self.ownership(payload, pid)
+      return :unverified if payload.nil?
+      return :legacy     if payload["_legacy"]
+
+      recorded = payload["process_start_time"]
+      live = Hive::Lock.process_start_time(pid)
+      return :unverified if recorded.nil? || live.nil?
+
+      recorded == live ? :verified : :reused
+    end
+
+    # Ownership-aware shutdown boundary for callers that read *another*
+    # hive process's PID file and want it stopped (e.g. `hive uninstall`
+    # TERM-ing a foreground daemon before purge). Never re-implement this
+    # at the call site: the owner writes a YAML process-identity payload,
+    # a bare-integer parse of that doc reads PID 0 (a silent no-op), and a
+    # numeric PID whose start time no longer matches may belong to an
+    # unrelated process — signalling it is bystander harm.
+    #
+    # Returns `{ status:, pid: }` where status is one of:
+    #   :absent     no PID file at +path+
+    #   :malformed  unreadable/corrupt/non-positive payload
+    #   :stale      payload PID is not alive (or died mid-stop)
+    #   :reused     PID is alive but its start time mismatches the record
+    #   :unverified ownership cannot be proven; refusing to signal
+    #   :signalled  ownership verified; +signal+ delivered
+    def self.stop(path, signal: "TERM", process: Process)
+      return { status: :absent, pid: nil } unless File.exist?(path)
+
+      payload = begin
+        parse_payload(File.read(path))
+      rescue SystemCallError, IOError
+        nil
+      end
+      pid = payload && payload["pid"]
+      return { status: :malformed, pid: nil } unless pid.is_a?(Integer) && pid.positive?
+      return { status: :stale, pid: pid } unless alive?(pid, process: process)
+
+      case ownership(payload, pid)
+      when :reused     then return { status: :reused, pid: pid }
+      when :unverified then return { status: :unverified, pid: pid }
+      end
+
+      begin
+        process.kill(signal, pid)
+        { status: :signalled, pid: pid }
+      rescue Errno::ESRCH
+        { status: :stale, pid: pid }
+      rescue Errno::EPERM
+        warn "hive: insufficient permissions to signal pid #{pid}"
+        { status: :unverified, pid: pid }
+      end
     end
 
     def read_live_pid
@@ -92,17 +146,10 @@ module Hive
       Hive::PidFile.alive?(pid)
     end
 
+    # Delegate to the module-level tri-state so the reuse/unverified
+    # policy lives in exactly one place, mirroring `pid_alive?`.
     def pid_ownership(payload, pid)
-      return :unverified if payload.nil?
-      return :legacy     if payload["_legacy"]
-
-      recorded = payload["process_start_time"]
-      return :unverified if recorded.nil?
-
-      live = Hive::Lock.process_start_time(pid)
-      return :unverified if live.nil?
-
-      recorded == live ? :verified : :reused
+      Hive::PidFile.ownership(payload, pid)
     end
 
     def pid_owned_by_us?(payload, pid)
@@ -112,27 +159,18 @@ module Hive
 
     # Deliberately NOT a thin wrapper over the stateless `self.read`: this
     # ownership-aware reader has a different contract that callers depend on —
-    # it returns nil (not {}) when the file is absent, swallows parse errors to
-    # nil instead of propagating them, and still accepts a legacy bare-integer
-    # PID file. Collapsing it into `self.read` would shift all three behaviors.
+    # it returns nil (not {}) when the file is absent, still accepts a legacy
+    # bare-integer PID file, and yields the `_legacy` marker the tri-state
+    # policy keys on. The parsing itself delegates to `self.parse_payload` so
+    # the on-disk format lives in exactly one place while bounded callers keep
+    # their hardened read path.
     def read_pid_file_payload(max_bytes: nil)
       return nil unless File.exist?(pid_file)
 
       raw = max_bytes ? read_bounded_pid_file(max_bytes) : File.read(pid_file)
       return nil unless raw
 
-      parsed = begin
-        YAML.safe_load(raw, permitted_classes: [ Time ])
-      rescue Psych::Exception, SystemStackError, NoMemoryError
-        nil
-      end
-      return parsed if parsed.is_a?(Hash) && parsed["pid"]
-
-      if raw.strip =~ /\A\d+\z/
-        return { "pid" => raw.strip.to_i, "process_start_time" => nil, "_legacy" => true }
-      end
-
-      nil
+      Hive::PidFile.parse_payload(raw)
     end
 
     def read_bounded_pid_file(max_bytes)

@@ -301,19 +301,24 @@ module Hive
 
       # Best-effort: find a running foreground daemon writing under
       # state_home and TERM it before purge would yank the floor.
-      # No-ops if the daemon isn't running. The pid is read through the
-      # daemon lifecycle boundary (Hive::PidFile.read_pid), never parsed
-      # locally: the owner writes a YAML payload, and a bare-integer
-      # parse of that doc yields PID 0 (a silent no-op shutdown).
+      # No-ops if the daemon isn't running. Shutdown is delegated to the
+      # daemon lifecycle boundary (Hive::PidFile.stop) and never signalled
+      # from a locally parsed number: the owner writes a YAML
+      # process-identity payload, a bare-integer parse of that doc reads
+      # PID 0 (a silent no-op shutdown), and a live PID whose start time
+      # no longer matches may belong to an unrelated process — reused and
+      # unverified identities are refused, mirroring `hive daemon stop`.
       def stop_foreground_daemon
-        pid = Hive::PidFile.read_pid(
+        outcome = Hive::PidFile.stop(
           File.join(Hive::Paths.state_home, ".daemon.pid")
         )
-        return if pid.nil?
-
-        Process.kill("TERM", pid)
-      rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT
-        nil
+        case outcome[:status]
+        when :reused
+          @output.puts "hive: foreground daemon PID #{outcome[:pid]} appears reused " \
+                       "(start_time mismatch); refusing to signal"
+        when :unverified
+          @output.puts "hive: cannot verify PID #{outcome[:pid]} is the hive daemon; refusing to signal"
+        end
       end
 
       def prompt_yes?(message)

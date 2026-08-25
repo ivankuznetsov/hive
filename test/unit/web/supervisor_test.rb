@@ -54,23 +54,30 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
-  def test_should_restart_skips_only_clean_exit_and_shutdown
+  def test_should_restart_skips_only_clean_exit_shutdown_and_undesired_children
     with_tmp_global_config do
       sup = build
       crashed = run_status([ "sh", "-c", "exit 1" ])
       clean = run_status([ "true" ])
       signaled = run_status([ "sh", "-c", "kill -TERM $$" ])
+      wanted = Child.new(name: "bot", argv: %w[x], pid: nil, started_at: Time.now, desired: true)
+      undesired = Child.new(name: "bot", argv: %w[x], pid: nil, started_at: Time.now, desired: false)
+      legacy = Child.new(name: "web", argv: %w[x], pid: nil, started_at: Time.now)
 
-      assert sup.send(:should_restart?, crashed), "a non-zero crash must restart"
-      refute sup.send(:should_restart?, clean), "a clean (success) exit must NOT restart"
-      assert sup.send(:should_restart?, signaled),
+      assert sup.send(:should_restart?, wanted, crashed), "a non-zero crash must restart"
+      assert sup.send(:should_restart?, legacy, crashed),
+             "a child with no desired flag (nil) counts as desired — legacy construction"
+      refute sup.send(:should_restart?, wanted, clean), "a clean (success) exit must NOT restart"
+      assert sup.send(:should_restart?, wanted, signaled),
              "a signal death OUTSIDE shutdown (e.g. the OOM killer) must respawn — " \
              "@stopping already excludes the terminate_all race"
+      refute sup.send(:should_restart?, undesired, signaled),
+             "the supervisor's own intentional TERM (desired: false) must not respawn"
 
       sup.instance_variable_set(:@stopping, true)
-      refute sup.send(:should_restart?, crashed),
+      refute sup.send(:should_restart?, wanted, crashed),
              "nothing is restarted once the supervisor is stopping"
-      refute sup.send(:should_restart?, signaled),
+      refute sup.send(:should_restart?, wanted, signaled),
              "shutdown TERMs must not respawn-then-re-kill"
     end
   end
@@ -154,6 +161,34 @@ class WebSupervisorTest < Minitest::Test
       _, status = Process.waitpid2(bot_pid)
       assert status.signaled?, "reload with bot disabled must stop the running bot"
       refute restart_at(sup).key?("bot"), "a disabled bot must not be rescheduled"
+    end
+  end
+
+  # Patrol regression: disabling the bot via SIGHUP reload TERMs it; the reap
+  # of that signal death used to look like a crash (not @stopping, not a
+  # success exit), re-adding the @restart_at entry handle_reload had just
+  # deleted and respawning a bot the operator had disabled. The child's
+  # desired-running state must survive until the reap so the stop sticks.
+  def test_handle_reload_disabled_bot_stays_stopped_through_reap_and_restart_scan
+    with_tmp_global_config do
+      sup = build
+      bot_pid = Process.spawn("sleep", "30", pgroup: true)
+      bot = Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: bot_pid,
+                      started_at: Time.now - 3600)
+      sup.instance_variable_get(:@children) << bot
+
+      sup.send(:handle_reload)
+
+      assert_equal false, bot.desired,
+                   "reload must flip desired-running to false BEFORE the TERM"
+      reap_until_drained(sup)
+      refute restart_at(sup).key?("bot"),
+             "reaping an intentionally stopped bot must not schedule a respawn"
+
+      started = stub_start_child(sup)
+      sup.send(:start_due_restarts)
+      assert_empty started,
+                   "a disabled bot must never come back via start_due_restarts"
     end
   end
 

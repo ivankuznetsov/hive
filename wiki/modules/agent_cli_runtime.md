@@ -194,7 +194,12 @@ JSON probe checks matched the retained workflow artifact before Hive's cutover.
 Package tests run directly from the subtree and through the root `rake test`
 task. Candidate tooling builds one gem, records its source commit and dirty
 state, checksums it, installs it into a private gem home, proves a clean require,
-and exercises the executable. Root parity fixtures cover non-default
+and exercises the executable. The repository keeps one internal conformance
+suite at `test/support/conformance.rb` as the single owner of the ordered
+provider inventory and the OpenCode capability contract; `bin/verify-candidate`,
+the source contract tests, and its synthetic probe stub all consume it, and
+`test/conformance_suite_test.rb` guards parity with shipped library behavior.
+Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
 and observable normalization/redaction across all five built-ins. The
 0.2.0 release promotes OpenCode to the public compatibility surface without

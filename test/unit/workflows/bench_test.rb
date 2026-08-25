@@ -699,6 +699,60 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
+  def test_generate_strict_execution_refuses_a_preserved_execute_failed_patch
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    validator = instruction.match(
+      /set \+e\nruby -ryaml -rjson -e '\n(?<code>.*?)\n' "\$REPO_ROOT" >\.generate-outcome\.out/m
+    )
+    refute_nil validator, "generate instruction must expose its outcome validator"
+    validator_code = validator[:code].gsub(%q('"'"'), "'")
+
+    Dir.mktmpdir("hive-bench-strict-execution") do |root|
+      task_dir = File.join(root, "task")
+      run_dir = File.join(root, "runs", "strict-run", "candidate-one--task-one")
+      patch_dir = File.join(run_dir, "task-one", "candidate_one", "target")
+      FileUtils.mkdir_p([ task_dir, patch_dir ])
+      File.write(
+        File.join(task_dir, "campaign.yml"),
+        {
+          "campaign_id" => "strict-run",
+          "require_successful_execution" => true,
+          "tasks" => [ "task-one" ],
+          "candidates" => [ "candidate-one" ],
+          "exclusions" => []
+        }.to_yaml
+      )
+      File.write(
+        File.join(run_dir, "results.json"),
+        JSON.generate(
+          "cells" => [ {
+            "task_id" => "task-one",
+            "agent_id" => "candidate-one",
+            "run_status" => "execute_failed",
+            "judges" => {}
+          } ],
+          "pending" => [],
+          "failed" => []
+        )
+      )
+      File.write(
+        File.join(patch_dir, "candidate.patch"),
+        "diff --git a/file b/file\n"
+      )
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rjson", "-e", validator_code, root,
+        chdir: task_dir
+      )
+
+      assert_equal 2, status.exitstatus, out + err
+      assert_includes out,
+                      "UNFINISHED candidate-one/task-one: execute_failed — " \
+                      "campaign requires successful execution"
+      assert_empty err
+    end
+  end
+
   def test_generate_quota_marker_has_canonical_recovery_identity
     instruction = File.read(stages_by_name.fetch("generate").instruction)
     function = instruction.match(
@@ -896,6 +950,21 @@ class WorkflowsBenchTest < Minitest::Test
 
       assert status.success?, "a complete judge slate must pass: #{out}#{err}"
       assert_empty out
+      assert_empty err
+
+      campaign["require_successful_execution"] = true
+      results.dig("cells", 0)["run_status"] = "execute_failed"
+      File.write(campaign_path, campaign.to_yaml)
+      File.write(results_path, JSON.generate(results))
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, stderr_path,
+        chdir: root
+      )
+
+      assert_equal 2, status.exitstatus,
+                   "strict campaigns must not judge failed execution: #{out}#{err}"
+      assert_includes out, "INVALID_RUN_STATUS candidate-one task-one execute_failed"
       assert_empty err
     end
   end

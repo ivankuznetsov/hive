@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-21
+updated: 2026-08-25
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -56,6 +56,12 @@ with an exact PR and zero duplicate replay.
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## OpenCode live validation (updated 2026-08-21)
+
+Strict benchmark campaigns can now require normal execute completion before
+judging. Retrying such a campaign intentionally permits the failed cell's
+preserved candidate patch to be replaced; the run tree retains attempt logs,
+but Hive does not yet provide a campaign-level archive view of every replaced
+patch.
 
 OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
 offline smoke, fake-CLI Hive execute and native Compound Engineering plan

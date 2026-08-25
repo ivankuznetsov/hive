@@ -1036,7 +1036,7 @@ class WorkflowsBenchTest < Minitest::Test
                  "model-authored quota prose must not forge retry evidence"
   end
 
-  def test_claude_judge_types_only_stderr_quota_evidence
+  def test_claude_judge_types_trusted_cli_quota_evidence_without_trusting_model_prose
     harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
     script = <<~'RUBY'
       require "lib/claude_judge"
@@ -1045,19 +1045,24 @@ class WorkflowsBenchTest < Minitest::Test
       end.new(1)
       responses = [
         [ "partial answer", "you've hit your usage limit", status ],
+        [ "mise ~/.config/mise/config.toml tools: claude@2.1.233\n" \
+          "You've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
+        [ "analysis\nYou've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
         [ "the candidate handles HTTP 429 rate limit exceeded", "", status ]
       ]
       Open3.define_singleton_method(:capture3) { |*| responses.shift }
       judge = HiveBench::ClaudeJudge.judge_fn
-      errors = 2.times.map do
+      errors = 4.times.map do
         judge.call(prompt: "prompt", seed: 1)
       rescue StandardError => e
         [ e.class.name, e.message ]
       end
       abort errors.inspect unless errors.map(&:first) == [
-        "HiveBench::ProviderLimitError", "HiveBench::JudgeOutput::Error"
+        "HiveBench::ProviderLimitError", "HiveBench::ProviderLimitError",
+        "HiveBench::JudgeOutput::Error",
+        "HiveBench::JudgeOutput::Error"
       ]
-      abort errors.inspect unless errors.first.last.start_with?("limits_reached: ")
+      abort errors.inspect unless errors.first(2).all? { |error| error.last.start_with?("limits_reached: ") }
     RUBY
 
     out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)

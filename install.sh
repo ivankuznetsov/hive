@@ -930,11 +930,12 @@ if [[ "$hive_link_published" -ne 1 ]] ||
     warn "Hive launchers remain available under ${gem_home}/bin"
   fi
 else
-  # Always refresh hv when we already own it so stale symlinks from
-  # earlier installs don't dangle.
-  if [[ -L "$hv_path" ]] && [[ "$(readlink "$hv_path" 2>/dev/null || true)" == "${gem_home}/bin/hv" ]]; then
-    publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"
-  fi
+  # The hive launcher is published and unconflicted, but hv must still exist
+  # as the Apache Hive collision fallback: create it when absent, refresh it
+  # when it is ours (so stale symlinks from earlier installs don't dangle),
+  # and back off only when another program owns the name — matching the qmd
+  # managed-link behavior above.
+  publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"
 fi
 
 runtime_preflight

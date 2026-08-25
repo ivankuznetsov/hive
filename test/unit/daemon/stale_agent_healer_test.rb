@@ -299,6 +299,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_markerless_stall_disk_failure_is_logged_without_crashing_the_tick
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      with_markers_set_if_current_failure(state_file) do
+        refute @healer.heal_markerless_stall(row)
+      end
+
+      assert_equal :none, Hive::Markers.current(state_file).name
+      failure = @logger.events.find { |name, _attributes| name == :marker_heal_failed }
+      assert_equal "agent_exited_without_terminal_marker", failure.last.fetch(:reason)
+      assert_match(/ENOSPC/, failure.last.fetch(:error))
+    end
+  end
+
   def test_unattributed_execute_dirty_wait_remains_a_human_pause
     with_marker_file do |state_file|
       attrs = { "reason" => "dirty_worktree" }
@@ -1111,5 +1133,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     yield
   ensure
     Hive::Markers.define_singleton_method(:set, &original)
+  end
+
+  def with_markers_set_if_current_failure(state_file)
+    original = Hive::Markers.method(:set_if_current)
+    Hive::Markers.define_singleton_method(:set_if_current) do |path, *args, **kwargs|
+      raise Errno::ENOSPC, "no space left" if path == state_file
+
+      original.call(path, *args, **kwargs)
+    end
+    yield
+  ensure
+    Hive::Markers.define_singleton_method(:set_if_current, &original)
   end
 end

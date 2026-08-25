@@ -596,6 +596,9 @@ components:
         - Hive::AgentSupport::Codex::ArtifactPolicy
         - Hive::AgentSupport::Codex::Runtime
         - Hive::AgentSupport::Codex::Skills
+        - Hive::AgentSupport::Grok
+        - Hive::AgentSupport::Grok::Runtime
+        - Hive::AgentSupport::Grok::Skills
         - Hive::AgentSupport::OpenCode
         - Hive::AgentSupport::OpenCode::Configuration
         - Hive::AgentSupport::OpenCode::Execution
@@ -615,6 +618,9 @@ components:
       - lib/hive/agent_support/codex/artifact_policy.rb
       - lib/hive/agent_support/codex/runtime.rb
       - lib/hive/agent_support/codex/skills.rb
+      - lib/hive/agent_support/grok.rb
+      - lib/hive/agent_support/grok/runtime.rb
+      - lib/hive/agent_support/grok/skills.rb
       - lib/hive/agent_support/opencode.rb
       - lib/hive/agent_support/opencode/configuration.rb
       - lib/hive/agent_support/opencode/execution.rb
@@ -644,6 +650,8 @@ components:
       - Hive::AgentSupport::Codex::ArtifactPolicy
       - Hive::AgentSupport::Codex::Runtime
       - Hive::AgentSupport::Codex::Skills
+      - Hive::AgentSupport::Grok::Runtime
+      - Hive::AgentSupport::Grok::Skills
       - Hive::AgentSupport::OpenCode::Configuration
       - Hive::AgentSupport::OpenCode::Execution
       - Hive::AgentSupport::OpenCode::LaunchPolicy
@@ -829,6 +837,7 @@ components:
       - lib/hive/agent_support/opencode/setup_adapter.rb
       - lib/hive/agent_support/pi/setup_adapter.rb
       - lib/hive/agent_support/codex/setup_adapter.rb
+      - lib/hive/agent_support/grok/setup_adapter.rb
       - config/agent-skills.yml
     state_contracts:
       - "Canonical skill source and projected agent-home directories"

@@ -9,7 +9,7 @@ module Hive::AgentSupport::Codex
 
   module_function
 
-  def credential_path(home: Dir.home) = File.join(home, ".codex", "auth.json")
+  def credential_path(home: nil) = File.join(home || Dir.home, ".codex", "auth.json")
   def execution_identity(model) = [ "openai", model.to_s.empty? ? nil : model.to_s ]
   def projection_sources = [ "agents/openai.yaml" ]
   def skill_invocation?(invocation) = invocation.match?(/\A\$[A-Za-z0-9_.-]+\z/)

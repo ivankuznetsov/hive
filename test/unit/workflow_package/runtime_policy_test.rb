@@ -1799,7 +1799,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       package = File.join(dir, "package")
       FileUtils.mkdir_p([ task, package ])
 
-      sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+      sandbox = Hive::AgentSupport.for(:grok)::Runtime::SANDBOX_PATH
       original_file = File.method(:file?)
       file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
 
@@ -2157,7 +2157,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   def with_available_grok_sandbox
-    sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+    sandbox = Hive::AgentSupport.for(:grok)::Runtime::SANDBOX_PATH
     original_file = File.method(:file?)
     original_executable = File.method(:executable?)
     file_check = ->(path) { path == sandbox || original_file.call(path) }

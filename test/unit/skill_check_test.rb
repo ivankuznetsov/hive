@@ -335,7 +335,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       )
       write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 
@@ -363,7 +363,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       )
       write_file(File.join(grok_home, "config.toml"), "[plugins]\ndisabled = [\"compound-engineering\"]\n")
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 
@@ -379,7 +379,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       project_skill = File.join(project, ".grok", "plugins", "private-review", "skills", "ce-code-review", "SKILL.md")
       write_file(project_skill)
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review",
         project_root: project,
         environment: { "HOME" => home, "GROK_HOME" => grok_home }
@@ -391,7 +391,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
   end
 
   def test_malformed_invocation_returns_missing_with_argument_error
-    status, message = Hive::SkillCheck::Grok.verify("garbage")
+    status, message = Hive::AgentSupport.for(:grok)::Skills.verify("garbage")
 
     assert_equal :missing, status
     assert_match(/expected/, message)
@@ -410,7 +410,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
         )
       )
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 
@@ -426,7 +426,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       grok_home = File.join(home, ".grok")
       write_file(File.join(grok_home, "installed-plugins", "registry.json"), "{")
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 
@@ -452,13 +452,13 @@ class HiveSkillCheckGrokTest < Minitest::Test
         )
       )
 
-      missing_config = Hive::SkillCheck::Grok.resolve(
+      missing_config = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
       assert_equal :missing, missing_config.status
 
       write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = ['compound-engineering']\n")
-      enabled = Hive::SkillCheck::Grok.resolve(
+      enabled = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
       assert_equal :present, enabled.status
@@ -466,7 +466,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
   end
 
   def test_invalid_toml_string_escape_is_treated_as_unconfigured
-    entries = Hive::SkillCheck::Grok.toml_string_array('enabled = ["\q"]', "enabled")
+    entries = Hive::AgentSupport.for(:grok)::Skills.toml_string_array('enabled = ["\q"]', "enabled")
 
     assert_empty entries
   end
@@ -489,7 +489,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       )
       write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 
@@ -519,7 +519,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       )
       write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 
@@ -546,7 +546,7 @@ class HiveSkillCheckGrokTest < Minitest::Test
       )
       write_file(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
 
-      resolution = Hive::SkillCheck::Grok.resolve(
+      resolution = Hive::AgentSupport.for(:grok)::Skills.resolve(
         "/ce-code-review", environment: { "HOME" => home, "GROK_HOME" => grok_home }
       )
 

@@ -12,7 +12,7 @@ module Hive::AgentSupport::OpenCode
 
   module_function
 
-  def credential_path(home: Dir.home)
+  def credential_path(home: nil)
     AgentCliRuntime::Profiles.opencode_auth_path(home:, env: ENV)
   end
   def configuration = (@configuration ||= Configuration.new)

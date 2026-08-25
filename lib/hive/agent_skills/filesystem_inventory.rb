@@ -25,7 +25,6 @@ module Hive
         else
           case native_spec.provider
         when "claude" then claude_inventory(native_spec, root)
-        when "grok" then grok_inventory(native_spec, root)
         else raise TypeError, "unsupported provider #{native_spec.provider.inspect}"
           end
         end
@@ -98,42 +97,6 @@ module Hive
             "name" => native_spec.marketplace,
             "source" => marketplace_source(marketplace_entry)
           }.freeze
-        }.freeze
-      end
-
-      def grok_inventory(native_spec, root)
-        registry_path = File.join(root, "installed-plugins", "registry.json")
-        document = read_optional_json(registry_path, { "repos" => {} })
-        repos = document.fetch("repos")
-        raise TypeError, "#{registry_path} repos must be an object" unless repos.is_a?(Hash)
-
-        repo_entry = repos.find do |_repo_key, entry|
-          entry.is_a?(Hash) &&
-            entry["plugins"].is_a?(Hash) &&
-            entry["plugins"].key?(native_spec.package)
-        end
-        unless repo_entry
-          return { "package" => nil, "marketplace" => nil }.freeze
-        end
-
-        repo_key, entry = repo_entry
-        plugin = entry.fetch("plugins").fetch(native_spec.package)
-        unless plugin.is_a?(Hash)
-          raise TypeError, "#{registry_path} plugin #{native_spec.package.inspect} must be an object"
-        end
-        install_path = entry["path"] || File.join(root, "installed-plugins", repo_key)
-        install_path = Hive::SkillCheck::Grok.jailed_install_root(install_path, root)
-        raise TypeError, "#{registry_path} install path escapes #{root}" unless install_path
-
-        {
-          "package" => {
-            "id" => native_spec.package,
-            "version" => plugin["version"],
-            "enabled" => Hive::SkillCheck::Grok.plugin_enabled?(root, native_spec.package),
-            "install_path" => install_path,
-            "source" => entry.dig("kind", "url")
-          }.freeze,
-          "marketplace" => nil
         }.freeze
       end
 

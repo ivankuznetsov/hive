@@ -1,6 +1,7 @@
 module Hive::AgentSupport
-  BUILTINS = { pi: "Pi", opencode: "OpenCode", codex: "Codex" }.freeze
+  BUILTINS = { pi: "Pi", opencode: "OpenCode", codex: "Codex", grok: "Grok" }.freeze
   DEFAULT_PROMPT_STYLES = { codex: :stdin }.freeze
+  PROTOCOLS = { grok_end: :grok }.freeze
 
   module SkillPolicy
     def verify(invocation, **options)
@@ -29,4 +30,6 @@ module Hive::AgentSupport
     require "hive/agent_support/#{name}"
     const_get(constant, false)
   end
+
+  def self.for_protocol(protocol) = self.for(PROTOCOLS[protocol&.to_sym])
 end

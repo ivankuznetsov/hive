@@ -246,9 +246,6 @@ module Hive
           case provider.to_sym
         when :claude
           json_model(paths(project_root, home, ".claude/settings.json"), %w[model])
-        when :grok
-          json_model(paths(project_root, home, ".grok/settings.json"), %w[model defaultModel]) ||
-            toml_model(paths(project_root, home, ".grok/config.toml"))
         else
           raise ResolutionError, "unknown provider #{provider.inspect}"
           end

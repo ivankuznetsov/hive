@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/agent/message_extractor"
+require "hive/agent_support/grok"
 require "hive/agent_support/pi"
 
 class AgentMessageExtractorTest < Minitest::Test
@@ -53,11 +54,13 @@ class AgentMessageExtractorTest < Minitest::Test
     refute Hive::Agent::MessageExtractor.sensitive_payload_event?(event)
     assert_equal(
       JSON.generate(event.fetch("structuredOutput")),
-      Hive::Agent::MessageExtractor.extract(event, structured_output_protocol: :grok_end)
+      Hive::Agent::MessageExtractor.extract(
+        event, structured_output_protocol: Hive::AgentSupport::Grok
+      )
     )
     assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
       event,
-      structured_output_protocol: :grok_end
+      structured_output_protocol: Hive::AgentSupport::Grok
     )
   end
 
@@ -108,7 +111,7 @@ class AgentMessageExtractorTest < Minitest::Test
   def test_strict_grok_terminal_output_invalidates_the_preceding_stream
     accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
       max_bytes: 256,
-      structured_output_protocol: :grok_end,
+      structured_output_protocol: Hive::AgentSupport::Grok,
       require_terminal_structured_output: true
     )
     accumulator.observe({

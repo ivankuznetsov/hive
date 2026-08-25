@@ -893,30 +893,20 @@ class AgentSkillsInspectorTest < Minitest::Test
       other = File.join(install, "skills", "other-review", "SKILL.md")
       write(expected)
       write(other)
-      target = Hive::AgentSkills::Target.new(
-        surfaces: [ "review" ], kind: "agent", agent: "grok",
-        configured_skill: "ce-code-review", invocation: "/ce-code-review",
-        capability_id: "ce-code-review", package_id: "compound-engineering", managed: true
-      )
-      inspector = Hive::AgentSkills::Inspector.new(
-        config: config(agent: "grok"),
-        project_root: dir,
-        runner: FakeRunner.new,
-        environment: { "HOME" => dir, "PATH" => "" }
-      )
       native = {
         "package" => { "install_path" => install },
         "runtime_skills" => []
       }
+      skills = Hive::AgentSupport.for(:grok)::Skills
 
-      missing = inspector.send(
-        :grok_runtime_skill_issues, "/ce-code-review", expected, target, native
+      missing = skills.resolution_issues(
+        invocation: "/ce-code-review", resolved_path: expected, native:
       )
       assert_match(/does not report skill/, missing.first.last)
 
       native["runtime_skills"] = [ { "name" => "ce-code-review", "source_path" => other } ]
-      mismatched = inspector.send(
-        :grok_runtime_skill_issues, "/ce-code-review", expected, target, native
+      mismatched = skills.resolution_issues(
+        invocation: "/ce-code-review", resolved_path: expected, native:
       )
       assert_match(/expected/, mismatched.first.last)
     end

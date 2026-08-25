@@ -379,14 +379,14 @@ module Hive
         inventory = if support
           support::Skills.live_inventory(
             bin:, native_spec:, issues:, root: config_root_for(native_spec),
-            run: ->(argv) { run(argv, commands) },
+            project_root: @project_root,
+            run: ->(argv, **options) { run(argv, commands, **options) },
             package_version: method(:package_version_from),
             failure: method(:command_failure)
           )
         else
           case native_spec.provider
         when "claude" then claude_inventory(bin, native_spec, commands, issues)
-        when "grok" then grok_inventory(bin, native_spec, commands, issues)
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
@@ -443,55 +443,6 @@ module Hive
         }
       end
 
-      def grok_inventory(bin, native_spec, commands, issues)
-        plugins_result = run([ bin, "plugin", "list", "--json" ], commands)
-        inspect_result = run([ bin, "inspect", "--json" ], commands, chdir: @project_root)
-        issues << [ "incompatible", "grok plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
-        issues << [ "incompatible", "grok runtime inspection failed: #{command_failure(inspect_result)}" ] unless inspect_result.success?
-        plugins = JSON.parse(plugins_result.stdout)
-        runtime = JSON.parse(inspect_result.stdout)
-        runtime_plugins = runtime.fetch("plugins")
-        runtime_skills = runtime.fetch("skills")
-        raise TypeError, "grok plugin list must be an Array" unless plugins.is_a?(Array)
-        raise TypeError, "grok runtime plugins must be an Array" unless runtime_plugins.is_a?(Array)
-        raise TypeError, "grok runtime skills must be an Array" unless runtime_skills.is_a?(Array)
-        validate_object_entries!(plugins, "grok plugin list")
-        validate_object_entries!(runtime_plugins, "grok runtime plugins")
-        validate_object_entries!(runtime_skills, "grok runtime skills")
-
-        plugin = plugins.find do |entry|
-          entry["status"] == "installed" && entry["name"] == native_spec.package
-        end
-        runtime_plugin = runtime_plugins.find { |entry| entry["name"] == native_spec.package }
-        if plugin && runtime_plugin && plugin["path"] && runtime_plugin["path"] &&
-           canonical_path(plugin["path"]) != canonical_path(runtime_plugin["path"])
-          issues << [
-            "conflicting",
-            "grok runtime plugin #{native_spec.package} resolves from #{runtime_plugin['path'].inspect}, " \
-              "expected installed package #{plugin['path'].inspect}"
-          ]
-        end
-        {
-          "package" => plugin && {
-            "id" => plugin["name"],
-            "version" => plugin["version"],
-            "enabled" => runtime_plugin ? runtime_plugin.fetch("enabled", true) : false,
-            "install_path" => plugin["path"],
-            "source" => plugin["source"]
-          }.freeze,
-          "marketplace" => nil,
-          "runtime_skills" => runtime_skills.map do |entry|
-            source = entry["source"]
-            raise TypeError, "grok runtime skill source must be an object" unless source.is_a?(Hash)
-
-            {
-              "name" => entry["name"],
-              "source_path" => source["path"]
-            }.freeze
-          end.freeze
-        }
-      end
-
       def inspect_resolution(target, contract, native)
         issues = []
         alias_path = nil
@@ -517,7 +468,12 @@ module Hive
         if path && !expected_resolution_path?(path, target, native)
           issues << [ "conflicting", "unexpected higher-precedence skill #{path} wins #{target.invocation}" ]
         end
-        issues.concat(grok_runtime_skill_issues(invocation, path, target, native)) if target.agent == "grok"
+        skills = Hive::AgentProfiles.support_for(target.agent)&.const_get(:Skills, false)
+        if skills&.respond_to?(:resolution_issues)
+          issues.concat(skills.resolution_issues(
+            invocation:, resolved_path: path, native:
+          ))
+        end
         resolution_hash(resolved).merge(
           "invocation" => invocation,
           "alias_path" => alias_path,
@@ -608,37 +564,6 @@ module Hive
         end
       end
 
-      def grok_runtime_skill_issues(invocation, resolved_path, target, native)
-        runtime_skills = native["runtime_skills"]
-        return [] unless runtime_skills
-
-        skill_name = Hive::SkillCheck.parse(invocation).name
-        runtime_skill = runtime_skills.find { |entry| entry["name"] == skill_name }
-        unless runtime_skill
-          return [ [ "conflicting", "grok runtime does not report skill #{skill_name.inspect}" ] ]
-        end
-
-        source_path = runtime_skill["source_path"]
-        unless source_path && expected_resolution_path?(source_path, target, native)
-          return [ [
-            "conflicting",
-            "grok runtime skill #{skill_name} resolves from #{source_path.inspect}, outside the expected installed package"
-          ] ]
-        end
-        return [] unless resolved_path && canonical_path(source_path) != canonical_path(resolved_path)
-
-        [ [
-          "conflicting",
-          "grok runtime skill #{skill_name} resolves from #{source_path.inspect}, expected #{resolved_path.inspect}"
-        ] ]
-      end
-
-      def validate_object_entries!(entries, label)
-        return if entries.all? { |entry| entry.is_a?(Hash) }
-
-        raise TypeError, "#{label} entries must be objects"
-      end
-
       def canonical_path(path)
         File.realpath(path)
       rescue SystemCallError
@@ -709,7 +634,6 @@ module Hive
       def skill_module(agent)
         Hive::AgentProfiles.support_for(agent)&.const_get(:Skills, false) || case agent
         when "claude" then Hive::SkillCheck::Claude
-        when "grok" then Hive::SkillCheck::Grok
         else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
         end
       end

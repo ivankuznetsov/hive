@@ -49,10 +49,8 @@ module Hive
         }
       end
 
-      # Codex and Grok carry a real filesystem sandbox, which confines writes
-      # to the disposable Git worktree while leaving reads, shell and network
-      # intact. The cwd is now a real checkout, so Codex needs no repository-
-      # shape bypass.
+      # Profiles that advertise workspace-write support confine writes to the
+      # disposable Git worktree while leaving review capabilities intact.
       def workspace_write_kwargs(_profile)
         {
           permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,

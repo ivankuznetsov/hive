@@ -19,7 +19,7 @@ in Hive.
 
 Built-in profiles resolve optional provider behavior through
 `Hive::AgentSupport`. The root support catalog is data-only and loads a
-provider namespace only when that provider is selected. Pi, OpenCode, and Codex keep
+provider namespace only when that provider is selected. Pi, OpenCode, Codex, and Grok keep
 their runtime, skill/setup, credential, review, and identity decisions under
 their respective `Hive::AgentSupport` namespaces. The generic agent,
 artifact, workflow, Web, and skillpack callers retain process custody, durable
@@ -100,7 +100,7 @@ undeclared route or variant remains a fail-closed preflight error.
 Cleanup runs from the process owner's `ensure` path after preparation, spawn,
 inspection, or normalization failures. Only the prepared invocation's owned
 paths are eligible for removal; worktrees, task folders, selected config, and
-credential sources remain caller-owned. The legacy Claude, Pi, and Grok
+credential sources remain caller-owned. The legacy Claude and Pi
 spawn path and mutable result shape are unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
@@ -250,7 +250,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   files or state directories. No add-dir or budget flag.
   Text events are concatenated into `final_message`; unavailable token usage
   stays nil. Min version `0.2.90`. `:output_file_exists`.
-  `Hive::SkillCheck::Grok` resolves project/user skills plus enabled native
+  `Hive::AgentSupport::Grok::Skills` resolves project/user skills plus enabled native
   installed-plugin skills under `GROK_HOME`; Compound Engineering is
   provisioned with Grok's own plugin install/enable/update commands. Native
   inspection runs from the target project and verifies the exact runtime skill

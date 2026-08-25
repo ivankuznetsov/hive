@@ -9,7 +9,7 @@ module Hive::AgentSupport::Pi
 
   module_function
 
-  def credential_path(home: Dir.home) = File.join(home, ".pi", "agent", "auth.json")
+  def credential_path(home: nil) = File.join(home || Dir.home, ".pi", "agent", "auth.json")
   def execution_identity(model)
     value = model.to_s
     value.include?("/") ? value.split("/", 2) : [ nil, value ]

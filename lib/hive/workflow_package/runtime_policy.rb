@@ -30,7 +30,6 @@ module Hive
       PORTABLE_SUPPORTED_TOOLS = (
         PORTABLE_FILE_TOOLS + PORTABLE_NETWORK_TOOLS + PORTABLE_HOST_OUTPUT_TOOLS
       ).freeze
-      GROK_SANDBOX_PATH = "/usr/bin/bwrap".freeze
 
       Policy = Data.define(
         :permission_mode, :allowed_tools, :disallowed_tools, :directories,
@@ -304,9 +303,7 @@ module Hive
       def self.compile_portable_actor(parsed_spec, scope:, task_root:, directories:,
                                       profile:, environment:, managed_outputs:, prepare:)
         support = Hive::AgentSupport.for(profile)
-        portable = support&.const_defined?(:Runtime, false) ||
-          profile.name == :grok
-        unless portable
+        unless support&.const_defined?(:Runtime, false)
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
         end
@@ -335,19 +332,9 @@ module Hive
           parsed_spec, task_root: task_root, requested: managed_outputs
         )
         runtime_root = prepare && !outputs.empty? ? Dir.mktmpdir("hive-managed-actor-") : nil
-        if support
-          return support::Runtime.compile_managed_actor(
-            host: self, scope:, task_root:, directories:, profile:, environment:,
-            outputs:, runtime_root:, tool_names:, prepare:
-          )
-        end
-        return portable_admission_policy(
-          scope, task_root:, directories:, environment:
-        ) unless prepare
-
-        compile_grok_actor(
-          scope, task_root:, directories:, profile:, environment:, outputs:, runtime_root:,
-          schema: outputs.empty? ? nil : output_schema(outputs.keys), tool_names:
+        support::Runtime.compile_managed_actor(
+          host: self, scope:, task_root:, directories:, profile:, environment:,
+          outputs:, runtime_root:, tool_names:, prepare:
         )
       rescue StandardError
         begin
@@ -368,53 +355,6 @@ module Hive
       def self.write_output_schema(path, names)
         Hive::AtomicFile.write(path, CanonicalJSON.generate(output_schema(names)), mode: 0o600)
       end
-
-      def self.compile_grok_actor(scope, task_root:, directories:, profile:, environment:,
-                                  outputs:, runtime_root:, schema:, tool_names:)
-        unless File.file?(GROK_SANDBOX_PATH) && File.executable?(GROK_SANDBOX_PATH)
-          raise Hive::ConfigError, "runner :grok requires bubblewrap for managed workflow isolation"
-        end
-
-        executable = resolve_profile_executable(profile)
-        auth_path = Hive::AgentProfiles.grok_auth_path
-        unless File.file?(auth_path)
-          raise Hive::ConfigError, "runner :grok managed workflow auth file is unavailable"
-        end
-
-        runtime_home = runtime_root || Dir.mktmpdir("hive-managed-grok-")
-        visible_tools = tool_names - PORTABLE_HOST_OUTPUT_TOOLS
-        flags = [
-          "--sandbox", "read-only",
-          "--permission-mode", "dontAsk",
-          "--tools", visible_tools.join(","),
-          "--deny", "Read(/auth/**)",
-          "--deny", "Grep(/auth/**)",
-          "--deny", "Glob(/auth/**)",
-          "--deny", "Read(/proc/**)",
-          "--deny", "Grep(/proc/**)",
-          "--deny", "Glob(/proc/**)",
-          "--no-memory", "--no-subagents", "--verbatim"
-        ]
-        flags << "--disable-web-search" if (visible_tools & PORTABLE_NETWORK_TOOLS).empty?
-        flags.concat([ "--json-schema", JSON.generate(schema) ]) if schema
-        grok_environment = environment.merge(
-          "HOME" => "/runtime-home",
-          "GROK_HOME" => "/runtime-home/.grok",
-          "GROK_AUTH_PATH" => "/auth/auth.json",
-          "PATH" => "/usr/local/bin"
-        ).freeze
-
-        prefix = grok_bwrap_prefix(
-          executable: executable, auth_path: auth_path, runtime_home: runtime_home,
-          directories: directories, cwd: task_root
-        )
-        portable_policy(
-          scope, task_root: task_root, directories: directories, environment: grok_environment,
-          outputs: outputs, runtime_root: runtime_home, cli_flags: flags,
-          executable: "/usr/local/bin/grok", command_prefix: prefix
-        )
-      end
-
 
       def self.portable_policy(scope, task_root:, directories:, environment:, outputs:, runtime_root:,
                                cli_flags:, executable:, command_prefix: [])
@@ -555,36 +495,6 @@ module Hive
           next
         end
         nil
-      end
-
-      def self.grok_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:)
-        parent_dirs = sandbox_parent_dirs(
-          directories + [ cwd ],
-          excluded: %w[/tmp /usr /usr/local /usr/local/bin /etc /proc /dev /auth /runtime-home]
-        )
-
-        prefix = [
-          GROK_SANDBOX_PATH,
-          "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
-          "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-          "--dir", "/usr", "--dir", "/usr/local", "--dir", "/usr/local/bin",
-          "--ro-bind", executable, "/usr/local/bin/grok",
-          "--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl",
-          "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-          "--ro-bind", "/etc/hosts", "/etc/hosts",
-          "--dir", "/auth", "--ro-bind", auth_path, "/auth/auth.json",
-          "--bind", runtime_home, "/runtime-home"
-        ]
-        parent_dirs.each { |path| prefix.concat([ "--dir", path ]) }
-        directories.uniq.each { |path| prefix.concat([ "--ro-bind", path, path ]) }
-        prefix.concat([
-          "--setenv", "HOME", "/runtime-home",
-          "--setenv", "GROK_HOME", "/runtime-home/.grok",
-          "--setenv", "GROK_AUTH_PATH", "/auth/auth.json",
-          "--setenv", "PATH", "/usr/local/bin",
-          "--chdir", cwd,
-          "--"
-        ])
       end
 
       def self.sandbox_parent_dirs(paths, excluded:)

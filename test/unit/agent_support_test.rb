@@ -91,6 +91,30 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_grok_loads_only_after_selection_and_keeps_facets_lazy
+    script = <<~RUBY
+      require "hive/agent_profiles"
+      puts defined?(Hive::AgentSupport::Grok) || "unloaded"
+      support = Hive::AgentSupport.for(Hive::AgentProfiles.lookup(:grok))
+      puts support.name
+      puts support.autoload?(:Runtime) || "runtime-loaded"
+      puts support.autoload?(:Skills) || "skills-loaded"
+      puts support.autoload?(:SetupAdapter) || "setup-loaded"
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I#{File.expand_path('../../lib', __dir__)}", "-e", script
+    )
+
+    assert status.success?, stderr
+    assert_equal [
+      "unloaded", "Hive::AgentSupport::Grok",
+      "hive/agent_support/grok/runtime",
+      "hive/agent_support/grok/skills",
+      "hive/agent_support/grok/setup_adapter"
+    ], stdout.lines.map(&:strip)
+  end
+
   def test_pi_behavior_has_no_generic_core_residue
     pi_branch = /(?:when\s+(?::pi|["']pi["'])|(?:==|!=)\s*(?::pi|["']pi["'])|def\s+(?:self\.)?pi_|\b(?:compile_pi|pi_(?:evidence|executable|auth|bwrap))|Hive::SkillCheck::Pi|Adapters::Pi)/
     support_root = File.join(ROOT, "lib/hive/agent_support")
@@ -132,6 +156,21 @@ class AgentSupportTest < Minitest::Test
 
     assert_empty offenders,
                  "Codex behavior escaped its support boundary: #{offenders.join(', ')}"
+  end
+
+  def test_grok_behavior_has_no_generic_core_residue
+    branch = /(?:when\s+(?::grok|["']grok["'])|(?:==|!=)\s*(?::grok|["']grok["'])|def\s+(?:self\.)?(?:grok_|\w+_grok\b)|\b(?:compile_grok|grok_(?:runtime|inventory|auth|bwrap))|:grok_end|Hive::SkillCheck::Grok|Adapters::Grok)/
+    allowed = File.join(ROOT, "lib/hive/agent_profiles/grok.rb")
+    support_root = File.join(ROOT, "lib/hive/agent_support")
+    offenders = Dir[File.join(ROOT, "{lib/hive,web/app}/**/*.rb")].filter_map do |path|
+      next if path.start_with?(support_root) || path == allowed
+
+      relative = path.delete_prefix("#{ROOT}/")
+      relative if File.read(path).match?(branch)
+    end
+
+    assert_empty offenders,
+                 "Grok behavior escaped its support boundary: #{offenders.join(', ')}"
   end
 
   def test_support_does_not_depend_on_orchestration_layers

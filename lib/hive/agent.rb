@@ -325,7 +325,8 @@ module Hive
 
       cmd = build_cmd
       log_file = log_path
-      structured_output_protocol = Hive::AgentSupport.for(@profile) || @profile.structured_output_protocol
+      structured_output_protocol = support ||
+        Hive::AgentSupport.for_protocol(@profile.structured_output_protocol)
       messages = Hive::Agent::MessageExtractor::Accumulator.new(
         max_bytes: FINAL_MESSAGE_TAIL_BYTES,
         structured_output_protocol: structured_output_protocol,

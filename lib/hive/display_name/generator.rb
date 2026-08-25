@@ -66,7 +66,8 @@ module Hive
         pgid = process_group(pid)
         messages = Hive::Agent::MessageExtractor::Accumulator.new(
           max_bytes: TAIL_BYTES,
-          structured_output_protocol: Hive::AgentSupport.for(profile) || profile.structured_output_protocol
+          structured_output_protocol: Hive::AgentSupport.for(profile) ||
+            Hive::AgentSupport.for_protocol(profile.structured_output_protocol)
         )
         reader = Thread.new do
           File.open(log_path, "a") do |log|

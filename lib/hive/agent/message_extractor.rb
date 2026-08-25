@@ -4,8 +4,6 @@ module Hive
   class Agent
     module MessageExtractor
       MAX_FAILURE_DIAGNOSTIC_BYTES = 200
-      GROK_END_TYPE_FIELD = /"type"\s*:\s*"end"/.freeze
-      GROK_STRUCTURED_OUTPUT_FIELD = /"structuredOutput"\s*:/.freeze
 
       class Accumulator
         attr_reader :source
@@ -142,11 +140,6 @@ module Hive
         case data["type"]
         when "text"
           text_chunk(data["data"])
-        when "end"
-          return nil unless structured_output_protocol == :grok_end
-
-          structured_output = data["structuredOutput"]
-          JSON.generate(structured_output) if structured_output.is_a?(Hash)
         when "result"
           text_value(data["result"])
         when "item.completed"
@@ -175,7 +168,6 @@ module Hive
         if structured_output_protocol.respond_to?(:sensitive_payload?)
           return structured_output_protocol.sensitive_payload?(data, raw_line:)
         end
-        return false unless structured_output_protocol == :grok_end
         return sensitive_payload_event?(data, structured_output_protocol:) if data.is_a?(Hash)
 
         data.nil? && sensitive_payload_line?(raw_line, structured_output_protocol:)
@@ -187,19 +179,12 @@ module Hive
           return structured_output_protocol.sensitive_payload?(data, raw_line: nil)
         end
 
-        case structured_output_protocol
-        when :grok_end
-          data["type"] == "end" && data.key?("structuredOutput")
-        else
-          false
-        end
+        false
       end
 
       def sensitive_payload_line?(line, structured_output_protocol: nil)
-        return false unless structured_output_protocol == :grok_end
-
-        text = line.to_s.scrub
-        text.match?(GROK_END_TYPE_FIELD) && text.match?(GROK_STRUCTURED_OUTPUT_FIELD)
+        structured_output_protocol.respond_to?(:sensitive_payload?) &&
+          structured_output_protocol.sensitive_payload?(nil, raw_line: line)
       end
 
       def parse_json_line(line)

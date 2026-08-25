@@ -1,5 +1,4 @@
 require "hive/agent_skills/adapters/claude"
-require "hive/agent_skills/adapters/grok"
 require "hive/agent_profiles"
 
 module Hive
@@ -7,8 +6,7 @@ module Hive
     module Adapters
       class Registry
         ADAPTERS = {
-          "claude" => Claude,
-          "grok" => Grok
+          "claude" => Claude
         }.freeze
 
         def initialize(**options)

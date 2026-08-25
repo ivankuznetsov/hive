@@ -85,6 +85,25 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
     assert_includes out, "q/Esc close"
   end
 
+  def test_sanitizes_control_characters_in_slug_and_project_name
+    archive = [
+                      {
+                        "name" => "de\e[2Jmo",
+                        "path" => "/tmp/de",
+                        "hive_state_path" => "/tmp/de/.hive-state",
+                        "tasks" => [ task(slug: "demo\e[2Jtask", stage: "9-done", project: "de\e[2Jmo") ]
+                      }
+                    ]
+    snap = snapshot([], archive_projects: archive)
+
+    out = Hive::Tui::Views::ArchivePane.render(model(snap), width: 100)
+
+    refute_includes out, "\e["
+    refute_includes out, "\e[2J"
+    assert_includes out, "demotask"
+    assert_includes out, "demo"
+  end
+
   def test_renders_empty_placeholder_when_no_archived_tasks
     snap = snapshot([
                       {

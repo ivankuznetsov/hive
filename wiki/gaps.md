@@ -89,8 +89,11 @@ into a large agent session before OpenRouter rejected the in-flight credit
 reservation. OpenRouter-backed Codex judges now run from a private temporary
 home and empty working directory with user config, rules, and session
 persistence disabled. A real Ox Alpha probe returned the requested score
-directly through this boundary; a completed six-cell Sol deliberation remains
-the live proof for the full recovery and provider capacity.
+directly through this boundary. The ChatGPT route now uses the same empty
+workspace and ephemeral/config/rules flags while retaining the operator Codex
+home only for subscription authentication; a real Sol-ultra probe returned its
+score directly there. A completed six-cell Sol deliberation remains the live
+proof for the full recovery and provider capacity.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

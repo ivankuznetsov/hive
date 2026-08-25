@@ -174,6 +174,68 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
+  def test_codex_judge_keeps_chatgpt_auth_home_but_uses_an_empty_ephemeral_workspace
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    harness = File.join(runtime, "harness")
+
+    Dir.mktmpdir("hive-bench-codex-chatgpt") do |root|
+      operator_codex_home = File.join(root, "operator-codex-home")
+      FileUtils.mkdir_p(operator_codex_home)
+      argv_log = File.join(root, "argv.json")
+      codex_home_log = File.join(root, "codex-home.txt")
+      cwd_log = File.join(root, "cwd.txt")
+      fake_codex = File.join(root, "codex")
+      fake_codex_ruby = File.join(root, "codex.rb")
+      File.write(fake_codex_ruby, <<~RUBY)
+        require "json"
+        File.write(ENV.fetch("ARGV_LOG"), JSON.generate(ARGV))
+        File.write(ENV.fetch("CODEX_HOME_LOG"), ENV.fetch("CODEX_HOME"))
+        File.write(ENV.fetch("CWD_LOG"), Dir.pwd)
+        STDIN.read
+        puts JSON.generate(score: 8.0, reason: "subscription route")
+      RUBY
+      File.write(fake_codex, <<~'SH')
+        #!/bin/sh
+        exec ruby "$FAKE_CODEX_RUBY" "$@"
+      SH
+      FileUtils.chmod(0o755, fake_codex)
+
+      script = <<~RUBY
+        $LOAD_PATH.unshift(#{harness.inspect})
+        require "lib/codex_judge"
+        verdict = HiveBench::CodexJudge.judge_fn(
+          bin: #{fake_codex.inspect},
+          model: "gpt-5.6-sol",
+          effort: "ultra",
+          provider: "chatgpt"
+        ).call(prompt: "judge this", seed: 1)
+        abort("wrong verdict") unless verdict[:score] == 8.0
+      RUBY
+      env = {
+        "ARGV_LOG" => argv_log,
+        "CODEX_HOME_LOG" => codex_home_log,
+        "CWD_LOG" => cwd_log,
+        "FAKE_CODEX_RUBY" => fake_codex_ruby,
+        "CODEX_HOME" => operator_codex_home
+      }
+
+      _out, err, status = Open3.capture3(env, RbConfig.ruby, "-e", script)
+
+      assert status.success?, err
+      argv = JSON.parse(File.read(argv_log))
+      judge_cwd = File.read(cwd_log)
+      assert_equal operator_codex_home, File.read(codex_home_log)
+      assert_path_exists operator_codex_home
+      refute_equal root, judge_cwd
+      refute_path_exists judge_cwd
+      assert_includes argv, "--ephemeral"
+      assert_includes argv, "--ignore-user-config"
+      assert_includes argv, "--ignore-rules"
+      assert_equal "gpt-5.6-sol", argv.fetch(argv.index("-m") + 1)
+      assert_includes argv, "model_reasoning_effort=ultra"
+    end
+  end
+
   def test_judge_stage_maps_codex_openrouter_campaign_fields_to_harness_arguments
     instruction = File.read(stages_by_name.fetch("judge").instruction)
     prefix = instruction.split("\n' >.judge-args.out", 2).first

@@ -4887,6 +4887,7 @@ def test_refresh_post_completion_mtime_discards_a_previous_stage_baseline
     FileUtils.mkdir_p(task_dir)
     state_file = File.join(task_dir, "fix.md")
     File.write(state_file, "# fix\n")
+    File.utime(T0 - 1, T0 - 1, state_file)
     ctrl.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
     child = ChildExit.new(
       pid: 999, exit_code: 0, project: "p1", slug: "s1", stage: "4-review",
@@ -4903,6 +4904,37 @@ def test_refresh_post_completion_mtime_discards_a_previous_stage_baseline
 
     assert_nil ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
                "a review route back to fix must be first sight for the fix stage"
+  end
+end
+
+def test_refresh_post_completion_mtime_preserves_newer_cross_stage_edit
+  dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher
+
+  Dir.mktmpdir("dispatcher-completion-stage-edit") do |dir|
+    hive_state_path = File.join(dir, ".hive-state")
+    task_dir = File.join(hive_state_path, "stages", "2-fix", "s1")
+    FileUtils.mkdir_p(task_dir)
+    state_file = File.join(task_dir, "fix.md")
+    File.write(state_file, "# operator edit\n")
+    File.utime(T0 + 1, T0 + 1, state_file)
+    previous_baseline = T0 - 600
+    ctrl.observe_state_file_mtime(project: "p1", slug: "s1", mtime: previous_baseline)
+    child = ChildExit.new(
+      pid: 999, exit_code: 0, project: "p1", slug: "s1", stage: "4-review",
+      command: "hive run s1", state_file_path: File.join(dir, "moved.md"),
+      started_at: T0 - 100, finished_at: T0, json_envelope: nil
+    )
+
+    with_replaced_singleton_method(
+      Hive::Config, :find_project,
+      ->(_project) { { "hive_state_path" => hive_state_path } }
+    ) do
+      dispatcher.send(:refresh_post_completion_mtime, child)
+    end
+
+    assert_equal previous_baseline,
+                 ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
+                 "a post-completion successor edit must remain newer than the baseline"
   end
 end
 
@@ -5888,6 +5920,45 @@ end
       assert_nil controller.last_dispatched_state_file_mtime_for(
         project: "p1", slug: "s1"
       ), "a durable review route back to fix must not inherit review's baseline"
+    end
+  end
+
+  def test_terminal_attempt_preserves_a_newer_cross_stage_edit
+    Dir.mktmpdir("hive-terminal-attempt-stage-edit") do |state_home|
+      hive_state_path = File.join(state_home, "project-state")
+      task_dir = File.join(hive_state_path, "stages", "2-fix", "s1")
+      FileUtils.mkdir_p(task_dir)
+      state_file = File.join(task_dir, "fix.md")
+      File.write(state_file, "# operator edit\n")
+      File.utime(T0 + 1, T0 + 1, state_file)
+
+      attempt_class = Struct.new(:attempt_id) do
+        def [](key)
+          {
+            "project" => "p1", "task_slug" => "s1",
+            "intended_stage" => "4-review",
+            "ended_at" => HiveDaemonDispatcherTest::T0.iso8601(6)
+          }[key]
+        end
+      end
+      terminal = attempt_class.new("terminal-1")
+      dispatcher, _supervisor, controller = make_dispatcher(rows: [])
+      previous_baseline = T0 - 600
+      controller.observe_state_file_mtime(
+        project: "p1", slug: "s1", mtime: previous_baseline
+      )
+
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        ->(_project) { { "hive_state_path" => hive_state_path } }
+      ) do
+        dispatcher.send(:refresh_post_attempt_completion_mtime, terminal)
+      end
+
+      assert_equal previous_baseline,
+                   controller.last_dispatched_state_file_mtime_for(
+                     project: "p1", slug: "s1"
+                   ), "a post-terminal successor edit must remain newer than the baseline"
     end
   end
 

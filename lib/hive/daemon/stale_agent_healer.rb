@@ -281,18 +281,13 @@ module Hive
         return false if row.live_task_lock == true
 
         transitioned = with_heal_lock(row, reason: MARKERLESS_EXIT_REASON, create: false) do
-          marker = Hive::Markers.current(row.state_file)
-          if marker.none?
-            Hive::Markers.set(
-              row.state_file,
-              :error,
-              reason: MARKERLESS_EXIT_REASON,
-              observed_marker: marker.name
-            )
-            true
-          else
-            false
-          end
+          Hive::Markers.set_if_current(
+            row.state_file,
+            expected_name: :none,
+            name: :error,
+            reason: MARKERLESS_EXIT_REASON,
+            observed_marker: :none
+          )
         end
         return false unless transitioned
 

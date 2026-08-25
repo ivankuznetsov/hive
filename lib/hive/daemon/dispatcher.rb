@@ -1331,6 +1331,9 @@ module Hive
         path = resolve_post_completion_path(child_entry)
         return unless path && File.exist?(path)
 
+        state_file_mtime = File.mtime(path)
+        return if child_entry.finished_at && state_file_mtime > child_entry.finished_at
+
         if state_file_in_different_stage?(path, child_entry.stage)
           @controller.forget_state_file_mtime(
             project: child_entry.project, slug: child_entry.slug
@@ -1340,7 +1343,7 @@ module Hive
 
         @controller.observe_state_file_mtime(
           project: child_entry.project, slug: child_entry.slug,
-          mtime: File.mtime(path)
+          mtime: state_file_mtime
         )
       rescue StandardError
         # Stat failure is non-fatal; just don't update.
@@ -1361,15 +1364,15 @@ module Hive
         path = find_post_advance_state_file(project_entry["hive_state_path"], slug)
         return unless path && File.exist?(path)
 
+        state_file_mtime = File.mtime(path)
+        attempt_ended_at = Time.iso8601(attempt["ended_at"].to_s)
+        return if state_file_mtime > attempt_ended_at
+
         intended_stage = attempt["intended_stage"].to_s
         if state_file_in_different_stage?(path, intended_stage)
           @controller.forget_state_file_mtime(project: project, slug: slug)
           return
         end
-
-        state_file_mtime = File.mtime(path)
-        attempt_ended_at = Time.iso8601(attempt["ended_at"].to_s)
-        return if state_file_mtime > attempt_ended_at
 
         @controller.observe_state_file_mtime(
           project: project, slug: slug, mtime: state_file_mtime

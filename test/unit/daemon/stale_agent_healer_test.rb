@@ -183,6 +183,78 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_markerless_stall_enters_existing_recovery_on_next_heal_pass
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "2-fix",
+        workflow: "patrol-fix",
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      assert @healer.heal_markerless_stall(row)
+
+      marker = Hive::Markers.current(state_file)
+      error_row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "2-fix",
+        workflow: "patrol-fix",
+        marker: "error",
+        marker_attrs: marker.attrs,
+        action: "error",
+        live_task_lock: false
+      )
+      heal([ error_row ])
+
+      assert_equal 1, @coordinator.requests.size
+      assert_equal "agent_exited_without_terminal_marker",
+                   @coordinator.requests.first.fetch(:row).marker_attrs.fetch("reason")
+    end
+  end
+
+  def test_markerless_stall_is_not_healed_when_admission_is_closed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+      healer = build_healer(admission_open: -> { false })
+
+      refute healer.heal_markerless_stall(row)
+      assert_equal :none, Hive::Markers.current(state_file).name
+      assert_empty @logger.events
+    end
+  end
+
+  def test_markerless_stall_is_not_healed_while_controller_is_running_task
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+      healer = build_healer(
+        controller: FakeController.new(running_pairs: [ [ "p", "s" ] ])
+      )
+
+      refute healer.heal_markerless_stall(row)
+      assert_equal :none, Hive::Markers.current(state_file).name
+      assert_empty @logger.events
+    end
+  end
+
   def test_markerless_stall_heal_loses_to_live_or_newer_task_state
     with_marker_file do |state_file|
       File.write(state_file, "# task\n")
@@ -912,13 +984,15 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def build_healer(controller: @controller,
                    recovery_coordinator: @coordinator,
-                   project_daemon_enabled: ->(_project) { true })
+                   project_daemon_enabled: ->(_project) { true },
+                   admission_open: -> { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: controller,
       logger: @logger,
       grace_sec: 300,
       project_daemon_enabled: project_daemon_enabled,
-      recovery_coordinator: recovery_coordinator
+      recovery_coordinator: recovery_coordinator,
+      admission_open: admission_open
     )
   end
 

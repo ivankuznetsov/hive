@@ -311,6 +311,40 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
+  def test_projected_identity_materialization_is_delegated_to_the_resolver
+    with_tmp_dir do |root|
+      task = TaskStub.new(
+        folder: root, state_file: File.join(root, "task.md"), slug: "legacy-task",
+        id: 42, project_root: root
+      )
+      identity = {
+        "stage" => "execute", "provider" => "codex", "model" => "gpt-5.6-sol",
+        "profile_name" => "codex", "launcher_identity" => "codex-cli/v1",
+        "source" => "persisted_execute", "generation" => 2,
+        "originating_attempt" => "execute-2", "requested_effort" => "xhigh",
+        "effective_effort" => "xhigh", "effort_supported" => true,
+        "model_pinned" => true
+      }
+      projection = Struct.new(:value) do
+        def read = value
+      end.new({ "implementation_identity" => { "execute" => identity } })
+      sentinel = Object.new
+      resolver = Minitest::Mock.new
+      resolver.expect(:materialize_persisted, sentinel, [ identity ])
+      subject = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(root), attempt_store: Object.new,
+        projection_store: projection, resolver: resolver
+      )
+
+      selection = with_attempt_context(
+        attempt_id: "retry", task_generation: 2, ownership_generation: "owner-2"
+      ) { subject.reconstruct! }
+
+      assert_same sentinel, selection
+      resolver.verify
+    end
+  end
+
   private
 
   def described_class(task, store)

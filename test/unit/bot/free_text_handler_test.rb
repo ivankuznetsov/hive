@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/bot/handlers/free_text_handler"
+require "hive/bot/conversation_store"
 
 class HiveBotFreeTextHandlerTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
@@ -99,5 +100,24 @@ class HiveBotFreeTextHandlerTest < Minitest::Test
     assert_equal :reply, result.action,
                  "captionless media must not record a blank answer"
     assert_nil result.answer_text
+  end
+
+  # Regression: with the real store, opening a second answer conversation for
+  # the same chat must make the slug-less free-text lookup target the newest
+  # task, not whichever task was started first.
+  def test_second_answer_conversation_routes_free_text_to_newest_slug
+    real_store = Hive::Bot::ConversationStore.new(ttl_sec: 3600)
+    real_store.start(chat_id: 1, slug: "task-a", question_n: 1)
+    real_store.start(chat_id: 1, slug: "task-b", question_n: 2)
+    real_handler = Hive::Bot::Handlers::FreeTextHandler.new(
+      conversation_store: real_store, result_class: Result
+    )
+
+    result = real_handler.handle(LegacyUpdate.new(chat_id: 1, text: "the answer"))
+
+    assert_equal :write_answer_then_reply, result.action
+    assert_equal "task-b", result.slug,
+                 "a reply after opening task B must target task B, not the stale task A"
+    assert_equal 2, result.question_n
   end
 end

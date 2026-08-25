@@ -22,6 +22,7 @@ module Hive
       completion_ready unknown idle
     ].freeze
     RUNNING_ACTIONS = %w[agent_running].freeze
+    RUNNING_MARKERS = %w[agent_working review_working].freeze
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
@@ -416,12 +417,7 @@ module Hive
           "marker" => row.fetch("marker"),
           "allowed_outcomes" => Array(row["outcomes"])
         },
-        "liveness" => {
-          "status" => liveness_status(row),
-          "pid" => row["task_lock_pid"] || row["claude_pid"],
-          "attempt_id" => row["attempt_id"],
-          "task_generation" => row["task_generation"]
-        },
+        "liveness" => liveness_payload(row),
         "state" => state,
         "blocker_owner" => owner,
         "reason" => reasons.first.fetch("message"),
@@ -892,6 +888,9 @@ module Hive
     end
 
     def stale_liveness?(row)
+      return false unless RUNNING_ACTIONS.include?(row["action"]) ||
+                          RUNNING_MARKERS.include?(row["marker"])
+
       (row["claude_pid"] && row["claude_pid_alive"] == false) ||
         (row["task_lock_pid"] && row["live_task_lock"] == false)
     end
@@ -1043,6 +1042,17 @@ module Hive
       return "stale" if stale_liveness?(row)
 
       "not_running"
+    end
+
+    def liveness_payload(row)
+      status = liveness_status(row)
+      owned = status != "not_running"
+      {
+        "status" => status,
+        "pid" => owned ? row["task_lock_pid"] || row["claude_pid"] : nil,
+        "attempt_id" => owned ? row["attempt_id"] : nil,
+        "task_generation" => owned ? row["task_generation"] : nil
+      }
     end
 
     def archive_payload(archived)

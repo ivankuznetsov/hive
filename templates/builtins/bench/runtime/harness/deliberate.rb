@@ -43,7 +43,13 @@ module HiveBench
                  Rejudge.read_plan(info[:entry])
                end
         reference = withhold_reference ? nil : Rejudge.read_reference(info[:entry])
-        verdicts = delib.call(plan: plan, candidate_diff: diff, reference: reference)
+        verdicts = delib.call(
+          plan: plan,
+          candidate_diff: diff,
+          reference: reference,
+          task_id: cell["task_id"],
+          agent_id: cell["agent_id"]
+        )
         next if verdicts.empty?
 
         warn "  deliberated #{cell["agent_id"]} #{cell["task_id"]}: " +

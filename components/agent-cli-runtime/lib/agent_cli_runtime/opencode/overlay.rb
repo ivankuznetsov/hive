@@ -105,9 +105,6 @@ module AgentCliRuntime
           )
           executable =
             preparation.request.executable || profile.bin(env: env)
-          probe_env = env.to_h.merge(
-            "AGENT_CLI_RUNTIME_OPENCODE_BIN" => executable
-          )
           probe_request = ProbeRequest.new(
             profile: profile,
             route: requested_route,
@@ -119,9 +116,10 @@ module AgentCliRuntime
                 staged_credential.last, requested_route.provider
               ),
             configured_variants:
-              configured_variants(source_config, requested_route)
+              configured_variants(source_config, requested_route),
+            executable: executable
           )
-          probe_result = OpenCode::Probe.call!(probe_request, env: probe_env)
+          probe_result = OpenCode::Probe.call!(probe_request, env: env)
           invocation = compile_invocation(
             preparation, profile, requested_route, roots,
             executable:, pure: pure,

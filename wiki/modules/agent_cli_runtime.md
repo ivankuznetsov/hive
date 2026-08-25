@@ -78,7 +78,10 @@ shared with the component.
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
 flags, a selected authentication source, and an exact `provider/model` plus
 requested variant while remote model fetching and ambient project
-configuration are disabled. An exact route declared by the selected overlay is
+configuration are disabled. The probe accepts the caller's already-resolved
+executable on `ProbeRequest.executable` and otherwise falls back to declared
+environment overrides; either way it validates and reports exactly the
+executable the compiled invocation runs. An exact route declared by the selected overlay is
 authoritative and skips the large verbose CLI inventory; an undeclared route
 must still exist in that bounded local inventory. Generic `probe(profile)` and
 `prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary

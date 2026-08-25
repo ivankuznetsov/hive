@@ -68,6 +68,16 @@ sources:
 - JobStore discovery claims, checkpoints, cooldowns, and retirement remain the
   sole lifecycle authority.
 
+Merged-PR intake stores only repository paths, file statuses, and rename
+origins. GitHub patch bodies are neither an admission signal nor an immutable
+input: semantic classification uses merge metadata and the changed-path
+inventory, while discovery analyzes the exact pinned worktree. Older v3
+records that contain patch bodies remain readable, but new records omit them
+and no patch-size threshold can block cursor progress. Replay compares legacy
+and current snapshots after removing only the obsolete patch field; it does
+not rewrite or migrate the old record. True snapshot conflicts enter the
+normal reconciler backoff instead of hot-spinning one ingest index.
+
 Current state is split intentionally:
 
 ```text

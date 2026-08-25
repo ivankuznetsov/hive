@@ -83,7 +83,14 @@ artifacts are assembled and validated. The first OpenRouter-backed Sol
 deliberation also exposed that the pinned npm Codex entrypoint could see a mise
 Node shim but not its active runtime under Hive's narrow agent PATH; the
 harness now prepends that pinned entrypoint's own directory for the child only.
-A completed six-cell deliberation remains the live proof for that recovery.
+The next retry reached OpenRouter but inherited the operator's Codex profile,
+project instructions, and tool integrations, turning a one-shot scoring prompt
+into a large agent session before OpenRouter rejected the in-flight credit
+reservation. OpenRouter-backed Codex judges now run from a private temporary
+home and empty working directory with user config, rules, and session
+persistence disabled. A real Ox Alpha probe returned the requested score
+directly through this boundary; a completed six-cell Sol deliberation remains
+the live proof for the full recovery and provider capacity.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

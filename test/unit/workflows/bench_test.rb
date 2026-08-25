@@ -90,11 +90,15 @@ class WorkflowsBenchTest < Minitest::Test
     Dir.mktmpdir("hive-bench-codex-provider") do |root|
       argv_log = File.join(root, "argv.json")
       path_log = File.join(root, "path.txt")
+      codex_home_log = File.join(root, "codex-home.txt")
+      cwd_log = File.join(root, "cwd.txt")
       fake_codex = File.join(root, "codex")
       fake_codex_ruby = File.join(root, "codex.rb")
       File.write(fake_codex_ruby, <<~RUBY)
         require "json"
         File.write(ENV.fetch("ARGV_LOG"), JSON.generate(ARGV))
+        File.write(ENV.fetch("CODEX_HOME_LOG"), ENV.fetch("CODEX_HOME"))
+        File.write(ENV.fetch("CWD_LOG"), Dir.pwd)
         STDIN.read
         puts JSON.generate(score: 7.5, reason: "routed")
       RUBY
@@ -138,7 +142,10 @@ class WorkflowsBenchTest < Minitest::Test
       env = {
         "ARGV_LOG" => argv_log,
         "PATH_LOG" => path_log,
+        "CODEX_HOME_LOG" => codex_home_log,
+        "CWD_LOG" => cwd_log,
         "FAKE_CODEX_RUBY" => fake_codex_ruby,
+        "CODEX_HOME" => "/operator-profile-canary",
         "OPENROUTER_API_KEY" => "secret-canary"
       }
 
@@ -147,7 +154,16 @@ class WorkflowsBenchTest < Minitest::Test
       assert status.success?, err
       argv = JSON.parse(File.read(argv_log))
       assert_equal root, File.read(path_log).split(File::PATH_SEPARATOR).first
+      judge_codex_home = File.read(codex_home_log)
+      judge_cwd = File.read(cwd_log)
+      refute_equal "/operator-profile-canary", judge_codex_home
+      refute_equal root, judge_cwd
+      refute_path_exists judge_codex_home
+      refute_path_exists judge_cwd
       assert_equal "openai/gpt-5.6-sol", argv.fetch(argv.index("-m") + 1)
+      assert_includes argv, "--ephemeral"
+      assert_includes argv, "--ignore-user-config"
+      assert_includes argv, "--ignore-rules"
       assert_includes argv, 'model_provider="openrouter"'
       assert_includes argv, 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"'
       assert_includes argv, 'model_providers.openrouter.env_key="OPENROUTER_API_KEY"'

@@ -3,6 +3,8 @@
 require "open3"
 require "json"
 require "pathname"
+require "tmpdir"
+require "fileutils"
 require "lib/judge_output"
 require "lib/agent_limit"
 
@@ -51,6 +53,7 @@ module HiveBench
         end
 
         argv = [ "timeout", timeout_s.to_s, bin, "exec", "--skip-git-repo-check" ]
+        argv += [ "--ephemeral", "--ignore-user-config", "--ignore-rules" ] if provider == OPENROUTER_PROVIDER
         argv += [ "-m", provider == OPENROUTER_PROVIDER ? provider_model : model ] if model
         if provider == OPENROUTER_PROVIDER
           argv += [
@@ -71,11 +74,31 @@ module HiveBench
         # directory to this child only so it resolves its sibling runtime
         # without mutating the operator's global mise configuration.
         child_env = if Pathname.new(bin).absolute?
-                      { "PATH" => [ File.dirname(bin), ENV["PATH"] ].compact.join(File::PATH_SEPARATOR) }
-                    else
-                      {}
-                    end
-        out, err, status = Open3.capture3(child_env, *argv, stdin_data: prompt.to_s)
+          { "PATH" => [ File.dirname(bin), ENV["PATH"] ].compact.join(File::PATH_SEPARATOR) }
+        else
+          {}
+        end
+        out, err, status = if provider == OPENROUTER_PROVIDER
+          # OpenRouter authentication is supplied directly by
+          # environment, so this route does not need the
+          # operator's Codex home. A private home and empty
+          # working directory keep personal plugins, skills,
+          # MCP servers, memories, and project AGENTS.md out
+          # of what must be a one-shot scoring process.
+          Dir.mktmpdir("hive-bench-codex-judge") do |root|
+            codex_home = File.join(root, "codex-home")
+            workspace = File.join(root, "workspace")
+            FileUtils.mkdir_p([ codex_home, workspace ])
+            Open3.capture3(
+              child_env.merge("CODEX_HOME" => codex_home),
+              *argv,
+              stdin_data: prompt.to_s,
+              chdir: workspace
+            )
+          end
+        else
+          Open3.capture3(child_env, *argv, stdin_data: prompt.to_s)
+        end
         raise Error, "codex judge timed out after #{timeout_s}s" if status.exitstatus == 124
 
         unless status.success?

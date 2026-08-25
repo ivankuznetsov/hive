@@ -44,6 +44,7 @@ module Hive
       def build(source:, files:, lane: nil, classification: nil, provenance: nil,
                 identity: nil)
         version = classification ? SCHEMA_VERSION : LEGACY_SCHEMA_VERSION
+        files = path_inventory(files)
         payload = {
           "schema" => SCHEMA,
           "schema_version" => version,
@@ -60,6 +61,12 @@ module Hive
           payload["provenance"] = provenance
         end
         payload.merge("manifest_checksum" => checksum(payload))
+      end
+
+      def path_inventory(files)
+        files.map do |file|
+          file.slice("path", "status", "previous_path").compact
+        end
       end
 
       def job_id(source:, identity: nil)
@@ -102,9 +109,6 @@ module Hive
                files.all? { |file| valid_file?(file, version: version) } &&
                changed_paths == files.map { |file| file.fetch("path") } && changed_paths.uniq == changed_paths
           raise Invalid, "refactor patrol job manifest file scope is invalid"
-        end
-        if version == SCHEMA_VERSION && files.sum { |file| file.fetch("patch").bytesize } > 512 * 1024
-          raise Invalid, "refactor patrol job manifest patches exceed their aggregate bound"
         end
         validate_v3!(manifest) if version == SCHEMA_VERSION
 
@@ -152,11 +156,10 @@ module Hive
         allowed << "patch" if version == SCHEMA_VERSION
         return false unless (file.keys - allowed).empty?
         return false unless %w[path status].all? { |key| file.key?(key) }
-        return false if version == SCHEMA_VERSION && !file.key?("patch")
         return false unless FILE_STATUSES.include?(file["status"])
         return false if file.key?("patch") &&
-                        (!file["patch"].is_a?(String) || file["patch"].bytesize > 32 * 1024 ||
-                         !file["patch"].valid_encoding? || file["patch"].include?("\0"))
+                        (!file["patch"].is_a?(String) || !file["patch"].valid_encoding? ||
+                         file["patch"].include?("\0"))
 
         [ file["path"], file["previous_path"] ].compact.all? do |path|
           valid_relative_path?(path) &&

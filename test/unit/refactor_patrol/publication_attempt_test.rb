@@ -229,6 +229,47 @@ class RefactorPatrolPublicationAttemptTest < Minitest::Test
     )
   end
 
+  def test_phase_grammar_accessors_expose_the_single_operation_and_payload_mapping
+    assert_equal "push_branch", Publication.phase_operation("push_intent")
+    assert_equal "push_branch_complete", Publication.phase_operation("push_complete")
+    assert_equal "create_pr", Publication.phase_operation("pr_create_intent")
+    Publication::PHASES.each do |phase|
+      assert_includes Publication.phase_payload_keys(phase), "operation"
+      assert_empty Publication.phase_payload_keys(phase) - %w[
+        operation canonical_action_id repository branch commit_sha expected_remote_oid remote_oid
+      ]
+    end
+    assert_raises(KeyError) { Publication.phase_operation("unknown") }
+    assert_raises(KeyError) { Publication.phase_payload_keys("unknown") }
+  end
+
+  def test_well_ordered_applies_the_append_policy_to_stored_attempts
+    push_complete = { "operation" => "push_branch_complete" }
+    create_intent = { "operation" => "create_pr" }
+    assert Publication.well_ordered?({})
+    assert Publication.well_ordered?({ "push_intent" => phase_payload })
+    assert Publication.well_ordered?(
+      { "push_complete" => push_complete, "pr_create_intent" => create_intent }
+    )
+    assert Publication.well_ordered?(
+      {
+        "push_intent" => phase_payload,
+        "push_complete" => push_complete,
+        "pr_create_intent" => create_intent
+      }
+    )
+
+    refute Publication.well_ordered?(nil)
+    refute Publication.well_ordered?("invalid")
+    refute Publication.well_ordered?(
+      { "pr_create_intent" => create_intent, "push_intent" => phase_payload }
+    )
+    refute Publication.well_ordered?({ "pr_create_intent" => create_intent })
+    refute Publication.well_ordered?(
+      { "push_complete" => "junk", "pr_create_intent" => create_intent }
+    )
+  end
+
   def test_supersede_validates_evidence_attempt_and_descriptor
     [ [ "bad-id", DRIFTED_BASE ], [ attempt_id, "short" ], [ attempt_id, "z" * 40 ] ].each do |id, observed|
       assert_publication_error("publication supersession evidence is invalid") do

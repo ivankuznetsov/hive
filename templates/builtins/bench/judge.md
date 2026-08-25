@@ -75,9 +75,11 @@ require_bench_judge_runtime() {
   fi
 
   if ! ruby -I"$BENCH_ROOT/harness" -rrejudge -e '
-    exit(HiveBench::Rejudge::FAILURE_EVENT_VERSION == 1 ? 0 : 1)
+    supported = HiveBench::Rejudge::FAILURE_EVENT_VERSION == 1 &&
+                HiveBench::CodexJudge::PROVIDER_ROUTE_VERSION == 1
+    exit(supported ? 0 : 1)
   ' >/dev/null 2>&1; then
-    write_waiting "ERROR: the installed bench runtime at $BENCH_ROOT predates automatic judge retries. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
+    write_waiting "ERROR: the installed bench runtime at $BENCH_ROOT predates automatic judge retries or explicit Codex provider routing. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
     return 1
   fi
 }
@@ -122,11 +124,19 @@ ruby -ryaml -e '
   if enabled.key?("codex")
     effort = enabled.dig("codex", "reasoning_effort")
     abort("judges.codex.reasoning_effort must be a non-empty single-line string") unless effort.is_a?(String) && !effort.include?("\n") && !effort.strip.empty?
+    provider = enabled.fetch("codex").fetch("provider", "chatgpt").to_s
+    abort("judges.codex.provider must be chatgpt or openrouter") unless %w[chatgpt openrouter].include?(provider)
+    if provider == "openrouter"
+      provider_model = enabled.dig("codex", "provider_model")
+      unless provider_model.is_a?(String) && !provider_model.include?("\n") && !provider_model.strip.empty?
+        abort("judges.codex.provider_model must be a non-empty single-line string for provider openrouter")
+      end
+    end
   end
   puts id
   puts source
   puts seeds
-  puts enabled.key?("openrouter")
+  puts enabled.key?("openrouter") || enabled.dig("codex", "provider") == "openrouter"
 ' >.judge-campaign.out 2>.judge-campaign.err || {
   write_waiting "$(cat .judge-campaign.err .judge-campaign.out)"
   exit 0
@@ -152,7 +162,11 @@ ruby -ryaml -e '
   end
   if (codex = judges["codex"]).is_a?(Hash)
     args += ["--codex-judge", "--codex-judge-model", codex.fetch("model").to_s,
-             "--codex-judge-effort", codex.fetch("reasoning_effort").to_s]
+             "--codex-judge-effort", codex.fetch("reasoning_effort").to_s,
+             "--codex-judge-provider", codex.fetch("provider", "chatgpt").to_s]
+    if codex.fetch("provider", "chatgpt").to_s == "openrouter"
+      args += ["--codex-judge-provider-model", codex.fetch("provider_model").to_s]
+    end
   else
     args << "--no-codex-judge"
   end

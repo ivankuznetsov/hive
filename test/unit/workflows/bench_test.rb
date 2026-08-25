@@ -83,6 +83,114 @@ class WorkflowsBenchTest < Minitest::Test
     assert_path_exists File.join(runtime, "Dockerfile.runner")
   end
 
+  def test_codex_judge_can_route_the_pinned_model_through_openrouter
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    harness = File.join(runtime, "harness")
+
+    Dir.mktmpdir("hive-bench-codex-provider") do |root|
+      argv_log = File.join(root, "argv.json")
+      path_log = File.join(root, "path.txt")
+      fake_codex = File.join(root, "codex")
+      fake_codex_ruby = File.join(root, "codex.rb")
+      File.write(fake_codex_ruby, <<~RUBY)
+        require "json"
+        File.write(ENV.fetch("ARGV_LOG"), JSON.generate(ARGV))
+        STDIN.read
+        puts JSON.generate(score: 7.5, reason: "routed")
+      RUBY
+      File.write(fake_codex, <<~'SH')
+        #!/bin/sh
+        printf '%s' "$PATH" >"$PATH_LOG"
+        exec ruby "$FAKE_CODEX_RUBY" "$@"
+      SH
+      FileUtils.chmod(0o755, fake_codex)
+
+      script = <<~RUBY
+        $LOAD_PATH.unshift(#{harness.inspect})
+        require "lib/codex_judge"
+        judge = HiveBench::CodexJudge.judge_fn(
+          bin: #{fake_codex.inspect},
+          model: "gpt-5.6-sol",
+          effort: "ultra",
+          provider: "openrouter",
+          provider_model: "openai/gpt-5.6-sol"
+        )
+        verdict = judge.call(prompt: "judge this", seed: 1)
+        abort("wrong verdict") unless verdict[:score] == 7.5
+        require "lib/judge_provenance"
+        metadata = HiveBench::JudgeProvenance.metadata(
+          "gpt-5.6-sol",
+          efforts: { "gpt-5.6-sol" => "ultra" },
+          routes: {
+            "gpt-5.6-sol" => {
+              provider: "openrouter",
+              provider_model: "openai/gpt-5.6-sol"
+            }
+          }
+        )
+        abort("missing provider provenance") unless metadata == {
+          "reasoning_effort" => "ultra",
+          "reasoning_effort_explicit" => true,
+          "judge_provider" => "openrouter",
+          "judge_provider_model" => "openai/gpt-5.6-sol"
+        }
+      RUBY
+      env = {
+        "ARGV_LOG" => argv_log,
+        "PATH_LOG" => path_log,
+        "FAKE_CODEX_RUBY" => fake_codex_ruby,
+        "OPENROUTER_API_KEY" => "secret-canary"
+      }
+
+      _out, err, status = Open3.capture3(env, RbConfig.ruby, "-e", script)
+
+      assert status.success?, err
+      argv = JSON.parse(File.read(argv_log))
+      assert_equal root, File.read(path_log).split(File::PATH_SEPARATOR).first
+      assert_equal "openai/gpt-5.6-sol", argv.fetch(argv.index("-m") + 1)
+      assert_includes argv, 'model_provider="openrouter"'
+      assert_includes argv, 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"'
+      assert_includes argv, 'model_providers.openrouter.env_key="OPENROUTER_API_KEY"'
+      assert_includes argv, 'model_providers.openrouter.wire_api="responses"'
+      assert_includes argv, "model_providers.openrouter.requires_openai_auth=false"
+      assert_includes argv, "model_reasoning_effort=ultra"
+      refute argv.any? { |arg| arg.include?("secret-canary") }
+    end
+  end
+
+  def test_judge_stage_maps_codex_openrouter_campaign_fields_to_harness_arguments
+    instruction = File.read(stages_by_name.fetch("judge").instruction)
+    prefix = instruction.split("\n' >.judge-args.out", 2).first
+    args_script = prefix.rpartition("ruby -ryaml -e '\n").last
+    refute_empty args_script
+
+    Dir.mktmpdir("hive-bench-judge-route") do |root|
+      File.write(File.join(root, "campaign.yml"), <<~YAML)
+        judges:
+          claude:
+            model: claude-fable-5
+          codex:
+            model: gpt-5.6-sol
+            reasoning_effort: ultra
+            provider: openrouter
+            provider_model: openai/gpt-5.6-sol
+          openrouter:
+      YAML
+
+      out, err, status = Open3.capture3(RbConfig.ruby, "-ryaml", "-e", args_script, chdir: root)
+
+      assert status.success?, err
+      assert_equal [
+        "--claude-judge", "--judge-model", "claude-fable-5",
+        "--codex-judge", "--codex-judge-model", "gpt-5.6-sol",
+        "--codex-judge-effort", "ultra",
+        "--codex-judge-provider", "openrouter",
+        "--codex-judge-provider-model", "openai/gpt-5.6-sol",
+        "--no-openrouter-judge"
+      ], out.lines.map(&:chomp)
+    end
+  end
+
   def test_judge_runtime_guard_rejects_a_pre_retry_snapshot_with_refresh_guidance
     instruction = File.read(stages_by_name.fetch("judge").instruction)
     waiting = instruction.match(

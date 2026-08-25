@@ -1023,20 +1023,20 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
                  Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
   end
 
-  def test_prepared_pinned_plugin_is_ready_without_ambient_cache
+  def test_configured_native_plugin_is_ready_without_ambient_cache
     resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
       "/ce-plan",
       configuration: {
         "plugin" => [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
       },
       environment: {
-        "HOME" => "/prepared/home", "XDG_CACHE_HOME" => "/prepared/cache",
-        "XDG_DATA_HOME" => "/prepared/data", "XDG_CONFIG_HOME" => "/prepared/config"
+        "HOME" => "/native/home", "XDG_CACHE_HOME" => "/native/cache",
+        "XDG_DATA_HOME" => "/native/data", "XDG_CONFIG_HOME" => "/native/config"
       }
     )
 
     assert_equal :present, resolution.status
-    assert_match(/prepared pinned plugin/, resolution.message)
+    assert_match(/configured native plugin/, resolution.message)
   end
 
   def test_opencode_resolution_fails_closed_for_unowned_and_malformed_plugin_sources

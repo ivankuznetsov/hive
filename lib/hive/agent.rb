@@ -1,10 +1,8 @@
 require "fileutils"
 require "json"
 require "open3"
-require "securerandom"
 require "tempfile"
 require "time"
-require "tmpdir"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
@@ -31,6 +29,14 @@ module Hive
       :termination
     )
 
+    # Hive runs under its own bundle, while native agent launches inherit the
+    # operator's environment. Unset Hive's Ruby toolchain so a child `ruby`,
+    # `gem`, or `bundle` resolves against the task repository instead.
+    SCRUBBED_TOOLCHAIN_ENV_KEYS = %w[
+      RUBYOPT RUBYLIB GEM_HOME GEM_PATH
+      BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_VERSION BUNDLER_SETUP
+    ].freeze
+
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so
     # an operator's exported HIVE_SCREENOTE_BASE_URL can't become a
@@ -38,7 +44,8 @@ module Hive
     # base_url. Mirrors the tmux path's blanking in
     # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
     SCRUBBED_CHILD_ENV = {
-      "HIVE_SCREENOTE_BASE_URL" => nil
+      "HIVE_SCREENOTE_BASE_URL" => nil,
+      **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }
     }.freeze
     ISOLATED_CHILD_ENV_KEYS = %w[
       HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR
@@ -58,7 +65,6 @@ module Hive
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
                    launch_environment: {}, provider_route: nil, log_stream: true,
-                   invocation_root: nil,
                    permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
@@ -76,7 +82,6 @@ module Hive
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @provider_route = provider_route
       @launch_environment = (launch_environment || {}).dup.freeze
-      @invocation_root = invocation_root&.to_s
       @permission_policy = permission_policy
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze

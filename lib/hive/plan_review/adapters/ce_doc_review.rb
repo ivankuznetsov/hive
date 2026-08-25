@@ -77,11 +77,9 @@ module Hive
             }
           end
 
-          # Capability checks must use the same project-prepared profile as
-          # the launch below. In particular, OpenCode plugins live in
-          # agents.opencode.plugins and are projected into a hermetic overlay;
-          # probing the stock ambient profile falsely reports those skills as
-          # absent even though the subsequent launch would provide them.
+          # Capability checks must use the same project profile as the launch
+          # below. OpenCode uses native plugins plus any explicit project
+          # plugin selection, so the probe must resolve that effective setup.
           def capability_probe(agent:, invocation:, project_root:)
             profile = Hive::AgentProfiles.lookup(agent, cfg: @cfg)
             status, message = profile.verify_skill(invocation, project_root:)

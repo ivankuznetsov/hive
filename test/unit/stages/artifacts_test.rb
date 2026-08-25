@@ -1999,7 +1999,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_opencode_read_only_roles_use_the_typed_permission_overlay
+  def test_opencode_read_only_roles_use_the_typed_permission_document
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       worktree = File.join(dir, "worktree")

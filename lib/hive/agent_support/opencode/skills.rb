@@ -55,7 +55,7 @@ module Hive::AgentSupport::OpenCode::Skills
       configured = "configured:#{PINNED_COMPOUND_ENGINEERING_PLUGIN}"
       return resolution(
         :present, candidates, parse_errors, path: configured,
-        message: "opencode: /#{inv.name} is provided by the prepared pinned plugin"
+        message: "opencode: /#{inv.name} is provided by the configured native plugin"
       )
     end
 

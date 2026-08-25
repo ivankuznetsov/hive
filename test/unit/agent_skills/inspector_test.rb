@@ -513,7 +513,7 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
-  def test_opencode_prepared_pinned_plugin_is_an_expected_resolution
+  def test_opencode_configured_pinned_plugin_is_an_expected_resolution
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "opencode")
       executable(bin)

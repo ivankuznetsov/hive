@@ -3,19 +3,17 @@ require "json"
 module Hive::AgentSupport::OpenCode
   class Configuration < Data.define(
     :configuration_path, :configuration, :credential_environment_keys,
-    :credential_file, :plugins, :pure
+    :plugins
   )
     OVERRIDES = {
       "config_path" => :configuration_path,
       "config" => :configuration,
       "credential_env" => :credential_environment_keys,
-      "credential_file" => :credential_file,
       "plugins" => :plugins
     }.freeze
 
     def initialize(configuration_path: nil, configuration: nil,
-                   credential_environment_keys: [], credential_file: nil,
-                   plugins: [], pure: true)
+                   credential_environment_keys: [], plugins: [])
       if configuration_path && configuration
         raise ArgumentError,
               "choose configuration_path or configuration, not both"
@@ -25,9 +23,7 @@ module Hive::AgentSupport::OpenCode
         configuration_path: configuration_path&.to_s&.dup&.freeze,
         configuration:,
         credential_environment_keys: environment_keys(credential_environment_keys),
-        credential_file: credential_file&.to_s&.dup&.freeze,
-        plugins: plugin_names(plugins),
-        pure: pure != false
+        plugins: plugin_names(plugins)
       )
     end
 
@@ -35,17 +31,12 @@ module Hive::AgentSupport::OpenCode
       values = to_h
       overrides.each do |key, value|
         name = key.to_s
-        if name == "isolation"
-          unless value.to_s == "hermetic"
-            raise Hive::ConfigError, "agents.opencode.isolation must be hermetic"
-          end
-        elsif (attribute = OVERRIDES[name])
+        if (attribute = OVERRIDES[name])
           values[attribute] = value
         else
-          known = OVERRIDES.keys + [ "isolation" ]
           raise Hive::ConfigError,
                 "agents.opencode.#{key} is not a recognized override key " \
-                "(known: #{known.inspect})"
+                "(known: #{OVERRIDES.keys.inspect})"
         end
       end
       self.class.new(**values)
@@ -53,7 +44,7 @@ module Hive::AgentSupport::OpenCode
 
     def resolve_project_paths(overrides, root:)
       overrides.to_h do |key, value|
-        if %w[config_path credential_file].include?(key.to_s) &&
+        if key.to_s == "config_path" &&
            !value.to_s.empty? && !File.absolute_path?(value.to_s) && !root.empty?
           [ key, File.expand_path(value.to_s, root) ]
         else

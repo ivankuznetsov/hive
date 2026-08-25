@@ -5440,8 +5440,7 @@ class ConfigTest < Minitest::Test
           "agents" => {
             "opencode" => {
               "config_path" => "opencode.json",
-              "credential_env" => [ "ANTHROPIC_API_KEY" ],
-              "isolation" => "hermetic"
+              "credential_env" => [ "ANTHROPIC_API_KEY" ]
             }
           }
         )

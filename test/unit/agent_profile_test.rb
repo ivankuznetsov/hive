@@ -101,9 +101,7 @@ class AgentProfileTest < Minitest::Test
       name: :opencode,
       opencode_configuration: { "model" => "openai/gpt-5" },
       opencode_credential_environment_keys: %w[OPENAI_API_KEY],
-      opencode_credential_file: "/tmp/opencode-auth.json",
-      opencode_plugins: %w[compound-engineering],
-      opencode_pure: false
+      opencode_plugins: %w[compound-engineering]
     )
 
     assert_instance_of Hive::AgentSupport::OpenCode::Configuration,
@@ -111,9 +109,7 @@ class AgentProfileTest < Minitest::Test
     assert_nil profile.opencode_configuration_path
     assert_equal({ "model" => "openai/gpt-5" }, profile.opencode_configuration)
     assert_equal %w[OPENAI_API_KEY], profile.opencode_credential_environment_keys
-    assert_equal "/tmp/opencode-auth.json", profile.opencode_credential_file
     assert_equal %w[compound-engineering], profile.opencode_plugins
-    refute profile.opencode_pure
 
     path_profile = make_profile(
       name: :opencode,
@@ -184,7 +180,12 @@ class AgentProfileTest < Minitest::Test
     error = assert_raises(Hive::ConfigError) do
       profile.with_overrides("isolation" => "best-effort")
     end
-    assert_match(/must be hermetic/, error.message)
+    assert_match(/is not a recognized override key/, error.message)
+
+    error = assert_raises(Hive::ConfigError) do
+      profile.with_overrides("credential_file" => "/tmp/opencode-auth.json")
+    end
+    assert_match(/is not a recognized override key/, error.message)
   end
 
   def test_configuration_directory_metadata_is_optional_and_validated

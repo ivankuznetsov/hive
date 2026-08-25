@@ -72,9 +72,9 @@ contract.
 ### OpenCode process ownership
 
 `Hive::AgentSupport::OpenCode::Execution` decides the OpenCode command,
-private overlay, child environment, and run/export interpretation while using
+native child environment, and run/export interpretation while using
 `Hive::Agent`'s provider-neutral bounded-process primitive. Hive starts exactly
-one `opencode run` process with the prepared prompt on owner-private
+one `opencode run` process with the prompt on owner-private
 file-backed stdin, captures bounded stdout and stderr, and records timeout or
 cancellation before parsing.
 After a zero exit it may start one non-model `opencode export --sanitize`
@@ -92,16 +92,17 @@ under a pipe, large live exports could exit zero after writing only a valid
 prefix. A regular file makes the write synchronous, after which Hive reads at
 most the parser's four-MiB limit and deletes the data when inspection returns.
 The local probe still checks OpenCode's exact model inventory first. When a
-dynamic route is absent there but the selected, non-secret overlay config
+dynamic route is absent there but the selected, non-secret native config
 explicitly declares that exact provider/model and its variants, that declaration
 is sufficient route evidence. The requested variant must still be present; an
 undeclared route or variant remains a fail-closed preflight error.
 
-Cleanup runs from the process owner's `ensure` path after preparation, spawn,
-inspection, or normalization failures. Only the prepared invocation's owned
-paths are eligible for removal; worktrees, task folders, selected config, and
-credential sources remain caller-owned. The legacy Claude and Pi
-spawn path and mutable result shape are unchanged.
+The run and sanitized export use the same operator-owned OpenCode state. Hive
+does not redirect XDG homes, copy `auth.json`, disable project discovery, or
+create an OpenCode-specific cleanup tree. Explicit `credential_env` entries
+may restore selected provider variables; other ambient provider variables are
+scrubbed. The legacy provider spawn paths and mutable result shape are
+unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps

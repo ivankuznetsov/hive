@@ -22,7 +22,7 @@ module Hive
     TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
     LEGACY_OPEN_CODE_OPTIONS = %i[
       configuration_path configuration credential_environment_keys
-      credential_file plugins pure
+      plugins
     ].to_h { |attribute| [ :"opencode_#{attribute}", attribute ] }.freeze
     private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_OPEN_CODE_OPTIONS
     STATUS_DETECTION_MODES =

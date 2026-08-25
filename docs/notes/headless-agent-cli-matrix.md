@@ -14,8 +14,8 @@ then update any affected Hive policy here.
 > captured against `1.14.25` and remain historical. OpenCode `1.18.16` is the
 > supported contract for the first-class profile: `run` exposes exact
 > `provider/model`, `--variant`, `--format json`, `--dir`, and `--pure`;
-> `OPENCODE_DISABLE_PROJECT_CONFIG` plus redirected XDG/config/data/state homes
-> permit an invocation-owned overlay; `export <session> --sanitize` preserves
+> `OPENCODE_PERMISSION` supplies per-process permission rules while native
+> config/data/state remain available; `export <session> --sanitize` preserves
 > assistant `providerID`/`modelID` and usage while redacting transcript/path
 > material. Compound Engineering `3.21.4` also ships a native OpenCode plugin
 > that registers its skills directory and slash commands. Committed fixtures
@@ -43,15 +43,13 @@ stage context is supplied, the pre-routing argv path and order are unchanged.
 ## Current OpenCode contract
 
 The supported OpenCode profile is entirely opt-in and does not alter defaults,
-councils, or fallbacks. It consumes only an explicitly selected non-secret
-provider config and named credential source, redirects OpenCode-owned homes to
-an invocation-private root, disables ambient project/default discovery and
-remote model refresh, and compiles `read-only` or `workspace-write` into stable
-deny-first permission rules. `yolo`/implicit nil permissions fail closed.
+councils, or fallbacks. Hive uses native OpenCode config, plugins, project
+discovery, session state, and login. It compiles `read-only` or
+`workspace-write` into stable deny-first rules passed through
+`OPENCODE_PERMISSION`; `yolo`/implicit nil permissions fail closed.
 
-Offline readiness checks the executable, `1.18.16+` version, required run and
-sanitized-export flags, selected auth, cached exact route, and requested
-variant without sending a prompt. The caller owns the main process and the
+Readiness checks the executable and `1.18.16+` version without sending a
+prompt. The caller owns the main process and the
 post-success `export SESSION --sanitize` inspection. Strict normalization
 correlates one terminal assistant message, keeps requested and actual nested
 routes separate, preserves nil versus zero usage/cost, and classifies timeout,

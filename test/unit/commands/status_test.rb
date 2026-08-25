@@ -432,7 +432,7 @@ class CommandsStatusTest < Minitest::Test
       "agents" => {
         "opencode" => {
           "config_path" => "/tmp/opencode.json",
-          "credential_env" => [], "plugins" => [], "isolation" => "hermetic"
+          "credential_env" => [], "plugins" => []
         }
       },
       "execute" => { "agent" => "opencode", "model" => execute.fetch("model") },

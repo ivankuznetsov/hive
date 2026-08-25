@@ -151,7 +151,6 @@ class AgentProfilesTest < Minitest::Test
   def test_opencode_profile_is_opt_in_route_strict_and_uses_explicit_sources
     with_tmp_dir do |project|
       config_path = File.join(project, "opencode.json")
-      credential_path = File.join(project, "auth.json")
       File.write(
         config_path,
         JSON.generate(
@@ -159,7 +158,6 @@ class AgentProfilesTest < Minitest::Test
           "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
         )
       )
-      File.write(credential_path, "{}")
       cfg = {
         "project_root" => project,
         "agents" => {
@@ -169,9 +167,7 @@ class AgentProfilesTest < Minitest::Test
             "min_version" => "1.18.16",
             "config_path" => "opencode.json",
             "credential_env" => %w[ANTHROPIC_API_KEY],
-            "credential_file" => "auth.json",
-            "plugins" => [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ],
-            "isolation" => "hermetic"
+            "plugins" => [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
           }
         }
       }
@@ -180,12 +176,10 @@ class AgentProfilesTest < Minitest::Test
 
       settings = profile.support_configuration
       assert_equal config_path, settings.configuration_path
-      assert_equal credential_path, settings.credential_file
       assert_equal %w[ANTHROPIC_API_KEY],
                    settings.credential_environment_keys
       assert_equal [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ],
                    settings.plugins
-      assert settings.pure
       assert_equal "anthropic/claude-sonnet-4-5",
                    profile.concrete_default_model(cfg: cfg, project_root: project)
 

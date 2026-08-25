@@ -107,7 +107,7 @@ class AgentTest < Minitest::Test
       assert_equal policy.settings_path, cmd[cmd.index("--settings") + 1]
       assert_equal "", cmd[cmd.index("--setting-sources") + 1]
       expected_scrubbed = [
-        "HIVE_SCREENOTE_BASE_URL",
+        *Hive::Agent::SCRUBBED_CHILD_ENV.keys,
         *Hive::AgentProfiles.lookup(:claude).credential_environment_keys
       ]
       assert_equal policy.environment,
@@ -193,43 +193,39 @@ class AgentTest < Minitest::Test
     end
   end
 
-  def test_prepared_opencode_resolves_tool_manager_launcher_before_hermetic_spawn
+  def test_native_opencode_preserves_the_operator_selected_launcher
     with_tmp_dir do |dir|
       launcher_dir = File.join(dir, "launchers")
-      concrete_dir = File.join(dir, "concrete")
-      FileUtils.mkdir_p([ launcher_dir, concrete_dir ])
+      FileUtils.mkdir_p(launcher_dir)
       launcher = File.join(launcher_dir, "opencode")
-      concrete = File.join(concrete_dir, "opencode")
       File.write(launcher, <<~SH)
         #!/bin/sh
         printf '%s\n' 'tool-manager startup noise'
         exec mise x opencode -- opencode "$@"
       SH
-      File.write(concrete, "#!/bin/sh\nexit 0\n")
-      FileUtils.chmod(0o755, [ launcher, concrete ])
+      FileUtils.chmod(0o755, launcher)
 
-      captured = nil
       with_env(
-        "PATH" => [ launcher_dir, concrete_dir ].join(File::PATH_SEPARATOR),
+        "PATH" => launcher_dir,
         "HIVE_OPENCODE_BIN" => "opencode"
       ) do
         profile = Hive::AgentProfiles.lookup(:opencode)
+        launch_arguments = profile.identity_arguments(
+          model: "anthropic/claude-sonnet-4-5", effort: "high"
+        )
         agent = Hive::Agent.new(
           task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
-          timeout_sec: 5, profile: profile, status_mode: :exit_code_only
+          timeout_sec: 5, profile:, status_mode: :exit_code_only,
+          permission_mode: "read-only", launch_arguments:
         )
-        replacement = lambda do |request, **|
-          captured = request
-          :prepared
-        end
-        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, replacement) do
-          support = Hive::AgentSupport.for(profile)
-          agent.extend(support.const_get(:Execution, false))
-          agent.send(:prepare_invocation)
-        end
-      end
+        support = Hive::AgentSupport.for(profile)
+        agent.extend(support.const_get(:Execution, false))
+        launch = agent.send(:prepare_native_invocation)
 
-      assert_equal concrete, captured.request.executable
+        assert_equal "opencode", launch.invocation.argv.first
+        assert_equal "opencode", launch.executable
+        refute_includes launch.environment, "PATH"
+      end
     end
   end
 

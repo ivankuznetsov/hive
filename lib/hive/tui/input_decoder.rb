@@ -53,6 +53,14 @@ module Hive
       MAX_PASTE_BYTES = 1 << 20 # 1 MiB
       MAX_PENDING_BYTES = 4096
 
+      # Sentinel returned by the generic escape-sequence parsers when
+      # the buffer ends before the sequence is complete.
+      INCOMPLETE_SEQUENCE = :incomplete
+
+      # ECMA-48 CSI final-byte range (0x40–0x7E).
+      CSI_FINAL_MIN = 0x40
+      CSI_FINAL_MAX = 0x7e
+
       # If we entered paste mode but never saw `\e[201~` within this
       # window, give up on the bracket and force-flush whatever was
       # buffered as text. Protects against a partial paste swallowing
@@ -230,6 +238,32 @@ module Hive
 
         return false if escape_prefix?(@pending)
 
+        # Unmapped-but-well-formed terminal sequences (modified keys
+        # like `\e[1;5D` for Ctrl+Left, unlisted SS3 function keys like
+        # `\eOP`, Alt-chords like `\eb`) are atomic units: swallow the
+        # whole sequence instead of falling through to the lone-ESC
+        # path, which would split it into KEY_ESC + literal payload —
+        # e.g. leaking ESC that cancels :new_idea / :filter and a rune
+        # or "[1;5D" text chunk that dispatches grid actions.
+        if (length = csi_sequence_length(@pending))
+          return false if length == INCOMPLETE_SEQUENCE
+
+          consume(length)
+          return true
+        end
+
+        if (length = ss3_sequence_length(@pending))
+          return false if length == INCOMPLETE_SEQUENCE
+
+          consume(length)
+          return true
+        end
+
+        if alt_chord_length(@pending)
+          consume(2)
+          return true
+        end
+
         consume(1)
         messages << key_message(Bubbletea::KeyMessage::KEY_ESC)
         # Esc-then-Enter (rapid cancel gesture) sometimes lands as a
@@ -297,6 +331,60 @@ module Hive
         ([ PASTE_START, PASTE_END ] + SEQUENCES.keys).any? do |seq|
           seq.start_with?(bytes)
         end
+      end
+
+      # Generic grammar for sequences outside SEQUENCES, so unknown
+      # CSI sequences decode atomically instead of as ESC + literal
+      # bytes. ECMA-48 CSI: `ESC [` + parameter bytes (0x30–0x3F),
+      # then intermediate bytes (0x20–0x2F), then one final byte
+      # (0x40–0x7E). Returns byte length when complete,
+      # INCOMPLETE_SEQUENCE when the buffer ends mid-sequence (caller
+      # must keep waiting), nil when it isn't a CSI sequence.
+      def csi_sequence_length(bytes)
+        return nil unless bytes.getbyte(1) == 0x5b # "["
+
+        idx = 2
+        idx += 1 while idx < bytes.bytesize && param_byte?(bytes.getbyte(idx))
+        idx += 1 while idx < bytes.bytesize && intermediate_byte?(bytes.getbyte(idx))
+        return INCOMPLETE_SEQUENCE if idx == bytes.bytesize
+
+        final = bytes.getbyte(idx)
+        return nil unless final.between?(CSI_FINAL_MIN, CSI_FINAL_MAX)
+
+        idx + 1
+      end
+
+      # SS3 (`ESC O` + single final byte): application-mode function /
+      # keypad keys not covered by the table, e.g. `\eOP` for F1.
+      def ss3_sequence_length(bytes)
+        return nil unless bytes.getbyte(1) == 0x4f # "O"
+        return INCOMPLETE_SEQUENCE if bytes.bytesize < 3
+
+        final = bytes.getbyte(2)
+        return nil unless final.between?(CSI_FINAL_MIN, CSI_FINAL_MAX)
+
+        3
+      end
+
+      # Alt-modified key chord (`ESC` + one printable byte, e.g. `\eb`
+      # for Alt+b). Excludes `[` and `O` leaders (handled above) and
+      # control bytes so the ESC-then-Enter cancel gesture and ESC +
+      # C0 combos still route through the lone-ESC fallback below.
+      def alt_chord_length(bytes)
+        return nil if bytes.bytesize < 2
+
+        second = bytes.getbyte(1)
+        return nil if [ 0x5b, 0x4f ].include?(second)
+
+        2 if second.between?(0x20, 0x7e)
+      end
+
+      def param_byte?(byte)
+        byte.between?(0x30, 0x3f)
+      end
+
+      def intermediate_byte?(byte)
+        byte.between?(0x20, 0x2f)
       end
 
       def suffix_prefix_length(bytes, marker)

@@ -49,6 +49,12 @@ module HiveBench
           manual << "MISSING_CELL #{candidate} #{task}"
           next
         end
+        if campaign["require_successful_execution"] == true &&
+           !%w[generated empty_diff].include?(cell["run_status"])
+          manual << "INVALID_RUN_STATUS #{candidate} #{task} #{cell["run_status"]} " \
+                    "(campaign requires generated or empty_diff)"
+          next
+        end
         next if cell["run_status"] == "empty_diff"
 
         records = cell.fetch("judges", {})

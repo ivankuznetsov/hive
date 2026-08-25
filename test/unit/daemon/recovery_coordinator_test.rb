@@ -6,6 +6,9 @@ require "hive/daemon/recovery_coordinator"
 require "hive/daemon/dispatch_request_queue"
 require "hive/attempts/finalization_maintenance"
 require "hive/attempts/contracts"
+require "hive/attempts/command_progress"
+require "hive/patrol_fix/receipt_store"
+require "hive/workflows/patrol_fix"
 require "hive/provider_health/evidence"
 require "hive/provider_routing/candidate"
 require "hive/lock"
@@ -53,6 +56,41 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal File.realpath(folder), resolved.folder
       assert_equal "historical-task", resolved.slug
+    end
+  end
+
+  def test_default_recovery_generation_matches_patrol_fix_dispatch_generation
+    with_tmp_dir do |root|
+      state_file = File.join(root, "patrol-fix-manifest.json")
+      File.write(state_file, "{}\n")
+      task_type = Data.define(
+        :id, :slug, :folder, :state_file, :stage_index, :stage_name, :workflow
+      )
+      task = task_type.new(
+        id: 42, slug: "durable-task", folder: root, state_file: state_file,
+        stage_index: 1, stage_name: "inbox",
+        workflow: Hive::Workflows::PatrolFix::DESCRIPTOR
+      )
+      Hive::PatrolFix::ReceiptStore.new(task_folder: root).append!(
+        patrol_fix_decision_receipt(task.slug)
+      )
+      fallback = Hive::Attempts::Generation.artifact_token(task)
+      dispatch_progress = Hive::Attempts::CommandProgress.token_for(
+        argv: [ "hive", "run", task.slug ], task: task, fallback: fallback
+      )
+      dispatch_generation = Hive::Attempts::Generation.resolve(
+        task: task, project: "demo", intended_stage: "1-inbox",
+        progress_token: dispatch_progress
+      )
+
+      recovery_generation = Hive::Daemon::RecoveryCoordinator.allocate.send(
+        :resolve_generation,
+        task, project: "demo", intended_stage: "1-inbox",
+        state_file_content: File.binread(state_file)
+      )
+
+      assert_equal dispatch_generation.progress_token, recovery_generation.progress_token
+      assert_equal dispatch_generation.task_generation, recovery_generation.task_generation
     end
   end
 
@@ -354,6 +392,40 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_resume_reuses_the_scan_admission_context_for_every_generation_check
+    observed_contexts = []
+    resolver = lambda do |resolved_task, project:, intended_stage:, state_file_content:,
+                          admission_context: nil|
+      observed_contexts << admission_context
+      progress = Digest::SHA256.hexdigest(
+        [ resolved_task.state_file, state_file_content ].join("\0")
+      )
+      FakeGeneration.new(
+        progress_token: progress,
+        task_generation: Digest::SHA256.hexdigest(
+          [ project, intended_stage, progress ].join("\0")
+        )
+      )
+    end
+
+    with_fixture(generation_resolver: resolver) do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "web", request_id: "recover-context", now: NOW
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+      observed_contexts.clear
+      admission_context = Object.new
+
+      resumed = coordinator.resume(
+        request: request, row: row, admission_context: admission_context
+      )
+
+      assert_equal "cleared", resumed.phase
+      refute_empty observed_contexts
+      assert observed_contexts.all? { |context| context.equal?(admission_context) }
+    end
+  end
+
   def test_resume_matches_unicode_marker_attrs_after_json_round_trip
     attrs = {
       "reason" => "implementer_failed",
@@ -532,6 +604,21 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "admitted",
                    Q.fetch(request.request_id, state_home: state_home)
                      .recovery.fetch("phase")
+
+      # A safety block is not inert: the sweep must re-inspect the task
+      # instead of parking it, because an operator cleaning the credential
+      # out of the state file should free the retry without a manual nudge.
+      # Re-inspecting must still be write-idempotent while the reason holds.
+      blocked_path = Q.fetch(request.request_id, state_home: state_home).path
+      blocked_inode = File.stat(blocked_path).ino
+
+      replayed = coordinator.resume(request: request, row: row)
+
+      assert_equal "blocked", replayed.status
+      assert_equal "safety_blocked", replayed.reason
+      assert_equal "operator", replayed.owner
+      assert_equal blocked_inode, File.stat(blocked_path).ino,
+                   "an unchanged safety block must not rewrite the queue file"
     end
   end
 
@@ -1010,6 +1097,62 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       request,
       successful.send(:clear_resolved_block, request, request_locked: true)
     )
+  end
+
+  def test_resume_replays_inert_blocks_without_reopening_the_task
+    task_resolutions = 0
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      task_resolver: lambda do |**|
+        task_resolutions += 1
+        raise "inert recovery must not resolve its task"
+      end,
+      attempt_store: Object.new
+    )
+
+    Hive::Daemon::RecoveryCoordinator::INERT_BLOCK_REASONS.each do |reason|
+      request = request_for_helpers(
+        recovery: {
+          "phase" => "cleared",
+          "failure_origin" => "timeout",
+          "next_eligible_at" => (NOW - 60).iso8601(6),
+          "owner" => "operator",
+          "blocked_reason" => reason,
+          "blocked_remediation" => "refresh status"
+        }
+      )
+
+      receipt = coordinator.resume(request: request, row: Object.new, now: NOW)
+
+      assert_equal "blocked", receipt.status
+      assert_equal reason, receipt.reason
+    end
+    assert_equal 0, task_resolutions
+  end
+
+  def test_resume_replays_cooldown_without_reopening_the_task
+    task_resolutions = 0
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      task_resolver: lambda do |**|
+        task_resolutions += 1
+        raise "cooldown recovery must not resolve its task"
+      end,
+      attempt_store: Object.new
+    )
+    request = request_for_helpers(
+      recovery: {
+        "phase" => "cleared",
+        "failure_origin" => "timeout",
+        "next_eligible_at" => (NOW + 60).iso8601(6),
+        "owner" => "scheduler",
+        "blocked_reason" => nil,
+        "blocked_remediation" => nil
+      }
+    )
+
+    receipt = coordinator.resume(request: request, row: Object.new, now: NOW)
+
+    assert_equal "cooldown", receipt.status
+    assert_equal 0, task_resolutions
   end
 
   def test_post_clear_dispatch_failure_uses_the_shared_retry_ladder
@@ -1784,7 +1927,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
 
   def with_fixture(marker_attrs: nil, marker_name: "ERROR", mtime: NOW - 3600,
-                   safety: nil, task_resolver_builder: nil, task_id: 817)
+                   safety: nil, task_resolver_builder: nil, task_id: 817,
+                   generation_resolver: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       folder = File.join(dir, "task")
       FileUtils.mkdir_p(folder)
@@ -1812,7 +1956,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         state_home: dir,
         task_resolver: task_resolver,
         safety: safety || ->(_row) { [ true, "safe" ] },
-        generation_resolver: lambda do |resolved_task, project:, intended_stage:, state_file_content:|
+        generation_resolver: generation_resolver || lambda do |resolved_task, project:, intended_stage:, state_file_content:|
           progress = Digest::SHA256.hexdigest(
             [ resolved_task.state_file, state_file_content ].join("\0")
           )
@@ -1826,5 +1970,20 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       )
       yield coordinator, row, dir
     end
+  end
+
+  def patrol_fix_decision_receipt(slug)
+    {
+      "schema" => "hive-patrol-fix-receipt", "schema_version" => 1,
+      "receipt_id" => "decision-1", "kind" => "decision", "stage" => "inbox",
+      "task" => { "slug" => slug, "generation" => 1 },
+      "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 },
+      "recorded_at" => "2026-08-20T12:00:00Z",
+      "payload" => {
+        "route" => "fix", "rationale" => "The finding requires a bounded fix.",
+        "evidence" => [ "The focused reproduction still fails." ],
+        "blocker_owner" => "inbox_gate", "head_revision" => "b" * 40
+      }
+    }
   end
 end

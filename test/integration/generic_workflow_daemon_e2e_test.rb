@@ -117,7 +117,9 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
             )
             consumer = LiveStatusConsumer.new(
               fetch: lambda do
-                out, = capture_io { Hive::CLI.start([ "status", "--json" ]) }
+                out, = capture_io do
+                  Hive::CLI.start([ "status", "--internal-task-graph", "--json" ])
+                end
                 doc = JSON.parse(out)
                 mapper = Hive::Daemon::StatusConsumer.new
                 Hive::Daemon::StatusConsumer::Result.new(
@@ -208,7 +210,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
   end
 
   # Status consumer that recomputes rows from a live in-process
-  # `hive status --json` each fetch (via the injected lambda), reusing the
+  # the internal task graph each fetch (via the injected lambda), reusing the
   # real StatusConsumer's row/project mapping so the dispatcher sees on-disk
   # state every tick.
   class LiveStatusConsumer
@@ -290,7 +292,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
   end
 
   def status_row(slug)
-    out, = capture_io { Hive::CLI.start([ "status", "--json" ]) }
+    out, = capture_io { Hive::CLI.start([ "status", "--internal-task-graph", "--json" ]) }
     payload = JSON.parse(out)
     payload.fetch("projects").flat_map { |project| project.fetch("tasks") }.find { |task| task.fetch("slug") == slug } ||
       flunk("missing status row for #{slug}")

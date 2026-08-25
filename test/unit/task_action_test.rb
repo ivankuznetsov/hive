@@ -78,6 +78,21 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
+  def test_disabled_plan_review_ignores_a_stale_review_projection
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    action = Hive::TaskAction.for(
+      task, marker(:complete),
+      config: { "plan_review" => { "enabled" => false } },
+      plan_review: {
+        "state" => "blocked",
+        "freshness" => { "status" => "invalid" }
+      }
+    )
+
+    assert_equal "ready_to_develop", action.key
+    assert_equal "hive develop demo-260426-aaaa --from 3-plan", action.command
+  end
+
   def test_plan_waiting_label_is_distinct
     task = fake_task(stage_name: "plan", stage_index: 3)
     action = Hive::TaskAction.for(task, marker(:waiting))

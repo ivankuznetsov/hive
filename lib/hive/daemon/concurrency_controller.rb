@@ -98,7 +98,7 @@ module Hive
       # Predicate: can the daemon spawn a child for (project, slug) now?
       #
       # `external_*_count` is the dispatcher's per-tick snapshot of
-      # active agent rows already visible in `hive status --json` but not
+      # active agent rows already visible in the internal task graph but not
       # owned by this controller. That lets a daemon restart respect
       # work already in flight while keeping waiting rows (`needs_input`,
       # recovery states, etc.) out of the cap.
@@ -210,8 +210,9 @@ module Hive
       # `:record_baseline` on a first-sight `kind: edit` row, the
       # dispatcher seeds the controller with the current mtime so the
       # next tick has something to compare against; (b) when durable
-      # admission returns a successful terminal replay, the dispatcher
-      # records the generation's consumed mtime; (c) post-child-completion,
+      # admission accepts a run or returns a successful terminal replay, the
+      # dispatcher records the generation's consumed mtime; (c)
+      # post-child-completion,
       # the dispatcher refreshes the recorded mtime to the
       # current state-file mtime so the agent's own `_WAITING`-marker
       # write (which moves mtime past the at-dispatch value) doesn't

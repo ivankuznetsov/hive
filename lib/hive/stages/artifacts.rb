@@ -554,7 +554,7 @@ module Hive
            !(spec.is_a?(Hash) && spec["preset"].to_s == "read-only")
           raise Hive::ConfigError, "artifacts.evidence.#{role} permissions cannot exceed read-only"
         end
-        if role != "producer" && profile.name != :claude
+        if role != "producer" && !%i[claude opencode].include?(profile.name)
           if profile.read_only_supported?
             return { permission_mode: Hive::AgentProfile::READ_ONLY_PERMISSION_MODE }
           end

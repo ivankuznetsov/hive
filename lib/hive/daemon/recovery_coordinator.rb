@@ -4,6 +4,7 @@ require "shellwords"
 require "time"
 require "hive/agent_limit"
 require "hive/attempts/generation"
+require "hive/attempts/command_progress"
 require "hive/attempts/store"
 require "hive/daemon/auto_retry_safety"
 require "hive/daemon/dispatch_request_queue"
@@ -156,6 +157,9 @@ module Hive
       RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
       DETERMINISTIC_FAILURE_THRESHOLD = 3
       FAILURE_HISTORY_LIMIT = 64
+      INERT_BLOCK_REASONS = %w[
+        deterministic_failure generation_conflict task_identity_conflict
+      ].freeze
 
       # A deliberate human retry is not the automatic sweep. The cooldown
       # paces Hive's own retries; gating an operator on it leaves a task idle
@@ -606,11 +610,15 @@ module Hive
       # daemon immediately before ordinary attempt admission. It can recover a
       # crash after the marker rewrite because the expected markerless
       # fingerprint was persisted before mutation.
-      def resume(request:, row:, now: Time.now.utc)
+      def resume(request:, row:, now: Time.now.utc, admission_context: nil)
         now = now.utc
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
         return receipt_for_request(request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
+        return receipt_for_request(request, now: now) if
+          INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
+        return receipt_for_request(request, now: now) if
+          recovery["blocked_reason"].nil? && !recovery_due?(recovery, now: now)
 
         task = resolve_task_for(row)
         Hive::Lock.with_task_lock(task.folder, "operation" => "recovery_transition") do
@@ -621,7 +629,9 @@ module Hive
             recovery = current_request.recovery
             return receipt_for_request(current_request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
             return receipt_for_request(current_request, now: now) if
-              recovery["blocked_reason"] == "deterministic_failure"
+              INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
+            return receipt_for_request(current_request, now: now) if
+              recovery["blocked_reason"].nil? && !recovery_due?(recovery, now: now)
 
             locked_task = resolve_task_for(row)
             unless same_task_identity?(task, locked_task) &&
@@ -663,7 +673,9 @@ module Hive
               )
             end
 
-            generation = generation_for_current(locked_task, current_request)
+            generation = generation_for_current(
+              locked_task, current_request, admission_context: admission_context
+            )
             if recovery["phase"] == "admitted"
               if admission_failure_recovery?(recovery)
                 return block_request(
@@ -685,11 +697,11 @@ module Hive
                   expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
 
                 markerless = Hive::Markers.without_markers(File.binread(locked_task.state_file))
-                predicted = @generation_resolver.call(
-                  locked_task,
-                  project: current_request.project,
+                predicted = call_generation_resolver(
+                  locked_task, project: current_request.project,
                   intended_stage: current_request.expected_stage,
-                  state_file_content: markerless
+                  state_file_content: markerless,
+                  admission_context: admission_context
                 )
                 return block_request(
                   current_request, "generation_conflict",
@@ -705,7 +717,9 @@ module Hive
                   current_request, "generation_conflict",
                   owner: "operator", request_locked: true
                 ) unless cleared
-                generation = generation_for_current(locked_task, current_request)
+                generation = generation_for_current(
+                  locked_task, current_request, admission_context: admission_context
+                )
                 return block_request(
                   current_request, "generation_conflict",
                   owner: "operator", request_locked: true
@@ -1273,9 +1287,14 @@ module Hive
         Hive::TaskResolver.new(target, project_filter: project, stage_filter: stage).resolve
       end
 
-      def resolve_generation(task, project:, intended_stage:, state_file_content:)
+      def resolve_generation(task, project:, intended_stage:, state_file_content:,
+                             admission_context: nil)
         progress = Hive::Attempts::Generation.artifact_token(
-          task, state_file_content: state_file_content
+          task, state_file_content: state_file_content,
+          admission_context: admission_context
+        )
+        progress = Hive::Attempts::CommandProgress.task_token_for(
+          task: task, fallback: progress
         )
         Hive::Attempts::Generation.resolve(
           task: task,
@@ -1285,13 +1304,24 @@ module Hive
         )
       end
 
-      def generation_for_current(task, request)
-        @generation_resolver.call(
-          task,
-          project: request.project,
+      def generation_for_current(task, request, admission_context: nil)
+        call_generation_resolver(
+          task, project: request.project,
           intended_stage: request.expected_stage,
-          state_file_content: File.binread(task.state_file)
+          state_file_content: File.binread(task.state_file),
+          admission_context: admission_context
         )
+      end
+
+      def call_generation_resolver(task, project:, intended_stage:, state_file_content:,
+                                   admission_context: nil)
+        options = {
+          project: project,
+          intended_stage: intended_stage,
+          state_file_content: state_file_content
+        }
+        options[:admission_context] = admission_context if admission_context
+        @generation_resolver.call(task, **options)
       end
 
       def generation_matches?(generation, recovery)

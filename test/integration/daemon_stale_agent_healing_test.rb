@@ -67,12 +67,12 @@ class DaemonStaleAgentHealingTest < Minitest::Test
   end
 
   def status_rows_via_consumer(dir)
-    # Run the real `hive status --json` against the tmp project and
+    # Run the internal task-graph producer against the tmp project and
     # parse it the same way the dispatcher does. Goes through the
     # whole pipeline: Status command → TaskAction classification →
     # JSON envelope → StatusConsumer Row struct.
     out, _err = capture_io do
-      Hive::Commands::Status.new(json: true).call
+      Hive::Commands::Status.new(json: true, full: true).call
     rescue Hive::Error
       # status command exits non-zero when no tasks; that's fine here
     end
@@ -195,7 +195,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
                "status attrs must be a hash, got: #{target.marker_attrs.inspect}"
         assert_equal "unpushed_commits", target.marker_attrs["reason"]
         assert_equal stamped_id, target.marker_attrs["marker_id"].to_s,
-                     "status --json error-row attrs must carry the on-disk marker_id so the " \
+                     "internal status error-row attrs must carry the on-disk marker_id so the " \
                      "coordinator's generation guard keys off the real marker identity; " \
                      "attrs=#{target.marker_attrs.inspect}"
       end
@@ -208,7 +208,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     # memory, daemon healer on disk) must read the same value so they
     # classify rows with one threshold. This pins the
     # global-config → Status → TaskAction chain via the real
-    # `hive status --json` command.
+    # internal task-graph producer.
     with_seeded_task do |dir, _folder, state_file, slug|
       File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n\n<!-- AGENT_WORKING -->\n")
       # 90 seconds old: still inside the default 300s grace, but well
@@ -217,7 +217,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
       File.utime(mtime, mtime, state_file)
 
       # Without the override: row classifies as agent_running.
-      out, _err = capture_io { Hive::Commands::Status.new(json: true).call rescue Hive::Error }
+      out, _err = capture_io { Hive::Commands::Status.new(json: true, full: true).call rescue Hive::Error }
       row_default = JSON.parse(out)["projects"].flat_map { |p| p["tasks"] }.find { |t| t["slug"] == slug }
       assert_equal "agent_working", row_default["marker"]
       assert_equal "agent_running", row_default["action"],
@@ -235,7 +235,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
       Hive::Config.write_global_config!(existing)
 
       # New Status instance to bypass per-call memoization.
-      out2, _err2 = capture_io { Hive::Commands::Status.new(json: true).call rescue Hive::Error }
+      out2, _err2 = capture_io { Hive::Commands::Status.new(json: true, full: true).call rescue Hive::Error }
       row_overridden = JSON.parse(out2)["projects"].flat_map { |p| p["tasks"] }.find { |t| t["slug"] == slug }
       assert_equal "error", row_overridden["action"],
                    "with 60s grace, the same 90s-old placeholder must reclassify to error; " \

@@ -1,4 +1,6 @@
 require "open3"
+require "json"
+require "hive/atomic_file"
 require "hive/artifact_firewall"
 require "hive/stages/base"
 
@@ -27,9 +29,23 @@ module Hive
         fix = cfg.dig("patrol", "fix")
         fix = {} unless fix.is_a?(Hash)
         fix_agent = fix["agent"]
+        fixing = actor == "patrol_fix"
         profile = Hive::Stages::Base.stage_profile(
-          cfg, "patrol", explicit_agent: fix_agent
+          cfg, "patrol", explicit_agent: fixing ? fix_agent : nil
         )
+        model_actor = fixing ? "patrol_fix" : actor
+        model_current = if fixing
+          fix_model_routing_current(cfg, fix, fix_agent)
+        else
+          Hive::Stages::Base.model_routing_current(cfg["patrol"])
+        end
+        prompt = <<~PROMPT
+          #{prompt.rstrip}
+
+          After writing the required report, stop using tools.
+          Return that same JSON object as your complete final response.
+          Do not wrap it in Markdown or add prose.
+        PROMPT
         prompt, scope = if profile.name == :opencode
           [ prompt, opencode_scope(task, actor, cwd, add_dirs, output_path) ]
         else
@@ -48,7 +64,10 @@ module Hive
             root: task.folder, worktree_path: cwd,
             protected_task_paths: protected_task_paths,
             required_outputs: { output_label => output_path }
-          )
+          ),
+          before_validation: lambda { |result|
+            materialize_exact_final_json(result, output_path)
+          }
         )
         result = Hive::Stages::Base.spawn_agent(
           task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: cwd,
@@ -57,8 +76,7 @@ module Hive
           ),
           log_label: log_label, profile: profile,
           **Hive::Stages::Base.model_launch_arguments(
-            cfg, "patrol_fix", profile,
-            current: fix_model_routing_current(cfg, fix, fix_agent)
+            cfg, model_actor, profile, current: model_current
           ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
@@ -77,6 +95,20 @@ module Hive
           diagnostic: report&.diagnostic
         }
       end
+
+      def materialize_exact_final_json(result, output_path)
+        return unless result.is_a?(Hash) && result[:status] == :ok
+        return if result[:final_message_truncated] == true
+        return if File.exist?(output_path) || File.symlink?(output_path)
+
+        value = JSON.parse(result[:final_message].to_s)
+        return unless value.is_a?(Hash)
+
+        Hive::AtomicFile.write(output_path, JSON.generate(value) + "\n", mode: 0o600)
+      rescue JSON::ParserError
+        nil
+      end
+      private_class_method :materialize_exact_final_json
 
       def fix_model_routing_current(cfg, fix, fix_agent)
         patrol = Hive::Stages::Base.model_routing_current(cfg["patrol"])

@@ -565,6 +565,10 @@ module Hive
                               pass: pass)
             return { commit: "fix_status_check_failed_pass_#{format('%02d', pass)}",
                      status: :review_error }
+          when Hash
+            mark_pre_fix_clean_exit_failure(task, pre_fix_status, pass)
+            return { commit: "ensure_clean_on_exit_failed_pass_#{format('%02d', pass)}",
+                     status: :review_error }
           end
 
           # Protect orchestrator-owned files PLUS the current pass's
@@ -808,7 +812,7 @@ module Hive
         close_phase_event!(task) if @open_phase_event
       end
 
-      # Marker attr values are scanned by `hive status --json` and read by
+      # Marker attr values are scanned by the internal task graph and read by
       # the TUI; an unbounded multi-kilobyte tail in a single attr would
       # break the line-oriented marker format. 500 bytes is the same cap
       # `prepare_claude_session!` uses for its own tail capture.
@@ -1204,7 +1208,7 @@ module Hive
       # attribute. The reason attr carries the coarse closed-enum class; this
       # preserves the condensed cause (a tmux session death, an "expected
       # output missing" timeout, a CLI crash) so `status.md`,
-      # `hive status --json`, and the web diagnostic card show something
+      # the internal task graph, and the web diagnostic card show something
       # actionable even when the class falls back to `unknown`. nil/blank
       # collapses to no attr (Markers.set compacts nil values); multi-line /
       # quote / comment-marker content is sanitized downstream by
@@ -2531,13 +2535,20 @@ module Hive
         when :auto_committed
           emit_pre_fix_clean_exit_event(task, cleanup)
           worktree_status(worktree_path)
-        when :safety_violation, :git_failed
-          [ :status_failed, cleanup[:message].to_s ]
+        when :scope_violation, :safety_violation, :git_failed
+          cleanup
         else
           :dirty
         end
       rescue Hive::ConfigError => e
-        [ :status_failed, "invalid auto-commit config: #{e.message}" ]
+        { status: :git_failed, message: "invalid auto-commit config: #{e.message}" }
+      end
+
+      def mark_pre_fix_clean_exit_failure(task, result, pass)
+        attrs = Hive::Stages::CleanExit.failure_marker_attrs(
+          result, origin: :review_pre_fix, task_folder: task.folder
+        )
+        Hive::Markers.set(task.state_file, :error, **attrs.merge(phase: :fix, pass: pass))
       end
 
       def emit_pre_fix_clean_exit_event(task, result)

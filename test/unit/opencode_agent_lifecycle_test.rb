@@ -45,6 +45,65 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_tool_only_terminal_step_is_a_completed_run
+    with_fixture(mode: :tool_only) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "tool-only-260812-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-tool-only")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal "", result.fetch(:final_message)
+      assert result.fetch(:output_completed)
+    end
+  end
+
+  def test_sanitized_export_uses_a_regular_file_to_avoid_lost_stdout_tails
+    with_fixture(mode: :inspection_requires_regular_file) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-file-260821-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-file")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 1, calls.count { |line| line.start_with?("export ses_") }
+    end
+  end
+
+  def test_oversized_sanitized_export_is_rejected_with_a_bounded_diagnostic
+    with_fixture(mode: :oversized_export) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-oversized-260822-aaaa")
+      result = with_runtime_constant(
+        AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
+      ) do
+        with_agent_constant(:OPENCODE_EXPORT_CAPTURE_BYTES, 4096) do
+          with_agent_constant(:OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0) do
+            with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+              build_agent(
+                task, fixture,
+                invocation_root: File.join(fixture.fetch(:dir), "invocation-oversized")
+              ).run!
+            end
+          end
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :malformed_output, result.fetch(:normalized_outcome_kind)
+      assert_match(/sanitized export inspection stdout exceeded 4095 bytes/,
+                   result.fetch(:inspection_diagnostic))
+    end
+  end
+
   def test_implementation_sized_prompt_is_piped_without_crossing_exec_argument_limit
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "large-prompt-260812-aaaa")
@@ -97,6 +156,73 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         assert_equal export_count,
                      calls.count { |line| line.start_with?("export ses_") }, mode
       end
+    end
+  end
+
+  def test_structured_provider_rate_limit_writes_a_retryable_limit_marker
+    with_fixture(mode: :rate_limited) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "rate-limited-260824-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-rate-limited"),
+          profile_status: :state_file_marker
+        ).run!
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "limits_reached", result.fetch(:error_reason)
+      assert_equal :rate_limited, result.dig(:provider_error, :kind)
+      assert_includes result.fetch(:limit_text), "temporarily rate-limited upstream"
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      refute_nil marker.attrs["retry_after"]
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 0, calls.count { |line| line.start_with?("export ses_") }
+    end
+  end
+
+  def test_malformed_sanitized_export_is_retried_before_failing_the_run
+    with_fixture(mode: :inspection_malformed_once) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-retry-260821-aaaa")
+      result = with_agent_constant(
+        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture,
+            invocation_root: File.join(fixture.fetch(:dir), "invocation-retry")
+          ).run!
+        end
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal 2, calls.count { |line| line.start_with?("export ses_") }
+    end
+
+    with_fixture(mode: :inspection_malformed) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inspection-malformed-260821-aaaa")
+      result = with_agent_constant(
+        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      ) do
+        with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(
+            task, fixture,
+            invocation_root: File.join(fixture.fetch(:dir), "invocation-malformed")
+          ).run!
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :malformed_output, result.fetch(:normalized_outcome_kind)
+      assert_match(/remained malformed after 3 attempts/,
+                   result.fetch(:inspection_diagnostic))
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      assert_equal Hive::Agent::OPENCODE_INSPECTION_JSON_ATTEMPTS,
+                   calls.count { |line| line.start_with?("export ses_") }
     end
   end
 
@@ -303,17 +429,20 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       )
       joins = []
       killed = false
+      capture = { data: +"", truncated: false }
       thread = Object.new
       thread.define_singleton_method(:join) { |seconds| joins << seconds }
       thread.define_singleton_method(:alive?) { true }
       thread.define_singleton_method(:kill) { killed = true }
       io = StringIO.new
 
-      agent.send(:finish_capture_thread, thread, io)
+      agent.send(:finish_capture_thread, thread, io, capture: capture)
 
-      assert_equal [ 2, 0.2 ], joins
+      assert_equal [ Hive::Agent::OPENCODE_CAPTURE_DRAIN_SECONDS, 0.2 ], joins
       assert_predicate io, :closed?
       assert killed
+      assert capture.fetch(:truncated),
+             "a forced reader shutdown must invalidate the partial capture"
 
       rescue_killed = false
       failing_thread = Object.new
@@ -350,8 +479,10 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/sanitized export inspection failed/,
+      assert_match(/sanitized export inspection timed out after 0.05 seconds/,
                    result.fetch(:inspection_diagnostic))
+      assert_match(/sanitized export inspection timed out after 0.05 seconds/,
+                   result.fetch(:error_message))
     end
 
     with_fixture(mode: :inspection_empty_failure) do |fixture|
@@ -364,6 +495,57 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       end
       assert_match(/sanitized export inspection failed/,
                    result.fetch(:inspection_diagnostic))
+      assert_match(/sanitized export inspection failed/,
+                   result.fetch(:error_message))
+    end
+  end
+
+  def test_long_session_export_larger_than_the_old_four_megabyte_cap_completes
+    with_fixture(mode: :large_export) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "large-export-260822-aaaa")
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(
+          task, fixture,
+          invocation_root: File.join(fixture.fetch(:dir), "invocation-large-export")
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+    end
+  end
+
+  def test_export_inspection_caps_oversized_stdout_and_stderr
+    capture_limit = 4 * 1024
+    {
+      oversized_export: [ "stdout", "stderr" ],
+      oversized_export_stderr: [ "stderr", "stdout" ]
+    }.each do |mode, (oversized_stream, bounded_stream)|
+      with_fixture(mode:) do |fixture|
+        task = make_task(
+          fixture.fetch(:dir), slug: "#{mode.to_s.tr('_', '-')}-260824-aaaa"
+        )
+        result = with_agent_constant(
+          :OPENCODE_EXPORT_CAPTURE_BYTES, capture_limit
+        ) do
+          with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            build_agent(
+              task, fixture,
+              invocation_root: File.join(
+                fixture.fetch(:dir), "invocation-#{mode}"
+              )
+            ).run!
+          end
+        end
+
+        assert_equal :error, result.fetch(:status), mode
+        sizes = JSON.parse(File.read(fixture.fetch(:capture_sizes)))
+        assert_equal capture_limit, sizes.fetch(oversized_stream), mode
+        assert_operator sizes.fetch(bounded_stream), :<, capture_limit, mode
+        assert_match(/#{oversized_stream} exceeded #{capture_limit - 1} bytes/,
+                     result.fetch(:inspection_diagnostic), mode)
+      end
     end
   end
 
@@ -516,6 +698,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       calls = File.join(dir, "calls.log")
       stdin = File.join(dir, "stdin.log")
       environment = File.join(dir, "environment.json")
+      capture_sizes = File.join(dir, "capture-sizes.json")
       configuration = File.join(dir, "selected-config.json")
       selected_config = {
         "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
@@ -524,14 +707,18 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       File.write(configuration, JSON.generate(selected_config))
       bin = File.join(dir, "opencode")
       File.write(bin, fixture_script(
-        mode:, calls:, stdin:, environment:, source_root: dir
+        mode:, calls:, stdin:, environment:, capture_sizes:, source_root: dir
       ))
       File.chmod(0o755, bin)
-      yield({ dir:, work:, calls:, stdin:, environment:, configuration:, bin: })
+      yield({
+        dir:, work:, calls:, stdin:, environment:, capture_sizes:,
+        configuration:, bin:
+      })
     end
   end
 
-  def fixture_script(mode:, calls:, stdin:, environment:, source_root:)
+  def fixture_script(mode:, calls:, stdin:, environment:, capture_sizes:,
+                     source_root:)
     run_help = File.read(File.join(
       source_root_for_fixtures,
       "run-help.txt"
@@ -542,12 +729,31 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       mode == :malformed ? "run-malformed-json.jsonl" :
         (mode == :auth_failure ? "run-auth-error.jsonl" : "run-one-step.jsonl")
     ))
+    if mode == :rate_limited
+      run_output = JSON.generate(
+        "type" => "error",
+        "sessionID" => "ses_rate_limit",
+        "error" => {
+          "name" => "APIError",
+          "data" => {
+            "message" => "[Stealth] stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly."
+          }
+        }
+      ) + "\n"
+    end
+    run_output = run_output.sub('"text":"Done."', '"text":""') if mode == :tool_only
     export_output = File.read(File.join(
       source_root_for_fixtures, "session-export-matching.json"
     ))
     <<~RUBY
       #!/usr/bin/ruby --disable-gems
       require "json"
+      def record_capture_sizes(path)
+        File.write(path, JSON.generate({
+          "stdout" => STDOUT.stat.size, "stderr" => STDERR.stat.size
+        }))
+      end
+
       File.open(#{calls.dump}, "a") { |file| file.puts(ARGV.join(" ")) }
       case ARGV
       when ["--version"]
@@ -579,7 +785,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           sleep 10 if #{%i[timeout cancelled].include?(mode)}
           print #{run_output.dump}
           warn "authentication failed" if #{mode == :auth_failure}
-          exit(#{mode == :auth_failure ? 1 : 0})
+          exit(#{%i[auth_failure rate_limited].include?(mode) ? 1 : 0})
         elsif ARGV.first == "export"
           sleep 10 if #{mode == :inspection_timeout}
           exit 1 if #{mode == :inspection_empty_failure}
@@ -587,7 +793,48 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             warn "export unavailable"
             exit 1
           end
-          print #{export_output.dump}
+          if #{mode == :inspection_requires_regular_file} &&
+             !STDOUT.stat.file?
+            print #{export_output.byteslice(0, export_output.bytesize / 2).dump}
+            exit 0
+          end
+          export_calls = File.readlines(#{calls.dump}).count do |line|
+            line.start_with?("export ses_")
+          end
+          if #{mode == :inspection_malformed} ||
+             (#{mode == :inspection_malformed_once} && export_calls == 1)
+            print #{export_output.byteslice(0, export_output.bytesize / 2).dump}
+            exit 0
+          end
+          if #{mode == :large_export}
+            export = JSON.parse(#{export_output.dump})
+            export["bounded_test_padding"] = "x" * (5 * 1024 * 1024)
+            print JSON.generate(export)
+          elsif #{mode == :oversized_export}
+            Signal.trap("XFSZ", "IGNORE") if Signal.list.key?("XFSZ")
+            export = JSON.parse(#{export_output.dump})
+            export["bounded_test_padding"] = "x" * (8 * 1024)
+            begin
+              print JSON.generate(export)
+            rescue Errno::EFBIG
+              nil
+            end
+            STDOUT.flush
+            record_capture_sizes(#{capture_sizes.dump})
+          elsif #{mode == :oversized_export_stderr}
+            Signal.trap("XFSZ", "IGNORE") if Signal.list.key?("XFSZ")
+            begin
+              STDERR.write("x" * (8 * 1024))
+            rescue Errno::EFBIG
+              nil
+            end
+            print #{export_output.dump}
+            STDOUT.flush
+            STDERR.flush
+            record_capture_sizes(#{capture_sizes.dump})
+          else
+            print #{export_output.dump}
+          end
         else
           warn "unexpected argv: #{ARGV.inspect}"
           exit 64
@@ -604,13 +851,16 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   end
 
   def with_agent_constant(name, replacement)
-    original = Hive::Agent.const_get(name)
-    Hive::Agent.send(:remove_const, name)
-    Hive::Agent.const_set(name, replacement)
+    with_runtime_constant(Hive::Agent, name, replacement) { yield }
+  end
+
+  def with_runtime_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
     yield
   ensure
-    Hive::Agent.send(:remove_const, name) if
-      Hive::Agent.const_defined?(name, false)
-    Hive::Agent.const_set(name, original)
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
   end
 end

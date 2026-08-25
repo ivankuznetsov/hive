@@ -388,7 +388,7 @@ module Hive
         "max_wall_clock_sec" => 28_800
       },
       # Hive daemon settings (ADR-024). The daemon polls
-      # `hive status --json`, dispatches workflow verbs on tasks the
+      # Hive's internal task graph, dispatches workflow verbs on tasks the
       # classifier marks safe, and stops only at human-input gates.
       #
       # Per-project `daemon.enabled` is rendered into a project's
@@ -1188,7 +1188,7 @@ module Hive
     # Surface a misconfigured HIVE_HOME loudly on READ paths only.
     # When ENV["HIVE_HOME"] is explicitly set to a path that doesn't exist
     # (e.g., a user typo), `registered_projects` returning [] silently hid
-    # the typo and made `hive status --json | jq .ok` falsely report `true`
+    # the typo and made the internal task graph falsely report `ok: true`
     # under nonexistent-HIVE_HOME smoke runs. Fire only when explicitly set
     # AND missing — leave the default unset path lazy-creatable by
     # `register_project` (which does its own mkdir_p), and accept the
@@ -2069,6 +2069,7 @@ module Hive
       "routes" => %w[primary adversarial verification fallbacks]
     }.freeze
     PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
+    PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV = "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"
     PLAN_REVIEW_NAME = /\A[a-z][a-z0-9_]{0,63}\z/
     PLAN_REVIEW_POLICY_KEYS = %w[
       id version action risk paths valid_from valid_until revoked
@@ -2077,7 +2078,9 @@ module Hive
     def validate_plan_review!(cfg, source_path)
       review = cfg.fetch("plan_review")
       validate_closed_mapping!(review, PLAN_REVIEW_KEYS, "plan_review", source_path)
-      unless review["enabled"] == true
+      benchmark_opt_out = review["enabled"] == false &&
+        ENV[PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV] == "1"
+      unless review["enabled"] == true || benchmark_opt_out
         raise ConfigError,
               "plan_review.enabled in #{describe_source(source_path)} must be true; " \
               "built-in coding review cannot be disabled"

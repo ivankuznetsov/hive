@@ -133,8 +133,8 @@ module Hive
         new.read(task, project: project, quarantine: quarantine)
       end
 
-      def projection(task, project: nil)
-        service = new
+      def projection(task, project: nil, attempt_store: nil)
+        service = new(attempt_store: attempt_store)
         result = service.read(task, project: project)
         return nil if result.absent?
         return result.receipt if result.valid?
@@ -193,7 +193,8 @@ module Hive
         )
       end
 
-      def task_generation(task, marker: Hive::Markers.current(task.state_file))
+      def task_generation(task, marker: Hive::Markers.current(task.state_file),
+                          attempt_store: nil)
         markerless = if File.file?(task.state_file)
           Hive::Markers.without_markers(File.binread(task.state_file))
         else
@@ -202,9 +203,9 @@ module Hive
         meta = File.file?(task.meta_yml_path) ? File.binread(task.meta_yml_path) : ""
         pr_path = File.join(task.folder, "pr.md")
         pr_identity = File.file?(pr_path) ? File.binread(pr_path) : ""
-        projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(
-          marker: marker
-        )
+        store_options = { task_folder: task.folder }
+        store_options[:attempt_store] = attempt_store if attempt_store
+        projection = Hive::TaskProjection::Store.new(**store_options).read(marker: marker)
         digest(
           "slug" => task.slug,
           "id" => task.id&.to_s,
@@ -241,12 +242,14 @@ module Hive
         end.first
       end
 
-      def validate_active_cas!(task, receipt)
+      def validate_active_cas!(task, receipt, attempt_store: nil)
         observation = receipt.fetch("observation")
         current_stage = "#{task.stage_index}-#{task.stage_name}"
         marker = Hive::Markers.current(task.state_file)
         unless observation.fetch("stage") == current_stage &&
-               observation.fetch("task_generation") == task_generation(task, marker: marker) &&
+               observation.fetch("task_generation") == task_generation(
+                 task, marker: marker, attempt_store: attempt_store
+               ) &&
                observation.fetch("marker_generation") == marker_generation(marker)
           raise InvalidReceipt, "closure receipt no longer matches the active task generation"
         end
@@ -911,7 +914,9 @@ module Hive
         "folder" => task.folder,
         "stage" => "#{task.stage_index}-#{task.stage_name}",
         "marker" => marker.name.to_s,
-        "task_generation" => self.class.task_generation(task, marker: marker),
+        "task_generation" => self.class.task_generation(
+          task, marker: marker, attempt_store: @attempt_store
+        ),
         "marker_generation" => self.class.marker_generation(marker)
       }
     end
@@ -1022,7 +1027,9 @@ module Hive
         raise InvalidReceipt, "closure evidence digest does not match"
       end
       validate_receipt_semantics!(receipt)
-      self.class.validate_active_cas!(task, receipt) unless self.class.terminal_task?(task)
+      unless self.class.terminal_task?(task)
+        self.class.validate_active_cas!(task, receipt, attempt_store: @attempt_store)
+      end
       receipt
     end
 
@@ -1174,7 +1181,7 @@ module Hive
       end
 
       unless self.class.terminal_task?(task)
-        self.class.validate_active_cas!(task, receipt)
+        self.class.validate_active_cas!(task, receipt, attempt_store: @attempt_store)
         delivered_heads = receipt.fetch("evidence").filter_map do |item|
           item["head_oid"] if item["kind"] == "pull_request" &&
                               item["same_repository"] == true
@@ -1236,7 +1243,7 @@ module Hive
     end
 
     def validate_final_transition!(task, project, receipt)
-      self.class.validate_active_cas!(task, receipt)
+      self.class.validate_active_cas!(task, receipt, attempt_store: @attempt_store)
 
       repository_errors = []
       live_repository = resolve_task_repository(task, project, repository_errors)
@@ -1435,10 +1442,7 @@ module Hive
     end
 
     def default_attempt_store
-      root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-      return Hive::Attempts::Store.new(create_directories: false) if root.empty?
-
-      Hive::Attempts::Store.new(root: root, create_directories: false)
+      Hive::Attempts::Store.runtime(create_directories: false)
     end
   end
 end

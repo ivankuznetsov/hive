@@ -39,7 +39,7 @@ Preserve the task folder, worktree, attempt records, queue entries, locks, marke
   `hive worktree commit-residue SLUG --json` or
   `hive worktree discard-residue SLUG --paths PATH [PATH ...] --json`.
   These commands are marker-gated, task-locked, and preserve the marker. After
-  the repair, refresh `hive status --json` and invoke only the fresh
+  the repair, refresh `hive status --operational --json` and invoke only the fresh
   generation-guarded `workflow.retry` action it emits.
 - If the daemon is not running and background automation is expected,
   `hive daemon start --detach` is the normal start form.
@@ -64,7 +64,8 @@ Keep these commonly confused cases separate:
   present in the local PR source; open-PR/finalize re-entry also scans the
   current remote body before any new publication.
 
-Use `hive status --json` only when detailed compatibility evidence such as marker attributes is needed. Prefer the operational contract for owner and reason classification.
+Use `hive task TARGET --project PROJECT --json` for one task's detailed
+evidence. Use the operational contract for owner and reason classification.
 
 ## Use the native recovery action
 

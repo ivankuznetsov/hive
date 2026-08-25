@@ -580,7 +580,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
   # rather than the controller — see dispatch_baselines_test.rb's
   # test_write_catches_unexpected_error_and_logs_typed_event for the contract pin.
 
-  # `hive status --json` skips projects with `error: not_initialised` (NFS
+  # The internal task graph skips projects with `error: not_initialised` (NFS
   # hiccup, project being re-bootstrapped, transient race with `hive forget`)
   # — so their tasks disappear from `result.rows` even though the overall
   # fetch is still ok. Without a per-project scope guard the prune would

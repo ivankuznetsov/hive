@@ -61,6 +61,17 @@ module Hive
         replay(journal_binding(bytes), marker: marker)
       end
 
+      # Status may consume an exact, unchanged bounded checkpoint. Any
+      # append, partial result, or unverifiable cache falls back to #read.
+      def read_cached(marker: nil, limits: Hive::TaskWorkspace::Limits.new)
+        bounded = read_bounded(marker: marker, limits: limits)
+        projection = bounded.projection
+        journal_hash = projection && projection["journal"]["hash"]
+        return projection if bounded.state == "current" && journal_hash
+
+        read(marker: marker)
+      end
+
       def rebuild!(marker: nil)
         snapshot = read_snapshot
         bytes = journal_bytes
@@ -191,7 +202,8 @@ module Hive
       def read_from_checkpoint(checkpoint, marker:, suffix_limit:, event_limit:)
         journal = checkpoint.fetch("journal")
         cursor = Integer(journal.fetch("cursor"))
-        base_projection = Hive::TaskProjection.from_data(checkpoint.fetch("snapshot"))
+        snapshot = checkpoint.fetch("snapshot")
+        base_projection = Hive::TaskProjection.from_data(snapshot)
         return degraded_from_projection(
           base_projection, reason: "checkpoint_prefix_changed", state: "stale", cursor: cursor
         ) unless checkpoint_prefix_valid?(journal, cursor)
@@ -213,7 +225,9 @@ module Hive
             cursor: cursor
           )
         end
-        if suffix.empty?
+        attempts = refreshed_attempt_bindings(snapshot)
+        raise Hive::TaskProjection::InvalidJournal, "checkpoint attempt bindings are unavailable" unless attempts
+        if suffix.empty? && attempts == snapshot.dig("journal", "attempts")
           projection = marker ? base_projection.with_marker(marker) : base_projection
           return BoundedRead.new(
             projection: projection, state: "current", diagnostics: [],
@@ -232,8 +246,14 @@ module Hive
           )
         end
 
-        replayed = Hive::TaskProjection.replay_journal(suffix, attempt_store: @attempt_store)
-        records = checkpoint_seed_records(base_projection) + replayed.records
+        replayed_records = if suffix.empty?
+          []
+        else
+          Hive::TaskProjection.replay_journal(
+            suffix, attempt_store: @attempt_store
+          ).records
+        end
+        records = checkpoint_seed_records(base_projection, attempts: attempts) + replayed_records
         projection = @projector.project(
           records: records,
           cursor: current_size,
@@ -243,16 +263,18 @@ module Hive
           marker: marker
         )
         projection_data = projection.to_h
+        projection_data["journal"]["event_id"] = snapshot.dig("journal", "event_id") if
+          suffix.empty?
         projection_data["provenance"]["authoritative_event_count"] =
           base_projection.to_h.dig("provenance", "authoritative_event_count").to_i +
-          replayed.records.length
+          replayed_records.length
         projection_data["provenance"]["legacy_event_count"] =
           base_projection.to_h.dig("provenance", "legacy_event_count").to_i
         projection = Hive::TaskProjection.from_data(projection_data)
         BoundedRead.new(
           projection: projection, state: "current", diagnostics: [],
           truncated: false, journal_cursor: current_size,
-          journal_records: replayed.records.map do |record|
+          journal_records: replayed_records.map do |record|
             record.reject { |key, _| key.to_s.start_with?("__") }
           end
         )
@@ -318,6 +340,12 @@ module Hive
             stat.dev == path_stat.dev && stat.ino == path_stat.ino
           return false unless journal["device"].nil? || stat.dev == journal["device"]
           return false unless journal["inode"].nil? || stat.ino == journal["inode"]
+          if stat.size == cursor
+            checkpoint_stat = File.lstat(checkpoint_path)
+            return false unless checkpoint_stat.file? && !checkpoint_stat.symlink?
+            return false unless stat.mtime <= checkpoint_stat.mtime
+            return false unless stat.ctime <= checkpoint_stat.ctime
+          end
 
           head = io.pread([ cursor, CHECKPOINT_ANCHOR_BYTES ].min, 0).to_s
           tail_offset = [ cursor - CHECKPOINT_ANCHOR_BYTES, 0 ].max
@@ -329,9 +357,9 @@ module Hive
         false
       end
 
-      def checkpoint_seed_records(projection)
+      def checkpoint_seed_records(projection, attempts: nil)
         data = projection.to_h
-        attempts = Array(data.dig("journal", "attempts"))
+        attempts ||= Array(data.dig("journal", "attempts"))
         task = data["task"]
         conditions = (Array(data.dig("conditions", "current")) +
                       Array(data.dig("conditions", "history"))).sort_by do |fact|
@@ -584,26 +612,48 @@ module Hive
         bindings = snapshot.dig("journal", "attempts")
         return false unless bindings.is_a?(Array)
 
-        bindings.all? do |binding|
-          next false unless binding.is_a?(Hash) && @attempt_store
+        refreshed = refreshed_attempt_bindings(snapshot)
+        refreshed && bindings.zip(refreshed).all? do |expected, current|
+          expected.values_at("state", "outcome", "lease_version") ==
+            current.values_at("state", "outcome", "lease_version")
+        end
+      end
+
+      def refreshed_attempt_bindings(snapshot)
+        bindings = snapshot.dig("journal", "attempts")
+        return nil unless bindings.is_a?(Array)
+        return [] if bindings.empty?
+        return nil unless @attempt_store
+
+        bindings.map do |binding|
+          return nil unless binding.is_a?(Hash)
+          next binding if Hive::Attempts::Record::FINAL_STATES.include?(binding["state"])
 
           attempt = fetch_attempt_binding(binding["attempt_id"])
-          task = binding["task"]
-          attempt && task.is_a?(Hash) &&
-            attempt["task_slug"] == task["slug"] &&
-            (task["id"].nil? || attempt["task_id"].to_s == task["id"].to_s) &&
-            attempt["intended_stage"] == binding["stage"] &&
-            attempt_value(attempt, :task_input_epoch) == binding["task_generation"] &&
-            attempt_value(attempt, :state) == binding["state"] &&
-            attempt_value(attempt, :outcome) == binding["outcome"] &&
-            attempt_value(attempt, :lease_version) == binding["lease_version"] &&
-            attempt["accepted_at"] == binding["accepted_at"] &&
-            attempt["predecessor_attempt_id"] == binding["predecessor_attempt_id"] &&
-            (binding["ownership_generation"].nil? ||
-             attempt_value(attempt, :ownership_generation) == binding["ownership_generation"])
+          return nil unless attempt
+
+          current = Hive::TaskProjection.durable_attempt_metadata(attempt)
+          return nil unless same_attempt_identity?(binding, current)
+
+          current
         end
       rescue Hive::Error, SystemCallError, IOError
-        false
+        nil
+      end
+
+      def same_attempt_identity?(expected, current)
+        expected_task = expected["task"]
+        current_task = current["task"]
+        expected_task.is_a?(Hash) && current_task.is_a?(Hash) &&
+          expected["attempt_id"] == current["attempt_id"] &&
+          expected_task["slug"] == current_task["slug"] &&
+          (expected_task["id"].nil? || expected_task["id"].to_s == current_task["id"].to_s) &&
+          expected["stage"] == current["stage"] &&
+          expected["task_generation"] == current["task_generation"] &&
+          (expected["ownership_generation"].nil? ||
+           expected["ownership_generation"] == current["ownership_generation"]) &&
+          expected["accepted_at"] == current["accepted_at"] &&
+          expected["predecessor_attempt_id"] == current["predecessor_attempt_id"]
       end
 
       def fetch_attempt_binding(attempt_id)
@@ -612,10 +662,6 @@ module Hive
         else
           @attempt_store.fetch(attempt_id)
         end
-      end
-
-      def attempt_value(attempt, name)
-        attempt.respond_to?(name) ? attempt.public_send(name) : attempt[name.to_s]
       end
 
       def durable_handoff_snapshot?(snapshot)
@@ -650,10 +696,7 @@ module Hive
       end
 
       def default_attempt_store
-        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-        return Hive::Attempts::Store.new(create_directories: false) if root.empty?
-
-        Hive::Attempts::Store.new(root: root, create_directories: false)
+        Hive::Attempts::Store.runtime(create_directories: false)
       end
     end
   end

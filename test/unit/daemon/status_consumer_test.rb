@@ -3,20 +3,20 @@ require "json"
 require "tmpdir"
 require "hive/daemon/status_consumer"
 
-# Pin StatusConsumer's parsing of `hive status --json` output. We
+# Pin StatusConsumer's parsing of Hive's internal task-graph output. We
 # stand in a tiny ruby script that emits a controlled JSON envelope on
 # stdout, since calling the real binary would couple this test to the
 # whole status implementation.
 class HiveDaemonStatusConsumerTest < Minitest::Test
   include HiveTestHelper
 
-  def with_fake_status(payload, exit_code: 0, stderr_text: "")
+  def with_fake_status(payload, exit_code: 0, stderr_text: "", expected_args: %w[status --internal-task-graph --json])
     with_tmp_dir do |dir|
       script = File.join(dir, "fake-hive")
       File.write(script, <<~RUBY)
         #!/usr/bin/env ruby
-        if ARGV != %w[status --json]
-          $stderr.puts "fake-hive: unexpected argv #{ARGV.inspect}"
+        if ARGV != #{expected_args.inspect}
+          $stderr.puts "fake-hive: unexpected argv \#{ARGV.inspect}"
           exit 64
         end
         $stderr.write #{stderr_text.inspect}
@@ -94,8 +94,86 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
       assert_equal plan_review, row.plan_review
+      assert_equal payload, result.status_payload
       assert_equal 3, result.hidden_archived_task_count
       assert_equal 3, result.projects.first.hidden_archived_task_count
+    end
+  end
+
+  def test_fetch_tasks_requests_and_accepts_only_a_partial_envelope
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_row(slug: "changed") ]
+    } ]).merge("partial" => true)
+    expected = %w[status --internal-task-graph --json --daemon-task p:changed p:other]
+
+    with_fake_status(JSON.generate(payload), expected_args: expected) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+        [ [ "p", "changed" ], [ "p", "other" ] ]
+      )
+
+      assert result.ok
+      assert_equal [ "changed" ], result.rows.map(&:slug)
+      assert_nil result.status_payload,
+                 "bounded task reads must not replace the daemon's authoritative full graph"
+    end
+
+    without_partial = payload.reject { |key, _value| key == "partial" }
+    with_fake_status(JSON.generate(without_partial), expected_args: expected) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+        [ [ "p", "changed" ], [ "p", "other" ] ]
+      )
+
+      refute result.ok
+      assert_includes result.error, "partial=true"
+    end
+  end
+
+  def test_fetch_tasks_skips_the_subprocess_for_an_empty_change_set
+    consumer = Hive::Daemon::StatusConsumer.new(hive_bin: "/definitely/missing/hive")
+
+    result = consumer.fetch_tasks([])
+
+    assert result.ok
+    assert_empty result.rows
+  end
+
+  def test_fetch_tasks_rejects_project_errors_and_unrequested_rows
+    expected = %w[status --internal-task-graph --json --daemon-task p:changed]
+    failed = make_envelope(projects: [ {
+      "name" => "p", "error" => "project_load_failed", "tasks" => []
+    } ]).merge("partial" => true)
+    with_fake_status(JSON.generate(failed), expected_args: expected) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+        [ [ "p", "changed" ] ]
+      )
+
+      refute result.ok
+      assert_includes result.error, "project_load_failed"
+    end
+
+    wrong_project = make_envelope(projects: [ {
+      "name" => "other", "tasks" => []
+    } ]).merge("partial" => true)
+    with_fake_status(JSON.generate(wrong_project), expected_args: expected) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+        [ [ "p", "changed" ] ]
+      )
+
+      refute result.ok
+      assert_includes result.error, "projects do not match"
+    end
+
+    extra = make_envelope(projects: [ {
+      "name" => "p", "tasks" => [ task_row(slug: "other") ]
+    } ]).merge("partial" => true)
+    with_fake_status(JSON.generate(extra), expected_args: expected) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+        [ [ "p", "changed" ] ]
+      )
+
+      refute result.ok
+      assert_includes result.error, "unrequested task p:other"
     end
   end
 

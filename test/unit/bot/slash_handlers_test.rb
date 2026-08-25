@@ -10,7 +10,7 @@ require "hive/bot/status_watcher"
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
-                      :intent, :alert_reset, :clear_keyboard, :format,
+                      :intent, :alert_reset, :clear_keyboard,
                       :attachment, :recovery, keyword_init: true)
   Update = Struct.new(:text, :chat_id, keyword_init: true) do
     def effective_text = text
@@ -153,20 +153,21 @@ class HiveBotSlashHandlersTest < Minitest::Test
     end
   end
 
-  def test_status_with_json_flag_sets_format_json
+  def test_status_with_json_flag_points_to_bounded_cli_contracts
     result = @handlers.status(Update.new(text: "/status --json"))
 
-    assert_equal :json, result.format
-    assert_nil result.project, "/status --json without a project must produce a no-project filter"
-    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :reply, result.action
+    assert_match(/human-only/, result.text)
+    assert_match(/hive status --json/, result.text)
+    assert_match(/--operational --json/, result.text)
   end
 
-  def test_status_with_json_flag_and_project_filters_and_sets_format_json
+  def test_status_with_json_flag_does_not_expose_full_graph_for_project
     result = @handlers.status(Update.new(text: "/status --json hive"))
 
-    assert_equal :json, result.format
-    assert_equal "hive", result.project
-    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :reply, result.action
+    assert_nil result.command_argv
+    assert_match(/human-only/, result.text)
   end
 
   FakeConversationState = Struct.new(:slug, keyword_init: true)

@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require "judge"
+require "lib/agent_limit"
+require "lib/judge_slate"
 
 module HiveBench
   # Judge deliberation: after each judge independently grades a diff (round 1,
@@ -20,6 +22,7 @@ module HiveBench
   # never by model name, and the prompt forbids identity speculation.
   class Deliberation
     PROMPT_PATH = File.expand_path("../deliberate-prompt.md", __dir__)
+    FAILURE_EVENT_VERSION = 1
 
     Verdict = Data.define(:initial, :initial_reason, :final, :final_reason, :discussion) do
       def revised? = !final.nil? && (final - initial).abs >= 0.05
@@ -38,33 +41,35 @@ module HiveBench
     # Returns { "<judge-name>" => Verdict }. Fail-soft per judge and per round:
     # a judge that errors in round 1 sits out entirely; one that errors in
     # round 2 keeps its initial verdict with final=nil (recorded, not invented).
-    def call(plan:, candidate_diff:, reference: nil)
-      initial = round_one(plan, candidate_diff, reference)
+    def call(plan:, candidate_diff:, reference: nil, task_id: nil, agent_id: nil)
+      initial = round_one(plan, candidate_diff, reference, task_id:, agent_id:)
       return {} if initial.size < 2 # nothing to discuss
 
-      round_two(initial, plan, candidate_diff, reference)
+      round_two(initial, plan, candidate_diff, reference, task_id:, agent_id:)
     end
 
     private
 
-    def round_one(plan, diff, reference)
+    def round_one(plan, diff, reference, task_id:, agent_id:)
       prompt = @round1.call(plan: plan, candidate_diff: diff, reference: reference)
       @judge_fns.filter_map do |name, fn|
         v = fn.call(prompt: prompt, seed: 1)
         [name, { score: Float(v.fetch(:score)).clamp(0.0, 10.0), reason: v[:reason].to_s }]
       rescue StandardError => e
+        warn_failure(name:, round: 1, error: e, task_id:, agent_id:)
         warn "deliberation: #{name} failed round 1 (#{e.class}: #{e.message.to_s[0, 80]}) — sitting out"
         nil
       end.to_h
     end
 
-    def round_two(initial, plan, diff, reference)
+    def round_two(initial, plan, diff, reference, task_id:, agent_id:)
       initial.to_h do |name, own|
         prompt = render_discussion(own: own, others: initial.except(name), plan: plan,
                                    diff: diff, reference: reference)
         final = begin
           @judge_fns.fetch(name).call(prompt: prompt, seed: 2)
         rescue StandardError => e
+          warn_failure(name:, round: 2, error: e, task_id:, agent_id:)
           warn "deliberation: #{name} failed round 2 (#{e.class}: #{e.message.to_s[0, 80]}) — keeping initial"
           nil
         end
@@ -75,6 +80,18 @@ module HiveBench
           discussion: final && final[:discussion].to_s
         )]
       end
+    end
+
+    def warn_failure(name:, round:, error:, task_id:, agent_id:)
+      return if task_id.to_s.empty? || agent_id.to_s.empty?
+
+      warn JudgeSlate.failure_event(
+        task_id: task_id,
+        agent_id: agent_id,
+        judge: name,
+        limits_reached: error.is_a?(ProviderLimitError),
+        detail: "round #{round}: #{error.class}: #{error.message}"
+      )
     end
 
     # Other judges appear as "Referee B/C/…" — order-stable but nameless, so a

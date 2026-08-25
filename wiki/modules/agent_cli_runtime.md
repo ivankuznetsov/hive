@@ -68,6 +68,13 @@ paths, and idempotent `cleanup!`; it never starts `opencode run`. The process
 owner forwards only the named credential keys, binds any compiled `stdin_data`
 to the run process, and must invoke cleanup from its own lifecycle `ensure`.
 
+That prepared-overlay API remains available to independent component
+consumers, but Hive no longer selects it. Hive compiles `opencode run`
+directly against the operator's native config, plugins, project discovery,
+session store, and login, then supplies only its workflow permission document
+through `OPENCODE_PERMISSION`. Run/export parsing and normalization remain
+shared with the component.
+
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
 flags, a selected authentication source, and an exact `provider/model` plus
 requested variant while remote model fetching and ambient project

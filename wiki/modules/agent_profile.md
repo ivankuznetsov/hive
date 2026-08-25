@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-20
+updated: 2026-08-25
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -16,6 +16,15 @@ registry; its Claude, Codex, Pi, Grok, and OpenCode adapters reference the packa
 built-in profiles. Process lifetime, workflow selection, model routing,
 subscription binding, retries, artifact acceptance, and stage success remain
 in Hive.
+
+Built-in profiles resolve optional provider behavior through
+`Hive::AgentSupport`. The root support catalog is data-only and loads a
+provider namespace only when that provider is selected. Pi, OpenCode, Codex, and Grok keep
+their runtime, skill/setup, credential, review, and identity decisions under
+their respective `Hive::AgentSupport` namespaces. The generic agent,
+artifact, workflow, Web, and skillpack callers retain process custody, durable
+writes, and transitions and dispatch to those facets without provider
+branches. See [[modules/agent_support]].
 
 ## Supported Agent ABI
 
@@ -62,22 +71,16 @@ contract.
 
 ### OpenCode process ownership
 
-OpenCode uses the component's additive prepared-invocation ABI while keeping
-process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
-exactly one `opencode run` process with a selected child environment and the
-prepared prompt on owner-private file-backed stdin, captures bounded stdout
-and stderr, and records timeout or cancellation before parsing.
-The selected environment also contains one random invocation-custody ID.
-After the run exits, Hive inventories only processes carrying that exact ID
-and terminates them by PID plus start identity through bounded TERM/KILL
-rounds. This closes the process-group escape where an OpenCode shell command
-calls `setsid`, reparents a development server to the user service manager,
-and otherwise leaves it listening after the attempt ends; another invocation's
-processes do not match and remain untouched. Linux uses exact NUL-delimited
-`/proc/<pid>/environ` entries; platforms without procfs use the current user's
-bounded `ps xeww` inventory. Empty procfs environments are ordinary non-matches
-rather than inventory failures, including Ruby's `nil` result for a
-length-bounded read at EOF.
+`Hive::AgentSupport::OpenCode::Execution` decides the OpenCode command,
+native child environment, and run/export interpretation while using
+`Hive::Agent`'s provider-neutral bounded-process primitive. Hive starts exactly
+one `opencode run` process with the prompt on owner-private
+file-backed stdin, captures bounded stdout and stderr, and records timeout or
+cancellation before parsing.
+Each run also carries a random invocation-custody ID. After the run exits,
+Hive terminates only same-user processes carrying that exact ID, closing a
+`setsid` escape without affecting another invocation. A custody-cleanup
+failure overrides an otherwise successful transcript.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -93,19 +96,17 @@ under a pipe, large live exports could exit zero after writing only a valid
 prefix. A regular file makes the write synchronous, after which Hive reads at
 most the parser's four-MiB limit and deletes the data when inspection returns.
 The local probe still checks OpenCode's exact model inventory first. When a
-dynamic route is absent there but the selected, non-secret overlay config
+dynamic route is absent there but the selected, non-secret native config
 explicitly declares that exact provider/model and its variants, that declaration
 is sufficient route evidence. The requested variant must still be present; an
 undeclared route or variant remains a fail-closed preflight error.
 
-Cleanup runs from the process owner's `ensure` path after preparation, spawn,
-inspection, or normalization failures. Only the prepared invocation's owned
-paths are eligible for removal; worktrees, task folders, selected config, and
-credential sources remain caller-owned. A descendant that remains alive after
-custody teardown makes an otherwise successful run fail as
-`process_cleanup_failed`; chat completion cannot override leaked process
-ownership. The legacy Claude, Codex, Pi, and Grok spawn path and mutable result
-shape are unchanged.
+The run and sanitized export use the same operator-owned OpenCode state. Hive
+does not redirect XDG homes, copy `auth.json`, disable project discovery, or
+create an OpenCode-specific cleanup tree. Explicit `credential_env` entries
+may restore selected provider variables; other ambient provider variables are
+scrubbed. The legacy provider spawn paths and mutable result shape are
+unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps
@@ -130,7 +131,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
-| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. The published runtime profile supplies the built-in default; custom profiles fall back to `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. A profile-native flag supplies the run cap; provider protocol parsing determines whether the run ended because that cap was exhausted. |
@@ -254,7 +255,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   files or state directories. No add-dir or budget flag.
   Text events are concatenated into `final_message`; unavailable token usage
   stays nil. Min version `0.2.90`. `:output_file_exists`.
-  `Hive::SkillCheck::Grok` resolves project/user skills plus enabled native
+  `Hive::AgentSupport::Grok::Skills` resolves project/user skills plus enabled native
   installed-plugin skills under `GROK_HOME`; Compound Engineering is
   provisioned with Grok's own plugin install/enable/update commands. Native
   inspection runs from the target project and verifies the exact runtime skill
@@ -285,7 +286,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   tool result and legitimately exceed the former 4 MiB short-session ceiling,
   while malformed or larger evidence still fails closed without unbounded
   temporary-file growth.
-  `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
+  `Hive::AgentSupport::OpenCode::Skills` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected
   native source before spawn and reject a higher-precedence project/user CE
@@ -429,6 +430,8 @@ the attempt evidence channel.
 - `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
+- `test/unit/agent_support_test.rb` — selective clean-process loading,
+  upward-dependency checks, and live production residue scanning for Pi.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
 - `test/unit/agent_profiles/error_normalizers_test.rb` — captured Claude
   subscription limits, closed diagnostic taxonomy, task-local unsupported

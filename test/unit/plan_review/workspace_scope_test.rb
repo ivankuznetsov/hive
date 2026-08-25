@@ -63,7 +63,7 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     assert_nil scope.fetch(:permission_mode)
     assert_nil scope.fetch(:allowed_tools)
     assert_nil scope.fetch(:disallowed_tools)
-    policy = scope.fetch(:opencode_permission_policy)
+    policy = scope.fetch(:permission_policy)
     assert_instance_of Hive::AgentRuntime::OpenCodePermissionPolicy, policy
     assert_equal "allow", policy.rules.fetch("bash")
     assert_equal "allow", policy.rules.fetch("webfetch")

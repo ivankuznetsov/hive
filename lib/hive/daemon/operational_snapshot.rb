@@ -10,6 +10,7 @@ require "hive/attempts/storage_health"
 require "hive/lock"
 require "hive/paths"
 require "hive/recovery"
+require "hive/runtime_identity"
 
 module Hive
   module Daemon
@@ -210,10 +211,13 @@ module Hive
       class Assembler
         attr_reader :tick_sequence
 
-        def initialize(store:, daemon_identity:, poll_interval_sec:, status_cache_store: nil)
+        def initialize(store:, daemon_identity:, poll_interval_sec:, status_cache_store: nil,
+                       runtime_identity: Hive::RuntimeIdentity.new.to_h)
           @store = store
           @status_cache_store = status_cache_store
           @daemon_identity = stringify_keys(daemon_identity)
+          @runtime_identity = Hive::RuntimeIdentity.parse(runtime_identity) ||
+            Hive::RuntimeIdentity.unknown
           reconfigure(poll_interval_sec: poll_interval_sec)
           @tick_sequence = 0
           @started_at = nil
@@ -362,6 +366,7 @@ module Hive
             "tick_sequence" => tick_sequence,
             "published_at" => instant.iso8601(6),
             "valid_until" => (instant + @validity_sec).iso8601(6),
+            "runtime" => @runtime_identity,
             "payload" => payload
           )
         rescue StandardError
@@ -415,6 +420,9 @@ module Hive
             "condition_task_generation" => nullable_string(value(row, :condition_task_generation)),
             "commit_generation" => value(row, :commit_generation),
             "attempt_id" => nullable_string(value(row, :attempt_id)),
+            # Controller workflows can report a folder mtime in the task graph
+            # while recovery tracks the manifest's precise local stat.
+            "status_payload_mtime" => time_string(value(row, :status_payload_mtime)),
             "state_file_mtime" => time_string(value(row, :state_file_mtime)),
             "action" => nullable_string(value(row, :action)),
             "depends_on" => nullable_string(value(row, :depends_on)),

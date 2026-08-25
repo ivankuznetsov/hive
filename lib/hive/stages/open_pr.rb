@@ -27,13 +27,8 @@ module Hive
                             Hive::GithubPublication::MAX_BODY_BYTES + 1_024
       Authoring = Data.define(:title, :body)
 
-      # OpenCode's permission overlay is its enforcement boundary. The
-      # open-PR agent is only a metadata author, so letting a project-level
-      # scope grant Bash turns it into a second, uncontrolled publisher: a
-      # shell can reach the host Git credential helper even when OpenCode's
-      # own external-directory tool rule is narrow. Pin this actor to its one
-      # controller-consumed output. The publication controller remains the
-      # sole owner of git push and GitHub mutations.
+      # An OpenCode author needs to write only the controller-consumed draft.
+      # Keep it from inheriting project shell access or a writable worktree.
       def opencode_authoring_permissions(path)
         {
           "preset" => "scoped",
@@ -129,7 +124,7 @@ module Hive
           return { commit: "open_pr_tampered", status: :error }
         end
 
-        Hive::Stages::Base.record_deferred_opencode_observation(
+        Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "open_pr", spawn_result
         )
         unless spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
@@ -179,13 +174,13 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           **launch_arguments
         }
-        # Only Agent/OpenCode understands controller completion probes. Passing
-        # a nil probe through the Claude launcher is still an unknown keyword,
-        # so keep the provider-specific contract out of the shared kwargs.
-        if profile.name == :opencode
-          kwargs[:completion_probe] = -> { complete_authoring_file?(expected_output) }
-        end
-        if profile.name == :claude
+        # OpenCode can leave a detached interactive session alive after the
+        # controller-owned authoring file is complete. The bounded probe lets
+        # Agent terminate that session without teaching other providers this
+        # provider-specific completion contract.
+        kwargs[:completion_probe] = -> { complete_authoring_file?(expected_output) } if
+          profile.name == :opencode
+        if Hive::AgentSupport.supports?(profile, :Interactive)
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task, cfg, **kwargs,
             session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: stable tmux label
@@ -315,14 +310,10 @@ module Hive
         raise Hive::StageError, "#{AUTHORING_FILE} is unreadable: #{e.class}: #{e.message}"
       end
 
-      # OpenCode can finish its file tool call and then spend minutes in an
-      # empty trailing provider turn. Once the exact controller input is fully
-      # parseable, Agent gives the CLI a short normal-exit grace and then owns
-      # termination. Invalid or partially-written JSON never trips the probe.
       def complete_authoring_file?(path)
         read_authoring(path)
         true
-      rescue Hive::StageError, JSON::ParserError
+      rescue Hive::StageError
         false
       end
 

@@ -184,11 +184,11 @@ module Hive
           )
         end
 
-        Hive::Stages::Base.record_deferred_opencode_observation(
+        Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "execute", impl_result
         )
 
-        completion_candidate = opencode_commit_completion_candidate?(impl_result)
+        completion_candidate = commit_completion_candidate?(impl_result)
         if agent_failed?(impl_result) && !completion_candidate
           return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
@@ -388,17 +388,13 @@ module Hive
         %i[error timeout].include?(result[:status])
       end
 
-      # OpenCode may finish a successful tool-driven turn with no terminal
-      # assistant text. The runtime correctly reports that protocol defect as
-      # malformed output. A clean descendant commit is only a checkpoint,
-      # though: a multi-unit implementer can commit U1 and continue. The
-      # caller therefore also requires the exact plan-bound completion trailer
-      # that the execute prompt reserves for the final commit.
-      def opencode_commit_completion_candidate?(result)
-        result &&
-          result[:implementation_provider].to_s == "opencode" &&
-          result[:exit_code] == 0 &&
-          result[:normalized_outcome_kind] == :malformed_output
+      # A provider may accept a clean durable commit despite a missing final
+      # text event. The provider package owns that protocol exception; the
+      # stage still requires the plan-bound completion trailer below.
+      def commit_completion_candidate?(result)
+        support = result && Hive::AgentSupport.for(result[:implementation_provider])
+        support&.respond_to?(:commit_completion_candidate?) &&
+          support.commit_completion_candidate?(result)
       end
 
       def completion_attested?(worktree_git, head, task)
@@ -541,14 +537,14 @@ module Hive
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )
-        scope = restrict_opencode_task_state_access(scope, task, profile)
+        scope = restrict_task_state_access(scope, task, profile)
         launch_arguments = Hive::Stages::Base.implementation_launch_arguments(
           identity, profile
         )
         # Direct/manual stage runs can legitimately lack an Attempts::Context,
         # so there is no durable Selection to carry models.execute_implementation
         # into the spawn. Resolve that same closed routing cell here instead of
-        # leaving route-required profiles such as OpenCode with a nil model.
+        # leaving a route-required profile with a nil model.
         if identity.nil?
           launch_arguments.merge!(
             Hive::Stages::Base.model_launch_arguments(
@@ -586,7 +582,7 @@ module Hive
           status_mode: :exit_code_only,
           **launch_arguments
         }
-        result = if profile.name == :claude
+        result = if Hive::AgentSupport.supports?(profile, :Interactive)
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
             cfg,
@@ -603,26 +599,16 @@ module Hive
         merged
       end
 
-      # OpenCode receives the reviewed plan in its prompt and its working
-      # directory is the complete repository worktree. The generic stage scope
-      # also exposes task.folder, which let a file-tool call replace
-      # controller-owned task.md and its live ownership marker. Execute output
-      # and the terminal marker are appended by the controller after the spawn,
-      # so OpenCode needs no task-state file-tool access.
-      def restrict_opencode_task_state_access(scope, task, profile)
-        return scope unless profile.name == :opencode
+      def restrict_task_state_access(scope, task, profile)
+        support = Hive::AgentSupport.for(profile)
+        return scope unless support&.const_defined?(:LaunchPolicy, false)
 
-        task_root = File.expand_path(task.folder)
-        without_task_root = lambda do |roots|
-          Array(roots).reject { |root| File.expand_path(root) == task_root }
-        end
-        scope.merge(
-          add_dirs: without_task_root.call(scope[:add_dirs]),
-          additional_read_roots: without_task_root.call(scope[:additional_read_roots]),
-          additional_write_roots: without_task_root.call(scope[:additional_write_roots])
-        )
+        policy = support.const_get(:LaunchPolicy, false)
+        return scope unless policy&.respond_to?(:restrict_task_state_scope)
+
+        policy.restrict_task_state_scope(scope:, task:)
       end
-      private_class_method :restrict_opencode_task_state_access
+      private_class_method :restrict_task_state_access
 
       def record_tamper(task, tampered, who:, restored: false, restore_error: nil)
         Hive::Markers.set(task.state_file, :error,

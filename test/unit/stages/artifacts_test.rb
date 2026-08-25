@@ -1999,6 +1999,32 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_opencode_read_only_roles_use_the_typed_permission_document
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      worktree = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task.define_singleton_method(:worktree_path) { worktree }
+      profile = Hive::AgentProfiles.lookup(:opencode)
+
+      %w[inference reviewer].each do |role|
+        security = Hive::Stages::Artifacts.role_security_kwargs(
+          role, task: task, cfg: {}, profile: profile, actor_cfg: {}
+        )
+
+        assert_equal Hive::AgentProfile::READ_ONLY_PERMISSION_MODE,
+                     security.fetch(:permission_mode), role
+        assert_nil security.fetch(:allowed_tools), role
+        assert_nil security.fetch(:disallowed_tools), role
+        assert_equal [ task.folder, worktree ],
+                     security.fetch(:additional_read_roots), role
+        assert_empty security.fetch(:additional_write_roots), role
+        assert_empty security.fetch(:edit_patterns), role
+        assert_empty security.fetch(:bash_patterns), role
+      end
+    end
+  end
+
   def test_role_json_producer_paths_and_cleanup_roots_are_bounded
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

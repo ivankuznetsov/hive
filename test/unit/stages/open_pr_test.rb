@@ -280,8 +280,8 @@ class HiveStagesOpenPrTest < Minitest::Test
       end
 
       assert_equal "workspace-write", captured.fetch(:permission_mode)
-      assert_equal [ output ], captured.fetch(:opencode_edit_patterns)
-      assert_empty captured.fetch(:opencode_bash_patterns)
+      assert_equal [ output ], captured.fetch(:edit_patterns)
+      assert_empty captured.fetch(:bash_patterns)
       assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
       assert_nil captured.fetch(:allowed_tools)
       assert_nil captured.fetch(:disallowed_tools)

@@ -532,7 +532,7 @@ class ClaudeLauncherTest < Minitest::Test
       "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
       "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
     ) do
-      assert_equal Hive::ClaudeLauncher::CLAUDE_READY_WAIT_TIMEOUT_SEC,
+      assert_equal Hive::AgentSupport::Claude::Interactive::READY_WAIT_TIMEOUT_SEC,
                    Hive::ClaudeLauncher.claude_ready_wait_timeout
     end
   end

@@ -1,3 +1,4 @@
+require "json"
 require "thor"
 require "hive/plan_review"
 require "hive/stages"
@@ -34,7 +35,7 @@ module Hive
         "(author one with `hive workflow new ID`)"
     end
 
-    # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
+    # `--json` is honoured by `version`, `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, `plan-review`, `pairing`, and the workflow verbs
     # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `new` accepts
     # the flag silently so an automated caller can pass it uniformly. Most
@@ -50,7 +51,16 @@ module Hive
 
     desc "version", "Print hive version"
     def version
-      puts Hive::VERSION
+      if options[:json]
+        puts JSON.generate({
+          "schema" => "hive-version",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-version"),
+          "ok" => true,
+          "runtime" => Hive::RuntimeIdentity.new.to_h
+        })
+      else
+        puts Hive::VERSION
+      end
     end
     map "--version" => :version
 
@@ -2040,7 +2050,7 @@ module Hive
               schema: "hive-web-status",
               error: error,
               error_kind: "invalid_task_path",
-              extras: Hive::Commands::Web.error_context(environment: ENV)
+              extras: Hive::Commands::Web.status_error_context(environment: ENV)
             )
           )
           raise error

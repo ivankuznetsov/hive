@@ -46,8 +46,11 @@ module Hive
           Return that same JSON object as your complete final response.
           Do not wrap it in Markdown or add prose.
         PROMPT
-        prompt, scope = if profile.name == :opencode
-          [ prompt, opencode_scope(task, actor, cwd, add_dirs, output_path) ]
+        support = Hive::AgentProfiles.support_for(profile)
+        prompt, scope = if support&.const_defined?(:LaunchPolicy, false)
+          support::LaunchPolicy.custody_scope(
+            prompt:, task_root: task.folder, actor:, cwd:, add_dirs:, output_path:
+          )
         else
           Hive::Stages::Base.actor_prompt_and_scope(
             cfg, actor, task, profile,
@@ -119,31 +122,6 @@ module Hive
         patrol.merge(Hive::Stages::Base.model_routing_current(fix))
       end
       private_class_method :fix_model_routing_current
-
-      def opencode_scope(task, actor, cwd, add_dirs, output_path)
-        task_root = File.expand_path(task.folder)
-        worktree = File.expand_path(cwd)
-        output = File.expand_path(output_path)
-
-        write_roots = [ task_root ]
-        edit_patterns = [ output ]
-        bash_patterns = []
-        if actor == "patrol_fix"
-          write_roots.unshift(worktree)
-          edit_patterns.unshift(File.join(worktree, "**"))
-          bash_patterns << "*"
-        end
-
-        {
-          add_dirs: Array(add_dirs), permission_mode: "workspace-write",
-          allowed_tools: nil, disallowed_tools: nil,
-          additional_read_roots: Array(add_dirs),
-          additional_write_roots: write_roots,
-          opencode_edit_patterns: edit_patterns,
-          opencode_bash_patterns: bash_patterns
-        }
-      end
-      private_class_method :opencode_scope
 
       def validate_regular_or_absent!(root, names)
         names.each do |name|

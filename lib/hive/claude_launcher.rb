@@ -6,6 +6,7 @@ require "yaml"
 
 require "hive/agent_runtime"
 require "hive/agent_profiles"
+require "hive/agent_support/claude"
 require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/config"
@@ -18,6 +19,8 @@ require "hive/tmux_runner"
 
 module Hive
   module ClaudeLauncher
+    extend Hive::AgentSupport::Claude::Interactive
+
     READY_WAIT_TIMEOUT_SEC = 5
     DONE_POLL_INTERVAL_SEC = 0.5
     SENTINEL_POLL_INTERVAL_SEC = 5
@@ -31,66 +34,8 @@ module Hive
     # to 120s so a slow-streaming-but-alive pane is treated as busy
     # rather than crashed; an actually-dead session still surfaces
     # quickly via the explicit `session_exists?` precheck.
-    CLAUDE_READY_WAIT_TIMEOUT_SEC = 120
-    CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
     MIN_TMUX_VERSION = "3.0"
     TERMINAL_MARKERS = %i[waiting complete error execute_complete review_complete review_waiting review_error].freeze
-    # Observed against Claude Code 2.1.133 (2026-05-25 dogfood), the
-    # 2026-05-27 build that moved the input caret to the end of a
-    # context-prefixed line, and Claude Code 2.1.179 (2026-06-29), which
-    # renders a separator/caret/separator/footer shape and may use a Unicode
-    # separator such as NBSP around the caret.
-    #
-    # Robustness note: readiness detection keys on the `❯` input caret, the
-    # most stable signal across the Claude Code TUI revisions seen so far.
-    # What churns between releases is the caret's POSITION on its line
-    # (older builds: `❯ Try …` at line start; newer: `<cwd> <git-status>  ❯`
-    # at line end) and what renders BELOW it (e.g. a `⏵⏵ bypass permissions …`
-    # hint footer, so the caret is no longer the last line). To tolerate that
-    # without treating a `❯` Claude prints in its OWN output (shell snippets,
-    # prose, bullets) as ready, we (a) require the caret to be the first or
-    # last glyph of its line — never mid-prose — and (b) inspect only the
-    # current input region, accepting a caret only when every line below it is
-    # terminal chrome (box/separator/footer). Blank lines are stripped before
-    # the chrome check runs, so the predicate only ever sees non-empty chrome.
-    # The detector deliberately does not assume a fixed footer distance.
-    #
-    # Copy strings still gate readiness in two places, both version-coupled
-    # and both to update when Claude Code changes them: the positive
-    # `Claude Code` banner, and the NEGATIVE trust/permission guards
-    # (misreading one of those as "ready" is the dangerous case).
-    CLAUDE_TRUST_PROMPT_MARKERS = [
-      "Quick safety check",
-      "Yes, I trust this folder"
-    ].freeze
-    CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
-    CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
-    CLAUDE_READY_FOOTER_MARKER = "for agents".freeze
-    # The `⏵⏵ bypass permissions …` hint footer that renders beneath the idle
-    # caret. Match the copy, not the bare `⏵⏵` glyph: a stale caret followed by
-    # real output Claude prints with that glyph (e.g. `⏵⏵ running build step
-    # 1/2`) must NOT be mistaken for terminal chrome.
-    CLAUDE_PROMPT_FOOTER_HINT_MARKER = "bypass permissions".freeze
-    # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
-    # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
-    # context). Ruby's `String#strip` does not normalize every Unicode
-    # separator Claude can paint, so match `\p{Zs}` explicitly on both sides
-    # of the caret. A caret embedded mid-line is Claude's own output, not the
-    # idle prompt, so it is intentionally not matched.
-    CLAUDE_READY_PROMPT_LINE = /\A❯(?:[\p{Zs}\s]|\z)|(?:[\p{Zs}\s])❯\z/u.freeze
-    CLAUDE_MENU_OPTION_LINE = /\A\s*❯\s*\d+\./.freeze
-    CLAUDE_PROMPT_CHROME_LINE = /\A[\p{Zs}\s?+\-─━│┄┈┉┅┇┊┋┆┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬╭╮╰╯╴╵╶╷╸╹╺╻╼╽╾╿]+\z/u.freeze
-    CLAUDE_PROMPT_CONTEXT_LINES = 12
-    # Lines at the bottom of the current input region to inspect for the idle
-    # caret. The scan is wide enough for separator/caret/separator/footer
-    # layouts; acceptance is content-anchored by the chrome-only rule above,
-    # not by a fixed footer offset.
-    #
-    # MUST stay reconciled with CLAUDE_PROMPT_CONTEXT_LINES (both 12):
-    # `current_prompt_text` already caps the region at CONTEXT_LINES, so the
-    # `.last(TAIL_LINES)` below is a no-op only while the two match. Narrowing
-    # one without the other would silently shrink the scan vs. context window.
-    CLAUDE_PROMPT_TAIL_LINES = 12
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
     # them as constants means a policy change lands in one place; previous
     # PRs inlined the string literal across 11 sites and silently drifted
@@ -102,8 +47,8 @@ module Hive
     # is intentional: both forms are normalized by PermissionScope.tool_csv
     # at the argv chokepoint, which accepts CSV String | Array | nil (see its
     # doc for the idempotency caveat).
-    PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
-    IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
+    PLANNER_ALLOWED_TOOLS = Hive::AgentSupport::Claude::Interactive::PLANNER_TOOLS
+    IMPLEMENTER_ALLOWED_TOOLS = Hive::AgentSupport::Claude::Interactive::IMPLEMENTER_TOOLS
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
@@ -158,7 +103,7 @@ module Hive
                 strict_mcp_config: false, identity_arguments: nil,
                 routing_arguments: nil, runtime_policy: nil,
                 additional_read_roots: [], additional_write_roots: [],
-                opencode_edit_patterns: [], opencode_bash_patterns: [],
+                edit_patterns: [], bash_patterns: [],
                 resource_guards: nil, agent_custody: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
@@ -199,8 +144,8 @@ module Hive
           runtime_policy: runtime_policy,
           additional_read_roots: additional_read_roots,
           additional_write_roots: additional_write_roots,
-          opencode_edit_patterns: opencode_edit_patterns,
-          opencode_bash_patterns: opencode_bash_patterns,
+          edit_patterns: edit_patterns,
+          bash_patterns: bash_patterns,
           resource_guards: resource_guards,
           agent_custody: agent_custody
         )
@@ -408,12 +353,6 @@ module Hive
       end
     end
 
-    def ensure_claude_profile!(profile)
-      return if profile.name == :claude
-
-      raise Hive::AgentError, "ClaudeLauncher only supports the claude profile; got #{profile.name.inspect}"
-    end
-
     def tmux_session_name(stage_short_name, task)
       # Byte-slice (not char-slice) — a multi-byte slug would otherwise
       # produce a session name longer than 250 bytes after String#[]
@@ -509,60 +448,6 @@ module Hive
       ENV.fetch("HIVE_TMUX_BIN", "tmux")
     end
 
-    def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
-                        allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                        disallowed_tools: nil, cli_flags: [],
-                        mcp_config_path: nil, strict_mcp_config: false,
-                        runtime_policy: nil)
-      if runtime_policy
-        add_dirs = runtime_policy.directories
-        permission_mode = runtime_policy.permission_mode
-        allowed_tools = runtime_policy.allowed_tools
-        disallowed_tools = runtime_policy.disallowed_tools
-      end
-      command = [
-        "bash",
-        File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
-        "--cwd", cwd
-      ]
-      Array(add_dirs).each { |dir| command.concat([ "--add-dir", dir ]) }
-      command.concat(profile.permission_flags(permission_mode))
-      # claude.model / claude.effort from config — without them every
-      # pipeline run inherits the operator's interactive default (often
-      # their most expensive model).
-      command.concat(Array(cli_flags))
-      if runtime_policy
-        command.concat(runtime_policy.cli_flags)
-      else
-        command.concat(mcp_cli_flags(mcp_config_path, strict_mcp_config))
-      end
-      allowed = Hive::PermissionScope.tool_csv(allowed_tools)
-      disallowed = Hive::PermissionScope.tool_csv(disallowed_tools)
-      command.concat([ "--allowedTools", allowed ]) if allowed
-      command.concat([ "--disallowedTools", disallowed ]) if disallowed
-      command.concat([ "--bin", profile.bin ])
-      command
-    end
-
-    def isolated_managed_command(command, runtime_policy, task)
-      environment = runtime_policy.environment.merge(
-        Hive::AgentProfiles.lookup(:claude)
-          .subscription_environment(unset_value: "")
-      ).merge(
-        "HIVE_SCREENOTE_BASE_URL" => "",
-        "HIVE_TASK_STAGE_DIR" => task.folder
-      )
-      [ "/usr/bin/env", "-i", *environment.sort.map { |key, value| "#{key}=#{value}" }, *command ]
-    end
-
-    def mcp_cli_flags(path, strict)
-      return [] if path.to_s.strip.empty?
-
-      flags = [ "--mcp-config", path ]
-      flags << "--strict-mcp-config" if strict
-      flags
-    end
-
     def wait_until_session_exists!(runner)
       deadline = Time.now + session_ready_wait_timeout
       until runner.session_exists?
@@ -641,7 +526,7 @@ module Hive
           remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
           break if remaining <= 0
 
-          sleep [ CLAUDE_READY_POLL_INTERVAL_SEC, remaining ].min
+          sleep [ Hive::AgentSupport::Claude::Interactive::READY_POLL_INTERVAL_SEC, remaining ].min
           next
         end
 
@@ -658,7 +543,7 @@ module Hive
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         break if remaining <= 0
 
-        sleep [ CLAUDE_READY_POLL_INTERVAL_SEC, remaining ].min
+        sleep [ Hive::AgentSupport::Claude::Interactive::READY_POLL_INTERVAL_SEC, remaining ].min
       end
 
       reason = caller_deadline && deadline == caller_deadline ? "before caller deadline" : "in tmux session #{runner.name}"
@@ -672,55 +557,6 @@ module Hive
             "last pane tail: #{last_tail.byteslice(-500, 500).to_s.scrub.inspect}"
     rescue Hive::TmuxError => e
       raise Hive::AgentError, "could not inspect claude tmux session #{runner.name}: #{e.message}"
-    end
-
-    def claude_trust_prompt?(pane)
-      current_prompt_text(pane).then do |text|
-        CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| text.include?(marker) }
-      end
-    end
-
-    def claude_ready_prompt?(pane)
-      current_text = current_prompt_text(pane)
-      current_lines = current_text.each_line.map(&:strip).reject(&:empty?)
-
-      return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
-      return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
-      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER) ||
-                          current_text.include?(CLAUDE_READY_FOOTER_MARKER)
-
-      # No-op while CLAUDE_PROMPT_TAIL_LINES == CLAUDE_PROMPT_CONTEXT_LINES
-      # (current_lines is already capped at CONTEXT_LINES); kept as a defensive
-      # bound. The two constants must stay reconciled — see their definitions.
-      prompt_tail = current_lines.last(CLAUDE_PROMPT_TAIL_LINES)
-      caret_index = prompt_tail.rindex do |line|
-        line.match?(CLAUDE_READY_PROMPT_LINE) && !line.match?(CLAUDE_MENU_OPTION_LINE)
-      end
-      return false unless caret_index
-
-      prompt_tail[(caret_index + 1)..].all? do |line|
-        claude_prompt_chrome_line?(line)
-      end
-    end
-
-    def claude_prompt_chrome_line?(line)
-      # Callers pass lines from `current_lines`, which is already
-      # `.reject(&:empty?)`-filtered, so blank lines never reach this
-      # predicate — only non-empty footer/separator chrome does.
-      line.include?(CLAUDE_READY_FOOTER_MARKER) ||
-        (line.start_with?("⏵⏵") && line.include?(CLAUDE_PROMPT_FOOTER_HINT_MARKER)) ||
-        line.match?(CLAUDE_PROMPT_CHROME_LINE)
-    end
-
-    def current_prompt_text(pane)
-      raw_lines = pane.each_line.map(&:strip)
-      last_blank_index = raw_lines.rindex("")
-      last_banner_index = raw_lines.rindex { |line| line.include?(CLAUDE_READY_BANNER_MARKER) }
-      last_blank_start = last_blank_index ? last_blank_index + 1 : nil
-      start_index = [ last_banner_index, last_blank_start, 0 ].compact.max
-      current_lines = raw_lines[start_index..] || []
-
-      current_lines.reject(&:empty?).last(CLAUDE_PROMPT_CONTEXT_LINES).join("\n")
     end
 
     def wait_for_terminal_marker(task, runner, timeout)
@@ -1137,7 +973,7 @@ module Hive
     end
 
     def claude_ready_wait_timeout
-      shared_timeout = tmux_env("READY_WAIT_TIMEOUT_SEC", CLAUDE_READY_WAIT_TIMEOUT_SEC.to_s)
+      shared_timeout = tmux_env("READY_WAIT_TIMEOUT_SEC", Hive::AgentSupport::Claude::Interactive::READY_WAIT_TIMEOUT_SEC.to_s)
       Float(tmux_env("CLAUDE_READY_WAIT_TIMEOUT_SEC", shared_timeout))
     end
 

@@ -419,9 +419,7 @@ module Hive
           [ task.folder, task.worktree_path ].compact.uniq
         end
         result = nil
-        permission_arguments = if role == "producer" && profile.name == :codex
-          producer_permission_arguments
-        end
+        permission_arguments = producer_permission_arguments if role == "producer"
         begin
           result = Hive::Stages::Base.spawn_agent(
             task,
@@ -521,7 +519,7 @@ module Hive
           if profile.workspace_write_supported?
             return { permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE }
           end
-          if profile.name == :pi && producer_runtime_policy
+          if producer_runtime_policy
             return Hive::Stages::Base.tool_scope_kwargs(
               permission_mode: producer_runtime_policy.permission_mode,
               allowed_tools: producer_runtime_policy.allowed_tools,
@@ -529,7 +527,7 @@ module Hive
               runtime_policy: producer_runtime_policy
             )
           end
-          unless profile.name == :claude
+          unless Hive::AgentSupport.supports?(profile, :Interactive)
             raise Hive::ConfigError,
                   "outcome-evidence producer agent #{profile.name.inspect} cannot enforce " \
                   "controller-scoped evidence writes"
@@ -551,7 +549,9 @@ module Hive
            !(spec.is_a?(Hash) && spec["preset"].to_s == "read-only")
           raise Hive::ConfigError, "artifacts.evidence.#{role} permissions cannot exceed read-only"
         end
-        if role != "producer" && profile.name != :claude
+        stage_scoped = Hive::AgentSupport.supports?(profile, :Interactive) ||
+          Hive::AgentSupport.supports?(profile, :LaunchPolicy)
+        if role != "producer" && !stage_scoped
           if profile.read_only_supported?
             return { permission_mode: Hive::AgentProfile::READ_ONLY_PERMISSION_MODE }
           end
@@ -609,18 +609,13 @@ module Hive
         )
         required = Array(claims).map { |claim| claim.fetch("proof_kind") }.uniq
         unsupported = required - [ "document" ]
-        if unsupported.any? && !%i[codex pi].include?(profile.name)
+        support = Hive::AgentSupport.for(profile)
+        if unsupported.any? && !support&.respond_to?(:validate_capture_profile!)
           raise Hive::ConfigError,
                 "artifacts evidence producer #{profile.name.inspect} cannot use the managed " \
                 "agent-browser capture boundary; configure a Codex or Pi producer"
         end
-        if unsupported.any? && profile.name == :codex &&
-           (!profile.workspace_write_supported? || !profile.add_dir_flag)
-          raise Hive::ConfigError,
-                "artifacts evidence producer #{profile.name.inspect} cannot safely produce " \
-                "#{unsupported.join(', ')} proof; configure a workspace-sandboxed producer " \
-                "with per-attempt writable roots"
-        end
+        support.validate_capture_profile!(profile:, unsupported:) if unsupported.any?
         profile
       end
 
@@ -896,7 +891,7 @@ module Hive
           status_mode: :state_file_marker
         }
         mcp_config_path = nil
-        if profile.name == :claude
+        if Hive::AgentSupport.supports?(profile, :Interactive)
           allowed_tools = Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           if screenote[:connected]
             begin

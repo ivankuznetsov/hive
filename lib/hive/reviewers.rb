@@ -1,7 +1,7 @@
 require "hive/reviewers/base"
 require "hive/reviewers/synthetic_task"
 require "hive/reviewers/agent"
-require "hive/reviewers/codex_review"
+require "hive/agent_support"
 
 module Hive
   # Reviewer adapters for the 6-review stage.
@@ -13,7 +13,7 @@ module Hive
   #   agent writes the findings file itself (Hive::Reviewers::Agent).
   # - "codex_review": runs codex's native, single-pass `codex review`
   #   subcommand and captures its stdout into the findings file
-  #   (Hive::Reviewers::CodexReview). This is the patrol-default reviewer —
+  #   (Hive::AgentSupport::Codex::Reviewer). This is the patrol-default reviewer —
   #   one cheap tuned pass instead of the multi-persona ce-code-review
   #   fan-out — and needs no CE `skill`.
   #
@@ -41,7 +41,7 @@ module Hive
 
     # Capped exponential backoff (1s, 2s, 4s, 8s, 8s, …) for the Nth failed
     # attempt. Single source of truth shared by the reviewer adapters
-    # (Hive::Reviewers::Agent, CodexReview) and the 6-review triage retry
+    # (Hive::Reviewers::Agent, AgentSupport::Codex::Reviewer) and the 6-review triage retry
     # (Hive::Stages::Review#triage_retry_backoff); each caller keeps its own
     # thin wrapper as a test-stub seam but delegates the formula here.
     def self.backoff_seconds_for(failed_attempt)
@@ -72,7 +72,7 @@ module Hive
       when "agent"
         Agent.new(spec, ctx, cfg: cfg)
       when "codex_review"
-        CodexReview.new(spec, ctx, cfg: cfg)
+        Hive::AgentSupport.for(:codex)::Reviewer.new(spec, ctx, cfg: cfg)
       when "linter"
         raise UnknownKindError, <<~MSG.strip
           reviewer kind "linter" is not supported in v1.

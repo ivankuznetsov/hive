@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-21
+updated: 2026-08-25
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -56,6 +56,12 @@ with an exact PR and zero duplicate replay.
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## OpenCode live validation (updated 2026-08-21)
+
+Strict benchmark campaigns can now require normal execute completion before
+judging. Retrying such a campaign intentionally permits the failed cell's
+preserved candidate patch to be replaced; the run tree retains attempt logs,
+but Hive does not yet provide a campaign-level archive view of every replaced
+patch.
 
 OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
 offline smoke, fake-CLI Hive execute and native Compound Engineering plan
@@ -720,7 +726,7 @@ post-fix failure sample. Next live triage failure should now carry the
 `expected_output_session_alive?`.
 ## codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
 
-`Hive::Reviewers::CodexReview` accepts a prose (non-checkbox) verdict as a
+`Hive::AgentSupport::Codex::Reviewer` accepts a prose (non-checkbox) verdict as a
 `:clean` pass only when `clean_verdict?` matches an affirmative no-findings
 phrase (`CLEAN_VERDICT`) and no `CONCERN_SIGNAL`. This closed the `all_failed`
 regression (genuine clean reviews failing) while preventing a prose-described
@@ -1208,3 +1214,15 @@ it through a hidden internal transport. Separate consumer-specific projection
 PRs must remove those fields and then delete the v7 schema/producer entirely;
 this PR deliberately does not combine those independent scheduler and UI
 optimizations.
+
+## Dogfood runtime identity awaits installed replacement proof (2026-08-25)
+
+Source contracts now expose the active runtime channel, exact build SHA, and
+deployment ID through version, operational, daemon, and web status. The
+canonical Hive skill tells plugins to use the normal `hive` command and not
+bypass dogfood for another binary, registry, daemon, or web service. The
+machine-local dogfood launcher and service overrides are deployment-owned and
+not stored in this repository, so this remains unproven as an end-to-end
+installed flow until a later authorized dogfood cutover supplies all three
+`HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
+unchanged installed plugin observes the matching status identity.

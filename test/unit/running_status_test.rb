@@ -18,11 +18,63 @@ class RunningStatusTest < Minitest::Test
       assert_equal 0, payload.fetch("observed_count")
       assert_equal true, payload.fetch("observed_count_exact")
       assert_equal true, payload.fetch("complete")
+      assert_equal "release", payload.dig("runtime", "channel")
       assert_equal false, payload.fetch("truncated")
       assert_equal true, payload.fetch("omitted_count_exact")
       assert_operator JSON.generate(payload).bytesize, :<, 64 * 1024
       assert_schema_valid(payload)
     end
+  end
+
+  def test_dogfood_snapshot_identifies_the_active_build
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    }).to_h
+    payload = Hive::RunningStatus.new(
+      daemon_state: daemon_state.merge(runtime: runtime),
+      runtime_identity: runtime
+    ).payload([], now: NOW)
+
+    assert_equal "dogfood", payload.dig("runtime", "channel")
+    assert_equal sha, payload.dig("runtime", "build_sha")
+    assert_schema_valid(payload)
+  end
+
+  def test_live_daemon_runtime_wins_over_the_observing_cli_runtime
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    observer_runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    }).to_h
+    payload = Hive::RunningStatus.new(
+      daemon_state: daemon_state.merge(runtime: Hive::RuntimeIdentity.new.to_h),
+      runtime_identity: observer_runtime
+    ).payload([], now: NOW)
+
+    assert_equal "release", payload.dig("runtime", "channel")
+    assert_nil payload.dig("runtime", "build_sha")
+    assert_schema_valid(payload)
+  end
+
+  def test_live_legacy_daemon_runtime_fails_closed_instead_of_using_the_observer
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    observer_runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    }).to_h
+    payload = Hive::RunningStatus.new(
+      daemon_state: daemon_state(runtime: nil),
+      runtime_identity: observer_runtime
+    ).payload([], now: NOW)
+
+    assert_equal "unknown", payload.dig("runtime", "channel")
+    assert_nil payload.dig("runtime", "build_sha")
+    assert_schema_valid(payload)
   end
 
   def test_missing_hive_state_path_is_unavailable_not_relative_to_cwd
@@ -516,6 +568,7 @@ class RunningStatusTest < Minitest::Test
 
       assert_equal false, payload.dig("daemon", "running")
       assert_nil payload.dig("daemon", "pid")
+      assert_equal "unknown", payload.dig("runtime", "channel")
       assert_schema_valid(payload)
     end
   end
@@ -525,15 +578,24 @@ class RunningStatusTest < Minitest::Test
       pid_path = File.join(hive_home, ".daemon.pid")
       File.mkfifo(pid_path)
       report = Hive::Daemon::StatusReport.new(hive_home: hive_home)
-      running_status = Hive::RunningStatus.new(daemon_report: report)
+      running_status = Hive::RunningStatus.new(
+        daemon_report: report,
+        runtime_identity: Hive::RuntimeIdentity.new(environment: {
+          "HIVE_RUNTIME_CHANNEL" => "dogfood",
+          "HIVE_RUNTIME_BUILD_SHA" => "0864de726d9a75f7bc46610a89db851c90b402ee",
+          "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+        }).to_h
+      )
 
       fifo_payload = Timeout.timeout(1) { running_status.payload([], now: NOW) }
       assert_equal false, fifo_payload.dig("daemon", "running")
+      assert_equal "unknown", fifo_payload.dig("runtime", "channel")
 
       FileUtils.rm_f(pid_path)
       File.write(pid_path, "1" * (Hive::RunningStatus::MAX_DAEMON_PID_BYTES + 1))
       oversized_payload = running_status.payload([], now: NOW)
       assert_equal false, oversized_payload.dig("daemon", "running")
+      assert_equal "unknown", oversized_payload.dig("runtime", "channel")
       assert_schema_valid(oversized_payload)
     end
   end
@@ -550,6 +612,7 @@ class RunningStatusTest < Minitest::Test
 
       assert_equal false, payload.dig("daemon", "running")
       assert_nil payload.dig("daemon", "pid")
+      assert_equal "unknown", payload.dig("runtime", "channel")
       assert_schema_valid(payload)
     end
   end
@@ -570,8 +633,10 @@ class RunningStatusTest < Minitest::Test
     Hive::RunningStatus.new(daemon_state: daemon_state)
   end
 
-  def daemon_state
-    { running: true, pid: 123, uptime_sec: 45 }
+  def daemon_state(runtime: Hive::RuntimeIdentity.new.to_h)
+    state = { running: true, pid: 123, uptime_sec: 45 }
+    state[:runtime] = runtime if runtime
+    state
   end
 
   def with_project(name: "demo")

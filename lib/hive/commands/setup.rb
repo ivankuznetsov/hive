@@ -399,7 +399,7 @@ module Hive
         Hive::Web::ServiceStatus.snapshot(
           installer: installer, config: web_config, environment: @environment,
           wait_for_running: wait_for_running
-        ).reject { |key, _| key == "runtime" }
+        ).except("runtime")
       end
 
       def add_web_phase

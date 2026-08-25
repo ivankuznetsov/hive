@@ -23,7 +23,7 @@ module Hive
         {
           "mode" => "managed_service",
           "warnings" => Hive::Web::Environment.warnings(environment: environment)
-        }.merge(state.reject { |key, _| key == "runtime" })
+        }.merge(state.except("runtime"))
       rescue StandardError
         config = Hive::Config::DEFAULTS.fetch("web")
         {
@@ -442,7 +442,7 @@ module Hive
           wait_for_running: true,
           attempts: INSTALL_READINESS_ATTEMPTS,
           interval: INSTALL_READINESS_INTERVAL_SEC
-        ).reject { |key, _| key == "runtime" }
+        ).except("runtime")
         {
           "schema" => "hive-web-install",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"),

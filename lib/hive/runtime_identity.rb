@@ -120,8 +120,7 @@ module Hive
       return @release_version if resolved_channel == "release"
       return "#{@release_version}+unknown" if resolved_channel == "unknown"
 
-      suffix = resolved_sha ? resolved_sha[0, 9] : "unknown"
-      "#{@release_version}+dogfood.#{suffix}"
+      "#{@release_version}+dogfood.#{resolved_sha[0, 9]}"
     end
   end
 end

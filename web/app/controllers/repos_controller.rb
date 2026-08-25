@@ -18,8 +18,11 @@ class ReposController < ApplicationController
     project = @project_name && registered_projects.find { |entry| entry.name == @project_name }
     return unless project
 
-    @workflows = project.workflows
     @current_workflow = project.default_workflow || @current_workflow
+    # InitSetup owns the form-facing enumeration, including preserving a
+    # persisted default that is no longer registry-valid in the option list.
+    @workflows = InitSetup.workflow_options(project_root: project.path,
+                                            persisted: @current_workflow)
   end
 
   def create

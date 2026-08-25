@@ -53,7 +53,7 @@ module HiveBench
         end
 
         argv = [ "timeout", timeout_s.to_s, bin, "exec", "--skip-git-repo-check" ]
-        argv += [ "--ephemeral", "--ignore-user-config", "--ignore-rules" ] if provider == OPENROUTER_PROVIDER
+        argv += [ "--ephemeral", "--ignore-user-config", "--ignore-rules" ]
         argv += [ "-m", provider == OPENROUTER_PROVIDER ? provider_model : model ] if model
         if provider == OPENROUTER_PROVIDER
           argv += [
@@ -78,26 +78,27 @@ module HiveBench
         else
           {}
         end
-        out, err, status = if provider == OPENROUTER_PROVIDER
-          # OpenRouter authentication is supplied directly by
-          # environment, so this route does not need the
-          # operator's Codex home. A private home and empty
-          # working directory keep personal plugins, skills,
-          # MCP servers, memories, and project AGENTS.md out
-          # of what must be a one-shot scoring process.
-          Dir.mktmpdir("hive-bench-codex-judge") do |root|
+        # Every Codex judge runs from an empty temporary workspace so project
+        # AGENTS.md instructions cannot turn scoring into implementation work.
+        # OpenRouter supplies auth directly by environment and additionally gets
+        # a private Codex home. ChatGPT retains the operator home for subscription
+        # auth, while the CLI flags above still exclude its config, rules, and
+        # persisted sessions from the one-shot judge.
+        out, err, status = Dir.mktmpdir("hive-bench-codex-judge") do |root|
+          workspace = File.join(root, "workspace")
+          FileUtils.mkdir_p(workspace)
+          isolated_env = child_env
+          if provider == OPENROUTER_PROVIDER
             codex_home = File.join(root, "codex-home")
-            workspace = File.join(root, "workspace")
-            FileUtils.mkdir_p([ codex_home, workspace ])
-            Open3.capture3(
-              child_env.merge("CODEX_HOME" => codex_home),
-              *argv,
-              stdin_data: prompt.to_s,
-              chdir: workspace
-            )
+            FileUtils.mkdir_p(codex_home)
+            isolated_env = child_env.merge("CODEX_HOME" => codex_home)
           end
-        else
-          Open3.capture3(child_env, *argv, stdin_data: prompt.to_s)
+          Open3.capture3(
+            isolated_env,
+            *argv,
+            stdin_data: prompt.to_s,
+            chdir: workspace
+          )
         end
         raise Error, "codex judge timed out after #{timeout_s}s" if status.exitstatus == 124
 

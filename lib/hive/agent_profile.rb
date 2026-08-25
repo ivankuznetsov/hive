@@ -20,7 +20,11 @@ module Hive
     READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
     VERSION_CHECK_TIMEOUT_SEC = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
     TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
-    private_constant :TOOL_SCOPE_FLAGS_UNSET
+    LEGACY_OPEN_CODE_OPTIONS = %i[
+      configuration_path configuration credential_environment_keys
+      credential_file plugins pure
+    ].to_h { |attribute| [ :"opencode_#{attribute}", attribute ] }.freeze
+    private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_OPEN_CODE_OPTIONS
     STATUS_DETECTION_MODES =
       %i[state_file_marker exit_code_only output_file_exists].freeze
 
@@ -92,7 +96,8 @@ module Hive
                    configuration_environment_key: nil,
                    default_configuration_directory: nil,
                    permission_presets: nil,
-                   support_configuration: nil)
+                   support_configuration: nil,
+                   **legacy_opencode_options)
       if runtime_profile && !runtime_profile.is_a?(AgentCliRuntime::Profile)
         raise ArgumentError, "runtime_profile must be an AgentCliRuntime::Profile"
       end
@@ -160,8 +165,14 @@ module Hive
       @routed_effort_argument_builder =
         routed_effort_argument_builder || @runtime_profile.effort_argument_builder
       @structured_output_protocol = structured_output_protocol&.to_sym
-      @permission_presets = normalize_permission_presets(permission_presets || [])
-      @support_configuration = support_configuration
+      @permission_presets = normalize_permission_presets(
+        permission_presets || Hive::AgentSupport::DEFAULT_PERMISSION_PRESETS.fetch(
+          effective_name.to_sym, []
+        )
+      )
+      @support_configuration = support_configuration_from_legacy(
+        support_configuration, legacy_opencode_options
+      )
       @billing_semantics = billing_semantics.to_sym
       unless BILLING_SEMANTICS.include?(@billing_semantics)
         raise ArgumentError,
@@ -179,6 +190,14 @@ module Hive
       default_configuration_directory
     ].each do |method_name|
       define_method(method_name) { @runtime_profile.public_send(method_name) }
+    end
+
+    LEGACY_OPEN_CODE_OPTIONS.each do |reader, attribute|
+      define_method(reader) do
+        configuration = @support_configuration ||
+          Hive::AgentSupport.for(:opencode).configuration
+        configuration.public_send(attribute)
+      end
     end
 
     def bin
@@ -540,6 +559,19 @@ module Hive
     end
 
     private
+
+    def support_configuration_from_legacy(configuration, options)
+      unknown = options.keys - LEGACY_OPEN_CODE_OPTIONS.keys
+      raise ArgumentError, "unknown keywords: #{unknown.join(", ")}" if unknown.any?
+      return configuration if options.empty?
+      if configuration
+        raise ArgumentError,
+              "legacy OpenCode keywords cannot be mixed with support_configuration"
+      end
+
+      typed = options.transform_keys { |key| LEGACY_OPEN_CODE_OPTIONS.fetch(key) }
+      Hive::AgentSupport.for(:opencode)::Configuration.new(**typed)
+    end
 
     def required_runtime_value(value, keyword)
       return value unless value.nil?

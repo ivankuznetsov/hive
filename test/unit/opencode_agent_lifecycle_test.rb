@@ -649,6 +649,25 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_export_inspection_reports_stderr_truncated_below_the_export_cap
+    with_fixture(mode: :oversized_export_stderr) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "stderr-cap-260825-aaaa")
+      result = with_execution_constant(:EXPORT_CAPTURE_BYTES, 16 * 1024) do
+        with_runtime_constant(Hive::Agent, :FINAL_MESSAGE_TAIL_BYTES, 4 * 1024) do
+          with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            build_agent(
+              task, fixture,
+              invocation_root: File.join(fixture.fetch(:dir), "invocation-stderr-cap")
+            ).run!
+          end
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/stderr exceeded 4095 bytes/, result.fetch(:inspection_diagnostic))
+    end
+  end
+
   private
 
   def make_task(dir, slug: "opencode-agent-260812-aaaa")

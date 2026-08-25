@@ -75,7 +75,6 @@ module Hive
         end
         @version_cache[root] = nil
       end
-
     end
   end
 end

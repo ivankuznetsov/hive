@@ -96,6 +96,50 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
+  def test_legacy_opencode_keywords_build_typed_support_configuration
+    profile = make_profile(
+      name: :opencode,
+      opencode_configuration: { "model" => "openai/gpt-5" },
+      opencode_credential_environment_keys: %w[OPENAI_API_KEY],
+      opencode_credential_file: "/tmp/opencode-auth.json",
+      opencode_plugins: %w[compound-engineering],
+      opencode_pure: false
+    )
+
+    assert_instance_of Hive::AgentSupport::OpenCode::Configuration,
+                       profile.support_configuration
+    assert_nil profile.opencode_configuration_path
+    assert_equal({ "model" => "openai/gpt-5" }, profile.opencode_configuration)
+    assert_equal %w[OPENAI_API_KEY], profile.opencode_credential_environment_keys
+    assert_equal "/tmp/opencode-auth.json", profile.opencode_credential_file
+    assert_equal %w[compound-engineering], profile.opencode_plugins
+    refute profile.opencode_pure
+
+    path_profile = make_profile(
+      name: :opencode,
+      opencode_configuration_path: "/tmp/opencode.json"
+    )
+    assert_equal "/tmp/opencode.json", path_profile.opencode_configuration_path
+    assert_nil path_profile.opencode_configuration
+  end
+
+  def test_rejects_mixed_legacy_and_typed_opencode_configuration
+    error = assert_raises(ArgumentError) do
+      make_profile(
+        name: :opencode,
+        support_configuration: opencode_configuration,
+        opencode_plugins: %w[compound-engineering]
+      )
+    end
+
+    assert_match(/legacy OpenCode keywords.*support_configuration/, error.message)
+  end
+
+  def test_claude_permission_presets_keep_legacy_default
+    assert_equal %w[read-only scoped], make_profile(name: :claude).permission_presets
+    assert_empty make_profile(name: :claude, permission_presets: []).permission_presets
+  end
+
   def test_opencode_contract_fields_fail_closed_and_deep_freeze_json_values
     assert_raises(ArgumentError) do
       make_profile(name: :opencode, permission_presets: [ "unconfined" ])

@@ -21,11 +21,12 @@ class InitDoctorPreflightTest < Minitest::Test
 
     def inspect
       Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve.map do |target|
-        resolver = Hive::AgentProfiles.support_for(target.agent)&.const_get(:Skills, false) || case target.agent
-        when "claude" then Hive::AgentSupport.for(:claude)::Skills
-        when "codex" then Hive::AgentSupport.for(:codex)::Skills
-        when "opencode" then Hive::AgentSupport::OpenCode::Skills
-        end
+        resolver = Hive::AgentProfiles.support_for(target.agent)&.const_get(:Skills, false) ||
+          case target.agent
+          when "claude" then Hive::AgentSupport.for(:claude)::Skills
+          when "codex" then Hive::AgentSupport.for(:codex)::Skills
+          when "opencode" then Hive::AgentSupport::OpenCode::Skills
+          end
         found = resolver.resolve(target.invocation, project_root: @project_root)
         health = found.status == :present ? "healthy" : "missing"
         Hive::AgentSkills::Inspection.new(

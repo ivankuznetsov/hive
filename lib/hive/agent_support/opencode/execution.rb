@@ -28,7 +28,7 @@ module Hive
             forward_signals: true,
             drain_timeout: CAPTURE_DRAIN_SECONDS
           )
-          write_capture_log(log_file, run.stdout, run.stderr)
+          provider_error = write_capture_log(log_file, run.stdout, run.stderr)
           inspection_output, inspection_diagnostic = inspect_run(prepared, run)
           captured = Hive::AgentRuntime::CapturedResult.new(
             stdout: run.stdout,
@@ -40,7 +40,7 @@ module Hive
             @profile, captured, requested_route: prepared.requested_route
           )
           result = result_hash(
-            prepared, run, outcome, inspection_diagnostic, log_file
+            prepared, run, outcome, inspection_diagnostic, log_file, provider_error
           )
         ensure
           cleanup_preparation(prepared, result)
@@ -205,7 +205,7 @@ module Hive
               "#{EXPORT_CAPTURE_BYTES - 1} bytes"
           elsif captured.stderr_truncated
             "OpenCode sanitized export inspection stderr exceeded " \
-              "#{EXPORT_CAPTURE_BYTES - 1} bytes"
+              "#{[ EXPORT_CAPTURE_BYTES, self.class::FINAL_MESSAGE_TAIL_BYTES ].min - 1} bytes"
           elsif captured.stderr.empty?
             "OpenCode sanitized export inspection failed"
           else
@@ -214,9 +214,9 @@ module Hive
           AgentCliRuntime::Redactor.diagnostic(message)
         end
 
-        def result_hash(prepared, run, outcome, inspection_diagnostic, log_file)
+        def result_hash(prepared, run, outcome, inspection_diagnostic, log_file,
+                        provider_error)
           termination = run.termination
-          provider_error = provider_error(run.stdout)
           {
             pid: run.pid,
             pgid: run.pgid,
@@ -262,17 +262,6 @@ module Hive
           }.freeze
         end
 
-        def provider_error(stdout)
-          stdout.each_line do |line|
-            event = parse_json_line(line)
-            next unless event
-
-            error = Hive::AgentRuntime.extract_provider_error(@profile, event)
-            return error if error
-          end
-          nil
-        end
-
         def write_spawn_log(log_file, prepared, command)
           open_private_log(log_file) do |log|
             log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
@@ -283,9 +272,13 @@ module Hive
         end
 
         def write_capture_log(log_file, stdout, stderr)
+          provider_error = nil
           open_private_log(log_file) do |log|
             stdout.each_line do |line|
               event = parse_json_line(line)
+              provider_error ||= Hive::AgentRuntime.extract_provider_error(
+                @profile, event
+              ) if event
               type = event.is_a?(Hash) ? event.fetch("type", "unknown") : "malformed"
               log.puts "[opencode event omitted type=#{type}]"
             end
@@ -294,6 +287,7 @@ module Hive
               log.write("\n") unless line.end_with?("\n")
             end
           end
+          provider_error
         end
 
         def cleanup_preparation(prepared, result)

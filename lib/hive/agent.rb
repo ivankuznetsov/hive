@@ -677,7 +677,7 @@ module Hive
           stdout_file.rewind
           stdout = stdout_file.read(file_limit).to_s
           stdout_truncated = stdout.bytesize >= file_limit || !stdout_file.eof?
-          stderr_truncated = stderr_file.size >= file_limit
+          stderr_truncated = stderr_file.size >= [ file_limit, stderr_limit ].min
           stderr_file.rewind
           stderr = stderr_file.read(stderr_limit).to_s
           return CapturedProcess.new(
@@ -747,7 +747,8 @@ module Hive
     def process_exit_code(status)
       return unless status
       return status.exitstatus if status.exited?
-      return -status.termsig if status.signaled?
+
+      -status.termsig if status.signaled?
     end
 
     def process_signal(status)

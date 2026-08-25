@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/agent/message_extractor"
+require "hive/agent_profile"
 require "hive/agent_support/grok"
 require "hive/agent_support/pi"
 
@@ -92,6 +93,33 @@ class AgentMessageExtractorTest < Minitest::Test
     assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
       event,
       structured_output_protocol: Hive::AgentSupport::Pi
+    )
+  end
+
+  def test_custom_profile_resolves_the_pi_terminal_protocol
+    profile = Hive::AgentProfile.new(
+      name: :custom,
+      bin_default: "custom-agent",
+      headless_flag: "-p",
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      structured_output_protocol: :pi_agent_end
+    )
+    event = {
+      "type" => "agent_end",
+      "messages" => [
+        {
+          "role" => "assistant",
+          "content" => [ { "type" => "text", "text" => "done" } ]
+        }
+      ]
+    }
+
+    support = Hive::AgentSupport.for_protocol(profile.structured_output_protocol)
+
+    assert_same Hive::AgentSupport::Pi, support
+    assert_equal "done", Hive::Agent::MessageExtractor.extract(
+      event, structured_output_protocol: support
     )
   end
 

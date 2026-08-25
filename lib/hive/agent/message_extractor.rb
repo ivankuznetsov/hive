@@ -193,7 +193,6 @@ module Hive
         text = value.to_s
         text.empty? ? nil : text
       end
-
     end
   end
 end

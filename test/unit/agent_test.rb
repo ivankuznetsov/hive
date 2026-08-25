@@ -223,7 +223,9 @@ class AgentTest < Minitest::Test
           :prepared
         end
         with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, replacement) do
-          agent.send(:prepare_opencode_invocation)
+          support = Hive::AgentSupport.for(profile)
+          agent.extend(support.const_get(:Execution, false))
+          agent.send(:prepare_invocation)
         end
       end
 

@@ -74,6 +74,5 @@ module Hive
     def self.same_source?(actual, expected) = normalize_source(actual) == normalize_source(expected)
     def self.normalize_source(value) = value.to_s.strip
       .sub(%r{\Ahttps://github\.com/}i, "").sub(/\.git\z/i, "").downcase
-
   end
 end

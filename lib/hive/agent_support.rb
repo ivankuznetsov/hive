@@ -6,7 +6,8 @@ module Hive::AgentSupport
   DEFAULT_TOOL_SCOPE_FLAGS = {
     claude: { allowed: "--allowedTools", disallowed: "--disallowedTools" }.freeze
   }.freeze
-  PROTOCOLS = { grok_end: :grok }.freeze
+  DEFAULT_PERMISSION_PRESETS = { claude: %w[read-only scoped].freeze }.freeze
+  PROTOCOLS = { grok_end: :grok, pi_agent_end: :pi }.freeze
   autoload :StreamMeter, "hive/agent_support/stream_meter"
 
   module SkillPolicy

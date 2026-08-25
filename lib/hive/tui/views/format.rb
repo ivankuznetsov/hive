@@ -55,6 +55,24 @@ module Hive
           (" " * [ width - display_width(string), 0 ].max) + string
         end
 
+        # Cell-aware tail: keep as many trailing cells of `label` as fit in
+        # `max_width`, dropping whole leading grapheme clusters that no longer
+        # fit. Complement of the private `take_cells` cut — used by sliding
+        # input surfaces (e.g. the filter prompt) that must show the END of a
+        # long buffer within a fixed cell budget.
+        def tail_cells(label, max_width)
+          remaining = max_width.to_i
+          kept = []
+          label.to_s.each_grapheme_cluster.reverse_each do |cluster|
+            cluster_width = display_width(cluster)
+            break if cluster_width > remaining
+
+            kept << cluster
+            remaining -= cluster_width
+          end
+          kept.reverse.join
+        end
+
         def wrap(label, width)
           string = label.to_s
           return [ "" ] if string.empty?

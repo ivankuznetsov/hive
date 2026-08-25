@@ -246,6 +246,19 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_opencode_profile_ignores_native_auth_path_errors
+    cfg = { "agents" => { "opencode" => { "credential_env" => [] } } }
+
+    with_replaced_singleton_method(
+      Hive::AgentProfiles, :opencode_auth_path,
+      ->(**_kwargs) { raise Errno::EACCES, "native auth unavailable" }
+    ) do
+      profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+
+      assert_nil profile.opencode_credential_file
+    end
+  end
+
   def test_opencode_default_model_resolution_rejects_ambiguous_or_malformed_sources
     inline_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
       Hive::AgentProfiles::OpenCodeDefaults.resolve(

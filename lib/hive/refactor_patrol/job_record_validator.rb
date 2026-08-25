@@ -1035,7 +1035,7 @@ module Hive
               path: path
             )
           end
-          if attempt.key?("pr_create_intent") && !attempt.key?("push_complete")
+          unless PublicationAttempt.well_ordered?(attempt)
             inconsistent!("publication PR-create intent requires durable push completion", path)
           end
           if (superseded = attempt["superseded"])
@@ -1069,27 +1069,14 @@ module Hive
       end
 
       def validate_publication_phase!(phase, payload, descriptor:, patch:, action_id:, repository:, path:)
-        expected_keys = case phase
-        when "push_intent"
-          %w[operation canonical_action_id repository branch commit_sha expected_remote_oid]
-        when "push_complete"
-          %w[operation canonical_action_id repository branch commit_sha remote_oid]
-        when "pr_create_intent"
-          %w[operation canonical_action_id repository branch commit_sha]
-        end
         strict_hash!(
           payload,
-          required: expected_keys,
-          allowed: expected_keys,
+          required: PublicationAttempt.phase_payload_keys(phase),
+          allowed: PublicationAttempt.phase_payload_keys(phase),
           label: "publication #{phase}",
           path: path
         )
-        operation = {
-          "push_intent" => "push_branch",
-          "push_complete" => "push_branch_complete",
-          "pr_create_intent" => "create_pr"
-        }.fetch(phase)
-        unless payload.fetch("operation") == operation &&
+        unless payload.fetch("operation") == PublicationAttempt.phase_operation(phase) &&
                payload.fetch("canonical_action_id") == action_id &&
                payload.fetch("repository") == repository &&
                payload.fetch("branch") == patch["branch"] &&

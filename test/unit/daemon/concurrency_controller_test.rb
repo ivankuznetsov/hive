@@ -401,6 +401,19 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal initial, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
   end
 
+  def test_forget_state_file_mtime_removes_and_persists_the_baseline
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0)
+
+      c.forget_state_file_mtime(project: "p1", slug: "s1")
+
+      assert_nil c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_nil revived.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+    end
+  end
+
   # ── in_flight bookkeeping ─────────────────────────────────────────────
 
   def test_running_count_for_includes_internal_and_external_project_counts

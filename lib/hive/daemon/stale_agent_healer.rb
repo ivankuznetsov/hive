@@ -84,6 +84,7 @@ module Hive
         fix_auto_commit_sign_policy_failed
         fix_auto_commit_signing_failed
       ].freeze
+      MARKERLESS_EXIT_REASON = "agent_exited_without_terminal_marker"
 
       def initialize(controller:, logger:, grace_sec: 300,
                      attempt_store: nil, attempt_dispatcher: nil,
@@ -266,6 +267,50 @@ module Hive
 
           heal_row(row, reason: reason)
         end
+      end
+
+      # A generic workflow stage can return without writing any terminal
+      # marker. Policy brakes that unchanged row as `markerless_stalled`; turn
+      # the observation into the same durable ERROR used by Hive::Agent so the
+      # sole RecoveryCoordinator can retry it on the next tick. The task lock
+      # and marker re-read close both stale-status races: a live runner or a
+      # newer marker always wins.
+      def heal_markerless_stall(row)
+        return false unless admission_open?
+        return false if @controller.running_task?(project: row.project, slug: row.slug)
+        return false if row.live_task_lock == true
+
+        transitioned = with_heal_lock(row, reason: MARKERLESS_EXIT_REASON, create: false) do
+          Hive::Markers.set_if_current(
+            row.state_file,
+            expected_name: :none,
+            name: :error,
+            reason: MARKERLESS_EXIT_REASON,
+            observed_marker: :none
+          )
+        end
+        return false unless transitioned
+
+        @logger.event(
+          :marker_healed,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          prior_marker: row.marker,
+          reason: MARKERLESS_EXIT_REASON,
+          state_file: row.state_file
+        )
+        true
+      rescue StandardError => e
+        @logger.event(
+          :marker_heal_failed,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          reason: MARKERLESS_EXIT_REASON,
+          error: "#{e.class}: #{e.message}"
+        )
+        false
       end
 
       # Read-only assessment shared with the scheduler disposition publisher.
@@ -460,7 +505,7 @@ module Hive
         # undeletable lock, or still-live post-KILL holder makes the claim fail
         # closed and leaves the marker untouched.
         terminate_lock_holder(holder)
-        transitioned = with_review_heal_lock(row, reason: "review_agent_died") do
+        transitioned = with_heal_lock(row, reason: "review_agent_died") do
           transition_review_working_to_error(
             row, expected_attrs: marker_attrs, reason: "review_agent_died"
           )
@@ -505,7 +550,7 @@ module Hive
         return unless mtime && (now - mtime) > @grace_sec
 
         marker_attrs = review_marker_attrs(row)
-        transitioned = with_review_heal_lock(row, reason: "review_orphaned") do
+        transitioned = with_heal_lock(row, reason: "review_orphaned") do
           transition_review_working_to_error(
             row, expected_attrs: marker_attrs, reason: "review_orphaned"
           )
@@ -635,16 +680,21 @@ module Hive
         recorded.nil? || Hive::Lock.process_start_time(pid) == recorded
       end
 
-      def with_review_heal_lock(row, reason:)
+      def with_heal_lock(row, reason:, create: true)
         Hive::Lock.with_task_lock(
           row.folder.to_s,
           "owner" => "stale_agent_healer",
-          "reason" => reason
+          "reason" => reason,
+          create: create
         ) { yield }
       rescue Hive::ConcurrentRunError
         # A runner acquired the task after this tick's status snapshot.
         # Leave both its lock and the marker untouched; the next tick will
         # reconcile the new generation.
+        false
+      rescue Errno::ENOENT
+        raise if create
+
         false
       end
 

@@ -268,6 +268,24 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_set_if_current_preserves_a_newer_marker
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, "# task\n")
+      Hive::Markers.set(file, :waiting, reason: "operator_input")
+
+      refute Hive::Markers.set_if_current(
+        file,
+        expected_name: :none,
+        name: :error,
+        reason: "agent_exited_without_terminal_marker"
+      )
+      marker = Hive::Markers.current(file)
+      assert_equal :waiting, marker.name
+      assert_equal "operator_input", marker.attrs["reason"]
+    end
+  end
+
   def test_review_recovery_markers_get_unique_marker_ids
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-08-22
+updated: 2026-08-25
 tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
@@ -136,6 +136,12 @@ that form polls `LOCK_NB` against a monotonic deadline and raises the retryable
 brainstorm writer uses both options, preventing a stalled marker holder from
 keeping the task lock and hanging CLI, web, or Telegram writes indefinitely.
 
+`set_if_current(path, expected_name:, name:, ...)` performs a marker
+compare-and-set under that same sidecar lock. It returns `false` when another
+writer changed the current marker first. The daemon's markerless-stall repair
+uses this operation so a concurrent agent or operator `WAITING`, `COMPLETE`, or
+`ERROR` marker wins instead of being overwritten by stale recovery input.
+
 ## `parse_attrs`
 
 Parses the attribute string into a Hash. Format: `key=value` pairs, optional double-quoted values for whitespace-containing payloads. Quoted values may span newlines and may contain `>` characters; parsing stops at the closing quote, not at branch-arrow text. Regex: `/(\w[\w-]*)=("[^"]*"|\S+)/`.
@@ -146,7 +152,8 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
   attribute quoting/sanitization, last-marker semantics, bounded sparse-file
   tails, atomic EOF relocation, nonblocking FIFO and no-follow symlink refusal, predictable-temp
   symlink resistance, Git stderr attrs containing `branch -> branch`, and
-  migration compare-and-swap refusal after a newer generation lands.
+  migration compare-and-swap refusal after a newer generation lands, and
+  marker compare-and-set refusal after a concurrent marker transition.
 
 ## Used by
 

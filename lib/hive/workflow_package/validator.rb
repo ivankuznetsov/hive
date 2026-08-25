@@ -314,7 +314,9 @@ module Hive
       end
 
       def validate_hive_tools(tools, manifest, diagnostics)
-        unless tools.is_a?(Array) && tools.all? { |entry| entry.is_a?(Hash) && entry.keys == [ "path" ] }
+        unless tools.is_a?(Array) && tools.all? do |entry|
+          entry.is_a?(Hash) && entry.keys == [ "path" ] && entry["path"].is_a?(String)
+        end
           diagnostics << diagnostic("x-hive.invalid_tools", RegistryManifest::FILE_NAME,
                                     "x-hive tools must be path-only maps")
           return
@@ -346,7 +348,8 @@ module Hive
         valid_shape = inputs.is_a?(Array) && inputs.all? do |entry|
           entry.is_a?(Hash) && entry.keys.sort == %w[authorized_slots name] &&
             entry["name"].is_a?(String) && InputName.valid?(entry["name"]) &&
-            entry["authorized_slots"].is_a?(Array)
+            entry["authorized_slots"].is_a?(Array) &&
+            entry["authorized_slots"].all? { |slot| slot.is_a?(String) }
         end
         unless valid_shape
           diagnostics << diagnostic("x-hive.invalid_inputs", RegistryManifest::FILE_NAME,
@@ -398,7 +401,9 @@ module Hive
       end
 
       def validate_hive_prompt_assets(assets, manifest, diagnostics)
-        unless assets.is_a?(Array) && assets.all? { |entry| entry.is_a?(Hash) && entry.keys == [ "path" ] }
+        unless assets.is_a?(Array) && assets.all? do |entry|
+          entry.is_a?(Hash) && entry.keys == [ "path" ] && entry["path"].is_a?(String)
+        end
           diagnostics << diagnostic("x-hive.invalid_prompt_assets", RegistryManifest::FILE_NAME,
                                     "x-hive prompt_assets must be path-only maps")
           return

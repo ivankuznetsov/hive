@@ -323,6 +323,9 @@ class WorkflowPackageValidatorTest < Minitest::Test
         [ { "path" => "../escape" }, { "path" => "assets/missing.md" } ], manifest, diagnostics
       )
 
+      validator.send(:validate_hive_tools, [ { "path" => 1 } ], manifest, diagnostics)
+      validator.send(:validate_hive_prompt_assets, [ { "path" => 2 } ], manifest, diagnostics)
+
       rules = diagnostics.map(&:rule_id)
       %w[
         x-hive.invalid_tools x-hive.invalid_tool_path x-hive.tool_not_executable
@@ -344,6 +347,10 @@ class WorkflowPackageValidatorTest < Minitest::Test
     validator.send(:validate_hive_inputs, duplicate, [ "stages.work" ], diagnostics)
     invalid_slots = [ { "name" => "TOKEN", "authorized_slots" => [ "stages.missing", "stages.missing" ] } ]
     validator.send(:validate_hive_inputs, invalid_slots, [ "stages.work" ], diagnostics)
+    validator.send(
+      :validate_hive_inputs,
+      [ { "name" => "REGION", "authorized_slots" => [1, "build"] } ], [ "build" ], diagnostics
+    )
 
     rules = diagnostics.map(&:rule_id)
     assert_includes rules, "x-hive.invalid_inputs"

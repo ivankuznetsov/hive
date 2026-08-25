@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-20
+updated: 2026-08-25
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -16,6 +16,16 @@ registry; its Claude, Codex, Pi, Grok, and OpenCode adapters reference the packa
 built-in profiles. Process lifetime, workflow selection, model routing,
 subscription binding, retries, artifact acceptance, and stage success remain
 in Hive.
+
+Built-in profiles resolve optional provider behavior through
+`Hive::AgentSupport`. The root support catalog is data-only and loads a
+provider namespace only when that provider is selected. Pi is the first
+migrated provider; its message protocol, native model discovery, credential
+shape, plan-review policy, skill discovery/inventory, setup adapter, and
+managed runtime now live together under `Hive::AgentSupport::Pi`. The generic
+agent, artifact, workflow, Web, and skillpack callers retain process custody,
+durable writes, and transitions and dispatch to those facets without Pi
+branches. See [[modules/agent_support]].
 
 ## Supported Agent ABI
 
@@ -415,6 +425,8 @@ the attempt evidence channel.
 - `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
+- `test/unit/agent_support_test.rb` — selective clean-process loading,
+  upward-dependency checks, and live production residue scanning for Pi.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
 - `test/unit/agent_profiles/error_normalizers_test.rb` — captured Claude
   subscription limits, closed diagnostic taxonomy, task-local unsupported

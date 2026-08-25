@@ -1,6 +1,7 @@
 require "test_helper"
 require "digest"
 require "hive/agent_skills/adapters/registry"
+require "hive/agent_support/pi/setup_adapter"
 
 class AgentSkillAdaptersTest < Minitest::Test
   include HiveTestHelper
@@ -596,7 +597,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       stale = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                          health: "stale", bin: "/fake/pi",
                          native_package: { "id" => "source", "version" => "2.9.0" })
-      adapter = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir)
+      adapter = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir)
 
       assert_equal [ "/fake/pi", "install", "https://github.com/EveryInc/compound-engineering-plugin" ],
                    adapter.plan([ fresh ]).operations.fetch(0).argv
@@ -610,7 +611,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       runner = FakeRunner.new { |_argv, _env, _timeout| command_result(status: nil, timed_out: true) }
       row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/pi")
-      adapter = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: runner)
+      adapter = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir, runner: runner)
 
       outcome = adapter.execute(adapter.plan([ row ]).operations.fetch(0))
 
@@ -628,7 +629,7 @@ class AgentSkillAdaptersTest < Minitest::Test
 
       assert_instance_of Hive::AgentSkills::Adapters::Claude, registry.fetch("claude")
       assert_instance_of Hive::AgentSkills::Adapters::Codex, registry.fetch("codex")
-      assert_instance_of Hive::AgentSkills::Adapters::Pi, registry.fetch("pi")
+      assert_instance_of Hive::AgentSupport::Pi::SetupAdapter, registry.fetch("pi")
     end
   end
 
@@ -637,7 +638,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/pi")
       raising = FakeRunner.new { |_argv, _env, _timeout| raise IOError, "runner exploded" }
-      pi = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: raising)
+      pi = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir, runner: raising)
       outcome = pi.execute(pi.plan([ row ]).operations.first)
       assert_equal "failed", outcome.status
       assert_match(/runner exploded/, outcome.message)
@@ -697,7 +698,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       end
       row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/pi")
-      outcome = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: runner)
+      outcome = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir, runner: runner)
         .then { |instance| instance.execute(instance.plan([ row ]).operations.first) }
       assert_match(/spawn denied/, outcome.message)
     end

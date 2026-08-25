@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/agent_support"
 require "hive/agent_runtime"
 require "hive/config"
 require "hive/permission_scope"
@@ -31,15 +32,9 @@ module Hive
       def launch_kwargs(profile:, workspace:, role:, output_path: nil)
         return workspace_write_kwargs(profile) if profile.workspace_write_supported?
         return opencode_kwargs if profile.name == :opencode
-
-        # Pi's managed-workflow wrapper is deliberately read-only and cannot
-        # expose Bash or network access. Those are both required here: the
-        # reviewer must inspect the repository and referenced documentation,
-        # and its finding format requires SHA-256. Plan review uses the same
-        # disposable-worktree and ArtifactFirewall boundaries, so launch Pi
-        # directly instead of pretending its managed output wrapper can
-        # enforce this broader review contract.
-        return unrestricted_kwargs if profile.name == :pi
+        if (support = Hive::AgentSupport.for(profile))
+          return support.plan_review_launch_kwargs(workspace:, role:, output_path:)
+        end
 
         tools = REVIEW_TOOLS + write_tools(workspace)
         scope = Hive::PermissionScope.resolve(

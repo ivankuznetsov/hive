@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/artifacts/capture_toolkit"
+require "hive/agent_support/pi"
 require "hive/commands/evidence"
 
 class ArtifactsCaptureToolkitTest < Minitest::Test
@@ -45,7 +46,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       toolkit = Hive::Artifacts::CaptureToolkit.new(hive_executable: "/opt/hive/bin/hive")
 
       receipt = with_replaced_singleton_method(
-        Hive::WorkflowPackage::RuntimePolicy, :compile_pi_evidence_actor, compile
+        Hive::AgentSupport::Pi::Runtime, :compile_evidence_actor, compile
       ) do
         toolkit.prepare!(
           kinds: %w[document terminal], task_root: root, source_root: source,

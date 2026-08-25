@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "digest"
 require "hive/commands/doctor"
+require "hive/agent_support/pi"
 require "hive/agent_skills/inspector"
 require "hive/agent_skills/target_resolver"
 
@@ -27,7 +28,7 @@ class HiveCommandsDoctorTest < Minitest::Test
           resolver = case target.agent
           when "claude" then Hive::SkillCheck::Claude
           when "codex" then Hive::SkillCheck::Codex
-          when "pi" then Hive::SkillCheck::Pi
+          when "pi" then Hive::AgentSupport::Pi::Skills
           end
           found = resolver.resolve(target.invocation, project_root: @project_root)
           health = found.status == :present ? "healthy" : "missing"

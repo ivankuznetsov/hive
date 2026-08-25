@@ -50,7 +50,7 @@ class ImplementationIdentityTest < Minitest::Test
       File.write(File.join(home, ".pi", "settings.json"), JSON.generate("provider" => "google"))
 
       assert_raises(Hive::ImplementationIdentity::ResolutionError) do
-        Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, home: home)
+        Hive::AgentSupport.for(:pi).default_model(home: home)
       end
     end
   end

@@ -10,6 +10,7 @@ require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
+require "hive/agent_support"
 require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
@@ -324,7 +325,7 @@ module Hive
 
       cmd = build_cmd
       log_file = log_path
-      structured_output_protocol = @profile.structured_output_protocol
+      structured_output_protocol = Hive::AgentSupport.for(@profile) || @profile.structured_output_protocol
       messages = Hive::Agent::MessageExtractor::Accumulator.new(
         max_bytes: FINAL_MESSAGE_TAIL_BYTES,
         structured_output_protocol: structured_output_protocol,

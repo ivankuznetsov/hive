@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-21
+updated: 2026-08-25
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -23,6 +23,7 @@ boundary.
 | Patrol Fix Workflow Core | `boundary-ready` | `require "hive/patrol_fix"` → `Hive::PatrolFix` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
+| Agent Support | `boundary-ready` | `require "hive/agent_support"` → `Hive::AgentSupport` | [[modules/agent_support]] |
 | Agent ABI | `boundary-ready` | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
@@ -40,12 +41,13 @@ version, tag, or release.
 
 ## Graph audit
 
-The catalog retains fifteen components: eleven are `boundary-ready`; Provider
+The catalog retains sixteen components: twelve are `boundary-ready`; Provider
 Health, Provider Routing Policy, Provider Routing Operations, and Attempts
 remain `candidate`. There are no migration exceptions.
 
 ```mermaid
 flowchart LR
+  agent_abi[Agent ABI] --> agent_support[Agent Support]
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   workflow_execution[Workflow Creator Execution] --> workflow_core[Workflow Creator]
   workflow_live[Workflow Creator Live Orchestration] --> workflow_execution

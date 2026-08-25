@@ -1,8 +1,8 @@
 require "hive/agent_skills/adapters/claude"
 require "hive/agent_skills/adapters/codex"
 require "hive/agent_skills/adapters/grok"
-require "hive/agent_skills/adapters/pi"
 require "hive/agent_skills/adapters/opencode"
+require "hive/agent_profiles"
 
 module Hive
   module AgentSkills
@@ -12,7 +12,6 @@ module Hive
           "claude" => Claude,
           "codex" => Codex,
           "grok" => Grok,
-          "pi" => Pi,
           "opencode" => OpenCode
         }.freeze
 
@@ -23,7 +22,7 @@ module Hive
 
         def fetch(agent)
           name = agent.to_s
-          klass = ADAPTERS.fetch(name) do
+          klass = Hive::AgentProfiles.support_for(name)&.const_get(:SetupAdapter, false) || ADAPTERS.fetch(name) do
             raise Hive::ConfigError, "no agent-skills adapter for #{name.inspect}"
           end
           @instances[name] ||= klass.new(**@options)

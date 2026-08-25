@@ -13,6 +13,7 @@ require "hive/artifacts/managed_web_server"
 require "hive/artifacts/outcome_evidence/proof"
 require "hive/artifacts/terminal_recorder"
 require "hive/config"
+require "hive/agent_support"
 require "hive/invoked_binary"
 require "hive/web/browser_bundle"
 require "hive/workflow_package/runtime_policy"
@@ -95,7 +96,8 @@ module Hive
         }
         producer_profile ||= Hive::AgentProfiles.lookup(:codex)
         managed = required & CAPTURE_KINDS
-        return receipt if managed.empty? && producer_profile.name != :pi
+        support = Hive::AgentSupport.for(producer_profile)
+        return receipt if managed.empty? && !support&.capture_interface_required?
 
         extra_read_paths = []
 
@@ -183,23 +185,23 @@ module Hive
             codex_runtime_roots: codex_runtime_roots,
             hive_runtime_paths: hive_runtime_paths
           )
-        when :pi
+        else
+          unless support
+            raise Hive::ConfigError,
+                  "managed capture evidence does not support producer #{producer_profile.name.inspect}"
+          end
           @producer_runtime_policy =
-            Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+            support::Runtime.compile_evidence_actor(
+              host: Hive::WorkflowPackage::RuntimePolicy,
               task_folder: source_root, package_root: task_root,
               profile: producer_profile, environment: @launch_environment,
               mailbox_root: @capture_mailbox.root, writable_root: writable_root,
               hive_executable: @hive_executable,
               browser: (required & VISUAL_KINDS).any?
             )
-          receipt["producer_interface"] = {
-            "document" => "evidence_write",
-            "terminal" => required.include?("terminal") ? "evidence_terminal" : nil,
-            "browser" => (required & VISUAL_KINDS).any? ? "evidence_browser" : nil
-          }.compact
-        else
-          raise Hive::ConfigError,
-                "managed capture evidence does not support producer #{producer_profile.name.inspect}"
+          receipt["producer_interface"] = support.producer_interface(
+            required_kinds: required, browser: (required & VISUAL_KINDS).any?
+          )
         end
         receipt
       rescue Hive::Artifacts::CaptureProxy::ProxyError => e

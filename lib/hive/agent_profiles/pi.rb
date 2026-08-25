@@ -1,5 +1,5 @@
 require "hive/agent_profile"
-require "hive/skill_check"
+require "hive/agent_support"
 
 module Hive
   module AgentProfiles
@@ -9,10 +9,11 @@ module Hive
       skill_syntax_format: "/skill:%{skill}",
       status_detection_mode: :output_file_exists,
       billing_semantics: :subscription_backed,
-      structured_output_protocol: :pi_agent_end,
-      skill_verifier: Hive::SkillCheck::Pi.method(:verify),
+      skill_verifier: ->(invocation, project_root: nil) {
+        Hive::AgentSupport.for(PI)::Skills.verify(invocation, project_root: project_root)
+      },
       default_model_resolver: ->(**kwargs) {
-        Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, **kwargs)
+        Hive::AgentSupport.for(PI).default_model(**kwargs)
       },
       routed_model_argument_builder: ->(model) {
         %w[default inherit].include?(model) ? [] : [ "--model", model ]

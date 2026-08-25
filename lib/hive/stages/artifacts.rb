@@ -521,7 +521,7 @@ module Hive
           if profile.workspace_write_supported?
             return { permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE }
           end
-          if profile.name == :pi && producer_runtime_policy
+          if producer_runtime_policy
             return Hive::Stages::Base.tool_scope_kwargs(
               permission_mode: producer_runtime_policy.permission_mode,
               allowed_tools: producer_runtime_policy.allowed_tools,

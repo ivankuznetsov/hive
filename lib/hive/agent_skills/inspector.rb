@@ -6,6 +6,7 @@ require "hive/agent_skills/command_runner"
 require "hive/agent_skills/filesystem_inventory"
 require "hive/agent_skills/manifest"
 require "hive/agent_skills/target_resolver"
+require "hive/agent_profiles"
 require "hive/skill_check"
 
 module Hive
@@ -374,10 +375,18 @@ module Hive
           issues << [ "incompatible", "#{profile.name} CLI #{version} is below supported #{profile.min_version}" ]
         end
 
-        inventory = case native_spec.provider
+        support = Hive::AgentProfiles.support_for(profile)
+        inventory = if support
+          support::Skills.live_inventory(
+            bin:, native_spec:, issues:,
+            run: ->(argv) { run(argv, commands) },
+            package_version: method(:package_version_from),
+            failure: method(:command_failure)
+          )
+        else
+          case native_spec.provider
         when "claude" then claude_inventory(bin, native_spec, commands, issues)
         when "codex" then codex_inventory(bin, native_spec, commands, issues)
-        when "pi" then pi_inventory(bin, native_spec, commands, issues)
         when "grok" then grok_inventory(bin, native_spec, commands, issues)
         when "opencode"
           FilesystemInventory.new.inspect(
@@ -393,6 +402,7 @@ module Hive
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
+          end
         end
 
         evidence = {
@@ -472,24 +482,6 @@ module Hive
             "source" => marketplace.dig("marketplaceSource", "source")
           }.freeze
         }
-      end
-
-      def pi_inventory(bin, native_spec, commands, issues)
-        list_result = run([ bin, "list" ], commands)
-        issues << [ "incompatible", "pi package inventory failed: #{command_failure(list_result)}" ] unless list_result.success?
-        lines = list_result.stdout.lines
-        source_index = lines.index { |line| same_source?(line.strip, native_spec.source) }
-        install_path = if source_index
-          lines[(source_index + 1)..]&.find { |line| !line.strip.empty? }&.strip
-        end
-        package = source_index && {
-          "id" => native_spec.package,
-          "version" => package_version_from(install_path),
-          "enabled" => true,
-          "install_path" => install_path,
-          "source" => lines[source_index].strip
-        }.freeze
-        { "package" => package, "marketplace" => nil }
       end
 
       def grok_inventory(bin, native_spec, commands, issues)
@@ -762,10 +754,9 @@ module Hive
       end
 
       def skill_module(agent)
-        case agent
+        Hive::AgentProfiles.support_for(agent)&.const_get(:Skills, false) || case agent
         when "claude" then Hive::SkillCheck::Claude
         when "codex" then Hive::SkillCheck::Codex
-        when "pi" then Hive::SkillCheck::Pi
         when "grok" then Hive::SkillCheck::Grok
         when "opencode" then Hive::SkillCheck::OpenCode
         else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
@@ -806,20 +797,13 @@ module Hive
       end
 
       def same_source?(actual, expected)
-        Hive::AgentSkills.same_source?(actual, expected)
+        Hive::SkillCheck.same_source?(actual, expected)
       end
 
       def config_root_for(native_spec)
-        home = @environment["HOME"] || Dir.home
-        value = @environment[native_spec.config_home].to_s
-        return File.expand_path(value) unless value.empty?
-        case native_spec.provider
-        when "claude" then File.join(home, ".claude")
-        when "codex" then File.join(home, ".codex")
-        when "pi" then File.join(home, ".pi", "agent")
-        when "grok" then File.join(home, ".grok")
-        when "opencode" then File.join(home, ".config", "opencode")
-        end
+        Hive::AgentProfiles.lookup(native_spec.provider).configuration_directory(
+          environment: @environment
+        )
       end
 
       def alias_path_for(alias_spec)

@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/agent_support"
 
 module Hive
   # Registry for the AgentProfile instances hive ships and any custom ones
@@ -56,6 +57,8 @@ module Hive
         @mutex.synchronize { @profiles.keys }
       end
 
+      def support_for(profile) = Hive::AgentSupport.for(profile)
+
       def grok_auth_path(home: nil)
         AgentCliRuntime::Profiles.grok_auth_path(home:, env: ENV)
       end
@@ -66,13 +69,14 @@ module Hive
         # and codex create ~/.claude / ~/.codex (settings, cache, history)
         # the first time they run, *before* any token exists, so a dir check
         # reports a green "Logged in" on a box that has no credential.
+        support = Hive::AgentSupport.for(name)
+        return credential_present?(support.credential_path(home: home || Dir.home)) if support
+
         case name.to_sym
         when :claude
           credential_present?(File.join(home || Dir.home, ".claude", ".credentials.json"))
         when :codex
           credential_present?(File.join(home || Dir.home, ".codex", "auth.json"))
-        when :pi
-          credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
         when :grok
           credential_present?(grok_auth_path(home:))
         when :opencode

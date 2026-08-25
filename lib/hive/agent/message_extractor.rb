@@ -134,6 +134,10 @@ module Hive
       def extract(data, structured_output_protocol: nil)
         data = parse_json_line(data) if data.is_a?(String)
         return nil unless data.is_a?(Hash)
+        if structured_output_protocol.respond_to?(:extract_message)
+          message = structured_output_protocol.extract_message(data)
+          return message if message
+        end
 
         case data["type"]
         when "text"
@@ -143,13 +147,6 @@ module Hive
 
           structured_output = data["structuredOutput"]
           JSON.generate(structured_output) if structured_output.is_a?(Hash)
-        when "agent_end"
-          return nil unless structured_output_protocol == :pi_agent_end
-
-          assistant = Array(data["messages"]).reverse.find do |message|
-            message.is_a?(Hash) && message["role"] == "assistant"
-          end
-          text_from_content(assistant && assistant["content"])
         when "result"
           text_value(data["result"])
         when "item.completed"
@@ -175,7 +172,10 @@ module Hive
       end
 
       def sensitive_payload?(data, raw_line: nil, structured_output_protocol: nil)
-        return false unless %i[grok_end pi_agent_end].include?(structured_output_protocol)
+        if structured_output_protocol.respond_to?(:sensitive_payload?)
+          return structured_output_protocol.sensitive_payload?(data, raw_line:)
+        end
+        return false unless structured_output_protocol == :grok_end
         return sensitive_payload_event?(data, structured_output_protocol:) if data.is_a?(Hash)
 
         data.nil? && sensitive_payload_line?(raw_line, structured_output_protocol:)
@@ -183,12 +183,13 @@ module Hive
 
       def sensitive_payload_event?(data, structured_output_protocol: nil)
         return false unless data.is_a?(Hash)
+        if structured_output_protocol.respond_to?(:sensitive_payload?)
+          return structured_output_protocol.sensitive_payload?(data, raw_line: nil)
+        end
 
         case structured_output_protocol
         when :grok_end
           data["type"] == "end" && data.key?("structuredOutput")
-        when :pi_agent_end
-          data["type"] == "agent_end" && data.key?("messages")
         else
           false
         end

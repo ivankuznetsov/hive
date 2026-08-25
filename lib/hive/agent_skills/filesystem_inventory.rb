@@ -1,8 +1,7 @@
 require "json"
 require "rubygems/version"
-require "uri"
-
 require "hive/agent_skills"
+require "hive/agent_profiles"
 require "hive/skill_check"
 
 module Hive
@@ -20,13 +19,19 @@ module Hive
       end
 
       def inspect(profile:, bin:, native_spec:, root:)
-        inventory = case native_spec.provider
+        support = Hive::AgentProfiles.support_for(native_spec.provider)
+        inventory = if support
+          support::Skills.filesystem_inventory(
+            native_spec:, root:, package_version: method(:package_version_from)
+          )
+        else
+          case native_spec.provider
         when "claude" then claude_inventory(native_spec, root)
         when "codex" then codex_inventory(native_spec, root)
-        when "pi" then pi_inventory(native_spec, root)
         when "grok" then grok_inventory(native_spec, root)
         when "opencode" then opencode_inventory(native_spec, root)
         else raise TypeError, "unsupported provider #{native_spec.provider.inspect}"
+          end
         end
 
         {
@@ -127,20 +132,6 @@ module Hive
             "name" => native_spec.marketplace,
             "source" => marketplace_values["source"]
           }.freeze
-        }.freeze
-      end
-
-      def pi_inventory(native_spec, root)
-        install_path = pi_install_path(root, native_spec.source)
-        {
-          "package" => install_path && {
-            "id" => native_spec.package,
-            "version" => package_version_from(install_path),
-            "enabled" => true,
-            "install_path" => install_path,
-            "source" => source_for_pi_install(root, install_path)
-          }.freeze,
-          "marketplace" => nil
         }.freeze
       end
 
@@ -279,41 +270,6 @@ module Hive
         directories.max_by { |version, path| [ version, path ] }&.last
       end
 
-      def pi_install_path(root, source)
-        git_root = File.join(root, "git")
-        direct = direct_pi_install_path(git_root, source)
-        return direct if direct && File.directory?(direct)
-        return nil unless File.directory?(git_root)
-
-        pi_package_roots(git_root).find do |path|
-          same_source?(source_for_pi_install(root, path), source)
-        end
-      end
-
-      def direct_pi_install_path(git_root, source)
-        uri = URI.parse(source.to_s)
-        return nil unless uri.is_a?(URI::HTTP) && uri.host
-        segments = uri.path.delete_prefix("/").sub(/\.git\z/i, "").split("/")
-        return nil if segments.empty? || segments.any? { |part| !part.match?(/\A[A-Za-z0-9._-]+\z/) }
-
-        File.join(git_root, uri.host, *segments)
-      rescue URI::InvalidURIError
-        nil
-      end
-
-      def pi_package_roots(git_root)
-        Hive::SkillCheck::Pi.git_package_roots(git_root).sort
-      end
-
-      def source_for_pi_install(root, install_path)
-        git_root = File.join(root, "git")
-        jailed = Hive::SkillCheck::Pi.jail_path(install_path, [ git_root ])
-        return nil unless jailed
-
-        prefix = File.expand_path(git_root) + File::SEPARATOR
-        "https://#{jailed.delete_prefix(prefix)}"
-      end
-
       def package_version_from(root)
         return nil unless root
         return @version_cache.fetch(root) if @version_cache.key?(root)
@@ -333,9 +289,6 @@ module Hive
         @version_cache[root] = nil
       end
 
-      def same_source?(actual, expected)
-        Hive::AgentSkills.same_source?(actual, expected)
-      end
     end
   end
 end

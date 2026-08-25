@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/agent/message_extractor"
+require "hive/agent_support/pi"
 
 class AgentMessageExtractorTest < Minitest::Test
   def test_extracts_claude_result_message
@@ -80,18 +81,21 @@ class AgentMessageExtractorTest < Minitest::Test
     refute Hive::Agent::MessageExtractor.sensitive_payload_event?(event)
     assert_equal(
       '{"files":{"result.md":"done\\n"}}',
-      Hive::Agent::MessageExtractor.extract(event, structured_output_protocol: :pi_agent_end)
+      Hive::Agent::MessageExtractor.extract(
+        event,
+        structured_output_protocol: Hive::AgentSupport::Pi
+      )
     )
     assert Hive::Agent::MessageExtractor.sensitive_payload_event?(
       event,
-      structured_output_protocol: :pi_agent_end
+      structured_output_protocol: Hive::AgentSupport::Pi
     )
   end
 
   def test_strict_pi_terminal_output_invalidates_a_missing_assistant_message
     accumulator = Hive::Agent::MessageExtractor::Accumulator.new(
       max_bytes: 256,
-      structured_output_protocol: :pi_agent_end,
+      structured_output_protocol: Hive::AgentSupport::Pi,
       require_terminal_structured_output: true
     )
 

@@ -2,6 +2,7 @@ require "test_helper"
 
 require "hive/agent_skills/filesystem_inventory"
 require "hive/agent_skills/manifest"
+require "hive/agent_support/pi"
 
 class AgentSkillsFilesystemInventoryTest < Minitest::Test
   include HiveTestHelper
@@ -113,7 +114,9 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
       assert_empty result.fetch("issues")
       assert_nil result.fetch("package")
 
-      assert_nil inventory.send(:direct_pi_install_path, File.join(root, "git"), "https://bad host/%")
+      assert_nil Hive::AgentSupport::Pi::Skills.direct_install_path(
+        File.join(root, "git"), "https://bad host/%"
+      )
     end
 
     with_tmp_dir do |root|

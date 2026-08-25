@@ -16,14 +16,14 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   Row = Struct.new(
     :project, :slug, :folder, :workflow, :stage, :marker, :marker_attrs,
     :task_generation, :condition_task_generation, :commit_generation,
-    :attempt_id, :state_file_mtime, :action, :depends_on, :blocked_by,
+    :attempt_id, :status_payload_mtime, :state_file_mtime, :action, :depends_on, :blocked_by,
     :dependency_stage, :blocked, :admission_error,
     keyword_init: true
   )
 
   def row(stage: "4-execute", marker: "waiting", task_generation: "task-generation-1",
           slug: "ship-it", marker_attrs: { "marker_id" => "marker-1" },
-          state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
+          status_payload_mtime: nil, state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
           blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil,
           folder: nil)
     folder ||= "/tmp/#{slug}"
@@ -32,10 +32,34 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       workflow: "coding", stage: stage, marker: marker,
       marker_attrs: marker_attrs,
       task_generation: task_generation, condition_task_generation: "condition-1",
-      commit_generation: 2, attempt_id: "attempt-1", state_file_mtime: state_file_mtime,
+      commit_generation: 2, attempt_id: "attempt-1",
+      status_payload_mtime: status_payload_mtime,
+      state_file_mtime: state_file_mtime,
       action: action, depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked, admission_error: admission_error
     )
+  end
+
+  def test_scheduler_identity_uses_status_payload_mtime_for_controller_rows
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      payload_mtime = "2026-08-25T00:17:21.900432Z"
+      observed = row(
+        status_payload_mtime: payload_mtime,
+        state_file_mtime: Time.utc(2026, 8, 25, 0, 10, 48, 584_735)
+      )
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [ observed ], controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+      )
+
+      snapshot = reader.read(now: T0 + 2)
+      assert_equal payload_mtime, snapshot.dig("tasks", 0, "status_payload_mtime")
+      assert_equal "2026-08-25T00:10:48.584735Z",
+                   snapshot.dig("tasks", 0, "state_file_mtime")
+    end
   end
 
   def build(path)

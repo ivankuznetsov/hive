@@ -503,7 +503,7 @@ module Hive
         "condition_task_generation" => row["condition_task_generation"],
         "commit_generation" => row["commit_generation"],
         "attempt_id" => row["attempt_id"],
-        "state_file_mtime" => row["mtime"],
+        "status_payload_mtime" => row["mtime"],
         "action" => row["action"],
         "depends_on" => row["depends_on"],
         "blocked_by" => row["blocked_by"],
@@ -521,7 +521,8 @@ module Hive
         "condition_task_generation" => observed["condition_task_generation"],
         "commit_generation" => observed["commit_generation"],
         "attempt_id" => observed["attempt_id"],
-        "state_file_mtime" => observed["state_file_mtime"],
+        # Older private snapshots used state_file_mtime for this join.
+        "status_payload_mtime" => scheduler_status_payload_mtime(observed),
         "action" => observed["action"],
         "depends_on" => observed["depends_on"],
         "blocked_by" => observed["blocked_by"],
@@ -529,10 +530,26 @@ module Hive
         "blocked" => observed["blocked"],
         "admission_error" => observed["admission_error"]
       }
+      if legacy_controller_payload_mtime_unknown?(observed, row)
+        expected.delete("status_payload_mtime")
+        actual.delete("status_payload_mtime")
+      end
       expected.all? do |key, value|
         other = actual[key]
         scheduler_value_matches?(value, other)
       end
+    end
+
+    def legacy_controller_payload_mtime_unknown?(observed, row)
+      !observed.key?("status_payload_mtime") &&
+        row["workflow"] == PATROL_FIX_WORKFLOW &&
+        task_graph_bound_to_snapshot?(@daemon_snapshot)
+    end
+
+    def scheduler_status_payload_mtime(observed)
+      return observed["status_payload_mtime"] if observed.key?("status_payload_mtime")
+
+      observed["state_file_mtime"]
     end
 
     def scheduler_value_matches?(expected, actual)

@@ -45,20 +45,21 @@ module HiveBench
     # backfill must never re-buy existing scores.
     def run(cells:, search_dirs:, source:, corpus_root:, judges:, scorer: Score.new,
             restorer: GitRestore.new, withhold_reference: false, only_missing_judges: false,
-            plan_source: :frozen, judge_efforts: {}, minimum_samples: 1)
+            plan_source: :frozen, judge_efforts: {}, judge_routes: {}, minimum_samples: 1)
       bases = Corpus.load(root: corpus_root, checkout_source: source)
                     .to_h { |e| [ e["task_id"], { base: e.dig("source", "base_commit"), entry: e } ] }
       records = cells.map do |old|
         rejudge_cell(old, bases, search_dirs, judges, scorer, restorer,
                      withhold_reference: withhold_reference, only_missing: only_missing_judges,
-                     plan_source: plan_source, minimum_samples: minimum_samples)
+                     plan_source: plan_source, minimum_samples: minimum_samples,
+                     judge_efforts: judge_efforts, judge_routes: judge_routes)
       end
       result = scorer.results(records: records, corpus_version: "v2", generated_at: Time.now.utc.iso8601)
       JudgeProvenance.annotate_document!(result, efforts: judge_efforts)
     end
 
     def rejudge_cell(old, bases, search_dirs, judges, scorer, restorer, withhold_reference:, only_missing:,
-                     plan_source: :frozen, minimum_samples: 1)
+                     plan_source: :frozen, minimum_samples: 1, judge_efforts: {}, judge_routes: {})
       info = bases.fetch(old["task_id"])
       diff = recover_diff(search_dirs, old, info[:base], restorer)
       # Task contract (external review, threat #4): v2 graded every cell against
@@ -81,6 +82,9 @@ module HiveBench
       end
       warn "  judged #{old["agent_id"]} #{old["task_id"]} (#{diff.lines.size} diff lines): #{judged.transform_values(&:mean).inspect}"
       rec = scorer.cell_record(cell: cell_meta(old), gate: NO_GATE, judges: judged)
+      (rec["judges"] || {}).each do |name, record|
+        record.merge!(JudgeProvenance.metadata(name, efforts: judge_efforts, routes: judge_routes))
+      end
       # Keep the cell's existing judge scores; the fresh ones fill the gaps.
       rec["judges"] = (old["judges"] || {}).merge(rec["judges"] || {})
       rec
@@ -166,6 +170,8 @@ if $PROGRAM_NAME == __FILE__
            openrouter_model: "openai/gpt-5.5-pro", withhold_reference: false, only_missing: false, plan_source: :frozen }
   opts[:codex_judge_model] = HiveBench::CodexJudge::DEFAULT_MODEL
   opts[:codex_judge_effort] = HiveBench::CodexJudge::DEFAULT_EFFORT
+  opts[:codex_judge_provider] = HiveBench::CodexJudge::DEFAULT_PROVIDER
+  opts[:codex_judge_provider_model] = nil
   OptionParser.new do |o|
     o.banner = "Usage: OPENROUTER_API_KEY=… ruby harness/rejudge.rb --source <clone> [opts] <search-dir>..."
     o.on("--source PATH") { |v| opts[:source] = v }
@@ -175,10 +181,15 @@ if $PROGRAM_NAME == __FILE__
     o.on("--seeds N", Integer) { |v| opts[:seeds] = v }
     o.on("--[no-]claude-judge") { |v| opts[:claude_judge] = v }
     o.on("--judge-model M") { |v| opts[:judge_model] = v }
-    o.on("--[no-]codex-judge", "score via the codex CLI (subscription)") { |v| opts[:codex_judge] = v }
+    o.on("--[no-]codex-judge", "score via the codex CLI (subscription by default)") { |v| opts[:codex_judge] = v }
     o.on("--codex-judge-model M", "default: #{HiveBench::CodexJudge::DEFAULT_MODEL}") { |v| opts[:codex_judge_model] = v }
     o.on("--codex-judge-effort LEVEL", "default: #{HiveBench::CodexJudge::DEFAULT_EFFORT}") do |v|
       opts[:codex_judge_effort] = v
+    end
+    o.on("--codex-judge-provider PROVIDER", HiveBench::CodexJudge::PROVIDERS,
+         "default: #{HiveBench::CodexJudge::DEFAULT_PROVIDER}") { |v| opts[:codex_judge_provider] = v }
+    o.on("--codex-judge-provider-model M", "provider model id (required for OpenRouter)") do |v|
+      opts[:codex_judge_provider_model] = v
     end
     o.on("--[no-]openrouter-judge") { |v| opts[:openrouter_judge] = v }
     o.on("--openrouter-model M") { |v| opts[:openrouter_model] = v }
@@ -203,7 +214,9 @@ if $PROGRAM_NAME == __FILE__
     judges[opts[:codex_judge_model]] =
       HiveBench::Judge.new(
         judge_fn: HiveBench::CodexJudge.judge_fn(model: opts[:codex_judge_model],
-                                                 effort: opts[:codex_judge_effort]),
+                                                 effort: opts[:codex_judge_effort],
+                                                 provider: opts[:codex_judge_provider],
+                                                 provider_model: opts[:codex_judge_provider_model]),
         seeds: opts[:seeds]
       )
   end
@@ -217,11 +230,19 @@ if $PROGRAM_NAME == __FILE__
 
   cells = JSON.parse(File.read(opts[:results]))["cells"]
   judge_efforts = opts[:codex_judge] ? { opts[:codex_judge_model] => opts[:codex_judge_effort] } : {}
+  judge_routes = if opts[:codex_judge]
+                   { opts[:codex_judge_model] => {
+                     provider: opts[:codex_judge_provider],
+                     provider_model: opts[:codex_judge_provider_model] || opts[:codex_judge_model]
+                   } }
+                 else
+                   {}
+                 end
   results = HiveBench::Rejudge.run(cells: cells, search_dirs: ARGV, source: opts[:source],
                                    corpus_root: opts[:corpus], judges: judges,
                                    withhold_reference: opts[:withhold_reference], plan_source: opts[:plan_source],
                                    only_missing_judges: opts[:only_missing], minimum_samples: opts[:seeds],
-                                   judge_efforts: judge_efforts)
+                                   judge_efforts: judge_efforts, judge_routes: judge_routes)
   FileUtils.mkdir_p(File.dirname(opts[:out]))
   File.write(opts[:out], "#{JSON.pretty_generate(results)}\n")
   warn "wrote #{opts[:out]}: #{results["cells"].size} cells re-judged by #{judges.keys.join(" + ")}"

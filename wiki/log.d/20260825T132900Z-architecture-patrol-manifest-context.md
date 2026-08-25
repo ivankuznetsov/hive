@@ -9,4 +9,7 @@
 - Public `source_pr` envelopes retain the compact source reference; frozen v3
   provenance is used only for the authoritative manifest/job comparison so
   successful partial discovery reports continue to satisfy schema v4.
+- Durable checkpoint validation compares that public reference with the same
+  compact projection of the authoritative job while retaining full v3
+  provenance in job storage.
 - Added regression coverage for the daemon's scheduled job-manifest path.

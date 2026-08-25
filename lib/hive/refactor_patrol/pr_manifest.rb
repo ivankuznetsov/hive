@@ -24,6 +24,7 @@ module Hive
       SOURCE_KEYS = %w[
         url number repository registration base_branch base_sha merge_sha merged_at
       ].freeze
+      SOURCE_REFERENCE_KEYS = (SOURCE_KEYS + %w[changed_paths manifest_checksum]).freeze
       FILE_STATUSES = %w[added removed modified renamed copied changed unchanged].freeze
       CLASSIFICATION_KEYS = %w[
         occurrence_id snapshot_digest changed_paths_digest decision reason rationale evidence
@@ -80,7 +81,7 @@ module Hive
         manifest.fetch("source").merge(
           "changed_paths" => manifest.fetch("changed_paths"),
           "manifest_checksum" => manifest.fetch("manifest_checksum")
-        )
+        ).slice(*SOURCE_REFERENCE_KEYS)
       end
 
       def job_id(source:, identity: nil)

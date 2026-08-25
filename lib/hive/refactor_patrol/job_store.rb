@@ -2048,7 +2048,9 @@ module Hive
                payload["project"] == aggregate.dig("source", "registration") &&
                payload["project_root"] == project_root && payload["dry_run"] == false &&
                payload["analysis_sha"] == aggregate.fetch("analysis_sha") &&
-               payload["source_pr"] == aggregate.fetch("source") &&
+               payload["source_pr"] == aggregate.fetch("source").slice(
+                 *PrManifest::SOURCE_REFERENCE_KEYS
+               ) &&
                payload["attempts"] == [] && payload["actions"] == []
           raise InconsistentRecord, "refactor patrol completion payload does not match its claimed job"
         end

@@ -784,9 +784,11 @@ module Hive
         @logger.event(:update_check_error, error_class: e.class.name, message: e.message)
       end
 
-      # SHA-256 of lib/hive.rb (the file holding SCHEMA_VERSIONS). Used
-      # as a cheap drift signal — if the on-disk file's digest no longer
-      # matches what we captured at startup, the loaded code is stale.
+      # SHA-256 of the file that owns Hive::Schemas (resolved through
+      # source_location so it follows the namespace; currently
+      # lib/hive/schemas.rb). Used as a cheap drift signal — if the
+      # on-disk file's digest no longer matches what we captured at
+      # startup, the loaded code is stale.
       # Returns nil on any failure; a nil baseline disables drift checks
       # so a transient read failure never re-execs.
       def compute_code_fingerprint

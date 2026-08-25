@@ -353,24 +353,27 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
-  def test_stop_foreground_daemon_terms_pid_from_owner_payload
+  def test_stop_foreground_daemon_terms_an_identity_verified_pid
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)
       File.write(
         File.join(Hive::Paths.state_home, ".daemon.pid"),
-        { "pid" => 123, "process_start_time" => nil, "started_at" => Time.now.utc.iso8601 }.to_yaml
+        { "pid" => 123, "process_start_time" => "boot-1", "started_at" => Time.now.utc.iso8601 }.to_yaml
       )
       signals = []
 
-      # Regression: Uninstall must read through Hive::PidFile.read_pid. The
-      # lifecycle owner writes a YAML mapping here; the retired local
-      # `File.read.strip.to_i` parsed this doc as PID 0 and silently
-      # skipped the shutdown.
-      with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
-        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_daemon)
+      # Regression: Uninstall must read through the daemon lifecycle
+      # boundary (Hive::PidFile.stop) and only signal an identity-verified
+      # PID. The retired local `File.read.strip.to_i` parsed this YAML doc
+      # as PID 0 and silently skipped the shutdown.
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "boot-1" }) do
+        with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+          Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_daemon)
+        end
       end
 
-      assert_equal [ [ "TERM", 123 ] ], signals
+      assert_equal [ 0, 123 ], signals.first, "liveness probe precedes the TERM"
+      assert_equal [ "TERM", 123 ], signals.last
     end
   end
 
@@ -384,7 +387,58 @@ class UninstallCommandTest < Minitest::Test
         Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_daemon)
       end
 
-      assert_equal [ [ "TERM", 123 ] ], signals
+      assert_equal [ "TERM", 123 ], signals.last
+    end
+  end
+
+  def test_stop_foreground_daemon_refuses_to_signal_a_reused_pid
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(
+        File.join(Hive::Paths.state_home, ".daemon.pid"),
+        { "pid" => 123, "process_start_time" => "boot-1", "started_at" => Time.now.utc.iso8601 }.to_yaml
+      )
+      output = StringIO.new
+
+      # The live PID 123 booted under a different start time than the one
+      # recorded in the payload: it belongs to an unrelated process now.
+      # Regression: uninstall must refuse to TERM it, mirroring daemon stop.
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "boot-2" }) do
+        with_replaced_singleton_method(Process, :kill, lambda { |signal, _pid|
+          raise "must not signal a reused PID" if signal == "TERM"
+
+          true # liveness probe
+        }) do
+          Hive::Commands::Uninstall.new(output: output).send(:stop_foreground_daemon)
+        end
+      end
+
+      assert_match(/reused.*refusing to signal/m, output.string)
+    end
+  end
+
+  def test_stop_foreground_daemon_refuses_to_signal_an_unverified_pid
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(
+        File.join(Hive::Paths.state_home, ".daemon.pid"),
+        { "pid" => 456, "process_start_time" => nil, "started_at" => Time.now.utc.iso8601 }.to_yaml
+      )
+      output = StringIO.new
+
+      # Without a recoverable live start time, identity cannot be proven;
+      # bystander safety forbids signalling even though the PID is alive.
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { nil }) do
+        with_replaced_singleton_method(Process, :kill, lambda { |signal, _pid|
+          raise "must not signal an unverified PID" if signal == "TERM"
+
+          true # liveness probe
+        }) do
+          Hive::Commands::Uninstall.new(output: output).send(:stop_foreground_daemon)
+        end
+      end
+
+      assert_match(/cannot verify PID 456.*refusing to signal/m, output.string)
     end
   end
 

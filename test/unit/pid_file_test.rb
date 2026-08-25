@@ -2,17 +2,26 @@ require "test_helper"
 require "tmpdir"
 require "hive/pid_file"
 
-# Covers the stateless module-level helpers Hive::PidFile.alive? / .read
-# (the mixin instance methods are exercised via the daemon/babysit commands).
+# Covers the stateless module-level helpers Hive::PidFile.alive? / .read /
+# .parse_payload / .ownership / .stop (the mixin instance methods are
+# exercised via the daemon/babysit commands).
 class HivePidFileModuleTest < Minitest::Test
+  include HiveTestHelper
+
   PF = Hive::PidFile
 
-  AliveProcess = Struct.new(:behaviour) do
-    def kill(_signal, _pid)
+  AliveProcess = Struct.new(:behaviour, :signals) do
+    def kill(signal, pid)
       case behaviour
       when :esrch then raise Errno::ESRCH
       when :eperm then raise Errno::EPERM
-      else true
+      when :dies_on_signal
+        raise Errno::ESRCH unless signal == 0
+        signals << [ signal, pid ]
+        true
+      else
+        signals << [ signal, pid ] if signals
+        true
       end
     end
   end
@@ -54,62 +63,165 @@ class HivePidFileModuleTest < Minitest::Test
     end
   end
 
-  def test_read_pid_returns_nil_for_missing_file
-    Dir.mktmpdir("hive-pid-file") do |dir|
-      assert_nil PF.read_pid(File.join(dir, "absent.pid"))
-    end
-  end
-
-  def test_read_pid_parses_the_owner_yaml_payload
+  def test_parse_payload_parses_the_owner_yaml_mapping
     Dir.mktmpdir("hive-pid-file") do |dir|
       path = File.join(dir, "daemon.pid")
-      File.write(path, { "pid" => 4242, "process_start_time" => nil }.to_yaml)
+      raw = { "pid" => 4242, "process_start_time" => "boot-1", "started_at" => Time.now.utc.iso8601 }.to_yaml
 
-      assert_equal 4242, PF.read_pid(path)
+      payload = PF.parse_payload(raw)
+
+      assert_equal 4242, payload["pid"]
+      assert_equal "boot-1", payload["process_start_time"]
+      refute payload["_legacy"]
     end
   end
 
-  def test_read_pid_accepts_legacy_bare_integer_doc
-    Dir.mktmpdir("hive-pid-file") do |dir|
-      path = File.join(dir, "daemon.pid")
-      File.write(path, "4242\n")
+  def test_parse_payload_wraps_a_legacy_bare_integer_doc
+    payload = PF.parse_payload("4242\n")
 
-      assert_equal 4242, PF.read_pid(path)
-    end
+    assert_equal 4242, payload["pid"]
+    assert_nil payload["process_start_time"]
+    assert payload["_legacy"]
   end
 
-  def test_read_pid_rejects_non_positive_pids
+  def test_parse_payload_rejects_corrupt_and_scalar_docs_but_keeps_owner_shaped_payloads
+    assert_nil PF.parse_payload("pid: [")
+    assert_nil PF.parse_payload("just-a-string")
+    # Owner-shaped mappings pass through even with a bad pid field; the
+    # positive-Integer gate lives in `stop` / the daemon's own stop path.
+    assert_equal({ "pid" => "not-a-pid" }, PF.parse_payload({ "pid" => "not-a-pid" }.to_yaml))
+    assert_equal({ "pid" => 0 }, PF.parse_payload({ "pid" => 0 }.to_yaml))
+  end
+
+  def test_stop_reports_malformed_for_non_positive_or_non_integer_pids
     Dir.mktmpdir("hive-pid-file") do |dir|
       zero = File.join(dir, "zero.pid")
       File.write(zero, { "pid" => 0 }.to_yaml)
-      negative = File.join(dir, "negative.pid")
-      File.write(negative, { "pid" => -1 }.to_yaml)
+      assert_equal({ status: :malformed, pid: nil }, PF.stop(zero))
 
-      assert_nil PF.read_pid(zero)
-      assert_nil PF.read_pid(negative)
+      nonint = File.join(dir, "nonint.pid")
+      File.write(nonint, { "pid" => "not-a-pid" }.to_yaml)
+      assert_equal({ status: :malformed, pid: nil }, PF.stop(nonint))
     end
   end
 
-  def test_read_pid_rejects_non_integer_pid_field
+  def test_ownership_tri_state_over_recorded_and_live_start_times
+    verified = { "pid" => 4242, "process_start_time" => "boot-1" }
+    reused = { "pid" => 4242, "process_start_time" => "boot-1" }
+    unverified = { "pid" => 4242, "process_start_time" => nil }
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "boot-1" }) do
+      assert_equal :verified, PF.ownership(verified, 4242)
+    end
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "boot-2" }) do
+      assert_equal :reused, PF.ownership(reused, 4242)
+    end
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "boot-2" }) do
+      assert_equal :unverified, PF.ownership(unverified, 4242)
+      assert_equal :unverified, PF.ownership(nil, 4242)
+    end
+    assert_equal :legacy, PF.ownership({ "pid" => 4242, "_legacy" => true }, 4242)
+  end
+
+  def test_stop_returns_absent_for_missing_file
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      assert_equal({ status: :absent, pid: nil }, PF.stop(File.join(dir, "absent.pid")))
+    end
+  end
+
+  def test_stop_signals_a_verified_owner_payload
     Dir.mktmpdir("hive-pid-file") do |dir|
       path = File.join(dir, "daemon.pid")
-      File.write(path, { "pid" => "not-a-pid" }.to_yaml)
+      File.write(path, { "pid" => 4242, "process_start_time" => "boot-1" }.to_yaml)
+      signals = []
 
-      assert_nil PF.read_pid(path)
+      outcome = with_replaced_singleton_method(
+        Hive::Lock, :process_start_time, ->(_pid) { "boot-1" }
+      ) do
+        PF.stop(path, process: AliveProcess.new(:ok, signals))
+      end
+
+      assert_equal({ status: :signalled, pid: 4242 }, outcome)
+      assert_includes signals, [ "TERM", 4242 ]
     end
   end
 
-  def test_read_pid_returns_nil_for_corrupt_or_unreadable_docs
+  def test_stop_signals_a_legacy_bare_integer_doc_best_effort
     Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, "4242\n")
+      signals = []
+
+      outcome = PF.stop(path, process: AliveProcess.new(:ok, signals))
+
+      assert_equal({ status: :signalled, pid: 4242 }, outcome)
+      assert_includes signals, [ "TERM", 4242 ]
+    end
+  end
+
+  def test_stop_refuses_to_signal_a_reused_pid
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      # The recorded start time names a boot that is no longer current:
+      # PID 4242 now belongs to an unrelated process.
+      File.write(path, { "pid" => 4242, "process_start_time" => "boot-1" }.to_yaml)
+      signals = []
+
+      outcome = with_replaced_singleton_method(
+        Hive::Lock, :process_start_time, ->(_pid) { "boot-2" }
+      ) do
+        PF.stop(path, process: AliveProcess.new(:ok, signals))
+      end
+
+      assert_equal({ status: :reused, pid: 4242 }, outcome)
+      refute_includes signals, [ "TERM", 4242 ], "a reused PID must never be signalled"
+    end
+  end
+
+  def test_stop_refuses_to_signal_an_unverified_pid
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      # No recorded start time (and none recoverable): identity cannot be
+      # proven, so bystander safety forbids signalling.
+      File.write(path, { "pid" => 4242, "process_start_time" => nil }.to_yaml)
+      signals = []
+
+      outcome = with_replaced_singleton_method(
+        Hive::Lock, :process_start_time, ->(_pid) { nil }
+      ) do
+        PF.stop(path, process: AliveProcess.new(:ok, signals))
+      end
+
+      assert_equal({ status: :unverified, pid: 4242 }, outcome)
+      refute_includes signals, [ "TERM", 4242 ]
+    end
+  end
+
+  def test_stop_reports_stale_malformed_and_unreadable_files
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      stale = File.join(dir, "stale.pid")
+      File.write(stale, { "pid" => 4242, "_legacy" => true }.to_yaml)
+      assert_equal({ status: :stale, pid: 4242 }, PF.stop(stale, process: AliveProcess.new(:esrch)))
+
+      malformed = File.join(dir, "malformed.pid")
+      File.write(malformed, "this is not a PID payload\n")
+      assert_equal({ status: :malformed, pid: nil }, PF.stop(malformed))
+
       corrupt = File.join(dir, "corrupt.pid")
       File.write(corrupt, "pid: [")
+      assert_equal({ status: :malformed, pid: nil }, PF.stop(corrupt))
+    end
+  end
 
-      assert_nil PF.read_pid(corrupt)
+  def test_stop_treats_a_mid_stop_death_as_stale
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, { "pid" => 4242, "_legacy" => true }.to_yaml)
+      signals = []
 
-      scalar = File.join(dir, "scalar.pid")
-      File.write(scalar, "just-a-string")
+      outcome = PF.stop(path, process: AliveProcess.new(:dies_on_signal, signals))
 
-      assert_nil PF.read_pid(scalar)
+      assert_equal({ status: :stale, pid: 4242 }, outcome)
     end
   end
 

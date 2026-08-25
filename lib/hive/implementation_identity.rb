@@ -240,19 +240,9 @@ module Hive
 
       def resolve(provider, project_root: nil, home: nil, **)
         home ||= Dir.home
-        value = case provider.to_sym
-        when :claude
-          json_model(paths(project_root, home, ".claude/settings.json"), %w[model])
-        when :codex
-          toml_model(paths(project_root, home, ".codex/config.toml"))
-        when :pi
-          pi_model(paths(project_root, home, ".pi/settings.json", home_relative: ".pi/agent/settings.json"))
-        when :grok
-          json_model(paths(project_root, home, ".grok/settings.json"), %w[model defaultModel]) ||
-            toml_model(paths(project_root, home, ".grok/config.toml"))
-        else
-          raise ResolutionError, "unknown provider #{provider.inspect}"
-        end
+        raise ResolutionError, "unknown provider #{provider.inspect}" unless block_given?
+
+        value = yield(project_root: project_root, home: home)
 
         if value.to_s.strip.empty?
           raise ResolutionError, "#{provider} did not expose a concrete default model"
@@ -269,35 +259,20 @@ module Hive
         values.uniq
       end
 
-      def json_model(candidate_paths, keys)
+      def json_model(candidate_paths, keys, provider_keys: [])
         candidate_paths.each do |path|
           next unless File.file?(path)
 
           data = JSON.parse(File.binread(path))
           next unless data.is_a?(Hash)
+          value = keys.lazy.map { |key| data[key] }.find { |item| !item.to_s.strip.empty? }
+          next if value.nil?
 
-          keys.each do |key|
-            value = data[key]
-            return value unless value.to_s.strip.empty?
-          end
-        end
-        nil
-      end
+          provider = provider_keys.lazy.map { |key| data[key] }
+            .find { |item| !item.to_s.strip.empty? }
+          return value if provider.to_s.empty? || value.to_s.include?("/")
 
-      def pi_model(candidate_paths)
-        candidate_paths.each do |path|
-          next unless File.file?(path)
-
-          data = JSON.parse(File.binread(path))
-          next unless data.is_a?(Hash)
-
-          model = data["model"] || data["defaultModel"]
-          next if model.to_s.strip.empty?
-
-          provider = data["provider"] || data["defaultProvider"]
-          return model if provider.to_s.empty? || model.to_s.include?("/")
-
-          return "#{provider}/#{model}"
+          return "#{provider}/#{value}"
         end
         nil
       end

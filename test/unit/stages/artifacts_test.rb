@@ -2050,8 +2050,8 @@ class StagesArtifactsTest < Minitest::Test
         assert_equal [ task.folder, worktree ],
                      security.fetch(:additional_read_roots), role
         assert_empty security.fetch(:additional_write_roots), role
-        assert_empty security.fetch(:opencode_edit_patterns), role
-        assert_empty security.fetch(:opencode_bash_patterns), role
+        assert_empty security.fetch(:edit_patterns), role
+        assert_empty security.fetch(:bash_patterns), role
       end
     end
   end

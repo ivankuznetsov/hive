@@ -1,6 +1,9 @@
 require "test_helper"
 require "digest"
 require "hive/agent_skills/adapters/registry"
+require "hive/agent_support/opencode"
+require "hive/agent_support/opencode/setup_adapter"
+require "hive/agent_support/pi/setup_adapter"
 
 class AgentSkillAdaptersTest < Minitest::Test
   include HiveTestHelper
@@ -77,7 +80,7 @@ class AgentSkillAdaptersTest < Minitest::Test
                    health: "missing", bin: "/fake/claude")
       end
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan(rows)
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan(rows)
 
       assert_equal 2, plan.operations.size
       marketplace, install = plan.operations
@@ -98,7 +101,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         marketplace: { "name" => "compound-engineering-plugin", "source" => "EveryInc/compound-engineering-plugin" }
       )
 
-      operation = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ row ]).operations.fetch(0)
+      operation = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ row ]).operations.fetch(0)
 
       assert_equal [ "/fake/claude", "plugin", "update", "compound-engineering@compound-engineering-plugin", "--scope", "user" ], operation.argv
     end
@@ -110,7 +113,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         agent: "grok", capability: "ce-code-review", package: "compound-engineering",
         health: "missing", bin: "/fake/grok"
       )
-      install = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ missing ]).operations.fetch(0)
+      install = adapter(Hive::AgentSupport.for(:grok)::SetupAdapter, dir: dir).plan([ missing ]).operations.fetch(0)
       assert_equal [
         "/fake/grok", "plugin", "install", "EveryInc/compound-engineering-plugin", "--trust"
       ], install.argv
@@ -122,7 +125,7 @@ class AgentSkillAdaptersTest < Minitest::Test
           "id" => "compound-engineering", "version" => "3.20.0", "enabled" => false
         }
       )
-      enable = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ disabled ]).operations.fetch(0)
+      enable = adapter(Hive::AgentSupport.for(:grok)::SetupAdapter, dir: dir).plan([ disabled ]).operations.fetch(0)
       assert_equal [ "/fake/grok", "plugin", "enable", "compound-engineering" ], enable.argv
 
       stale = inspection(
@@ -132,7 +135,7 @@ class AgentSkillAdaptersTest < Minitest::Test
           "id" => "compound-engineering", "version" => "2.9.0", "enabled" => true
         }
       )
-      update = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ stale ]).operations.fetch(0)
+      update = adapter(Hive::AgentSupport.for(:grok)::SetupAdapter, dir: dir).plan([ stale ]).operations.fetch(0)
       assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], update.argv
 
       stale_and_disabled = inspection(
@@ -143,7 +146,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         }
       )
       combined = adapter(
-        Hive::AgentSkills::Adapters::Grok, dir: dir
+        Hive::AgentSupport.for(:grok)::SetupAdapter, dir: dir
       ).plan([ stale_and_disabled ]).operations
       assert_equal %w[plugin_update plugin_enable], combined.map(&:kind)
       assert_equal [ combined.first.id ], combined.last.depends_on
@@ -155,7 +158,7 @@ class AgentSkillAdaptersTest < Minitest::Test
           "id" => "compound-engineering", "version" => "3.20.0", "enabled" => true
         }
       )
-      repair = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ unresolved ]).operations.fetch(0)
+      repair = adapter(Hive::AgentSupport.for(:grok)::SetupAdapter, dir: dir).plan([ unresolved ]).operations.fetch(0)
       assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], repair.argv
     end
   end
@@ -166,7 +169,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         config: Hive::Config::DEFAULTS, project_root: dir, environment: { "HOME" => dir }
       )
 
-      assert_instance_of Hive::AgentSkills::Adapters::Grok, registry.fetch("grok")
+      assert_instance_of Hive::AgentSupport.for(:grok)::SetupAdapter, registry.fetch("grok")
     end
   end
 
@@ -183,7 +186,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         bin: "/fake/opencode"
       )
       instance = adapter(
-        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir,
         environment: { "OPENCODE_CONFIG_DIR" => config_home }
       )
 
@@ -200,7 +203,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       assert_equal "succeeded", outcome.status
       assert_equal "system", document.fetch("theme")
       assert_equal [
-        Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+        Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
       ], document.fetch("plugin")
       assert_equal 0o600, File.stat(config_path).mode & 0o777
     end
@@ -225,7 +228,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         bin: "/fake/opencode"
       )
       conflicting = adapter(
-        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir,
         environment: { "OPENCODE_CONFIG_DIR" => config_home }
       ).plan([ row ])
 
@@ -234,7 +237,7 @@ class AgentSkillAdaptersTest < Minitest::Test
 
       File.write(config_path, "{}\n")
       instance = adapter(
-        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir,
         environment: { "OPENCODE_CONFIG_DIR" => config_home }
       )
       operation = instance.plan([ row ]).operations.fetch(0)
@@ -258,7 +261,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         package: "compound-engineering", health: "missing",
         bin: "/fake/opencode"
       )
-      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+      instance = adapter(Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir)
 
       File.write(config_path, "{")
       preview = instance.plan([ row ])
@@ -280,7 +283,7 @@ class AgentSkillAdaptersTest < Minitest::Test
           metadata: {
             "config_path" => config_path,
             "snapshot" => snapshot,
-            "plugin" => Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+            "plugin" => Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
           }
         )
 
@@ -299,7 +302,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         config_path,
         JSON.generate(
           "plugin" => [
-            Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+            Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
           ]
         )
       )
@@ -308,7 +311,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         package: "compound-engineering", health: "missing",
         bin: "/fake/opencode"
       )
-      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+      instance = adapter(Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir)
 
       assert_empty instance.plan([ row ]).operations
     end
@@ -321,7 +324,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         environment: { "HOME" => dir }
       )
 
-      assert_instance_of Hive::AgentSkills::Adapters::OpenCode,
+      assert_instance_of Hive::AgentSupport::OpenCode::SetupAdapter,
                          registry.fetch("opencode")
     end
   end
@@ -334,7 +337,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
         health: "healthy", bin: "/fake/claude"
       )
-      adapter = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
+      adapter = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir)
       plan = adapter.plan([ prerequisite, row ])
       alias_operation = plan.operations.find { |operation| operation.kind == "alias_write" }
 
@@ -356,7 +359,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                         health: "missing", bin: "/fake/claude")
 
-      operations = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ ce, wiki ]).operations
+      operations = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ ce, wiki ]).operations
       ce_final = operations.reverse.find { |operation| operation.package_id == "compound-engineering" }
       wiki_operations = operations.select { |operation| operation.package_id == "llm-wiki" }
 
@@ -369,7 +372,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                         health: "missing", bin: "/fake/claude")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ wiki ])
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ wiki ])
 
       assert_empty plan.operations
       assert_equal 1, plan.conflicts.size
@@ -386,7 +389,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                         health: "missing", bin: "/fake/claude")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ prerequisite, wiki ])
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ prerequisite, wiki ])
 
       assert_empty plan.operations
       assert_match(/prerequisite is incompatible/, plan.conflicts.first)
@@ -401,7 +404,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                        health: "conflicting", bin: "/fake/claude")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ row ])
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ row ])
 
       assert_empty plan.operations
       assert_equal "private\n", File.read(path)
@@ -413,7 +416,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/codex")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+      plan = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
                      environment: { "CODEX_HOME" => File.join(dir, "codex") }).plan([ row ])
 
       assert_equal [
@@ -444,7 +447,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         inspection(agent: "codex", capability: "wiki-plan", package: "llm-wiki",
                    health: "missing", bin: "/fake/codex")
       ]
-      instance = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+      instance = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: runner,
                          environment: { "CODEX_HOME" => codex_home })
 
       outcomes = instance.plan(rows).operations.map { |operation| instance.execute(operation) }
@@ -470,7 +473,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/codex")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+      plan = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
                      environment: { "CODEX_HOME" => codex_home }).plan([ row ])
 
       assert_empty plan.operations
@@ -491,7 +494,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         health: "missing", bin: "/fake/codex",
         marketplace: { "name" => "compound-engineering-plugin", "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
       )
-      adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+      adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: runner,
                         environment: { "CODEX_HOME" => codex_home })
       operation = adapter.plan([ row ]).operations.fetch(0)
       File.write(config_path, "# concurrent user edit\n")
@@ -516,7 +519,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         marketplace: nil
       )
       codex = adapter(
-        Hive::AgentSkills::Adapters::Codex, dir: dir,
+        Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
         environment: { "CODEX_HOME" => codex_home }
       )
       operation = codex.plan([ row ]).operations.find { |item| item.kind == "plugin_install" }
@@ -545,7 +548,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         health: "missing", bin: "/fake/codex",
         marketplace: { "name" => "compound-engineering-plugin", "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
       )
-      adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+      adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: runner,
                         environment: { "CODEX_HOME" => codex_home })
 
       outcome = adapter.execute(adapter.plan([ row ]).operations.fetch(0))
@@ -573,7 +576,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         File.open(config_path, "a") { |file| file.write("[plugins.\"compound-engineering@compound-engineering-plugin\"]\nenabled = true\n") }
         command_result(status: 1, stderr: "offline")
       end
-      targeted_adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: targeted_runner,
+      targeted_adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: targeted_runner,
                                  environment: { "CODEX_HOME" => codex_home })
       targeted_adapter.execute(targeted_adapter.plan([ row ]).operations.fetch(0))
       assert_equal original, File.read(config_path)
@@ -582,7 +585,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         File.open(config_path, "a") { |file| file.write("user_value = 1\n[plugins.\"compound-engineering@compound-engineering-plugin\"]\nenabled = true\n") }
         command_result(status: 1, stderr: "offline")
       end
-      concurrent_adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: concurrent_runner,
+      concurrent_adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: concurrent_runner,
                                    environment: { "CODEX_HOME" => codex_home })
       concurrent_adapter.execute(concurrent_adapter.plan([ row ]).operations.fetch(0))
       assert_includes File.read(config_path), "user_value = 1"
@@ -596,7 +599,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       stale = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                          health: "stale", bin: "/fake/pi",
                          native_package: { "id" => "source", "version" => "2.9.0" })
-      adapter = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir)
+      adapter = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir)
 
       assert_equal [ "/fake/pi", "install", "https://github.com/EveryInc/compound-engineering-plugin" ],
                    adapter.plan([ fresh ]).operations.fetch(0).argv
@@ -610,7 +613,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       runner = FakeRunner.new { |_argv, _env, _timeout| command_result(status: nil, timed_out: true) }
       row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/pi")
-      adapter = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: runner)
+      adapter = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir, runner: runner)
 
       outcome = adapter.execute(adapter.plan([ row ]).operations.fetch(0))
 
@@ -626,9 +629,9 @@ class AgentSkillAdaptersTest < Minitest::Test
         config: Hive::Config::DEFAULTS, project_root: dir, environment: { "HOME" => dir }
       )
 
-      assert_instance_of Hive::AgentSkills::Adapters::Claude, registry.fetch("claude")
-      assert_instance_of Hive::AgentSkills::Adapters::Codex, registry.fetch("codex")
-      assert_instance_of Hive::AgentSkills::Adapters::Pi, registry.fetch("pi")
+      assert_instance_of Hive::AgentSupport.for(:claude)::SetupAdapter, registry.fetch("claude")
+      assert_instance_of Hive::AgentSupport.for(:codex)::SetupAdapter, registry.fetch("codex")
+      assert_instance_of Hive::AgentSupport::Pi::SetupAdapter, registry.fetch("pi")
     end
   end
 
@@ -637,7 +640,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/pi")
       raising = FakeRunner.new { |_argv, _env, _timeout| raise IOError, "runner exploded" }
-      pi = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: raising)
+      pi = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir, runner: raising)
       outcome = pi.execute(pi.plan([ row ]).operations.first)
       assert_equal "failed", outcome.status
       assert_match(/runner exploded/, outcome.message)
@@ -650,7 +653,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       assert_raises(NotImplementedError) { abstract_adapter.plan([ claude_row ]) }
 
       codex_native = Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for("codex")
-      codex = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir)
+      codex = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir)
       assert_equal File.join(dir, ".codex"), codex.send(:config_root, codex_native)
       nested = { "items" => [ { "name" => "frozen" } ] }
       codex.send(:deep_freeze, nested)
@@ -666,7 +669,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
         health: "healthy", bin: "/fake/claude"
       )
-      claude = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
+      claude = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir)
       path = File.join(dir, ".claude", "commands", "plan.md")
       spec = Hive::AgentSkills::Manifest.load.capability("wiki-plan").agent("claude").alias_spec
       FileUtils.mkdir_p(File.dirname(path))
@@ -697,7 +700,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       end
       row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/pi")
-      outcome = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: runner)
+      outcome = adapter(Hive::AgentSupport::Pi::SetupAdapter, dir: dir, runner: runner)
         .then { |instance| instance.execute(instance.plan([ row ]).operations.first) }
       assert_match(/spawn denied/, outcome.message)
     end
@@ -715,7 +718,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         marketplace: { "name" => "compound-engineering-plugin",
                        "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
       )
-      codex = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+      codex = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
                       environment: { "CODEX_HOME" => codex_home })
       assert codex.plan([ row ]).operations.any? { |operation| operation.kind == "marketplace_upgrade" }
 
@@ -729,7 +732,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         health: "missing", bin: "/fake/codex",
         marketplace: row.native.fetch("marketplace")
       )
-      changing = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: changing_runner,
+      changing = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: changing_runner,
                          environment: { "CODEX_HOME" => codex_home })
       outcome = changing.execute(changing.plan([ fresh ]).operations.first)
       assert_match(/changed comments or unrelated/, outcome.message)
@@ -746,7 +749,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       end
       missing_marketplace = inspection(agent: "codex", capability: "ce-brainstorm",
                                        package: "compound-engineering", health: "missing", bin: "/fake/codex")
-      rolling = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: failing_runner,
+      rolling = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: failing_runner,
                         environment: { "CODEX_HOME" => codex_home })
       rolling.execute(rolling.plan([ missing_marketplace ]).operations.first)
       refute File.exist?(config_path)

@@ -24,7 +24,7 @@ module HiveBench
   module CodexJudge
     Error = JudgeOutput::Error
 
-    DEFAULT_TIMEOUT = 1800 # sol at xhigh reasons long on big diffs
+    DEFAULT_TIMEOUT = 3600 # Sol at ultra can exceed 30m on large diffs under parallel load
     DEFAULT_BIN = File.expand_path("~/.local/share/mise/installs/node/26.2.0/bin/codex")
     DEFAULT_MODEL = "gpt-5.6-sol"
     DEFAULT_EFFORT = "xhigh"

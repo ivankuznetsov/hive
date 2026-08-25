@@ -420,6 +420,9 @@ module Hive
             "condition_task_generation" => nullable_string(value(row, :condition_task_generation)),
             "commit_generation" => value(row, :commit_generation),
             "attempt_id" => nullable_string(value(row, :attempt_id)),
+            # Controller workflows can report a folder mtime in the task graph
+            # while recovery tracks the manifest's precise local stat.
+            "status_payload_mtime" => time_string(value(row, :status_payload_mtime)),
             "state_file_mtime" => time_string(value(row, :state_file_mtime)),
             "action" => nullable_string(value(row, :action)),
             "depends_on" => nullable_string(value(row, :depends_on)),

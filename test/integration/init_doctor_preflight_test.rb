@@ -21,12 +21,12 @@ class InitDoctorPreflightTest < Minitest::Test
 
     def inspect
       Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve.map do |target|
-        resolver = case target.agent
-        when "claude" then Hive::SkillCheck::Claude
-        when "codex" then Hive::SkillCheck::Codex
-        when "pi" then Hive::SkillCheck::Pi
-        when "opencode" then Hive::SkillCheck::OpenCode
-        end
+        resolver = Hive::AgentProfiles.support_for(target.agent)&.const_get(:Skills, false) ||
+          case target.agent
+          when "claude" then Hive::AgentSupport.for(:claude)::Skills
+          when "codex" then Hive::AgentSupport.for(:codex)::Skills
+          when "opencode" then Hive::AgentSupport::OpenCode::Skills
+          end
         found = resolver.resolve(target.invocation, project_root: @project_root)
         health = found.status == :present ? "healthy" : "missing"
         Hive::AgentSkills::Inspection.new(
@@ -91,7 +91,7 @@ class InitDoctorPreflightTest < Minitest::Test
     write_file("#{home}/.codex/skills/ce-code-review/SKILL.md")
     write_file("#{home}/.claude/plugins/cache/mp/pr-review-toolkit/1.0/skills/review-pr/SKILL.md")
     write_file("#{home}/.config/opencode/opencode.json", JSON.generate(
-      "plugin" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
+      "plugin" => [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
     ))
   end
 

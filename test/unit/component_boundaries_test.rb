@@ -17,6 +17,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
+      agent-support
       attempts
       patrol-fix
       provider-health
@@ -193,6 +194,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty clean_load.fetch("forbidden_loaded_features")
     assert_empty clean_load.fetch("forbidden_constants")
 
+    agent_support = contract.component("agent-support")
+    assert_equal "boundary-ready", agent_support.fetch("state")
+    assert_equal "hive/agent_support", agent_support.dig("entrypoint", "require")
+    assert_empty agent_support.fetch("migration_exceptions")
+
     agent_abi = contract.component("agent-abi")
     assert_equal "boundary-ready", agent_abi.fetch("state")
     assert_equal "hive/agent_runtime", agent_abi.dig("entrypoint", "require")
@@ -229,6 +235,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::AgentSkills", skillpack.dig("entrypoint", "constant")
     assert_equal(
       %w[
+        Hive::AgentSkills::Adapter
         Hive::AgentSkills::Plan
         Hive::AgentSkills::Projection
         Hive::AgentSkills::ProjectionReport
@@ -449,7 +456,7 @@ class ComponentBoundariesTest < Minitest::Test
                  workflow_live.fetch("hive_consumers")
     assert_empty workflow_live.fetch("migration_exceptions")
 
-    ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
+    ready_components.push(agent_support, agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
                           workflow_values, workflow_core, workflow_execution, workflow_live)
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
@@ -464,6 +471,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
+      agent-support
       patrol-fix
       safe-agent-git-gate
       skillpack
@@ -696,12 +704,13 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_equal(
       {
+        "agent-abi" => [ "agent-support" ],
         "attempts" => [ "provider-health", "provider-routing-policy" ],
         "patrol-fix" => [ "safe-agent-git-gate" ],
         "provider-routing-operations" => [
           "attempts", "provider-health", "provider-routing-policy"
         ],
-        "skillpack" => [ "agent-abi" ],
+        "skillpack" => [ "agent-abi", "agent-support" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
         "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],
         "workflow-creator-execution" => [ "workflow-creator-core" ]

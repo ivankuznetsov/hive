@@ -6,6 +6,7 @@ require "hive/agent_skills/command_runner"
 require "hive/agent_skills/filesystem_inventory"
 require "hive/agent_skills/manifest"
 require "hive/agent_skills/target_resolver"
+require "hive/agent_profiles"
 require "hive/skill_check"
 
 module Hive
@@ -374,22 +375,15 @@ module Hive
           issues << [ "incompatible", "#{profile.name} CLI #{version} is below supported #{profile.min_version}" ]
         end
 
-        inventory = case native_spec.provider
-        when "claude" then claude_inventory(bin, native_spec, commands, issues)
-        when "codex" then codex_inventory(bin, native_spec, commands, issues)
-        when "pi" then pi_inventory(bin, native_spec, commands, issues)
-        when "grok" then grok_inventory(bin, native_spec, commands, issues)
-        when "opencode"
-          FilesystemInventory.new.inspect(
-            profile: profile, bin: bin, native_spec: native_spec,
-            root: config_root_for(native_spec)
-          ).then do |evidence|
-            issues.concat(evidence.fetch("issues"))
-            {
-              "package" => evidence.fetch("package"),
-              "marketplace" => evidence.fetch("marketplace")
-            }
-          end
+        support = Hive::AgentProfiles.support_for(native_spec.provider)
+        inventory = if support
+          support::Skills.live_inventory(
+            bin:, native_spec:, issues:, root: config_root_for(native_spec),
+            project_root: @project_root,
+            run: ->(argv, **options) { run(argv, commands, **options) },
+            package_version: method(:package_version_from),
+            failure: method(:command_failure)
+          )
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
@@ -418,129 +412,6 @@ module Hive
         }
       end
 
-      def claude_inventory(bin, native_spec, commands, issues)
-        plugins_result = run([ bin, "plugin", "list", "--json" ], commands)
-        marketplaces_result = run([ bin, "plugin", "marketplace", "list", "--json" ], commands)
-        issues << [ "incompatible", "claude plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
-        issues << [ "incompatible", "claude marketplace inventory failed: #{command_failure(marketplaces_result)}" ] unless marketplaces_result.success?
-        plugins = JSON.parse(plugins_result.stdout)
-        marketplaces = JSON.parse(marketplaces_result.stdout)
-        raise TypeError, "plugin list must be an Array" unless plugins.is_a?(Array)
-        raise TypeError, "marketplace list must be an Array" unless marketplaces.is_a?(Array)
-
-        plugin = plugins.find { |entry| entry["id"] == native_spec.package }
-        marketplace = marketplaces.find { |entry| entry["name"] == native_spec.marketplace }
-        {
-          "package" => plugin && {
-            "id" => plugin["id"],
-            "version" => plugin["version"],
-            "enabled" => plugin.fetch("enabled", true),
-            "install_path" => plugin["installPath"],
-            "source" => nil
-          }.freeze,
-          "marketplace" => marketplace && {
-            "name" => marketplace["name"],
-            "source" => marketplace["repo"] || marketplace["source"]
-          }.freeze
-        }
-      end
-
-      def codex_inventory(bin, native_spec, commands, issues)
-        plugins_result = run([ bin, "plugin", "list", "--available", "--json" ], commands)
-        marketplaces_result = run([ bin, "plugin", "marketplace", "list", "--json" ], commands)
-        issues << [ "incompatible", "codex plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
-        issues << [ "incompatible", "codex marketplace inventory failed: #{command_failure(marketplaces_result)}" ] unless marketplaces_result.success?
-        plugins_doc = JSON.parse(plugins_result.stdout)
-        marketplaces_doc = JSON.parse(marketplaces_result.stdout)
-        plugins = plugins_doc.fetch("installed")
-        marketplaces = marketplaces_doc.fetch("marketplaces")
-        raise TypeError, "installed plugin list must be an Array" unless plugins.is_a?(Array)
-        raise TypeError, "marketplace list must be an Array" unless marketplaces.is_a?(Array)
-
-        plugin = plugins.find { |entry| entry["pluginId"] == native_spec.package }
-        marketplace = marketplaces.find { |entry| entry["name"] == native_spec.marketplace }
-        {
-          "package" => plugin && {
-            "id" => plugin["pluginId"],
-            "version" => plugin["version"],
-            "enabled" => plugin.fetch("enabled", true),
-            "install_path" => nil,
-            "source" => plugin.dig("source", "url") || plugin.dig("marketplaceSource", "source")
-          }.freeze,
-          "marketplace" => marketplace && {
-            "name" => marketplace["name"],
-            "source" => marketplace.dig("marketplaceSource", "source")
-          }.freeze
-        }
-      end
-
-      def pi_inventory(bin, native_spec, commands, issues)
-        list_result = run([ bin, "list" ], commands)
-        issues << [ "incompatible", "pi package inventory failed: #{command_failure(list_result)}" ] unless list_result.success?
-        lines = list_result.stdout.lines
-        source_index = lines.index { |line| same_source?(line.strip, native_spec.source) }
-        install_path = if source_index
-          lines[(source_index + 1)..]&.find { |line| !line.strip.empty? }&.strip
-        end
-        package = source_index && {
-          "id" => native_spec.package,
-          "version" => package_version_from(install_path),
-          "enabled" => true,
-          "install_path" => install_path,
-          "source" => lines[source_index].strip
-        }.freeze
-        { "package" => package, "marketplace" => nil }
-      end
-
-      def grok_inventory(bin, native_spec, commands, issues)
-        plugins_result = run([ bin, "plugin", "list", "--json" ], commands)
-        inspect_result = run([ bin, "inspect", "--json" ], commands, chdir: @project_root)
-        issues << [ "incompatible", "grok plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
-        issues << [ "incompatible", "grok runtime inspection failed: #{command_failure(inspect_result)}" ] unless inspect_result.success?
-        plugins = JSON.parse(plugins_result.stdout)
-        runtime = JSON.parse(inspect_result.stdout)
-        runtime_plugins = runtime.fetch("plugins")
-        runtime_skills = runtime.fetch("skills")
-        raise TypeError, "grok plugin list must be an Array" unless plugins.is_a?(Array)
-        raise TypeError, "grok runtime plugins must be an Array" unless runtime_plugins.is_a?(Array)
-        raise TypeError, "grok runtime skills must be an Array" unless runtime_skills.is_a?(Array)
-        validate_object_entries!(plugins, "grok plugin list")
-        validate_object_entries!(runtime_plugins, "grok runtime plugins")
-        validate_object_entries!(runtime_skills, "grok runtime skills")
-
-        plugin = plugins.find do |entry|
-          entry["status"] == "installed" && entry["name"] == native_spec.package
-        end
-        runtime_plugin = runtime_plugins.find { |entry| entry["name"] == native_spec.package }
-        if plugin && runtime_plugin && plugin["path"] && runtime_plugin["path"] &&
-           canonical_path(plugin["path"]) != canonical_path(runtime_plugin["path"])
-          issues << [
-            "conflicting",
-            "grok runtime plugin #{native_spec.package} resolves from #{runtime_plugin['path'].inspect}, " \
-              "expected installed package #{plugin['path'].inspect}"
-          ]
-        end
-        {
-          "package" => plugin && {
-            "id" => plugin["name"],
-            "version" => plugin["version"],
-            "enabled" => runtime_plugin ? runtime_plugin.fetch("enabled", true) : false,
-            "install_path" => plugin["path"],
-            "source" => plugin["source"]
-          }.freeze,
-          "marketplace" => nil,
-          "runtime_skills" => runtime_skills.map do |entry|
-            source = entry["source"]
-            raise TypeError, "grok runtime skill source must be an object" unless source.is_a?(Hash)
-
-            {
-              "name" => entry["name"],
-              "source_path" => source["path"]
-            }.freeze
-          end.freeze
-        }
-      end
-
       def inspect_resolution(target, contract, native)
         issues = []
         alias_path = nil
@@ -566,7 +437,12 @@ module Hive
         if path && !expected_resolution_path?(path, target, native)
           issues << [ "conflicting", "unexpected higher-precedence skill #{path} wins #{target.invocation}" ]
         end
-        issues.concat(grok_runtime_skill_issues(invocation, path, target, native)) if target.agent == "grok"
+        skills = Hive::AgentProfiles.support_for(target.agent)&.const_get(:Skills, false)
+        if skills&.respond_to?(:resolution_issues)
+          issues.concat(skills.resolution_issues(
+            invocation:, resolved_path: path, native:
+          ))
+        end
         resolution_hash(resolved).merge(
           "invocation" => invocation,
           "alias_path" => alias_path,
@@ -635,10 +511,9 @@ module Hive
 
       def expected_resolution_path?(path, target, native)
         native_spec = @manifest.package(target.package_id).native_for(target.agent)
-        if target.agent == "opencode" &&
-           path == "configured:#{native_spec.package}" &&
-           native.dig("package", "id") == native_spec.package
-          return true
+        support = Hive::AgentProfiles.support_for(target.agent)
+        if support&.const_get(:Skills, false)&.respond_to?(:expected_resolution_path?)
+          return true if support::Skills.expected_resolution_path?(path:, native_spec:, native:)
         end
 
         roots = []
@@ -656,37 +531,6 @@ module Hive
           expanded_root = canonical_path(root)
           expanded_path == expanded_root || expanded_path.start_with?(expanded_root + File::SEPARATOR)
         end
-      end
-
-      def grok_runtime_skill_issues(invocation, resolved_path, target, native)
-        runtime_skills = native["runtime_skills"]
-        return [] unless runtime_skills
-
-        skill_name = Hive::SkillCheck.parse(invocation).name
-        runtime_skill = runtime_skills.find { |entry| entry["name"] == skill_name }
-        unless runtime_skill
-          return [ [ "conflicting", "grok runtime does not report skill #{skill_name.inspect}" ] ]
-        end
-
-        source_path = runtime_skill["source_path"]
-        unless source_path && expected_resolution_path?(source_path, target, native)
-          return [ [
-            "conflicting",
-            "grok runtime skill #{skill_name} resolves from #{source_path.inspect}, outside the expected installed package"
-          ] ]
-        end
-        return [] unless resolved_path && canonical_path(source_path) != canonical_path(resolved_path)
-
-        [ [
-          "conflicting",
-          "grok runtime skill #{skill_name} resolves from #{source_path.inspect}, expected #{resolved_path.inspect}"
-        ] ]
-      end
-
-      def validate_object_entries!(entries, label)
-        return if entries.all? { |entry| entry.is_a?(Hash) }
-
-        raise TypeError, "#{label} entries must be objects"
       end
 
       def canonical_path(path)
@@ -753,33 +597,22 @@ module Hive
       end
 
       def runner_environment
-        %w[
-          HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
-          OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
-        ].each_with_object({}) do |key, out|
-          out[key] = @environment[key] if @environment.key?(key)
-        end
+        @environment.slice(*Hive::AgentSkills::RUNNER_ENVIRONMENT_KEYS)
       end
 
       def skill_module(agent)
-        case agent
-        when "claude" then Hive::SkillCheck::Claude
-        when "codex" then Hive::SkillCheck::Codex
-        when "pi" then Hive::SkillCheck::Pi
-        when "grok" then Hive::SkillCheck::Grok
-        when "opencode" then Hive::SkillCheck::OpenCode
-        else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
-        end
+        Hive::AgentProfiles.support_for(agent)&.const_get(:Skills, false) ||
+          raise(Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}")
       end
 
       def skill_environment(agent)
-        return @environment unless agent.to_s == "opencode"
+        support = Hive::AgentProfiles.support_for(agent)
+        return @environment unless support&.const_get(:Skills, false)&.respond_to?(:environment)
 
-        profile = Hive::AgentProfiles.lookup(:opencode, cfg: @config)
-        path = profile.opencode_configuration_path
-        return @environment unless path
-
-        @environment.merge("OPENCODE_CONFIG" => path)
+        support::Skills.environment(
+          profile: Hive::AgentProfiles.lookup(agent, cfg: @config),
+          environment: @environment
+        )
       end
 
       def parse_version(output)
@@ -788,13 +621,8 @@ module Hive
 
       def package_version_from(root)
         return nil unless root && File.directory?(root)
-        candidates = [
-          File.join(root, ".claude-plugin", "plugin.json"),
-          File.join(root, ".codex-plugin", "plugin.json"),
-          File.join(root, ".grok-plugin", "plugin.json"),
-          File.join(root, ".opencode", "plugin.json"),
-          File.join(root, "package.json")
-        ]
+        candidates = Dir[File.join(root, ".*-plugin", "plugin.json")]
+        candidates << File.join(root, "package.json")
         candidates.each do |path|
           next unless File.file?(path)
           version = JSON.parse(File.read(path))["version"]
@@ -806,20 +634,13 @@ module Hive
       end
 
       def same_source?(actual, expected)
-        Hive::AgentSkills.same_source?(actual, expected)
+        Hive::SkillCheck.same_source?(actual, expected)
       end
 
       def config_root_for(native_spec)
-        home = @environment["HOME"] || Dir.home
-        value = @environment[native_spec.config_home].to_s
-        return File.expand_path(value) unless value.empty?
-        case native_spec.provider
-        when "claude" then File.join(home, ".claude")
-        when "codex" then File.join(home, ".codex")
-        when "pi" then File.join(home, ".pi", "agent")
-        when "grok" then File.join(home, ".grok")
-        when "opencode" then File.join(home, ".config", "opencode")
-        end
+        Hive::AgentProfiles.lookup(native_spec.provider).configuration_directory(
+          environment: @environment
+        )
       end
 
       def alias_path_for(alias_spec)

@@ -107,6 +107,12 @@ were made. A retained cache from the previous tick can still provide cheap
 task visibility while a new tick is running, but scheduler completeness
 remains unavailable until that tick completes. Independently supplied status
 graphs still pass the timestamp and per-task scheduler-join fences.
+During a binary/daemon cutover, an older scheduler record has no dedicated
+payload-mtime field. A same-tick cached Patrol Fix controller graph may treat
+only that unavailable timestamp as unknown because the shared tick sequence
+already binds the graph to the decision. Fresh scans and ordinary legacy rows
+keep the mtime comparison, and current snapshots always compare the explicit
+payload timestamp.
 The operational human heading reports the cached graph's age. The operational
 JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
 `age_seconds` separately from the projection timestamp.
@@ -132,6 +138,13 @@ A benign dependency-blocked row is always
 Explicit human input still has higher precedence, so a row that is both
 dependency-blocked and waiting for answers remains `waiting_on_you` while the
 dependency reason stays secondary.
+
+Patrol Fix outcomes parked by the controller are terminal, non-runnable rows.
+The hidden compatibility graph continues to expose their action as
+`needs_input`, but operational status recognizes the closed Patrol shape
+(`marker: none`, no suggested command) and reports `completion_ready` with
+`blocker_owner: none`. Rejected, blocked, and escalated findings therefore
+remain visible for audit without inflating the operator-decision count.
 
 For a daemon-enrolled project with global automatic retry enabled, a real
 `ERROR` or `REVIEW_ERROR` defaults to

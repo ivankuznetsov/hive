@@ -145,6 +145,13 @@ module Hive
         handle.flock(File::LOCK_EX)
         handle
       rescue SystemCallError, IOError => e
+        # flock can fail after the fd is already open (e.g. ENOLCK on exotic
+        # filesystems); close it so degradation doesn't leak one fd per op.
+        begin
+          handle&.close
+        rescue StandardError
+          nil
+        end
         @logger&.event(:update_check_state_lock_error, path: @path,
                                                         error_class: e.class.name, message: e.message)
         nil

@@ -6,9 +6,9 @@ module Hive::AgentSupport::OpenCode
   autoload :Execution, "hive/agent_support/opencode/execution"
   autoload :LaunchPolicy, "hive/agent_support/opencode/launch_policy"
   autoload :Observation, "hive/agent_support/opencode/observation"
-  autoload :Runtime, "hive/agent_support/opencode/runtime"
   autoload :Skills, "hive/agent_support/opencode/skills"
   autoload :SetupAdapter, "hive/agent_support/opencode/setup_adapter"
+  PORTABLE_MANAGED_RUNTIME = true
 
   module_function
 

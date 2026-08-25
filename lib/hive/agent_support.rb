@@ -3,6 +3,9 @@ module Hive::AgentSupport
     pi: "Pi", opencode: "OpenCode", codex: "Codex", grok: "Grok", claude: "Claude"
   }.freeze
   DEFAULT_PROMPT_STYLES = { codex: :stdin }.freeze
+  DEFAULT_TOOL_SCOPE_FLAGS = {
+    claude: { allowed: "--allowedTools", disallowed: "--disallowedTools" }.freeze
+  }.freeze
   PROTOCOLS = { grok_end: :grok }.freeze
   autoload :StreamMeter, "hive/agent_support/stream_meter"
 

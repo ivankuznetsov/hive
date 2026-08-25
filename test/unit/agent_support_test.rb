@@ -44,6 +44,7 @@ class AgentSupportTest < Minitest::Test
       puts support.autoload?(:Execution) || "execution-loaded"
       puts support.autoload?(:Skills) || "skills-loaded"
       puts support.autoload?(:SetupAdapter) || "setup-loaded"
+      puts support.const_defined?(:PORTABLE_MANAGED_RUNTIME, false)
       puts support.configuration.class.name
       puts support.autoload?(:Execution) || "execution-loaded"
       puts support.autoload?(:Skills) || "skills-loaded"
@@ -58,6 +59,7 @@ class AgentSupportTest < Minitest::Test
       "unloaded", "Hive::AgentSupport::OpenCode", "configuration-loaded",
       "hive/agent_support/opencode/execution", "hive/agent_support/opencode/skills",
       "hive/agent_support/opencode/setup_adapter",
+      "true",
       "Hive::AgentSupport::OpenCode::Configuration",
       "hive/agent_support/opencode/execution", "hive/agent_support/opencode/skills"
     ], stdout.lines.map(&:strip)

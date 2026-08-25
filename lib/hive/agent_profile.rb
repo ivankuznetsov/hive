@@ -19,6 +19,8 @@ module Hive
       AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE
     READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
     VERSION_CHECK_TIMEOUT_SEC = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
+    TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
+    private_constant :TOOL_SCOPE_FLAGS_UNSET
     STATUS_DETECTION_MODES =
       %i[state_file_marker exit_code_only output_file_exists].freeze
 
@@ -82,7 +84,7 @@ module Hive
                    routing_argument_placement: :subcommand,
                    routed_model_argument_builder: nil,
                    routed_effort_argument_builder: nil,
-                   tool_scope_flags: {},
+                   tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
                    raw_cli_arguments_supported: false,
                    structured_output_protocol: nil,
                    billing_semantics: :unknown,
@@ -103,6 +105,10 @@ module Hive
         prompt_style:, status_detection_mode:, initial_context_tokens:,
         routing_argument_placement:, structured_output_protocol:
       )
+
+      tool_scope_flags = Hive::AgentSupport::DEFAULT_TOOL_SCOPE_FLAGS.fetch(
+        effective_name.to_sym, {}
+      ) if tool_scope_flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
 
       normalized_cli_capabilities = normalize_cli_capabilities(cli_capabilities)
 

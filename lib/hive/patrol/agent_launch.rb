@@ -36,7 +36,8 @@ module Hive
       private_class_method :review_turn_limit
 
       def claude?(profile)
-        Hive::AgentSupport.supports?(profile, :Interactive)
+        profile.respond_to?(:name) && profile.name.is_a?(Symbol) &&
+          Hive::AgentSupport.supports?(profile, :Interactive)
       end
       private_class_method :claude?
     end

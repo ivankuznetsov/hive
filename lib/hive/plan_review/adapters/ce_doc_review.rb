@@ -291,7 +291,7 @@ module Hive
           return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
           provider = request.reviewer.fetch("provider")
           support = Hive::AgentSupport.for(provider)
-          return support.plan_review_capability if support
+          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
 
           contract = @capability_resolver.call(CAPABILITY, provider)
           stringify(@capability_probe.call(

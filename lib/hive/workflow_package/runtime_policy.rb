@@ -1,4 +1,5 @@
 require "fileutils"
+require "forwardable"
 require "json"
 require "open3"
 require "rbconfig"
@@ -201,6 +202,28 @@ module Hive
         end
       end
 
+      module ProviderHost
+        extend SingleForwardable
+
+        PORTABLE_NETWORK_TOOLS = RuntimePolicy::PORTABLE_NETWORK_TOOLS
+        PORTABLE_HOST_OUTPUT_TOOLS = RuntimePolicy::PORTABLE_HOST_OUTPUT_TOOLS
+        def_delegators RuntimePolicy, *%i[
+          actor_environment capture3_bounded direct_policy find_executable output_schema
+          policy portable_admission_policy portable_policy resolve_profile_executable
+          sandbox_parent_dirs write_output_schema
+        ]
+
+        def self.compile_managed_actor(host:, scope:, task_root:, directories:,
+                                       environment:, outputs:, prepare:, **)
+          return portable_admission_policy(scope, task_root:, directories:, environment:) unless prepare
+
+          portable_policy(
+            scope, task_root:, directories:, environment:, outputs:,
+            runtime_root: nil, cli_flags: [], executable: nil
+          )
+        end
+      end
+
       def self.compile(permissions, task_folder:, profile:, policy_dir:)
         new(permissions, task_folder: task_folder, profile: profile, policy_dir: policy_dir).compile
       end
@@ -233,7 +256,7 @@ module Hive
         child_environment = actor_environment(environment)
         if runtime&.respond_to?(:compile_direct_actor)
           return runtime.compile_direct_actor(
-            host: self, scope:, task_root:, directories:, profile:,
+            host: ProviderHost, scope:, task_root:, directories:, profile:,
             environment: child_environment, managed_outputs:, prepare:
           )
         end
@@ -313,7 +336,10 @@ module Hive
       def self.compile_portable_actor(parsed_spec, scope:, task_root:, directories:,
                                       profile:, environment:, managed_outputs:, prepare:)
         support = Hive::AgentSupport.for(profile)
-        unless support&.const_defined?(:Runtime, false)
+        runtime = support::Runtime if support&.const_defined?(:Runtime, false)
+        compiler = runtime
+        compiler ||= ProviderHost if support&.const_defined?(:PORTABLE_MANAGED_RUNTIME, false)
+        unless compiler
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
         end
@@ -330,8 +356,7 @@ module Hive
           match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
           rule if match && match[:tool] == "Read" && match[:specifier]
         end
-        supports_qualified_reads = support&.const_defined?(:Runtime, false) &&
-          support::Runtime.const_defined?(:PATH_QUALIFIED_READS, false)
+        supports_qualified_reads = runtime&.const_defined?(:PATH_QUALIFIED_READS, false)
         if path_read_rules.any? && !supports_qualified_reads
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce path-qualified Read rules " \
@@ -342,8 +367,8 @@ module Hive
           parsed_spec, task_root: task_root, requested: managed_outputs
         )
         runtime_root = prepare && !outputs.empty? ? Dir.mktmpdir("hive-managed-actor-") : nil
-        support::Runtime.compile_managed_actor(
-          host: self, scope:, task_root:, directories:, profile:, environment:,
+        compiler.compile_managed_actor(
+          host: ProviderHost, scope:, task_root:, directories:, profile:, environment:,
           outputs:, runtime_root:, tool_names:, prepare:
         )
       rescue StandardError

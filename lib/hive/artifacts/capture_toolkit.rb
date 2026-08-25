@@ -181,7 +181,7 @@ module Hive
         end
         browser = (required & VISUAL_KINDS).any?
         preparation = support.prepare_capture(
-          host: Hive::WorkflowPackage::RuntimePolicy,
+          host: Hive::WorkflowPackage::RuntimePolicy::ProviderHost,
           profile: producer_profile, environment: @launch_environment,
           task_root:, source_root:, task_folder: source_root, package_root: task_root,
           writable_root:, mailbox_root: @capture_mailbox.root,

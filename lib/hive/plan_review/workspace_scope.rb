@@ -31,7 +31,7 @@ module Hive
 
       def launch_kwargs(profile:, workspace:, role:, output_path: nil)
         return workspace_write_kwargs(profile) if profile.workspace_write_supported?
-        if (support = Hive::AgentSupport.for(profile))
+        if (support = Hive::AgentSupport.for(profile))&.respond_to?(:plan_review_launch_kwargs)
           return support.plan_review_launch_kwargs(workspace:, role:, output_path:)
         end
 

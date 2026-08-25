@@ -28,7 +28,8 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
   location/token schema, capture interface, and plan-review exceptions.
 - OpenCode additionally owns its typed configuration, bounded run/export
   transaction, launch-scope translation, route observation normalization,
-  exact-route/default-model policy, and completion-protocol exception.
+  exact-route/default-model policy, and completion-protocol exception. Its
+  declarative portable-runtime marker selects the generic core compiler.
 - Codex owns its native reviewer, managed-runtime and evidence permissions,
   path-qualified reads, skill/plugin inventory, setup, credential, model,
   effort, and invocation rules. The generic runtime still materializes output
@@ -51,8 +52,10 @@ facets remain lazy.
 
 Core authority does not move: Hive still starts and reaps processes, writes
 credentials and durable artifacts, admits evidence, and performs workflow
-transitions. This refactor relocates existing provider decisions; it does not
-add security hardening or create a separate gem.
+transitions. Provider runtime facets receive only the narrow
+`RuntimePolicy::ProviderHost` API needed to describe policy; they cannot depend
+on the full core runtime module. This refactor relocates existing provider
+decisions; it does not add security hardening or create a separate gem.
 
 ## Gate
 

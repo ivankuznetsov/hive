@@ -609,7 +609,6 @@ components:
         - Hive::AgentSupport::OpenCode::Execution
         - Hive::AgentSupport::OpenCode::LaunchPolicy
         - Hive::AgentSupport::OpenCode::Observation
-        - Hive::AgentSupport::OpenCode::Runtime
         - Hive::AgentSupport::OpenCode::Skills
         - Hive::AgentSupport::Pi
         - Hive::AgentSupport::Pi::Runtime
@@ -637,7 +636,6 @@ components:
       - lib/hive/agent_support/opencode/execution.rb
       - lib/hive/agent_support/opencode/launch_policy.rb
       - lib/hive/agent_support/opencode/observation.rb
-      - lib/hive/agent_support/opencode/runtime.rb
       - lib/hive/agent_support/opencode/skills.rb
       - lib/hive/agent_support/pi.rb
       - lib/hive/agent_support/pi/runtime.rb
@@ -670,7 +668,6 @@ components:
       - Hive::AgentSupport::OpenCode::Execution
       - Hive::AgentSupport::OpenCode::LaunchPolicy
       - Hive::AgentSupport::OpenCode::Observation
-      - Hive::AgentSupport::OpenCode::Runtime
       - Hive::AgentSupport::Pi::Runtime
       - Hive::AgentSupport::Pi::Skills
     forbidden_constructions: []

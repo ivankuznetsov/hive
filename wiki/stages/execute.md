@@ -3,7 +3,7 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-28
 tags: [stage, execute, worktree, plan-review]
 ---
 
@@ -85,7 +85,7 @@ signing, ownership, branch, ancestry, and cleanliness gates.
 - **`--add-dir <task folder>`**: lets the agent read plan.md and append to `task.md` ("## Implementation" section).
 - **Budgets**: `cfg["budget_usd"]["execute_implementation"]` (100), `cfg["timeout_sec"]["execute_implementation"]` (2700).
 - **Log label**: `execute-impl`.
-- **Final message capture**: `Hive::Agent` records the last `result`, `item.completed agent_message`, `assistant` stream-json message, or plain stdout tail. `Stages::Execute` writes it to `task.md` before the terminal marker so investigation work is not trapped only in raw logs. Only structured final messages count as research-mode output; plain stdout/stderr progress is preserved but does not complete research mode.
+- **Final message capture**: `Hive::Agent` records the last `result`, `item.completed agent_message`, `assistant` stream-json message, or plain stdout tail. `Stages::Execute` writes it to `task.md` before the terminal marker so investigation work is not trapped only in raw logs. A nil spawn result is treated as no final message, leaving the state file unchanged so the normal implementation-failure path can classify and recover the attempt. Only structured final messages count as research-mode output; plain stdout/stderr progress is preserved but does not complete research mode.
 - Agent must commit each logical unit in the worktree and run lint/tests as it goes. May only edit `task.md` inside the task folder; must not touch `plan.md` or `worktree.yml` (SHA-256 protected, ADR-013).
 - The firewall also protects the task journal/projection and every promoted
   `context-receipts` and `activity-operations` record. Because those immutable
@@ -102,7 +102,7 @@ signing, ownership, branch, ancestry, and cleanliness gates.
 ## Tests
 
 - `test/unit/agent_test.rb` — captures final messages from stream-json result lines.
-- `test/unit/stages/execute_test.rb` — pins execute's provider-limit classification via both `error_message` and raw `limit_text`, typed and exceptional `implementer_failed` markers, tamper precedence, and bounded custody of growing controller-receipt history.
+- `test/unit/stages/execute_test.rb` — pins execute's provider-limit classification via both `error_message` and raw `limit_text`, typed and exceptional `implementer_failed` markers, nil spawn-result output capture, tamper precedence, and bounded custody of growing controller-receipt history.
 - `test/integration/run_execute_test.rb` — init pass produces `EXECUTE_COMPLETE`; no-change exits preserve `## Execute Output` and pause; research-mode no-change runs can complete with output; research-mode without output pauses; re-run announces 5-open-pr; tampering → `:error`; impl failure → `:error`; missing plan.md exits 1; no review files written.
 
 ## Backlinks

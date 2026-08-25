@@ -1172,6 +1172,17 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_append_implementation_output_tolerates_nil_spawn_result
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      File.write(task.state_file, "# Task\n\n<!-- AGENT_WORKING -->\n")
+
+      Hive::Stages::Execute.append_implementation_output(task, nil)
+
+      assert_match(/<!-- AGENT_WORKING -->\n\z/, File.read(task.state_file))
+    end
+  end
+
   def test_research_execution_returns_false_for_malformed_frontmatter
     with_tmp_dir do |dir|
       task = build_task(dir)

@@ -1595,6 +1595,35 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_strict_pointer_rejects_zero_byte_file_as_worktree_error
+    Dir.mktmpdir do |folder|
+      File.open(File.join(folder, "worktree.yml"), "w") {}
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
+      end
+      assert_includes error.message, "must be a hash"
+    end
+  end
+
+  def test_owned_pointer_rejects_zero_byte_file_as_worktree_error
+    with_tmp_dir do |root|
+      folder = File.join(root, "task")
+      FileUtils.mkdir_p(folder)
+      File.open(File.join(folder, "worktree.yml"), "w") {}
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          folder,
+          project_root: root,
+          slug: "owned-task",
+          expected_root: root
+        )
+      end
+      assert_includes error.message, "must be a hash"
+    end
+  end
+
   def test_strict_pointer_rejects_missing_symlink_malformed_and_identity_mismatch
     with_tmp_dir do |root|
       folder = File.join(root, "task")

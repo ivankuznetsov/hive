@@ -1,5 +1,6 @@
 require "lipgloss"
 require "hive/tui/styles"
+require "hive/tui/text"
 require "hive/tui/views/format"
 
 module Hive
@@ -42,9 +43,13 @@ module Hive
           model.snapshot.archive_rows
         end
 
+        # Archive slugs and project names come from on-disk directory names,
+        # so they carry no display-safety guarantee; strip ANSI CSI and
+        # control bytes before they reach the panel (same invariant as
+        # TasksPane's column rendering).
         def render_row(row, inner_width)
-          slug = Format.truncate(row.slug.to_s, SLUG_WIDTH).ljust(SLUG_WIDTH)
-          project = Format.truncate(row.project_name.to_s, PROJECT_WIDTH).ljust(PROJECT_WIDTH)
+          slug = Format.truncate(Hive::Tui::Text.sanitize(row.slug), SLUG_WIDTH).ljust(SLUG_WIDTH)
+          project = Format.truncate(Hive::Tui::Text.sanitize(row.project_name), PROJECT_WIDTH).ljust(PROJECT_WIDTH)
           age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
           Format.truncate("#{slug} #{project} #{age}", inner_width)
         end

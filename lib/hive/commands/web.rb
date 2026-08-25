@@ -426,8 +426,6 @@ module Hive
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-status"),
             "ok" => true,
             "mode" => "managed_service",
-            "runtime" => Hive::RuntimeIdentity.parse(state["runtime"]) ||
-              Hive::RuntimeIdentity.unknown,
             "warnings" => environment_warnings
           }.merge(state))
         else

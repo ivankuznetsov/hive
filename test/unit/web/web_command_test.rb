@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/web"
 require "hive/commands/service_installer/outcome"
 
@@ -893,7 +894,6 @@ class WebCommandTest < Minitest::Test
     assert_equal "unknown", payload.dig("runtime", "channel")
     assert_nil payload.dig("runtime", "build_sha")
 
-    require "json_schemer"
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
     assert_empty schema.validate(payload).to_a
   end
@@ -960,7 +960,6 @@ class WebCommandTest < Minitest::Test
     assert_nil payload.dig("runtime", "build_sha")
     assert_nil payload.dig("runtime", "deployment_id")
 
-    require "json_schemer"
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
     assert_empty schema.validate(payload).to_a
   end

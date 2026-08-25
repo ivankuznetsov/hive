@@ -113,6 +113,41 @@ module Hive
         )
       end
 
+      # Single authority for materializing one persisted identity projection
+      # back into a live Selection. Routed selections carry no native argv —
+      # their frozen routing metadata is replayed through routing_arguments —
+      # while legacy flat identities re-derive typed arguments from their
+      # profile. This mirrors build_selection's routed-versus-flat
+      # representation so Store and Reconstructor cannot diverge from it.
+      def materialize_persisted(identity)
+        profile = Hive::AgentProfiles.lookup(identity.fetch("provider"), cfg: @cfg)
+        routing = identity["routing"]
+        native_arguments =
+          if routing
+            []
+          else
+            profile.identity_arguments(
+              model: identity.fetch("model"), effort: identity["requested_effort"],
+              pin_model: identity.fetch("model_pinned", true)
+            ).native_arguments
+          end
+        selection = Selection.new(
+          stage: identity.fetch("stage"), provider: identity.fetch("provider"),
+          model: identity.fetch("model"), profile_name: identity.fetch("profile_name"),
+          launcher_identity: identity.fetch("launcher_identity"), source: identity.fetch("source"),
+          generation: identity.fetch("generation"),
+          originating_attempt: identity["originating_attempt"],
+          requested_effort: identity["requested_effort"],
+          effective_effort: identity["effective_effort"],
+          effort_supported: identity["effort_supported"],
+          model_pinned: identity.fetch("model_pinned", true),
+          native_arguments: native_arguments,
+          routing: routing
+        )
+        selection.routing_arguments(profile) if routing
+        selection
+      end
+
       def resolve_legacy(provider:, model:, effort:, generation:, attempt_id:)
         profile = Hive::AgentProfiles.lookup(provider, cfg: @cfg)
         build_selection(

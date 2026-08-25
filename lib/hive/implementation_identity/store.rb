@@ -175,33 +175,10 @@ module Hive
         raise InvalidIdentity, "invalid OpenCode observation: #{e.message}", cause: e
       end
 
+      # Materialization itself is owned by Resolver#materialize_persisted so
+      # projection reads and legacy reconstruction cannot diverge.
       def selection_from_projection(identity)
-        profile = Hive::AgentProfiles.lookup(identity.fetch("provider"), cfg: @cfg)
-        routing = identity["routing"]
-        native_arguments =
-          if routing
-            []
-          else
-            profile.identity_arguments(
-              model: identity.fetch("model"), effort: identity["requested_effort"],
-              pin_model: identity.fetch("model_pinned", true)
-            ).native_arguments
-          end
-        selection = Selection.new(
-          stage: identity.fetch("stage"), provider: identity.fetch("provider"),
-          model: identity.fetch("model"), profile_name: identity.fetch("profile_name"),
-          launcher_identity: identity.fetch("launcher_identity"), source: identity.fetch("source"),
-          generation: identity.fetch("generation"),
-          originating_attempt: identity["originating_attempt"],
-          requested_effort: identity["requested_effort"],
-          effective_effort: identity["effective_effort"],
-          effort_supported: identity["effort_supported"],
-          model_pinned: identity.fetch("model_pinned", true),
-          native_arguments: native_arguments,
-          routing: routing
-        )
-        selection.routing_arguments(profile) if routing
-        selection
+        @resolver.materialize_persisted(identity)
       end
 
       def projected_stage(stage, generation)

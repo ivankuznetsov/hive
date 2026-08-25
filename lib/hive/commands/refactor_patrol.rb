@@ -1048,10 +1048,7 @@ module Hive
       end
 
       def source_pr_context
-        @manifest.fetch("source").merge(
-          "changed_paths" => @manifest.fetch("changed_paths"),
-          "manifest_checksum" => @manifest.fetch("manifest_checksum")
-        )
+        Hive::RefactorPatrol::PrManifest.source_context(@manifest)
       end
 
       def pin_checkout!(project_root, cfg)

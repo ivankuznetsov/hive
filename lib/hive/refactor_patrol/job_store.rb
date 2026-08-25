@@ -2152,18 +2152,7 @@ module Hive
         %w[url number repository registration base_branch base_sha merge_sha merged_at].each do |key|
           source.fetch(key)
         end
-        projected = source.merge(
-          "changed_paths" => manifest.fetch("changed_paths"),
-          "manifest_checksum" => manifest.fetch("manifest_checksum")
-        )
-        if manifest.fetch("schema_version") == PrManifest::SCHEMA_VERSION
-          projected = projected.merge(
-            "lane" => manifest.fetch("lane"),
-            "classification" => manifest.fetch("classification"),
-            "provenance" => manifest.fetch("provenance")
-          )
-        end
-        projected
+        PrManifest.source_context(manifest)
       rescue PrManifest::Invalid => error
         raise CorruptRecord, error.message
       end

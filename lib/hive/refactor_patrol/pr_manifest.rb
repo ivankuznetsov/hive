@@ -69,6 +69,16 @@ module Hive
         end
       end
 
+      def source_context(manifest)
+        context = manifest.fetch("source").merge(
+          "changed_paths" => manifest.fetch("changed_paths"),
+          "manifest_checksum" => manifest.fetch("manifest_checksum")
+        )
+        return context unless manifest.fetch("schema_version") == SCHEMA_VERSION
+
+        context.merge(manifest.slice("lane", "classification", "provenance"))
+      end
+
       def job_id(source:, identity: nil)
         occurrence_fields = [
           source.fetch("registration"), source.fetch("repository"),

@@ -61,6 +61,50 @@ class HiveCommandsRefactorPatrolManifestTest < Minitest::Test
     end
   end
 
+  def test_scheduled_v3_manifest_matches_the_authoritative_job_source
+    with_tmp_dir do |dir|
+      source = manifest_for("demo").fetch("source").merge(
+        "base_sha" => "a" * 40, "merge_sha" => "b" * 40
+      )
+      classification = {
+        "occurrence_id" => "c" * 64, "snapshot_digest" => "d" * 64,
+        "changed_paths_digest" => "e" * 64, "decision" => "feature",
+        "reason" => "llm", "rationale" => "New capability",
+        "evidence" => [ "Feature behavior" ], "model_receipt" => "fake:model",
+        "attempts" => 1, "classified_at" => "2026-08-20T12:00:00Z",
+        "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
+      }
+      provenance = {
+        "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
+          "classification_occurrence_id" => classification.fetch("occurrence_id"),
+          "path_mappings" => [ { "path" => "lib/demo.rb", "slice_ids" => [ "slice" ] } ]
+        ) ]
+      }
+      manifest = Hive::RefactorPatrol::PrManifest.build(
+        source: source, files: [ { "path" => "lib/demo.rb", "status" => "modified" } ],
+        lane: "post_merge", classification: classification, provenance: provenance
+      )
+      Hive::RefactorPatrol::PrManifest.validate!(manifest)
+      aggregate = {
+        "source" => Hive::RefactorPatrol::PrManifest.source_context(manifest)
+      }
+      store = Object.new
+      store.define_singleton_method(:read_job) { |_job_id| aggregate }
+      command = Hive::Commands::RefactorPatrol.new(
+        "demo", json: true, job_manifest: "/unused",
+        job_store_factory: ->(_root) { store }
+      )
+      command.instance_variable_set(:@manifest, manifest)
+
+      command.send(
+        :prepare_durable_discovery!,
+        { "name" => "demo", "path" => dir }, dir, { "default_branch" => "main" }
+      )
+
+      assert_equal aggregate, command.instance_variable_get(:@durable_aggregate)
+    end
+  end
+
   private
 
   def manifest_for(registration)

@@ -137,6 +137,15 @@ module Hive
       end
     end
 
+    # Hive runs under its own bundle, and a native launch keeps the operator's
+    # environment instead of rebuilding one with `unsetenv_others`. Without
+    # these unsets the agent inherits Hive's Ruby toolchain context, so any
+    # `ruby`, `gem`, or `bundle` it runs inside the task repository resolves
+    # against Hive's Gemfile rather than the project's.
+    SCRUBBED_TOOLCHAIN_ENV_KEYS = %w[
+      RUBYOPT RUBYLIB GEM_HOME GEM_PATH
+      BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_VERSION BUNDLER_SETUP
+    ].freeze
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so
     # an operator's exported HIVE_SCREENOTE_BASE_URL can't become a
@@ -144,7 +153,8 @@ module Hive
     # base_url. Mirrors the tmux path's blanking in
     # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
     SCRUBBED_CHILD_ENV = {
-      "HIVE_SCREENOTE_BASE_URL" => nil
+      "HIVE_SCREENOTE_BASE_URL" => nil,
+      **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }
     }.freeze
     ISOLATED_CHILD_ENV_KEYS = %w[
       HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR

@@ -107,7 +107,7 @@ class AgentTest < Minitest::Test
       assert_equal policy.settings_path, cmd[cmd.index("--settings") + 1]
       assert_equal "", cmd[cmd.index("--setting-sources") + 1]
       expected_scrubbed = [
-        "HIVE_SCREENOTE_BASE_URL",
+        *Hive::Agent::SCRUBBED_CHILD_ENV.keys,
         *Hive::AgentProfiles.lookup(:claude).credential_environment_keys
       ]
       assert_equal policy.environment,

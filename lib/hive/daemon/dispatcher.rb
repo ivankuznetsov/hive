@@ -1331,6 +1331,13 @@ module Hive
         path = resolve_post_completion_path(child_entry)
         return unless path && File.exist?(path)
 
+        if state_file_in_different_stage?(path, child_entry.stage)
+          @controller.forget_state_file_mtime(
+            project: child_entry.project, slug: child_entry.slug
+          )
+          return
+        end
+
         @controller.observe_state_file_mtime(
           project: child_entry.project, slug: child_entry.slug,
           mtime: File.mtime(path)
@@ -1353,6 +1360,12 @@ module Hive
 
         path = find_post_advance_state_file(project_entry["hive_state_path"], slug)
         return unless path && File.exist?(path)
+
+        intended_stage = attempt["intended_stage"].to_s
+        if state_file_in_different_stage?(path, intended_stage)
+          @controller.forget_state_file_mtime(project: project, slug: slug)
+          return
+        end
 
         state_file_mtime = File.mtime(path)
         attempt_ended_at = Time.iso8601(attempt["ended_at"].to_s)
@@ -1422,6 +1435,19 @@ module Hive
                         project: entry.project, slug: entry.slug, stage: entry.stage,
                         dry_run: true, elapsed_sec: 0)
         end
+      end
+
+      def state_file_stage(path)
+        parts = File.expand_path(path.to_s).split(File::SEPARATOR)
+        stages_index = parts.rindex("stages")
+        return nil unless stages_index
+
+        parts[stages_index + 1]
+      end
+
+      def state_file_in_different_stage?(path, prior_stage)
+        current_stage = state_file_stage(path)
+        !current_stage.nil? && !prior_stage.to_s.empty? && current_stage != prior_stage.to_s
       end
 
       def handle_row(row, now:)
@@ -1584,12 +1610,14 @@ module Hive
         when :markerless_stalled
           # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
           # marker and its state file shows no progress, so it re-classifies to
-          # ready_to_run indefinitely. Log it explicitly (not a bare :skipped)
-          # so the stall is observable rather than silent. The per-project daily
-          # dispatch cap bounds re-dispatch if the file does keep changing.
+          # ready_to_run indefinitely. Convert it to the ordinary recoverable
+          # ERROR lifecycle under the task lock; the next tick submits it to the
+          # sole RecoveryCoordinator. Keep the explicit event for observability.
+          healed = @stale_agent_healer.heal_markerless_stall(row)
           @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
                                               stage: row.stage, action: row.action,
-                                              reason: "agent_exited_without_marker")
+                                              reason: "agent_exited_without_marker",
+                                              healed: healed)
           observe_policy_disposition(row, decision)
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,

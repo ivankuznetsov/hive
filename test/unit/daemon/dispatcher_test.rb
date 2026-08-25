@@ -2124,7 +2124,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # WAITING/COMPLETE marker). The real tick must surface it as
   # `:markerless_stalled` and NOT re-spawn — proving the
   # handle_row → :markerless_stalled wiring end-to-end.
-  def test_generic_ready_to_run_unchanged_mtime_is_markerless_stalled_not_respawned
+  def test_generic_ready_to_run_unchanged_mtime_is_healed_without_respawning
     rows = [ row(slug: "g1", stage: "2-gather", workflow: "research",
                  action: "ready_to_run", command: "hive run g1",
                  marker: "none", mtime: T0 - 600) ]
@@ -2138,6 +2138,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     stalled = logger.events.find { |(n, _)| n == :markerless_stalled }
     refute_nil stalled, "the stall must be surfaced explicitly, not as a silent skip"
     assert_equal "agent_exited_without_marker", stalled[1][:reason]
+    marker = Hive::Markers.current(rows.first.state_file)
+    assert_equal :error, marker.name
+    assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
     refute events_include?(logger, :dispatched)
   end
 
@@ -4875,6 +4878,34 @@ def test_refresh_post_completion_mtime_records_existing_state_file
   end
 end
 
+def test_refresh_post_completion_mtime_discards_a_previous_stage_baseline
+  dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher
+
+  Dir.mktmpdir("dispatcher-completion-stage-advance") do |dir|
+    hive_state_path = File.join(dir, ".hive-state")
+    task_dir = File.join(hive_state_path, "stages", "2-fix", "s1")
+    FileUtils.mkdir_p(task_dir)
+    state_file = File.join(task_dir, "fix.md")
+    File.write(state_file, "# fix\n")
+    ctrl.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
+    child = ChildExit.new(
+      pid: 999, exit_code: 0, project: "p1", slug: "s1", stage: "4-review",
+      command: "hive run s1", state_file_path: File.join(dir, "moved.md"),
+      started_at: T0 - 100, finished_at: T0, json_envelope: nil
+    )
+
+    with_replaced_singleton_method(
+      Hive::Config, :find_project,
+      ->(_project) { { "hive_state_path" => hive_state_path } }
+    ) do
+      dispatcher.send(:refresh_post_completion_mtime, child)
+    end
+
+    assert_nil ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
+               "a review route back to fix must be first sight for the fix stage"
+  end
+end
+
 def test_success_completion_then_followup_tick_does_not_redispatch_same_stage
   # Plan Unit 1 end-to-end scenario: simulate a SUCCESS where the
   # post-completion mtime refresh has run, then assert the next
@@ -5820,6 +5851,43 @@ end
                    controller.last_dispatched_state_file_mtime_for(
                      project: "p1", slug: "s1"
                    ), "a post-terminal user edit must remain newer than the baseline"
+    end
+  end
+
+  def test_terminal_attempt_discards_a_previous_stage_baseline_after_advancing
+    Dir.mktmpdir("hive-terminal-attempt-stage-advance") do |state_home|
+      hive_state_path = File.join(state_home, "project-state")
+      task_dir = File.join(hive_state_path, "stages", "2-fix", "s1")
+      FileUtils.mkdir_p(task_dir)
+      state_file = File.join(task_dir, "fix.md")
+      File.write(state_file, "# fix\n")
+      File.utime(T0 - 1, T0 - 1, state_file)
+
+      attempt_class = Struct.new(:attempt_id) do
+        def [](key)
+          {
+            "project" => "p1", "task_slug" => "s1",
+            "intended_stage" => "4-review",
+            "ended_at" => HiveDaemonDispatcherTest::T0.iso8601(6)
+          }[key]
+        end
+      end
+      terminal = attempt_class.new("terminal-1")
+      dispatcher, _supervisor, controller = make_dispatcher(rows: [])
+      controller.observe_state_file_mtime(
+        project: "p1", slug: "s1", mtime: T0 - 600
+      )
+
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        ->(_project) { { "hive_state_path" => hive_state_path } }
+      ) do
+        dispatcher.send(:refresh_post_attempt_completion_mtime, terminal)
+      end
+
+      assert_nil controller.last_dispatched_state_file_mtime_for(
+        project: "p1", slug: "s1"
+      ), "a durable review route back to fix must not inherit review's baseline"
     end
   end
 

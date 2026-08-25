@@ -159,6 +159,74 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_markerless_stall_becomes_a_recoverable_error_under_the_task_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "2-fix",
+        workflow: "patrol-fix",
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      assert @healer.heal_markerless_stall(row)
+
+      marker = Hive::Markers.current(state_file)
+      assert_equal :error, marker.name
+      assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+      assert_equal "none", marker.attrs["observed_marker"]
+      event = @logger.events.find { |name, _attributes| name == :marker_healed }
+      assert_equal "agent_exited_without_terminal_marker", event.last.fetch(:reason)
+    end
+  end
+
+  def test_markerless_stall_heal_loses_to_live_or_newer_task_state
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      live_row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: true
+      )
+
+      refute @healer.heal_markerless_stall(live_row)
+      assert_equal :none, Hive::Markers.current(state_file).name
+
+      Hive::Markers.set(state_file, :waiting, reason: "operator_input")
+      stale_row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      refute @healer.heal_markerless_stall(stale_row)
+      assert_equal :waiting, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_markerless_stall_heal_does_not_recreate_a_moved_task_folder
+    Dir.mktmpdir do |dir|
+      folder = File.join(dir, "moved-task")
+      row = make_row(
+        File.join(folder, "fix.md"),
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      refute @healer.heal_markerless_stall(row)
+      refute_path_exists folder
+    end
+  end
+
   def test_unattributed_execute_dirty_wait_remains_a_human_pause
     with_marker_file do |state_file|
       attrs = { "reason" => "dirty_worktree" }

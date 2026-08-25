@@ -226,6 +226,17 @@ module Hive
         persist_dispatch_baselines!
       end
 
+      # A task that moved to another workflow stage has a different state file
+      # even though its [project, slug] identity is unchanged. The old stage's
+      # debounce baseline must not make the new stage look like an unchanged
+      # markerless rerun.
+      def forget_state_file_mtime(project:, slug:)
+        key = [ project, slug ]
+        removed = @last_dispatched_mtime.delete(key)
+        @restored_dispatch_baseline_keys.delete(key)
+        persist_dispatch_baselines! if removed
+      end
+
       # Record a fresh dispatch. Caller is the dispatcher AFTER the
       # supervisor's spawn returns a real PID. Consumes one daily-rate
       # slot for the (project, today) pair (refunded later if the run

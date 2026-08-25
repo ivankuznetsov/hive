@@ -18,6 +18,11 @@ candidates:
 # a review contract rather than a hive_run.rb flag.
 effort_pins: {}
 
+# Opt in when a benchmark row is valid only if every cell completes Hive's
+# execute stage normally. Failed cells with preserved patches are rerun and
+# cannot enter judging. The default keeps paid-patch recovery compatibility.
+require_successful_execution: false
+
 # Judge samples. Use at least 3 for published results.
 seeds: 3
 

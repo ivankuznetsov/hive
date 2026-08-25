@@ -122,6 +122,9 @@ ruby -ryaml -rjson -e '
   abort("corpus_version must be a single-line scalar; got #{cv.inspect}") unless (cv.is_a?(String) || cv.is_a?(Integer)) && !cv.to_s.include?("\n")
   abort("tasks must be a non-empty array") unless data["tasks"].is_a?(Array) && !data["tasks"].empty?
   abort("candidates must be a non-empty array") unless data["candidates"].is_a?(Array) && !data["candidates"].empty?
+  if data.key?("require_successful_execution")
+    abort("require_successful_execution must be true or false") unless [true, false].include?(data["require_successful_execution"])
+  end
   abort("seeds must be a positive integer") unless data["seeds"].is_a?(Integer) && data["seeds"].positive?
   judges = data["judges"]
   abort("judges must be a mapping") unless judges.is_a?(Hash)
@@ -185,6 +188,7 @@ ruby -ryaml -rshellwords -rjson -e '
   require File.join(runtime, "harness/profiles/candidates")
   data = YAML.safe_load_file("campaign.yml")
   terminal = %w[generated empty_diff].freeze
+  require_successful_execution = data["require_successful_execution"] == true
   exclusions = data.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
   # A cell is BOUGHT once generation reached a terminal status — or once ANY
   # candidate diff was captured on disk, regardless of which bucket
@@ -209,6 +213,8 @@ ruby -ryaml -rshellwords -rjson -e '
       cell = (result["cells"] || []).first
       next true if cell && terminal.include?(cell["run_status"])
     end
+    next false if require_successful_execution
+
     !Dir.glob(File.join(repo, out_dir, "*", "*", "target", "candidate.patch")).empty?
   end
   hive_timeout = data.fetch("timeouts", {})["hive_seconds"]
@@ -338,6 +344,7 @@ ruby -ryaml -rjson -e '
   repo = ARGV.fetch(0)
   data = YAML.safe_load_file("campaign.yml")
   terminal = %w[generated empty_diff].freeze
+  require_successful_execution = data["require_successful_execution"] == true
   exclusions = data.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
   bad = []
   quota_only = true
@@ -369,14 +376,16 @@ ruby -ryaml -rjson -e '
         next
       end
       patches = Dir.glob(File.join(dir, "*", "*", "target", "candidate.patch"))
-      if cell && pending.empty? && failed.empty? && patches.any? { |path| File.size?(path) }
+      if !require_successful_execution && cell && pending.empty? && failed.empty? && patches.any? { |path| File.size?(path) }
         # The generation outcome remains honest (for example execute_failed),
         # but a non-empty paid diff is sufficient input for the judge stage.
         # Merge it into the campaign root below; judge will backfill the exact
         # configured slate without re-running the candidate.
         next
       end
-      unless patches.empty?
+      if require_successful_execution
+        status = "#{status} — campaign requires successful execution"
+      elsif !patches.empty?
         # Applies to every bucket a walled cell can land in (pending, failed,
         # or a non-terminal cells[] record): the diff is paid for either way.
         status = "judges_pending (was: #{status}) — diff already captured; do NOT regenerate. Backfill judges with harness/rejudge.rb against the campaign-root runs/#{data.fetch("campaign_id")}/results.json only — never point rejudge --out at this cell'"'"'s results.json (that erases pending[] and re-arms regeneration)"
@@ -427,5 +436,5 @@ fi
   exit 0
 }
 
-write_complete "${run_note}Every non-excluded campaign cell is terminal or has a preserved non-empty candidate patch, with empty pending/failed buckets; merged campaign results written to \`runs/$CAMPAIGN_ID/results.json\` for judge backfill."
+write_complete "${run_note}Every non-excluded campaign cell satisfies its execution policy, with empty pending/failed buckets; merged campaign results written to \`runs/$CAMPAIGN_ID/results.json\` for judge backfill."
 ```

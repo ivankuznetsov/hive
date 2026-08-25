@@ -79,7 +79,21 @@ reading it, and still fails closed on malformed evidence. Exports retain a
 60-second process deadline, and an inspection failure remains the surfaced task
 diagnostic instead of degrading to a generic missing-evidence message. Final
 six-task generation and dual-judge completion remain open until the benchmark
-artifacts are assembled and validated.
+artifacts are assembled and validated. The first OpenRouter-backed Sol
+deliberation also exposed that the pinned npm Codex entrypoint could see a mise
+Node shim but not its active runtime under Hive's narrow agent PATH; the
+harness now prepends that pinned entrypoint's own directory for the child only.
+The next retry reached OpenRouter but inherited the operator's Codex profile,
+project instructions, and tool integrations, turning a one-shot scoring prompt
+into a large agent session before OpenRouter rejected the in-flight credit
+reservation. OpenRouter-backed Codex judges now run from a private temporary
+home and empty working directory with user config, rules, and session
+persistence disabled. A real Ox Alpha probe returned the requested score
+directly through this boundary. The ChatGPT route now uses the same empty
+workspace and ephemeral/config/rules flags while retaining the operator Codex
+home only for subscription authentication; a real Sol-ultra probe returned its
+score directly there. A completed six-cell Sol deliberation remains the live
+proof for the full recovery and provider capacity.
 
 Invocation-token custody now cleans ordinary inherited descendants even after
 `setsid` and reparenting, which is the leak observed during live Webmail

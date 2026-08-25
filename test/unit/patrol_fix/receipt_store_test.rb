@@ -26,6 +26,39 @@ class PatrolFixReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_progress_token_tracks_valid_receipts_and_degrades_invalid_journals
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)
+      empty = store.progress_token
+
+      store.append!(decision_receipt)
+      current = store.progress_token
+
+      refute_equal empty, current
+      assert_equal current, store.progress_token
+
+      File.write(store.path, "not-json\n")
+      unreadable = store.progress_token
+      refute_equal current, unreadable
+      refute_equal empty, unreadable
+      assert_equal unreadable, store.progress_token
+    end
+  end
+
+  def test_progress_token_degrades_encoding_and_serialization_failures
+    [ ArgumentError, JSON::GeneratorError ].each do |failure_class|
+      Dir.mktmpdir do |dir|
+        store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)
+        store.define_singleton_method(:read_all) { raise failure_class, "bad journal" }
+
+        token = store.progress_token
+
+        assert_match(/\A[0-9a-f]{64}\z/, token)
+        assert_equal token, store.progress_token
+      end
+    end
+  end
+
   def test_rejects_receipts_with_unknown_versions_or_cross_generation_bindings
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)

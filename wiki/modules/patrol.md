@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-23
+updated: 2026-08-25
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -141,6 +141,15 @@ Patrol Fix owns the repair workflow:
 3. Validate runs only configured or structured validation commands.
 4. Review records an independent route decision.
 5. Publish uses `Hive::GithubPublication`.
+
+The task manifest is immutable during each controller stage. Stage outcomes
+are appended to `patrol-fix-receipts.jsonl`, and that validated receipt
+projection participates in durable attempt generation. The successful stage
+run therefore remains idempotent while its journal is unchanged, but appending
+the outcome receipt makes the following advance action a new semantic attempt
+instead of replaying the stage run forever. The worker mutation fence and
+recovery coordinator resolve that same receipt-aware identity before accepting
+side effects or retrying the task.
 
 Inbox and review use the independent `patrol.agent` identity and the
 `models.patrol_review` route. Only the fix stage uses `patrol.fix.agent` and the

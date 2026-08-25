@@ -262,6 +262,18 @@ still replays the successful orchestration attempt, while a changed projection
 advances generation so the daemon can run the next review step instead of
 replaying the earlier success forever.
 
+Patrol Fix task generations likewise bind the validated append-only
+`patrol-fix-receipts.jsonl` projection in addition to the immutable task
+manifest. Each controller stage records its outcome as a receipt before the
+separate advance action moves the task. An unchanged journal still replays the
+successful controller attempt, while a newly appended receipt advances
+generation so the daemon can admit the corresponding stage transition.
+Malformed journals contribute a stable unreadable-owner token and remain
+fail-closed in the Patrol Fix projection. Ordinary dispatch, worker-side
+generation fencing, and recovery generation resolution all use this same
+task-owned token; they cannot partition one Patrol task into separate
+generation namespaces.
+
 A terminal explicit attempt with a trusted provider-evidence receipt is also a
 valid, narrowly scoped successor predecessor. `RecoveryCoordinator` alone puts
 that immutable predecessor ID on the v5 recovery delivery after provider

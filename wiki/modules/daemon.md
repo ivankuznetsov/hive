@@ -922,7 +922,7 @@ at or before the attempt's validated `ended_at`; a later operator edit remains
 newer than the baseline and eligible for dispatch. The agent's own final marker
 write therefore cannot masquerade as operator input on the next tick.
 
-See [[architecture]] §"Dispatch flow" for the cross-layer picture.
+See [[architecture]] §"Process model" for the cross-layer picture.
 
 ### At-most-once dispatch via atomic claim (C3)
 

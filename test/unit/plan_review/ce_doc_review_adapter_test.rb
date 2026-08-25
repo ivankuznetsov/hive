@@ -32,7 +32,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     adapter = Hive::PlanReview::Adapters::CeDocReview.new(runner:)
 
     assert_equal "present", result.fetch("status")
-    assert_includes result.fetch("diagnostic"), "configured pinned plugin"
+    assert_includes result.fetch("diagnostic"), "configured native plugin"
     assert_equal runner, adapter.instance_variable_get(:@capability_probe).receiver
   end
 

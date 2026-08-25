@@ -276,7 +276,7 @@ grok plugin enable compound-engineering
 grok plugin update compound-engineering
 ```
 
-`Hive::SkillCheck::Grok` resolves enabled plugin skills from Grok's native
+`Hive::AgentSupport::Grok::Skills` resolves enabled plugin skills from Grok's native
 `installed-plugins/registry.json` and `[plugins]` configuration. The opt-in Grok
 CE reviewer now invokes `/ce-code-review`; the previous self-contained copied
 review prompt was only a compatibility stopgap and has been removed. Doctor

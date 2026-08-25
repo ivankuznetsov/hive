@@ -22,7 +22,7 @@ class ModelRoutingSurfaceTest < Minitest::Test
     "review_ci" => %w[lib/hive/implementation_identity/resolver.rb],
     "review_reviewers" => %w[
       lib/hive/reviewers/agent.rb
-      lib/hive/reviewers/codex_review.rb
+      lib/hive/agent_support/codex/reviewer.rb
       lib/hive/stages/review.rb
     ],
     "review_triage" => %w[lib/hive/stages/review/triage.rb],

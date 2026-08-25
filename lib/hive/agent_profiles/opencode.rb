@@ -1,63 +1,22 @@
-require "json"
-
 require "hive/agent_profile"
-require "hive/skill_check"
+require "hive/agent_support"
 
 module Hive
   module AgentProfiles
-    module OpenCodeDefaults
-      module_function
-
-      def resolve(cfg:, project_root: nil, **)
-        inline = cfg&.dig("agents", "opencode", "config")
-        if inline
-          unless inline.is_a?(Hash)
-            raise Hive::ImplementationIdentity::ResolutionError,
-                  "agents.opencode.config must be a JSON object"
-          end
-          return AgentCliRuntime::Route.parse(inline["model"]).to_s
-        end
-
-        path = cfg&.dig("agents", "opencode", "config_path").to_s
-        unless path.empty? || File.absolute_path?(path)
-          path = File.expand_path(path, project_root || cfg["project_root"])
-        end
-        if path.empty?
-          raise Hive::ImplementationIdentity::ResolutionError,
-                "OpenCode requires models.<role>.model or an explicit " \
-                "agents.opencode.config_path default"
-        end
-
-        document = JSON.parse(File.binread(path))
-        unless document.is_a?(Hash)
-          raise Hive::ImplementationIdentity::ResolutionError,
-                "OpenCode selected configuration must be a JSON object"
-        end
-        AgentCliRuntime::Route.parse(document["model"]).to_s
-      rescue Errno::ENOENT, Errno::EACCES, JSON::ParserError, ArgumentError => e
-        raise Hive::ImplementationIdentity::ResolutionError,
-              "could not inspect explicit OpenCode default model: #{e.message}"
-      end
-    end
-
     OPENCODE = AgentProfile.new(
       runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
       skill_syntax_format: "/%{skill}",
       status_detection_mode: :output_file_exists,
       permission_presets: %w[read-only scoped],
-      skill_verifier: Hive::SkillCheck::OpenCode.method(:verify),
-      default_model_resolver: OpenCodeDefaults.method(:resolve),
+      skill_verifier: Hive::AgentSupport.skill_verifier(:opencode),
+      default_model_resolver: Hive::AgentSupport.model_resolver(:opencode),
       routed_model_argument_builder: lambda { |model|
         AgentCliRuntime::Profiles.opencode_model_arguments(model)
       },
       routed_effort_argument_builder: lambda { |effort|
         AgentCliRuntime::Profiles.opencode_variant_arguments(effort)
       },
-      routed_effort_values: AgentCliRuntime::Profiles::OPENCODE_VARIANTS,
-      # Provider API-key variables are scrubbed by default. OpenCode's native
-      # auth file remains available through its normal data home; projects may
-      # explicitly name environment credentials when they prefer them.
-      opencode_credential_environment_keys: []
+      routed_effort_values: AgentCliRuntime::Profiles::OPENCODE_VARIANTS
     )
 
     register(:opencode, OPENCODE)

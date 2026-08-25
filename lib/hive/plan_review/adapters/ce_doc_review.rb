@@ -6,6 +6,7 @@ require "securerandom"
 require "timeout"
 require "hive/agent_limit"
 require "hive/agent_profiles"
+require "hive/agent_support"
 require "hive/agent_skills"
 require "hive/artifact_firewall"
 require "hive/config"
@@ -286,16 +287,13 @@ module Hive
 
         def capability_for(request)
           return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
-          if request.reviewer.fetch("provider") == "pi"
-            return {
-              "status" => "present", "diagnostic" => nil,
-              "invocation" => nil
-            }
-          end
+          provider = request.reviewer.fetch("provider")
+          support = Hive::AgentSupport.for(provider)
+          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
 
-          contract = @capability_resolver.call(CAPABILITY, request.reviewer.fetch("provider"))
+          contract = @capability_resolver.call(CAPABILITY, provider)
           stringify(@capability_probe.call(
-            agent: request.reviewer.fetch("provider"),
+            agent: provider,
             invocation: contract.invocation,
             project_root: request.project_root
           )).merge("invocation" => contract.invocation)

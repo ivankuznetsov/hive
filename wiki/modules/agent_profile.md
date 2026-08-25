@@ -17,6 +17,15 @@ built-in profiles. Process lifetime, workflow selection, model routing,
 subscription binding, retries, artifact acceptance, and stage success remain
 in Hive.
 
+Built-in profiles resolve optional provider behavior through
+`Hive::AgentSupport`. The root support catalog is data-only and loads a
+provider namespace only when that provider is selected. Pi, OpenCode, Codex, and Grok keep
+their runtime, skill/setup, credential, review, and identity decisions under
+their respective `Hive::AgentSupport` namespaces. The generic agent,
+artifact, workflow, Web, and skillpack callers retain process custody, durable
+writes, and transitions and dispatch to those facets without provider
+branches. See [[modules/agent_support]].
+
 ## Supported Agent ABI
 
 The supported entry point is:
@@ -62,11 +71,12 @@ contract.
 
 ### OpenCode process ownership
 
-OpenCode keeps process supervision in Hive but uses the operator's native
-OpenCode state. `Hive::Agent` starts exactly one `opencode run` process with
-the native config, plugins, project discovery, session store, and login plus
-the prepared prompt on owner-private file-backed stdin. Hive captures bounded
-stdout and stderr and records timeout or cancellation before parsing.
+`Hive::AgentSupport::OpenCode::Execution` decides the OpenCode command,
+native child environment, and run/export interpretation while using
+`Hive::Agent`'s provider-neutral bounded-process primitive. Hive starts exactly
+one `opencode run` process with the prompt on owner-private
+file-backed stdin, captures bounded stdout and stderr, and records timeout or
+cancellation before parsing.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -81,11 +91,18 @@ OpenCode 1.18.18 emits the entire export through one unawaited stdout write;
 under a pipe, large live exports could exit zero after writing only a valid
 prefix. A regular file makes the write synchronous, after which Hive reads at
 most the parser's four-MiB limit and deletes the data when inspection returns.
-The run and sanitized export use the same native state. Hive never copies the
-auth file or creates OpenCode-specific XDG homes. Provider API-key variables
-are scrubbed by default and only explicitly named `credential_env` values are
-restored. The legacy Claude, Codex, Pi, and Grok spawn path and mutable result
-shape are unchanged.
+The local probe still checks OpenCode's exact model inventory first. When a
+dynamic route is absent there but the selected, non-secret native config
+explicitly declares that exact provider/model and its variants, that declaration
+is sufficient route evidence. The requested variant must still be present; an
+undeclared route or variant remains a fail-closed preflight error.
+
+The run and sanitized export use the same operator-owned OpenCode state. Hive
+does not redirect XDG homes, copy `auth.json`, disable project discovery, or
+create an OpenCode-specific cleanup tree. Explicit `credential_env` entries
+may restore selected provider variables; other ambient provider variables are
+scrubbed. The legacy provider spawn paths and mutable result shape are
+unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps
@@ -110,7 +127,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
-| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. The published runtime profile supplies the built-in default; custom profiles fall back to `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. A profile-native flag supplies the run cap; provider protocol parsing determines whether the run ended because that cap was exhausted. |
@@ -162,7 +179,7 @@ The public routed capability matrix is mirrored in
 `docs/notes/headless-agent-cli-matrix.md`: Claude, Codex, Grok, and OpenCode
 support model plus effort, while Pi supports routed model only. OpenCode model
 values are exact nested `provider/model` routes and faithful efforts render as
-`--variant`; an explicitly selected config may supply the exact route when the
+`--variant`; a selected overlay config may supply the exact route when the
 stage omits it. Codex places routed
 controls before `exec`/`review`; Claude uses the same rendered flags in
 headless and tmux launches. Unsupported effective controls raise before the
@@ -234,19 +251,26 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   files or state directories. No add-dir or budget flag.
   Text events are concatenated into `final_message`; unavailable token usage
   stays nil. Min version `0.2.90`. `:output_file_exists`.
-  `Hive::SkillCheck::Grok` resolves project/user skills plus enabled native
+  `Hive::AgentSupport::Grok::Skills` resolves project/user skills plus enabled native
   installed-plugin skills under `GROK_HOME`; Compound Engineering is
   provisioned with Grok's own plugin install/enable/update commands. Native
   inspection runs from the target project and verifies the exact runtime skill
   source against the realpath-jailed installed plugin.
 - `opencode` — opt-in headless execution through `opencode run --format json`
   with minimum version `1.18.16`. Every selected model is an exact nested
-  `provider/model` route and supported effort values render as `--variant`.
-  Hive uses native config, plugins, project discovery, sessions, and
-  `opencode auth login` in place. It maps read-only/scoped stage permissions
-  to deny-first OpenCode rules supplied through `OPENCODE_PERMISSION` without
-  mutating native configuration. Provider API-key variables remain scrubbed
-  unless named in `credential_env`. A successful
+  `provider/model` route; supported effort values render as `--variant` only
+  after route-aware capability validation. Hive prepares private XDG/config
+  homes, forwards only configured credential names, and maps read-only/scoped
+  stage permissions to deny-first OpenCode rules. Local capability inspection
+  remains bounded at 10 seconds per command except for the version probe and
+  verbose model inventory, which get 30 seconds because Bun startup under
+  sustained host I/O and a cold hermetic provider catalog can both exceed the
+  generic bound before any model invocation starts. Exact custom
+  models and variants declared in the selected provider configuration are
+  combined with that inventory: this keeps a new operator-pinned route usable
+  when the fetch-disabled bundled catalog is stale, while an undeclared route
+  missing from the CLI inventory still fails closed. A route accepted on that
+  declaration alone also records `configured_model_route` evidence. A successful
   run is complete only after its terminal assistant record correlates with
   sanitized session export. The correlated terminal record may have empty prose
   when a tool-only turn already produced the required artifact; the finish
@@ -258,7 +282,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   tool result and legitimately exceed the former 4 MiB short-session ceiling,
   while malformed or larger evidence still fails closed without unbounded
   temporary-file growth.
-  `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
+  `Hive::AgentSupport::OpenCode::Skills` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected
   native source before spawn and reject a higher-precedence project/user CE
@@ -302,9 +326,11 @@ sanitized export supplied it.
   network, MCP servers, apps, plugins, memory, hooks, or subagents. Bounded Grok
   mappings run the static CLI inside bubblewrap with only the task, package,
   and descriptor-declared extra read roots mounted. Bounded OpenCode actors use
-  the same portable output-materialization boundary with a per-run deny-first
-  permission document and no unrestricted shell. Native OpenCode state remains
-  available to the CLI but is outside the model's declared edit roots. Caller context does not
+  the same portable output-materialization boundary with an invocation-owned
+  deny-first overlay and no unrestricted shell. The overlay admits its own
+  cleanup-bound `TMPDIR` as an external directory so a model can consume
+  intermediate analysis it created there; other generated config, data, cache,
+  state, and credential paths remain outside the model's declared roots. Caller context does not
   widen a bounded actor; only explicit `yolo` inherits the owning project root.
   For all portable runners, Hive asks
   for schema-constrained file content under a read-only policy and atomically
@@ -400,6 +426,8 @@ the attempt evidence channel.
 - `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
+- `test/unit/agent_support_test.rb` — selective clean-process loading,
+  upward-dependency checks, and live production residue scanning for Pi.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
 - `test/unit/agent_profiles/error_normalizers_test.rb` — captured Claude
   subscription limits, closed diagnostic taxonomy, task-local unsupported

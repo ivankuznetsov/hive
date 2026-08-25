@@ -1163,7 +1163,7 @@ module Hive
       agent_name = (stage_cfg["agent"] || DEFAULTS.dig(stage, "agent") || "claude").to_s
       configured_skill = stage_cfg["skill"]
 
-      return configured_skill if configured_skill && !legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, configured_skill)
+      return configured_skill if configured_skill && !unsupported_legacy_wiki_plan_alias?(stage, agent_name, configured_skill)
 
       skills_by_agent = {}
       default_skills_by_agent = DEFAULTS.dig(stage, "skill_by_agent")
@@ -1178,10 +1178,11 @@ module Hive
       end
     end
 
-    def legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, skill)
+    def unsupported_legacy_wiki_plan_alias?(stage, agent_name, skill)
+      support = Hive::AgentSupport.for(agent_name)
       stage == "plan" &&
-        agent_name != "claude" &&
-        skill.to_s == LEGACY_WIKI_PLAN_ALIAS
+        skill.to_s == LEGACY_WIKI_PLAN_ALIAS &&
+        !(support&.respond_to?(:legacy_wiki_plan_alias?) && support.legacy_wiki_plan_alias?)
     end
 
     # Surface a misconfigured HIVE_HOME loudly on READ paths only.
@@ -2876,7 +2877,7 @@ module Hive
         # built-in review and takes no CE skill, so it is exempt. The
         # codex_review adapter DOES require `agent` (it resolves the codex
         # binary via Hive::AgentProfiles.lookup(spec.fetch("agent")) — see
-        # lib/hive/reviewers/codex_review.rb), so require it here to fail at
+        # lib/hive/agent_support/codex/reviewer.rb), so require it here to fail at
         # load instead of crashing mid-dispatch with a KeyError. (The generic
         # validate_agent_name! below returns early on nil, so without this
         # entry a codex_review spec missing `agent` would pass load.)

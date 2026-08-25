@@ -582,6 +582,116 @@ components:
       - test/unit/commands/uninstall_test.rb
     migration_exceptions: []
 
+  - id: agent-support
+    name: Agent Support
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_support.rb
+      require: hive/agent_support
+      constant: Hive::AgentSupport
+    public_contract:
+      values:
+        - Hive::AgentSupport
+        - Hive::AgentSupport::StreamMeter
+        - Hive::AgentSupport::Claude
+        - Hive::AgentSupport::Claude::Interactive
+        - Hive::AgentSupport::Claude::Runtime
+        - Hive::AgentSupport::Claude::Skills
+        - Hive::AgentSupport::Codex
+        - Hive::AgentSupport::Codex::ArtifactPolicy
+        - Hive::AgentSupport::Codex::Runtime
+        - Hive::AgentSupport::Codex::Skills
+        - Hive::AgentSupport::Grok
+        - Hive::AgentSupport::Grok::Runtime
+        - Hive::AgentSupport::Grok::Skills
+        - Hive::AgentSupport::OpenCode
+        - Hive::AgentSupport::OpenCode::Configuration
+        - Hive::AgentSupport::OpenCode::Execution
+        - Hive::AgentSupport::OpenCode::LaunchPolicy
+        - Hive::AgentSupport::OpenCode::Observation
+        - Hive::AgentSupport::OpenCode::Skills
+        - Hive::AgentSupport::Pi
+        - Hive::AgentSupport::Pi::Runtime
+        - Hive::AgentSupport::Pi::Skills
+      errors:
+        - Hive::ConfigError
+        - Hive::Error
+    owned_paths:
+      - lib/hive/agent_support.rb
+      - lib/hive/agent_support/stream_meter.rb
+      - lib/hive/agent_support/claude.rb
+      - lib/hive/agent_support/claude/interactive.rb
+      - lib/hive/agent_support/claude/runtime.rb
+      - lib/hive/agent_support/claude/skills.rb
+      - lib/hive/agent_support/claude/stream.rb
+      - lib/hive/agent_support/codex.rb
+      - lib/hive/agent_support/codex/artifact_policy.rb
+      - lib/hive/agent_support/codex/runtime.rb
+      - lib/hive/agent_support/codex/skills.rb
+      - lib/hive/agent_support/grok.rb
+      - lib/hive/agent_support/grok/runtime.rb
+      - lib/hive/agent_support/grok/skills.rb
+      - lib/hive/agent_support/opencode.rb
+      - lib/hive/agent_support/opencode/configuration.rb
+      - lib/hive/agent_support/opencode/execution.rb
+      - lib/hive/agent_support/opencode/launch_policy.rb
+      - lib/hive/agent_support/opencode/observation.rb
+      - lib/hive/agent_support/opencode/skills.rb
+      - lib/hive/agent_support/pi.rb
+      - lib/hive/agent_support/pi/runtime.rb
+      - lib/hive/agent_support/pi/skills.rb
+    state_contracts:
+      - "The data-only built-in catalog loads only the selected provider root; provider facets remain lazy until their owning operation uses them"
+      - "Provider-specific message, model, credential, review, skill, inventory, and managed-runtime decisions stay under one provider namespace"
+    schema_contracts:
+      - "A built-in support name maps by convention to one provider module with explicit Runtime, Skills, and setup facets where required"
+    lock_contracts:
+      - "Support discovery owns no lock or cache; generic process and artifact owners retain their existing lifecycle locks"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/agent/message_extractor
+      - hive/agent_support
+      - hive/atomic_file
+      - hive/permission_scope
+      - hive/skill_check
+    internal_collaborators:
+      - Hive::AgentSupport::OpenCode::Skills
+      - Hive::AgentSupport::Claude::Interactive
+      - Hive::AgentSupport::Claude::Runtime
+      - Hive::AgentSupport::Claude::Skills
+      - Hive::AgentSupport::Codex::ArtifactPolicy
+      - Hive::AgentSupport::Codex::Runtime
+      - Hive::AgentSupport::Codex::Skills
+      - Hive::AgentSupport::Grok::Runtime
+      - Hive::AgentSupport::Grok::Skills
+      - Hive::AgentSupport::OpenCode::Configuration
+      - Hive::AgentSupport::OpenCode::Execution
+      - Hive::AgentSupport::OpenCode::LaunchPolicy
+      - Hive::AgentSupport::OpenCode::Observation
+      - Hive::AgentSupport::Pi::Runtime
+      - Hive::AgentSupport::Pi::Skills
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/agent.rb
+      - lib/hive/agent_profiles.rb
+      - lib/hive/artifacts/capture_toolkit.rb
+      - lib/hive/display_name/generator.rb
+      - lib/hive/plan_review/adapters/ce_doc_review.rb
+      - lib/hive/plan_review/workspace_scope.rb
+      - lib/hive/web/agents_auth.rb
+      - lib/hive/workflow_package/runtime_policy.rb
+    mutation_authority: "Provider support declares provider-specific behavior only; generic owners retain process supervision, durable artifacts, credential writes, and workflow transitions."
+    recovery_surface: "Provider failures remain ordinary typed Hive errors; retry, cleanup, and workflow recovery stay with the generic caller."
+    wiki_page: wiki/modules/agent_support.md
+    focused_tests:
+      - test/unit/agent_support_test.rb
+      - test/unit/agent_message_extractor_test.rb
+      - test/unit/skill_check_test.rb
+      - test/unit/workflow_package/runtime_policy_test.rb
+      - test/unit/artifacts/capture_toolkit_test.rb
+    migration_exceptions: []
+
   - id: agent-abi
     name: Agent ABI
     state: boundary-ready
@@ -618,7 +728,8 @@ components:
       - "Hive profile constructor, registry extension point, and runtime value constants remain forwarding-compatible"
     lock_contracts:
       - "agent-cli-runtime version/capability probes are bounded and reap descendant process groups"
-    component_dependencies: []
+    component_dependencies:
+      - agent-support
     allowed_hive_dependencies:
       - hive/implementation_identity
       - hive/model_routing
@@ -633,7 +744,7 @@ components:
       - lib/hive/diagnosis_agent.rb
       - lib/hive/display_name/generator.rb
       - lib/hive/patrol/agent_launch.rb
-      - lib/hive/reviewers/codex_review.rb
+      - lib/hive/agent_support/codex/reviewer.rb
       - lib/hive/stages/base.rb
       - lib/hive/tui/bubble_model.rb
     mutation_authority: "Hive orchestration selects profiles and permission policy; adapters only compile and observe."
@@ -721,6 +832,7 @@ components:
       constant: Hive::AgentSkills
     public_contract:
       values:
+        - Hive::AgentSkills::Adapter
         - Hive::AgentSkills::Plan
         - Hive::AgentSkills::Projection
         - Hive::AgentSkills::ProjectionReport
@@ -733,15 +845,22 @@ components:
     owned_paths:
       - lib/hive/agent_skills.rb
       - lib/hive/agent_skills
+      - lib/hive/agent_support/opencode/setup_adapter.rb
+      - lib/hive/agent_support/pi/setup_adapter.rb
+      - lib/hive/agent_support/codex/setup_adapter.rb
+      - lib/hive/agent_support/grok/setup_adapter.rb
+      - lib/hive/agent_support/claude/setup_adapter.rb
       - config/agent-skills.yml
     state_contracts:
       - "Canonical skill source and projected agent-home directories"
+      - "Provider setup facets subclass the public lazy Adapter while remaining physically local to their provider namespace"
     schema_contracts:
       - "config/agent-skills.yml manifest and projection provenance"
     lock_contracts:
       - "Private staging and complete-directory atomic publication"
     component_dependencies:
       - agent-abi
+      - agent-support
     allowed_hive_dependencies:
       - hive/atomic_file
       - hive/config

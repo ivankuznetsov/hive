@@ -1,6 +1,7 @@
 require "test_helper"
 require "shellwords"
 require "hive/agent_skills/adapters/registry"
+require "hive/agent_support/pi/setup_adapter"
 
 class AgentSkillAdaptersIntegrationTest < Minitest::Test
   include HiveTestHelper
@@ -31,7 +32,7 @@ class AgentSkillAdaptersIntegrationTest < Minitest::Test
         resolution: { "path" => nil },
         health: "missing", severity: "error", explanation: "missing", remediation: "repair"
       )
-      adapter = Hive::AgentSkills::Adapters::Pi.new(
+      adapter = Hive::AgentSupport::Pi::SetupAdapter.new(
         config: Hive::Config::DEFAULTS,
         project_root: dir,
         manifest: manifest,

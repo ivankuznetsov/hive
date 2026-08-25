@@ -1,5 +1,5 @@
 require "agent_cli_runtime"
-require "json"
+require "hive/agent_support"
 require "hive/implementation_identity"
 require "hive/model_routing"
 
@@ -13,19 +13,18 @@ module Hive
   class AgentProfile
     PROMPT_STYLES = AgentCliRuntime::Profile::PROMPT_STYLES
     ROUTING_ARGUMENT_PLACEMENTS = %i[global subcommand].freeze
-    STRUCTURED_OUTPUT_PROTOCOLS = %i[grok_end pi_agent_end].freeze
+    STRUCTURED_OUTPUT_PROTOCOLS = Hive::AgentSupport::PROTOCOLS.keys
     BILLING_SEMANTICS = %i[unknown subscription_backed api_billed].freeze
     WORKSPACE_WRITE_PERMISSION_MODE =
       AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE
     READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
     VERSION_CHECK_TIMEOUT_SEC = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
     TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
-    LEGACY_CLAUDE_TOOL_SCOPE_FLAGS = {
-      allowed: "--allowedTools",
-      disallowed: "--disallowedTools"
-    }.freeze
-    private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_CLAUDE_TOOL_SCOPE_FLAGS
-
+    LEGACY_OPEN_CODE_OPTIONS = %i[
+      configuration_path configuration credential_environment_keys
+      plugins
+    ].to_h { |attribute| [ :"opencode_#{attribute}", attribute ] }.freeze
+    private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_OPEN_CODE_OPTIONS
     STATUS_DETECTION_MODES =
       %i[state_file_marker exit_code_only output_file_exists].freeze
 
@@ -65,9 +64,8 @@ module Hive
                 :routed_effort_values, :routing_argument_placement,
                 :routed_model_argument_builder, :routed_effort_argument_builder,
                 :structured_output_protocol, :cli_capabilities,
-                :permission_presets, :opencode_configuration_path,
-                :opencode_configuration, :opencode_credential_environment_keys,
-                :opencode_plugins, :billing_semantics
+                :permission_presets, :support_configuration,
+                :billing_semantics
 
     # Existing custom profile registrations remain source compatible. Shipped
     # profiles pass runtime_profile: so their compatibility definition comes
@@ -98,25 +96,25 @@ module Hive
                    configuration_environment_key: nil,
                    default_configuration_directory: nil,
                    permission_presets: nil,
-                   opencode_configuration_path: nil,
-                   opencode_configuration: nil,
-                   opencode_credential_environment_keys: [],
-                   opencode_plugins: [])
+                   support_configuration: nil,
+                   **legacy_opencode_options)
+      if runtime_profile && !runtime_profile.is_a?(AgentCliRuntime::Profile)
+        raise ArgumentError, "runtime_profile must be an AgentCliRuntime::Profile"
+      end
       effective_name = runtime_profile&.name || name
       raise ArgumentError, "missing keyword: :name" if effective_name.nil?
 
-      prompt_style ||= effective_name.to_sym == :codex ? :stdin : :positional
+      prompt_style ||= runtime_profile&.prompt_style ||
+        Hive::AgentSupport::DEFAULT_PROMPT_STYLES.fetch(effective_name.to_sym, :positional)
       validate_hive_policy!(
         prompt_style:, status_detection_mode:, initial_context_tokens:,
         routing_argument_placement:, structured_output_protocol:
       )
 
-      scope_flags =
-        if tool_scope_flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
-          effective_name.to_sym == :claude ? LEGACY_CLAUDE_TOOL_SCOPE_FLAGS : {}
-        else
-          tool_scope_flags
-        end
+      tool_scope_flags = Hive::AgentSupport::DEFAULT_TOOL_SCOPE_FLAGS.fetch(
+        effective_name.to_sym, {}
+      ) if tool_scope_flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
+
       normalized_cli_capabilities = normalize_cli_capabilities(cli_capabilities)
 
       @runtime_profile = runtime_profile || AgentCliRuntime::Profile.new(
@@ -128,7 +126,7 @@ module Hive
         workspace_write_flags: Array(workspace_write_flags),
         read_only_flags: Array(read_only_flags),
         add_dir_flag: add_dir_flag,
-        tool_scope_flags: scope_flags,
+        tool_scope_flags: tool_scope_flags,
         budget_flag: budget_flag,
         output_format_flags: output_format_flags,
         version_flag: required_runtime_value(version_flag, :version_flag),
@@ -144,11 +142,6 @@ module Hive
         configuration_environment_key: configuration_environment_key,
         default_configuration_directory: default_configuration_directory
       )
-      unless @runtime_profile.is_a?(AgentCliRuntime::Profile)
-        raise ArgumentError,
-              "runtime_profile must be an AgentCliRuntime::Profile"
-      end
-
       @env_bin_override_key =
         env_bin_override_key || @runtime_profile.env_bin_override_keys.find do |key|
           key.start_with?("HIVE_")
@@ -173,25 +166,13 @@ module Hive
         routed_effort_argument_builder || @runtime_profile.effort_argument_builder
       @structured_output_protocol = structured_output_protocol&.to_sym
       @permission_presets = normalize_permission_presets(
-        permission_presets ||
-          (effective_name.to_sym == :claude ? %w[read-only scoped] : [])
+        permission_presets || Hive::AgentSupport::DEFAULT_PERMISSION_PRESETS.fetch(
+          effective_name.to_sym, []
+        )
       )
-      if opencode_configuration_path && opencode_configuration
-        raise ArgumentError,
-              "choose opencode_configuration_path or opencode_configuration, not both"
-      end
-      @opencode_configuration_path =
-        opencode_configuration_path&.to_s&.dup&.freeze
-      @opencode_configuration =
-        if opencode_configuration
-          deep_freeze_hash(opencode_configuration).tap do |configuration|
-            validate_nonsecret_opencode_configuration!(configuration)
-          end
-        end
-      @opencode_credential_environment_keys = normalize_environment_keys(
-        opencode_credential_environment_keys
+      @support_configuration = support_configuration_from_legacy(
+        support_configuration, legacy_opencode_options
       )
-      @opencode_plugins = normalize_opencode_plugins(opencode_plugins)
       @billing_semantics = billing_semantics.to_sym
       unless BILLING_SEMANTICS.include?(@billing_semantics)
         raise ArgumentError,
@@ -209,6 +190,14 @@ module Hive
       default_configuration_directory
     ].each do |method_name|
       define_method(method_name) { @runtime_profile.public_send(method_name) }
+    end
+
+    LEGACY_OPEN_CODE_OPTIONS.each do |reader, attribute|
+      define_method(reader) do
+        configuration = @support_configuration ||
+          Hive::AgentSupport.for(:opencode).configuration
+        configuration.public_send(attribute)
+      end
     end
 
     def bin
@@ -256,11 +245,8 @@ module Hive
       return [ :not_applicable, "no skill verifier configured for this profile" ] unless @skill_verifier
 
       kwargs = { project_root: project_root }
-      if name == :opencode
-        kwargs[:configuration_path] = @opencode_configuration_path if
-          @opencode_configuration_path
-        kwargs[:configuration] = @opencode_configuration if @opencode_configuration
-        kwargs[:plugins] = @opencode_plugins unless @opencode_plugins.empty?
+      if @support_configuration&.respond_to?(:skill_options)
+        kwargs.merge!(@support_configuration.skill_options)
       end
       @skill_verifier.call(invocation, **kwargs)
     end
@@ -334,11 +320,10 @@ module Hive
         end
       raise Hive::ImplementationIdentity::ResolutionError, message, cause: e
     rescue ArgumentError => e
-      raise unless name == :opencode
+      raise unless @support_configuration&.respond_to?(:identity_error)
 
       raise Hive::ImplementationIdentity::ResolutionError,
-            "agent profile :opencode requires an exact provider/model route: #{e.message}",
-            cause: e
+            @support_configuration.identity_error(e), cause: e
     end
 
     def validate_routed_control!(control, source: nil)
@@ -350,14 +335,10 @@ module Hive
       value = normalize_routed_value(control.value, control_path(control, source))
       case control.field
       when :model
-        if name == :opencode
-          begin
-            value = AgentCliRuntime::Route.parse(value).to_s
-          rescue ArgumentError => e
-            raise Hive::ConfigError,
-                  "#{control_path(control, source)} must be an exact OpenCode " \
-                  "provider/model route: #{e.message}"
-          end
+        if @support_configuration&.respond_to?(:validate_route)
+          value = @support_configuration.validate_route(
+            field: control.field, value:, path: control_path(control, source)
+          )
         end
         return value if @routed_model_argument_builder
 
@@ -476,12 +457,6 @@ module Hive
       "env_override" => :env_bin_override_key,
       "min_version" => :min_version
     }.freeze
-    OPENCODE_OVERRIDE_KEYS = {
-      "config_path" => :opencode_configuration_path,
-      "config" => :opencode_configuration,
-      "credential_env" => :opencode_credential_environment_keys,
-      "plugins" => :opencode_plugins
-    }.freeze
 
     def with_overrides(overrides_hash)
       return self if overrides_hash.nil? || overrides_hash.empty?
@@ -491,24 +466,25 @@ module Hive
       end
 
       runtime_overrides = {}
-      policy_overrides = {}
+      support_overrides = {}
       overrides_hash.each do |key, value|
         normalized_key = key.to_s
         if (kwarg = RUNTIME_OVERRIDE_KEYS[normalized_key])
           runtime_overrides[kwarg] = value
-          next
+        else
+          support_overrides[key] = value
         end
-        if name == :opencode &&
-           (kwarg = OPENCODE_OVERRIDE_KEYS[normalized_key])
-          policy_overrides[kwarg] = value
-          next
+      end
+      support_configuration = @support_configuration
+      if support_overrides.any?
+        unless support_configuration&.respond_to?(:with_overrides)
+          key = support_overrides.keys.first
+          known = RUNTIME_OVERRIDE_KEYS.keys
+          raise Hive::ConfigError,
+                "agents.#{name}.#{key} is not a recognized override key " \
+                "(known: #{known.inspect})"
         end
-
-        known = RUNTIME_OVERRIDE_KEYS.keys
-        known += OPENCODE_OVERRIDE_KEYS.keys if name == :opencode
-        raise Hive::ConfigError,
-              "agents.#{name}.#{key} is not a recognized override key " \
-              "(known: #{known.inspect})"
+        support_configuration = support_configuration.with_overrides(support_overrides)
       end
 
       overridden_runtime = RuntimeProfileOverride.new(
@@ -520,11 +496,21 @@ module Hive
       )
       self.class.new(
         **construction_kwargs.merge(
-          **policy_overrides,
           runtime_profile: overridden_runtime,
+          support_configuration:,
           env_bin_override_key:
             runtime_overrides.fetch(:env_bin_override_key, @env_bin_override_key)
         )
+      )
+    end
+
+    def with_support_configuration(configuration)
+      return self if configuration.equal?(@support_configuration)
+
+      self.class.new(
+        **construction_kwargs,
+        runtime_profile: @runtime_profile,
+        support_configuration: configuration
       )
     end
 
@@ -573,6 +559,19 @@ module Hive
     end
 
     private
+
+    def support_configuration_from_legacy(configuration, options)
+      unknown = options.keys - LEGACY_OPEN_CODE_OPTIONS.keys
+      raise ArgumentError, "unknown keywords: #{unknown.join(", ")}" if unknown.any?
+      return configuration if options.empty?
+      if configuration
+        raise ArgumentError,
+              "legacy OpenCode keywords cannot be mixed with support_configuration"
+      end
+
+      typed = options.transform_keys { |key| LEGACY_OPEN_CODE_OPTIONS.fetch(key) }
+      Hive::AgentSupport.for(:opencode)::Configuration.new(**typed)
+    end
 
     def required_runtime_value(value, keyword)
       return value unless value.nil?
@@ -654,11 +653,7 @@ module Hive
         routed_effort_argument_builder: @routed_effort_argument_builder,
         structured_output_protocol: @structured_output_protocol,
         permission_presets: @permission_presets.dup,
-        opencode_configuration_path: @opencode_configuration_path,
-        opencode_configuration: @opencode_configuration,
-        opencode_credential_environment_keys:
-          @opencode_credential_environment_keys.dup,
-        opencode_plugins: @opencode_plugins.dup,
+        support_configuration: @support_configuration,
         billing_semantics: @billing_semantics
       }
     end
@@ -692,72 +687,6 @@ module Hive
       presets.freeze
     end
 
-    def normalize_environment_keys(values)
-      keys = Array(values).map { |value| value.to_s.dup.freeze }
-      invalid = keys.find { |key| !key.match?(/\A[A-Z][A-Z0-9_]*\z/) }
-      raise ArgumentError, "invalid OpenCode credential environment key" if invalid
-      raise ArgumentError, "OpenCode credential environment keys must be unique" if
-        keys.uniq.length != keys.length
-
-      keys.freeze
-    end
-
-    def normalize_opencode_plugins(values)
-      unless values.is_a?(Array)
-        raise ArgumentError, "OpenCode plugins must be an array"
-      end
-      plugins = values.map { |plugin| plugin.to_s.dup.freeze }
-      if plugins.any?(&:empty?)
-        raise ArgumentError, "OpenCode plugins must be non-empty strings"
-      end
-      if plugins.uniq.length != plugins.length
-        raise ArgumentError, "OpenCode plugins must be unique"
-      end
-
-      plugins.freeze
-    end
-
-    def deep_freeze_hash(value)
-      unless value.is_a?(Hash)
-        raise ArgumentError, "opencode_configuration must be a Hash"
-      end
-
-      JSON.parse(JSON.generate(value)).tap do |copy|
-        deep_freeze_value(copy)
-      end
-    rescue JSON::GeneratorError
-      raise ArgumentError, "opencode_configuration must contain JSON values"
-    end
-
-    def deep_freeze_value(value)
-      case value
-      when Hash
-        value.each { |key, item| key.freeze; deep_freeze_value(item) }
-      when Array
-        value.each { |item| deep_freeze_value(item) }
-      when String
-        value.freeze
-      end
-      value.freeze
-    end
-
-    def validate_nonsecret_opencode_configuration!(value, key = nil)
-      case value
-      when Hash
-        value.each do |child_key, child|
-          validate_nonsecret_opencode_configuration!(child, child_key)
-        end
-      when Array
-        value.each { |child| validate_nonsecret_opencode_configuration!(child, key) }
-      when String
-        if key.to_s.match?(/(?:api[_-]?key|token|secret|password|credential)/i) &&
-           !value.match?(/\A\{env:[A-Z][A-Z0-9_]*\}\z/)
-          raise ArgumentError,
-                "OpenCode provider definitions cannot contain credential values"
-        end
-      end
-    end
-
     def control_path(control, source)
       key = control.provenance.key || control.stage
       path = "models.#{key}.#{control.field}"
@@ -786,8 +715,9 @@ module Hive
       def initialize(base, bin_default:, env_bin_override_key:, min_version:)
         @base = base
         @bin_default_override = bin_default.to_s.dup.freeze
-        # Keep the package-owned override keys as fallbacks so package probes
-        # and Hive launches resolve the same operator-selected executable.
+        # Keep package-owned override keys as fallbacks. Prepared runtimes pin
+        # the resolved executable through their package key, so replacing the
+        # inventory with a Hive-only key could probe a different binary.
         @env_bin_override_keys = [
           *Array(env_bin_override_key), *base.env_bin_override_keys
         ].compact.map { |key| key.to_s.dup.freeze }.uniq.freeze

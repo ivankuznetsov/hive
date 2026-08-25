@@ -215,10 +215,12 @@ class AgentTest < Minitest::Test
         )
         agent = Hive::Agent.new(
           task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
-          timeout_sec: 5, profile: profile, status_mode: :exit_code_only,
+          timeout_sec: 5, profile:, status_mode: :exit_code_only,
           permission_mode: "read-only", launch_arguments:
         )
-        launch = agent.send(:prepare_native_opencode_invocation)
+        support = Hive::AgentSupport.for(profile)
+        agent.extend(support.const_get(:Execution, false))
+        launch = agent.send(:prepare_native_invocation)
 
         assert_equal "opencode", launch.invocation.argv.first
         assert_equal "opencode", launch.executable
@@ -1527,7 +1529,7 @@ class AgentTest < Minitest::Test
       )
       write_result = { "type" => "user", "tool_use_result" => { "type" => "create" } }
 
-      assert agent.send(:output_completed_event?, write_result)
+      assert Hive::AgentSupport.for(:claude)::Stream.output_completed_event?(write_result)
 
       result = { output_completed: true }
       agent.handle_exit(result)
@@ -1678,7 +1680,7 @@ class AgentTest < Minitest::Test
   end
 
   def test_stream_token_meter_sums_claude_turns_without_double_counting_deltas
-    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    meter = Hive::AgentSupport::Claude::Stream::TokenMeter.new
     first_start = {
       "type" => "stream_event",
       "event" => { "type" => "message_start" }
@@ -1700,7 +1702,7 @@ class AgentTest < Minitest::Test
   end
 
   def test_stream_token_meter_keeps_observed_usage_when_terminal_total_regresses
-    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    meter = Hive::AgentSupport::Claude::Stream::TokenMeter.new
     stream = {
       "type" => "stream_event",
       "event" => { "type" => "message_start" }
@@ -1717,7 +1719,7 @@ class AgentTest < Minitest::Test
   end
 
   def test_stream_token_meter_accumulates_non_claude_usage_events
-    meter = Hive::Agent::StreamTokenMeter.new(:codex)
+    meter = Hive::AgentSupport::StreamMeter.new
 
     assert_equal 0, meter.observe({ "type" => "item.completed" }, nil)
     assert_equal 3, meter.observe(
@@ -2168,6 +2170,16 @@ class AgentTest < Minitest::Test
 
       with_replaced_singleton_method(Process, :wait, ->(_pid, _flags) { raise Errno::ECHILD }) do
         assert_nil agent.sleep_grace_then_kill(123, 456)
+      end
+    end
+  end
+
+  def test_wait_for_process_tolerates_an_already_reaped_child
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+
+      with_replaced_singleton_method(Process, :wait2, ->(*) { raise Errno::ECHILD }) do
+        assert_equal [ false, nil ], agent.send(:wait_for_process, 123, 123, 5)
       end
     end
   end
@@ -2667,7 +2679,7 @@ class AgentTest < Minitest::Test
         }
       }
 
-      assert agent.send(:claude_write_tool_event?, event)
+      assert Hive::AgentSupport.for(:claude)::Stream.write_tool_event?(event)
     end
   end
 

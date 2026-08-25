@@ -718,7 +718,7 @@ post-fix failure sample. Next live triage failure should now carry the
 `expected_output_session_alive?`.
 ## codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
 
-`Hive::Reviewers::CodexReview` accepts a prose (non-checkbox) verdict as a
+`Hive::AgentSupport::Codex::Reviewer` accepts a prose (non-checkbox) verdict as a
 `:clean` pass only when `clean_verdict?` matches an affirmative no-findings
 phrase (`CLEAN_VERDICT`) and no `CONCERN_SIGNAL`. This closed the `all_failed`
 regression (genuine clean reviews failing) while preventing a prose-described

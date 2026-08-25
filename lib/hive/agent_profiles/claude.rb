@@ -1,5 +1,4 @@
 require "hive/agent_profile"
-require "hive/skill_check"
 
 module Hive
   module AgentProfiles
@@ -14,10 +13,8 @@ module Hive
         tools directories commands domains settings_isolation mcp_isolation
         environment_isolation
       ],
-      skill_verifier: Hive::SkillCheck::Claude.method(:verify),
-      default_model_resolver: ->(**kwargs) {
-        Hive::ImplementationIdentity::NativeDefaults.resolve(:claude, **kwargs)
-      },
+      skill_verifier: Hive::AgentSupport.skill_verifier(:claude),
+      default_model_resolver: Hive::AgentSupport.model_resolver(:claude),
       routed_model_argument_builder: ->(model) {
         model == "inherit" ? [] : [ "--model", model ]
       },
@@ -25,6 +22,7 @@ module Hive
         %w[default inherit].include?(effort) ? [] : [ "--effort", effort ]
       },
       routed_effort_values: %w[default inherit low medium high xhigh max],
+      permission_presets: %w[read-only scoped],
       cli_capabilities: {
         safe_mode: [ "--safe-mode" ],
         patrol_review_context: [

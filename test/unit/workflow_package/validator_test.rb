@@ -179,6 +179,12 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
+  def test_linux_linker_namespace_prefix_is_reserved_for_optional_inputs
+    %w[LD_AUDIT LD_BIND_NOW LD_DEBUG LD_LIBRARY_PATH LD_PRELOAD].each do |name|
+      refute Hive::WorkflowPackage::InputName.valid?(name), name
+    end
+  end
+
   def test_registry_actor_contract_diagnostics_cover_nested_permissions_and_identity
     reviewer = Hive::Workflow::Reviewer.new(
       name: "reviewer", agent: "claude",

@@ -45,6 +45,15 @@ types. At an execute boundary the order is
 reconciliation, durable batch, snapshot publication, gate evaluation,
 compatibility marker.
 
+Execute-observation deduplication in the reconciler compares each fresh
+observation only against the most recent journal record of the same event
+stream (`event_type` + `attempt_id` + condition name), never against the whole
+history. Journal consumers apply last-event-wins semantics, so a re-transition
+back to a previously observed state (for example a worktree becoming dirty
+again at an unchanged HEAD) must append a new record even though an identical
+older one exists; only an unchanged re-observation of the latest stream state
+is skipped.
+
 Journal envelopes, idempotent journal appends, condition evidence, policy
 descriptors/options, execute-observation deduplication, and task-projection
 copies all normalize nested hash keys through `Hive::StringifyKeys`. The

@@ -240,16 +240,9 @@ module Hive
 
       def resolve(provider, project_root: nil, home: nil, **)
         home ||= Dir.home
-        value = if block_given?
-          yield(project_root: project_root, home: home)
-        else
-          case provider.to_sym
-        when :claude
-          json_model(paths(project_root, home, ".claude/settings.json"), %w[model])
-        else
-          raise ResolutionError, "unknown provider #{provider.inspect}"
-          end
-        end
+        raise ResolutionError, "unknown provider #{provider.inspect}" unless block_given?
+
+        value = yield(project_root: project_root, home: home)
 
         if value.to_s.strip.empty?
           raise ResolutionError, "#{provider} did not expose a concrete default model"

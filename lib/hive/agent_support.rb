@@ -1,7 +1,10 @@
 module Hive::AgentSupport
-  BUILTINS = { pi: "Pi", opencode: "OpenCode", codex: "Codex", grok: "Grok" }.freeze
+  BUILTINS = {
+    pi: "Pi", opencode: "OpenCode", codex: "Codex", grok: "Grok", claude: "Claude"
+  }.freeze
   DEFAULT_PROMPT_STYLES = { codex: :stdin }.freeze
   PROTOCOLS = { grok_end: :grok }.freeze
+  autoload :StreamMeter, "hive/agent_support/stream_meter"
 
   module SkillPolicy
     def verify(invocation, **options)
@@ -23,7 +26,7 @@ module Hive::AgentSupport
 
   def self.for(profile)
     name = profile.respond_to?(:name) ? profile.name : profile
-    return if name.nil?
+    return unless name.respond_to?(:to_sym)
 
     constant = BUILTINS[name.to_sym] or return
 
@@ -32,4 +35,5 @@ module Hive::AgentSupport
   end
 
   def self.for_protocol(protocol) = self.for(PROTOCOLS[protocol&.to_sym])
+  def self.supports?(profile, facet) = self.for(profile)&.const_defined?(facet, false) || false
 end

@@ -1164,7 +1164,7 @@ module Hive
       agent_name = (stage_cfg["agent"] || DEFAULTS.dig(stage, "agent") || "claude").to_s
       configured_skill = stage_cfg["skill"]
 
-      return configured_skill if configured_skill && !legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, configured_skill)
+      return configured_skill if configured_skill && !unsupported_legacy_wiki_plan_alias?(stage, agent_name, configured_skill)
 
       skills_by_agent = {}
       default_skills_by_agent = DEFAULTS.dig(stage, "skill_by_agent")
@@ -1179,10 +1179,11 @@ module Hive
       end
     end
 
-    def legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, skill)
+    def unsupported_legacy_wiki_plan_alias?(stage, agent_name, skill)
+      support = Hive::AgentSupport.for(agent_name)
       stage == "plan" &&
-        agent_name != "claude" &&
-        skill.to_s == LEGACY_WIKI_PLAN_ALIAS
+        skill.to_s == LEGACY_WIKI_PLAN_ALIAS &&
+        !(support&.respond_to?(:legacy_wiki_plan_alias?) && support.legacy_wiki_plan_alias?)
     end
 
     # Surface a misconfigured HIVE_HOME loudly on READ paths only.

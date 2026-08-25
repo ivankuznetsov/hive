@@ -34,10 +34,6 @@ module Hive
         HIVE_EVIDENCE_APP_PORT HIVE_EVIDENCE_BROWSER_ORIGIN
         HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
       ].freeze
-      DIRECT_PROVIDER_IDENTITIES = {
-        claude: "anthropic"
-      }.freeze
-
       module_function
 
       # Per-spawn random nonce for the user_supplied wrapper. Defends against
@@ -262,11 +258,12 @@ module Hive
       end
 
       def legacy_model_routing_values(cfg, profile)
-        return Hive::ModelRouting::EMPTY_MODELS unless profile.name == :claude
+        support = Hive::AgentSupport.for(profile)
+        return Hive::ModelRouting::EMPTY_MODELS unless support&.respond_to?(:legacy_control)
 
         {
-          model: cfg.dig("claude", "model"),
-          effort: cfg.dig("claude", "effort")
+          model: support.legacy_control(cfg, :model),
+          effort: support.legacy_control(cfg, :effort)
         }.compact
       end
       private_class_method :legacy_model_routing_values
@@ -448,8 +445,9 @@ module Hive
 
       def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
         return nil unless default_allowed_tools
-        return nil unless profile.name == :claude
-        return nil unless cfg && Hive::Config.claude_mode(cfg) == :tmux
+        support = Hive::AgentSupport.for(profile)
+        return nil unless cfg && support&.respond_to?(:interactive_mode) &&
+                          support.interactive_mode(cfg) == :tmux
 
         default_allowed_tools
       end
@@ -1051,9 +1049,9 @@ module Hive
             warn_model_effort_dropped(task, profile, model: model, effort: effort)
             identity_arguments = []
           end
-        elsif derive_flags_from_cfg && cfg && profile.name == :claude
-          permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-          cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
+        elsif derive_flags_from_cfg && cfg && support&.respond_to?(:legacy_launch_options)
+          legacy_permission, cli_flags = support.legacy_launch_options(cfg, model:, effort:)
+          permission_mode ||= legacy_permission
         end
 
         started_at = Time.now.utc.iso8601
@@ -1214,7 +1212,8 @@ module Hive
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
-        if context&.explicit_routing? && context.adapter != "claude"
+        if context&.explicit_routing? &&
+            !Hive::AgentSupport.supports?(context.adapter, :Interactive)
           return spawn_agent(
             task,
             prompt: prompt,
@@ -1245,7 +1244,7 @@ module Hive
 
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if context&.explicit_routing?
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        unless profile.name == :claude
+        unless Hive::AgentSupport.supports?(profile, :Interactive)
           raise Hive::AgentError,
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
@@ -1485,12 +1484,11 @@ module Hive
 
       def execution_identity(profile, model)
         value = model.to_s
-        profile_name = profile.name.to_sym
         support = Hive::AgentSupport.for(profile)
         return support.execution_identity(value) if
           support&.respond_to?(:execution_identity)
 
-        [ DIRECT_PROVIDER_IDENTITIES[profile_name], value.empty? ? nil : value ]
+        [ nil, value.empty? ? nil : value ]
       end
 
       def enrich_execution_identity!(result, profile)
@@ -1505,7 +1503,7 @@ module Hive
           if route
             "sanitized_export"
           elsif model
-            DIRECT_PROVIDER_IDENTITIES.key?(profile.name.to_sym) ?
+            provider ?
               "provider_usage_event_and_profile_contract" : "provider_usage_event"
           else
             "unavailable"

@@ -425,7 +425,7 @@ module Hive
             status_mode: :exit_code_only,
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
-          if profile.name == :claude
+          if Hive::AgentSupport.supports?(profile, :Interactive)
             Hive::Stages::Base.spawn_claude!(
               task,
               cfg,

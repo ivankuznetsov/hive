@@ -61,7 +61,7 @@ module Hive::AgentSupport::Pi::Skills
     { "package" => package, "marketplace" => nil }
   end
 
-  def filesystem_inventory(native_spec:, root:, package_version:)
+  def filesystem_inventory(native_spec:, root:, package_version:, **)
     install_path = install_path(root, native_spec.source)
     {
       "package" => install_path && package_record(

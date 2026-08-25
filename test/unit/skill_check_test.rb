@@ -62,7 +62,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_present_via_user_command_directory
     with_fake_home do |home|
       write_file("#{home}/.claude/commands/plan.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/plan")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/plan")
       assert_equal :present, status
       assert_equal "#{home}/.claude/commands/plan.md", msg
     end
@@ -73,7 +73,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
       config_dir = File.join(home, "elsewhere", "claude")
       write_file("#{config_dir}/commands/plan.md")
 
-      resolution = Hive::SkillCheck::Claude.resolve(
+      resolution = Hive::AgentSupport.for(:claude)::Skills.resolve(
         "/plan", environment: { "HOME" => home, "CLAUDE_CONFIG_DIR" => config_dir }
       )
 
@@ -86,7 +86,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_present_via_user_skill_directory
     with_fake_home do |home|
       write_file("#{home}/.claude/skills/wiki-researcher/SKILL.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/wiki-researcher")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/wiki-researcher")
       assert_equal :present, status
       assert_equal "#{home}/.claude/skills/wiki-researcher/SKILL.md", msg
     end
@@ -97,7 +97,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
       write_file("#{home}/.claude/commands/plan.md", "user")
       with_tmp_dir do |project|
         write_file("#{project}/.claude/commands/plan.md", "project")
-        status, msg = Hive::SkillCheck::Claude.verify("/plan", project_root: project)
+        status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/plan", project_root: project)
         assert_equal :present, status
         assert_equal "#{project}/.claude/commands/plan.md", msg,
           "project-level path must beat the user-level one"
@@ -108,7 +108,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_present_via_plugin_cache_layout
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/every-marketplace/compound-engineering/3.0.1/skills/ce-plan/SKILL.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/compound-engineering:ce-plan")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/compound-engineering:ce-plan")
       assert_equal :present, status
       assert_match(%r{cache/every-marketplace/compound-engineering/3.0.1/skills/ce-plan/SKILL.md\z}, msg)
     end
@@ -117,7 +117,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_present_via_plugin_marketplace_source_layout
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/marketplaces/some-mp/plugins/compound-engineering/skills/ce-brainstorm/SKILL.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/compound-engineering:ce-brainstorm")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/compound-engineering:ce-brainstorm")
       assert_equal :present, status
       assert_match(%r{plugins/compound-engineering/skills/ce-brainstorm/SKILL.md\z}, msg)
     end
@@ -125,7 +125,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
 
   def test_missing_returns_install_hint_for_plain_invocation
     with_fake_home do |_home|
-      status, msg = Hive::SkillCheck::Claude.verify("/nonexistent-skill")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/nonexistent-skill")
       assert_equal :missing, status
       assert_match(/not found under ~\/\.claude\/\{commands,skills\}/, msg)
       assert_match(/installed plugin/, msg, "hint mentions plugin fallback path")
@@ -141,7 +141,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
     # — even though there's no explicit `<plugin>:` prefix.
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/every-marketplace/compound-engineering/3.0.1/skills/ce-code-review/SKILL.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/ce-code-review")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/ce-code-review")
       assert_equal :present, status
       assert_match(%r{cache/every-marketplace/compound-engineering/3\.0\.1/skills/ce-code-review/SKILL.md\z}, msg)
     end
@@ -150,7 +150,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_present_via_plugin_marketplace_source_for_bare_invocation
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/marketplaces/some-mp/plugins/compound-engineering/skills/ce-code-review/SKILL.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/ce-code-review")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/ce-code-review")
       assert_equal :present, status
       assert_match(%r{plugins/compound-engineering/skills/ce-code-review/SKILL.md\z}, msg)
     end
@@ -159,7 +159,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_ce_doc_review_resolves_from_compound_engineering_plugin
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/every-marketplace/compound-engineering/3.0.1/skills/ce-doc-review/SKILL.md")
-      status, message = Hive::SkillCheck::Claude.verify("/ce-doc-review")
+      status, message = Hive::AgentSupport.for(:claude)::Skills.verify("/ce-doc-review")
       assert_equal :present, status
       assert_match(%r{skills/ce-doc-review/SKILL\.md\z}, message)
     end
@@ -169,7 +169,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
     with_fake_home do |home|
       write_file("#{home}/.claude/commands/ce-code-review.md", "user")
       write_file("#{home}/.claude/plugins/cache/mp/foo/1.0/skills/ce-code-review/SKILL.md", "plugin")
-      status, msg = Hive::SkillCheck::Claude.verify("/ce-code-review")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/ce-code-review")
       assert_equal :present, status
       assert_match(%r{commands/ce-code-review\.md\z}, msg,
         "user-level command must beat the plugin-fallback path")
@@ -179,7 +179,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
   def test_glob_metacharacters_do_not_match_claude_plugin_fallback
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/mp/foo/1.0/skills/foobar/SKILL.md")
-      status, msg = Hive::SkillCheck::Claude.verify("/foo*")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/foo*")
       assert_equal :missing, status
       assert_match(/foo\*/, msg)
     end
@@ -187,7 +187,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
 
   def test_missing_returns_install_hint_for_plugin_invocation
     with_fake_home do |_home|
-      status, msg = Hive::SkillCheck::Claude.verify("/no-such-plug:no-such-skill")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("/no-such-plug:no-such-skill")
       assert_equal :missing, status
       assert_match(/claude plugin install/, msg)
     end
@@ -195,7 +195,7 @@ class HiveSkillCheckClaudeTest < Minitest::Test
 
   def test_malformed_invocation_returns_missing_with_argument_error
     with_fake_home do |_home|
-      status, msg = Hive::SkillCheck::Claude.verify("garbage")
+      status, msg = Hive::AgentSupport.for(:claude)::Skills.verify("garbage")
       assert_equal :missing, status
       assert_match(/expected/, msg)
     end

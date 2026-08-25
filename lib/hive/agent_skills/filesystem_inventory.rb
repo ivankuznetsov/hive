@@ -20,13 +20,11 @@ module Hive
         support = Hive::AgentProfiles.support_for(native_spec.provider)
         inventory = if support
           support::Skills.filesystem_inventory(
-            native_spec:, root:, package_version: method(:package_version_from)
+            native_spec:, root:, package_version: method(:package_version_from),
+            read_json: method(:read_optional_json)
           )
         else
-          case native_spec.provider
-        when "claude" then claude_inventory(native_spec, root)
-        else raise TypeError, "unsupported provider #{native_spec.provider.inspect}"
-          end
+          raise TypeError, "unsupported provider #{native_spec.provider.inspect}"
         end
 
         {
@@ -56,63 +54,12 @@ module Hive
 
       private
 
-      def claude_inventory(native_spec, root)
-        plugins_path = File.join(root, "plugins", "installed_plugins.json")
-        marketplaces_path = File.join(root, "plugins", "known_marketplaces.json")
-        plugins_doc = read_optional_json(plugins_path, { "plugins" => {} })
-        marketplaces = read_optional_json(marketplaces_path, {})
-        settings_path = File.join(root, "settings.json")
-        settings = read_optional_json(settings_path, {})
-        plugins = plugins_doc.fetch("plugins")
-        raise TypeError, "#{plugins_path} plugins must be an object" unless plugins.is_a?(Hash)
-        raise TypeError, "#{marketplaces_path} must be an object" unless marketplaces.is_a?(Hash)
-        raise TypeError, "#{settings_path} must be an object" unless settings.is_a?(Hash)
-
-        entries = plugins.fetch(native_spec.package, [])
-        raise TypeError, "#{plugins_path} entry #{native_spec.package.inspect} must be an array" unless entries.is_a?(Array)
-        entry = entries.find { |candidate| candidate.is_a?(Hash) && candidate["scope"] == native_spec.scope } ||
-          entries.find { |candidate| candidate.is_a?(Hash) }
-        marketplace_entry = marketplaces[native_spec.marketplace]
-        if marketplace_entry && !marketplace_entry.is_a?(Hash)
-          raise TypeError, "#{marketplaces_path} entry #{native_spec.marketplace.inspect} must be an object"
-        end
-        enabled_plugins = settings.fetch("enabledPlugins", {})
-        unless enabled_plugins.nil? || enabled_plugins.is_a?(Hash)
-          raise TypeError, "#{settings_path} enabledPlugins must be an object"
-        end
-        enabled = enabled_plugins.nil? ? true : enabled_plugins.fetch(native_spec.package, true)
-        unless enabled == true || enabled == false
-          raise TypeError, "#{settings_path} enabledPlugins entry #{native_spec.package.inspect} must be boolean"
-        end
-
-        {
-          "package" => entry && {
-            "id" => native_spec.package,
-            "version" => entry["version"],
-            "enabled" => enabled,
-            "install_path" => entry["installPath"],
-            "source" => nil
-          }.freeze,
-          "marketplace" => marketplace_entry && {
-            "name" => native_spec.marketplace,
-            "source" => marketplace_source(marketplace_entry)
-          }.freeze
-        }.freeze
-      end
-
       def read_optional_json(path, default)
         return @json_cache.fetch(path) if @json_cache.key?(path)
 
         @json_cache[path] = JSON.parse(File.binread(path))
       rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EISDIR
         default
-      end
-
-      def marketplace_source(entry)
-        source = entry["source"]
-        return source["repo"] || source["url"] || source["source"] if source.is_a?(Hash)
-
-        entry["repo"] || source
       end
 
       def package_version_from(root)

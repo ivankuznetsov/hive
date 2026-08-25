@@ -297,18 +297,20 @@ module Hive
       end
 
       def configured_model(profile)
-        return nil unless profile.name == :claude
+        support = Hive::AgentSupport.for(profile)
+        return nil unless support&.respond_to?(:legacy_control)
 
-        value = @cfg.dig("claude", "model").to_s.strip
+        value = support.legacy_control(@cfg, :model).to_s.strip
         return nil if value.empty? || %w[default inherit].include?(value)
 
         Hive::ImplementationIdentity.normalize_model(value, concrete: true)
       end
 
       def configured_effort(profile)
-        return nil unless profile.name == :claude
+        support = Hive::AgentSupport.for(profile)
+        return nil unless support&.respond_to?(:legacy_control)
 
-        value = @cfg.dig("claude", "effort").to_s.strip
+        value = support.legacy_control(@cfg, :effort).to_s.strip
         return nil if value.empty? || %w[default inherit].include?(value)
 
         Hive::ImplementationIdentity.normalize_effort(value)

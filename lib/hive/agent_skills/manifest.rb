@@ -24,8 +24,6 @@ module Hive
       SAFE_SOURCE = %r{\A(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)\z}
       SAFE_PACKAGE = %r{\A(?:[A-Za-z0-9][A-Za-z0-9_.-]*|[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?|[A-Za-z0-9_.-]+@git\+https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git#[A-Za-z0-9_.-]+)\z}
       SAFE_RELATIVE_PATH = %r{\A(?!/)(?!.*(?:\A|/)\.\.(?:/|\z))[A-Za-z0-9._/-]+\z}
-      CLAUDE_ALIAS_ROOT = ".claude/commands/"
-
       class ValidationError < Hive::ConfigError; end
       class CoverageError < ValidationError; end
 
@@ -295,12 +293,15 @@ module Hive
       end
 
       def parse_alias(value, path, agent)
-        invalid!(path, "aliases are supported only for claude") unless agent == "claude"
+        root = Hive::AgentSupport.for(agent)&.then do |support|
+          support.skill_alias_root if support.respond_to?(:skill_alias_root)
+        end
+        invalid!(path, "aliases are not supported for #{agent}") unless root
         row = expect_hash(value, path)
         assert_keys!(row, %w[path target owner], path)
         alias_path = safe_relative_path!(row.fetch("path"), "#{path}.path")
-        unless alias_path.start_with?(CLAUDE_ALIAS_ROOT) && alias_path.end_with?(".md")
-          invalid!("#{path}.path", "must be a markdown file under #{CLAUDE_ALIAS_ROOT}")
+        unless alias_path.start_with?(root) && alias_path.end_with?(".md")
+          invalid!("#{path}.path", "must be a markdown file under #{root}")
         end
         target = string!(row.fetch("target"), "#{path}.target")
         invalid!("#{path}.target", "must be a slash invocation") unless target.match?(%r{\A/[A-Za-z0-9_.:-]+\z})

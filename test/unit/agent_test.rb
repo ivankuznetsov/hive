@@ -1531,7 +1531,7 @@ class AgentTest < Minitest::Test
       )
       write_result = { "type" => "user", "tool_use_result" => { "type" => "create" } }
 
-      assert agent.send(:output_completed_event?, write_result)
+      assert Hive::AgentSupport.for(:claude)::Stream.output_completed_event?(write_result)
 
       result = { output_completed: true }
       agent.handle_exit(result)
@@ -1682,7 +1682,7 @@ class AgentTest < Minitest::Test
   end
 
   def test_stream_token_meter_sums_claude_turns_without_double_counting_deltas
-    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    meter = Hive::AgentSupport::Claude::Stream::TokenMeter.new
     first_start = {
       "type" => "stream_event",
       "event" => { "type" => "message_start" }
@@ -1704,7 +1704,7 @@ class AgentTest < Minitest::Test
   end
 
   def test_stream_token_meter_keeps_observed_usage_when_terminal_total_regresses
-    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    meter = Hive::AgentSupport::Claude::Stream::TokenMeter.new
     stream = {
       "type" => "stream_event",
       "event" => { "type" => "message_start" }
@@ -1721,7 +1721,7 @@ class AgentTest < Minitest::Test
   end
 
   def test_stream_token_meter_accumulates_non_claude_usage_events
-    meter = Hive::Agent::StreamTokenMeter.new(:codex)
+    meter = Hive::AgentSupport::StreamMeter.new
 
     assert_equal 0, meter.observe({ "type" => "item.completed" }, nil)
     assert_equal 3, meter.observe(
@@ -2671,7 +2671,7 @@ class AgentTest < Minitest::Test
         }
       }
 
-      assert agent.send(:claude_write_tool_event?, event)
+      assert Hive::AgentSupport.for(:claude)::Stream.write_tool_event?(event)
     end
   end
 

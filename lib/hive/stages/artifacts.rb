@@ -527,7 +527,7 @@ module Hive
               runtime_policy: producer_runtime_policy
             )
           end
-          unless profile.name == :claude
+          unless Hive::AgentSupport.supports?(profile, :Interactive)
             raise Hive::ConfigError,
                   "outcome-evidence producer agent #{profile.name.inspect} cannot enforce " \
                   "controller-scoped evidence writes"
@@ -549,7 +549,9 @@ module Hive
            !(spec.is_a?(Hash) && spec["preset"].to_s == "read-only")
           raise Hive::ConfigError, "artifacts.evidence.#{role} permissions cannot exceed read-only"
         end
-        if role != "producer" && !%i[claude opencode].include?(profile.name)
+        stage_scoped = Hive::AgentSupport.supports?(profile, :Interactive) ||
+          Hive::AgentSupport.supports?(profile, :LaunchPolicy)
+        if role != "producer" && !stage_scoped
           if profile.read_only_supported?
             return { permission_mode: Hive::AgentProfile::READ_ONLY_PERMISSION_MODE }
           end
@@ -889,7 +891,7 @@ module Hive
           status_mode: :state_file_marker
         }
         mcp_config_path = nil
-        if profile.name == :claude
+        if Hive::AgentSupport.supports?(profile, :Interactive)
           allowed_tools = Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           if screenote[:connected]
             begin

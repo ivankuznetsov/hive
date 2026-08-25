@@ -212,10 +212,10 @@ module Hive
                              base_add_dirs: [], managed_outputs: [], prepare: true)
         task_root = File.realpath(task_folder)
         package_root = File.realpath(package_root)
-        scope, parsed = if profile.name == :claude
-          [ Hive::PermissionScope.resolve(
-            permission_spec, task_folder: task_root, profile: profile, stage: "managed-workflow"
-          ), nil ]
+        support = Hive::AgentSupport.for(profile)
+        runtime = support::Runtime if support&.const_defined?(:Runtime, false)
+        scope, parsed = if runtime&.respond_to?(:resolve_scope)
+          runtime.resolve_scope(permission_spec, task_root:, profile:)
         else
           Hive::PermissionScope.resolve_managed_spec(
             permission_spec, task_folder: task_root, stage: "managed-workflow"
@@ -231,13 +231,25 @@ module Hive
           directories = (directories + trusted_actor_read_roots(base_add_dirs)).uniq
         end
         child_environment = actor_environment(environment)
-        if profile.name != :claude && !scope.yolo?
+        if runtime&.respond_to?(:compile_direct_actor)
+          return runtime.compile_direct_actor(
+            host: self, scope:, task_root:, directories:, profile:,
+            environment: child_environment, managed_outputs:, prepare:
+          )
+        end
+        unless scope.yolo?
           return compile_portable_actor(
             parsed, scope: scope, task_root: task_root,
             directories: directories, profile: profile, environment: child_environment,
             managed_outputs: managed_outputs, prepare: prepare
           )
         end
+        direct_policy(scope, task_root:, directories:, environment: child_environment)
+      rescue Errno::ENOENT, Errno::EACCES => e
+        raise Hive::ConfigError, "managed runtime package context is unavailable (#{e.class.name.split('::').last})"
+      end
+
+      def self.direct_policy(scope, task_root:, directories:, environment:)
         Policy.new(
           permission_mode: scope.permission_mode,
           allowed_tools: scope.allowed_tools,
@@ -246,7 +258,7 @@ module Hive
           commands: [].freeze,
           domains: [].freeze,
           executables: {}.freeze,
-          environment: child_environment.freeze,
+          environment: environment.freeze,
           settings_path: nil,
           mcp_config_path: nil,
           policy_path: nil,
@@ -259,8 +271,6 @@ module Hive
           output_paths: {}.freeze,
           cleanup_paths: [].freeze
         ).freeze
-      rescue Errno::ENOENT, Errno::EACCES => e
-        raise Hive::ConfigError, "managed runtime package context is unavailable (#{e.class.name.split('::').last})"
       end
 
       def self.actor_environment(environment)
@@ -682,7 +692,9 @@ module Hive
       def validate_profile!
         capabilities = @profile.respond_to?(:policy_capabilities) ? @profile.policy_capabilities : []
         missing = REQUIRED_CAPABILITIES - capabilities
-        return if @profile.name == :claude && missing.empty?
+        support = Hive::AgentSupport.for(@profile)
+        runtime = support::Runtime if support&.const_defined?(:Runtime, false)
+        return if runtime&.respond_to?(:legacy_policy?) && runtime.legacy_policy? && missing.empty?
 
         raise Hive::ConfigError,
               "runner #{@profile.name.inspect} cannot enforce managed workflow policy" \

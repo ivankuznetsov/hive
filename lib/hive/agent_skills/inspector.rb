@@ -375,7 +375,7 @@ module Hive
           issues << [ "incompatible", "#{profile.name} CLI #{version} is below supported #{profile.min_version}" ]
         end
 
-        support = Hive::AgentProfiles.support_for(profile)
+        support = Hive::AgentProfiles.support_for(native_spec.provider)
         inventory = if support
           support::Skills.live_inventory(
             bin:, native_spec:, issues:, root: config_root_for(native_spec),
@@ -385,12 +385,8 @@ module Hive
             failure: method(:command_failure)
           )
         else
-          case native_spec.provider
-        when "claude" then claude_inventory(bin, native_spec, commands, issues)
-        else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
-          end
         end
 
         evidence = {
@@ -413,33 +409,6 @@ module Hive
           "package" => nil,
           "marketplace" => nil,
           "issues" => [ [ "incompatible", "#{profile.name} native inventory is malformed: #{e.message}" ] ].freeze
-        }
-      end
-
-      def claude_inventory(bin, native_spec, commands, issues)
-        plugins_result = run([ bin, "plugin", "list", "--json" ], commands)
-        marketplaces_result = run([ bin, "plugin", "marketplace", "list", "--json" ], commands)
-        issues << [ "incompatible", "claude plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
-        issues << [ "incompatible", "claude marketplace inventory failed: #{command_failure(marketplaces_result)}" ] unless marketplaces_result.success?
-        plugins = JSON.parse(plugins_result.stdout)
-        marketplaces = JSON.parse(marketplaces_result.stdout)
-        raise TypeError, "plugin list must be an Array" unless plugins.is_a?(Array)
-        raise TypeError, "marketplace list must be an Array" unless marketplaces.is_a?(Array)
-
-        plugin = plugins.find { |entry| entry["id"] == native_spec.package }
-        marketplace = marketplaces.find { |entry| entry["name"] == native_spec.marketplace }
-        {
-          "package" => plugin && {
-            "id" => plugin["id"],
-            "version" => plugin["version"],
-            "enabled" => plugin.fetch("enabled", true),
-            "install_path" => plugin["installPath"],
-            "source" => nil
-          }.freeze,
-          "marketplace" => marketplace && {
-            "name" => marketplace["name"],
-            "source" => marketplace["repo"] || marketplace["source"]
-          }.freeze
         }
       end
 
@@ -632,10 +601,8 @@ module Hive
       end
 
       def skill_module(agent)
-        Hive::AgentProfiles.support_for(agent)&.const_get(:Skills, false) || case agent
-        when "claude" then Hive::SkillCheck::Claude
-        else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
-        end
+        Hive::AgentProfiles.support_for(agent)&.const_get(:Skills, false) ||
+          raise(Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}")
       end
 
       def skill_environment(agent)

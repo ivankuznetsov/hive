@@ -19,13 +19,6 @@ module Hive
       AgentCliRuntime::Profile::WORKSPACE_WRITE_PERMISSION_MODE
     READ_ONLY_PERMISSION_MODE = AgentCliRuntime::Profile::READ_ONLY_PERMISSION_MODE
     VERSION_CHECK_TIMEOUT_SEC = AgentCliRuntime::Profile::CAPTURE_TIMEOUT_SECONDS
-    TOOL_SCOPE_FLAGS_UNSET = Object.new.freeze
-    LEGACY_CLAUDE_TOOL_SCOPE_FLAGS = {
-      allowed: "--allowedTools",
-      disallowed: "--disallowedTools"
-    }.freeze
-    private_constant :TOOL_SCOPE_FLAGS_UNSET, :LEGACY_CLAUDE_TOOL_SCOPE_FLAGS
-
     STATUS_DETECTION_MODES =
       %i[state_file_marker exit_code_only output_file_exists].freeze
 
@@ -89,7 +82,7 @@ module Hive
                    routing_argument_placement: :subcommand,
                    routed_model_argument_builder: nil,
                    routed_effort_argument_builder: nil,
-                   tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
+                   tool_scope_flags: {},
                    raw_cli_arguments_supported: false,
                    structured_output_protocol: nil,
                    billing_semantics: :unknown,
@@ -111,12 +104,6 @@ module Hive
         routing_argument_placement:, structured_output_protocol:
       )
 
-      scope_flags =
-        if tool_scope_flags.equal?(TOOL_SCOPE_FLAGS_UNSET)
-          effective_name.to_sym == :claude ? LEGACY_CLAUDE_TOOL_SCOPE_FLAGS : {}
-        else
-          tool_scope_flags
-        end
       normalized_cli_capabilities = normalize_cli_capabilities(cli_capabilities)
 
       @runtime_profile = runtime_profile || AgentCliRuntime::Profile.new(
@@ -128,7 +115,7 @@ module Hive
         workspace_write_flags: Array(workspace_write_flags),
         read_only_flags: Array(read_only_flags),
         add_dir_flag: add_dir_flag,
-        tool_scope_flags: scope_flags,
+        tool_scope_flags: tool_scope_flags,
         budget_flag: budget_flag,
         output_format_flags: output_format_flags,
         version_flag: required_runtime_value(version_flag, :version_flag),
@@ -167,10 +154,7 @@ module Hive
       @routed_effort_argument_builder =
         routed_effort_argument_builder || @runtime_profile.effort_argument_builder
       @structured_output_protocol = structured_output_protocol&.to_sym
-      @permission_presets = normalize_permission_presets(
-        permission_presets ||
-          (effective_name.to_sym == :claude ? %w[read-only scoped] : [])
-      )
+      @permission_presets = normalize_permission_presets(permission_presets || [])
       @support_configuration = support_configuration
       @billing_semantics = billing_semantics.to_sym
       unless BILLING_SEMANTICS.include?(@billing_semantics)

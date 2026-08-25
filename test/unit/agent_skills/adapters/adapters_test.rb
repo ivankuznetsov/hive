@@ -80,7 +80,7 @@ class AgentSkillAdaptersTest < Minitest::Test
                    health: "missing", bin: "/fake/claude")
       end
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan(rows)
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan(rows)
 
       assert_equal 2, plan.operations.size
       marketplace, install = plan.operations
@@ -101,7 +101,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         marketplace: { "name" => "compound-engineering-plugin", "source" => "EveryInc/compound-engineering-plugin" }
       )
 
-      operation = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ row ]).operations.fetch(0)
+      operation = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ row ]).operations.fetch(0)
 
       assert_equal [ "/fake/claude", "plugin", "update", "compound-engineering@compound-engineering-plugin", "--scope", "user" ], operation.argv
     end
@@ -337,7 +337,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
         health: "healthy", bin: "/fake/claude"
       )
-      adapter = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
+      adapter = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir)
       plan = adapter.plan([ prerequisite, row ])
       alias_operation = plan.operations.find { |operation| operation.kind == "alias_write" }
 
@@ -359,7 +359,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                         health: "missing", bin: "/fake/claude")
 
-      operations = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ ce, wiki ]).operations
+      operations = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ ce, wiki ]).operations
       ce_final = operations.reverse.find { |operation| operation.package_id == "compound-engineering" }
       wiki_operations = operations.select { |operation| operation.package_id == "llm-wiki" }
 
@@ -372,7 +372,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                         health: "missing", bin: "/fake/claude")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ wiki ])
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ wiki ])
 
       assert_empty plan.operations
       assert_equal 1, plan.conflicts.size
@@ -389,7 +389,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                         health: "missing", bin: "/fake/claude")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ prerequisite, wiki ])
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ prerequisite, wiki ])
 
       assert_empty plan.operations
       assert_match(/prerequisite is incompatible/, plan.conflicts.first)
@@ -404,7 +404,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                        health: "conflicting", bin: "/fake/claude")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ row ])
+      plan = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir).plan([ row ])
 
       assert_empty plan.operations
       assert_equal "private\n", File.read(path)
@@ -629,7 +629,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         config: Hive::Config::DEFAULTS, project_root: dir, environment: { "HOME" => dir }
       )
 
-      assert_instance_of Hive::AgentSkills::Adapters::Claude, registry.fetch("claude")
+      assert_instance_of Hive::AgentSupport.for(:claude)::SetupAdapter, registry.fetch("claude")
       assert_instance_of Hive::AgentSupport.for(:codex)::SetupAdapter, registry.fetch("codex")
       assert_instance_of Hive::AgentSupport::Pi::SetupAdapter, registry.fetch("pi")
     end
@@ -669,7 +669,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
         health: "healthy", bin: "/fake/claude"
       )
-      claude = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
+      claude = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir)
       path = File.join(dir, ".claude", "commands", "plan.md")
       spec = Hive::AgentSkills::Manifest.load.capability("wiki-plan").agent("claude").alias_spec
       FileUtils.mkdir_p(File.dirname(path))

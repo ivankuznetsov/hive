@@ -38,7 +38,7 @@ class ImplementationIdentityTest < Minitest::Test
       File.write(File.join(home, ".claude", "settings.json"), "{")
 
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
-        Hive::ImplementationIdentity::NativeDefaults.resolve(:claude, home: home)
+        Hive::AgentSupport.for(:claude).default_model(home: home)
       end
       assert_match(/could not inspect claude default model/, error.message)
     end

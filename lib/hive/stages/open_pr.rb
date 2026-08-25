@@ -159,7 +159,7 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           **launch_arguments
         }
-        if profile.name == :claude
+        if Hive::AgentSupport.supports?(profile, :Interactive)
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task, cfg, **kwargs,
             session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: stable tmux label

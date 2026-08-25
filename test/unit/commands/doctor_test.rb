@@ -26,7 +26,7 @@ class HiveCommandsDoctorTest < Minitest::Test
           resolution = { "status" => "not_applicable", "path" => nil }
         else
           resolver = case target.agent
-          when "claude" then Hive::SkillCheck::Claude
+          when "claude" then Hive::AgentSupport.for(:claude)::Skills
           when "codex" then Hive::AgentSupport.for(:codex)::Skills
           when "pi" then Hive::AgentSupport::Pi::Skills
           end

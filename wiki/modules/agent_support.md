@@ -4,13 +4,13 @@ type: module
 source: lib/hive/agent_support.rb, lib/hive/agent_support/
 created: 2026-08-25
 updated: 2026-08-25
-tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok]
+tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok, claude]
 ---
 
 **TLDR**: `Hive::AgentSupport` is a small convention loader for optional
 built-in provider behavior. It has no registry objects, policy hierarchy,
-cache, or process host. Selecting Pi, OpenCode, Codex, or Grok loads only that provider;
-selecting an unmigrated provider returns `nil` and preserves its current path.
+cache, or process host. Selecting a built-in loads only that provider root;
+larger execution, runtime, skill, setup, and interactive facets stay lazy.
 
 ## Boundary
 
@@ -38,11 +38,16 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
 - Grok owns its terminal event protocol, auth precedence and environment,
   native model discovery, managed bubblewrap argv, skill/plugin inventory,
   runtime provenance checks, and setup operations.
+- Claude owns its stream protocol and accounting, native model and credential
+  rules, skill/plugin inventory, setup operations, managed-policy translation,
+  TUI readiness grammar, wrapper argv, and skill-alias root. The existing
+  launcher retains tmux/process custody, task markers, logs, and cleanup.
 
 Generic callers resolve the selected support once at their existing seam and
-use the named facet. They do not switch on a migrated provider. Loading the
-profile catalog loads none of Pi, OpenCode, Codex, or Grok; selecting one loads its small
-root/configuration, while execution, skills, and setup remain lazy.
+use the named facet. They do not switch on a migrated provider name. Loading
+the profile catalog loads no provider support; selecting one loads its small
+root/configuration, while execution, runtime, skills, setup, and interactive
+facets remain lazy.
 
 Core authority does not move: Hive still starts and reaps processes, writes
 credentials and durable artifacts, admits evidence, and performs workflow

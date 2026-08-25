@@ -592,6 +592,11 @@ components:
     public_contract:
       values:
         - Hive::AgentSupport
+        - Hive::AgentSupport::StreamMeter
+        - Hive::AgentSupport::Claude
+        - Hive::AgentSupport::Claude::Interactive
+        - Hive::AgentSupport::Claude::Runtime
+        - Hive::AgentSupport::Claude::Skills
         - Hive::AgentSupport::Codex
         - Hive::AgentSupport::Codex::ArtifactPolicy
         - Hive::AgentSupport::Codex::Runtime
@@ -614,6 +619,12 @@ components:
         - Hive::Error
     owned_paths:
       - lib/hive/agent_support.rb
+      - lib/hive/agent_support/stream_meter.rb
+      - lib/hive/agent_support/claude.rb
+      - lib/hive/agent_support/claude/interactive.rb
+      - lib/hive/agent_support/claude/runtime.rb
+      - lib/hive/agent_support/claude/skills.rb
+      - lib/hive/agent_support/claude/stream.rb
       - lib/hive/agent_support/codex.rb
       - lib/hive/agent_support/codex/artifact_policy.rb
       - lib/hive/agent_support/codex/runtime.rb
@@ -647,6 +658,9 @@ components:
       - hive/skill_check
     internal_collaborators:
       - Hive::AgentSupport::OpenCode::Skills
+      - Hive::AgentSupport::Claude::Interactive
+      - Hive::AgentSupport::Claude::Runtime
+      - Hive::AgentSupport::Claude::Skills
       - Hive::AgentSupport::Codex::ArtifactPolicy
       - Hive::AgentSupport::Codex::Runtime
       - Hive::AgentSupport::Codex::Skills
@@ -838,6 +852,7 @@ components:
       - lib/hive/agent_support/pi/setup_adapter.rb
       - lib/hive/agent_support/codex/setup_adapter.rb
       - lib/hive/agent_support/grok/setup_adapter.rb
+      - lib/hive/agent_support/claude/setup_adapter.rb
       - config/agent-skills.yml
     state_contracts:
       - "Canonical skill source and projected agent-home directories"

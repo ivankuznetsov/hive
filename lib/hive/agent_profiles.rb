@@ -71,14 +71,7 @@ module Hive
         # the first time they run, *before* any token exists, so a dir check
         # reports a green "Logged in" on a box that has no credential.
         support = Hive::AgentSupport.for(name)
-        return credential_present?(support.credential_path(home:)) if support
-
-        case name.to_sym
-        when :claude
-          credential_present?(File.join(home || Dir.home, ".claude", ".credentials.json"))
-        else
-          false
-        end
+        support && credential_present?(support.credential_path(home:))
       rescue SystemCallError, ArgumentError
         false
       end

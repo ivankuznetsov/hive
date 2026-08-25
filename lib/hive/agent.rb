@@ -26,108 +26,6 @@ module Hive
     TURN_LIMIT_REASON = "turn_limit".freeze
     MODEL_OUTPUT_LIMIT_REASON = "model_output_limit".freeze
 
-    # Converts provider JSONL usage events into one monotonic in-flight count.
-    # Claude reports input/cache at message_start and cumulative output for the
-    # current turn at message_delta; treating each event as an independent row
-    # would double count output. Other profiles are conservatively accumulated
-    # until they emit a terminal run-total event.
-    class StreamTokenMeter
-      TERMINAL_TYPES = %w[result turn.completed response.completed run.completed task.completed].freeze
-
-      attr_reader :total
-
-      def initialize(profile_name)
-        @profile_name = profile_name.to_sym
-        @total = 0
-        @usage = { input: 0, output: 0, cached: 0, model: nil }
-        @completed_claude = { input: 0, output: 0, cached: 0 }
-        @claude_turn = nil
-      end
-
-      def observe(event, usage)
-        return @total unless usage.is_a?(Hash)
-
-        @usage[:model] = usage[:model] unless usage[:model].to_s.empty?
-        if terminal?(event)
-          replace_with_run_total(usage)
-        elsif claude_stream?(event)
-          observe_claude_stream(event, usage)
-        else
-          add_usage(usage)
-        end
-        @total
-      end
-
-      def terminal?(event)
-        event.is_a?(Hash) && TERMINAL_TYPES.include?(event["type"].to_s)
-      end
-
-      def usage
-        @usage.dup
-      end
-
-      private
-
-      def claude_stream?(event)
-        @profile_name == :claude && event["type"] == "stream_event"
-      end
-
-      def observe_claude_stream(event, usage)
-        kind = event.dig("event", "type").to_s
-        if kind == "message_start"
-          finish_claude_turn
-          @claude_turn = usage_counts(usage)
-        else
-          @claude_turn ||= { input: 0, output: 0, cached: 0 }
-          counts = usage_counts(usage)
-          @claude_turn[:input] = [ @claude_turn[:input], counts[:input] ].max
-          @claude_turn[:output] = [ @claude_turn[:output], counts[:output] ].max
-          @claude_turn[:cached] = [ @claude_turn[:cached], counts[:cached] ].max
-        end
-        refresh_claude_total
-      end
-
-      def finish_claude_turn
-        return unless @claude_turn
-
-        %i[input output cached].each do |key|
-          @completed_claude[key] += @claude_turn[key]
-        end
-      end
-
-      def refresh_claude_total
-        counts = @completed_claude.dup
-        if @claude_turn
-          %i[input output cached].each { |key| counts[key] += @claude_turn[key] }
-        end
-        @usage.merge!(counts)
-        @total = counts.values_at(:input, :output).sum
-      end
-
-      def add_usage(usage)
-        counts = usage_counts(usage)
-        %i[input output cached].each { |key| @usage[key] += counts[key] }
-        @total = @usage.values_at(:input, :output).sum
-      end
-
-      def replace_with_run_total(usage)
-        counts = usage_counts(usage)
-        terminal_total = counts.values_at(:input, :output).sum
-        return if terminal_total < @total
-
-        @usage.merge!(counts)
-        @total = terminal_total
-      end
-
-      def usage_counts(usage)
-        {
-          input: [ usage[:input].to_i, 0 ].max,
-          output: [ usage[:output].to_i, 0 ].max,
-          cached: [ usage[:cached].to_i, 0 ].max
-        }
-      end
-    end
-
     CapturedProcess = Data.define(
       :pid, :pgid, :stdout, :stderr, :stdout_truncated, :stderr_truncated,
       :termination
@@ -335,7 +233,10 @@ module Hive
       limit_text = nil
       structured_failure = nil
       last_usage = nil
-      token_meter = StreamTokenMeter.new(@profile.name)
+      stream = support::Stream if support&.const_defined?(:Stream, false)
+      meter_class = stream&.const_defined?(:TokenMeter, false) ?
+        stream::TokenMeter : Hive::AgentSupport::StreamMeter
+      token_meter = meter_class.new
       resource_exhaustion = nil
       provider_signal = nil
       provider_error = nil
@@ -398,9 +299,7 @@ module Hive
               structured_output_protocol: structured_output_protocol
             )
             message = messages.observe(json, raw_line: line)
-            if structured_failure.nil? && @profile.name == :claude
-              structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
-            end
+            structured_failure ||= stream.failure(json) if stream&.respond_to?(:failure)
             if @log_stream
               safe_line = if message || sensitive_payload
                 event_type = json.is_a?(Hash) ? json.fetch("type", "unknown") : "end"
@@ -435,7 +334,7 @@ module Hive
                 limit_text = (detail || line).to_s.strip
               end
             end
-            turn_started = claude_turn_started?(json)
+            turn_started = stream&.turn_started?(json)
             if turn_started
               if completion_event_deadline && termination_deadline.nil?
                 termination_deadline = begin_termination(pgid)
@@ -444,7 +343,7 @@ module Hive
               write_tool_in_current_turn = false
               write_turn_completed = false
             end
-            write_tool_in_current_turn = true if claude_write_tool_event?(json)
+            write_tool_in_current_turn = true if stream&.write_tool_event?(json)
 
             usage = json && Hive::AgentRuntime.extract_usage(@profile, json)
             if usage
@@ -464,7 +363,7 @@ module Hive
                 observed: usage&.dig(:output)
               }.compact
             end
-            turn_completed = claude_turn_completed?(json)
+            turn_completed = stream&.turn_completed?(json)
             if turn_completed
               completed_turns += 1
               write_turn_completed = true if write_tool_in_current_turn
@@ -477,7 +376,8 @@ module Hive
               end
             end
 
-            output_completed ||= output_completed_event?(json)
+            output_completed ||= (@max_turns || @max_tokens) &&
+              stream&.output_completed_event?(json) && completed_output_file?
             terminal_usage = json && token_meter.terminal?(json)
             if output_completed && (write_turn_completed || terminal_usage)
               unless terminal_usage
@@ -1093,38 +993,6 @@ module Hive
       amount
     rescue ArgumentError, TypeError
       raise ArgumentError, "max_turns must be a positive integer"
-    end
-
-    def claude_turn_completed?(event)
-      @profile.name == :claude &&
-        event.is_a?(Hash) &&
-        event["type"] == "stream_event" &&
-        event.dig("event", "type") == "message_delta"
-    end
-
-    def claude_turn_started?(event)
-      @profile.name == :claude &&
-        event.is_a?(Hash) &&
-        event["type"] == "stream_event" &&
-        event.dig("event", "type") == "message_start"
-    end
-
-    def claude_write_tool_event?(event)
-      return false unless @profile.name == :claude && event.is_a?(Hash)
-
-      block = event.dig("event", "content_block")
-      return true if block.is_a?(Hash) && block["type"] == "tool_use" && block["name"] == "Write"
-
-      message = event["message"]
-      content = message.is_a?(Hash) ? message["content"] : nil
-      Array(content).any? do |item|
-        item.is_a?(Hash) && item["type"] == "tool_use" && item["name"] == "Write"
-      end
-    end
-
-    def output_completed_event?(event)
-      (@max_turns || @max_tokens) &&
-        @profile.name == :claude && event.is_a?(Hash) && completed_output_file?
     end
 
     def handle_resource_exhaustion(result)

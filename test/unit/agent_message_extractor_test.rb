@@ -198,7 +198,7 @@ class AgentMessageExtractorTest < Minitest::Test
   end
 
   def test_budget_failure_omits_an_invalid_observed_cost
-    failure = Hive::Agent::MessageExtractor.extract_failure(
+    failure = Hive::AgentSupport.for(:claude)::Stream.failure(
       "type" => "result",
       "subtype" => "error_max_budget_usd",
       "total_cost_usd" => "not-a-number"

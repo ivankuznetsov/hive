@@ -27,7 +27,7 @@ class AgentSupportTest < Minitest::Test
 
     assert status.success?, stderr
     assert_equal [
-      "unloaded", "profiles-unloaded", "nil", "Hive::AgentSupport::Pi",
+      "unloaded", "profiles-unloaded", "Hive::AgentSupport::Claude", "Hive::AgentSupport::Pi",
       "/tmp/home/.pi/agent/auth.json",
       "hive/agent_support/pi/setup_adapter", "Hive::AgentSupport::Pi::SetupAdapter",
       "hive/agent_support/pi/skills", "missing", "skills-loaded"
@@ -115,6 +115,34 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_claude_loads_only_after_selection_and_keeps_facets_lazy
+    script = <<~RUBY
+      require "hive/agent_profiles"
+      puts defined?(Hive::AgentSupport::Claude) || "unloaded"
+      support = Hive::AgentSupport.for(Hive::AgentProfiles.lookup(:claude))
+      puts support.name
+      puts support.autoload?(:Interactive) || "interactive-loaded"
+      puts support.autoload?(:Runtime) || "runtime-loaded"
+      puts support.autoload?(:Skills) || "skills-loaded"
+      puts support.autoload?(:SetupAdapter) || "setup-loaded"
+      puts Hive::AgentSupport.autoload?(:StreamMeter) || "stream-meter-loaded"
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I#{File.expand_path('../../lib', __dir__)}", "-e", script
+    )
+
+    assert status.success?, stderr
+    assert_equal [
+      "unloaded", "Hive::AgentSupport::Claude",
+      "hive/agent_support/claude/interactive",
+      "hive/agent_support/claude/runtime",
+      "hive/agent_support/claude/skills",
+      "hive/agent_support/claude/setup_adapter",
+      "hive/agent_support/stream_meter"
+    ], stdout.lines.map(&:strip)
+  end
+
   def test_pi_behavior_has_no_generic_core_residue
     pi_branch = /(?:when\s+(?::pi|["']pi["'])|(?:==|!=)\s*(?::pi|["']pi["'])|def\s+(?:self\.)?pi_|\b(?:compile_pi|pi_(?:evidence|executable|auth|bwrap))|Hive::SkillCheck::Pi|Adapters::Pi)/
     support_root = File.join(ROOT, "lib/hive/agent_support")
@@ -171,6 +199,19 @@ class AgentSupportTest < Minitest::Test
 
     assert_empty offenders,
                  "Grok behavior escaped its support boundary: #{offenders.join(', ')}"
+  end
+
+  def test_claude_dispatch_has_no_generic_core_name_branch
+    branch = /(?:when\s+(?::claude|["']claude["'])|(?:==|!=)\s*(?::claude|["']claude["'])|Hive::SkillCheck::Claude|Adapters::Claude)/
+    support_root = File.join(ROOT, "lib/hive/agent_support")
+    offenders = Dir[File.join(ROOT, "{lib/hive,web/app}/**/*.rb")].filter_map do |path|
+      next if path.start_with?(support_root)
+
+      path.delete_prefix("#{ROOT}/") if File.read(path).match?(branch)
+    end
+
+    assert_empty offenders,
+                 "Claude dispatch escaped its support boundary: #{offenders.join(', ')}"
   end
 
   def test_support_does_not_depend_on_orchestration_layers

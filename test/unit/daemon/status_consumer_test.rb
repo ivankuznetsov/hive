@@ -496,6 +496,39 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_controller_row_retains_payload_mtime_separately_from_state_file_precision
+    with_tmp_dir do |dir|
+      folder = File.join(dir, "patrol-fix-controller")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "patrol-fix-manifest.json")
+      File.write(state_file, JSON.generate("schema" => "hive-patrol-fix-manifest"))
+      state_file_mtime = Time.utc(2026, 8, 25, 0, 10, 48, 584_735)
+      File.utime(state_file_mtime, state_file_mtime, state_file)
+      payload_mtime = "2026-08-25T00:17:21.900432Z"
+
+      task = task_row(slug: "patrol-fix-controller", mtime: payload_mtime).merge(
+        "workflow" => "patrol-fix",
+        "folder" => folder,
+        "state_file" => state_file
+      )
+      payload = make_envelope(projects: [ {
+        "name" => "hive",
+        "path" => dir,
+        "hive_state_path" => File.join(dir, ".hive-state"),
+        "tasks" => [ task ]
+      } ])
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+
+        assert result.ok, "expected ok=true; got error #{result.error.inspect}"
+        assert_equal payload_mtime, result.rows.first.status_payload_mtime
+        assert_in_delta state_file_mtime.to_f,
+                        result.rows.first.state_file_mtime.to_f, 0.001
+      end
+    end
+  end
+
   # ── failure modes ─────────────────────────────────────────────────────
 
   def test_non_zero_exit_returns_not_ok

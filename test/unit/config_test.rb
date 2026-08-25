@@ -5440,8 +5440,7 @@ class ConfigTest < Minitest::Test
           "agents" => {
             "opencode" => {
               "config_path" => "opencode.json",
-              "credential_env" => [ "ANTHROPIC_API_KEY" ],
-              "isolation" => "hermetic"
+              "credential_env" => [ "ANTHROPIC_API_KEY" ]
             }
           }
         )
@@ -5452,7 +5451,7 @@ class ConfigTest < Minitest::Test
         assert_equal "opencode", loaded.dig(*path), path.join(".")
         assert_equal File.join(project, "opencode.json"),
                      Hive::AgentProfiles.lookup(:opencode, cfg: loaded)
-                       .opencode_configuration_path
+                       .support_configuration.configuration_path
       end
     end
   end

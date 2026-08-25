@@ -3,10 +3,6 @@ require "json"
 module Hive
   class Agent
     module MessageExtractor
-      MAX_FAILURE_DIAGNOSTIC_BYTES = 200
-      GROK_END_TYPE_FIELD = /"type"\s*:\s*"end"/.freeze
-      GROK_STRUCTURED_OUTPUT_FIELD = /"structuredOutput"\s*:/.freeze
-
       class Accumulator
         attr_reader :source
 
@@ -112,44 +108,17 @@ module Hive
 
       module_function
 
-      # Claude reports a per-invocation `--max-budget-usd` stop as a
-      # structured result event whose `result` field is absent. Keep this
-      # protocol signal separate from prose and from provider account quota:
-      # ordinary assistant text is not authoritative failure metadata.
-      def extract_failure(data)
-        data = parse_json_line(data) if data.is_a?(String)
-        return nil unless data.is_a?(Hash)
-        return nil unless data["type"] == "result"
-        return nil unless data["subtype"] == "error_max_budget_usd"
-
-        {
-          origin: "budget_exhausted",
-          subtype: data["subtype"],
-          observed_cost_usd: finite_number(data["total_cost_usd"]),
-          diagnostic: bounded_diagnostic(Array(data["errors"]).first),
-          remedy: "raise_stage_budget"
-        }.compact
-      end
-
       def extract(data, structured_output_protocol: nil)
         data = parse_json_line(data) if data.is_a?(String)
         return nil unless data.is_a?(Hash)
+        if structured_output_protocol.respond_to?(:extract_message)
+          message = structured_output_protocol.extract_message(data)
+          return message if message
+        end
 
         case data["type"]
         when "text"
           text_chunk(data["data"])
-        when "end"
-          return nil unless structured_output_protocol == :grok_end
-
-          structured_output = data["structuredOutput"]
-          JSON.generate(structured_output) if structured_output.is_a?(Hash)
-        when "agent_end"
-          return nil unless structured_output_protocol == :pi_agent_end
-
-          assistant = Array(data["messages"]).reverse.find do |message|
-            message.is_a?(Hash) && message["role"] == "assistant"
-          end
-          text_from_content(assistant && assistant["content"])
         when "result"
           text_value(data["result"])
         when "item.completed"
@@ -175,7 +144,9 @@ module Hive
       end
 
       def sensitive_payload?(data, raw_line: nil, structured_output_protocol: nil)
-        return false unless %i[grok_end pi_agent_end].include?(structured_output_protocol)
+        if structured_output_protocol.respond_to?(:sensitive_payload?)
+          return structured_output_protocol.sensitive_payload?(data, raw_line:)
+        end
         return sensitive_payload_event?(data, structured_output_protocol:) if data.is_a?(Hash)
 
         data.nil? && sensitive_payload_line?(raw_line, structured_output_protocol:)
@@ -183,22 +154,16 @@ module Hive
 
       def sensitive_payload_event?(data, structured_output_protocol: nil)
         return false unless data.is_a?(Hash)
-
-        case structured_output_protocol
-        when :grok_end
-          data["type"] == "end" && data.key?("structuredOutput")
-        when :pi_agent_end
-          data["type"] == "agent_end" && data.key?("messages")
-        else
-          false
+        if structured_output_protocol.respond_to?(:sensitive_payload?)
+          return structured_output_protocol.sensitive_payload?(data, raw_line: nil)
         end
+
+        false
       end
 
       def sensitive_payload_line?(line, structured_output_protocol: nil)
-        return false unless structured_output_protocol == :grok_end
-
-        text = line.to_s.scrub
-        text.match?(GROK_END_TYPE_FIELD) && text.match?(GROK_STRUCTURED_OUTPUT_FIELD)
+        structured_output_protocol.respond_to?(:sensitive_payload?) &&
+          structured_output_protocol.sensitive_payload?(nil, raw_line: line)
       end
 
       def parse_json_line(line)
@@ -227,20 +192,6 @@ module Hive
       def text_chunk(value)
         text = value.to_s
         text.empty? ? nil : text
-      end
-
-      def finite_number(value)
-        number = Float(value)
-        number.finite? ? number : nil
-      rescue ArgumentError, TypeError
-        nil
-      end
-
-      def bounded_diagnostic(value)
-        text = value.to_s.strip
-        return nil if text.empty?
-
-        text.byteslice(0, MAX_FAILURE_DIAGNOSTIC_BYTES).to_s.scrub
       end
     end
   end

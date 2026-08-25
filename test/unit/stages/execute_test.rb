@@ -1259,8 +1259,8 @@ class HiveStagesExecuteTest < Minitest::Test
       spawned = nil
       result = {
         status: :ok,
-        requested_opencode_route: "anthropic/claude-sonnet-4-5",
-        actual_opencode_route: "anthropic/claude-sonnet-4-5-20250929",
+        requested_route: "anthropic/claude-sonnet-4-5",
+        actual_route: "anthropic/claude-sonnet-4-5-20250929",
         route_resolution_status: :resolved_differently,
         normalized_outcome_kind: :completed,
         usage: {

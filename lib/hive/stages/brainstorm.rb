@@ -13,7 +13,7 @@ module Hive
         case runtime_for(cfg)
         when :headless
           profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
-          if profile.name == :claude
+          if Hive::AgentSupport.supports?(profile, :Interactive)
             run_claude!(task, cfg_with_claude_mode(cfg, :headless), profile: profile)
           else
             run_headless!(task, cfg, profile: profile)
@@ -25,7 +25,7 @@ module Hive
 
       def runtime_for(cfg)
         agent_name = (cfg.dig("brainstorm", "agent") || "claude").to_s
-        return :headless unless agent_name == "claude"
+        return :headless unless Hive::AgentSupport.supports?(agent_name, :Interactive)
 
         if !Hive::Config.explicit_claude_mode?(cfg) &&
            Hive::Config.explicit_brainstorm_runtime?(cfg)

@@ -1999,7 +1999,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_opencode_read_only_roles_use_the_typed_permission_overlay
+  def test_opencode_read_only_roles_use_the_typed_permission_document
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       worktree = File.join(dir, "worktree")
@@ -2019,8 +2019,8 @@ class StagesArtifactsTest < Minitest::Test
         assert_equal [ task.folder, worktree ],
                      security.fetch(:additional_read_roots), role
         assert_empty security.fetch(:additional_write_roots), role
-        assert_empty security.fetch(:opencode_edit_patterns), role
-        assert_empty security.fetch(:opencode_bash_patterns), role
+        assert_empty security.fetch(:edit_patterns), role
+        assert_empty security.fetch(:bash_patterns), role
       end
     end
   end

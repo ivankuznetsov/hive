@@ -213,7 +213,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
       manifest = JSON.parse(build_out.lines.last)
       refute manifest.fetch("source_dirty")
       gem_path = manifest.fetch("gem_path")
-      assert_equal "agent-cli-runtime-0.2.3.gem", File.basename(gem_path)
+      assert_equal "agent-cli-runtime-0.2.4.gem", File.basename(gem_path)
 
       verify_out, verify_err, verify_status = Open3.capture3(
         unbundled_environment,
@@ -221,7 +221,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
         gem_path, manifest.fetch("sha256")
       )
       assert verify_status.success?, "#{verify_out}\n#{verify_err}"
-      assert_equal "0.2.3", JSON.parse(verify_out).fetch("version")
+      assert_equal "0.2.4", JSON.parse(verify_out).fetch("version")
     end
   end
 

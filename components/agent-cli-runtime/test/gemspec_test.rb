@@ -9,7 +9,7 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
     description = spec.description.gsub(/\s+/, " ").strip
 
     assert_equal "agent-cli-runtime", spec.name
-    assert_equal Gem::Version.new("0.2.3"), spec.version
+    assert_equal Gem::Version.new("0.2.4"), spec.version
     # Facts are pinned exactly; prose stays free-form but must name every
     # supported CLI so the metadata cannot silently drop a provider.
     refute_empty spec.summary
@@ -45,7 +45,7 @@ class AgentCliRuntimeGemspecTest < Minitest::Test
     assert_includes readme, "PreparedInvocation#cleanup!"
     refute_match(/~> 0\.1\./, readme)
     assert_match(
-      /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.3 - 2026-08-21\n/,
+      /\A# Changelog\n\n## Unreleased\n\n## 0\.2\.4 - 2026-08-25\n/,
       changelog
     )
     assert_includes changelog, "first-class OpenCode `1.18.16+` support"

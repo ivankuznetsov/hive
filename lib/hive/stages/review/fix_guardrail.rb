@@ -170,6 +170,12 @@ module Hive
             # DELETES `.github/workflows/*.yml` — header reads `+++ /dev/null`,
             # path lives only on the `--- a/` side) trip :file_path
             # patterns just like additions and modifications do.
+            # Pure renames/copies with no content change emit NO ---/+++
+            # pair at all — git prints only `rename from <old>` /
+            # `rename to <new>` (or `copy from/to`) extended headers, so a
+            # `git mv innocent.yml .github/workflows/deploy.yml` fix would
+            # slip past every :file_path pattern. Scan both sides of those
+            # headers too, mirroring the ---/+++ handling above.
             # With diff.mnemonicPrefix enabled git emits c/ (commit), i/
             # (index), w/ (worktree), or o/ (object) instead of a/ and b/.
             # Accept either form so cached architecture-patrol diffs receive
@@ -178,6 +184,25 @@ module Hive
                            chomped.match(%r{\A\+\+\+ [bciow]/(.+)\z})
             if header_match
               path = header_match[1]
+              current_file = path
+
+              patterns.each do |name, spec|
+                next unless spec[:targets] == :file_path
+                next unless spec[:regex] =~ path
+
+                matches << build_match(
+                  pattern_name: name.to_s,
+                  file: path,
+                  line: nil,
+                  snippet: path,
+                  severity: spec[:severity]
+                )
+              end
+              next
+            end
+
+            if (rename_match = chomped.match(/\A(?:rename|copy) (?:from|to) (.+)\z/))
+              path = rename_match[1]
               current_file = path
 
               patterns.each do |name, spec|

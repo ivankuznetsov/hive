@@ -332,6 +332,58 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal false, JSON.parse(output.string)["ok"]
   end
 
+  # A malformed global `web` block (e.g. `web: "x"`) makes Config.load_global_web
+  # raise Hive::ConfigError. The URL resolution runs both in add_web_phase AND
+  # again inside emit, so a raw raise would abort `hive setup` before any
+  # envelope exists. Regression: the run must still emit, fail the web phase,
+  # and exit non-zero (AE5).
+  def broken_web_config_stub
+    ->(*) { raise Hive::ConfigError, "web in config.yml must be a Hash; got String" }
+  end
+
+  def test_broken_global_web_config_still_emits_json_and_fails_the_run
+    output = StringIO.new
+
+    exit_code = with_all_collaborators_ok(diagnostics: diag(ok_row)) do
+      with_fake_init do
+        with_replaced_singleton_method(Hive::Config, :load_global_web, broken_web_config_stub) do
+          Hive::Commands::Setup.new(json: true, yes: true, output: output).call
+        end
+      end
+    end
+
+    payload = JSON.parse(output.string)
+    assert_equal 1, exit_code
+    assert_equal false, payload["ok"]
+    assert_match(%r{\Ahttp://}, payload["url"], "url must stay resolvable from defaults")
+    web_service = payload["phases"].find { |p| p["name"] == "web_service" }
+    assert_equal "blocked", web_service["mutation"], "a broken web config must not be replaced by defaults for a real mutation"
+    web = payload["phases"].find { |p| p["name"] == "web" }
+    assert_equal false, web["ok"]
+    assert_match(/must be a Hash/, web["message"])
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-setup"))))
+    assert_empty schemer.validate(payload).to_a,
+                 "broken-web-config failure envelope must validate against hive-setup.v1"
+  end
+
+  def test_broken_global_web_config_still_emits_in_diagnose_only_mode
+    output = StringIO.new
+
+    exit_code = with_all_collaborators_ok(diagnostics: diag(ok_row)) do
+      with_replaced_singleton_method(Hive::Config, :load_global_web, broken_web_config_stub) do
+        Hive::Commands::Setup.new(json: true, no_bootstrap: true, output: output).call
+      end
+    end
+
+    payload = JSON.parse(output.string)
+    assert_equal 1, exit_code
+    assert_equal false, payload["ok"]
+    web = payload["phases"].find { |p| p["name"] == "web" }
+    assert_equal false, web["ok"]
+    assert_match(/must be a Hash/, web["message"])
+    refute_includes payload["phases"].map { |p| p["name"] }, "web_service"
+  end
+
   def test_json_without_yes_reports_consent_required_before_any_mutation
     output = StringIO.new
     exit_code = with_replaced_singleton_method(Hive::Setup::Diagnostics, :new,

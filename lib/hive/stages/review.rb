@@ -631,7 +631,7 @@ module Hive
                      status: :review_error }
           end
 
-          Hive::Stages::Base.record_deferred_opencode_observation(
+          Hive::Stages::Base.record_deferred_agent_observation(
             task, cfg, "review.fix", fix_result
           )
 
@@ -1884,7 +1884,7 @@ module Hive
       def claude_tmux_reviewer?(cfg, spec)
         Hive::Config.claude_mode(cfg) == :tmux &&
           (spec["kind"] || "agent").to_s == "agent" &&
-          spec["agent"].to_s == "claude"
+          Hive::AgentSupport.supports?(spec["agent"], :Interactive)
       end
 
       # NOTE: no outer rescue here — `GithubPublisher.publish!` has
@@ -2165,7 +2165,7 @@ module Hive
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         }
-        if profile.name == :claude
+        if Hive::AgentSupport.supports?(profile, :Interactive)
           Hive::Stages::Base.spawn_claude!(
             task,
             cfg,

@@ -22,7 +22,7 @@ class ImplementationIdentityTest < Minitest::Test
       )
 
       assert_equal "gpt-5.6-sol",
-                   Hive::ImplementationIdentity::NativeDefaults.resolve(:codex, home: home)
+                   Hive::AgentSupport.for(:codex).default_model(home: home)
       assert_equal "gpt-5.6-sol",
                    Hive::AgentProfiles.lookup(:codex).concrete_default_model(home: home)
     end
@@ -38,7 +38,7 @@ class ImplementationIdentityTest < Minitest::Test
       File.write(File.join(home, ".claude", "settings.json"), "{")
 
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
-        Hive::ImplementationIdentity::NativeDefaults.resolve(:claude, home: home)
+        Hive::AgentSupport.for(:claude).default_model(home: home)
       end
       assert_match(/could not inspect claude default model/, error.message)
     end
@@ -50,7 +50,7 @@ class ImplementationIdentityTest < Minitest::Test
       File.write(File.join(home, ".pi", "settings.json"), JSON.generate("provider" => "google"))
 
       assert_raises(Hive::ImplementationIdentity::ResolutionError) do
-        Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, home: home)
+        Hive::AgentSupport.for(:pi).default_model(home: home)
       end
     end
   end

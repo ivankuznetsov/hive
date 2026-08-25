@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 
 require "hive/agent_skills/inspector"
+require "hive/agent_profiles"
 require "hive/atomic_file"
 
 module Hive
@@ -148,16 +149,9 @@ module Hive
         end
 
         def config_root(native_spec)
-          configured = @environment[native_spec.config_home].to_s
-          return File.expand_path(configured) unless configured.empty?
-          home = @environment["HOME"] || Dir.home
-          case native_spec.provider
-          when "claude" then File.join(home, ".claude")
-          when "codex" then File.join(home, ".codex")
-          when "pi" then File.join(home, ".pi", "agent")
-          when "grok" then File.join(home, ".grok")
-          when "opencode" then File.join(home, ".config", "opencode")
-          end
+          Hive::AgentProfiles.lookup(native_spec.provider).configuration_directory(
+            environment: @environment
+          )
         end
 
         def package_state(rows)
@@ -197,12 +191,7 @@ module Hive
         end
 
         def runner_environment
-          %w[
-            HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
-            OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
-          ].each_with_object({}) do |key, out|
-            out[key] = @environment[key] if @environment.key?(key)
-          end
+          @environment.slice(*Hive::AgentSkills::RUNNER_ENVIRONMENT_KEYS)
         end
 
         def file_snapshot(path)
@@ -408,3 +397,5 @@ module Hive
     end
   end
 end
+
+Hive::AgentSkills::Adapter = Hive::AgentSkills::Adapters::Base

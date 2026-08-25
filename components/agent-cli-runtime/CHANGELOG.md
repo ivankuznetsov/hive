@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Expose the OpenCode permission compiler independently from the prepared
+  overlay so callers can supply the same deny-first rules through native
+  per-process configuration without duplicating policy generation.
+
 ## 0.2.3 - 2026-08-21
 
 - Classify extracted provider failures once at the runtime boundary as

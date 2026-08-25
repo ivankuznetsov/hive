@@ -139,7 +139,7 @@ class AgentProfileTest < Minitest::Test
     error = assert_raises(Hive::ConfigError) do
       profile.with_overrides("isolation" => "best-effort")
     end
-    assert_match(/must be hermetic/, error.message)
+    assert_match(/is not a recognized override key/, error.message)
   end
 
   def test_configuration_directory_metadata_is_optional_and_validated

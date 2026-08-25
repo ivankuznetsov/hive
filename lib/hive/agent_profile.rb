@@ -67,8 +67,7 @@ module Hive
                 :structured_output_protocol, :cli_capabilities,
                 :permission_presets, :opencode_configuration_path,
                 :opencode_configuration, :opencode_credential_environment_keys,
-                :opencode_credential_file, :opencode_plugins, :opencode_pure,
-                :billing_semantics
+                :opencode_plugins, :billing_semantics
 
     # Existing custom profile registrations remain source compatible. Shipped
     # profiles pass runtime_profile: so their compatibility definition comes
@@ -102,8 +101,7 @@ module Hive
                    opencode_configuration_path: nil,
                    opencode_configuration: nil,
                    opencode_credential_environment_keys: [],
-                   opencode_credential_file: nil,
-                   opencode_plugins: [], opencode_pure: true)
+                   opencode_plugins: [])
       effective_name = runtime_profile&.name || name
       raise ArgumentError, "missing keyword: :name" if effective_name.nil?
 
@@ -193,9 +191,7 @@ module Hive
       @opencode_credential_environment_keys = normalize_environment_keys(
         opencode_credential_environment_keys
       )
-      @opencode_credential_file = opencode_credential_file&.to_s&.dup&.freeze
       @opencode_plugins = normalize_opencode_plugins(opencode_plugins)
-      @opencode_pure = opencode_pure != false
       @billing_semantics = billing_semantics.to_sym
       unless BILLING_SEMANTICS.include?(@billing_semantics)
         raise ArgumentError,
@@ -484,9 +480,7 @@ module Hive
       "config_path" => :opencode_configuration_path,
       "config" => :opencode_configuration,
       "credential_env" => :opencode_credential_environment_keys,
-      "credential_file" => :opencode_credential_file,
-      "plugins" => :opencode_plugins,
-      "isolation" => :opencode_isolation
+      "plugins" => :opencode_plugins
     }.freeze
 
     def with_overrides(overrides_hash)
@@ -506,14 +500,7 @@ module Hive
         end
         if name == :opencode &&
            (kwarg = OPENCODE_OVERRIDE_KEYS[normalized_key])
-          if kwarg == :opencode_isolation
-            unless value.to_s == "hermetic"
-              raise Hive::ConfigError,
-                    "agents.opencode.isolation must be hermetic"
-            end
-          else
-            policy_overrides[kwarg] = value
-          end
+          policy_overrides[kwarg] = value
           next
         end
 
@@ -671,9 +658,7 @@ module Hive
         opencode_configuration: @opencode_configuration,
         opencode_credential_environment_keys:
           @opencode_credential_environment_keys.dup,
-        opencode_credential_file: @opencode_credential_file,
         opencode_plugins: @opencode_plugins.dup,
-        opencode_pure: @opencode_pure,
         billing_semantics: @billing_semantics
       }
     end
@@ -801,11 +786,8 @@ module Hive
       def initialize(base, bin_default:, env_bin_override_key:, min_version:)
         @base = base
         @bin_default_override = bin_default.to_s.dup.freeze
-        # Keep the package-owned override keys as fallbacks. OpenCode
-        # preparation pins the already-resolved executable through the
-        # package's AGENT_CLI_RUNTIME_* key; replacing the inventory with a
-        # Hive-only config key would make that private route probe look for a
-        # different binary after preparation had already resolved one.
+        # Keep the package-owned override keys as fallbacks so package probes
+        # and Hive launches resolve the same operator-selected executable.
         @env_bin_override_keys = [
           *Array(env_bin_override_key), *base.env_bin_override_keys
         ].compact.map { |key| key.to_s.dup.freeze }.uniq.freeze

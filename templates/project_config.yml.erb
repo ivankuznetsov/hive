@@ -35,15 +35,15 @@ claude:
 <% end %>
 # OpenCode 1.18.16+ is built in but selected nowhere by default. Opt in with
 # an explicit non-secret provider config, exact provider/model routing, and
-# read-only/scoped stage permissions. Hive uses a valid native `opencode auth
-# login` file by default; `credential_env` is an explicit automation option:
+# read-only/scoped stage permissions. Hive uses OpenCode's native config,
+# plugins, sessions, and `opencode auth login`; `credential_env` is an
+# explicit automation option:
 # agents:
 #   opencode:
 #     config_path: .hive/opencode.json
 #     # credential_env: [ANTHROPIC_API_KEY]
 #     plugins:
 #       - compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git#compound-engineering-v3.21.4
-#     isolation: hermetic
 # models:
 #   execute_implementation:
 #     model: anthropic/claude-sonnet-4-5

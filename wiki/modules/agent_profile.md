@@ -62,11 +62,11 @@ contract.
 
 ### OpenCode process ownership
 
-OpenCode uses the component's additive prepared-invocation ABI while keeping
-process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
-exactly one `opencode run` process with a selected child environment and the
-prepared prompt on owner-private file-backed stdin, captures bounded stdout
-and stderr, and records timeout or cancellation before parsing.
+OpenCode keeps process supervision in Hive but uses the operator's native
+OpenCode state. `Hive::Agent` starts exactly one `opencode run` process with
+the native config, plugins, project discovery, session store, and login plus
+the prepared prompt on owner-private file-backed stdin. Hive captures bounded
+stdout and stderr and records timeout or cancellation before parsing.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -81,17 +81,11 @@ OpenCode 1.18.18 emits the entire export through one unawaited stdout write;
 under a pipe, large live exports could exit zero after writing only a valid
 prefix. A regular file makes the write synchronous, after which Hive reads at
 most the parser's four-MiB limit and deletes the data when inspection returns.
-The local probe still checks OpenCode's exact model inventory first. When a
-dynamic route is absent there but the selected, non-secret overlay config
-explicitly declares that exact provider/model and its variants, that declaration
-is sufficient route evidence. The requested variant must still be present; an
-undeclared route or variant remains a fail-closed preflight error.
-
-Cleanup runs from the process owner's `ensure` path after preparation, spawn,
-inspection, or normalization failures. Only the prepared invocation's owned
-paths are eligible for removal; worktrees, task folders, selected config, and
-credential sources remain caller-owned. The legacy Claude, Codex, Pi, and Grok
-spawn path and mutable result shape are unchanged.
+The run and sanitized export use the same native state. Hive never copies the
+auth file or creates OpenCode-specific XDG homes. Provider API-key variables
+are scrubbed by default and only explicitly named `credential_env` values are
+restored. The legacy Claude, Codex, Pi, and Grok spawn path and mutable result
+shape are unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps
@@ -168,7 +162,7 @@ The public routed capability matrix is mirrored in
 `docs/notes/headless-agent-cli-matrix.md`: Claude, Codex, Grok, and OpenCode
 support model plus effort, while Pi supports routed model only. OpenCode model
 values are exact nested `provider/model` routes and faithful efforts render as
-`--variant`; a selected overlay config may supply the exact route when the
+`--variant`; an explicitly selected config may supply the exact route when the
 stage omits it. Codex places routed
 controls before `exec`/`review`; Claude uses the same rendered flags in
 headless and tmux launches. Unsupported effective controls raise before the
@@ -247,22 +241,12 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   source against the realpath-jailed installed plugin.
 - `opencode` — opt-in headless execution through `opencode run --format json`
   with minimum version `1.18.16`. Every selected model is an exact nested
-  `provider/model` route; supported effort values render as `--variant` only
-  after route-aware capability validation. Hive prepares private XDG/config
-  homes and stages a valid native `opencode auth login` file when the project
-  does not explicitly select a credential file or environment names. Explicit
-  sources remain authoritative. The private copy is owner-only and removed
-  with the invocation overlay. Hive maps read-only/scoped stage permissions to
-  deny-first OpenCode rules. Local capability inspection
-  remains bounded at 10 seconds per command except for the version probe and
-  verbose model inventory, which get 30 seconds because Bun startup under
-  sustained host I/O and a cold hermetic provider catalog can both exceed the
-  generic bound before any model invocation starts. Exact custom
-  models and variants declared in the selected provider configuration are
-  combined with that inventory: this keeps a new operator-pinned route usable
-  when the fetch-disabled bundled catalog is stale, while an undeclared route
-  missing from the CLI inventory still fails closed. A route accepted on that
-  declaration alone also records `configured_model_route` evidence. A successful
+  `provider/model` route and supported effort values render as `--variant`.
+  Hive uses native config, plugins, project discovery, sessions, and
+  `opencode auth login` in place. It maps read-only/scoped stage permissions
+  to deny-first OpenCode rules supplied through `OPENCODE_PERMISSION` without
+  mutating native configuration. Provider API-key variables remain scrubbed
+  unless named in `credential_env`. A successful
   run is complete only after its terminal assistant record correlates with
   sanitized session export. The correlated terminal record may have empty prose
   when a tool-only turn already produced the required artifact; the finish
@@ -318,11 +302,9 @@ sanitized export supplied it.
   network, MCP servers, apps, plugins, memory, hooks, or subagents. Bounded Grok
   mappings run the static CLI inside bubblewrap with only the task, package,
   and descriptor-declared extra read roots mounted. Bounded OpenCode actors use
-  the same portable output-materialization boundary with an invocation-owned
-  deny-first overlay and no unrestricted shell. The overlay admits its own
-  cleanup-bound `TMPDIR` as an external directory so a model can consume
-  intermediate analysis it created there; other generated config, data, cache,
-  state, and credential paths remain outside the model's declared roots. Caller context does not
+  the same portable output-materialization boundary with a per-run deny-first
+  permission document and no unrestricted shell. Native OpenCode state remains
+  available to the CLI but is outside the model's declared edit roots. Caller context does not
   widen a bounded actor; only explicit `yolo` inherits the owning project root.
   For all portable runners, Hive asks
   for schema-constrained file content under a read-only policy and atomically

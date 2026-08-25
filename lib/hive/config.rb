@@ -210,8 +210,7 @@ module Hive
           "env_override" => "HIVE_OPENCODE_BIN",
           "min_version" => "1.18.16",
           "credential_env" => [],
-          "plugins" => [],
-          "isolation" => "hermetic"
+          "plugins" => []
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role

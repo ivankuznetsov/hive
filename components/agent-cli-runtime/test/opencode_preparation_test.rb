@@ -474,6 +474,14 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
   end
 
   def test_nil_permission_mode_requires_a_typed_policy
+    invalid = assert_raises(ArgumentError) do
+      AgentCliRuntime::OpenCode::Permissions.compile(
+        permission_mode: nil, permission_policy: Object.new,
+        working_directory: Dir.pwd
+      )
+    end
+    assert_match(/must be an OpenCodePermissionPolicy/, invalid.message)
+
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|
         work = File.join(dir, "work")

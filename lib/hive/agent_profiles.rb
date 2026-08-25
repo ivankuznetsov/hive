@@ -40,9 +40,9 @@ module Hive
         return entry if cfg.nil?
 
         overrides = cfg.dig("agents", name.to_s)
-        return entry if (overrides.nil? || overrides.empty?) && sym != :opencode
+        return entry if overrides.nil? || overrides.empty?
 
-        entry.with_overrides(resolve_opencode_overrides(name, overrides || {}, cfg))
+        entry.with_overrides(resolve_project_paths(name, overrides, cfg))
       rescue ArgumentError => e
         raise Hive::ConfigError,
               "agents.#{name} configuration is invalid: #{e.message}", cause: e
@@ -58,12 +58,6 @@ module Hive
 
       def grok_auth_path(home: nil)
         AgentCliRuntime::Profiles.grok_auth_path(home:, env: ENV)
-      end
-
-      def opencode_auth_path(home: nil)
-        AgentCliRuntime::Profiles.opencode_auth_path(
-          home: home || Dir.home, env: ENV
-        )
       end
 
       def logged_in?(name, home: nil)
@@ -82,7 +76,11 @@ module Hive
         when :grok
           credential_present?(grok_auth_path(home:))
         when :opencode
-          credential_present?(opencode_auth_path(home:))
+          credential_present?(
+            AgentCliRuntime::Profiles.opencode_auth_path(
+              home: home || Dir.home, env: ENV
+            )
+          )
         else
           false
         end
@@ -104,37 +102,19 @@ module Hive
 
       private
 
-      def resolve_opencode_overrides(name, overrides, cfg)
+      def resolve_project_paths(name, overrides, cfg)
         return overrides unless name.to_sym == :opencode
         return overrides unless overrides.is_a?(Hash)
 
         root = cfg["project_root"].to_s
-        resolved = overrides.to_h do |key, value|
-          if %w[config_path credential_file].include?(key.to_s) &&
+        overrides.to_h do |key, value|
+          if key.to_s == "config_path" &&
              !value.to_s.empty? && !File.absolute_path?(value.to_s) && !root.empty?
             [ key, File.expand_path(value.to_s, root) ]
           else
             [ key, value ]
           end
         end
-
-        resolve_native_opencode_credential(resolved)
-      end
-
-      def resolve_native_opencode_credential(overrides)
-        credential_file = overrides.find { |key, _value| key.to_s == "credential_file" }&.last
-        credential_env = overrides.find { |key, _value| key.to_s == "credential_env" }&.last
-        return overrides unless credential_file.to_s.empty?
-        return overrides unless Array(credential_env).empty?
-
-        home = ENV["HOME"].to_s
-        home = Dir.home if home.empty?
-        path = opencode_auth_path(home:)
-        return overrides unless credential_present?(path)
-
-        overrides.merge("credential_file" => path)
-      rescue SystemCallError, ArgumentError
-        overrides
       end
     end
   end

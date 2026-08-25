@@ -1021,7 +1021,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
     )
 
     assert_equal :present, resolution.status
-    assert_match(/prepared pinned plugin/, resolution.message)
+    assert_match(/configured pinned plugin/, resolution.message)
   end
 
   def test_opencode_resolution_fails_closed_for_unowned_and_malformed_plugin_sources

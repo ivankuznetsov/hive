@@ -151,7 +151,7 @@ project credentials are not inherited. Before that environment is cleared,
 Hive resolves a bare provider command past tool-manager launchers to a concrete
 executable; opaque tool-manager session variables are never copied into the
 role. OpenCode inference and reviewer roles receive their read-only access
-through OpenCode's typed permission overlay; Hive never forwards the legacy
+through OpenCode's typed per-run permission input; Hive never forwards the legacy
 `allowed_tools` or `disallowed_tools` channels to those launches. Producer
 paths are task-relative, must begin with the controller-issued
 attempt root, and cross a no-follow, hash-checked custody copy before the

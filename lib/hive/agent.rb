@@ -1,10 +1,8 @@
 require "fileutils"
 require "json"
 require "open3"
-require "securerandom"
 require "tempfile"
 require "time"
-require "tmpdir"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
@@ -32,6 +30,10 @@ module Hive
     TOKEN_LIMIT_REASON = "token_limit".freeze
     TURN_LIMIT_REASON = "turn_limit".freeze
     MODEL_OUTPUT_LIMIT_REASON = "model_output_limit".freeze
+    OpenCodeNativeLaunch = Data.define(
+      :invocation, :requested_route, :environment, :executable
+    )
+    private_constant :OpenCodeNativeLaunch
 
     # Converts provider JSONL usage events into one monotonic in-flight count.
     # Claude reports input/cache at message_start and cumulative output for the
@@ -162,7 +164,6 @@ module Hive
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
                    launch_environment: {}, provider_route: nil, log_stream: true,
-                   opencode_invocation_root: nil,
                    opencode_permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    opencode_edit_patterns: [], opencode_bash_patterns: [],
@@ -180,7 +181,6 @@ module Hive
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @provider_route = provider_route
       @launch_environment = (launch_environment || {}).dup.freeze
-      @opencode_invocation_root = opencode_invocation_root&.to_s
       @opencode_permission_policy = opencode_permission_policy
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
@@ -608,15 +608,14 @@ module Hive
     end
 
     def spawn_opencode_and_wait
-      prepared = nil
       stdin_file = nil
       result = nil
-      prepared = prepare_opencode_invocation
-      validate_prepared_opencode_skills!(prepared)
-      cmd = prepared.invocation.argv
-      stdin_file = stdin_file_for(prepared.invocation.stdin_data)
+      launch = prepare_native_opencode_invocation
+      validate_native_opencode_skills!(launch)
+      cmd = launch.invocation.argv
+      stdin_file = stdin_file_for(launch.invocation.stdin_data)
       log_file = log_path
-      write_opencode_spawn_log(log_file, prepared, cmd)
+      write_opencode_spawn_log(log_file, launch.executable, cmd)
 
       stdout_reader, stdout_writer = IO.pipe
       stderr_reader, stderr_writer = IO.pipe
@@ -628,11 +627,11 @@ module Hive
       stderr_thread = capture_bounded_stream(
         stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
       )
-      child_env = opencode_child_environment(prepared)
+      child_env = launch.environment
       spawn_opts = {
-        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
-        unsetenv_others: true
+        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer
       }
+      spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
       spawn_opts[:in] = stdin_file if stdin_file
       pid = Process.spawn(child_env, *cmd, **spawn_opts)
       stdout_writer.close
@@ -677,7 +676,7 @@ module Hive
           parsed = AgentRuntime.parse_run(
             @profile, stdout: stdout_capture.fetch(:data)
           )
-          inspection = AgentRuntime.prepare_inspection(prepared, parsed)
+          inspection = native_opencode_inspection(launch, parsed)
           inspection_result = capture_opencode_inspection(inspection)
           if inspection_result.fetch(:success)
             inspection_output = inspection_result.fetch(:stdout)
@@ -695,7 +694,7 @@ module Hive
         inspection_output: inspection_output
       )
       outcome = AgentRuntime.normalize(
-        @profile, captured, requested_route: prepared.requested_route
+        @profile, captured, requested_route: launch.requested_route
       )
       provider_error = opencode_provider_error(stdout_capture.fetch(:data))
       usage = opencode_usage(outcome)
@@ -724,8 +723,7 @@ module Hive
         output_completed: outcome.completed?,
         provider_signal: nil,
         provider_error: provider_error,
-        status: nil,
-        invocation_root: prepared.invocation_root
+        status: nil
       }
       result
     ensure
@@ -736,71 +734,53 @@ module Hive
         thread.kill if thread&.alive?
       end
       close_prompt_stdin_file(stdin_file)
-      if prepared
-        begin
-          prepared.cleanup!
-          result[:cleanup_completed] = true if result
-        rescue StandardError => e
-          diagnostic = AgentCliRuntime::Redactor.diagnostic(e)
-          if result
-            result[:cleanup_completed] = false
-            result[:cleanup_error] = diagnostic
-          end
-          warn "[hive] OpenCode cleanup failed: #{diagnostic}"
-        end
-      end
     end
 
-    def prepare_opencode_invocation
+    def prepare_native_opencode_invocation
       validate_opencode_launch_channels!
       model, effort = opencode_route_and_effort
-      executable = isolated_executable(@runtime_policy&.executable || @profile.bin)
-      request = AgentCliRuntime::Request.new(
-        profile: @profile.runtime_profile,
+      route = AgentRuntime::Route.parse(model)
+      executable = @runtime_policy&.executable || @profile.bin
+      executable = isolated_executable(executable) if @isolate_environment
+      invocation = AgentRuntime.compile(AgentRuntime::Request.new(
+        profile: @profile,
         prompt: @prompt,
         permission_mode: @permission_mode,
-        model: model,
-        effort: effort,
+        permission_arguments: [ "--auto" ],
+        add_dirs: @add_dirs,
+        allowed_tools: @allowed_tools,
+        disallowed_tools: @disallowed_tools,
+        max_budget_usd: @max_budget_usd,
+        identity_arguments: @identity_arguments,
+        routing_arguments: @routing_arguments,
+        raw_cli_arguments: @cli_flags,
+        trusted_cli_arguments: [ *@runtime_cli_flags, "--dir", @cwd ],
         executable: executable,
         command_prefix: @runtime_policy&.command_prefix || []
+      ))
+      OpenCodeNativeLaunch.new(
+        invocation: invocation,
+        requested_route: route,
+        environment: native_opencode_environment,
+        executable: executable
       )
-      root = @opencode_invocation_root || File.join(
-        Dir.tmpdir,
-        "hive-opencode-#{Process.pid}-#{SecureRandom.hex(12)}"
-      )
-      preparation = AgentRuntime::OpenCodePreparationRequest.new(
-        request: request,
-        working_directory: @cwd,
-        invocation_root: root,
-        configuration_path: @profile.opencode_configuration_path,
-        configuration: @profile.opencode_configuration,
-        credential_environment_keys:
-          @profile.opencode_credential_environment_keys,
-        credential_file: @profile.opencode_credential_file,
-        permission_policy: @opencode_permission_policy,
-        additional_read_roots: @additional_read_roots,
-        additional_write_roots: @additional_write_roots,
-        edit_patterns: @opencode_edit_patterns,
-        bash_patterns: @opencode_bash_patterns,
-        plugins: @profile.opencode_plugins,
-        pure: @profile.opencode_pure
-      )
-      AgentRuntime.prepare!(preparation, env: opencode_preparation_environment)
     end
 
-    def validate_prepared_opencode_skills!(prepared)
+    def validate_native_opencode_skills!(launch)
       invocations = @prompt.scan(%r{/(?:[A-Za-z0-9_.-]+:)?ce-[a-z0-9-]+}).uniq
       invocations.each do |invocation|
         resolution = Hive::SkillCheck::OpenCode.resolve(
           invocation,
           project_root: @cwd,
-          environment: prepared.environment_for(env: opencode_preparation_environment),
-          configuration_path: prepared.configuration_path
+          environment: effective_opencode_environment(launch.environment),
+          configuration_path: @profile.opencode_configuration_path,
+          configuration: @profile.opencode_configuration,
+          plugins: @profile.opencode_plugins
         )
         next if resolution.status == :present
 
         raise Hive::AgentError,
-              "OpenCode prepared skill readiness failed for #{invocation}: #{resolution.message}"
+              "OpenCode native skill readiness failed for #{invocation}: #{resolution.message}"
       end
     end
 
@@ -811,25 +791,28 @@ module Hive
       end
       if @allowed_tools || @disallowed_tools
         raise Hive::ConfigError,
-              "OpenCode tool access must come from its typed permission overlay"
+              "OpenCode tool access must come from its native permission policy"
       end
-      declared = (@additional_read_roots + @additional_write_roots + [ @cwd ])
-        .map { |path| File.expand_path(path) }
-      omitted = @add_dirs.reject do |path|
-        declared.include?(File.expand_path(path))
-      end
-      return if omitted.empty?
-
-      raise Hive::ConfigError,
-            "OpenCode additional directories require explicit read/write roots"
     end
 
     def opencode_route_and_effort
       model = @routing_arguments&.model || @launch_arguments&.model ||
         opencode_identity_argument("--model")
+      model ||= opencode_configured_default_route
       effort = @routing_arguments&.effort || @launch_arguments&.effective_effort ||
         opencode_identity_argument("--variant")
       [ model, effort ]
+    end
+
+    def opencode_configured_default_route
+      configured = @profile.opencode_configuration
+      return configured["model"] if configured&.key?("model")
+      return nil unless @profile.opencode_configuration_path
+
+      document = JSON.parse(File.binread(@profile.opencode_configuration_path))
+      document["model"] if document.is_a?(Hash)
+    rescue Errno::ENOENT, Errno::EACCES, JSON::ParserError
+      nil
     end
 
     def opencode_identity_argument(flag)
@@ -839,36 +822,68 @@ module Hive
       @identity_arguments[index + 1]
     end
 
-    def opencode_preparation_environment
-      base = selected_base_environment
+    def native_opencode_environment
+      environment = @child_environment.dup
       @profile.opencode_credential_environment_keys.each do |key|
         value = selected_credential_value(key)
-        base[key] = value unless value.to_s.empty?
+        environment[key] = value unless value.to_s.empty?
       end
-      base
+      if @profile.opencode_configuration_path
+        environment["OPENCODE_CONFIG"] = @profile.opencode_configuration_path
+      end
+      content = opencode_native_configuration_content
+      environment["OPENCODE_CONFIG_CONTENT"] = JSON.generate(content) unless content.empty?
+      permission = AgentCliRuntime::OpenCode::Permissions.compile(
+        permission_mode: @permission_mode,
+        permission_policy: @opencode_permission_policy,
+        working_directory: @cwd,
+        additional_read_roots: @additional_read_roots,
+        additional_write_roots: @additional_write_roots,
+        edit_patterns: @opencode_edit_patterns,
+        bash_patterns: @opencode_bash_patterns,
+        plugins: opencode_skill_invocations.empty? ? [] : [ "native" ]
+      )
+      environment["OPENCODE_PERMISSION"] = JSON.generate(permission) if permission
+      environment.freeze
     end
 
-    def opencode_child_environment(prepared)
-      prepared.environment_for(env: opencode_preparation_environment)
-        .merge(selected_base_environment)
-        .freeze
+    def effective_opencode_environment(overrides)
+      return overrides if @runtime_policy || @isolate_environment
+
+      ENV.to_h.merge(overrides)
     end
 
-    def selected_base_environment
-      %w[
-        HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR SSL_CERT_FILE
-        USER
-      ].each_with_object({}) do |key, selected|
-        value = @launch_environment.key?(key) ?
-          @launch_environment[key] : ENV[key]
-        selected[key] = value.to_s unless value.to_s.empty?
+    def opencode_native_configuration_content
+      content = if @profile.opencode_configuration
+        JSON.parse(JSON.generate(@profile.opencode_configuration))
+      else
+        {}
       end
+      unless @profile.opencode_plugins.empty?
+        content["plugin"] = @profile.opencode_plugins.dup
+      end
+      content
+    end
+
+    def opencode_skill_invocations
+      @opencode_skill_invocations ||=
+        @prompt.scan(%r{/(?:[A-Za-z0-9_.-]+:)?ce-[a-z0-9-]+}).uniq.freeze
     end
 
     def selected_credential_value(key)
       return @launch_environment[key] if @launch_environment.key?(key)
 
       ENV[key]
+    end
+
+    def native_opencode_inspection(launch, parsed)
+      AgentRuntime::InspectionCommand.new(
+        argv: [ launch.executable, "export", parsed.session_id, "--sanitize" ],
+        environment: launch.environment,
+        credential_environment_keys: [],
+        session_id: parsed.session_id,
+        message_id: parsed.terminal_message_id
+      )
     end
 
     def capture_bounded_stream(io, capture, max_bytes)
@@ -973,12 +988,17 @@ module Hive
       Tempfile.create([ "hive-opencode-export-", ".json" ]) do |stdout_file|
         Tempfile.create([ "hive-opencode-export-", ".stderr" ]) do |stderr_file|
           capture_limit = OPENCODE_EXPORT_CAPTURE_BYTES
-          pid = Process.spawn(
-            opencode_child_environment(inspection),
-            *inspection.argv,
+          spawn_options = {
             chdir: @cwd, pgroup: true, out: stdout_file, err: stderr_file,
-            unsetenv_others: true,
             rlimit_fsize: [ capture_limit, capture_limit ]
+          }
+          if @runtime_policy || @isolate_environment
+            spawn_options[:unsetenv_others] = true
+          end
+          pid = Process.spawn(
+            inspection.environment,
+            *inspection.argv,
+            **spawn_options
           )
           pgid = begin
             Process.getpgid(pid)
@@ -1056,11 +1076,11 @@ module Hive
       }.freeze
     end
 
-    def write_opencode_spawn_log(log_file, prepared, cmd)
+    def write_opencode_spawn_log(log_file, executable, cmd)
       open_private_log(log_file) do |log|
         log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                 "profile=opencode executable=#{File.basename(prepared.executable)} " \
+                 "profile=opencode executable=#{File.basename(executable)} " \
                  "argc=#{cmd.length}#{launch_identity_log_fields}"
       end
     end

@@ -659,14 +659,13 @@ coarse `models:` route overrides it.
 
 OpenCode adds only typed, non-secret overrides under `agents.opencode`:
 `config_path`, an inline non-secret `config` object, `credential_env` names,
-an optional `credential_file`, explicit `plugins`, and `isolation: hermetic`.
+and explicit `plugins`.
 Relative source paths resolve against `project_root`. Credential values, raw
 argv, raw environment maps, unknown agent blocks, and unknown override keys
-are rejected during config validation. The selected config remains read-only;
-Hive prepares and later removes a private per-invocation overlay. When neither
-credential source is explicit and OpenCode's native auth file is valid, profile
-lookup resolves that file as the invocation credential source. An explicit
-file or non-empty `credential_env` remains authoritative.
+are rejected during config validation. Native OpenCode config, plugins,
+project discovery, sessions, and login are used in place. A non-empty
+`credential_env` explicitly selects environment authentication; Hive never
+accepts or stages a credential file.
 
 Every `ROLE_AGENT_PATHS` entry accepts `agent: opencode`, but none of
 `DEFAULT_GLOBAL_AGENTS`, stage defaults, reviewer councils, or fallback lists

@@ -498,7 +498,7 @@ module Hive
           return Resolution.new(
             status: :present,
             path: "configured:#{PINNED_COMPOUND_ENGINEERING_PLUGIN}",
-            message: "opencode: /#{inv.name} is provided by the prepared pinned plugin",
+            message: "opencode: /#{inv.name} is provided by the configured pinned plugin",
             candidates: candidates.freeze, parse_errors: parse_errors.freeze
           )
         end

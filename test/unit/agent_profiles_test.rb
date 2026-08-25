@@ -150,7 +150,6 @@ class AgentProfilesTest < Minitest::Test
   def test_opencode_profile_is_opt_in_route_strict_and_uses_explicit_sources
     with_tmp_dir do |project|
       config_path = File.join(project, "opencode.json")
-      credential_path = File.join(project, "auth.json")
       File.write(
         config_path,
         JSON.generate(
@@ -158,7 +157,6 @@ class AgentProfilesTest < Minitest::Test
           "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
         )
       )
-      File.write(credential_path, "{}")
       cfg = {
         "project_root" => project,
         "agents" => {
@@ -168,9 +166,7 @@ class AgentProfilesTest < Minitest::Test
             "min_version" => "1.18.16",
             "config_path" => "opencode.json",
             "credential_env" => %w[ANTHROPIC_API_KEY],
-            "credential_file" => "auth.json",
-            "plugins" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ],
-            "isolation" => "hermetic"
+            "plugins" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
           }
         }
       }
@@ -178,12 +174,10 @@ class AgentProfilesTest < Minitest::Test
       profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
 
       assert_equal config_path, profile.opencode_configuration_path
-      assert_equal credential_path, profile.opencode_credential_file
       assert_equal %w[ANTHROPIC_API_KEY],
                    profile.opencode_credential_environment_keys
       assert_equal [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ],
                    profile.opencode_plugins
-      assert profile.opencode_pure
       assert_equal "anthropic/claude-sonnet-4-5",
                    profile.concrete_default_model(cfg: cfg, project_root: project)
 
@@ -191,71 +185,6 @@ class AgentProfilesTest < Minitest::Test
         profile.identity_arguments(model: "claude-sonnet-4-5", effort: nil)
       end
       assert_match(/provider\/model/, error.message)
-    end
-  end
-
-  def test_opencode_profile_uses_native_auth_when_no_credential_source_is_explicit
-    with_tmp_dir do |home|
-      data_home = File.join(home, "data")
-      auth_path = File.join(data_home, "opencode", "auth.json")
-      explicit_path = File.join(home, "explicit-auth.json")
-      FileUtils.mkdir_p(File.dirname(auth_path))
-      File.write(auth_path, JSON.generate("openrouter" => { "type" => "oauth" }))
-      File.write(explicit_path, JSON.generate("openrouter" => { "type" => "api" }))
-      cfg = {
-        "agents" => {
-          "opencode" => {
-            "config" => { "model" => "openrouter/stealth/ox-alpha" }
-          }
-        }
-      }
-
-      with_env("HOME" => home, "XDG_DATA_HOME" => data_home) do
-        implicit = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
-        explicit = Hive::AgentProfiles.lookup(
-          :opencode,
-          cfg: {
-            "agents" => {
-              "opencode" => cfg.dig("agents", "opencode").merge(
-                "credential_env" => [ "OPENROUTER_API_KEY" ]
-              )
-            }
-          }
-        )
-        explicit_file = Hive::AgentProfiles.lookup(
-          :opencode,
-          cfg: {
-            "agents" => {
-              "opencode" => cfg.dig("agents", "opencode").merge(
-                "credential_file" => explicit_path
-              )
-            }
-          }
-        )
-
-        assert_equal auth_path, implicit.opencode_credential_file
-        assert_nil explicit.opencode_credential_file
-        assert_equal [ "OPENROUTER_API_KEY" ],
-                     explicit.opencode_credential_environment_keys
-        assert_equal explicit_path, explicit_file.opencode_credential_file
-
-        File.write(auth_path, "{}")
-        assert_nil Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
-                                      .opencode_credential_file
-      end
-    end
-  end
-
-  def test_opencode_profile_ignores_native_auth_path_errors
-    cfg = { "agents" => { "opencode" => { "credential_env" => [] } } }
-
-    with_replaced_singleton_method(
-      Hive::AgentProfiles, :opencode_auth_path,
-      ->(**_kwargs) { raise Errno::EACCES, "native auth unavailable" }
-    ) do
-      profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
-
-      assert_nil profile.opencode_credential_file
     end
   end
 
@@ -299,7 +228,10 @@ class AgentProfilesTest < Minitest::Test
   end
 
   def test_opencode_overrides_reject_secret_or_untyped_escape_channels
-    %w[credential_value environment argv raw_cli_arguments].each do |key|
+    %w[
+      credential_value credential_file isolation environment argv
+      raw_cli_arguments
+    ].each do |key|
       error = assert_raises(Hive::ConfigError) do
         Hive::AgentProfiles.lookup(
           :opencode,

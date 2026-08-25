@@ -196,11 +196,10 @@ customizations; unrelated Claude launches do not receive it. Discovery still
 uses Claude's positional prompt, while Codex's normal and workspace-write
 launches send the prompt through stdin with `-` in argv.
 
-Prepared OpenCode launches resolve a bare executable to the concrete installed
-binary before building the hermetic overlay. Tool-manager shims are not allowed
-to sit on this JSONL protocol boundary: startup notices written by a shim to
-stdout would otherwise turn an otherwise valid OpenCode event stream into a
-typed `malformed_output` failure.
+Native OpenCode launches use the operator-selected executable and environment
+without resolving or replacing tool-manager launchers. As with the other
+agents, launcher output still belongs to the CLI protocol: non-JSON stdout on
+the strict JSONL run boundary becomes a typed `malformed_output` failure.
 
 ## `spawn_and_wait` (the long part)
 

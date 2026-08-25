@@ -44,37 +44,15 @@ hive init .
 OpenCode is registered everywhere Hive accepts an agent profile but remains
 entirely opt-in: no default stage, reviewer council, or fallback selects it.
 Install OpenCode 1.18.16 or newer and run `opencode auth login` for the provider
-you intend to use. When an OpenCode route does not declare another credential
-source, Hive stages that valid native auth file inside the private invocation
-home. Automation may instead name credential environment variables in project
-config. Hive never copies a credential value into YAML or its durable state.
+you intend to use. Hive launches the same native OpenCode setup an operator
+uses directly: its normal config, plugins, project discovery, session store,
+and auth file remain in place. Automation may instead name credential
+environment variables in project config; Hive never copies credential values
+into YAML or durable task state.
 
-Create an explicit, non-secret provider definition in the project, for
-example `.hive/opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "anthropic": {
-      "npm": "@ai-sdk/anthropic"
-    }
-  }
-}
-```
-
-Then add the typed profile and route settings to `.hive-state/config.yml`.
-Replace the example route with the exact local provider/model you intend to
-run:
+Select the profile and an exact route in `.hive-state/config.yml`:
 
 ```yaml
-agents:
-  opencode:
-    config_path: .hive/opencode.json
-    plugins:
-      - compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git#compound-engineering-v3.21.4
-    isolation: hermetic
-
 execute:
   agent: opencode
   permissions:
@@ -89,10 +67,9 @@ models:
 
 OpenCode routes are nested values inside the Hive `opencode` profile. They
 must be full `provider/model` values; a different configured provider never
-satisfies the request. A top-level exact `model` in the selected OpenCode JSON
-may be used as the explicit default when the role has no `models.*.model`.
-Faithful effort values render as OpenCode variants only after the local route
-probe proves that variant exists.
+satisfies the request. A top-level exact `model` in an explicitly selected
+OpenCode JSON may be used as the default when the role has no
+`models.*.model`. Faithful effort values render as OpenCode variants.
 
 OpenCode does not accept Hive's default `yolo` stage permission. Use
 `read-only` or a scoped policy. Read-only denies edits, shell, unsafe tools,
@@ -100,11 +77,9 @@ and external writes. Scoped `Write`/`Edit` enables the generated
 workspace-write policy over Hive's resolved working/write roots. Qualified
 rules such as `Bash(git*)` opt into only the named OpenCode shell patterns;
 bare `Bash` remains invalid, while `Bash(*)` deliberately grants the full
-shell with the Hive OS user's authority. Hive redirects OpenCode config, data, cache, and
-state into a private per-invocation root, ignores ambient project/global
-configuration, stages the native auth file or forwards only explicitly named
-credential variables, and removes the private credential copy with the overlay
-after every lifecycle outcome. This is application-level enforcement, not an
+shell with the Hive OS user's authority. Hive supplies these per-run rules via
+OpenCode's `OPENCODE_PERMISSION` input without replacing native config or
+copying authentication. This is application-level enforcement, not an
 OS/container boundary; use Hivebox for hostile-code containment.
 
 Skill-bearing roles additionally require the native Compound Engineering
@@ -116,8 +91,8 @@ hive setup-agents --agent opencode \
 hive doctor
 ```
 
-Setup previews the selected OpenCode config change and asks once before its
-atomic write. Normal task execution never mutates that source config. A
+Setup previews the native OpenCode config change and asks once before its
+atomic write. Normal task execution never mutates native config. A
 missing/stale plugin or a higher-precedence project/user CE skill that shadows
 the selected plugin fails readiness before any model process starts.
 

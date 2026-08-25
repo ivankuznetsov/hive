@@ -75,8 +75,8 @@ module Hive
         }
       end
 
-      # OpenCode deliberately rejects Claude-style allowed_tools: its
-      # hermetic launcher accepts only a typed permission overlay. Plan
+      # OpenCode deliberately rejects Claude-style allowed_tools: its native
+      # launcher accepts only a typed permission document. Plan
       # review is the exceptional role that needs both shell (including the
       # SHA-256 required by typed findings) and network access. The reviewer
       # already runs with the detached checkout as cwd, so deny external

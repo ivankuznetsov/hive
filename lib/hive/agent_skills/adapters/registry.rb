@@ -1,5 +1,4 @@
 require "hive/agent_skills/adapters/claude"
-require "hive/agent_skills/adapters/codex"
 require "hive/agent_skills/adapters/grok"
 require "hive/agent_profiles"
 
@@ -9,7 +8,6 @@ module Hive
       class Registry
         ADAPTERS = {
           "claude" => Claude,
-          "codex" => Codex,
           "grok" => Grok
         }.freeze
 

@@ -23,7 +23,7 @@ class InitDoctorPreflightTest < Minitest::Test
       Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve.map do |target|
         resolver = Hive::AgentProfiles.support_for(target.agent)&.const_get(:Skills, false) || case target.agent
         when "claude" then Hive::SkillCheck::Claude
-        when "codex" then Hive::SkillCheck::Codex
+        when "codex" then Hive::AgentSupport.for(:codex)::Skills
         when "opencode" then Hive::AgentSupport::OpenCode::Skills
         end
         found = resolver.resolve(target.invocation, project_root: @project_root)

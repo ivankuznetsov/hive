@@ -27,7 +27,7 @@ class HiveCommandsDoctorTest < Minitest::Test
         else
           resolver = case target.agent
           when "claude" then Hive::SkillCheck::Claude
-          when "codex" then Hive::SkillCheck::Codex
+          when "codex" then Hive::AgentSupport.for(:codex)::Skills
           when "pi" then Hive::AgentSupport::Pi::Skills
           end
           found = resolver.resolve(target.invocation, project_root: @project_root)

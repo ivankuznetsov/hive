@@ -1,5 +1,4 @@
 require "json"
-require "rubygems/version"
 require "hive/agent_skills"
 require "hive/agent_profiles"
 require "hive/skill_check"
@@ -14,7 +13,6 @@ module Hive
     class FilesystemInventory
       def initialize
         @json_cache = {}
-        @content_cache = {}
         @version_cache = {}
       end
 
@@ -27,7 +25,6 @@ module Hive
         else
           case native_spec.provider
         when "claude" then claude_inventory(native_spec, root)
-        when "codex" then codex_inventory(native_spec, root)
         when "grok" then grok_inventory(native_spec, root)
         else raise TypeError, "unsupported provider #{native_spec.provider.inspect}"
           end
@@ -104,36 +101,6 @@ module Hive
         }.freeze
       end
 
-      def codex_inventory(native_spec, root)
-        config_path = File.join(root, "config.toml")
-        marketplace_names = [
-          "marketplaces.#{native_spec.marketplace}",
-          "marketplaces.\"#{native_spec.marketplace}\""
-        ]
-        plugin_name = "plugins.\"#{native_spec.package}\""
-        sections = parse_toml_sections(
-          read_optional(config_path),
-          selected: marketplace_names + [ plugin_name ]
-        )
-        marketplace_values = marketplace_names.filter_map { |name| sections[name] }.first
-        plugin_values = sections[plugin_name]
-        install_path = codex_install_path(root, native_spec)
-
-        {
-          "package" => plugin_values && install_path && {
-            "id" => native_spec.package,
-            "version" => package_version_from(install_path),
-            "enabled" => plugin_values.fetch("enabled", true),
-            "install_path" => install_path,
-            "source" => marketplace_values && marketplace_values["source"]
-          }.freeze,
-          "marketplace" => marketplace_values && {
-            "name" => native_spec.marketplace,
-            "source" => marketplace_values["source"]
-          }.freeze
-        }.freeze
-      end
-
       def grok_inventory(native_spec, root)
         registry_path = File.join(root, "installed-plugins", "registry.json")
         document = read_optional_json(registry_path, { "repos" => {} })
@@ -178,14 +145,6 @@ module Hive
         default
       end
 
-      def read_optional(path)
-        return @content_cache.fetch(path) if @content_cache.key?(path)
-
-        @content_cache[path] = File.binread(path)
-      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EISDIR
-        ""
-      end
-
       def marketplace_source(entry)
         source = entry["source"]
         return source["repo"] || source["url"] || source["source"] if source.is_a?(Hash)
@@ -193,64 +152,12 @@ module Hive
         entry["repo"] || source
       end
 
-      def parse_toml_sections(content, selected:)
-        sections = {}
-        current = nil
-        content.each_line.with_index(1) do |line, line_number|
-          stripped = line.strip
-          next if stripped.empty? || stripped.start_with?("#")
-          if (match = stripped.match(/\A\[([^\]]+)\]\z/))
-            name = match[1]
-            current = selected.include?(name) ? name : nil
-            sections[current] ||= {} if current
-            next
-          end
-          next unless current
-
-          match = stripped.match(/\A([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*\z/)
-          next unless match
-          sections.fetch(current)[match[1]] = parse_toml_scalar(match[2], line_number)
-        end
-        sections.freeze
-      end
-
-      def parse_toml_scalar(value, line_number)
-        return true if value == "true"
-        return false if value == "false"
-        return value[1...-1] if value.start_with?("\"") && value.end_with?("\"")
-
-        raise TypeError, "unsupported config.toml value at line #{line_number}"
-      end
-
-      def codex_install_path(root, native_spec)
-        plugin = native_spec.package.split("@", 2).first
-        base = File.join(root, "plugins", "cache", native_spec.marketplace, plugin)
-        return base if package_version_from(base)
-        return nil unless File.directory?(base)
-
-        directories = Dir.children(base).sort.filter_map do |entry|
-          path = File.join(base, entry)
-          next unless File.directory?(path)
-          version = package_version_from(path) || entry
-          begin
-            [ Gem::Version.new(version), path ]
-          rescue ArgumentError
-            nil
-          end
-        end
-        directories.max_by { |version, path| [ version, path ] }&.last
-      end
-
       def package_version_from(root)
         return nil unless root
         return @version_cache.fetch(root) if @version_cache.key?(root)
         return @version_cache[root] = nil unless File.directory?(root)
-        candidates = [
-          File.join(root, ".claude-plugin", "plugin.json"),
-          File.join(root, ".codex-plugin", "plugin.json"),
-          File.join(root, ".grok-plugin", "plugin.json"),
-          File.join(root, "package.json")
-        ]
+        candidates = Dir[File.join(root, ".*-plugin", "plugin.json")]
+        candidates << File.join(root, "package.json")
         candidates.each do |path|
           next unless File.file?(path)
           version = JSON.parse(File.binread(path))["version"]

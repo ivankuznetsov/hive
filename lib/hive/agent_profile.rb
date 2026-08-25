@@ -1,4 +1,5 @@
 require "agent_cli_runtime"
+require "hive/agent_support"
 require "hive/implementation_identity"
 require "hive/model_routing"
 
@@ -97,10 +98,14 @@ module Hive
                    default_configuration_directory: nil,
                    permission_presets: nil,
                    support_configuration: nil)
+      if runtime_profile && !runtime_profile.is_a?(AgentCliRuntime::Profile)
+        raise ArgumentError, "runtime_profile must be an AgentCliRuntime::Profile"
+      end
       effective_name = runtime_profile&.name || name
       raise ArgumentError, "missing keyword: :name" if effective_name.nil?
 
-      prompt_style ||= effective_name.to_sym == :codex ? :stdin : :positional
+      prompt_style ||= runtime_profile&.prompt_style ||
+        Hive::AgentSupport::DEFAULT_PROMPT_STYLES.fetch(effective_name.to_sym, :positional)
       validate_hive_policy!(
         prompt_style:, status_detection_mode:, initial_context_tokens:,
         routing_argument_placement:, structured_output_protocol:
@@ -139,11 +144,6 @@ module Hive
         configuration_environment_key: configuration_environment_key,
         default_configuration_directory: default_configuration_directory
       )
-      unless @runtime_profile.is_a?(AgentCliRuntime::Profile)
-        raise ArgumentError,
-              "runtime_profile must be an AgentCliRuntime::Profile"
-      end
-
       @env_bin_override_key =
         env_bin_override_key || @runtime_profile.env_bin_override_keys.find do |key|
           key.start_with?("HIVE_")

@@ -35,7 +35,7 @@ module Hive
         HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
       ].freeze
       DIRECT_PROVIDER_IDENTITIES = {
-        claude: "anthropic", codex: "openai", grok: "xai"
+        claude: "anthropic", grok: "xai"
       }.freeze
 
       module_function

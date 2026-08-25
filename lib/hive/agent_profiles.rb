@@ -80,8 +80,6 @@ module Hive
         case name.to_sym
         when :claude
           credential_present?(File.join(home || Dir.home, ".claude", ".credentials.json"))
-        when :codex
-          credential_present?(File.join(home || Dir.home, ".codex", "auth.json"))
         when :grok
           credential_present?(grok_auth_path(home:))
         else

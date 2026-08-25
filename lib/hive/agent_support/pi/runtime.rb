@@ -103,7 +103,12 @@ module Hive::AgentSupport::Pi::Runtime
   end
 
   def self.compile_managed_actor(host:, scope:, task_root:, directories:, profile:, environment:,
-                            outputs:, runtime_root:, tool_names:)
+                            outputs:, runtime_root:, tool_names:, prepare:)
+    unless prepare
+      return host.portable_admission_policy(
+        scope, task_root:, directories:, environment:
+      )
+    end
     require_sandbox!("workflow")
     network_tools = tool_names & NETWORK_TOOLS
     unless network_tools.empty?

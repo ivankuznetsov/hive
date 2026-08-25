@@ -5,8 +5,8 @@ require "uri"
 module Hive
   # Per-agent verification that a configured native skill
   # invocation actually resolves to a file on disk. `Hive::AgentProfile`
-  # delegates to one of `SkillCheck::Claude` / `SkillCheck::Codex` /
-  # `SkillCheck::Grok` or an optional AgentSupport skill facet so the
+  # delegates to `SkillCheck::Claude` / `SkillCheck::Grok` or an optional
+  # AgentSupport skill facet so the
   # profile interface stays uniform.
   #
   # Each profile-specific module exposes
@@ -176,82 +176,6 @@ module Hive
             "(write ~/.claude/commands/#{inv.name}.md), as a user skill " \
             "(write ~/.claude/skills/#{inv.name}/SKILL.md), or via " \
             "`claude plugin install <marketplace>` for a plugin that ships #{inv.name}."
-        end
-      end
-    end
-
-    module Codex
-      module_function
-
-      # Search order:
-      #   /<plugin>:<name>
-      #     1. ~/.codex/plugins/cache/*<plugin>*/<plugin>*/*/skills/<name>/SKILL.md
-      #        (cache layout is <marketplace>/<plugin>/<version>/skills/<name>/)
-      #   /<name>
-      #     1. ~/.codex/skills/<name>/SKILL.md
-      #     2. ~/.codex/skills/.system/<name>/SKILL.md
-      #     3. ~/.codex/plugins/cache/*/*/*/skills/<name>/SKILL.md (plugin fallback)
-      def verify(invocation, project_root: nil)
-        resolution = resolve(invocation, project_root: project_root)
-        [ resolution.status, resolution.message ]
-      end
-
-      def resolve(invocation, project_root: nil, environment: ENV)
-        inv = Hive::SkillCheck.parse(invocation)
-        home = environment["HOME"] || Dir.home
-        config_dir = environment["CODEX_HOME"].to_s
-        config_dir = File.join(home, ".codex") if config_dir.empty?
-        config_dir = File.expand_path(config_dir)
-        candidates = build_candidates(inv, config_dir: config_dir, project_root: project_root)
-        path = Hive::SkillCheck.first_existing(candidates)
-        return Resolution.new(status: :present, path: path, message: path,
-                              candidates: candidates.freeze, parse_errors: [].freeze) if path
-
-        message = install_hint(inv)
-        Resolution.new(status: :missing, path: nil, message: message,
-                       candidates: candidates.freeze, parse_errors: [].freeze)
-      rescue ArgumentError => e
-        message = "codex: #{e.message}"
-        Resolution.new(status: :missing, path: nil, message: message,
-                       candidates: [].freeze, parse_errors: [].freeze)
-      end
-
-      def build_candidates(inv, config_dir:, project_root:)
-        if inv.plugin
-          plugin = Hive::SkillCheck.glob_escape(inv.plugin)
-          name = Hive::SkillCheck.glob_escape(inv.name)
-          # Cache layout produced by `codex plugin add`:
-          # ~/.codex/plugins/cache/<owner>-<marketplace>/<plugin>/<version>/skills/<name>/SKILL.md
-          glob = File.join(config_dir, "plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
-          Dir[glob]
-        else
-          name = Hive::SkillCheck.glob_escape(inv.name)
-          paths = []
-          if project_root
-            paths << File.join(project_root, ".codex/skills/#{inv.name}/SKILL.md")
-          end
-          paths << File.join(config_dir, "skills/#{inv.name}/SKILL.md")
-          paths << File.join(config_dir, "skills/.system/#{inv.name}/SKILL.md")
-          # Plugin fallback: codex resolves `/foo` against any installed
-          # plugin's skill named `foo` in addition to user-level
-          # ~/.codex/skills/. Mirrors claude's behaviour.
-          paths.concat(Dir[File.join(config_dir, "plugins/cache/*/*/*/skills", name, "SKILL.md")])
-          paths
-        end
-      end
-
-      def install_hint(inv)
-        if inv.plugin
-          "codex: /#{inv.plugin}:#{inv.name} not found under " \
-            "~/.codex/plugins/cache/*/#{inv.plugin}/*/skills/. " \
-            "Install via `codex plugin add <plugin>@<marketplace>` for the marketplace " \
-            "that ships #{inv.plugin}."
-        else
-          "codex: /#{inv.name} not found under ~/.codex/skills/, ~/.codex/skills/.system/, " \
-            "or any installed plugin's skills/<name>/SKILL.md. Codex has no user-level " \
-            "slash-command directory; either install a skill named #{inv.name.inspect}, " \
-            "install a plugin that ships it, or override the stage's skill in config.yml " \
-            "(e.g. `plan.skill: /ce-plan`)."
         end
       end
     end

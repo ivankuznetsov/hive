@@ -8,12 +8,8 @@ module Hive
       skill_syntax_format: "/%{skill}",
       status_detection_mode: :output_file_exists,
       permission_presets: %w[read-only scoped],
-      skill_verifier: ->(invocation, project_root: nil) {
-        Hive::AgentProfiles.support_for(OPENCODE)::Skills.verify(invocation, project_root:)
-      },
-      default_model_resolver: ->(**options) {
-        Hive::AgentProfiles.support_for(OPENCODE).default_model(**options)
-      },
+      skill_verifier: Hive::AgentSupport.skill_verifier(:opencode),
+      default_model_resolver: Hive::AgentSupport.model_resolver(:opencode),
       routed_model_argument_builder: lambda { |model|
         AgentCliRuntime::Profiles.opencode_model_arguments(model)
       },

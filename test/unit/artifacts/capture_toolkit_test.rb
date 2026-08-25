@@ -110,7 +110,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     toolkit = Hive::Artifacts::CaptureToolkit.new(
       browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
       hive_executable: "/opt/hive/bin/hive",
-      codex_runtime_resolver: method(:fake_codex_runtime),
+      runtime_resolver: method(:fake_codex_runtime),
       browser_command_runner: ->(environment, argv) { browser_commands << [ environment, argv ] }
     )
 
@@ -190,7 +190,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     bundle.define_singleton_method(:ensure!) { entry }
     toolkit = Hive::Artifacts::CaptureToolkit.new(
       browser_bundle: bundle,
-      codex_runtime_resolver: method(:fake_codex_runtime),
+      runtime_resolver: method(:fake_codex_runtime),
       tool_resolver: ->(name) { name == "ffmpeg" ? "/usr/bin/ffmpeg" : nil }
     )
 
@@ -242,7 +242,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       toolkit = Hive::Artifacts::CaptureToolkit.new(
         browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
         web_server_factory: factory,
-        codex_runtime_resolver: method(:fake_codex_runtime),
+        runtime_resolver: method(:fake_codex_runtime),
         browser_command_runner: ->(environment, argv) do
           browser_closes << [ environment, argv ]
         end
@@ -290,7 +290,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       end
       toolkit = Hive::Artifacts::CaptureToolkit.new(
         browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
-        codex_runtime_resolver: method(:fake_codex_runtime),
+        runtime_resolver: method(:fake_codex_runtime),
         browser_command_runner: runner
       )
 
@@ -312,7 +312,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       work = File.join(root, "work")
       FileUtils.mkdir_p(source)
       toolkit = Hive::Artifacts::CaptureToolkit.new(
-        codex_runtime_resolver: method(:fake_codex_runtime)
+        runtime_resolver: method(:fake_codex_runtime)
       )
       toolkit.prepare!(
         kinds: [ "terminal" ], task_root: root, source_root: source,
@@ -403,7 +403,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
 
     assert_includes(
       dockerfile,
-      "@openai/codex@#{Hive::Artifacts::CaptureToolkit::MIN_CODEX_PERMISSION_VERSION}"
+      "@openai/codex@#{Hive::AgentSupport.for(:codex)::ArtifactPolicy::MINIMUM_VERSION}"
     )
   end
 

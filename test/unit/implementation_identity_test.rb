@@ -22,7 +22,7 @@ class ImplementationIdentityTest < Minitest::Test
       )
 
       assert_equal "gpt-5.6-sol",
-                   Hive::ImplementationIdentity::NativeDefaults.resolve(:codex, home: home)
+                   Hive::AgentSupport.for(:codex).default_model(home: home)
       assert_equal "gpt-5.6-sol",
                    Hive::AgentProfiles.lookup(:codex).concrete_default_model(home: home)
     end

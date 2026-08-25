@@ -98,7 +98,9 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
       invalid = File.join(root, "plugins", "cache", "market", "package", "not a version!")
       FileUtils.mkdir_p(invalid)
 
-      path = inventory.send(:codex_install_path, root, spec)
+      path = Hive::AgentSupport.for(:codex)::Skills.send(
+        :install_path, root, spec, inventory.method(:package_version_from)
+      )
 
       assert_nil path
     end

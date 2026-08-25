@@ -4,6 +4,7 @@ require "timeout"
 
 module Hive::AgentSupport::Pi::Skills
   Resolution = Hive::SkillCheck::Resolution
+  extend Hive::AgentSupport::SkillPolicy
 
   module_function
 
@@ -12,9 +13,6 @@ module Hive::AgentSupport::Pi::Skills
   # Pi resolves `/skill:<name>` across user, cross-agent, project, settings,
   # npm, git, and package-manifest locations. Other invocation shapes are
   # intentionally not applicable because `skill:` is Pi's resource marker.
-  def verify(invocation, project_root: nil) = resolve(invocation, project_root:)
-    .then { |resolution| [ resolution.status, resolution.message ] }
-
   def resolve(invocation, project_root: nil, environment: ENV)
     inv = Hive::SkillCheck.parse(invocation)
     unless inv.plugin == "skill"

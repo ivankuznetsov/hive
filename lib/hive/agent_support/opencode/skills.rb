@@ -3,19 +3,12 @@ require "uri"
 require "hive/skill_check"
 
 module Hive::AgentSupport::OpenCode::Skills
-  Resolution = Hive::SkillCheck::Resolution
+  extend Hive::AgentSupport::SkillPolicy
   PINNED_COMPOUND_ENGINEERING_PLUGIN =
     "compound-engineering@git+https://github.com/EveryInc/" \
     "compound-engineering-plugin.git#compound-engineering-v3.21.4"
 
   module_function
-
-  def verify(invocation, project_root: nil, configuration_path: nil,
-             configuration: nil, plugins: nil)
-    resolve(
-      invocation, project_root:, configuration_path:, configuration:, plugins:
-    ).then { |resolution| [ resolution.status, resolution.message ] }
-  end
 
   def resolve(invocation, project_root: nil, environment: ENV,
               configuration_path: nil, configuration: nil, plugins: nil)
@@ -69,13 +62,6 @@ module Hive::AgentSupport::OpenCode::Skills
     resolution(:missing, candidates, parse_errors, message: install_hint(inv, config_path))
   rescue ArgumentError => e
     resolution(:missing, [], [], message: "opencode: #{e.message}")
-  end
-
-  def resolution(status, candidates, parse_errors, path: nil, message:)
-    Resolution.new(
-      status:, path:, message:, candidates: candidates.freeze,
-      parse_errors: parse_errors.freeze
-    )
   end
 
   def build_candidates(inv, home:, config_dir:, project_root:, environment:, plugins:)

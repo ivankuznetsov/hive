@@ -26,8 +26,6 @@ module Hive
       VISUAL_KINDS = %w[screenshot video].freeze
       MEDIA_TOOLS = %w[ffmpeg ffprobe tesseract].freeze
       BROWSER_SESSION = "evidence".freeze
-      CODEX_PERMISSION_PROFILE = "hive-evidence".freeze
-      MIN_CODEX_PERMISSION_VERSION = "0.147.0".freeze
       BROWSER_CLOSE_TIMEOUT_SECONDS = 10
       CAPTURE_KINDS = %w[screenshot terminal video].freeze
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
@@ -37,7 +35,7 @@ module Hive
 
       def initialize(browser_bundle: nil, tool_resolver: nil, hive_executable: nil,
                      web_server_factory: nil, browser_command_runner: nil,
-                     codex_runtime_resolver: nil)
+                     runtime_resolver: nil)
         @browser_bundle = browser_bundle || Hive::Web::BrowserBundle.new
         @tool_resolver = tool_resolver || ->(name) { Hive::InvokedBinary.which(name) }
         @hive_executable = File.expand_path(
@@ -45,7 +43,7 @@ module Hive
         )
         @web_server_factory = web_server_factory
         @browser_command_runner = browser_command_runner || method(:run_browser_command)
-        @codex_runtime_resolver = codex_runtime_resolver || method(:resolve_codex_runtime)
+        @runtime_resolver = runtime_resolver
         @launch_environment = {}
         @producer_add_dirs = []
         @producer_permission_arguments = nil
@@ -97,7 +95,9 @@ module Hive
         producer_profile ||= Hive::AgentProfiles.lookup(:codex)
         managed = required & CAPTURE_KINDS
         support = Hive::AgentSupport.for(producer_profile)
-        return receipt if managed.empty? && !support&.capture_interface_required?
+        capture_interface = support&.respond_to?(:capture_interface_required?) &&
+          support.capture_interface_required?
+        return receipt if managed.empty? && !capture_interface
 
         extra_read_paths = []
 
@@ -175,32 +175,24 @@ module Hive
         ).start!
         @launch_environment["HIVE_EVIDENCE_CAPTURE_MAILBOX"] = @capture_mailbox.root
         @producer_add_dirs = [ @capture_mailbox.root ]
-        case producer_profile.name
-        when :codex
-          codex_runtime_roots = Array(@codex_runtime_resolver.call(producer_profile))
-          @producer_permission_arguments = codex_permission_arguments(
-            task_root: task_root, source_root: source_root,
-            writable_root: writable_root, mailbox_root: @capture_mailbox.root,
-            extra_read_paths: extra_read_paths,
-            codex_runtime_roots: codex_runtime_roots,
-            hive_runtime_paths: hive_runtime_paths
-          )
-        else
-          unless support
-            raise Hive::ConfigError,
-                  "managed capture evidence does not support producer #{producer_profile.name.inspect}"
-          end
-          @producer_runtime_policy =
-            support::Runtime.compile_evidence_actor(
-              host: Hive::WorkflowPackage::RuntimePolicy,
-              task_folder: source_root, package_root: task_root,
-              profile: producer_profile, environment: @launch_environment,
-              mailbox_root: @capture_mailbox.root, writable_root: writable_root,
-              hive_executable: @hive_executable,
-              browser: (required & VISUAL_KINDS).any?
-            )
+        unless support&.respond_to?(:prepare_capture)
+          raise Hive::ConfigError,
+                "managed capture evidence does not support producer #{producer_profile.name.inspect}"
+        end
+        browser = (required & VISUAL_KINDS).any?
+        preparation = support.prepare_capture(
+          host: Hive::WorkflowPackage::RuntimePolicy,
+          profile: producer_profile, environment: @launch_environment,
+          task_root:, source_root:, task_folder: source_root, package_root: task_root,
+          writable_root:, mailbox_root: @capture_mailbox.root,
+          extra_read_paths:, hive_runtime_paths:, hive_executable: @hive_executable,
+          runtime_resolver: @runtime_resolver, browser:
+        )
+        @producer_permission_arguments = preparation[:permission_arguments]
+        @producer_runtime_policy = preparation[:runtime_policy]
+        if support.respond_to?(:producer_interface)
           receipt["producer_interface"] = support.producer_interface(
-            required_kinds: required, browser: (required & VISUAL_KINDS).any?
+            required_kinds: required, browser:
           )
         end
         receipt
@@ -490,45 +482,6 @@ module Hive
               "controller capture escapes the task folder"
       end
 
-      def codex_permission_arguments(task_root:, source_root:, writable_root:,
-                                     mailbox_root:, extra_read_paths:,
-                                     codex_runtime_roots:, hive_runtime_paths:)
-        filesystem = {
-          ":minimal" => "read",
-          task_root => "read",
-          source_root => "read",
-          writable_root => "write",
-          mailbox_root => "write"
-        }
-        extra_read_paths.each { |path| filesystem[path] = "read" }
-        codex_runtime_roots.each { |path| filesystem[path] = "read" }
-        hive_runtime_paths.each { |path| filesystem[path] = "read" }
-        filesystem = filesystem.map do |path, access|
-          "#{JSON.generate(path)}=#{JSON.generate(access)}"
-        end.join(",")
-        [
-          "--ephemeral", "--ignore-user-config", "--ignore-rules",
-          "--enable", "network_proxy",
-          "-c", 'approval_policy="never"',
-          "-c", "default_permissions=#{JSON.generate(CODEX_PERMISSION_PROFILE)}",
-          "-c", "permissions.#{CODEX_PERMISSION_PROFILE}.filesystem={#{filesystem}}",
-          "-c", "permissions.#{CODEX_PERMISSION_PROFILE}.network.enabled=true",
-          "-c", "permissions.#{CODEX_PERMISSION_PROFILE}.network.mode=\"limited\"",
-          "-c", "permissions.#{CODEX_PERMISSION_PROFILE}.network.allow_local_binding=true",
-          "-c", "permissions.#{CODEX_PERMISSION_PROFILE}.network.domains={}",
-          "-c", 'web_search="disabled"',
-          "-c", "mcp_servers={}",
-          "-c", "apps._default.enabled=false",
-          "-c", "features.apps=false",
-          "-c", "features.remote_plugin=false",
-          "-c", "features.tool_search=false",
-          "-c", "features.multi_agent=false",
-          "-c", "features.memories=false",
-          "-c", "features.hooks=false",
-          "-c", "features.plugins=false"
-        ].freeze
-      end
-
       def hive_runtime_paths
         root = File.dirname(File.dirname(@hive_executable))
         [
@@ -536,51 +489,6 @@ module Hive
           File.join(root, "lib"),
           *Gem.path.select { |path| File.directory?(path) }
         ].map { |path| File.expand_path(path) }.uniq
-      end
-
-      def resolve_codex_runtime(profile)
-        unless profile&.name == :codex
-          raise Hive::ConfigError,
-                "managed capture evidence requires the Codex producer"
-        end
-
-        compatible = profile.with_overrides(
-          "min_version" => MIN_CODEX_PERMISSION_VERSION
-        )
-        compatible.check_version!
-        candidates = if compatible.bin.include?(File::SEPARATOR)
-          [ File.expand_path(compatible.bin) ]
-        else
-          ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |directory|
-            next if directory.empty?
-
-            File.join(directory, compatible.bin)
-          end
-        end
-        executables = candidates.filter_map do |candidate|
-          next unless File.file?(candidate) && File.executable?(candidate)
-
-          File.realpath(candidate)
-        rescue Errno::ENOENT, Errno::EACCES
-          nil
-        end.uniq
-        native = executables.reject { |path| File.binread(path, 2) == "#!" }
-          .select do |path|
-            root = File.dirname(File.dirname(path))
-            File.basename(path) == "codex" ||
-              File.directory?(File.join(root, "codex-resources"))
-          end
-        if native.empty?
-          raise Hive::ConfigError,
-                "managed capture evidence could not resolve the Codex native runtime"
-        end
-        native.map do |executable|
-          Hive::WorkflowPackage::RuntimePolicy.codex_runtime_root(executable)
-        end.uniq
-      rescue Hive::AgentError => e
-        raise Hive::ConfigError,
-              "managed capture evidence requires Codex " \
-              "#{MIN_CODEX_PERMISSION_VERSION}+: #{e.message}"
       end
 
       def run_browser_command(environment, argv)

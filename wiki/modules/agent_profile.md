@@ -19,7 +19,7 @@ in Hive.
 
 Built-in profiles resolve optional provider behavior through
 `Hive::AgentSupport`. The root support catalog is data-only and loads a
-provider namespace only when that provider is selected. Pi and OpenCode keep
+provider namespace only when that provider is selected. Pi, OpenCode, and Codex keep
 their runtime, skill/setup, credential, review, and identity decisions under
 their respective `Hive::AgentSupport` namespaces. The generic agent,
 artifact, workflow, Web, and skillpack callers retain process custody, durable
@@ -100,7 +100,7 @@ undeclared route or variant remains a fail-closed preflight error.
 Cleanup runs from the process owner's `ensure` path after preparation, spawn,
 inspection, or normalization failures. Only the prepared invocation's owned
 paths are eligible for removal; worktrees, task folders, selected config, and
-credential sources remain caller-owned. The legacy Claude, Codex, Pi, and Grok
+credential sources remain caller-owned. The legacy Claude, Pi, and Grok
 spawn path and mutable result shape are unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
@@ -126,7 +126,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
-| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. The published runtime profile supplies the built-in default; custom profiles fall back to `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. A profile-native flag supplies the run cap; provider protocol parsing determines whether the run ended because that cap was exhausted. |

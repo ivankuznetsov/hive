@@ -416,7 +416,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/codex")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+      plan = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
                      environment: { "CODEX_HOME" => File.join(dir, "codex") }).plan([ row ])
 
       assert_equal [
@@ -447,7 +447,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         inspection(agent: "codex", capability: "wiki-plan", package: "llm-wiki",
                    health: "missing", bin: "/fake/codex")
       ]
-      instance = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+      instance = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: runner,
                          environment: { "CODEX_HOME" => codex_home })
 
       outcomes = instance.plan(rows).operations.map { |operation| instance.execute(operation) }
@@ -473,7 +473,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       row = inspection(agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
                        health: "missing", bin: "/fake/codex")
 
-      plan = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+      plan = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
                      environment: { "CODEX_HOME" => codex_home }).plan([ row ])
 
       assert_empty plan.operations
@@ -494,7 +494,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         health: "missing", bin: "/fake/codex",
         marketplace: { "name" => "compound-engineering-plugin", "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
       )
-      adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+      adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: runner,
                         environment: { "CODEX_HOME" => codex_home })
       operation = adapter.plan([ row ]).operations.fetch(0)
       File.write(config_path, "# concurrent user edit\n")
@@ -519,7 +519,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         marketplace: nil
       )
       codex = adapter(
-        Hive::AgentSkills::Adapters::Codex, dir: dir,
+        Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
         environment: { "CODEX_HOME" => codex_home }
       )
       operation = codex.plan([ row ]).operations.find { |item| item.kind == "plugin_install" }
@@ -548,7 +548,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         health: "missing", bin: "/fake/codex",
         marketplace: { "name" => "compound-engineering-plugin", "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
       )
-      adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+      adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: runner,
                         environment: { "CODEX_HOME" => codex_home })
 
       outcome = adapter.execute(adapter.plan([ row ]).operations.fetch(0))
@@ -576,7 +576,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         File.open(config_path, "a") { |file| file.write("[plugins.\"compound-engineering@compound-engineering-plugin\"]\nenabled = true\n") }
         command_result(status: 1, stderr: "offline")
       end
-      targeted_adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: targeted_runner,
+      targeted_adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: targeted_runner,
                                  environment: { "CODEX_HOME" => codex_home })
       targeted_adapter.execute(targeted_adapter.plan([ row ]).operations.fetch(0))
       assert_equal original, File.read(config_path)
@@ -585,7 +585,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         File.open(config_path, "a") { |file| file.write("user_value = 1\n[plugins.\"compound-engineering@compound-engineering-plugin\"]\nenabled = true\n") }
         command_result(status: 1, stderr: "offline")
       end
-      concurrent_adapter = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: concurrent_runner,
+      concurrent_adapter = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: concurrent_runner,
                                    environment: { "CODEX_HOME" => codex_home })
       concurrent_adapter.execute(concurrent_adapter.plan([ row ]).operations.fetch(0))
       assert_includes File.read(config_path), "user_value = 1"
@@ -630,7 +630,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       )
 
       assert_instance_of Hive::AgentSkills::Adapters::Claude, registry.fetch("claude")
-      assert_instance_of Hive::AgentSkills::Adapters::Codex, registry.fetch("codex")
+      assert_instance_of Hive::AgentSupport.for(:codex)::SetupAdapter, registry.fetch("codex")
       assert_instance_of Hive::AgentSupport::Pi::SetupAdapter, registry.fetch("pi")
     end
   end
@@ -653,7 +653,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       assert_raises(NotImplementedError) { abstract_adapter.plan([ claude_row ]) }
 
       codex_native = Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for("codex")
-      codex = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir)
+      codex = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir)
       assert_equal File.join(dir, ".codex"), codex.send(:config_root, codex_native)
       nested = { "items" => [ { "name" => "frozen" } ] }
       codex.send(:deep_freeze, nested)
@@ -718,7 +718,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         marketplace: { "name" => "compound-engineering-plugin",
                        "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
       )
-      codex = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+      codex = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir,
                       environment: { "CODEX_HOME" => codex_home })
       assert codex.plan([ row ]).operations.any? { |operation| operation.kind == "marketplace_upgrade" }
 
@@ -732,7 +732,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         health: "missing", bin: "/fake/codex",
         marketplace: row.native.fetch("marketplace")
       )
-      changing = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: changing_runner,
+      changing = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: changing_runner,
                          environment: { "CODEX_HOME" => codex_home })
       outcome = changing.execute(changing.plan([ fresh ]).operations.first)
       assert_match(/changed comments or unrelated/, outcome.message)
@@ -749,7 +749,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       end
       missing_marketplace = inspection(agent: "codex", capability: "ce-brainstorm",
                                        package: "compound-engineering", health: "missing", bin: "/fake/codex")
-      rolling = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: failing_runner,
+      rolling = adapter(Hive::AgentSupport.for(:codex)::SetupAdapter, dir: dir, runner: failing_runner,
                         environment: { "CODEX_HOME" => codex_home })
       rolling.execute(rolling.plan([ missing_marketplace ]).operations.first)
       refute File.exist?(config_path)

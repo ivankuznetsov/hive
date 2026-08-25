@@ -31,8 +31,6 @@ module Hive
         PORTABLE_FILE_TOOLS + PORTABLE_NETWORK_TOOLS + PORTABLE_HOST_OUTPUT_TOOLS
       ).freeze
       GROK_SANDBOX_PATH = "/usr/bin/bwrap".freeze
-      CODEX_MANAGED_PERMISSION_PROFILE = "hive-managed".freeze
-      CODEX_DOCTOR_TIMEOUT_SEC = 30
 
       Policy = Data.define(
         :permission_mode, :allowed_tools, :disallowed_tools, :directories,
@@ -307,25 +305,10 @@ module Hive
                                       profile:, environment:, managed_outputs:, prepare:)
         support = Hive::AgentSupport.for(profile)
         portable = support&.const_defined?(:Runtime, false) ||
-          %i[codex grok].include?(profile.name)
+          profile.name == :grok
         unless portable
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
-        end
-
-        path_read_rules = Array(parsed_spec["tools"]).filter_map do |rule|
-          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
-          rule if match && match[:tool] == "Read" && match[:specifier]
-        end
-        if path_read_rules.any? && profile.name != :codex
-          raise Hive::ConfigError,
-                "runner #{profile.name.inspect} cannot enforce path-qualified Read rules " \
-                "#{path_read_rules.inspect}"
-        end
-        codex_read_paths = if path_read_rules.any?
-          portable_codex_read_paths(
-            path_read_rules, task_root: task_root, allowed_roots: directories, prepare: prepare
-          )
         end
 
         tool_names = Array(scope.allowed_tools).flat_map do |rule|
@@ -336,37 +319,36 @@ module Hive
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed tools #{unsupported.sort.inspect}"
         end
+        path_read_rules = Array(parsed_spec["tools"]).filter_map do |rule|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
+          rule if match && match[:tool] == "Read" && match[:specifier]
+        end
+        supports_qualified_reads = support&.const_defined?(:Runtime, false) &&
+          support::Runtime.const_defined?(:PATH_QUALIFIED_READS, false)
+        if path_read_rules.any? && !supports_qualified_reads
+          raise Hive::ConfigError,
+                "runner #{profile.name.inspect} cannot enforce path-qualified Read rules " \
+                "#{path_read_rules.inspect}"
+        end
 
         outputs = portable_outputs(
           parsed_spec, task_root: task_root, requested: managed_outputs
         )
-        return portable_admission_policy(
-          scope, task_root: task_root, directories: directories, environment: environment
-        ) unless prepare
-
-        runtime_root = outputs.empty? ? nil : Dir.mktmpdir("hive-managed-actor-")
-        schema = outputs.empty? ? nil : output_schema(outputs.keys)
+        runtime_root = prepare && !outputs.empty? ? Dir.mktmpdir("hive-managed-actor-") : nil
         if support
           return support::Runtime.compile_managed_actor(
             host: self, scope:, task_root:, directories:, profile:, environment:,
-            outputs:, runtime_root:, tool_names:
+            outputs:, runtime_root:, tool_names:, prepare:
           )
         end
-        case profile.name
-        when :codex
-          compile_codex_actor(
-            scope, task_root: task_root, directories: directories, profile: profile,
-            environment: environment, outputs: outputs, runtime_root: runtime_root, schema: schema,
-            web_enabled: (tool_names & PORTABLE_NETWORK_TOOLS).any?,
-            read_paths: codex_read_paths || directories
-          )
-        when :grok
-          compile_grok_actor(
-            scope, task_root: task_root, directories: directories, profile: profile,
-            environment: environment, outputs: outputs, runtime_root: runtime_root, schema: schema,
-            tool_names: tool_names
-          )
-        end
+        return portable_admission_policy(
+          scope, task_root:, directories:, environment:
+        ) unless prepare
+
+        compile_grok_actor(
+          scope, task_root:, directories:, profile:, environment:, outputs:, runtime_root:,
+          schema: outputs.empty? ? nil : output_schema(outputs.keys), tool_names:
+        )
       rescue StandardError
         begin
           FileUtils.remove_entry_secure(runtime_root) if runtime_root
@@ -376,36 +358,6 @@ module Hive
         raise
       end
 
-      def self.portable_codex_read_paths(rules, task_root:, allowed_roots:, prepare:)
-        roots = allowed_roots.map { |root| File.realpath(root) }
-        rules.map do |rule|
-          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
-          raw = match[:specifier]
-          if raw.include?("*")
-            raise Hive::ConfigError,
-                  "runner :codex cannot enforce wildcard path-qualified Read rule #{rule.inspect}"
-          end
-
-          expanded = File.absolute_path?(raw) ? File.expand_path(raw) : File.expand_path(raw, task_root)
-          unless roots.any? { |root| expanded == root || expanded.start_with?(root + File::SEPARATOR) }
-            raise Hive::ConfigError,
-                  "runner :codex path-qualified Read rule escapes declared roots: #{rule.inspect}"
-          end
-
-          next expanded unless prepare
-
-          resolved = File.realpath(expanded)
-          unless roots.any? { |root| resolved == root || resolved.start_with?(root + File::SEPARATOR) }
-            raise Hive::ConfigError,
-                  "runner :codex path-qualified Read rule resolves outside declared roots: #{rule.inspect}"
-          end
-          resolved
-        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR
-          raise Hive::ConfigError,
-                "runner :codex path-qualified Read target is unavailable: #{rule.inspect}"
-        end.uniq.freeze
-      end
-
       def self.portable_admission_policy(scope, task_root:, directories:, environment:)
         portable_policy(
           scope, task_root: task_root, directories: directories, environment: environment,
@@ -413,46 +365,8 @@ module Hive
         )
       end
 
-      def self.compile_codex_actor(scope, task_root:, directories:, profile:, environment:,
-                                   outputs:, runtime_root:, schema:, web_enabled:, read_paths:)
-        executable = codex_executable(profile)
-        runtime_read_root = codex_runtime_root(executable)
-        schema_path = nil
-        if schema
-          schema_path = File.join(runtime_root, "output-schema.json")
-          Hive::AtomicFile.write(schema_path, CanonicalJSON.generate(schema), mode: 0o600)
-        end
-
-        runtime_read_paths = read_paths + [ runtime_read_root ]
-        runtime_read_paths << runtime_root if runtime_root
-        filesystem = ([ [ ":minimal", "read" ] ] + runtime_read_paths.uniq.map { |path| [ path, "read" ] })
-        filesystem_toml = filesystem.map do |path, access|
-          "#{JSON.generate(path)}=#{JSON.generate(access)}"
-        end.join(",")
-        flags = [
-          "--ephemeral", "--ignore-user-config", "--ignore-rules",
-          "-c", 'approval_policy="never"',
-          "-c", "default_permissions=#{JSON.generate(CODEX_MANAGED_PERMISSION_PROFILE)}",
-          "-c", "permissions.#{CODEX_MANAGED_PERMISSION_PROFILE}.filesystem={#{filesystem_toml}}",
-          "-c", "permissions.#{CODEX_MANAGED_PERMISSION_PROFILE}.network.enabled=false",
-          "-c", "web_search=#{JSON.generate(web_enabled ? 'live' : 'disabled')}",
-          "-c", "mcp_servers={}",
-          "-c", "apps._default.enabled=false",
-          "-c", "features.apps=false",
-          "-c", "features.remote_plugin=false",
-          "-c", "features.tool_search=false",
-          "-c", "features.multi_agent=false",
-          "-c", "features.memories=false",
-          "-c", "features.hooks=false",
-          "-c", "features.plugins=false"
-        ]
-        flags.concat([ "--output-schema", schema_path ]) if schema_path
-
-        portable_policy(
-          scope, task_root: task_root, directories: directories, environment: environment,
-          outputs: outputs, runtime_root: runtime_root, cli_flags: flags,
-          executable: executable
-        )
+      def self.write_output_schema(path, names)
+        Hive::AtomicFile.write(path, CanonicalJSON.generate(output_schema(names)), mode: 0o600)
       end
 
       def self.compile_grok_actor(scope, task_root:, directories:, profile:, environment:,
@@ -581,68 +495,6 @@ module Hive
           "additionalProperties" => false
         }
       end
-
-      def self.codex_executable(profile)
-        configured = profile.bin
-        return File.realpath(configured) if configured.include?(File::SEPARATOR) &&
-                                            File.file?(configured) && File.executable?(configured)
-
-        @codex_executables ||= {}
-        @codex_executables[configured] ||= begin
-          stdout, stderr, status = codex_doctor(configured)
-          report = begin
-            JSON.parse(stdout)
-          rescue JSON::ParserError
-            if status.success?
-              raise Hive::ConfigError, "runner :codex returned malformed doctor output"
-            end
-
-            raise Hive::ConfigError, codex_doctor_failure(stderr)
-          end
-          candidate = report.dig("checks", "runtime.provenance", "details", "current executable")
-          if candidate.is_a?(String) && File.absolute_path?(candidate) &&
-             File.file?(candidate) && File.executable?(candidate)
-            File.realpath(candidate)
-          else
-            raise Hive::ConfigError, codex_doctor_failure(stderr) unless status.success?
-
-            raise Hive::ConfigError, "runner :codex reported an unavailable managed executable"
-          end
-        rescue Timeout::Error
-          raise Hive::ConfigError,
-                "runner :codex managed executable probe timed out after " \
-                "#{CODEX_DOCTOR_TIMEOUT_SEC}s"
-        rescue Errno::ENOENT, Errno::EACCES
-          raise Hive::ConfigError, "runner :codex reported an unavailable managed executable"
-        end
-      end
-
-      def self.codex_doctor(configured)
-        Dir.mktmpdir("hive-codex-doctor-") do |probe_home|
-          capture3_bounded(
-            configured, "doctor", "--json",
-            timeout_sec: CODEX_DOCTOR_TIMEOUT_SEC,
-            environment: { "CODEX_HOME" => probe_home, "MISE_QUIET" => "1" }
-          )
-        end
-      end
-
-      def self.codex_doctor_failure(stderr)
-        detail = stderr.to_s.strip[0, 160]
-        detail = "doctor exited unsuccessfully without diagnostics" if detail.empty?
-        "runner :codex could not resolve its managed executable: #{detail}"
-      end
-
-      def self.codex_runtime_root(executable)
-        root = File.dirname(File.dirname(executable))
-        unless File.directory?(File.join(root, "codex-resources")) &&
-               File.directory?(File.join(root, "codex-path"))
-          # Direct/custom binaries do not need adjacent package resources.
-          return File.dirname(executable)
-        end
-        root
-      end
-
 
       def self.resolve_profile_executable(profile)
         find_executable(profile.bin) ||

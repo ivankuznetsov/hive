@@ -63,6 +63,34 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_codex_loads_only_after_selection_and_keeps_facets_lazy
+    script = <<~RUBY
+      require "hive/agent_profiles"
+      puts defined?(Hive::AgentSupport::Codex) || "unloaded"
+      support = Hive::AgentSupport.for(Hive::AgentProfiles.lookup(:codex))
+      puts support.name
+      puts support.autoload?(:Runtime) || "runtime-loaded"
+      puts support.autoload?(:ArtifactPolicy) || "artifact-loaded"
+      puts support.autoload?(:Reviewer) || "reviewer-loaded"
+      puts support.autoload?(:Skills) || "skills-loaded"
+      puts support.autoload?(:SetupAdapter) || "setup-loaded"
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I#{File.expand_path('../../lib', __dir__)}", "-e", script
+    )
+
+    assert status.success?, stderr
+    assert_equal [
+      "unloaded", "Hive::AgentSupport::Codex",
+      "hive/agent_support/codex/runtime",
+      "hive/agent_support/codex/artifact_policy",
+      "hive/agent_support/codex/reviewer",
+      "hive/agent_support/codex/skills",
+      "hive/agent_support/codex/setup_adapter"
+    ], stdout.lines.map(&:strip)
+  end
+
   def test_pi_behavior_has_no_generic_core_residue
     pi_branch = /(?:when\s+(?::pi|["']pi["'])|(?:==|!=)\s*(?::pi|["']pi["'])|def\s+(?:self\.)?pi_|\b(?:compile_pi|pi_(?:evidence|executable|auth|bwrap))|Hive::SkillCheck::Pi|Adapters::Pi)/
     support_root = File.join(ROOT, "lib/hive/agent_support")
@@ -91,6 +119,21 @@ class AgentSupportTest < Minitest::Test
                  "OpenCode behavior escaped its support boundary: #{offenders.join(', ')}"
   end
 
+  def test_codex_behavior_has_no_generic_core_residue
+    branch = /(?:when\s+(?::codex|["']codex["'])|(?:==|!=)\s*(?::codex|["']codex["'])|def\s+(?:self\.)?(?:codex_|\w+_codex\b)|\b(?:compile_codex|portable_codex|codex_(?:runtime|executable|doctor|permission|inventory|install_path))|\.codex-plugin|Hive::SkillCheck::Codex|Adapters::Codex)/
+    allowed = File.join(ROOT, "lib/hive/agent_profiles/codex.rb")
+    support_root = File.join(ROOT, "lib/hive/agent_support")
+    offenders = Dir[File.join(ROOT, "{lib/hive,web/app}/**/*.rb")].filter_map do |path|
+      next if path.start_with?(support_root) || path == allowed
+
+      relative = path.delete_prefix("#{ROOT}/")
+      relative if File.read(path).match?(branch)
+    end
+
+    assert_empty offenders,
+                 "Codex behavior escaped its support boundary: #{offenders.join(', ')}"
+  end
+
   def test_support_does_not_depend_on_orchestration_layers
     forbidden = %r{require ["']hive/(?:artifacts|commands|stages|web|workflow_package)}
     offenders = Dir[File.join(ROOT, "lib/hive/agent_support{.rb,/**/*.rb}")].filter_map do |path|
@@ -98,5 +141,12 @@ class AgentSupportTest < Minitest::Test
     end
 
     assert_empty offenders, "agent support has an upward dependency: #{offenders.join(', ')}"
+  end
+
+  def test_codex_reviewer_delegates_process_and_artifact_authority_to_core
+    source = File.read(File.join(ROOT, "lib/hive/agent_support/codex/reviewer.rb"))
+    forbidden = /\bProcess\.(?:spawn|kill|wait2?)|\bFile\.(?:write|delete)/
+
+    refute_match forbidden, source
   end
 end

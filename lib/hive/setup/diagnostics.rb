@@ -99,12 +99,13 @@ module Hive
         )
       end
 
-      def check_claude
-        check_agent("claude", REQUIRED.fetch("claude"), [ "claude", "setup-token" ])
-      end
-
-      def check_codex
-        check_agent("codex", REQUIRED.fetch("codex"), [ "codex", "login" ])
+      {
+        "claude" => %w[claude setup-token],
+        "codex" => %w[codex login]
+      }.each do |agent, login|
+        define_method("check_#{agent}") do
+          check_agent(agent, REQUIRED.fetch(agent), login)
+        end
       end
 
       def check_node

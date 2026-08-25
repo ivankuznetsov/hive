@@ -223,7 +223,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_present_via_user_skill
     with_fake_home do |home|
       write_file("#{home}/.codex/skills/plan/SKILL.md")
-      status, msg = Hive::SkillCheck::Codex.verify("/plan")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/plan")
       assert_equal :present, status
       assert_equal "#{home}/.codex/skills/plan/SKILL.md", msg
     end
@@ -234,7 +234,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
       codex_home = File.join(home, "custom-codex")
       write_file("#{codex_home}/skills/plan/SKILL.md")
 
-      resolution = Hive::SkillCheck::Codex.resolve(
+      resolution = Hive::AgentSupport.for(:codex)::Skills.resolve(
         "/plan", environment: { "HOME" => home, "CODEX_HOME" => codex_home }
       )
 
@@ -246,7 +246,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_present_via_system_skill
     with_fake_home do |home|
       write_file("#{home}/.codex/skills/.system/imagegen/SKILL.md")
-      status, msg = Hive::SkillCheck::Codex.verify("/imagegen")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/imagegen")
       assert_equal :present, status
       assert_match(%r{\.system/imagegen/SKILL.md\z}, msg)
     end
@@ -255,7 +255,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_present_via_plugin_cache
     with_fake_home do |home|
       write_file("#{home}/.codex/plugins/cache/compound-engineering-plugin/compound-engineering/3.6.1/skills/ce-plan/SKILL.md")
-      status, msg = Hive::SkillCheck::Codex.verify("/compound-engineering:ce-plan")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/compound-engineering:ce-plan")
       assert_equal :present, status
       assert_match(%r{compound-engineering/3.6.1/skills/ce-plan/SKILL.md\z}, msg)
     end
@@ -263,7 +263,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
 
   def test_missing_plain_invocation_with_codex_specific_hint
     with_fake_home do |_home|
-      status, msg = Hive::SkillCheck::Codex.verify("/no-such-skill")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/no-such-skill")
       assert_equal :missing, status
       assert_match(/no user-level slash-command directory/, msg)
       assert_match(/install a plugin that ships it/, msg, "hint mentions plugin fallback path")
@@ -273,7 +273,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_codex_present_via_plugin_cache_for_bare_invocation
     with_fake_home do |home|
       write_file("#{home}/.codex/plugins/cache/some-mp/compound-engineering/3.7.0/skills/ce-code-review/SKILL.md")
-      status, msg = Hive::SkillCheck::Codex.verify("/ce-code-review")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/ce-code-review")
       assert_equal :present, status
       assert_match(%r{compound-engineering/3\.7\.0/skills/ce-code-review/SKILL.md\z}, msg)
     end
@@ -282,7 +282,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_codex_ce_doc_review_resolves_from_compound_engineering_plugin
     with_fake_home do |home|
       write_file("#{home}/.codex/plugins/cache/some-mp/compound-engineering/3.7.0/skills/ce-doc-review/SKILL.md")
-      status, message = Hive::SkillCheck::Codex.verify("/ce-doc-review")
+      status, message = Hive::AgentSupport.for(:codex)::Skills.verify("/ce-doc-review")
       assert_equal :present, status
       assert_match(%r{skills/ce-doc-review/SKILL\.md\z}, message)
     end
@@ -291,7 +291,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_glob_metacharacters_do_not_match_codex_plugin_fallback
     with_fake_home do |home|
       write_file("#{home}/.codex/plugins/cache/some-mp/pkg/1.0/skills/foobar/SKILL.md")
-      status, msg = Hive::SkillCheck::Codex.verify("/foo*")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/foo*")
       assert_equal :missing, status
       assert_match(/foo\*/, msg)
     end
@@ -299,14 +299,14 @@ class HiveSkillCheckCodexTest < Minitest::Test
 
   def test_missing_plugin_invocation_with_install_hint
     with_fake_home do |_home|
-      status, msg = Hive::SkillCheck::Codex.verify("/missing-plug:missing-name")
+      status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("/missing-plug:missing-name")
       assert_equal :missing, status
       assert_match(/codex plugin add/, msg)
     end
   end
 
   def test_malformed_invocation_returns_missing_with_argument_error
-    status, msg = Hive::SkillCheck::Codex.verify("garbage")
+    status, msg = Hive::AgentSupport.for(:codex)::Skills.verify("garbage")
 
     assert_equal :missing, status
     assert_match(/expected/, msg)

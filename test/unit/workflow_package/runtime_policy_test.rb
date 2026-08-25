@@ -699,12 +699,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     resolved = with_replaced_singleton_method(
       Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
     ) do
-      Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+      Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
     end
 
     assert_equal File.realpath("/bin/true"), resolved
     assert_equal [ "codex-nonzero-doctor", "doctor", "--json" ], captured_argv
-    assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+    assert_equal Hive::AgentSupport.for(:codex)::Runtime::DOCTOR_TIMEOUT_SEC, captured_timeout
     assert_equal({ "CODEX_HOME" => probe_home, "MISE_QUIET" => "1" }, captured_environment)
     assert probe_home_visible
     refute File.exist?(probe_home)
@@ -730,12 +730,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
     ) do
       assert_raises(Hive::ConfigError) do
-        Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+        Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
       end
     end
 
     assert_includes error.message, "timed out after 30s"
-    assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+    assert_equal Hive::AgentSupport.for(:codex)::Runtime::DOCTOR_TIMEOUT_SEC, captured_timeout
     assert probe_home_visible
     refute File.exist?(probe_home)
   ensure
@@ -760,7 +760,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
     ) do
       assert_raises(Hive::ConfigError) do
-        Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+        Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
       end
     end
 
@@ -1343,11 +1343,11 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
       ) do
         assert_raises(Hive::ConfigError) do
-          Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+          Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
         end
       end
       assert_includes error.message, expected
-      assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC,
+      assert_equal Hive::AgentSupport.for(:codex)::Runtime::DOCTOR_TIMEOUT_SEC,
                    captured_timeout
       refute_nil captured_probe_home
       refute File.exist?(captured_probe_home)
@@ -1369,7 +1369,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       FileUtils.chmod(0o755, executable)
 
       assert_equal root,
-                   Hive::WorkflowPackage::RuntimePolicy.codex_runtime_root(executable)
+                   Hive::AgentSupport.for(:codex)::Runtime.runtime_root(executable)
 
       profile = Object.new
       profile.define_singleton_method(:bin) { "missing-grok-executable" }
@@ -2130,7 +2130,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   def reset_codex_executable_cache
-    Hive::WorkflowPackage::RuntimePolicy.instance_variable_set(:@codex_executables, {})
+    Hive::AgentSupport.for(:codex)::Runtime.instance_variable_set(:@executables, {})
   end
 
   def compile_two_output_codex_policy(task:, package:, article:)

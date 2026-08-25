@@ -15,12 +15,23 @@ module Hive::AgentSupport::Pi
     value.include?("/") ? value.split("/", 2) : [ nil, value ]
   end
   def capture_interface_required? = true
+  def validate_capture_profile!(profile:, unsupported:) = true
   def producer_interface(required_kinds:, browser:)
     {
       "document" => "evidence_write",
       "terminal" => required_kinds.include?("terminal") ? "evidence_terminal" : nil,
       "browser" => browser ? "evidence_browser" : nil
     }.compact
+  end
+  def prepare_capture(host:, profile:, task_folder:, package_root:, environment:,
+                      mailbox_root:, writable_root:, hive_executable:, browser:, **)
+    {
+      permission_arguments: nil,
+      runtime_policy: Runtime.compile_evidence_actor(
+        host:, task_folder:, package_root:, profile:, environment:, mailbox_root:,
+        writable_root:, hive_executable:, browser:
+      )
+    }.freeze
   end
   def default_model(**options) = Hive::ImplementationIdentity::NativeDefaults
     .resolve(:pi, **options) { |project_root:, home:| native_model(project_root:, home:) }

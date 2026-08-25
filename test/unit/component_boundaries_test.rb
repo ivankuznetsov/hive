@@ -710,7 +710,7 @@ class ComponentBoundariesTest < Minitest::Test
         "provider-routing-operations" => [
           "attempts", "provider-health", "provider-routing-policy"
         ],
-        "skillpack" => [ "agent-abi" ],
+        "skillpack" => [ "agent-abi", "agent-support" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
         "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],
         "workflow-creator-execution" => [ "workflow-creator-core" ]

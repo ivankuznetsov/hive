@@ -4,6 +4,7 @@ require "rubygems/requirement"
 
 require "hive/config"
 require "hive/agent_skills/canonical_skill"
+require "hive/agent_support"
 
 module Hive
   module AgentSkills
@@ -281,8 +282,10 @@ module Hive
           assert_keys!(row, %w[invocation probe alias], row_path, required: %w[invocation probe])
           invocation = string!(row.fetch("invocation"), "#{row_path}.invocation")
           slash_invocation = invocation.match?(%r{\A/[A-Za-z0-9_.:-]+\z})
-          codex_skill_mention = agent == "codex" && invocation.match?(/\A\$[A-Za-z0-9_.-]+\z/)
-          unless slash_invocation || codex_skill_mention
+          support = Hive::AgentSupport.for(agent)
+          native_invocation = support&.respond_to?(:skill_invocation?) &&
+            support.skill_invocation?(invocation)
+          unless slash_invocation || native_invocation
             invalid!("#{row_path}.invocation", "must be a platform-native skill invocation")
           end
           probe = safe_relative_path!(row.fetch("probe"), "#{row_path}.probe")

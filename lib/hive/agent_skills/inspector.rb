@@ -386,7 +386,6 @@ module Hive
         else
           case native_spec.provider
         when "claude" then claude_inventory(bin, native_spec, commands, issues)
-        when "codex" then codex_inventory(bin, native_spec, commands, issues)
         when "grok" then grok_inventory(bin, native_spec, commands, issues)
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
@@ -440,35 +439,6 @@ module Hive
           "marketplace" => marketplace && {
             "name" => marketplace["name"],
             "source" => marketplace["repo"] || marketplace["source"]
-          }.freeze
-        }
-      end
-
-      def codex_inventory(bin, native_spec, commands, issues)
-        plugins_result = run([ bin, "plugin", "list", "--available", "--json" ], commands)
-        marketplaces_result = run([ bin, "plugin", "marketplace", "list", "--json" ], commands)
-        issues << [ "incompatible", "codex plugin inventory failed: #{command_failure(plugins_result)}" ] unless plugins_result.success?
-        issues << [ "incompatible", "codex marketplace inventory failed: #{command_failure(marketplaces_result)}" ] unless marketplaces_result.success?
-        plugins_doc = JSON.parse(plugins_result.stdout)
-        marketplaces_doc = JSON.parse(marketplaces_result.stdout)
-        plugins = plugins_doc.fetch("installed")
-        marketplaces = marketplaces_doc.fetch("marketplaces")
-        raise TypeError, "installed plugin list must be an Array" unless plugins.is_a?(Array)
-        raise TypeError, "marketplace list must be an Array" unless marketplaces.is_a?(Array)
-
-        plugin = plugins.find { |entry| entry["pluginId"] == native_spec.package }
-        marketplace = marketplaces.find { |entry| entry["name"] == native_spec.marketplace }
-        {
-          "package" => plugin && {
-            "id" => plugin["pluginId"],
-            "version" => plugin["version"],
-            "enabled" => plugin.fetch("enabled", true),
-            "install_path" => nil,
-            "source" => plugin.dig("source", "url") || plugin.dig("marketplaceSource", "source")
-          }.freeze,
-          "marketplace" => marketplace && {
-            "name" => marketplace["name"],
-            "source" => marketplace.dig("marketplaceSource", "source")
           }.freeze
         }
       end
@@ -739,7 +709,6 @@ module Hive
       def skill_module(agent)
         Hive::AgentProfiles.support_for(agent)&.const_get(:Skills, false) || case agent
         when "claude" then Hive::SkillCheck::Claude
-        when "codex" then Hive::SkillCheck::Codex
         when "grok" then Hive::SkillCheck::Grok
         else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
         end
@@ -761,12 +730,8 @@ module Hive
 
       def package_version_from(root)
         return nil unless root && File.directory?(root)
-        candidates = [
-          File.join(root, ".claude-plugin", "plugin.json"),
-          File.join(root, ".codex-plugin", "plugin.json"),
-          File.join(root, ".grok-plugin", "plugin.json"),
-          File.join(root, "package.json")
-        ]
+        candidates = Dir[File.join(root, ".*-plugin", "plugin.json")]
+        candidates << File.join(root, "package.json")
         candidates.each do |path|
           next unless File.file?(path)
           version = JSON.parse(File.read(path))["version"]

@@ -2877,7 +2877,7 @@ module Hive
         # built-in review and takes no CE skill, so it is exempt. The
         # codex_review adapter DOES require `agent` (it resolves the codex
         # binary via Hive::AgentProfiles.lookup(spec.fetch("agent")) — see
-        # lib/hive/reviewers/codex_review.rb), so require it here to fail at
+        # lib/hive/agent_support/codex/reviewer.rb), so require it here to fail at
         # load instead of crashing mid-dispatch with a KeyError. (The generic
         # validate_agent_name! below returns early on nil, so without this
         # entry a codex_review spec missing `agent` would pass load.)

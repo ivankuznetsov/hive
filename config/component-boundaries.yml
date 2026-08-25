@@ -592,6 +592,10 @@ components:
     public_contract:
       values:
         - Hive::AgentSupport
+        - Hive::AgentSupport::Codex
+        - Hive::AgentSupport::Codex::ArtifactPolicy
+        - Hive::AgentSupport::Codex::Runtime
+        - Hive::AgentSupport::Codex::Skills
         - Hive::AgentSupport::OpenCode
         - Hive::AgentSupport::OpenCode::Configuration
         - Hive::AgentSupport::OpenCode::Execution
@@ -607,6 +611,10 @@ components:
         - Hive::Error
     owned_paths:
       - lib/hive/agent_support.rb
+      - lib/hive/agent_support/codex.rb
+      - lib/hive/agent_support/codex/artifact_policy.rb
+      - lib/hive/agent_support/codex/runtime.rb
+      - lib/hive/agent_support/codex/skills.rb
       - lib/hive/agent_support/opencode.rb
       - lib/hive/agent_support/opencode/configuration.rb
       - lib/hive/agent_support/opencode/execution.rb
@@ -633,6 +641,9 @@ components:
       - hive/skill_check
     internal_collaborators:
       - Hive::AgentSupport::OpenCode::Skills
+      - Hive::AgentSupport::Codex::ArtifactPolicy
+      - Hive::AgentSupport::Codex::Runtime
+      - Hive::AgentSupport::Codex::Skills
       - Hive::AgentSupport::OpenCode::Configuration
       - Hive::AgentSupport::OpenCode::Execution
       - Hive::AgentSupport::OpenCode::LaunchPolicy
@@ -714,7 +725,7 @@ components:
       - lib/hive/diagnosis_agent.rb
       - lib/hive/display_name/generator.rb
       - lib/hive/patrol/agent_launch.rb
-      - lib/hive/reviewers/codex_review.rb
+      - lib/hive/agent_support/codex/reviewer.rb
       - lib/hive/stages/base.rb
       - lib/hive/tui/bubble_model.rb
     mutation_authority: "Hive orchestration selects profiles and permission policy; adapters only compile and observe."
@@ -817,6 +828,7 @@ components:
       - lib/hive/agent_skills
       - lib/hive/agent_support/opencode/setup_adapter.rb
       - lib/hive/agent_support/pi/setup_adapter.rb
+      - lib/hive/agent_support/codex/setup_adapter.rb
       - config/agent-skills.yml
     state_contracts:
       - "Canonical skill source and projected agent-home directories"
@@ -827,6 +839,7 @@ components:
       - "Private staging and complete-directory atomic publication"
     component_dependencies:
       - agent-abi
+      - agent-support
     allowed_hive_dependencies:
       - hive/atomic_file
       - hive/config

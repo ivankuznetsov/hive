@@ -49,6 +49,7 @@ remain `candidate`. There are no migration exceptions.
 flowchart LR
   agent_abi[Agent ABI] --> agent_support[Agent Support]
   skillpack[Skillpack] --> agent_abi[Agent ABI]
+  skillpack[Skillpack] --> agent_support[Agent Support]
   workflow_execution[Workflow Creator Execution] --> workflow_core[Workflow Creator]
   workflow_live[Workflow Creator Live Orchestration] --> workflow_execution
   workflow_live --> workflow_core

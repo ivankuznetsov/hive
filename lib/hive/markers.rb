@@ -201,12 +201,12 @@ module Hive
       # nodes as an empty artifact and replace the directory entry atomically.
       body = read_regular_body(state_file_path) || "".b
       body = if at_end
-               without_last, = replace_last_marker(body, "")
-               append_marker(without_last, new_marker)
-             else
-               replaced, count = replace_last_marker(body, new_marker)
-               count.positive? ? replaced : append_marker(body, new_marker)
-             end
+        without_last, = replace_last_marker(body, "")
+        append_marker(without_last, new_marker)
+      else
+        replaced, count = replace_last_marker(body, new_marker)
+        count.positive? ? replaced : append_marker(body, new_marker)
+      end
       write_atomic(state_file_path, body)
     end
     private_class_method :write_marker_locked

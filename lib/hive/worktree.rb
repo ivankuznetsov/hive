@@ -459,7 +459,10 @@ module Hive
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
 
-        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        # IO#read(length) returns nil (not "") at EOF, e.g. for a zero-byte
+        # pointer file; normalize so the size check and YAML parse below see
+        # an empty String and fail as WorktreeError instead of NoMethodError.
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1) || ""
         if value.bytesize > STRICT_POINTER_MAX_BYTES
           raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes"
         end
@@ -516,7 +519,8 @@ module Hive
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
 
-        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        # See read_strict_pointer: read(2) at EOF yields nil, not "".
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1) || ""
         raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes" if value.bytesize > STRICT_POINTER_MAX_BYTES
 
         value

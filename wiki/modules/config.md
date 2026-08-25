@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-25
 tags: [config, yaml, validation, plan-review, opencode]
 ---
 
@@ -663,7 +663,10 @@ an optional `credential_file`, explicit `plugins`, and `isolation: hermetic`.
 Relative source paths resolve against `project_root`. Credential values, raw
 argv, raw environment maps, unknown agent blocks, and unknown override keys
 are rejected during config validation. The selected config remains read-only;
-Hive prepares and later removes a private per-invocation overlay.
+Hive prepares and later removes a private per-invocation overlay. When neither
+credential source is explicit and OpenCode's native auth file is valid, profile
+lookup resolves that file as the invocation credential source. An explicit
+file or non-empty `credential_env` remains authoritative.
 
 Every `ROLE_AGENT_PATHS` entry accepts `agent: opencode`, but none of
 `DEFAULT_GLOBAL_AGENTS`, stage defaults, reviewer councils, or fallback lists

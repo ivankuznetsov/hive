@@ -55,8 +55,8 @@ module Hive
       },
       routed_effort_values: AgentCliRuntime::Profiles::OPENCODE_VARIANTS,
       # Provider credentials are scrubbed from the child by the component
-      # inventory, but none are forwarded unless the operator explicitly
-      # names them in agents.opencode.credential_env.
+      # inventory. AgentProfiles.lookup resolves a valid native OpenCode auth
+      # file when the project does not explicitly select a credential source.
       opencode_credential_environment_keys: []
     )
 

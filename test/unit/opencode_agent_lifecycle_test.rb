@@ -8,6 +8,53 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
   ROUTE = "anthropic/claude-sonnet-4-5"
 
+  def test_native_auth_lookup_stages_credentials_for_one_hermetic_invocation
+    with_fixture do |fixture|
+      home = File.join(fixture.fetch(:dir), "home")
+      data_home = File.join(home, "data")
+      auth_path = File.join(data_home, "opencode", "auth.json")
+      FileUtils.mkdir_p(File.dirname(auth_path))
+      File.write(auth_path, JSON.generate("anthropic" => { "type" => "oauth" }))
+      File.chmod(0o600, auth_path)
+      root = File.join(fixture.fetch(:dir), "invocation-native-auth")
+      cfg = {
+        "project_root" => fixture.fetch(:dir),
+        "agents" => {
+          "opencode" => {
+            "bin" => fixture.fetch(:bin),
+            "config_path" => fixture.fetch(:configuration),
+            "credential_env" => [],
+            "plugins" => [],
+            "isolation" => "hermetic"
+          }
+        }
+      }
+
+      result = with_env(
+        "HOME" => home, "XDG_DATA_HOME" => data_home,
+        "ANTHROPIC_API_KEY" => nil, "OPENAI_API_KEY" => nil
+      ) do
+        profile = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+        assert_equal auth_path, profile.opencode_credential_file
+        build_agent(
+          make_task(fixture.fetch(:dir), slug: "native-auth-260825-aaaa"),
+          fixture, invocation_root: root, profile:,
+          expected_output: fixture.fetch(:environment)
+        ).run!
+      end
+
+      assert_equal :ok, result.fetch(:status), result.inspect
+      environment = JSON.parse(File.read(fixture.fetch(:environment)))
+      assert environment.fetch("staged_credential_present")
+      assert environment.fetch("staged_credential_supports_provider")
+      assert_equal 0o600, environment.fetch("staged_credential_mode")
+      refute environment.fetch("selected_credential_present")
+      refute environment.fetch("ambient_credential_present")
+      refute File.exist?(root)
+      assert File.file?(auth_path)
+    end
+  end
+
   def test_success_spawns_one_run_and_one_export_then_cleans_the_overlay
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir))
@@ -660,8 +707,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
                   explicit_launch: true, identity_only: false,
                   prompt: "make the atomic edit", plugins: [],
                   profile_status: :exit_code_only, launch_environment: {},
-                  **agent_options)
-    profile = Hive::AgentProfile.new(
+                  profile: nil, **agent_options)
+    profile ||= Hive::AgentProfile.new(
       runtime_profile: AgentCliRuntime::Profiles.fetch(:opencode),
       skill_syntax_format: "/%{skill}",
       status_detection_mode: profile_status,
@@ -669,7 +716,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       opencode_configuration_path: fixture.fetch(:configuration),
       opencode_credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
       opencode_plugins: plugins
-    ).with_overrides("bin" => fixture.fetch(:bin))
+    )
+    profile = profile.with_overrides("bin" => fixture.fetch(:bin))
     launch = if explicit_launch
       profile.identity_arguments(model: ROUTE, effort: "high")
     end
@@ -771,11 +819,23 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       else
         if ARGV.first == "run"
           File.binwrite(#{stdin.dump}, STDIN.read)
+          credential_path = File.join(
+            ENV.fetch("XDG_DATA_HOME"), "opencode", "auth.json"
+          )
+          credential = if File.file?(credential_path)
+            JSON.parse(File.binread(credential_path))
+          else
+            {}
+          end
           File.write(#{environment.dump}, JSON.generate({
             "XDG_CONFIG_HOME" => ENV["XDG_CONFIG_HOME"],
             "OPENCODE_DISABLE_PROJECT_CONFIG" => ENV["OPENCODE_DISABLE_PROJECT_CONFIG"],
             "selected_credential_present" => !ENV["ANTHROPIC_API_KEY"].to_s.empty?,
-            "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?
+            "ambient_credential_present" => !ENV["OPENAI_API_KEY"].to_s.empty?,
+            "staged_credential_present" => File.file?(credential_path),
+            "staged_credential_supports_provider" => credential.key?("anthropic"),
+            "staged_credential_mode" =>
+              (File.stat(credential_path).mode & 0777 if File.file?(credential_path))
           }))
           if #{mode == :replace_root_during_run}
             root = File.dirname(ENV.fetch("XDG_CONFIG_HOME"))

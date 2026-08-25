@@ -194,6 +194,58 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_opencode_profile_uses_native_auth_when_no_credential_source_is_explicit
+    with_tmp_dir do |home|
+      data_home = File.join(home, "data")
+      auth_path = File.join(data_home, "opencode", "auth.json")
+      explicit_path = File.join(home, "explicit-auth.json")
+      FileUtils.mkdir_p(File.dirname(auth_path))
+      File.write(auth_path, JSON.generate("openrouter" => { "type" => "oauth" }))
+      File.write(explicit_path, JSON.generate("openrouter" => { "type" => "api" }))
+      cfg = {
+        "agents" => {
+          "opencode" => {
+            "config" => { "model" => "openrouter/stealth/ox-alpha" }
+          }
+        }
+      }
+
+      with_env("HOME" => home, "XDG_DATA_HOME" => data_home) do
+        implicit = Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+        explicit = Hive::AgentProfiles.lookup(
+          :opencode,
+          cfg: {
+            "agents" => {
+              "opencode" => cfg.dig("agents", "opencode").merge(
+                "credential_env" => [ "OPENROUTER_API_KEY" ]
+              )
+            }
+          }
+        )
+        explicit_file = Hive::AgentProfiles.lookup(
+          :opencode,
+          cfg: {
+            "agents" => {
+              "opencode" => cfg.dig("agents", "opencode").merge(
+                "credential_file" => explicit_path
+              )
+            }
+          }
+        )
+
+        assert_equal auth_path, implicit.opencode_credential_file
+        assert_nil explicit.opencode_credential_file
+        assert_equal [ "OPENROUTER_API_KEY" ],
+                     explicit.opencode_credential_environment_keys
+        assert_equal explicit_path, explicit_file.opencode_credential_file
+
+        File.write(auth_path, "{}")
+        assert_nil Hive::AgentProfiles.lookup(:opencode, cfg: cfg)
+                                      .opencode_credential_file
+      end
+    end
+  end
+
   def test_opencode_default_model_resolution_rejects_ambiguous_or_malformed_sources
     inline_error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
       Hive::AgentProfiles::OpenCodeDefaults.resolve(

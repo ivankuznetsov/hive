@@ -43,10 +43,11 @@ hive init .
 
 OpenCode is registered everywhere Hive accepts an agent profile but remains
 entirely opt-in: no default stage, reviewer council, or fallback selects it.
-Install OpenCode 1.18.16 or newer and configure the provider credential you
-intend to use. `opencode auth login` writes OpenCode's own auth file; automation
-may instead name one credential environment variable in project config. Hive
-never accepts the credential value in YAML.
+Install OpenCode 1.18.16 or newer and run `opencode auth login` for the provider
+you intend to use. When an OpenCode route does not declare another credential
+source, Hive stages that valid native auth file inside the private invocation
+home. Automation may instead name credential environment variables in project
+config. Hive never copies a credential value into YAML or its durable state.
 
 Create an explicit, non-secret provider definition in the project, for
 example `.hive/opencode.json`:
@@ -63,14 +64,13 @@ example `.hive/opencode.json`:
 ```
 
 Then add the typed profile and route settings to `.hive-state/config.yml`.
-Replace the example route and credential variable name with the exact local
-provider/model you intend to run:
+Replace the example route with the exact local provider/model you intend to
+run:
 
 ```yaml
 agents:
   opencode:
     config_path: .hive/opencode.json
-    credential_env: [ANTHROPIC_API_KEY]
     plugins:
       - compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git#compound-engineering-v3.21.4
     isolation: hermetic
@@ -102,9 +102,10 @@ rules such as `Bash(git*)` opt into only the named OpenCode shell patterns;
 bare `Bash` remains invalid, while `Bash(*)` deliberately grants the full
 shell with the Hive OS user's authority. Hive redirects OpenCode config, data, cache, and
 state into a private per-invocation root, ignores ambient project/global
-configuration, forwards only the named credential source, and removes the
-overlay after every lifecycle outcome. This is application-level enforcement,
-not an OS/container boundary; use Hivebox for hostile-code containment.
+configuration, stages the native auth file or forwards only explicitly named
+credential variables, and removes the private credential copy with the overlay
+after every lifecycle outcome. This is application-level enforcement, not an
+OS/container boundary; use Hivebox for hostile-code containment.
 
 Skill-bearing roles additionally require the native Compound Engineering
 OpenCode plugin. Preview and apply its pinned `3.21.4` entry with:

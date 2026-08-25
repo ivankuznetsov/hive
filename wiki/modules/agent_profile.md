@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-20
+updated: 2026-08-25
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -249,8 +249,11 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   with minimum version `1.18.16`. Every selected model is an exact nested
   `provider/model` route; supported effort values render as `--variant` only
   after route-aware capability validation. Hive prepares private XDG/config
-  homes, forwards only configured credential names, and maps read-only/scoped
-  stage permissions to deny-first OpenCode rules. Local capability inspection
+  homes and stages a valid native `opencode auth login` file when the project
+  does not explicitly select a credential file or environment names. Explicit
+  sources remain authoritative. The private copy is owner-only and removed
+  with the invocation overlay. Hive maps read-only/scoped stage permissions to
+  deny-first OpenCode rules. Local capability inspection
   remains bounded at 10 seconds per command except for the version probe and
   verbose model inventory, which get 30 seconds because Bun startup under
   sustained host I/O and a cold hermetic provider catalog can both exceed the

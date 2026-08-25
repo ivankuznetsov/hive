@@ -28,9 +28,11 @@ module Hive
     class OversizedFile < MalformedLock; end
     class ScanLimitReached < StandardError; end
 
-    def initialize(daemon_state: nil, daemon_report: nil)
+    def initialize(daemon_state: nil, daemon_report: nil,
+                   runtime_identity: Hive::RuntimeIdentity.new.to_h)
       @daemon_state = daemon_state
       @daemon_report = daemon_report
+      @runtime_identity = runtime_identity
     end
 
     def payload(projects, now: Time.now.utc)
@@ -231,6 +233,7 @@ module Hive
     end
 
     def build_payload(rows, observed_count, counters, now)
+      state = resolved_daemon_state
       omitted_count = observed_count - rows.length
       incomplete_source = counters.values_at(
         "projects_unavailable", "malformed_locks", "transition_skips"
@@ -240,8 +243,9 @@ module Hive
         "schema" => "hive-running-status",
         "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-running-status"),
         "ok" => true,
+        "runtime" => runtime_identity_for(state),
         "generated_at" => now.iso8601(6),
-        "daemon" => daemon_payload,
+        "daemon" => daemon_payload(state),
         "complete" => !incomplete_source && !scan_truncated && omitted_count.zero?,
         "count" => rows.length,
         "observed_count" => observed_count,
@@ -264,11 +268,23 @@ module Hive
       }
     end
 
-    def daemon_payload
-      state = @daemon_state || daemon_report.running_state(
+    def resolved_daemon_state
+      @daemon_state || daemon_report.running_state(
         max_pid_bytes: MAX_DAEMON_PID_BYTES,
         require_start_time: true
       )
+    end
+
+    def runtime_identity_for(state)
+      if state.fetch(:running) == true
+        return Hive::RuntimeIdentity.parse(state[:runtime]) || Hive::RuntimeIdentity.unknown
+      end
+      return Hive::RuntimeIdentity.unknown if state[:runtime_observable] == false
+
+      @runtime_identity
+    end
+
+    def daemon_payload(state)
       running = state.fetch(:running) == true
       {
         "running" => running,

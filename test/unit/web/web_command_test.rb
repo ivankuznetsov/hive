@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/web"
 require "hive/commands/service_installer/outcome"
 
@@ -454,7 +455,8 @@ class WebCommandTest < Minitest::Test
       "platform" => "linux", "unit_path" => installer.target_path,
       "service_installed" => true, "service_enabled" => true,
       "service_running" => true, "service_manager_available" => true,
-      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready",
+      "runtime" => Hive::RuntimeIdentity.unknown
     }
 
     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, lambda { |**kwargs|
@@ -467,6 +469,9 @@ class WebCommandTest < Minitest::Test
       )
 
       assert envelope["ok"]
+      refute envelope.key?("runtime")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-install"))))
+      assert_empty schema.validate(envelope).to_a
     end
 
     assert_equal true, observed.fetch(:wait_for_running)
@@ -859,8 +864,17 @@ class WebCommandTest < Minitest::Test
     assert_match(/readiness=disabled/, out)
   end
 
-  def test_status_service_json_emits_status_envelope
-    command = Hive::Commands::Web.new("status", json: true)
+  def test_status_service_json_does_not_claim_the_observer_for_a_disabled_service
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    command = Hive::Commands::Web.new(
+      "status",
+      json: true,
+      environment: {
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_BUILD_SHA" => sha,
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+      }
+    )
     state = {
       "platform" => "linux", "service_installed" => true, "service_enabled" => false,
       "service_running" => false, "service_manager_available" => true
@@ -877,10 +891,49 @@ class WebCommandTest < Minitest::Test
     assert_equal false, payload["service_running"]
     assert_equal false, payload["ready"]
     assert_equal "disabled", payload["readiness"]
+    assert_equal "unknown", payload.dig("runtime", "channel")
+    assert_nil payload.dig("runtime", "build_sha")
+
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
+    assert_empty schema.validate(payload).to_a
+  end
+
+  def test_status_service_json_reports_the_managed_service_health_identity
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    }).to_h
+    state = {
+      "platform" => "linux", "unit_path" => "/unit", "service_installed" => true,
+      "service_enabled" => true, "service_running" => true,
+      "service_manager_available" => true, "url" => "http://127.0.0.1:4567",
+      "ready" => true, "readiness" => "ready", "runtime" => runtime
+    }
+    command = Hive::Commands::Web.new("status", json: true, environment: {})
+
+    out, = with_replaced_singleton_method(
+      Hive::Web::ServiceStatus, :snapshot, ->(**) { state }
+    ) do
+      with_fake_service_installer(platform: "linux") { capture_io { command.call } }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal runtime, payload.fetch("runtime")
   end
 
   def test_status_service_json_emits_versioned_error_when_config_is_invalid
-    command = Hive::Commands::Web.new("status", json: true)
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    command = Hive::Commands::Web.new(
+      "status",
+      json: true,
+      environment: {
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_BUILD_SHA" => sha,
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+      }
+    )
     output = StringIO.new
     original_stdout = $stdout
     begin
@@ -903,6 +956,12 @@ class WebCommandTest < Minitest::Test
     assert_equal false, payload["ok"]
     assert_equal "config_error", payload["error_kind"]
     assert_equal Hive::ExitCodes::CONFIG, payload["exit_code"]
+    assert_equal "unknown", payload.dig("runtime", "channel")
+    assert_nil payload.dig("runtime", "build_sha")
+    assert_nil payload.dig("runtime", "deployment_id")
+
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status"))))
+    assert_empty schema.validate(payload).to_a
   end
 
   # ── rails_app_dir resolution + bootstrap ────────────────────────────

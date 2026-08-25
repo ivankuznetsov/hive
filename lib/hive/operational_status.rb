@@ -29,11 +29,14 @@ module Hive
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
 
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
-                   status_payload_tick_sequence: nil, now: Time.now.utc)
+                   status_payload_tick_sequence: nil,
+                   runtime_identity: Hive::RuntimeIdentity.new.to_h,
+                   now: Time.now.utc)
       @status_payload = status_payload
       @project_context = project_context
       @scheduler_snapshot = scheduler_snapshot
       @status_payload_tick_sequence = status_payload_tick_sequence
+      @runtime_identity = runtime_identity
       @now = now.utc
     end
 
@@ -66,6 +69,7 @@ module Hive
         "schema" => "hive-operational-status",
         "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status"),
         "ok" => true,
+        "runtime" => @runtime_identity,
         "generated_at" => @now.iso8601,
         "completeness" => completeness,
         "source" => {

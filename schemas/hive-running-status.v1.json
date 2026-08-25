@@ -12,7 +12,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "generated_at", "daemon",
+        "schema", "schema_version", "ok", "runtime", "generated_at", "daemon",
         "complete", "count", "observed_count", "observed_count_exact",
         "truncated", "omitted_count", "omitted_count_exact", "limits",
         "source", "tasks"
@@ -21,6 +21,7 @@
         "schema": { "const": "hive-running-status" },
         "schema_version": { "const": 1 },
         "ok": { "const": true },
+        "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
         "generated_at": { "type": "string", "format": "date-time" },
         "daemon": { "$ref": "#/$defs/Daemon" },
         "complete": {
@@ -49,6 +50,38 @@
           "items": { "$ref": "#/$defs/Task" }
         }
       }
+    },
+    "RuntimeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "release_version", "display_version", "build_sha", "deployment_id"],
+      "properties": {
+        "channel": { "enum": ["release", "dogfood", "unknown"] },
+        "release_version": { "type": "string", "minLength": 1 },
+        "display_version": { "type": "string", "minLength": 1 },
+        "build_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "deployment_id": { "type": ["string", "null"], "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "channel": { "const": "dogfood" } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "string" },
+              "deployment_id": { "type": "string" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "channel": { "enum": ["release", "unknown"] } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "null" },
+              "deployment_id": { "type": "null" }
+            }
+          }
+        }
+      ]
     },
     "Daemon": {
       "type": "object",

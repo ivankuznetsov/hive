@@ -28,6 +28,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status"),
                  result.fetch("schema_version")
     assert_equal true, result.fetch("ok")
+    assert_equal "release", result.dig("runtime", "channel")
     assert_equal 6, result.dig("summary", "active")
     assert_equal 1, result.dig("archive", "count")
     assert_equal 4, result.dig("summary", "hidden_archived_task_count")
@@ -36,6 +37,24 @@ class OperationalStatusTest < Minitest::Test
       running waiting_on_you waiting_on_provider_or_scheduler needs_repair completion_ready idle
     ].sort, result.fetch("tasks").map { |row| row.fetch("state") }.sort
     refute result.fetch("tasks").any? { |row| row.dig("identity", "slug") == "archived" }
+  end
+
+  def test_operational_snapshot_identifies_the_active_dogfood_build
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    result = Hive::OperationalStatus.new(
+      status_payload: status_payload,
+      runtime_identity: Hive::RuntimeIdentity.new(environment: {
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_BUILD_SHA" => sha,
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+      }).to_h,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).to_h
+
+    assert_equal "dogfood", result.dig("runtime", "channel")
+    assert_equal sha, result.dig("runtime", "build_sha")
+    assert_equal "#{Hive::VERSION}+dogfood.0864de726",
+                 result.dig("runtime", "display_version")
   end
 
   def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt

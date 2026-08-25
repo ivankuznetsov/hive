@@ -239,6 +239,7 @@ module Hive
       end
 
       def render_running(payload)
+        render_runtime_identity(payload["runtime"])
         daemon = payload.fetch("daemon")
         if daemon.fetch("running")
           details = []
@@ -294,6 +295,7 @@ module Hive
       end
 
       def render_operational(payload)
+        render_runtime_identity(payload["runtime"])
         summary = payload.fetch("summary")
         completeness = %w[complete partial unknown].include?(payload["completeness"]) ?
           payload.fetch("completeness") : "unknown"
@@ -342,6 +344,20 @@ module Hive
           raise Hive::InvalidTaskPath,
                 "#{mode} cannot be combined with --diagnose, --write, or --force"
         end
+      end
+
+      def render_runtime_identity(runtime)
+        return unless runtime.is_a?(Hash)
+
+        channel = runtime["channel"].to_s
+        return if channel.empty? || channel == "release"
+
+        details = [ terminal_safe(runtime["display_version"]) ]
+        details << "sha=#{terminal_safe(runtime['build_sha'])}" unless runtime["build_sha"].to_s.empty?
+        unless runtime["deployment_id"].to_s.empty?
+          details << "deployment=#{terminal_safe(runtime['deployment_id'])}"
+        end
+        puts "HIVE #{terminal_safe(channel).upcase} · #{details.join(' · ')}"
       end
 
       def daemon_task_mode?
@@ -454,11 +470,17 @@ module Hive
         project_context = operational_project_context(
           projects, workflow_generations: workflow_generations
         )
+        runtime_identity = if cache
+          Hive::RuntimeIdentity.parse(cache["runtime"]) || Hive::RuntimeIdentity.unknown
+        else
+          Hive::RuntimeIdentity.new.to_h
+        end
         Hive::OperationalStatus.new(
           status_payload: source,
           project_context: project_context,
           scheduler_snapshot: scheduler_snapshot,
           status_payload_tick_sequence: cache&.fetch("tick_sequence", nil),
+          runtime_identity: runtime_identity,
           now: now
         )
       end

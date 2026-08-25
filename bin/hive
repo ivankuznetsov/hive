@@ -344,6 +344,9 @@ end
 
 def native_web_error_context(schema, argv)
   require "hive/commands/web"
+  if schema == "hive-web-status"
+    return Hive::Commands::Web.status_error_context(environment: ENV)
+  end
   context = Hive::Commands::Web.error_context(environment: ENV)
   return context unless schema == "hive-setup"
 

@@ -11,13 +11,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "generated_at", "completeness",
+        "schema", "schema_version", "ok", "runtime", "generated_at", "completeness",
         "source", "summary", "daemon", "attempt_storage", "scheduler", "archive", "issues", "tasks"
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
     "schema_version": { "const": 4 },
     "ok": { "const": true },
+    "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
     "generated_at": { "type": "string", "format": "date-time" },
     "completeness": { "$ref": "#/$defs/Completeness" },
     "source": {
@@ -129,6 +130,38 @@
     "issues": { "type": "array", "items": { "$ref": "#/$defs/Issue" } },
         "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } }
       }
+    },
+    "RuntimeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "release_version", "display_version", "build_sha", "deployment_id"],
+      "properties": {
+        "channel": { "enum": ["release", "dogfood", "unknown"] },
+        "release_version": { "type": "string", "minLength": 1 },
+        "display_version": { "type": "string", "minLength": 1 },
+        "build_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "deployment_id": { "type": ["string", "null"], "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "channel": { "const": "dogfood" } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "string" },
+              "deployment_id": { "type": "string" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "channel": { "enum": ["release", "unknown"] } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "null" },
+              "deployment_id": { "type": "null" }
+            }
+          }
+        }
+      ]
     },
     "ErrorPayload": {
       "type": "object",

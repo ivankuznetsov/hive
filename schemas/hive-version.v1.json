@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-version.v1.json",
+  "title": "hive version output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok", "runtime"],
+  "properties": {
+    "schema": { "const": "hive-version" },
+    "schema_version": { "const": 1 },
+    "ok": { "const": true },
+    "runtime": { "$ref": "#/$defs/RuntimeIdentity" }
+  },
+  "$defs": {
+    "RuntimeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "release_version", "display_version", "build_sha", "deployment_id"],
+      "properties": {
+        "channel": { "enum": ["release", "dogfood", "unknown"] },
+        "release_version": { "type": "string", "minLength": 1 },
+        "display_version": { "type": "string", "minLength": 1 },
+        "build_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "deployment_id": { "type": ["string", "null"], "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "channel": { "const": "dogfood" } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "string" },
+              "deployment_id": { "type": "string" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "channel": { "enum": ["release", "unknown"] } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "null" },
+              "deployment_id": { "type": "null" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

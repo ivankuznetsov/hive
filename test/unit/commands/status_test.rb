@@ -37,6 +37,7 @@ class CommandsStatusTest < Minitest::Test
       payload = JSON.parse(output)
 
       assert_equal "hive-running-status", payload.fetch("schema")
+      assert_equal "release", payload.dig("runtime", "channel")
       assert_equal [ "running-task-260824-abcd" ], payload.fetch("tasks").map { |row| row.fetch("slug") }
       assert_equal true, payload.dig("tasks", 0, "liveness", "running")
       assert_equal "", error
@@ -98,6 +99,28 @@ class CommandsStatusTest < Minitest::Test
       )
     end
     assert_includes output, "STATUS PARTIAL — source incomplete"
+  end
+
+  def test_human_status_names_a_dogfood_runtime_before_service_state
+    command = Hive::Commands::Status.new
+    payload = {
+      "runtime" => {
+        "channel" => "dogfood",
+        "display_version" => "#{Hive::VERSION}+dogfood.0864de726",
+        "build_sha" => "0864de726d9a75f7bc46610a89db851c90b402ee",
+        "deployment_id" => "hive-dogfood-0864de726"
+      },
+      "daemon" => { "running" => false },
+      "complete" => true,
+      "tasks" => []
+    }
+
+    output, = capture_io { command.send(:render_running, payload) }
+
+    assert_match(/HIVE DOGFOOD/, output.lines.first)
+    assert_includes output, "#{Hive::VERSION}+dogfood.0864de726"
+    assert_includes output, "0864de726d9a75f7bc46610a89db851c90b402ee"
+    assert_includes output, "hive-dogfood-0864de726"
   end
 
   def test_internal_task_graph_is_explicit_and_status_modes_remain_disjoint
@@ -2969,6 +2992,11 @@ class CommandsStatusTest < Minitest::Test
 
   def test_operational_payload_reuses_the_daemon_full_status_cache_without_rescanning_tasks
     now = Time.utc(2026, 8, 24, 10, 0, 2)
+    runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => "a" * 40,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-aaaaaaaaa"
+    }).to_h
     cached_payload = {
       "schema" => "hive-status",
       "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -2993,6 +3021,7 @@ class CommandsStatusTest < Minitest::Test
       "status_cache" => {
         "tick_sequence" => 9,
         "valid_until" => (now + 60).iso8601(6),
+        "runtime" => runtime,
         "payload" => cached_payload
       }
     }
@@ -3019,6 +3048,50 @@ class CommandsStatusTest < Minitest::Test
                  payload.dig("source", "task_graph", "generated_at")
     assert_equal "daemon_cache", payload.dig("source", "task_graph", "provenance")
     assert_equal 2.0, payload.dig("source", "task_graph", "age_seconds")
+    assert_equal runtime, payload.fetch("runtime")
+  end
+
+  def test_operational_payload_marks_a_legacy_daemon_cache_runtime_unknown
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 2).iso8601(6),
+      "projects" => [ {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state", "legacy_stage_dirs" => [],
+        "hidden_archived_task_count" => 0, "tasks" => []
+      } ]
+    }
+    snapshot = {
+      "status" => "current", "phase" => "complete", "tick_sequence" => 9,
+      "observed_at" => (now - 1).iso8601(6),
+      "valid_until" => (now + 60).iso8601(6),
+      "source_window" => {
+        "started_at" => (now - 3).iso8601(6),
+        "completed_at" => (now - 1).iso8601(6)
+      },
+      "capacity" => {}, "queue" => {}, "provider_holds" => [], "tasks" => [],
+      "status_cache" => {
+        "tick_sequence" => 9, "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |record, **|
+      record.fetch("status_cache")
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Config, :load, ->(*) { { "daemon" => { "enabled" => true } } }
+    ) do
+      command.operational_payload(
+        [ { "name" => "demo", "path" => "/tmp/demo" } ],
+        scheduler_snapshot: snapshot, now: now
+      )
+    end
+
+    assert_equal "unknown", payload.dig("runtime", "channel")
   end
 
   def test_operational_payload_falls_back_to_a_fresh_scan_after_the_daemon_cache_expires

@@ -178,7 +178,12 @@ module Hive
         # Write the PID file as YAML with process_start_time so `stop`
         # can detect PID reuse before sending TERM/KILL to a random
         # process that happens to have the same PID. PR-40 review P2 #3.
-        File.write(pid_file, pid_file_payload(Process.pid, own_start_time).to_yaml)
+        File.write(
+          pid_file,
+          pid_file_payload(Process.pid, own_start_time).merge(
+            "runtime" => Hive::RuntimeIdentity.new.to_h
+          ).to_yaml
+        )
 
         # Load the daemon block from ~/Dev/hive/config.yml so operator
         # overrides (max_concurrent_runs, poll_interval_sec, log paths,

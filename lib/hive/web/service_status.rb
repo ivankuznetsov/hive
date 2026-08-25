@@ -3,6 +3,7 @@ require "net/http"
 require "uri"
 require "hive/web/environment"
 require "hive/web/loopback"
+require "hive/runtime_identity"
 
 module Hive
   module Web
@@ -31,18 +32,26 @@ module Hive
           )
         end
         url = effective_url(config, environment: environment)
-        health_probe = probe || lambda { |health_url|
-          ready?(
-            health_url,
-            attempts: wait_for_running ? attempts : 1,
-            interval: interval
+        health_document = nil
+        raw_probe = probe || lambda { |health_url|
+          health_payload(
+            health_url, attempts: wait_for_running ? attempts : 1, interval: interval
           )
         }
+        health_probe = lambda do |health_url|
+          result = raw_probe.call(health_url)
+          health_document = result if result.is_a?(Hash)
+          result.is_a?(Hash) ? result["ok"] == true : result == true
+        end
         readiness = readiness_for(state, local_url(config), probe: health_probe)
+        runtime = if readiness == "ready"
+          Hive::RuntimeIdentity.parse(health_document&.fetch("runtime", nil))
+        end
         state.merge(
           "url" => url,
           "ready" => readiness == "ready",
-          "readiness" => readiness
+          "readiness" => readiness,
+          "runtime" => runtime || Hive::RuntimeIdentity.unknown
         )
       end
 
@@ -131,6 +140,10 @@ module Hive
       # Retry for a short bounded window, with tight per-request limits. The
       # health endpoint carries no operator state and is unauthenticated.
       def ready?(url, attempts: 12, interval: 0.25)
+        !health_payload(url, attempts: attempts, interval: interval).nil?
+      end
+
+      def health_payload(url, attempts: 12, interval: 0.25)
         uri = URI.parse(url)
         attempts.times do |attempt|
           response = Net::HTTP.start(
@@ -140,14 +153,14 @@ module Hive
             read_timeout: 1
           ) { |http| http.get(uri.request_uri, { "Host" => uri.host }) }
           body = JSON.parse(response.body) rescue {}
-          return true if response.is_a?(Net::HTTPSuccess) && body["ok"] == true
+          return body if response.is_a?(Net::HTTPSuccess) && body["ok"] == true
           sleep interval if attempt < attempts - 1
         rescue IOError, SystemCallError, SocketError, Timeout::Error
           sleep interval if attempt < attempts - 1
         end
-        false
+        nil
       rescue URI::InvalidURIError
-        false
+        nil
       end
     end
   end

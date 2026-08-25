@@ -102,6 +102,9 @@ class HiveCommandsRefactorPatrolManifestTest < Minitest::Test
       )
 
       assert_equal aggregate, command.instance_variable_get(:@durable_aggregate)
+      assert_equal Hive::RefactorPatrol::PrManifest.source_reference(manifest),
+                   command.send(:source_pr_context)
+      refute command.send(:source_pr_context).key?("provenance")
     end
   end
 

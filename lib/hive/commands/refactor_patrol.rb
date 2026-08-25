@@ -564,7 +564,8 @@ module Hive
             dry_run: @dry_run
           )
         end
-        unless aggregate.fetch("source") == source_pr_context
+        unless aggregate.fetch("source") ==
+               Hive::RefactorPatrol::PrManifest.source_context(@manifest)
           raise Hive::ConfigError, "refactor patrol manifest does not match its authoritative job"
         end
         @durable_aggregate = aggregate
@@ -1048,7 +1049,7 @@ module Hive
       end
 
       def source_pr_context
-        Hive::RefactorPatrol::PrManifest.source_context(@manifest)
+        Hive::RefactorPatrol::PrManifest.source_reference(@manifest)
       end
 
       def pin_checkout!(project_root, cfg)

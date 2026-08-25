@@ -26,6 +26,55 @@ class WorkflowPackageTransactionTest < Minitest::Test
     end
   end
 
+  def test_activate_journals_and_restores_non_ascii_lock_bytes
+    with_tmp_dir do |dir|
+      lock = File.join(dir, "demo", "honeycomb.lock.json")
+      FileUtils.mkdir_p(File.dirname(lock))
+      old = %Q({"author":"Jos\u00e9"}\n)
+      File.binwrite(lock, old)
+
+      assert_raises(Hive::GitError) do
+        Hive::WorkflowPackage::Transaction.activate(
+          lock_path: lock, workflows_dir: dir, new_lock: { "new" => true },
+          commit: -> { raise Hive::GitError, "commit failed" }
+        )
+      end
+
+      assert_equal old.b, File.binread(lock)
+      refute File.exist?(File.join(dir, ".transaction.json"))
+    end
+  end
+
+  def test_activate_commits_over_non_ascii_lock_bytes
+    with_tmp_dir do |dir|
+      lock = File.join(dir, "demo", "honeycomb.lock.json")
+      FileUtils.mkdir_p(File.dirname(lock))
+      File.binwrite(lock, %Q({"author":"Jos\u00e9"}\n))
+
+      Hive::WorkflowPackage::Transaction.activate(
+        lock_path: lock, workflows_dir: dir, new_lock: { "packages" => {} }
+      )
+
+      assert_equal "{\"packages\":{}}\n", File.read(lock)
+    end
+  end
+
+  def test_reconcile_restores_opaque_binary_old_pointer
+    with_tmp_dir do |dir|
+      lock = File.join(dir, "demo", "honeycomb.lock.json")
+      FileUtils.mkdir_p(File.dirname(lock))
+      old = "{\"author\":\"Jos\u00e9\"}\n\xFF\xFE".b
+      File.binwrite(lock, "{\"new\":true}\n")
+      Hive::WorkflowPackage::TransactionJournal.new(dir).write(
+        "schema_version" => 1, "phase" => "prepared", "lock_path" => lock,
+        "old_lock" => old, "new_lock" => "{\"new\":true}\n"
+      )
+
+      assert Hive::WorkflowPackage::Transaction.new(lock_path: lock, workflows_dir: dir).reconcile!
+      assert_equal old.b, File.binread(lock)
+    end
+  end
+
   def test_reconcile_restores_old_pointer_after_interrupted_activation
     with_tmp_dir do |dir|
       lock = File.join(dir, "demo", "honeycomb.lock.json")

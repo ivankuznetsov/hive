@@ -79,7 +79,11 @@ reading it, and still fails closed on malformed evidence. Exports retain a
 60-second process deadline, and an inspection failure remains the surfaced task
 diagnostic instead of degrading to a generic missing-evidence message. Final
 six-task generation and dual-judge completion remain open until the benchmark
-artifacts are assembled and validated.
+artifacts are assembled and validated. The first OpenRouter-backed Sol
+deliberation also exposed that the pinned npm Codex entrypoint could see a mise
+Node shim but not its active runtime under Hive's narrow agent PATH; the
+harness now prepends that pinned entrypoint's own directory for the child only.
+A completed six-cell deliberation remains the live proof for that recovery.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

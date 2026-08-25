@@ -2,6 +2,7 @@
 
 require "open3"
 require "json"
+require "pathname"
 require "lib/judge_output"
 require "lib/agent_limit"
 
@@ -63,7 +64,18 @@ module HiveBench
         end
         argv += [ "--config", "model_reasoning_effort=#{effort}" ] if effort
         argv << "-"
-        out, err, status = Open3.capture3(*argv, stdin_data: prompt.to_s)
+        # The pinned npm Codex entrypoint uses `#!/usr/bin/env node`. Hive's
+        # deliberately narrow agent PATH can contain mise's node shim without
+        # the matching active tool version, even though the pinned executable
+        # and node binary live beside each other. Scope the executable's own
+        # directory to this child only so it resolves its sibling runtime
+        # without mutating the operator's global mise configuration.
+        child_env = if Pathname.new(bin).absolute?
+                      { "PATH" => [ File.dirname(bin), ENV["PATH"] ].compact.join(File::PATH_SEPARATOR) }
+                    else
+                      {}
+                    end
+        out, err, status = Open3.capture3(child_env, *argv, stdin_data: prompt.to_s)
         raise Error, "codex judge timed out after #{timeout_s}s" if status.exitstatus == 124
 
         unless status.success?

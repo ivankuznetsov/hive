@@ -34,6 +34,35 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_opencode_loads_only_after_selection_and_keeps_heavy_facets_lazy
+    script = <<~RUBY
+      require "hive/agent_profiles"
+      puts defined?(Hive::AgentSupport::OpenCode) || "unloaded"
+      support = Hive::AgentSupport.for(Hive::AgentProfiles.lookup(:opencode))
+      puts support.name
+      puts support.autoload?(:Configuration) || "configuration-loaded"
+      puts support.autoload?(:Execution) || "execution-loaded"
+      puts support.autoload?(:Skills) || "skills-loaded"
+      puts support.autoload?(:SetupAdapter) || "setup-loaded"
+      puts support.configuration.class.name
+      puts support.autoload?(:Execution) || "execution-loaded"
+      puts support.autoload?(:Skills) || "skills-loaded"
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I#{File.expand_path('../../lib', __dir__)}", "-e", script
+    )
+
+    assert status.success?, stderr
+    assert_equal [
+      "unloaded", "Hive::AgentSupport::OpenCode", "configuration-loaded",
+      "hive/agent_support/opencode/execution", "hive/agent_support/opencode/skills",
+      "hive/agent_support/opencode/setup_adapter",
+      "Hive::AgentSupport::OpenCode::Configuration",
+      "hive/agent_support/opencode/execution", "hive/agent_support/opencode/skills"
+    ], stdout.lines.map(&:strip)
+  end
+
   def test_pi_behavior_has_no_generic_core_residue
     pi_branch = /(?:when\s+(?::pi|["']pi["'])|(?:==|!=)\s*(?::pi|["']pi["'])|def\s+(?:self\.)?pi_|\b(?:compile_pi|pi_(?:evidence|executable|auth|bwrap))|Hive::SkillCheck::Pi|Adapters::Pi)/
     support_root = File.join(ROOT, "lib/hive/agent_support")
@@ -45,6 +74,21 @@ class AgentSupportTest < Minitest::Test
     end
 
     assert_empty offenders, "Pi behavior escaped its support boundary: #{offenders.join(', ')}"
+  end
+
+  def test_opencode_behavior_has_no_generic_core_residue
+    branch = /(?:when\s+(?::opencode|["']opencode["'])|(?:==|!=)\s*(?::opencode|["']opencode["'])|def\s+(?:self\.)?opencode_|\bopencode_(?:configuration|permission|edit|bash|invocation|observation|route)|Hive::SkillCheck::OpenCode|Adapters::OpenCode)/
+    allowed = File.join(ROOT, "lib/hive/agent_profiles/opencode.rb")
+    support_root = File.join(ROOT, "lib/hive/agent_support")
+    offenders = Dir[File.join(ROOT, "{lib/hive,web/app}/**/*.rb")].filter_map do |path|
+      next if path.start_with?(support_root) || path == allowed
+
+      relative = path.delete_prefix("#{ROOT}/")
+      relative if File.read(path).match?(branch)
+    end
+
+    assert_empty offenders,
+                 "OpenCode behavior escaped its support boundary: #{offenders.join(', ')}"
   end
 
   def test_support_does_not_depend_on_orchestration_layers

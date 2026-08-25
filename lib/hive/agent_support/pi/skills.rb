@@ -51,7 +51,7 @@ module Hive::AgentSupport::Pi::Skills
     File.expand_path(configured.empty? ? File.join(home, ".pi", "agent") : configured)
   end
 
-  def live_inventory(bin:, native_spec:, issues:, run:, package_version:, failure:)
+  def live_inventory(bin:, native_spec:, issues:, run:, package_version:, failure:, root: nil)
     result = run[[ bin, "list" ]]
     issues << [ "incompatible", "pi package inventory failed: #{failure[result]}" ] unless result.success?
     lines = result.stdout.lines

@@ -163,7 +163,7 @@ module Hive
               )
             end
 
-            Hive::Stages::Base.record_deferred_opencode_observation(
+            Hive::Stages::Base.record_deferred_agent_observation(
               synthetic_task(ctx), cfg, "review.ci", spawn_result
             )
 

@@ -191,12 +191,7 @@ module Hive
         end
 
         def runner_environment
-          %w[
-            HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
-            OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
-          ].each_with_object({}) do |key, out|
-            out[key] = @environment[key] if @environment.key?(key)
-          end
+          @environment.slice(*Hive::AgentSkills::RUNNER_ENVIRONMENT_KEYS)
         end
 
         def file_snapshot(path)

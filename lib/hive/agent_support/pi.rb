@@ -10,6 +10,10 @@ module Hive::AgentSupport::Pi
   module_function
 
   def credential_path(home: Dir.home) = File.join(home, ".pi", "agent", "auth.json")
+  def execution_identity(model)
+    value = model.to_s
+    value.include?("/") ? value.split("/", 2) : [ nil, value ]
+  end
   def capture_interface_required? = true
   def producer_interface(required_kinds:, browser:)
     {

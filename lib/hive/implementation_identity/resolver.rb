@@ -163,11 +163,13 @@ module Hive
           return [ Hive::ImplementationIdentity.normalize_model(fields["model"], concrete: true), true ]
         end
 
-        if stage == "open_pr"
-          if profile.name == :opencode && !provider_changed
-            return [ identity_value(execute_identity, :model), true ]
-          end
+        support = Hive::AgentSupport.for(profile)
+        selected = support.downstream_model(
+          stage:, execute_identity:, provider_changed:
+        ) if support&.respond_to?(:downstream_model)
+        return selected if selected
 
+        if stage == "open_pr"
           policy = UtilityModels.resolve(profile.name)
           model = policy.fetch(:model) || profile.concrete_default_model(
             cfg: @cfg, project_root: @cfg["project_root"]

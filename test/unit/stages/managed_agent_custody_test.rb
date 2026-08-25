@@ -163,8 +163,8 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal "openrouter/stealth/ox-alpha", captured.fetch(:model)
       assert_equal "high", captured.fetch(:effort)
       assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
-      assert_equal [ output ], captured.fetch(:opencode_edit_patterns)
-      assert_empty captured.fetch(:opencode_bash_patterns)
+      assert_equal [ output ], captured.fetch(:edit_patterns)
+      assert_empty captured.fetch(:bash_patterns)
     end
   end
 
@@ -179,8 +179,8 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal [ task.project_root, task.folder ],
                    captured.fetch(:additional_write_roots)
       assert_equal [ File.join(task.project_root, "**"), output ],
-                   captured.fetch(:opencode_edit_patterns)
-      assert_equal [ "*" ], captured.fetch(:opencode_bash_patterns)
+                   captured.fetch(:edit_patterns)
+      assert_equal [ "*" ], captured.fetch(:bash_patterns)
     end
   end
 

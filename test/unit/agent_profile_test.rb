@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/agent_profile"
+require "hive/agent_support/opencode"
 require "hive/implementation_identity"
 require "hive/model_routing"
 
@@ -75,21 +76,22 @@ class AgentProfileTest < Minitest::Test
   def test_opencode_secret_placeholders_use_the_runtime_grammar
     profile = make_profile(
       name: :opencode,
-      opencode_configuration: {
+      support_configuration: opencode_configuration(configuration: {
         "provider" => {
           "anthropic" => { "options" => { "apiKey" => "{env:ANTHROPIC_API_KEY}" } }
         }
-      }
+      })
     )
     assert_equal "{env:ANTHROPIC_API_KEY}",
-                 profile.opencode_configuration.dig("provider", "anthropic", "options", "apiKey")
+                 profile.support_configuration.configuration
+                   .dig("provider", "anthropic", "options", "apiKey")
 
     assert_raises(ArgumentError) do
       make_profile(
         name: :opencode,
-        opencode_configuration: {
+        support_configuration: opencode_configuration(configuration: {
           "provider" => { "anthropic" => { "options" => { "apiKey" => "${ANTHROPIC_API_KEY}" } } }
-        }
+        })
       )
     end
   end
@@ -99,39 +101,33 @@ class AgentProfileTest < Minitest::Test
       make_profile(name: :opencode, permission_presets: [ "unconfined" ])
     end
     assert_raises(ArgumentError) do
-      make_profile(name: :opencode, opencode_plugins: "compound-engineering")
+      opencode_configuration(plugins: "compound-engineering")
     end
     assert_raises(ArgumentError) do
-      make_profile(name: :opencode, opencode_plugins: [ "" ])
+      opencode_configuration(plugins: [ "" ])
     end
     assert_raises(ArgumentError) do
-      make_profile(name: :opencode, opencode_plugins: %w[plugin plugin])
+      opencode_configuration(plugins: %w[plugin plugin])
     end
     assert_raises(ArgumentError) do
-      make_profile(name: :opencode, opencode_configuration: [])
+      opencode_configuration(configuration: [])
     end
     assert_raises(ArgumentError) do
-      make_profile(
-        name: :opencode,
-        opencode_configuration: { "temperature" => Float::NAN }
-      )
+      opencode_configuration(configuration: { "temperature" => Float::NAN })
     end
     assert_raises(ArgumentError) do
-      make_profile(
-        name: :opencode,
-        opencode_configuration: {
+      opencode_configuration(configuration: {
           "providers" => [ { "api_key" => "literal-secret" } ]
-        }
-      )
+        })
     end
 
     profile = make_profile(
       name: :opencode,
-      opencode_configuration: {
+      support_configuration: opencode_configuration(configuration: {
         "providers" => [ { "name" => "anthropic" } ]
-      }
+      })
     )
-    providers = profile.opencode_configuration.fetch("providers")
+    providers = profile.support_configuration.configuration.fetch("providers")
     assert_predicate providers, :frozen?
     assert_predicate providers.first, :frozen?
     assert_predicate providers.first.fetch("name"), :frozen?
@@ -188,6 +184,10 @@ class AgentProfileTest < Minitest::Test
       status_detection_mode: :state_file_marker
     }
     Hive::AgentProfile.new(**defaults.merge(overrides))
+  end
+
+  def opencode_configuration(**options)
+    Hive::AgentSupport::OpenCode::Configuration.new(**options)
   end
 
   def test_freezes_at_construction

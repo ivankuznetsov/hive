@@ -1,6 +1,8 @@
 require "test_helper"
 require "digest"
 require "hive/agent_skills/adapters/registry"
+require "hive/agent_support/opencode"
+require "hive/agent_support/opencode/setup_adapter"
 require "hive/agent_support/pi/setup_adapter"
 
 class AgentSkillAdaptersTest < Minitest::Test
@@ -184,7 +186,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         bin: "/fake/opencode"
       )
       instance = adapter(
-        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir,
         environment: { "OPENCODE_CONFIG_DIR" => config_home }
       )
 
@@ -201,7 +203,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       assert_equal "succeeded", outcome.status
       assert_equal "system", document.fetch("theme")
       assert_equal [
-        Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+        Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
       ], document.fetch("plugin")
       assert_equal 0o600, File.stat(config_path).mode & 0o777
     end
@@ -226,7 +228,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         bin: "/fake/opencode"
       )
       conflicting = adapter(
-        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir,
         environment: { "OPENCODE_CONFIG_DIR" => config_home }
       ).plan([ row ])
 
@@ -235,7 +237,7 @@ class AgentSkillAdaptersTest < Minitest::Test
 
       File.write(config_path, "{}\n")
       instance = adapter(
-        Hive::AgentSkills::Adapters::OpenCode, dir: dir,
+        Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir,
         environment: { "OPENCODE_CONFIG_DIR" => config_home }
       )
       operation = instance.plan([ row ]).operations.fetch(0)
@@ -259,7 +261,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         package: "compound-engineering", health: "missing",
         bin: "/fake/opencode"
       )
-      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+      instance = adapter(Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir)
 
       File.write(config_path, "{")
       preview = instance.plan([ row ])
@@ -281,7 +283,7 @@ class AgentSkillAdaptersTest < Minitest::Test
           metadata: {
             "config_path" => config_path,
             "snapshot" => snapshot,
-            "plugin" => Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+            "plugin" => Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
           }
         )
 
@@ -300,7 +302,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         config_path,
         JSON.generate(
           "plugin" => [
-            Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+            Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
           ]
         )
       )
@@ -309,7 +311,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         package: "compound-engineering", health: "missing",
         bin: "/fake/opencode"
       )
-      instance = adapter(Hive::AgentSkills::Adapters::OpenCode, dir: dir)
+      instance = adapter(Hive::AgentSupport::OpenCode::SetupAdapter, dir: dir)
 
       assert_empty instance.plan([ row ]).operations
     end
@@ -322,7 +324,7 @@ class AgentSkillAdaptersTest < Minitest::Test
         environment: { "HOME" => dir }
       )
 
-      assert_instance_of Hive::AgentSkills::Adapters::OpenCode,
+      assert_instance_of Hive::AgentSupport::OpenCode::SetupAdapter,
                          registry.fetch("opencode")
     end
   end

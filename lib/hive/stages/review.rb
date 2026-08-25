@@ -631,7 +631,7 @@ module Hive
                      status: :review_error }
           end
 
-          Hive::Stages::Base.record_deferred_opencode_observation(
+          Hive::Stages::Base.record_deferred_agent_observation(
             task, cfg, "review.fix", fix_result
           )
 

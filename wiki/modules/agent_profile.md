@@ -19,12 +19,11 @@ in Hive.
 
 Built-in profiles resolve optional provider behavior through
 `Hive::AgentSupport`. The root support catalog is data-only and loads a
-provider namespace only when that provider is selected. Pi is the first
-migrated provider; its message protocol, native model discovery, credential
-shape, plan-review policy, skill discovery/inventory, setup adapter, and
-managed runtime now live together under `Hive::AgentSupport::Pi`. The generic
-agent, artifact, workflow, Web, and skillpack callers retain process custody,
-durable writes, and transitions and dispatch to those facets without Pi
+provider namespace only when that provider is selected. Pi and OpenCode keep
+their runtime, skill/setup, credential, review, and identity decisions under
+their respective `Hive::AgentSupport` namespaces. The generic agent,
+artifact, workflow, Web, and skillpack callers retain process custody, durable
+writes, and transitions and dispatch to those facets without provider
 branches. See [[modules/agent_support]].
 
 ## Supported Agent ABI
@@ -72,11 +71,12 @@ contract.
 
 ### OpenCode process ownership
 
-OpenCode uses the component's additive prepared-invocation ABI while keeping
-process supervision in Hive. `Hive::Agent` prepares a private overlay, starts
-exactly one `opencode run` process with a selected child environment and the
-prepared prompt on owner-private file-backed stdin, captures bounded stdout
-and stderr, and records timeout or cancellation before parsing.
+`Hive::AgentSupport::OpenCode::Execution` decides the OpenCode command,
+private overlay, child environment, and run/export interpretation while using
+`Hive::Agent`'s provider-neutral bounded-process primitive. Hive starts exactly
+one `opencode run` process with the prepared prompt on owner-private
+file-backed stdin, captures bounded stdout and stderr, and records timeout or
+cancellation before parsing.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -281,7 +281,7 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   tool result and legitimately exceed the former 4 MiB short-session ceiling,
   while malformed or larger evidence still fails closed without unbounded
   temporary-file growth.
-  `Hive::SkillCheck::OpenCode` resolves project/user skills and explicitly
+  `Hive::AgentSupport::OpenCode::Skills` resolves project/user skills and explicitly
   configured plugin roots. Setup can atomically add the pinned Compound
   Engineering `3.21.4` plugin entry. Skill-bearing roles verify the selected
   native source before spawn and reject a higher-precedence project/user CE

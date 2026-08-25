@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/skill_check"
+require "hive/agent_support/opencode"
 require "hive/agent_support/pi"
 require "fileutils"
 
@@ -912,7 +913,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
       config = File.join(config_dir, "opencode.json")
       write_file(config, JSON.generate("plugin" => [ "file://#{plugin_entry}" ]))
 
-      resolution = Hive::SkillCheck::OpenCode.resolve(
+      resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
         "/ce-plan",
         configuration_path: config,
         environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
@@ -942,12 +943,12 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
         config,
         JSON.generate(
           "plugin" => [
-            Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+            Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
           ]
         )
       )
 
-      resolution = Hive::SkillCheck::OpenCode.resolve(
+      resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
         "/ce-code-review", project_root: project,
         configuration_path: config,
         environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
@@ -971,7 +972,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
       skill = File.join(plugin_root, "skills", "ce-plan", "SKILL.md")
       write_file(skill, "# plan\n")
 
-      resolution = Hive::SkillCheck::OpenCode.resolve(
+      resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
         "/ce-plan",
         configuration: { "model" => "anthropic/claude-sonnet-4-5" },
         plugins: [ "file://#{plugin_entry}" ],
@@ -988,7 +989,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
       config = File.join(home, ".config", "opencode", "opencode.json")
       write_file(config, "{")
 
-      resolution = Hive::SkillCheck::OpenCode.resolve(
+      resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
         "/ce-brainstorm", configuration_path: config,
         environment: { "HOME" => home }
       )
@@ -1006,14 +1007,14 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
     package = Hive::AgentSkills::Manifest.load
               .package("compound-engineering").native_for("opencode").package
     assert_equal package,
-                 Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+                 Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
   end
 
   def test_prepared_pinned_plugin_is_ready_without_ambient_cache
-    resolution = Hive::SkillCheck::OpenCode.resolve(
+    resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
       "/ce-plan",
       configuration: {
-        "plugin" => [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
+        "plugin" => [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
       },
       environment: {
         "HOME" => "/prepared/home", "XDG_CACHE_HOME" => "/prepared/cache",
@@ -1032,7 +1033,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
         project, ".opencode", "skills", "ce-plan", "SKILL.md"
       )
       write_file(unowned, "# unowned\n")
-      resolution = Hive::SkillCheck::OpenCode.resolve(
+      resolution = Hive::AgentSupport::OpenCode::Skills.resolve(
         "/ce-plan", project_root: project, plugins: [],
         configuration: {}, environment: { "HOME" => home }
       )
@@ -1043,7 +1044,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
       config = File.join(config_dir, "opencode.json")
       [ "[]", JSON.generate("plugin" => [ 42 ]) ].each do |content|
         write_file(config, content)
-        malformed = Hive::SkillCheck::OpenCode.resolve(
+        malformed = Hive::AgentSupport::OpenCode::Skills.resolve(
           "/ce-plan", configuration_path: config,
           environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
         )
@@ -1054,7 +1055,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
       plugin_root = File.join(home, "plugin")
       skill = File.join(plugin_root, "skills", "custom", "SKILL.md")
       write_file(skill, "# custom\n")
-      relative = Hive::SkillCheck::OpenCode.resolve(
+      relative = Hive::AgentSupport::OpenCode::Skills.resolve(
         "/custom", configuration: { "plugin" => [ "../plugin" ] },
         environment: { "HOME" => home, "OPENCODE_CONFIG_DIR" => config_dir }
       )
@@ -1063,10 +1064,10 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
 
       right = File.join(home, "right")
       write_file(right)
-      refute Hive::SkillCheck::OpenCode.send(
+      refute Hive::AgentSupport::OpenCode::Skills.send(
         :same_file?, File.join(home, "missing"), right
       )
-      roots = Hive::SkillCheck::OpenCode.plugin_roots(
+      roots = Hive::AgentSupport::OpenCode::Skills.plugin_roots(
         "file://%", config_dir: config_dir, environment: { "HOME" => home }
       )
       assert_equal 3, roots.length
@@ -1074,7 +1075,7 @@ class HiveSkillCheckOpenCodeTest < Minitest::Test
   end
 
   def test_malformed_invocation_returns_missing
-    status, message = Hive::SkillCheck::OpenCode.verify("garbage")
+    status, message = Hive::AgentSupport::OpenCode::Skills.verify("garbage")
 
     assert_equal :missing, status
     assert_match(/expected/, message)

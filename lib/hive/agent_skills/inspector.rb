@@ -378,7 +378,7 @@ module Hive
         support = Hive::AgentProfiles.support_for(profile)
         inventory = if support
           support::Skills.live_inventory(
-            bin:, native_spec:, issues:,
+            bin:, native_spec:, issues:, root: config_root_for(native_spec),
             run: ->(argv) { run(argv, commands) },
             package_version: method(:package_version_from),
             failure: method(:command_failure)
@@ -388,17 +388,6 @@ module Hive
         when "claude" then claude_inventory(bin, native_spec, commands, issues)
         when "codex" then codex_inventory(bin, native_spec, commands, issues)
         when "grok" then grok_inventory(bin, native_spec, commands, issues)
-        when "opencode"
-          FilesystemInventory.new.inspect(
-            profile: profile, bin: bin, native_spec: native_spec,
-            root: config_root_for(native_spec)
-          ).then do |evidence|
-            issues.concat(evidence.fetch("issues"))
-            {
-              "package" => evidence.fetch("package"),
-              "marketplace" => evidence.fetch("marketplace")
-            }
-          end
         else
           issues << [ "incompatible", "unsupported provider #{native_spec.provider.inspect}" ]
           { "package" => nil, "marketplace" => nil }
@@ -627,10 +616,9 @@ module Hive
 
       def expected_resolution_path?(path, target, native)
         native_spec = @manifest.package(target.package_id).native_for(target.agent)
-        if target.agent == "opencode" &&
-           path == "configured:#{native_spec.package}" &&
-           native.dig("package", "id") == native_spec.package
-          return true
+        support = Hive::AgentProfiles.support_for(target.agent)
+        if support&.const_get(:Skills, false)&.respond_to?(:expected_resolution_path?)
+          return true if support::Skills.expected_resolution_path?(path:, native_spec:, native:)
         end
 
         roots = []
@@ -745,12 +733,7 @@ module Hive
       end
 
       def runner_environment
-        %w[
-          HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
-          OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
-        ].each_with_object({}) do |key, out|
-          out[key] = @environment[key] if @environment.key?(key)
-        end
+        @environment.slice(*Hive::AgentSkills::RUNNER_ENVIRONMENT_KEYS)
       end
 
       def skill_module(agent)
@@ -758,19 +741,18 @@ module Hive
         when "claude" then Hive::SkillCheck::Claude
         when "codex" then Hive::SkillCheck::Codex
         when "grok" then Hive::SkillCheck::Grok
-        when "opencode" then Hive::SkillCheck::OpenCode
         else raise Hive::ConfigError, "unsupported skill resolver for #{agent.inspect}"
         end
       end
 
       def skill_environment(agent)
-        return @environment unless agent.to_s == "opencode"
+        support = Hive::AgentProfiles.support_for(agent)
+        return @environment unless support&.const_get(:Skills, false)&.respond_to?(:environment)
 
-        profile = Hive::AgentProfiles.lookup(:opencode, cfg: @config)
-        path = profile.opencode_configuration_path
-        return @environment unless path
-
-        @environment.merge("OPENCODE_CONFIG" => path)
+        support::Skills.environment(
+          profile: Hive::AgentProfiles.lookup(agent, cfg: @config),
+          environment: @environment
+        )
       end
 
       def parse_version(output)
@@ -783,7 +765,6 @@ module Hive
           File.join(root, ".claude-plugin", "plugin.json"),
           File.join(root, ".codex-plugin", "plugin.json"),
           File.join(root, ".grok-plugin", "plugin.json"),
-          File.join(root, ".opencode", "plugin.json"),
           File.join(root, "package.json")
         ]
         candidates.each do |path|

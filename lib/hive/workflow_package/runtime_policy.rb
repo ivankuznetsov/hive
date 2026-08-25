@@ -305,7 +305,10 @@ module Hive
 
       def self.compile_portable_actor(parsed_spec, scope:, task_root:, directories:,
                                       profile:, environment:, managed_outputs:, prepare:)
-        unless %i[codex pi grok opencode].include?(profile.name)
+        support = Hive::AgentSupport.for(profile)
+        portable = support&.const_defined?(:Runtime, false) ||
+          %i[codex grok].include?(profile.name)
+        unless portable
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
         end
@@ -343,7 +346,6 @@ module Hive
 
         runtime_root = outputs.empty? ? nil : Dir.mktmpdir("hive-managed-actor-")
         schema = outputs.empty? ? nil : output_schema(outputs.keys)
-        support = Hive::AgentSupport.for(profile)
         if support
           return support::Runtime.compile_managed_actor(
             host: self, scope:, task_root:, directories:, profile:, environment:,
@@ -363,12 +365,6 @@ module Hive
             scope, task_root: task_root, directories: directories, profile: profile,
             environment: environment, outputs: outputs, runtime_root: runtime_root, schema: schema,
             tool_names: tool_names
-          )
-        when :opencode
-          portable_policy(
-            scope, task_root: task_root, directories: directories,
-            environment: environment, outputs: outputs, runtime_root: nil,
-            cli_flags: [], executable: nil
           )
         end
       rescue StandardError

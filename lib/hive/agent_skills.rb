@@ -8,6 +8,11 @@ module Hive
   # skills. Hive configuration resolves which projections are needed above
   # this facade; this boundary owns deterministic bytes and stale-safe writes.
   module AgentSkills
+    RUNNER_ENVIRONMENT_KEYS = %w[
+      HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
+      OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
+    ].freeze
+
     autoload :Adapter, "hive/agent_skills/adapters/base"
 
     Projection = CanonicalSkill::Projection

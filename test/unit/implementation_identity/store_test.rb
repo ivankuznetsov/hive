@@ -84,7 +84,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
         ownership_generation: attempt.ownership_generation
       ) do
         store.capture_execute!
-        store.observe_opencode!(
+        store.observe_route!(
           stage: "execute",
           requested_route: "anthropic/claude-sonnet-4-5",
           actual_route: "anthropic/claude-sonnet-4-5-20250929",
@@ -130,7 +130,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
           ownership_generation: attempt.ownership_generation
         ) do
           store.capture_execute!
-          store.observe_opencode!(
+          store.observe_route!(
             stage: "execute", requested_route: "openai/gpt-5.6-sol",
             actual_route: nil, resolution_status: :unobserved,
             outcome_kind: :configuration_failure, usage: nil
@@ -156,7 +156,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       ) do
         store.capture_execute!
         [ [ "session-fix-1", 10 ], [ "session-fix-2", 20 ] ].each do |session_id, input|
-          store.observe_opencode!(
+          store.observe_route!(
             stage: "execute", requested_route: "anthropic/claude-sonnet-4-5",
             actual_route: "anthropic/claude-sonnet-4-5", resolution_status: :matched,
             outcome_kind: :completed, usage: { input:, output: 1 },
@@ -187,14 +187,14 @@ class ImplementationIdentityStoreTest < Minitest::Test
 
       with_attempt_context(**context) do
         assert_raises(Hive::ImplementationIdentity::ResolutionError) do
-          store.observe_opencode!(
+          store.observe_route!(
             stage: "plan", requested_route: "anthropic/claude-sonnet-4-5",
             actual_route: nil, resolution_status: :unobserved,
             outcome_kind: :configuration_failure, usage: nil
           )
         end
         assert_raises(Hive::ImplementationIdentity::ResolutionError) do
-          store.observe_opencode!(
+          store.observe_route!(
             stage: "execute", requested_route: "anthropic/claude-sonnet-4-5",
             actual_route: nil, resolution_status: :unobserved,
             outcome_kind: :configuration_failure, usage: nil
@@ -202,7 +202,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
         end
 
         store.capture_execute!
-        observation = store.observe_opencode!(
+        observation = store.observe_route!(
           stage: "execute", requested_route: "anthropic/claude-sonnet-4-5",
           actual_route: nil, resolution_status: :unobserved,
           outcome_kind: :configuration_failure, usage: nil,
@@ -217,7 +217,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
           },
           {
             outcome_kind: :completed, observation_id: "contains space",
-            error: /invalid OpenCode observation identity/
+            error: /invalid route observation identity/
           },
           {
             outcome_kind: :completed, observation_id: "bad-resolution",
@@ -235,7 +235,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
           }
         ].each do |values|
           raised = assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
-            store.observe_opencode!(
+            store.observe_route!(
               stage: "execute",
               requested_route: "anthropic/claude-sonnet-4-5",
               actual_route: values.fetch(:actual_route, "anthropic/claude-sonnet-4-5"),
@@ -261,7 +261,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       ) do
         store.capture_execute!
         assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
-          store.observe_opencode!(
+          store.observe_route!(
             stage: "execute", requested_route: "openai/gpt-5.6-sol",
             actual_route: nil, resolution_status: :unobserved,
             outcome_kind: :configuration_failure, usage: nil
@@ -285,7 +285,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
         ownership_generation: attempt.ownership_generation
       ) do
         selected = store.resolve_stage!("review.fix")
-        observation = store.observe_opencode!(
+        observation = store.observe_route!(
           stage: "review.fix", requested_route: selected.model,
           actual_route: nil, resolution_status: :unobserved,
           outcome_kind: :configuration_failure, usage: nil

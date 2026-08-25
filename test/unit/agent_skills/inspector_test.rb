@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/agent_skills"
 require "hive/agent_skills/inspector"
+require "hive/agent_support/opencode"
 
 class AgentSkillsInspectorTest < Minitest::Test
   include HiveTestHelper
@@ -473,7 +474,7 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_equal native.package, live.dig("package", "id")
       assert_equal install, live.dig("package", "install_path")
       assert_equal "1.18.16", live.fetch("cli_version")
-      assert_same Hive::SkillCheck::OpenCode,
+      assert_same Hive::AgentSupport::OpenCode::Skills,
                   inspector.send(:skill_module, "opencode")
       assert_equal config_path,
                    inspector.send(:skill_environment, "opencode")
@@ -498,7 +499,7 @@ class AgentSkillsInspectorTest < Minitest::Test
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "opencode")
       executable(bin)
-      plugin = Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+      plugin = Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
       config_root = File.join(dir, ".config", "opencode")
       write(File.join(config_root, "opencode.json"), JSON.generate("plugin" => [ plugin ]))
       cfg = config(agent: "opencode", bin: bin)

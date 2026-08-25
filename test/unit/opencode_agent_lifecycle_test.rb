@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/agent"
 require "hive/agent_profile"
+require "hive/agent_support/opencode"
 require "hive/task"
 
 class OpenCodeAgentLifecycleTest < Minitest::Test
@@ -22,8 +23,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       assert_equal :ok, result.fetch(:status)
       assert_equal :completed, result.fetch(:normalized_outcome_kind)
       assert_equal "Done.", result.fetch(:final_message)
-      assert_equal ROUTE, result.fetch(:requested_opencode_route)
-      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+      assert_equal ROUTE, result.fetch(:requested_route)
+      assert_equal ROUTE, result.fetch(:actual_route)
       assert_equal 5, result.dig(:usage, :input)
       assert_equal 2, result.dig(:usage, :cache_read)
       assert_equal 0, result.dig(:usage, :cache_write)
@@ -85,8 +86,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       result = with_runtime_constant(
         AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
       ) do
-        with_agent_constant(:OPENCODE_EXPORT_CAPTURE_BYTES, 4096) do
-          with_agent_constant(:OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0) do
+        with_execution_constant(:EXPORT_CAPTURE_BYTES, 4096) do
+          with_execution_constant(:INSPECTION_RETRY_DELAY_SECONDS, 0) do
             with_env("ANTHROPIC_API_KEY" => "secret-canary") do
               build_agent(
                 task, fixture,
@@ -186,8 +187,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   def test_malformed_sanitized_export_is_retried_before_failing_the_run
     with_fixture(mode: :inspection_malformed_once) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "inspection-retry-260821-aaaa")
-      result = with_agent_constant(
-        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      result = with_execution_constant(
+        :INSPECTION_RETRY_DELAY_SECONDS, 0
       ) do
         with_env("ANTHROPIC_API_KEY" => "secret-canary") do
           build_agent(
@@ -205,8 +206,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
     with_fixture(mode: :inspection_malformed) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "inspection-malformed-260821-aaaa")
-      result = with_agent_constant(
-        :OPENCODE_INSPECTION_RETRY_DELAY_SECONDS, 0
+      result = with_execution_constant(
+        :INSPECTION_RETRY_DELAY_SECONDS, 0
       ) do
         with_env("ANTHROPIC_API_KEY" => "secret-canary") do
           build_agent(
@@ -221,7 +222,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       assert_match(/remained malformed after 3 attempts/,
                    result.fetch(:inspection_diagnostic))
       calls = File.readlines(fixture.fetch(:calls), chomp: true)
-      assert_equal Hive::Agent::OPENCODE_INSPECTION_JSON_ATTEMPTS,
+      assert_equal Hive::AgentSupport::OpenCode::Execution::INSPECTION_JSON_ATTEMPTS,
                    calls.count { |line| line.start_with?("export ses_") }
     end
   end
@@ -311,8 +312,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       result = with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
 
       assert_equal :ok, result.fetch(:status)
-      assert_equal ROUTE, result.fetch(:requested_opencode_route)
-      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+      assert_equal ROUTE, result.fetch(:requested_route)
+      assert_equal ROUTE, result.fetch(:actual_route)
       refute File.exist?(root)
     end
   end
@@ -328,7 +329,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       result = with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
 
       assert_equal :ok, result.fetch(:status)
-      assert_equal ROUTE, result.fetch(:requested_opencode_route)
+      assert_equal ROUTE, result.fetch(:requested_route)
       run = File.readlines(fixture.fetch(:calls), chomp: true)
                 .find { |line| line.start_with?("run --auto ") }
       assert_includes run, "--model #{ROUTE}"
@@ -348,7 +349,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       agent = build_agent(
         task, fixture, invocation_root: root,
         prompt: "Use /ce-plan to produce the plan.",
-        plugins: [ Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
+        plugins: [ Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN ]
       )
 
       error = assert_raises(Hive::AgentError) do
@@ -411,9 +412,10 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         invocation_root: File.join(fixture.fetch(:dir), "invocation-environment"),
         launch_environment: { "LANG" => "C.explicit" }
       )
+      agent.extend(Hive::AgentSupport::OpenCode::Execution)
 
       selected = with_env("PATH" => "/host/path") do
-        agent.send(:selected_base_environment)
+        agent.send(:base_environment)
       end
       assert_equal "C.explicit", selected.fetch("LANG")
       assert_equal "/host/path", selected.fetch("PATH")
@@ -436,9 +438,15 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       thread.define_singleton_method(:kill) { killed = true }
       io = StringIO.new
 
-      agent.send(:finish_capture_thread, thread, io, capture: capture)
+      agent.send(
+        :finish_capture_thread, thread, io,
+        timeout: Hive::AgentSupport::OpenCode::Execution::CAPTURE_DRAIN_SECONDS,
+        capture: capture
+      )
 
-      assert_equal [ Hive::Agent::OPENCODE_CAPTURE_DRAIN_SECONDS, 0.2 ], joins
+      assert_equal [
+        Hive::AgentSupport::OpenCode::Execution::CAPTURE_DRAIN_SECONDS, 0.2
+      ], joins
       assert_predicate io, :closed?
       assert killed
       assert capture.fetch(:truncated),
@@ -456,14 +464,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       agent.send(:finish_capture_thread, failing_thread, failing_io)
       assert rescue_killed
 
-      cancellation = { cancelled: false }
-      killed_group = nil
-      agent.define_singleton_method(:kill_group) { |pgid| killed_group = pgid }
-      agent.send(:cancel_opencode!, cancellation, 42)
-      assert cancellation.fetch(:cancelled)
-      assert_equal 42, killed_group
-
-      agent.send(:close_opencode_ios, nil, failing_io)
+      agent.send(:close_ios, nil, failing_io)
     end
   end
 
@@ -474,7 +475,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         task, fixture,
         invocation_root: File.join(fixture.fetch(:dir), "invocation-inspection-timeout")
       )
-      result = with_agent_constant(:OPENCODE_INSPECTION_TIMEOUT_SECONDS, 0.05) do
+      result = with_execution_constant(:INSPECTION_TIMEOUT_SECONDS, 0.05) do
         with_env("ANTHROPIC_API_KEY" => "secret-canary") { agent.run! }
       end
 
@@ -512,7 +513,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
       assert_equal :ok, result.fetch(:status)
       assert_equal :completed, result.fetch(:normalized_outcome_kind)
-      assert_equal ROUTE, result.fetch(:actual_opencode_route)
+      assert_equal ROUTE, result.fetch(:actual_route)
     end
   end
 
@@ -526,8 +527,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         task = make_task(
           fixture.fetch(:dir), slug: "#{mode.to_s.tr('_', '-')}-260824-aaaa"
         )
-        result = with_agent_constant(
-          :OPENCODE_EXPORT_CAPTURE_BYTES, capture_limit
+        result = with_execution_constant(
+          :EXPORT_CAPTURE_BYTES, capture_limit
         ) do
           with_env("ANTHROPIC_API_KEY" => "secret-canary") do
             build_agent(
@@ -666,9 +667,11 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       skill_syntax_format: "/%{skill}",
       status_detection_mode: profile_status,
       permission_presets: %w[read-only scoped],
-      opencode_configuration_path: fixture.fetch(:configuration),
-      opencode_credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
-      opencode_plugins: plugins
+      support_configuration: Hive::AgentSupport::OpenCode::Configuration.new(
+        configuration_path: fixture.fetch(:configuration),
+        credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
+        plugins:
+      )
     ).with_overrides("bin" => fixture.fetch(:bin))
     launch = if explicit_launch
       profile.identity_arguments(model: ROUTE, effort: "high")
@@ -679,7 +682,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       { launch_arguments: launch }
     end
     options = {
-      opencode_invocation_root: invocation_root,
+      invocation_root: invocation_root,
       additional_read_roots: [ task.folder ],
       additional_write_roots: []
     }.merge(agent_options)
@@ -850,8 +853,10 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     )
   end
 
-  def with_agent_constant(name, replacement)
-    with_runtime_constant(Hive::Agent, name, replacement) { yield }
+  def with_execution_constant(name, replacement)
+    with_runtime_constant(Hive::AgentSupport::OpenCode::Execution, name, replacement) do
+      yield
+    end
   end
 
   def with_runtime_constant(owner, name, replacement)

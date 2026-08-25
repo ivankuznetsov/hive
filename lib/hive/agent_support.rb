@@ -1,8 +1,10 @@
 module Hive::AgentSupport
-  BUILTINS = { pi: "Pi" }.freeze
+  BUILTINS = { pi: "Pi", opencode: "OpenCode" }.freeze
 
   def self.for(profile)
     name = profile.respond_to?(:name) ? profile.name : profile
+    return if name.nil?
+
     constant = BUILTINS[name.to_sym] or return
 
     require "hive/agent_support/#{name}"

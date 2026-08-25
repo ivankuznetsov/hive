@@ -208,6 +208,25 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", manual.fetch("blocker_owner")
   end
 
+  def test_parked_patrol_fix_outcomes_are_completion_ready_without_an_operator_blocker
+    rows = [
+      [ "rejected", "Rejected (parked)" ],
+      [ "blocked", "Blocked (parked)" ],
+      [ "escalated", "Escalated (parked)" ]
+    ].map do |slug, label|
+      task(action: "needs_input", slug:, marker: "none").merge(
+        "workflow" => "patrol-fix", "action_label" => label, "suggested_command" => nil
+      )
+    end
+
+    projected = project(status_payload(*rows)).fetch("tasks")
+
+    assert_equal [ "completion_ready" ], projected.map { |row| row.fetch("state") }.uniq
+    assert_equal [ "none" ], projected.map { |row| row.fetch("blocker_owner") }.uniq
+    assert_equal [ "terminal_parked" ], projected.map { |row| row.dig("reasons", 0, "code") }.uniq
+    assert_equal rows.map { |row| row.fetch("action_label") }, projected.map { |row| row.fetch("reason") }
+  end
+
   def test_plan_review_state_owner_reason_and_projection_are_preserved
     review = {
       "applicable" => true,

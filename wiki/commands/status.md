@@ -133,6 +133,13 @@ Explicit human input still has higher precedence, so a row that is both
 dependency-blocked and waiting for answers remains `waiting_on_you` while the
 dependency reason stays secondary.
 
+Patrol Fix outcomes parked by the controller are terminal, non-runnable rows.
+The hidden compatibility graph continues to expose their action as
+`needs_input`, but operational status recognizes the closed Patrol shape
+(`marker: none`, no suggested command) and reports `completion_ready` with
+`blocker_owner: none`. Rejected, blocked, and escalated findings therefore
+remain visible for audit without inflating the operator-decision count.
+
 For a daemon-enrolled project with global automatic retry enabled, a real
 `ERROR` or `REVIEW_ERROR` defaults to
 `waiting_on_provider_or_scheduler` with `blocker_owner: scheduler`: Hive owns

@@ -27,6 +27,7 @@ module Hive
     PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
+    PATROL_FIX_WORKFLOW = Hive::PatrolFix::WORKFLOW_ID.to_s.freeze
 
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
                    status_payload_tick_sequence: nil,
@@ -611,6 +612,7 @@ module Hive
       return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
+      return [ "completion_ready", "none" ] if terminal_parked?(row)
       if human_input?(row)
         return [ "waiting_on_provider_or_scheduler", "scheduler" ] if daemon_plan_approval?(project, row)
 
@@ -876,6 +878,12 @@ module Hive
       HUMAN_ACTIONS.include?(row["action"])
     end
 
+    def terminal_parked?(row)
+      row["workflow"] == PATROL_FIX_WORKFLOW && row["action"] == "needs_input" &&
+        row["marker"] == "none" &&
+        row["suggested_command"].to_s.empty?
+    end
+
     def daemon_plan_approval?(project, row)
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
@@ -930,6 +938,8 @@ module Hive
         reasons << reason("provider_quota", "#{provider} quota hold#{retry_text}", "provider")
       elsif daemon_plan_approval?(project, row)
         reasons << reason("daemon_plan_approval", "daemon owns plan approval for this enrolled project", "scheduler")
+      elsif terminal_parked?(row)
+        reasons << reason("terminal_parked", row["action_label"] || "task reached a parked outcome", "task")
       elsif human_input?(row)
         unanswered = row["unanswered_questions"].to_i
         message = unanswered.positive? ? "#{unanswered} unanswered questions" : row["action_label"]

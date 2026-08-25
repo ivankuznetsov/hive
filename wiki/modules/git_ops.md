@@ -66,7 +66,7 @@ Returns `:created`.
 Appends `/.hive-state/` to `<project>/.gitignore` (idempotent: returns `:already` if the line is present). Then:
 
 1. `git -C <project> add .gitignore`.
-2. `git -C <project> commit -m "chore: ignore .hive-state worktree"`.
+2. `git -C <project> commit -m "chore: ignore .hive-state worktree" -- .gitignore` — pathspec-limited so any unrelated files the user had already staged are not swept into the bootstrap commit and stay staged.
 
 This is one of the project-setup commits Hive may make on master/default branch. Runtime task activity still goes to `hive/state`.
 
@@ -83,7 +83,7 @@ Stages the managed llm-wiki context paths written by `Hive::LlmWikiBootstrap`:
 - `wiki/{index,log,gaps,architecture,decisions,dependencies}.md`
 - `raw/notes/.gitkeep`
 
-If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise returns `:nothing_to_commit`. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately.
+Both the staged-emptiness check (`git diff --cached --quiet -- <paths>`) and the commit (`git commit -m "chore: initialize llm-wiki" -- <paths>`) are scoped to exactly those scaffolding paths, so pre-staged unrelated files neither ride along in the bootstrap commit nor mask the check. Returns `:nothing_to_commit` when only the scaffolding paths are unchanged; otherwise commits. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately.
 
 ## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false, after_stage: nil)`
 

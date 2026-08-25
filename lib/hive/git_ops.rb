@@ -192,7 +192,11 @@ module Hive
       separator = existing.empty? || existing.end_with?("\n") ? "" : "\n"
       File.write(gitignore_path, "#{existing}#{separator}#{pattern}\n")
       run_git!("-C", @project_root, "add", ".gitignore")
-      run_git!("-C", @project_root, "commit", "-m", "chore: ignore .hive-state worktree")
+      # Pathspec-limited commit: without `-- .gitignore` git would commit
+      # the whole index, sweeping up unrelated files the user had already
+      # staged into this project-root commit.
+      run_git!("-C", @project_root, "commit", "-m", "chore: ignore .hive-state worktree",
+               "--", ".gitignore")
       :added
     end
 
@@ -224,10 +228,16 @@ module Hive
       return :nothing_to_commit if addable.empty?
 
       run_git!("-C", @project_root, "add", "--", *addable)
-      _, _, status = Open3.capture3("git", "-C", @project_root, "diff", "--cached", "--quiet")
+      # Scope both the staged-emptiness check and the commit to exactly
+      # the scaffolding paths: a whole-index diff/commit would swallow
+      # unrelated files the user had already staged (or report nothing to
+      # commit because their index matched HEAD).
+      _, _, status = Open3.capture3("git", "-C", @project_root,
+                                    "diff", "--cached", "--quiet", "--", *addable)
       return :nothing_to_commit if status.success?
 
-      run_git!("-C", @project_root, "commit", "-m", "chore: initialize llm-wiki")
+      run_git!("-C", @project_root, "commit", "-m", "chore: initialize llm-wiki",
+               "--", *addable)
       :committed
     end
 

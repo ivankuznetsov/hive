@@ -141,6 +141,20 @@ class PruneCommandTest < Minitest::Test
     end
   end
 
+  # Sibling of test_prune_drops_integer_row_and_emits_success_envelope:
+  # without --json, render_text indexed `entry['name']` on the raw removed
+  # row and crashed with TypeError (String into Integer) AFTER the registry
+  # was rewritten. The text path now normalizes through entry_payload too.
+  def test_prune_drops_integer_row_and_renders_text_output
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "registered_projects:\n  - 42\n")
+
+      out, _err = capture_io { Hive::Commands::Prune.new.call }
+      assert_match(/removed 1, kept 0/, out)
+      assert_match(/  - 42 \(\)/, out, "operator must see the dropped row with an empty path")
+    end
+  end
+
   def test_prune_dry_run_json_payload_marks_dry_run_true
     with_tmp_global_config do
       Dir.mktmpdir("hive-live-project") do |live_dir|

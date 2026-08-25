@@ -107,6 +107,12 @@ were made. A retained cache from the previous tick can still provide cheap
 task visibility while a new tick is running, but scheduler completeness
 remains unavailable until that tick completes. Independently supplied status
 graphs still pass the timestamp and per-task scheduler-join fences.
+During a binary/daemon cutover, an older scheduler record has no dedicated
+payload-mtime field. A same-tick cached Patrol Fix controller graph may treat
+only that unavailable timestamp as unknown because the shared tick sequence
+already binds the graph to the decision. Fresh scans and ordinary legacy rows
+keep the mtime comparison, and current snapshots always compare the explicit
+payload timestamp.
 The operational human heading reports the cached graph's age. The operational
 JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
 `age_seconds` separately from the projection timestamp.

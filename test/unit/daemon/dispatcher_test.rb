@@ -4787,6 +4787,30 @@ def test_changed_task_tick_considers_cached_terminal_advances_before_fresh_work
   assert_equal 1, status.fetch_task_count
 end
 
+def test_changed_task_tick_does_not_replay_cached_coding_advance
+  coding_advance = row(
+    slug: "ready-for-pr", stage: "5-open-pr", workflow: "coding",
+    action: "ready_to_open_pr",
+    command: "hive open-pr ready-for-pr --from 5-open-pr"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor = make_dispatcher(rows: [ coding_advance ])
+  dispatcher.send(:refresh_status_index, [ coding_advance ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "new-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
 def test_failed_changed_task_status_keeps_cached_external_capacity
   running = row(
     slug: "external", action: "agent_running", command: nil,

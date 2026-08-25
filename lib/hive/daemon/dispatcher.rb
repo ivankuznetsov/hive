@@ -1273,7 +1273,7 @@ module Hive
         end
         @known_rows_by_key = rows.to_h { |row| [ task_key(row), row ] }
         @advance_rows_by_key = rows.filter_map do |row|
-          [ task_key(row), row ] if Hive::Daemon::Policy.advance?(row.action)
+          [ task_key(row), row ] if terminal_advance?(row)
         end.to_h
       end
 
@@ -1302,7 +1302,7 @@ module Hive
         rows.each { |row| @known_rows_by_key[task_key(row)] = row }
         keys.each { |key| @advance_rows_by_key.delete(key) }
         rows.each do |row|
-          next unless Hive::Daemon::Policy.advance?(row.action)
+          next unless terminal_advance?(row)
 
           @advance_rows_by_key[task_key(row)] = row
         end
@@ -2080,7 +2080,7 @@ module Hive
 
       # Order rows so tasks closer to the end of the pipeline dispatch
       # first: a 7-artifacts row before a 6-review row, an 8-finalize
-      # before both. Within one stage, drain terminal advance actions before
+      # before both. Within one stage, drain terminal Patrol Fix advance actions before
       # starting another agent. This matters for controller workflows whose
       # completed and fresh work share a stage directory: otherwise a large
       # inbox can consume every slot before an accepted task moves forward.
@@ -2095,7 +2095,20 @@ module Hive
       end
 
       def dispatch_action_rank(action)
-        Hive::Daemon::Policy.advance?(action) ? 0 : 1
+        terminal_advance_action?(action) ? 0 : 1
+      end
+
+      # Coding's ready_to_* actions initiate their next stage and may require
+      # an agent run. Only the generic Patrol Fix approval is a terminal
+      # controller transition that must outrank fresh work in the same stage.
+      # Treating every Policy.advance? action as terminal makes a fast tick
+      # replay a cached coding transition after an unrelated state change.
+      def terminal_advance?(row)
+        terminal_advance_action?(row.action)
+      end
+
+      def terminal_advance_action?(action)
+        action == "ready_to_advance"
       end
 
       # Split an already-prioritized status snapshot around its final
@@ -2103,9 +2116,7 @@ module Hive
       # lanes keeps same-stage fresh work from bypassing accepted work while
       # retaining later-stage-first ordering.
       def dispatch_priority_partitions(rows)
-        cutoff = rows.rindex do |row|
-          Hive::Daemon::Policy.advance?(row.action)
-        end
+        cutoff = rows.rindex { |row| terminal_advance?(row) }
         return [ [], rows ] unless cutoff
 
         [ rows.take(cutoff + 1), rows.drop(cutoff + 1) ]
@@ -2120,13 +2131,13 @@ module Hive
       end
 
       # A bounded status refresh may contain only a newly-ready run row while
-      # an unchanged accepted row remains in the last full-scan cache. Merge
-      # those cached advance contenders with the changed non-advance rows so
+      # an unchanged accepted Patrol Fix row remains in the last full-scan cache. Merge
+      # those cached terminal contenders with the changed non-terminal rows so
       # the same ordering applies without reading another task file or
       # rebuilding the complete status graph.
       def incremental_dispatch_rows(changed_rows)
         fresh_rows = changed_rows.reject do |row|
-          Hive::Daemon::Policy.advance?(row.action)
+          terminal_advance?(row)
         end
         dispatch_priority_order(@advance_rows_by_key.values + fresh_rows)
       end

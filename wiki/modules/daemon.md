@@ -149,7 +149,9 @@ probe: non-blocking child reap plus a rotating batch of at most 64 state-file
 mtime stats from the last full status scan. A child exit identifies its exact
 tracked task; an mtime change identifies the task owning that file. The daemon
 then asks status for only those project/slug rows and applies only their
-per-task heal/dispatch path. Every refreshed row with a dependency fails closed
+per-task heal/dispatch path. A cached `ready_to_advance` Patrol Fix approval
+can still claim capacity before a fresh same-stage row; coding `ready_to_*`
+transitions are never replayed from that cache. Every refreshed row with a dependency fails closed
 until authoritative dependency admission runs, so the incremental path does not
 build or traverse a dependency graph. Pure live-agent heartbeat refreshes reuse
 the last full attempt snapshot; a row that could heal or dispatch reconciles

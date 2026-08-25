@@ -409,6 +409,40 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_unreadable_native_configuration_has_no_inferred_default_route
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "missing-config-260825-aaaa")
+      agent = build_agent(task, fixture)
+      agent.extend(Hive::AgentSupport::OpenCode::Execution)
+      configuration = Hive::AgentSupport::OpenCode::Configuration.new(
+        configuration_path: File.join(fixture.fetch(:dir), "missing.json")
+      )
+
+      assert_nil agent.send(:configured_default_route, configuration)
+    end
+  end
+
+  def test_inline_native_configuration_is_copied_before_launch_enrichment
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "inline-config-260825-aaaa")
+      agent = build_agent(task, fixture)
+      agent.extend(Hive::AgentSupport::OpenCode::Execution)
+      source = {
+        "model" => ROUTE,
+        "provider" => { "anthropic" => { "npm" => "@ai-sdk/anthropic" } }
+      }
+      configuration = Hive::AgentSupport::OpenCode::Configuration.new(
+        configuration: source
+      )
+
+      content = agent.send(:native_configuration_content, configuration)
+
+      assert_equal source, content
+      refute_same source, content
+      refute_same source.fetch("provider"), content.fetch("provider")
+    end
+  end
+
   def test_capture_thread_shutdown_bounds_hung_and_defensive_io_paths
     with_fixture do |fixture|
       agent = build_agent(

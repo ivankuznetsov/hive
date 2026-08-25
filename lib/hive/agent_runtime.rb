@@ -184,7 +184,6 @@ module Hive
 
     def prepare!(profile, launch_binding: nil, env: ENV)
       if profile.is_a?(OpenCodePreparationRequest)
-        runtime = runtime_profile(profile.request.profile) || profile.request.profile
         return AgentCliRuntime.prepare!(profile, env: env)
       end
 

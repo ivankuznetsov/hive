@@ -179,6 +179,13 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
+  def test_reserved_optional_input_name_prefixes_are_rejected
+    assert Hive::WorkflowPackage::InputName.valid?("LOADER_FLAGS")
+    %w[LD_AUDIT LD_PROFILE LD_LIBRARY_PATH LD_PRELOAD DYLD_INSERT_LIBRARIES].each do |name|
+      refute Hive::WorkflowPackage::InputName.valid?(name), name
+    end
+  end
+
   def test_registry_actor_contract_diagnostics_cover_nested_permissions_and_identity
     reviewer = Hive::Workflow::Reviewer.new(
       name: "reviewer", agent: "claude",

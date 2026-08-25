@@ -404,8 +404,12 @@ class AgentProfilesTest < Minitest::Test
 
   def test_pi_profile_leaves_its_terminal_protocol_to_agent_support
     pi = Hive::AgentProfiles.lookup(:pi)
+    support = Hive::AgentSupport.for(pi)
 
     assert_nil pi.structured_output_protocol
+    assert_equal [ "openrouter", "anthropic/claude-sonnet-4" ],
+                 support.execution_identity("openrouter/anthropic/claude-sonnet-4")
+    assert_equal [ nil, "claude-sonnet-4" ], support.execution_identity("claude-sonnet-4")
   end
 
   def test_grok_profile_verifies_native_plugin_skills

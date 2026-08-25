@@ -2178,6 +2178,16 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_wait_for_process_tolerates_an_already_reaped_child
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+
+      with_replaced_singleton_method(Process, :wait2, ->(*) { raise Errno::ECHILD }) do
+        assert_equal [ false, nil ], agent.send(:wait_for_process, 123, 123, 5)
+      end
+    end
+  end
+
   def test_state_file_marker_nil_exit_without_marker_sets_error
     with_tmp_dir do |dir|
       task = make_task(dir)

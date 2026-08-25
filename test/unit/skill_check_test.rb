@@ -703,6 +703,19 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_present_via_pi_scoped_package_global_npm_root
+    with_fake_home do |home|
+      package = "#{home}/.pi/npm/node_modules/@scope/some-package"
+      write_file("#{package}/package.json", "{}")
+      write_file("#{package}/skills/foo/SKILL.md")
+
+      status, msg = Hive::AgentSupport::Pi::Skills.verify("/skill:foo")
+
+      assert_equal :present, status
+      assert_equal "#{package}/skills/foo/SKILL.md", msg
+    end
+  end
+
   def test_present_via_pi_package_npm_root_g
     with_fake_home do |_home|
       with_tmp_dir do |npm_root|

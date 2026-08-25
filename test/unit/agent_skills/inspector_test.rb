@@ -53,6 +53,10 @@ class AgentSkillsInspectorTest < Minitest::Test
     cfg
   end
 
+  def native_spec(provider)
+    Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for(provider)
+  end
+
   def claude_responses(bin:, plugins:, marketplaces:, version: "2.1.179")
     {
       [ bin, "--version" ] => result(stdout: "#{version} (Claude Code)\n"),
@@ -208,6 +212,20 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_equal "incompatible", row.health
       assert runner.calls.all? { |call| call.fetch(:argv).first == bin }
     end
+  end
+
+  def test_claude_failed_native_inventory_commands_are_incompatible
+    failed = result(stdout: "[]", stderr: "failed", status: 1)
+    issues = []
+    Hive::AgentSupport.for(:claude)::Skills.live_inventory(
+      bin: "claude", native_spec: native_spec("claude"), issues:,
+      run: ->(*) { failed }, failure: ->(response) { response.stderr }
+    )
+
+    assert_equal [
+      "claude plugin inventory failed: failed",
+      "claude marketplace inventory failed: failed"
+    ], issues.map(&:last)
   end
 
   def test_native_claim_without_runtime_resolution_remains_missing
@@ -984,6 +1002,23 @@ class AgentSkillsInspectorTest < Minitest::Test
         assert_match(/entries must be objects/, evidence.fetch("issues").first.last)
       end
     end
+  end
+
+  def test_grok_failed_native_inventory_commands_are_incompatible
+    failed = ->(argv, **) do
+      stdout = argv[1] == "inspect" ? JSON.generate("plugins" => [], "skills" => []) : "[]"
+      result(stdout:, stderr: "failed", status: 1)
+    end
+    issues = []
+    Hive::AgentSupport.for(:grok)::Skills.live_inventory(
+      bin: "grok", native_spec: native_spec("grok"), issues:, project_root: "/project",
+      run: failed, failure: ->(response) { response.stderr }
+    )
+
+    assert_equal [
+      "grok plugin inventory failed: failed",
+      "grok runtime inspection failed: failed"
+    ], issues.map(&:last)
   end
 
   def test_available_unmanaged_native_reviewer_is_non_blocking

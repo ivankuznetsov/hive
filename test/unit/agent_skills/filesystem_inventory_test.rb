@@ -61,6 +61,12 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
         {},
         { "enabledPlugins" => { "package@market" => "yes" } },
         /enabledPlugins entry .* must be boolean/
+      ],
+      [
+        { "plugins" => { "package@market" => {} } },
+        {},
+        {},
+        /entry .* must be an array/
       ]
     ]
 
@@ -208,8 +214,6 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
     )
 
     with_tmp_dir do |root|
-      write_json(File.join(root, "installed-plugins", "registry.json"), "repos" => {})
-
       missing = inspect_provider(spec, root)
 
       assert_empty missing.fetch("issues")
@@ -229,6 +233,15 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
       malformed = inspect_provider(spec, root)
 
       assert_match(/plugin "compound-engineering" must be an object/, malformed.fetch("issues").first.last)
+    end
+  end
+
+  def test_opencode_missing_config_is_an_empty_inventory
+    with_tmp_dir do |root|
+      result = inspect_provider(native_spec(provider: "opencode"), root)
+
+      assert_empty result.fetch("issues")
+      assert_nil result.fetch("package")
     end
   end
 

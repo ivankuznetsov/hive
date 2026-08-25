@@ -154,6 +154,11 @@ class AgentProfileTest < Minitest::Test
       opencode_configuration(plugins: %w[plugin plugin])
     end
     assert_raises(ArgumentError) do
+      opencode_configuration(
+        credential_environment_keys: %w[OPENAI_API_KEY OPENAI_API_KEY]
+      )
+    end
+    assert_raises(ArgumentError) do
       opencode_configuration(configuration: [])
     end
     assert_raises(ArgumentError) do

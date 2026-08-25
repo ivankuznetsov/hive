@@ -1106,19 +1106,18 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       package = File.join(dir, "package")
       FileUtils.mkdir_p([ task, package ])
 
-      policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-        "read-only",
-        task_folder: task,
-        package_root: package,
-        profile: Hive::AgentProfiles.lookup(:codex),
-        prepare: false
-      )
-      refute policy.host_outputs?
-      assert_equal "prompt", policy.decorate_prompt("prompt")
-      assert_empty policy.cli_flags
-      assert_nil policy.executable
-      assert_empty policy.cleanup_paths
-      assert_equal({ status: :ok }, policy.materialize_outputs!(status: :ok))
+      %i[codex pi].each do |profile_name|
+        policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          "read-only", task_folder: task, package_root: package,
+          profile: Hive::AgentProfiles.lookup(profile_name), prepare: false
+        )
+        refute policy.host_outputs?
+        assert_equal "prompt", policy.decorate_prompt("prompt")
+        assert_empty policy.cli_flags
+        assert_nil policy.executable
+        assert_empty policy.cleanup_paths
+        assert_equal({ status: :ok }, policy.materialize_outputs!(status: :ok))
+      end
 
       [ "not-an-array", [ "" ], [ "bad\0root" ] ].each do |roots|
         error = assert_raises(Hive::ConfigError) do

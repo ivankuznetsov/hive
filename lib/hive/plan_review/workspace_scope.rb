@@ -59,22 +59,13 @@ module Hive
         }
       end
 
-      def unrestricted_kwargs
-        {
-          permission_mode: nil,
-          allowed_tools: nil,
-          disallowed_tools: nil
-        }
-      end
-
       # Edit(path) alone: Claude does not enforce Write(path), so granting it
       # would be a rule that reads like a restriction and enforces nothing.
       def write_tools(workspace)
         [ "Edit(#{File.expand_path(workspace.to_s)}/**)" ]
       end
 
-      private_class_method :unrestricted_kwargs,
-                           :workspace_write_kwargs, :write_tools
+      private_class_method :workspace_write_kwargs, :write_tools
     end
   end
 end

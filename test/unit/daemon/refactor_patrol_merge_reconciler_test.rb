@@ -1311,6 +1311,17 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
         )
       end
       assert_equal retry_at, error.retry_at
+
+      intake.define_singleton_method(:ingest_for) do |*_, **|
+        raise Hive::RefactorPatrol::MergeClassifier::Conflict, "snapshot changed"
+      end
+      conflict = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::GithubFailure) do
+        intake.send(
+          :ingest_step, entry_for(dir), enabled_cfg, previous, progress,
+          now: T0, timeout_sec: 1
+        )
+      end
+      assert_nil conflict.retry_at
     end
   end
 
@@ -1416,7 +1427,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       "publication_provenance" => { "kind" => "none", "marker" => nil },
       "changed_files" => 1,
       "files" => [ {
-        "path" => "lib/pr_#{number}.rb", "status" => "modified", "patch" => "@@ -1 +1 @@"
+        "path" => "lib/pr_#{number}.rb", "status" => "modified"
       } ]
     )
   end

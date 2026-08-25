@@ -66,6 +66,9 @@ then owns implementation, validation, review, and publication.
 `Hive::Daemon::RefactorPatrolMergeReconciler` turns eligible merged PRs into
 immutable discovery manifests. `Hive::Daemon::RefactorPatrolScheduler` handles
 classification, discovery, checkpointing, retries, and post-merge bookkeeping.
+Those manifests carry path/status/rename metadata rather than GitHub patch
+bodies; the pinned merge worktree is the source of code truth, and patch size
+does not gate reconciliation.
 Scheduled current-main scans use the Architecture Patrol launch lane and
 reserve their completed dispositions through the same source adapter.
 

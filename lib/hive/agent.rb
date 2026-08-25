@@ -738,8 +738,7 @@ module Hive
 
     def prepare_native_opencode_invocation
       validate_opencode_launch_channels!
-      model, effort = opencode_route_and_effort
-      route = AgentRuntime::Route.parse(model)
+      route = requested_opencode_route
       executable = @runtime_policy&.executable || @profile.bin
       executable = isolated_executable(executable) if @isolate_environment
       invocation = AgentRuntime.compile(AgentRuntime::Request.new(
@@ -795,13 +794,11 @@ module Hive
       end
     end
 
-    def opencode_route_and_effort
+    def requested_opencode_route
       model = @routing_arguments&.model || @launch_arguments&.model ||
         opencode_identity_argument("--model")
       model ||= opencode_configured_default_route
-      effort = @routing_arguments&.effort || @launch_arguments&.effective_effort ||
-        opencode_identity_argument("--variant")
-      [ model, effort ]
+      AgentRuntime::Route.parse(model)
     end
 
     def opencode_configured_default_route

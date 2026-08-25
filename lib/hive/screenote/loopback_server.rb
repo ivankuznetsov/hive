@@ -6,13 +6,13 @@ module Hive
   module Screenote
     class LoopbackServer
       DEFAULT_TIMEOUT_SEC = 300
-      # Per-read deadline and header byte cap for the callback request.
-      # IO.select only guards `accept`; without the deadline a stalled or
-      # partial local request could keep `socket.gets` blocked indefinitely
-      # (a local DoS of the connect flow). MAX_REQUEST_BYTES bounds BOTH the
-      # cumulative header bytes AND each individual `socket.gets` read (it is
-      # passed as the gets length limit), so no single unterminated line is
-      # read wholesale into memory.
+      # Per-connection read deadline and header byte cap for the callback
+      # request. IO.select only guards `accept`; without the deadline a
+      # stalled or partial local request could keep the header read blocked
+      # indefinitely (a local DoS of the connect flow). MAX_REQUEST_BYTES
+      # bounds the cumulative header bytes. A read failure on ONE connection
+      # (deadline expiry, oversize headers, EOF, reset) is CONNECTION-fatal:
+      # that socket is dropped and the wait keeps going for the real redirect.
       READ_TIMEOUT_SEC = 5
       MAX_REQUEST_BYTES = 64 * 1024
 
@@ -39,7 +39,18 @@ module Hive
         loop do
           socket = accept_socket
           begin
-            path, params = read_callback_request(socket)
+            path, params =
+              begin
+                read_callback_request(socket)
+              rescue Hive::Error, EOFError, IOError, SystemCallError => e
+                # A per-connection read failure — silent connect, stalled or
+                # slow-drip request, oversized headers, reset — must NOT abort
+                # the entire OAuth wait: drop this connection (the ensure
+                # closes it) and keep accepting until the real /callback
+                # arrives. Only accept-level timeouts remain flow-fatal.
+                warn "[hive] dropping an unusable Screenote loopback connection: #{e.message}"
+                next
+              end
             unless callback_path?(path)
               write_response(socket, not_found_page, status: "404 Not Found")
               next
@@ -85,17 +96,8 @@ module Hive
       # Returns [path, params] for the request. `path` lets the caller drop
       # non-`/callback` prefetches; `params` is the decoded query string.
       def read_callback_request(socket)
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @read_timeout_sec
-        request_line = read_line(socket, deadline).to_s
-        bytes = request_line.bytesize
-        while (line = read_line(socket, deadline))
-          break if line == "\r\n" || line == "\n"
-
-          bytes += line.bytesize
-          if bytes > MAX_REQUEST_BYTES
-            raise Hive::Error, "Screenote OAuth callback request headers exceeded #{MAX_REQUEST_BYTES} bytes"
-          end
-        end
+        head = read_head(socket)
+        request_line = head.split(/\r?\n/, -1).fetch(0, "")
         path = request_line.split.fetch(1, "/")
         uri = URI("http://#{host}#{path}")
         [ uri.path, URI.decode_www_form(uri.query.to_s).to_h ]
@@ -116,18 +118,33 @@ module Hive
         path == "/callback"
       end
 
-      # Read one line with a deadline so a stalled local client cannot block
-      # the connect flow forever. The MAX_REQUEST_BYTES gets-limit caps a
-      # single unterminated line so it cannot be slurped wholesale into
-      # memory. Returns nil at EOF (caller ends its loop).
-      def read_line(socket, deadline)
-        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        raise Hive::Error, "timed out reading Screenote OAuth callback request" if remaining <= 0
+      # Read the full request head through the blank line that terminates the
+      # headers. Every chunk read is guarded by IO.select against the same
+      # deadline, so a client that sends a few bytes and then stalls can never
+      # block past the deadline (a plain `socket.gets` blocked indefinitely
+      # once select had reported readable). Raises Hive::Error at deadline
+      # expiry or when the cumulative header bytes exceed MAX_REQUEST_BYTES.
+      def read_head(socket)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @read_timeout_sec
+        head = +""
+        loop do
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          raise Hive::Error, "timed out reading Screenote OAuth callback request" if remaining <= 0
 
-        ready = IO.select([ socket ], nil, nil, remaining)
-        raise Hive::Error, "timed out reading Screenote OAuth callback request" unless ready
+          ready = IO.select([ socket ], nil, nil, remaining)
+          raise Hive::Error, "timed out reading Screenote OAuth callback request" unless ready
 
-        socket.gets("\n", MAX_REQUEST_BYTES)
+          begin
+            head << socket.readpartial(4096)
+          rescue EOFError
+            return head
+          end
+          if head.bytesize > MAX_REQUEST_BYTES
+            raise Hive::Error, "Screenote OAuth callback request headers exceeded #{MAX_REQUEST_BYTES} bytes"
+          end
+          break if head.match?(/\r\n\r\n|\n\n|\r\r/)
+        end
+        head
       end
 
       def write_response(socket, body, status: "200 OK")

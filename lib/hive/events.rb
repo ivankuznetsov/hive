@@ -84,12 +84,17 @@ module Hive
     end
 
     def truncate_message(message)
-      return message if message.bytesize <= MAX_MESSAGE_BYTES
+      # Sanitize encoding on every message, not just oversized ones:
+      # reinterpret raw bytes as UTF-8 and drop invalid sequences so
+      # JSON.generate never sees malformed input (binary-encoded command
+      # output can carry lone continuation bytes within any size budget).
+      sanitized = message.dup.force_encoding(Encoding::UTF_8).scrub!("")
+      return sanitized if sanitized.bytesize <= MAX_MESSAGE_BYTES
 
       # Trim by byte budget while staying on a valid UTF-8 boundary so the
       # JSON generator never sees malformed UTF-8 mid-character.
       budget = MAX_MESSAGE_BYTES - MESSAGE_TRUNCATION_SUFFIX.bytesize
-      trimmed = message.byteslice(0, budget).to_s
+      trimmed = sanitized.byteslice(0, budget).to_s
       trimmed.scrub!("")
       "#{trimmed}#{MESSAGE_TRUNCATION_SUFFIX}"
     end

@@ -33,6 +33,35 @@ class TaskResolverTest < Minitest::Test
     end
   end
 
+  # Regression: Kernel#Integer without an explicit base treats a leading "0"
+  # as an octal prefix, so "010" silently resolved to task 8 and "09" raised
+  # ArgumentError. Numeric targets are decimal digit strings and must parse
+  # strictly as base 10.
+  def test_zero_padded_numeric_target_resolves_decimal_id
+    with_tmp_global_config do |home|
+      project_root = File.join(home, "project-a")
+      eight = task_folder(project_root, "2-brainstorm", "task-eight")
+      ten = task_folder(project_root, "2-brainstorm", "task-ten")
+      Hive::TaskMeta.write(eight, id: 8, slug: "task-eight", display_name: nil)
+      Hive::TaskMeta.write(ten, id: 10, slug: "task-ten", display_name: nil)
+      write_registered_project(home, "project-a", project_root)
+
+      assert_equal ten, Hive::TaskResolver.new("010").resolve.folder
+      assert_equal ten, Hive::TaskResolver.new("0010").resolve.folder
+    end
+  end
+
+  def test_leading_zero_numeric_target_below_octal_eight_resolves_decimal_id
+    with_tmp_global_config do |home|
+      project_root = File.join(home, "project-a")
+      nine = task_folder(project_root, "2-brainstorm", "task-nine")
+      Hive::TaskMeta.write(nine, id: 9, slug: "task-nine", display_name: nil)
+      write_registered_project(home, "project-a", project_root)
+
+      assert_equal nine, Hive::TaskResolver.new("09").resolve.folder
+    end
+  end
+
   def test_numeric_target_respects_stage_filter
     with_tmp_global_config do |home|
       project_root = File.join(home, "project-a")

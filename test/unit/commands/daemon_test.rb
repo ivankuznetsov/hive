@@ -70,13 +70,15 @@ class HiveCommandsDaemonTest < Minitest::Test
     Hive::Commands::Daemon.new(subcommand, **{ hive_home: @home }.merge(kwargs))
   end
 
-  def write_pid_payload(pid: 4242, process_start_time: "start-time")
+  def write_pid_payload(pid: 4242, process_start_time: "start-time",
+                        runtime: Hive::RuntimeIdentity.new.to_h)
     File.write(
       File.join(@home, ".daemon.pid"),
       {
         "pid" => pid,
         "process_start_time" => process_start_time,
-        "started_at" => Time.now.utc.iso8601
+        "started_at" => Time.now.utc.iso8601,
+        "runtime" => runtime
       }.to_yaml
     )
   end
@@ -518,6 +520,8 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal "/home/u/.local/bin/hive", doc.fetch("installed_binary")
     assert_equal "/home/u/.local/bin/hive", doc.fetch("expected_binary")
     assert_equal "none", doc.fetch("binary_drift")
+    assert_equal "release", doc.dig("runtime", "channel")
+    assert_equal Hive::VERSION, doc.dig("runtime", "display_version")
     # Existing fields must survive the merge.
     assert_equal true, doc.fetch("running")
     assert_equal 1234, doc.fetch("pid")
@@ -525,6 +529,59 @@ class HiveCommandsDaemonTest < Minitest::Test
     require "json_schemer"
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-status"))))
     assert_empty schema.validate(doc).map { |error| error["error"] }
+  end
+
+  def test_status_report_identifies_the_exact_dogfood_runtime
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    runtime = Hive::RuntimeIdentity.new(
+      environment: {
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_BUILD_SHA" => sha,
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+      }
+    ).to_h
+    write_pid_payload(pid: 1234, runtime: runtime)
+    report = Hive::Daemon::StatusReport.new(hive_home: @home, environment: {})
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    report.define_singleton_method(:probe_service_state) do
+      {
+        "service_installed" => false,
+        "service_enabled" => false,
+        "unit_path" => nil,
+        "installed_binary" => nil,
+        "expected_binary" => nil
+      }
+    end
+    report.define_singleton_method(:update_nudge_payload) { nil }
+
+    runtime = report.payload.fetch("runtime")
+    assert_equal "dogfood", runtime.fetch("channel")
+    assert_equal sha, runtime.fetch("build_sha")
+    assert_equal "hive-dogfood-0864de726", runtime.fetch("deployment_id")
+  end
+
+  def test_status_report_does_not_stamp_the_observer_identity_onto_a_legacy_daemon
+    write_pid_payload(pid: 1234, runtime: nil)
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: @home,
+      environment: {
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_BUILD_SHA" => "a" * 40,
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-aaaaaaaaa"
+      }
+    )
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    report.define_singleton_method(:probe_service_state) do
+      {
+        "service_installed" => false, "service_enabled" => false, "unit_path" => nil,
+        "installed_binary" => nil, "expected_binary" => nil
+      }
+    end
+    report.define_singleton_method(:update_nudge_payload) { nil }
+
+    assert_equal "unknown", report.payload.dig("runtime", "channel")
   end
 
   def test_status_probe_uses_explicit_runtime_hive_bin_instead_of_private_path_wrapper
@@ -709,7 +766,10 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
 
     assert_equal(
-      { running: false, pid: nil, uptime_sec: nil },
+      {
+        running: false, pid: nil, uptime_sec: nil,
+        runtime: Hive::RuntimeIdentity.unknown, runtime_observable: false
+      },
       report.running_state(max_pid_bytes: 4 * 1024)
     )
     assert_raises(Errno::EIO) { report.running_state }

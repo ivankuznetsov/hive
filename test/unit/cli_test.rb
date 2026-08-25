@@ -162,6 +162,30 @@ class HiveCliTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_version_json_identifies_the_active_dogfood_build
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    out, _err = with_env(
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    ) do
+      capture_io { Hive::CLI.start([ "version", "--json" ]) }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-version", payload.fetch("schema")
+    assert_equal 1, payload.fetch("schema_version")
+    assert_equal true, payload.fetch("ok")
+    assert_equal "dogfood", payload.dig("runtime", "channel")
+    assert_equal sha, payload.dig("runtime", "build_sha")
+    assert_equal "#{Hive::VERSION}+dogfood.0864de726",
+                 payload.dig("runtime", "display_version")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-version"))))
+    assert_empty schema.validate(payload).to_a
+  end
+
   def test_init_forget_prune_update_uninstall_and_migrate_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])

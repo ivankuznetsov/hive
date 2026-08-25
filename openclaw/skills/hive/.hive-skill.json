@@ -5,10 +5,10 @@
   "platform": "openclaw",
   "invocation": "/hive",
   "skill_version": "0.1.5",
-  "canonical_digest": "e1144091dfb9de0a82624d60e0c4b168002bfd6409ade636444cd41283affb3b",
+  "canonical_digest": "1cf1e369f380cf92faaedfcd203323436e8f755f96942f1e6b4d0c7cf11de4e6",
   "hive_version": "0.7.2",
   "files": {
-    "SKILL.md": "a32be5825c5c44efee157621b9a460779044e2b0ed4f1da122cad73a47a01c9e",
+    "SKILL.md": "fe86ef971ddf88208debc42fa73c1bfb7b1e54948ceff752cbc154b7cb23cb96",
     "references/brainstorm-answering-scenarios.md": "331f7908ca824b02c343daddcb3f9f161f02136d4825bbf92e4dfcd7cab85b6f",
     "references/brainstorm-answering.md": "02dbd0a13197a7a15f89b8b1a7913bc4931e92b08876310758bbd82dfbcd95de",
     "references/patrol-health.md": "050c8e7d165f10cccf0caa1615900d9120c4ba8438b980434dbc5df2b1f3ebc9",

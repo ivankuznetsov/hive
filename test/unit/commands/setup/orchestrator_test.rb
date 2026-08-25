@@ -158,7 +158,8 @@ class SetupOrchestratorTest < Minitest::Test
                     ->(**_kw) { agent_setup }) do
                     require "hive/web/service_status"
                     status = web_installer.service_state.merge(
-                      "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
+                      "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567",
+                      "runtime" => Hive::RuntimeIdentity.unknown
                     )
                     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                       ->(**_kw) { status }) do
@@ -246,6 +247,10 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal 1, payload["schema_version"]
     assert_equal "managed_service", payload["mode"]
     assert_equal true, payload["ok"]
+    refute payload.fetch("service").key?("runtime")
+    refute payload.fetch("phases").find { |phase| phase["name"] == "web_service" }.key?("runtime")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-setup"))))
+    assert_empty schema.validate(payload).to_a
     names = payload["phases"].map { |p| p["name"] }
     assert_equal %w[diagnostics agent_skills web_bundle daemon_service babysitter_service enroll web_service web], names,
                  "phases must be recorded in provisioning order"

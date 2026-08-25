@@ -1197,3 +1197,15 @@ it through a hidden internal transport. Separate consumer-specific projection
 PRs must remove those fields and then delete the v7 schema/producer entirely;
 this PR deliberately does not combine those independent scheduler and UI
 optimizations.
+
+## Dogfood runtime identity awaits installed replacement proof (2026-08-25)
+
+Source contracts now expose the active runtime channel, exact build SHA, and
+deployment ID through version, operational, daemon, and web status. The
+canonical Hive skill tells plugins to use the normal `hive` command and not
+bypass dogfood for another binary, registry, daemon, or web service. The
+machine-local dogfood launcher and service overrides are deployment-owned and
+not stored in this repository, so this remains unproven as an end-to-end
+installed flow until a later authorized dogfood cutover supplies all three
+`HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
+unchanged installed plugin observes the matching status identity.

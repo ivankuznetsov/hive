@@ -102,6 +102,9 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     text = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files.values.join("\n")
 
     assert_includes text, "hive status --operational --json"
+    assert_includes text, "runtime.channel"
+    assert_includes text, "normal `hive` command is the active installation"
+    assert_includes text, "Do not bypass dogfood"
     assert_includes text, "hive task TARGET --project NAME --json"
     assert_includes text, "hive task TARGET --project NAME --log"
     assert_includes text, "receipt-correlated log reference"

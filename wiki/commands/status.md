@@ -1,9 +1,9 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-24
+updated: 2026-08-25
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -20,9 +20,9 @@ terminal history. The former public full-fleet status surface is removed.
 | Invocation | Contract |
 |---|---|
 | `hive status` | Bounded human daemon/liveness snapshot. |
-| `hive status --json` | `hive-running-status.v1`: daemon health plus only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. |
+| `hive status --json` | `hive-running-status.v1`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. |
 | `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. V4 adds a required nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
+| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
@@ -73,7 +73,14 @@ proved it. V1 deliberately emits `marker: null` rather than reading state
 files. It does not expose or reinterpret the full graph's `current_attempt`
 string. Clients must use the explicit liveness object.
 
-The producer returns at most 32 rows and guarantees that the encoded document,
+When a daemon is live, the producer carries the runtime identity attested by
+that daemon's ownership-checked PID receipt. A missing or malformed legacy
+receipt projects `unknown` rather than borrowing the observing CLI's identity.
+An unreadable or malformed receipt also projects `unknown` when daemon liveness
+cannot be established. When the daemon is observably absent, the runtime belongs
+to the observing CLI itself. This
+lets compact plugin calls distinguish release and dogfood without mislabeling
+a mixed cutover or expanding the task graph. The producer returns at most 32 rows and guarantees that the encoded document,
 including its trailing newline, is at most 65,536 bytes. `count` is the number
 returned. `observed_count` and `omitted_count` are exact when their paired
 `*_exact` flags are true; after a scan cap they are lower-bound/known-observed
@@ -159,7 +166,10 @@ an idle verdict. Unclassifiable rows remain `unknown`; a partial snapshot may
 still report a stronger directly observed active state, but never claims idle
 from missing evidence.
 
-`hive-operational-status.v4` includes summary/state counts, daemon identity and
+`hive-operational-status.v4` includes the task-graph producer's `runtime`
+identity (the daemon-recorded identity for a cache hit, or the CLI identity
+for a fresh scan),
+summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
 the required bounded `attempt_storage` cell for the current physical
 `attempts/v4` layout, per-task liveness/freshness,

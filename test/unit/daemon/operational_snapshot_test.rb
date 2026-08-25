@@ -155,6 +155,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       cache = cache_reader.read(snapshot: complete, now: T0 + 2)
       refute complete.key?("status_cache")
       assert_equal payload, cache.fetch("payload")
+      assert_equal "release", cache.dig("runtime", "channel")
       assert_equal 1, cache.fetch("tick_sequence")
       assert_equal (T0 + 91).iso8601(6), cache.fetch("valid_until")
 

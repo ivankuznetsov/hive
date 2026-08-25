@@ -4,6 +4,7 @@ require "shellwords"
 require "time"
 require "hive/agent_limit"
 require "hive/attempts/generation"
+require "hive/attempts/command_progress"
 require "hive/attempts/store"
 require "hive/daemon/auto_retry_safety"
 require "hive/daemon/dispatch_request_queue"
@@ -1291,6 +1292,9 @@ module Hive
         progress = Hive::Attempts::Generation.artifact_token(
           task, state_file_content: state_file_content,
           admission_context: admission_context
+        )
+        progress = Hive::Attempts::CommandProgress.task_token_for(
+          task: task, fallback: progress
         )
         Hive::Attempts::Generation.resolve(
           task: task,

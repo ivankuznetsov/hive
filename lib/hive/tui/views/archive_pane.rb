@@ -48,9 +48,13 @@ module Hive
         # control bytes before they reach the panel (same invariant as
         # TasksPane's column rendering).
         def render_row(row, inner_width)
-          slug = Format.truncate(Hive::Tui::Text.sanitize(row.slug), SLUG_WIDTH).ljust(SLUG_WIDTH)
-          project = Format.truncate(Hive::Tui::Text.sanitize(row.project_name), PROJECT_WIDTH).ljust(PROJECT_WIDTH)
-          age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
+          # Cell-aware padding (`ljust_cells`/`rjust_cells`), not String's
+          # column-naive `ljust`/`rjust`: wide (CJK) characters occupy two
+          # terminal cells, so padding to a character count overruns the
+          # column and pushes later columns out of alignment.
+          slug = Format.ljust_cells(Hive::Tui::Text.sanitize(row.slug), SLUG_WIDTH)
+          project = Format.ljust_cells(Hive::Tui::Text.sanitize(row.project_name), PROJECT_WIDTH)
+          age = Format.rjust_cells(Format.age(row.age_seconds), AGE_WIDTH)
           Format.truncate("#{slug} #{project} #{age}", inner_width)
         end
       end

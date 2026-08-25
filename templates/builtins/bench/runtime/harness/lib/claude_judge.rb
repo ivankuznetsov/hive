@@ -19,6 +19,10 @@ module HiveBench
   module ClaudeJudge
     Error = JudgeOutput::Error
 
+    MISE_VERSION_LINE = /\Amise\s+\S+\s+tools:\s+claude@\S+\z/i.freeze
+    CLAUDE_STDOUT_LIMIT_BANNER =
+      /\Ayou(?:'ve| have) hit your (?:usage|session) limit\s*·\s*resets\s+\S.+\z/i.freeze
+
     # Per-call ceiling (seconds) so a wedged claude CLI can't hang the pass. Set
     # generous (20m) because the judge prompt can carry a large diff + reference.
     DEFAULT_TIMEOUT = 1200
@@ -37,8 +41,8 @@ module HiveBench
         raise Error, "claude judge timed out after #{timeout_s}s" if status.exitstatus == 124
 
         unless status.success?
-          if AgentLimit.limit_hit?(err)
-            raise ProviderLimitError, "claude judge exited #{status.exitstatus}: #{err.strip[0, 300]}"
+          if (limit_detail = trusted_limit_detail(out:, err:))
+            raise ProviderLimitError, "claude judge exited #{status.exitstatus}: #{limit_detail[0, 300]}"
           end
 
           detail = err.strip
@@ -52,5 +56,20 @@ module HiveBench
 
     # Kept for the existing unit tests / callers; delegates to the shared parser.
     def parse_score(text) = JudgeOutput.parse_score(text)
+
+    # Claude CLI 2.1.233 prints its subscription wall to stdout and exits 1.
+    # Keep stdout classification deliberately narrower than the shared stderr
+    # classifier: only the exact standalone CLI reset banner (plus mise's
+    # launcher version line) is trusted, never arbitrary model prose.
+    def trusted_limit_detail(out:, err:)
+      stderr = err.to_s.strip
+      return stderr if AgentLimit.limit_hit?(stderr)
+
+      lines = AgentLimit.normalize(out).lines.map(&:strip).reject(&:empty?)
+      lines.reject! { |line| line.match?(MISE_VERSION_LINE) }
+      return unless lines.one? && lines.first.match?(CLAUDE_STDOUT_LIMIT_BANNER)
+
+      lines.first
+    end
   end
 end

@@ -90,6 +90,19 @@ class GemspecTest < Minitest::Test
     refute_nil spec.runtime_dependencies.find { |candidate| candidate.name == "base64" }
   end
 
+  # Ruby 3.4 unbundled or stopped guaranteeing several gems Hive's lib/ code
+  # requires directly (base64, bigdecimal, rexml, ...). Twice this has been
+  # fixed by adding an explicit gemspec declaration only after a stock install
+  # crashed with LoadError (base64, then rexml), and each time the knowledge
+  # lived only in comments and wiki pages. This guard turns it into a CI
+  # failure: every `require "<name>"` in lib/ whose top-level name is a Ruby
+  # 3.4 bundled-or-removed gem must appear somewhere in the runtime dependency
+  # closure resolved from hive.gemspec.
+  BUNDLED_OR_REMOVED_GEMS = %w[
+    abbrev base64 bigdecimal csv drb getoptlong mutex_m nkf observer
+    resolv-replace rexml rinda syslog
+  ].freeze
+
   def test_runtime_dependencies_include_fiddle_for_managed_storage
     spec = Gem::Specification.load(GEMSPEC_PATH)
     dependency = spec.runtime_dependencies.find do |candidate|
@@ -125,5 +138,58 @@ class GemspecTest < Minitest::Test
            "the Rails app must not ship inside the gem"
     refute spec.files.any? { |f| f.start_with?("public/") },
            "no Sinatra-era static assets should be packaged"
+  end
+
+  def test_lib_requires_of_bundled_or_removed_gems_are_in_the_runtime_dependency_closure
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    closure = resolve_runtime_dependency_closure(spec)
+    offenders = []
+
+    lib_requires.each do |path, name|
+      next unless BUNDLED_OR_REMOVED_GEMS.include?(name)
+      next if closure.include?(name)
+
+      offenders << %{#{path}: require "#{name}" is not covered by the hive.gemspec runtime dependency closure}
+    end
+
+    assert_empty offenders,
+                 "lib/ requires Ruby 3.4 bundled-or-removed gems outside the " \
+                 "declared runtime dependency closure; add an explicit " \
+                 "spec.add_dependency to hive.gemspec:\n#{offenders.join("\n")}"
+  end
+
+  private
+
+  def lib_requires
+    root = File.expand_path("../..", __dir__)
+    Dir.glob(File.join(root, "lib", "**", "*.rb")).sort.flat_map do |path|
+      File.readlines(path).filter_map do |line|
+        match = line.match(/\A\s*require\s+["']([^"'.][^"']*)["']/)
+        next unless match
+
+        [path.delete_prefix("#{root}/"), match[1].split("/").first]
+      end
+    end
+  end
+
+  def resolve_runtime_dependency_closure(spec)
+    closure = {}
+    queue = spec.runtime_dependencies.map(&:name)
+    until queue.empty?
+      name = queue.shift
+      next if closure.key?(name)
+
+      closure[name] = true
+      begin
+        Gem::Specification.find_by_name(name).runtime_dependencies.each do |dep|
+          queue << dep.name
+        end
+      rescue Gem::Exception
+        # A not-installed dependency cannot contribute transitive names here;
+        # bundler resolves it for real installs, and direct declarations are
+        # still caught because spec.runtime_dependencies seeds this closure.
+      end
+    end
+    closure.keys
   end
 end

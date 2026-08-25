@@ -69,8 +69,8 @@
       "note": "False positive. The packaged hive-bench extractor invokes sqlite3 through Open3.capture3 argv form. The database path and SQL are separate argv elements passed directly to execve(2), not a shell command."
     },
     {
-      "fingerprint": "f74ae0226a7716c15cff765f647a29a11e0ad654a9b838930c9d72e26f4213ae",
-      "note": "False positive. The packaged hive-bench Codex judge constructs an argv array and splats it into Open3.capture3; model, effort, and binary values are discrete argv elements and never enter a shell."
+      "fingerprint": "0d6194c739f5120c8be91b339cae16a94783740bdf1e2309d2b613c419a8fa94",
+      "note": "False positive. The packaged hive-bench Codex judge constructs an argv array and splats it into Open3.capture3; provider, model, effort, binary, and config values are discrete argv elements and never enter a shell. The OpenRouter API key remains in the environment and is not interpolated into argv."
     },
     {
       "fingerprint": "d477ab89b88d0ab84d095f04100e6fbb82265ced4d13e75fc9edcdf7be348972",

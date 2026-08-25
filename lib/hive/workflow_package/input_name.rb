@@ -12,7 +12,7 @@ module Hive
         RUBYLIB RUBYOPT SHELL TMP TMPDIR
       ].freeze
       RESERVED_PREFIXES = %w[
-        BASH_ BUNDLE_ CLAUDE_ CODEX_ DYLD_ GEM_ GIT_ HIVE_ LC_ OPENAI_ SSH_
+        BASH_ BUNDLE_ CLAUDE_ CODEX_ DYLD_ GEM_ GIT_ HIVE_ LD_ LC_ OPENAI_ SSH_
       ].freeze
 
       module_function

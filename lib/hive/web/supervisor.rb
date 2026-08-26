@@ -119,7 +119,9 @@ module Hive
       # respawn: reap_once collects the signal death and start_due_restarts
       # brings it back up (the pre-seeded @restart_at entry skips backoff).
       # The disable case instead records intent in @reload_disabled so
-      # reap_once treats the TERM death as operator-intended, not a crash.
+      # reap_once treats the TERM death as operator-intended, not a crash,
+      # and cancels any pending crash restart so start_due_restarts cannot
+      # respawn a bot the operator just disabled.
       def handle_reload
         @reload_requested = false
         bot = child("bot")
@@ -132,8 +134,13 @@ module Hive
           else
             start_child("bot", %w[hive bot start --foreground])
           end
-        elsif running
+        else
+          # Disabled: cancel any pending crash restart even when the bot is
+          # not currently running (a recent crash may still hold an entry),
+          # then stop the running child as operator-intended.
           @restart_at.delete("bot")
+          return unless running
+
           @reload_disabled << "bot"
           signal_group(bot.pid, "TERM")
         end

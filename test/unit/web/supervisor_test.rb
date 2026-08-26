@@ -198,6 +198,27 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  # Patrol follow-up: a bot that crashed moments before the disable SIGHUP has
+  # no running pid, only a pending @restart_at entry. The disable must cancel
+  # that entry too, or start_due_restarts respawns the just-disabled bot.
+  def test_disable_reload_cancels_a_pending_bot_restart
+    with_tmp_global_config do
+      sup = build
+      sup.instance_variable_get(:@children) <<
+        Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: nil, started_at: nil)
+      restart_at(sup)["bot"] = Time.now
+      started = stub_start_child(sup)
+
+      sup.send(:handle_reload)
+      sup.send(:start_due_restarts)
+
+      refute restart_at(sup).key?("bot"),
+             "disabling the bot must cancel its pending crash restart"
+      refute_includes started, "bot",
+                      "a disabled bot must not be respawned from a pending restart entry"
+    end
+  end
+
   def test_handle_reload_is_a_noop_when_bot_disabled
     with_tmp_global_config do
       sup = build

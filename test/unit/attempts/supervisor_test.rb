@@ -308,6 +308,72 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_equal "oversized", oversized.status
   end
 
+  def test_diagnostic_channel_contains_writer_and_reader_io_failures
+    writer = Hive::Attempts::DiagnosticChannel::Writer.new(StringIO.new)
+    with_replaced_singleton_method(
+      Hive::PatrolFix::AttemptDiagnostic, :validate!, ->(*, **) { true }
+    ) do
+      assert_raises(IOError) do
+        writer.write("detail" => "x" * Hive::Attempts::DiagnosticChannel::MAX_FRAME_BYTES)
+      end
+    end
+
+    broken_close = Object.new
+    broken_close.define_singleton_method(:closed?) { false }
+    broken_close.define_singleton_method(:close) { raise IOError }
+    refute Hive::Attempts::DiagnosticChannel::Writer.new(broken_close).close
+
+    unavailable = Object.new
+    unavailable.define_singleton_method(:read) { |_limit| raise IOError }
+    unavailable.define_singleton_method(:closed?) { false }
+    unavailable.define_singleton_method(:close) { @closed = true }
+    result = Hive::Attempts::DiagnosticChannel.read(unavailable)
+    assert_equal "unavailable", result.status
+    assert_nil result.document
+  end
+
+  def test_supervisor_finalizes_valid_frames_and_synthesizes_identity_mismatches
+    with_attempt(
+      worker_argv: [ "hive", "run", "durable-task" ], intended_stage: "4-review",
+      workflow_controller: :patrol_fix
+    ) do |_store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: Object.new, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), clock: -> { NOW }
+      )
+      log_reference = {
+        "path" => "logs/attempt-1.frames", "size" => 12, "sha256" => "a" * 64
+      }
+      draft = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error", "exit_code" => 7 },
+        stage: "4-review", task_generation: attempt.task_generation,
+        attempt_id: attempt.attempt_id, recorded_at: NOW
+      )
+      frame = Hive::Attempts::DiagnosticChannel::ReadResult.new(
+        document: draft, status: "valid"
+      )
+
+      finalized = supervisor.send(
+        :finalize_or_synthesize_diagnostic, attempt, frame,
+        log_reference: log_reference, exit_status: 7, outcome: "failed",
+        transport_status: "valid"
+      )
+      assert_equal "valid", finalized.fetch("transport_status")
+      assert_equal log_reference, finalized.fetch("log_reference")
+
+      mismatched = frame.with(document: draft.merge(
+        "attempt_id" => "other-attempt", "correlation_id" => "other-attempt"
+      ))
+      fallback = supervisor.send(
+        :finalize_or_synthesize_diagnostic, attempt, mismatched,
+        log_reference: log_reference, exit_status: 7, outcome: "failed",
+        transport_status: "valid"
+      )
+      assert_equal "malformed", fallback.fetch("transport_status")
+      assert_equal attempt.attempt_id, fallback.fetch("attempt_id")
+    end
+  end
+
   def test_existing_diagnostic_collision_is_read_with_a_strict_bound_and_no_symlinks
     with_tmp_dir do |root|
       path = File.join(root, Hive::PatrolFix::AttemptDiagnostic::FILENAME)
@@ -329,6 +395,60 @@ class AttemptsSupervisorTest < Minitest::Test
       File.symlink(target, path)
       assert_raises(Hive::Attempts::StoreError) do
         supervisor.send(:persist_diagnostic_once, path, {})
+      end
+    end
+  end
+
+  def test_existing_diagnostic_reconciliation_accepts_exact_bytes_and_rejects_other_shapes
+    with_tmp_dir do |root|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: Object.new, attempt_id: "attempt-1",
+        claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+      log_reference = {
+        "path" => "logs/attempt-1.frames", "size" => 12, "sha256" => "a" * 64
+      }
+      document = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error", "exit_code" => 1 },
+        stage: "4-review", task_generation: "generation-1",
+        attempt_id: "attempt-1", recorded_at: NOW, log_reference: log_reference
+      )
+      path = File.join(root, Hive::PatrolFix::AttemptDiagnostic::FILENAME)
+
+      assert supervisor.send(:persist_diagnostic_once, path, document)
+      assert supervisor.send(:persist_diagnostic_once, path, document)
+      conflict = document.merge("recorded_at" => (NOW + 1).iso8601(6))
+      assert_raises(Hive::Attempts::StoreError) do
+        supervisor.send(:persist_diagnostic_once, path, conflict)
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        supervisor.send(:persist_diagnostic_once, File.join(root, "missing", "diagnostic"), document)
+      end
+
+      fake_status = Object.new
+      fake_status.define_singleton_method(:file?) { false }
+      fake_status.define_singleton_method(:nlink) { 1 }
+      fake_status.define_singleton_method(:size) { 0 }
+      fake_file = Object.new
+      fake_file.define_singleton_method(:stat) { fake_status }
+      with_replaced_singleton_method(File, :open, ->(*_args, &block) { block.call(fake_file) }) do
+        assert_raises(Hive::Attempts::StoreError) do
+          supervisor.send(:read_existing_diagnostic, path)
+        end
+      end
+
+      fake_status.define_singleton_method(:file?) { true }
+      fake_status.define_singleton_method(:size) do
+        Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
+      end
+      fake_file.define_singleton_method(:read) do |_limit|
+        "x" * (Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES + 1)
+      end
+      with_replaced_singleton_method(File, :open, ->(*_args, &block) { block.call(fake_file) }) do
+        error = assert_raises(Hive::Attempts::StoreError) do
+          supervisor.send(:read_existing_diagnostic, path)
+        end
+        assert_match(/size limit/, error.message)
       end
     end
   end
@@ -677,11 +797,14 @@ class AttemptsSupervisorTest < Minitest::Test
       assert_nil supervisor.send(:terminate_worker_group)
     end
 
-    trapped = []
-    with_replaced_singleton_method(Signal, :trap, ->(signal, &_block) { trapped << signal }) do
+    trapped = {}
+    with_replaced_singleton_method(Signal, :trap, ->(signal, &block) { trapped[signal] = block }) do
       supervisor.send(:install_signal_handlers!)
     end
-    assert_equal %w[TERM INT], trapped
+    assert_equal %w[INT TERM], trapped.keys.sort
+    trapped.fetch("TERM").call
+    assert_equal "TERM", supervisor.instance_variable_get(:@cancel_signal)
+    assert_equal :signal, supervisor.instance_variable_get(:@cancel_reason)
 
     ready = Object.new
     ready.define_singleton_method(:closed?) { false }

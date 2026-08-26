@@ -96,6 +96,26 @@ class PatrolFixRunnerTest < Minitest::Test
     end
   end
 
+  def test_controller_failure_remains_authoritative_when_diagnostic_publication_also_fails
+    failure = Hive::StageError.new("controller failed")
+
+    raised = with_replaced_singleton_method(
+      Hive::PatrolFix::Runner, :run!, ->(*) { raise failure }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Stages::ManagedAgentCustody,
+        :publish_controller_failure,
+        ->(**) { raise IOError, "diagnostic pipe closed" }
+      ) do
+        assert_raises(Hive::StageError) do
+          Hive::Stages::PatrolFix::Runner.run!(Struct.new(:stage_name).new("fix"))
+        end
+      end
+    end
+
+    assert_same failure, raised
+  end
+
   private
 
   def capture_controller_failure(stage:, failure:)

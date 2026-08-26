@@ -253,6 +253,24 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
+  def test_attempt_diagnostic_publication_fails_closed_when_transport_is_unavailable
+    context = Struct.new(:intended_stage, :ownership_generation, :attempt_id) do
+      def publish_attempt_diagnostic(_diagnostic)
+        raise IOError, "diagnostic pipe closed"
+      end
+    end.new("2-fix", "opaque-generation", "attempt-1")
+
+    result = with_replaced_singleton_method(
+      Hive::Attempts::Context, :current, -> { context }
+    ) do
+      Hive::Stages::ManagedAgentCustody.publish_attempt_diagnostic(
+        { "status" => "error", "exit_code" => 1 }, stage: "fix"
+      )
+    end
+
+    assert_nil result
+  end
+
   def test_git_config_firewall_tamper_normalizes_restoration_state
     restoration = Hive::ArtifactFirewall::Restoration.new(
       attempted: true, succeeded: true, diagnostic: "restored"

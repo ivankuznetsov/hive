@@ -84,6 +84,8 @@ class CommandsStatusTest < Minitest::Test
     reader.binding = binding
     reader.bytes = JSON.generate(diagnostic.merge("log_reference" => log_reference.merge("size" => 99)))
     assert_nil command.send(:attempt_diagnostic_for, row)
+    reader.bytes = "{"
+    assert_nil command.send(:attempt_diagnostic_for, row)
 
     running = Marshal.load(Marshal.dump(row))
     running[:projection_data]["journal"]["attempts"][0]["state"] = "running"

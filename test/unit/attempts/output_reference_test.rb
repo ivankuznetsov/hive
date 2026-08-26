@@ -70,6 +70,9 @@ class AttemptsOutputReferenceTest < Minitest::Test
 
       assert_equal "typed diagnostic", reader.read_output(reference, max_bytes: 64)
       assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(reference, max_bytes: 0)
+      end
+      assert_raises(Hive::Attempts::StoreError) do
         reader.read_output(reference, max_bytes: 4)
       end
 
@@ -101,6 +104,15 @@ class AttemptsOutputReferenceTest < Minitest::Test
       }
       assert_raises(Hive::Attempts::StoreError) do
         reader.read_output(redirected_reference, max_bytes: 64)
+      end
+
+      linked_target = store.output_path("attempt-real", "linked-target.json")
+      File.binwrite(linked_target, "linked diagnostic")
+      linked_path = store.output_path("attempt-real", "linked-diagnostic.json")
+      File.link(linked_target, linked_path)
+      linked_reference = Hive::Attempts::OutputReference.build(linked_path, root: root)
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(linked_reference, max_bytes: 64)
       end
     end
   end

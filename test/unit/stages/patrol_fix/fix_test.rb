@@ -165,6 +165,30 @@ class PatrolFixFixStageTest < Minitest::Test
     end
   end
 
+  def test_agent_run_validation_surfaces_typed_failure_and_custody_codes
+    failure = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Fix.send(
+        :validate_agent_run!,
+        { status: :error, attempt_diagnostic: { "code" => "agent_exit_nonzero" } }
+      )
+    end
+    assert_equal "fix agent failed: agent_exit_nonzero", failure.message
+
+    custody = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Fix.send(
+        :validate_agent_run!,
+        {
+          status: :ok, custody: :tampered,
+          attempt_diagnostic: { "code" => "protected_git_config_tamper" }
+        }
+      )
+    end
+    assert_equal(
+      "fix agent modified controller authority: protected_git_config_tamper",
+      custody.message
+    )
+  end
+
   private
 
   def with_fix_task

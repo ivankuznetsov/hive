@@ -210,6 +210,113 @@ class PatrolDispatchReplayTest < Minitest::Test
     end
   end
 
+  def test_finalizer_binds_identity_and_applies_authoritative_provider_signal
+    draft = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      { "status" => "error", "exit_code" => 1, "detail" => "safe detail" },
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-1", recorded_at: Time.utc(2026, 8, 26)
+    )
+    log_reference = {
+      "path" => "logs/attempt-1.frames", "size" => 12, "sha256" => "a" * 64
+    }
+    provider_signal = {
+      "failure_class" => "model_capacity", "reset_hint_seconds" => 30,
+      "provenance" => "codex_jsonl_transport"
+    }
+
+    finalized = Hive::PatrolFix::AttemptDiagnostic.finalize(
+      draft, log_reference: log_reference,
+      expected_attempt_id: "attempt-1", expected_stage: "2-fix",
+      expected_task_generation: "generation-1", provider_signal: provider_signal,
+      provider_name: "codex", redactor: ->(_text) { raise "redactor unavailable" }
+    )
+
+    assert_equal "model_capacity", finalized.fetch("code")
+    assert_equal "provider", finalized.fetch("owner")
+    assert_equal "codex", finalized.dig("provider", "name")
+    assert_equal "30", finalized.dig("provider", "retry_hint")
+    assert_equal "failed", finalized.fetch("redaction_status")
+    assert_equal log_reference, finalized.fetch("log_reference")
+
+    assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+      Hive::PatrolFix::AttemptDiagnostic.finalize(
+        draft, log_reference: log_reference,
+        expected_attempt_id: "other-attempt", expected_stage: "2-fix",
+        expected_task_generation: "generation-1"
+      )
+    end
+    assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+      Hive::PatrolFix::AttemptDiagnostic.finalize(
+        draft, log_reference: log_reference,
+        expected_attempt_id: "attempt-1", expected_stage: "2-fix",
+        expected_task_generation: "generation-1",
+        provider_signal: { "failure_class" => "provider_error" }, provider_name: "codex"
+      )
+    end
+  end
+
+  def test_validator_rejects_each_fail_closed_document_shape
+    base = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      { "status" => "error", "exit_code" => 1 },
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-1", recorded_at: Time.utc(2026, 8, 26)
+    )
+    invalid_mutations = [
+      ->(row) { row.delete("owner") },
+      ->(row) { row["timed_out"] = nil },
+      ->(row) { row["detail"] = [] },
+      ->(row) { row["redaction_status"] = "future" },
+      ->(row) { row["provider"] = { "unexpected" => nil } },
+      ->(row) { row["stage"] = "" }
+    ]
+
+    invalid_mutations.each do |mutate|
+      candidate = JSON.parse(JSON.generate(base))
+      mutate.call(candidate)
+      assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+        Hive::PatrolFix::AttemptDiagnostic.validate!(candidate, require_log_reference: false)
+      end
+    end
+
+    candidate = JSON.parse(JSON.generate(base))
+    candidate["log_reference"] = {
+      "path" => "logs/attempt-1.frames", "size" => 12, "sha256" => "a" * 64
+    }
+    assert Hive::PatrolFix::AttemptDiagnostic.validate!(candidate, require_log_reference: false)
+
+    candidate["log_reference"]["size"] = -1
+    assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+      Hive::PatrolFix::AttemptDiagnostic.validate!(candidate, require_log_reference: false)
+    end
+    assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+      Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error" }, stage: "2-fix", task_generation: "generation-1",
+        attempt_id: "attempt-1", recorded_at: "not-a-time"
+      )
+    end
+  end
+
+  def test_normalizer_maps_remaining_provider_kinds_and_terminal_fallback
+    {
+      "provider_limit" => "provider_limit",
+      "provider_error" => "provider_error",
+      "model_output_limit" => "model_output_limit"
+    }.each_with_index do |(kind, code), index|
+      diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error", "provider_error" => { "kind" => kind } },
+        stage: "2-fix", task_generation: "generation-1",
+        attempt_id: "attempt-provider-#{index}", recorded_at: Time.utc(2026, 8, 26)
+      )
+      assert_equal code, diagnostic.fetch("code")
+    end
+
+    terminal = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      { "status" => "error" }, stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-terminal", recorded_at: Time.utc(2026, 8, 26)
+    )
+    assert_equal "agent_terminal_failure", terminal.fetch("code")
+  end
+
   def test_terminal_process_states_normalize_to_distinct_codes
     cases = {
       "agent_timeout" => { "timed_out" => true, "cancelled" => true, "exit_code" => 124 },

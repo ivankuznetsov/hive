@@ -270,15 +270,29 @@ module Hive
       end
 
       # A generic workflow stage can return without writing any terminal
-      # marker. Policy brakes that unchanged row as `markerless_stalled`; turn
-      # the observation into the same durable ERROR used by Hive::Agent so the
-      # sole RecoveryCoordinator can retry it on the next tick. The task lock
-      # and marker re-read close both stale-status races: a live runner or a
-      # newer marker always wins.
+      # marker. Policy brakes that unchanged row as `markerless_stalled`.
+      # Marker-driven workflows transition to the ordinary durable ERROR.
+      # Controller workflows keep structured JSON state instead, so they enter
+      # a generation-bound markerless recovery request without mutating that
+      # state file. The task lock and generation recheck close both stale-status
+      # races: a live runner or newer state always wins.
       def heal_markerless_stall(row)
         return false unless admission_open?
         return false if @controller.running_task?(project: row.project, slug: row.slug)
         return false if row.live_task_lock == true
+
+        if controller_workflow?(row)
+          return false unless @recovery_coordinator
+
+          receipt = @recovery_coordinator.request_markerless_failure(
+            row: row,
+            requestor: "healer",
+            reason: MARKERLESS_EXIT_REASON,
+            now: Time.now.utc
+          )
+          log_coordinated_recovery(row, receipt)
+          return %w[queued cooldown running].include?(receipt.status)
+        end
 
         transitioned = with_heal_lock(row, reason: MARKERLESS_EXIT_REASON, create: false) do
           Hive::Markers.set_if_current(
@@ -337,6 +351,13 @@ module Hive
       def admission_open?
         @admission_open.call == true
       rescue StandardError
+        false
+      end
+
+      def controller_workflow?(row)
+        workflow = Hive::Workflows::Registry.fetch(row.workflow.to_s.to_sym)
+        workflow.controller?
+      rescue Hive::Workflows::UnknownWorkflow
         false
       end
 
@@ -459,7 +480,8 @@ module Hive
       end
 
       def log_coordinated_recovery(row, receipt)
-        event = receipt.status == "queued" ? :recovery_requested : :recovery_blocked
+        event = %w[queued cooldown].include?(receipt.status) ?
+          :recovery_requested : :recovery_blocked
         @logger.event(
           event,
           project: row.project,

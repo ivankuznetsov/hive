@@ -254,7 +254,12 @@ action, and stage-wrapper paths, so those paths do not carry a parallel
 `patrol_fix_id?` predicate. Review and publication share one exact worktree
 snapshot helper for custody, HEAD, cleanliness, bounded diff, and digest
 validation; Inbox and Review output readers share the same strict JSON reader
-while retaining their route and schema ownership.
+while retaining their route and schema ownership. On the first Fix generation,
+the controller fetches the configured default branch from `origin` and records
+that exact remote OID as the worktree base. The local `HEAD` observed by Inbox
+is decision evidence only. There is no local-base fallback, while rework keeps
+the already-owned checkout and base. A same-generation retry also reuses that
+custody without refetching a moving remote branch.
 
 ## Durable human stages
 

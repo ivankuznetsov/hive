@@ -2207,9 +2207,9 @@ class AgentTest < Minitest::Test
 
       with_replaced_singleton_method(Time, :now, -> { now }) do
         with_replaced_singleton_method(
-          Process, :wait2, ->(_pid, flags = nil) { flags ? nil : [ 123, status ] }
+          Process, :wait2, ->(_pid, flags = nil) { flags ? nil : raise(Errno::ECHILD) }
         ) do
-          assert_equal [ false, status, true ], agent.send(
+          assert_equal [ false, nil, true ], agent.send(
             :wait_for_process, 123, 123, 5,
             completion_probe: -> { true }, completion_grace_seconds: 0
           )

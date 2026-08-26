@@ -425,7 +425,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       work = File.join(root, "work")
       FileUtils.mkdir_p(source)
       toolkit = Hive::Artifacts::CaptureToolkit.new(
-        codex_runtime_resolver: method(:fake_codex_runtime)
+        runtime_resolver: method(:fake_codex_runtime)
       )
       toolkit.prepare!(
         kinds: [ "terminal" ], task_root: root, source_root: source,

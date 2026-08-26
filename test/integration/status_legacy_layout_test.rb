@@ -54,7 +54,7 @@ class StatusLegacyLayoutTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(dir).call }
         seed_legacy_task(dir, "6-pr", "stuck-on-old-layout-260516-aaaa")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(operational: true).call }
         assert_includes out, "6-pr", "warning must name the legacy directory"
         assert_includes out, "hive migrate", "warning must point at the fix command"
         assert_match(/1 task hidden in legacy stage dirs/, out,
@@ -70,7 +70,7 @@ class StatusLegacyLayoutTest < Minitest::Test
         seed_legacy_task(dir, "6-pr", "stuck-one-260516-aaaa")
         seed_legacy_task(dir, "6-pr", "stuck-two-260516-bbbb")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(operational: true).call }
         assert_match(/2 tasks hidden in legacy stage dirs/, out,
                      "plural form of the warning must be used for multiple hidden tasks")
       end
@@ -199,7 +199,7 @@ class StatusLegacyLayoutTest < Minitest::Test
         seed_legacy_task(dir, "4-execute", "real-260516-aaaa")
         seed_legacy_task(dir, "6-pr", "stuck-260516-bbbb")
 
-        out, _err = capture_io { Hive::Commands::Status.new.call }
+        out, _err = capture_io { Hive::Commands::Status.new(operational: true).call }
         assert_match(/hidden in legacy stage dirs/, out,
                      "warning must appear even when canonical rows are also present")
         assert_includes out, "real-260516-aaaa",

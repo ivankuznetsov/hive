@@ -33,15 +33,21 @@ module Hive
           rest = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
           tokens = rest.split(/\s+/)
           json = !tokens.delete("--json").nil?
+          if json
+            return @result_class.new(
+              action: :reply,
+              text: "Telegram status is human-only. Use `hive status --json` for " \
+                    "liveness or `hive status --operational --json` for workflow state."
+            )
+          end
           project = tokens.join(" ").strip
           # The supervisor's in-process status intercept filters via
-          # Result.project; `hive status --json` itself does not honour a
+          # Result.project; the bot's internal status watcher does not honour a
           # snapshot-level --project, so the argv stays flag-free to avoid
           # claiming a filter the subprocess fallback would not enforce.
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "status", "--json" ],
-                            project: project.empty? ? nil : project,
-                            format: json ? :json : nil)
+                            project: project.empty? ? nil : project)
         end
 
         def waiting(_update)

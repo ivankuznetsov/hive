@@ -14,7 +14,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
-                      :intent, :alert_reset, :clear_keyboard, :format,
+                      :intent, :alert_reset, :clear_keyboard,
                       :attachment, :recovery, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)

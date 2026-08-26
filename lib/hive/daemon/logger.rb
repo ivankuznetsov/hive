@@ -93,6 +93,7 @@ module Hive
         architecture_patrol_blocked
         patrol_recovery_blocked
         patrol_fix_admission
+        patrol_fix_semantic_completion
         module_runtime
         fatal
       ].freeze

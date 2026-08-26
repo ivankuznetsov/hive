@@ -55,7 +55,7 @@ module Hive
 
       def run_in_session!(handle:, deadline: nil)
         run_with_spawn(deadline: deadline) do |profile, prompt, configured_timeout, spawn_timeout, attempts|
-          unless profile.name == :claude
+          unless Hive::AgentSupport.supports?(profile, :Interactive)
             raise Hive::AgentError, "shared Claude reviewer session cannot run #{profile.name.inspect}"
           end
 

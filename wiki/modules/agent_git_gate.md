@@ -3,7 +3,7 @@ title: Hive::AgentGitGate
 type: module
 source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
 created: 2026-07-26
-updated: 2026-08-14
+updated: 2026-08-26
 tags: [git, security, publication, worktree, boundary]
 ---
 
@@ -88,7 +88,13 @@ and supplies fixed config that neutralizes:
 - `ext` and `file` transports by default.
 
 HTTPS credentials are delegated to `gh auth git-credential`; embedded HTTPS
-userinfo is refused. SSH and Git URLs may carry a username but not embedded
+userinfo is refused. Services can pin the helper to an absolute executable with
+`HIVE_GH_BIN`; invalid or non-executable overrides fail before Git starts, while
+an unset override preserves the normal `PATH` lookup. Remote observation,
+fetch, and publication share a 60-second wall-clock deadline that covers Git
+and inherited credential-helper pipes. Expiry terminates the complete process
+group so a stuck helper cannot retain daemon capacity indefinitely. SSH and Git
+URLs may carry a username but not embedded
 passwords, and explicit transport ports remain valid. SSH may use the
 controller's agent socket. A caller can explicitly permit local file transport
 only for a scoped operation. Hive's `Gh` compatibility adapter accepts that
@@ -136,7 +142,8 @@ data trustworthy. Agent invocation guarantees belong to
   exact absence/OID leases, before/after receipts, ref-movement refusal,
   detached materialization, destination confinement, forbidden transports,
   unknown-operation rejection, immutable values, and helper suppression.
-- `test/unit/managed_git_test.rb` pins environment/config/command hardening.
+- `test/unit/managed_git_test.rb` pins environment/config/command hardening,
+  absolute credential-helper selection, and deadline process-group cleanup.
 - `test/unit/gh_test.rb`, `test/unit/worktree_test.rb`,
   `test/unit/stages/agent_report_test.rb`,
   `test/unit/stages/draft_pr_handoff_test.rb`,

@@ -115,6 +115,47 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_active_finding_retries_an_interrupted_admission_publication
+    with_patrol_project do |repo|
+      store = patrol_store(repo)
+      legacy = sample_finding
+      legacy.id = "legacy-finding"
+      legacy.lifecycle_state = "active"
+      legacy.lifecycle_reason = "admitted"
+      legacy.lifecycle_updated_at = Time.utc(2026, 8, 23, 12).iso8601
+      legacy.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      store.patrol_fix_admission_adapter.publish_finding!(legacy)
+      admission_root = store.patrol_fix_admission_adapter.store.root
+      File.delete(File.join(admission_root, "pending-index.json"))
+
+      _first_out, first_err, first_status = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ sample_finding ])
+        ).call
+      end
+
+      refute_equal Hive::ExitCodes::SUCCESS, first_status
+      assert_includes first_err, "hive migrate"
+      assert_equal [ "finding-1" ], patrol_store(repo).findings.map(&:id)
+
+      store.patrol_fix_admission_adapter.store.rebuild_pending_index!
+      second_out, _second_err, second_status = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ sample_finding ])
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, second_status
+      assert_equal 1, JSON.parse(second_out).fetch("findings")
+      identities = patrol_store(repo).patrol_fix_admission_adapter.store.pending.map do |record|
+        record.dig("source", "identity")
+      end
+      assert_equal %w[finding-1 legacy-finding], identities.sort
+    end
+  end
+
   def test_review_error_keeps_the_scanned_sha_unadvanced
     with_patrol_project do |repo|
       state_path = File.join(repo, ".hive-state", "patrol", "state.json")

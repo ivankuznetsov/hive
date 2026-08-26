@@ -88,6 +88,9 @@ class PatrolFixTaskActionTest < Minitest::Test
         now: Time.utc(2026, 8, 20, 12, 5)
       ).fetch("tasks").first
       refute operational.key?("patrol_fix")
+      assert_equal "completion_ready", operational.fetch("state")
+      assert_equal "none", operational.fetch("blocker_owner")
+      assert_equal "terminal_parked", operational.dig("reasons", 0, "code")
 
       tui_row = Hive::Tui::Snapshot.from_payload(payload).rows.first
       assert_equal "needs_input", tui_row.action_key

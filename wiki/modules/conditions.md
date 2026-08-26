@@ -73,6 +73,15 @@ on read and rebuild, and rebuild cannot overwrite the last snapshot. Markers
 from non-execute stages do not claim this execute-journal handoff. Only
 mutating reconciliation republishes it.
 
+Full status scans have an exact-cache path over the separately bounded
+`task-projection.checkpoint.json`. It verifies the checkpoint against the
+current journal, refreshes mutable durable attempt fields, and reprojects from
+checkpoint seed facts when an attempt changed. It can avoid old-history replay
+only while the journal has not grown and the bounded source checks remain
+current. Otherwise status delegates to the ordinary authoritative read above;
+the bounded workspace API may report partial diagnostics, but status cannot
+turn those into a condition projection.
+
 Selection proceeds by current task generation, then latest compatible attempt
 within each registry family, then exact commit generation/HEAD for branch facts.
 Predecessor lineage outranks wall-clock timestamps, so a clock step backward

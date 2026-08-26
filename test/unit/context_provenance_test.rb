@@ -335,7 +335,9 @@ class ContextProvenanceTest < Minitest::Test
       )
 
       assert decorated.start_with?(prompt)
-      assert_includes decorated, "context-receipts/attempt-1.json.next"
+      candidate = File.join(task.folder, "context-receipts", "attempt-1.json.next")
+      assert_includes decorated, candidate
+      refute_includes decorated, "write one JSON object to the task-relative path"
       assert_includes decorated, "optional"
       assert_includes decorated, "agent assertion"
       assert_includes decorated, "<!-- COMPLETE -->"

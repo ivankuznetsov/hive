@@ -467,6 +467,9 @@ class HiveCommandsApproveTest < Minitest::Test
   def test_backward_move_records_a_rejection_operation
     recorded = nil
     activity = Object.new
+    activity.define_singleton_method(:binding) do
+      { "task_generation" => 0, "ownership_generation" => "ownership-1" }
+    end
     activity.define_singleton_method(:begin_operation) { |**attributes| recorded = attributes }
     current = task(stage_index: 4, stage_name: "execute")
 
@@ -478,6 +481,125 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_equal "rejection_recorded", recorded.fetch(:kind)
     assert_equal "task stage rejection recorded", recorded.fetch(:reason)
     assert_match(/\Areject:/, recorded.fetch(:operation_id))
+  end
+
+  def test_approval_operation_identity_changes_only_when_task_ownership_changes
+    operation_ids = []
+    activity_for = lambda do |ownership_generation|
+      Object.new.tap do |activity|
+        activity.define_singleton_method(:binding) do
+          {
+            "task_generation" => 0,
+            "ownership_generation" => ownership_generation
+          }
+        end
+        activity.define_singleton_method(:begin_operation) do |**attributes|
+          operation_ids << attributes.fetch(:operation_id)
+        end
+      end
+    end
+    current = task(stage_index: 2, stage_name: "fix")
+    marker = Struct.new(:name).new(:complete)
+
+    command.send(
+      :begin_approval_operation, activity_for.call("ownership-1"), current,
+      "3-validate", marker, "forward"
+    )
+    command.send(
+      :begin_approval_operation, activity_for.call("ownership-1"), current,
+      "3-validate", marker, "forward"
+    )
+    command.send(
+      :begin_approval_operation, activity_for.call("ownership-2"), current,
+      "3-validate", marker, "forward"
+    )
+
+    assert_equal operation_ids[0], operation_ids[1],
+                 "attempt retries in one task ownership must stay idempotent"
+    refute_equal operation_ids[0], operation_ids[2],
+                 "a revisited stage must not collide with its completed approval receipt"
+  end
+
+  def test_revisited_approval_route_keeps_completed_receipt_and_starts_new_operation
+    with_tmp_dir do |folder|
+      now = Time.utc(2026, 8, 25, 10, 0, 0)
+      store = Hive::Attempts::Store.new(root: File.join(folder, "attempts"))
+      first = store.create_launching(
+        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        task_id: "42", project: "demo", task_slug: "durable-task",
+        intended_stage: "2-fix", task_generation: "ownership-1",
+        ownership_generation: "ownership-1", task_input_epoch: 0,
+        progress_token: "progress-1", provider: "pi", starting_revision: nil,
+        worker_argv: [ "hive", "run", "durable-task" ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+        retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: now
+      )
+      claimed = store.claim(
+        first, owner: { "pid" => Process.pid }, claim_capability: "c" * 64,
+        first_heartbeat_timeout_sec: 30, now: now
+      )
+      store.first_heartbeat(claimed, stale_sec: 30, now: now)
+      store.create_launching(
+        attempt_id: "attempt-2", request_id: "request-2",
+        predecessor_attempt_id: "attempt-1", task_id: "42", project: "demo",
+        task_slug: "durable-task", intended_stage: "2-fix",
+        task_generation: "ownership-2", ownership_generation: "ownership-2",
+        task_input_epoch: 0, progress_token: "progress-2", provider: "pi",
+        starting_revision: nil, worker_argv: [ "hive", "run", "durable-task" ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("d" * 64),
+        retry_charge: 1, inherited_outputs: [], launch_timeout_sec: 30, now: now
+      )
+      sequence = 0
+      writer = Hive::TaskJournal::Writer.new(
+        task_folder: folder, attempt_store: store, clock: -> { now },
+        id_generator: -> { sequence += 1; "event-#{sequence}" }
+      )
+      activity_for = lambda do |attempt_id, ownership_generation|
+        Hive::TaskActivity.new(
+          task_folder: folder, task: { "id" => "42", "slug" => "durable-task" },
+          workflow: "patrol", stage: "2-fix", attempt_id: attempt_id,
+          task_generation: 0, ownership_generation: ownership_generation,
+          commit_generation: 0, writer: writer, clock: -> { now }
+        )
+      end
+      current = task(stage_index: 2, stage_name: "fix")
+      marker = Struct.new(:name).new(:complete)
+
+      historical = command.send(
+        :begin_approval_operation, activity_for.call("attempt-1", "ownership-1"),
+        current, "3-validate", marker, "forward"
+      )
+      historical.complete!(result: { "stage" => "3-validate" }, occurred_at: now)
+      revisited = command.send(
+        :begin_approval_operation, activity_for.call("attempt-2", "ownership-2"),
+        current, "3-validate", marker, "forward"
+      )
+
+      refute_equal historical.operation_id, revisited.operation_id
+      assert historical.complete?
+      assert_equal "pending", revisited.receipt.fetch("state")
+      assert_equal 2,
+                   Dir[File.join(folder, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")].length
+    end
+  end
+
+  def test_approval_operation_identity_stays_bounded_for_long_stage_names
+    operation_id = nil
+    activity = Object.new
+    activity.define_singleton_method(:binding) do
+      { "task_generation" => 0, "ownership_generation" => "ownership-1" }
+    end
+    activity.define_singleton_method(:begin_operation) do |**attributes|
+      operation_id = attributes.fetch(:operation_id)
+    end
+    current = task(stage_index: 2, stage_name: "f" * 90)
+
+    command.send(
+      :begin_approval_operation, activity, current, "3-#{'v' * 90}",
+      Struct.new(:name).new(:complete), "forward"
+    )
+
+    assert_operator operation_id.bytesize, :<=, Hive::TaskActivity::MAX_IDENTIFIER_BYTES
   end
 
   def test_approval_reconciliation_selects_both_forward_and_backward_event_kinds

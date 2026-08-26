@@ -5,7 +5,7 @@ require "hive/commands/new"
 require "hive/commands/run"
 require "hive/commands/status"
 
-# Pin the agent-callable JSON contracts emitted by `hive status --json` and
+# Pin the bounded liveness and stage-action JSON contracts emitted by `hive status --json` and
 # `hive run --json`. Schema versions are checked explicitly so a future
 # breaking change to either payload fails this test instead of silently
 # breaking downstream parsers.
@@ -59,9 +59,10 @@ class JsonOutputTest < Minitest::Test
       out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
       assert_equal 1, out.lines.count, "JSON output must be a single line on stdout (no stray puts)"
       payload = JSON.parse(out)
-      assert_equal "hive-status", payload["schema"]
-      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"), payload["schema_version"]
-      assert_equal [], payload["projects"], "empty registry must surface as projects:[]"
+      assert_equal "hive-running-status", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-running-status"), payload["schema_version"]
+      assert_equal [], payload["tasks"], "empty registry must have no running tasks"
+      assert_equal false, payload.dig("daemon", "running")
       assert payload["generated_at"].match?(/\A\d{4}-\d{2}-\d{2}T/), "generated_at must be ISO-8601"
     end
   end
@@ -73,7 +74,7 @@ class JsonOutputTest < Minitest::Test
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "json status probe").call }
 
-        out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
+        out, _err = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
         payload = JSON.parse(out)
         proj = payload["projects"].find { |p| p["name"] == project }
         refute_nil proj, "registered project should appear in JSON output"
@@ -109,7 +110,7 @@ class JsonOutputTest < Minitest::Test
           reason: "missing_research_output"
         )
 
-        out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
+        out, _err = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
         tasks = JSON.parse(out).dig("projects", 0, "tasks").to_h { |task| [ task["slug"], task ] }
 
         dirty_action = tasks.fetch("execute-dirty-status-260426-aaaa").fetch("next_action")

@@ -12,20 +12,37 @@ class RecoveryMigrationTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 25, 12, 0, 0)
 
-  def test_new_default_store_creates_v4_and_the_v3_fence
+  def test_new_default_store_creates_v4_without_running_migration
     with_tmp_dir do |state_home|
       with_env("HIVE_HOME" => state_home) do
         store = Hive::Attempts::Store.new
         assert_equal File.join(state_home, "attempts", "v4"), store.root
         assert File.directory?(store.records_root)
         status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
-        assert_equal "complete", status.dig("layout", "migration")
-        assert_equal 0, status.dig("layout", "last_result", "source_count")
+        assert_equal "unknown", status.dig("layout", "migration")
+        assert_nil status.dig("layout", "last_result")
       end
 
-      assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v3"))
-      assert_equal 0o600, File.stat(File.join(state_home, "attempts", "v3")).mode & 0o777
-      assert_path_exists File.join(state_home, "recovery-migration-v6.json")
+      refute_path_exists File.join(state_home, "attempts", "v3")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
+    end
+  end
+
+  def test_read_only_default_store_does_not_inspect_or_migrate_legacy_layout
+    with_tmp_dir do |state_home|
+      write_v3_record(state_home, current_attempt(attempt_id: "legacy"))
+      legacy_record = File.join(state_home, "attempts", "v3", "records", "legacy.json")
+      before = File.binread(legacy_record)
+
+      with_env("HIVE_HOME" => state_home) do
+        store = Hive::Attempts::Store.new(create_directories: false)
+        assert_equal File.join(state_home, "attempts", "v4"),
+                     store.instance_variable_get(:@root)
+      end
+
+      assert_equal before, File.binread(legacy_record)
+      refute_path_exists File.join(state_home, "attempts", "v4")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
     end
   end
 
@@ -50,13 +67,15 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
-  def test_default_store_cuts_over_and_keeps_terminal_hot_until_journal_delivery
+  def test_explicit_cutover_makes_migrated_state_available_to_the_default_store
     with_tmp_dir do |state_home|
       record = terminal_attempt(current_attempt(attempt_id: "terminal"))
       write_v3_record(state_home, record)
       hot_log = File.join(state_home, "attempts", "v3", "logs", "terminal.frames")
       FileUtils.mkdir_p(File.dirname(hot_log))
       File.binwrite(hot_log, "frame\n")
+
+      Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
 
       with_env("HIVE_HOME" => state_home) do
         store = Hive::Attempts::Store.new
@@ -103,13 +122,33 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
+  def test_runtime_store_honors_override_without_touching_legacy_state
+    with_tmp_dir do |state_home|
+      write_v3_record(state_home, current_attempt(attempt_id: "legacy"))
+      custom = File.join(state_home, "runtime-attempts")
+
+      with_env(
+        "HIVE_HOME" => state_home,
+        "HIVE_ATTEMPT_STORE_ROOT" => custom
+      ) do
+        store = Hive::Attempts::Store.runtime
+        assert_equal custom, store.root
+      end
+
+      assert File.directory?(File.join(state_home, "attempts", "v3"))
+      refute_path_exists File.join(state_home, "attempts", "v4")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
+    end
+  end
+
   def test_open_default_uses_the_supplied_state_home
     with_tmp_dir do |root|
       state_home = File.join(root, "daemon-home")
       store = Hive::Attempts::Store.open_default(state_home: state_home)
 
       assert_equal File.join(state_home, "attempts", "v4"), store.root
-      assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v3"))
+      refute_path_exists File.join(state_home, "attempts", "v3")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
     end
   end
 
@@ -759,7 +798,6 @@ class RecoveryMigrationTest < Minitest::Test
         inject_after(boundary, state_home) do
           assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
         end
-
         result = migrate(state_home)
         store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts", "v4"))
         assert_equal 1, result.dig("attempts", "source_count"), boundary

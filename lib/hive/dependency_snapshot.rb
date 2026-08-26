@@ -196,23 +196,35 @@ module Hive
     # holds, but it must not mask a later wait->clear (or validation) change.
     # Hash only the verdict for this task so unrelated fleet movement does not
     # create a fresh generation.
-    def admission_fingerprint(task, registry_entries: Hive::Config.registered_projects)
+    def admission_fingerprint(task, registry_entries: nil, admission_context: nil)
       root = File.expand_path(task.project_root)
-      matches = registry_entries.select do |entry|
-        File.expand_path(entry.fetch("path")) == root
-      end
-      payload = if matches.one?
-        project = matches.first.fetch("name")
-        verdict = admission_context(registry_entries).verdict(project: project, slug: task.slug)
-        error = verdict.admission_error
-        [
-          "hive-dependency-admission-v1", project, task.slug.to_s,
-          verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
-          error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
-        ]
+      if admission_context
+        match_count = admission_context.project_path_match_count(root)
+        project = admission_context.project_for_path(root)&.name
       else
-        [ "hive-dependency-admission-v1", "project_enrollment", matches.length, root, task.slug.to_s ]
+        registry_entries ||= Hive::Config.registered_projects
+        matches = registry_entries.select do |entry|
+          File.expand_path(entry.fetch("path")) == root
+        end
+        match_count = matches.length
+        project = matches.first.fetch("name") if matches.one?
       end
+      unless project
+        payload = [
+          "hive-dependency-admission-v1", "project_enrollment",
+          match_count, root, task.slug.to_s
+        ]
+        return ::Digest::SHA256.hexdigest(JSON.generate(payload))
+      end
+
+      admission_context ||= self.admission_context(registry_entries)
+      verdict = admission_context.verdict(project: project, slug: task.slug)
+      error = verdict.admission_error
+      payload = [
+        "hive-dependency-admission-v1", project, task.slug.to_s,
+        verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
+        error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
+      ]
       ::Digest::SHA256.hexdigest(JSON.generate(payload))
     rescue StandardError => e
       ::Digest::SHA256.hexdigest(

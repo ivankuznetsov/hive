@@ -175,7 +175,7 @@ class DecideTest < Minitest::Test
         task, Hive::Markers.current(task.state_file)
       ).key
       assert_equal decided_at.iso8601, Hive::TaskMeta.read(approval).fetch(:completed_at)
-      status_out, = capture_io { Hive::Commands::Status.new(json: true).call }
+      status_out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
       status_row = JSON.parse(status_out).fetch("projects").flat_map { |project|
         project.fetch("tasks")
       }.find { |row| row.fetch("slug") == slug }
@@ -813,7 +813,7 @@ class DecideTest < Minitest::Test
 
   def test_status_and_operational_status_expose_human_outcomes
     with_editorial_task do |_dir, _approval, slug|
-      status_out, = capture_io { Hive::Commands::Status.new(json: true).call }
+      status_out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
       row = JSON.parse(status_out).fetch("projects").flat_map { |project| project.fetch("tasks") }
                      .find { |task| task.fetch("slug") == slug }
       assert_equal "needs_input", row.fetch("action")

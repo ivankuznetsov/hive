@@ -4,9 +4,11 @@ require "hive/patrol_fix/fix_report"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_receipt"
+require "hive/git_ops"
 require "hive/stages/base"
 require "hive/stages/managed_agent_custody"
 require "hive/stages/patrol_fix/inbox"
+require "hive/worktree"
 
 module Hive
   module Stages
@@ -19,7 +21,7 @@ module Hive
         def run!(task, cfg = {}, agent_runner: nil, worktree_root: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
-          decision, rework = fix_authorization(receipts, manifest)
+          rework = fix_authorization(receipts, manifest)
           existing = current(receipts, manifest, "fix", "fix")
           return complete(existing) if existing
 
@@ -38,9 +40,8 @@ module Hive
           else
             custody.prepare!(
               generation: manifest.dig("task", "generation"),
-              evidence_digest: manifest.dig("evidence_revision", "digest"),
-              base_revision: decision.dig("payload", "head_revision")
-            )
+              evidence_digest: manifest.dig("evidence_revision", "digest")
+            ) { strict_origin_base!(task, cfg) }
           end
           output = File.join(task.folder, REPORT_FILENAME)
           prompt = render_prompt(task, manifest, owner, output)
@@ -102,9 +103,17 @@ module Hive
           store.read_all.find { |r| r["kind"] == kind && r["stage"] == stage && r["task"] == manifest["task"] && r["evidence_revision"] == manifest["evidence_revision"] }
         end
         private_class_method :current
+        def strict_origin_base!(task, cfg)
+          branch = (cfg || {})["default_branch"] ||
+            Hive::GitOps.new(task.project_root).detect_default_branch
+          Hive::Worktree.new(task.project_root, task.slug).fetch_strict_origin_base!(branch)
+        rescue Hive::GitError, Hive::WorktreeError => e
+          raise Hive::StageError, "Patrol Fix worktree base is unavailable: #{e.message}"
+        end
+        private_class_method :strict_origin_base!
         def fix_authorization(store, manifest)
           inbox = current(store, manifest, "decision", "inbox")
-          return [ inbox, false ] if inbox&.dig("payload", "route") == "fix"
+          return false if inbox&.dig("payload", "route") == "fix"
 
           reopen = current(store, manifest, "reopen", "review")
           prior = store.read_all.find do |row|
@@ -112,7 +121,7 @@ module Hive
           end
           if reopen&.dig("payload", "operator") == "controller:review" &&
              prior&.dig("payload", "route") == "rework"
-            return [ prior, true ]
+            return true
           end
           raise Hive::StageError, "fix requires a current inbox fix or controller rework authorization"
         end

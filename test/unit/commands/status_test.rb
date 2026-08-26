@@ -6,6 +6,272 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_default_json_call_uses_compact_producer_without_building_full_graph
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "1-inbox", "running-task-260824-abcd",
+        state_file: "idea.md", marker: "WAITING"
+      )
+      File.write(
+        File.join(folder, ".lock"),
+        {
+          "pid" => Process.pid,
+          "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+          "lock_id" => "compact-status"
+        }.to_yaml
+      )
+      command_class = Class.new(Hive::Commands::Status) do
+        def json_payload(*) = raise("full graph must not be built")
+        def operational_payload(*) = raise("operational graph must not be built")
+      end
+      command = command_class.new(json: true)
+      project = status_project(project_root, hive_state)
+
+      output, error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ project ] }
+      ) do
+        capture_io { command.call }
+      end
+      payload = JSON.parse(output)
+
+      assert_equal "hive-running-status", payload.fetch("schema")
+      assert_equal "release", payload.dig("runtime", "channel")
+      assert_equal [ "running-task-260824-abcd" ], payload.fetch("tasks").map { |row| row.fetch("slug") }
+      assert_equal true, payload.dig("tasks", 0, "liveness", "running")
+      assert_equal "", error
+    end
+  end
+
+  def test_default_human_call_uses_compact_producer_without_building_full_graph
+    command_class = Class.new(Hive::Commands::Status) do
+      def json_payload(*) = raise("full graph must not be built")
+      def operational_payload(*) = raise("operational graph must not be built")
+      def running_payload(*)
+        {
+          "daemon" => { "running" => true, "pid" => 42, "uptime_sec" => 12 },
+          "complete" => true,
+          "count" => 1,
+          "truncated" => false,
+          "source" => {},
+          "tasks" => [ {
+            "project" => "demo", "slug" => "live-task", "display_name" => "Live task",
+            "stage" => "4-execute", "liveness" => { "source" => "task_lock" }
+          } ]
+        }
+      end
+    end
+
+    output, error = capture_io { command_class.new.call }
+
+    assert_includes output, "DAEMON RUNNING"
+    assert_includes output, "demo:live-task (Live task)"
+    assert_includes output, "4-execute"
+    assert_equal "", error
+  end
+
+  def test_default_human_call_explains_incomplete_status
+    command = Hive::Commands::Status.new
+    payload = {
+      "daemon" => { "running" => false },
+      "complete" => false,
+      "omitted_count" => 2,
+      "source" => {
+        "scan_truncated" => true,
+        "projects_unavailable" => 2,
+        "malformed_locks" => 3,
+        "transition_skips" => 4
+      },
+      "tasks" => []
+    }
+
+    output, = capture_io { command.send(:render_running, payload) }
+
+    assert_includes output,
+                    "STATUS PARTIAL — scan limit reached; 2 projects unavailable; " \
+                    "3 malformed locks; 4 transitions skipped; 2 live rows omitted"
+
+    output, = capture_io do
+      command.send(
+        :render_running,
+        payload.merge("omitted_count" => 0, "source" => {})
+      )
+    end
+    assert_includes output, "STATUS PARTIAL — source incomplete"
+  end
+
+  def test_human_status_names_a_dogfood_runtime_before_service_state
+    command = Hive::Commands::Status.new
+    payload = {
+      "runtime" => {
+        "channel" => "dogfood",
+        "display_version" => "#{Hive::VERSION}+dogfood.0864de726",
+        "build_sha" => "0864de726d9a75f7bc46610a89db851c90b402ee",
+        "deployment_id" => "hive-dogfood-0864de726"
+      },
+      "daemon" => { "running" => false },
+      "complete" => true,
+      "tasks" => []
+    }
+
+    output, = capture_io { command.send(:render_running, payload) }
+
+    assert_match(/HIVE DOGFOOD/, output.lines.first)
+    assert_includes output, "#{Hive::VERSION}+dogfood.0864de726"
+    assert_includes output, "0864de726d9a75f7bc46610a89db851c90b402ee"
+    assert_includes output, "hive-dogfood-0864de726"
+  end
+
+  def test_internal_task_graph_is_explicit_and_status_modes_remain_disjoint
+    Hive::Commands::Status.new(json: true, full: true).send(:validate_mode_combinations!)
+
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::Status.new(
+        json: true, full: true, operational: true
+      ).send(:validate_mode_combinations!)
+    end
+    assert_includes error.message,
+                    "--internal-task-graph cannot be combined with --operational"
+  end
+
+  def test_status_payloads_preserve_subsecond_generation_time
+    now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
+    command = Hive::Commands::Status.new(json: true, daemon_tasks: [])
+
+    assert_equal now.iso8601(6), command.json_payload([], now: now).fetch("generated_at")
+    assert_equal now.iso8601(6), command.daemon_task_payload([], now: now).fetch("generated_at")
+  end
+
+  def test_daemon_task_payload_reads_only_exact_requested_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      requested = "requested-task-260823-abcd"
+      write_status_task(
+        hive_state, "1-inbox", requested, state_file: "idea.md", marker: "WAITING"
+      )
+      write_status_task(
+        hive_state, "1-inbox", "unrelated-task-260823-abcd",
+        state_file: "idea.md", marker: "WAITING"
+      )
+      command_class = Class.new(Hive::Commands::Status) do
+        def stage_task_entries(_stage_dir)
+          raise "bounded daemon status must not enumerate stage children"
+        end
+      end
+      command = command_class.new(json: true, daemon_tasks: [ "demo:#{requested}" ])
+
+      payload = command.daemon_task_payload(
+        [ status_project(project_root, hive_state) ], now: Time.utc(2026, 8, 23)
+      )
+
+      assert_equal true, payload.fetch("partial")
+      assert_equal [ requested ], payload.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+      assert_equal false, payload.dig("projects", 0, "tasks", 0, "blocked")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+      assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_daemon_task_call_emits_the_partial_envelope
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260823-abcd"
+      write_status_task(
+        hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING"
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new(
+        json: true, full: true, daemon_tasks: [ "demo:#{slug}" ]
+      )
+
+      output, error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ project ] }
+      ) do
+        capture_io { command.call }
+      end
+
+      payload = JSON.parse(output)
+      assert_equal true, payload.fetch("partial")
+      assert_equal [ slug ], payload.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+      assert_equal "", error
+    end
+  end
+
+  def test_daemon_task_payload_holds_dependencies_for_the_authoritative_full_scan
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task-260823-abcd"
+      folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 2, slug: dependent, display_name: nil,
+        depends_on: "prerequisite-task-260823-abcd"
+      )
+      write_status_task(
+        hive_state, "9-done", "prerequisite-task-260823-abcd",
+        state_file: "done.md", marker: "COMPLETE"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}" ]
+      )
+
+      payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      row = payload.dig("projects", 0, "tasks", 0)
+
+      assert_equal dependent, row.fetch("slug")
+      assert_equal true, row.fetch("blocked")
+      assert_equal "admission_error", row.fetch("action")
+      assert_equal "dependency_validation_failed",
+                   row.dig("admission_error", "reason_code")
+      assert_includes row.dig("admission_error", "safe_correction"), "full dependency scan"
+    end
+  end
+
+  def test_daemon_task_payload_fails_closed_when_dependency_projection_raises
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260823-cdef"
+      write_status_task(
+        hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{slug}" ]
+      )
+      command.define_singleton_method(:apply_dependency_verdict) do |*|
+        raise "synthetic dependency failure"
+      end
+
+      payload = nil
+      _output, error = capture_io do
+        payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      end
+      row = payload.dig("projects", 0, "tasks", 0)
+
+      assert_equal true, row.fetch("blocked")
+      assert_equal "dependency_validation_failed",
+                   row.dig("admission_error", "reason_code")
+      assert_includes error, "holding changed rows until the next full scan"
+    end
+  end
+
+  def test_daemon_task_mode_requires_json_and_registered_project_slug_identity
+    command = Hive::Commands::Status.new(daemon_tasks: [ "demo:task-260823-abcd" ])
+    error = assert_raises(Hive::InvalidTaskPath) do
+      command.send(:validate_mode_combinations!)
+    end
+    assert_includes error.message, "requires --internal-task-graph --json"
+
+    invalid = Hive::Commands::Status.new(
+      json: true, daemon_tasks: [ "missing:task-260823-abcd" ]
+    )
+    error = assert_raises(Hive::InvalidTaskPath) do
+      invalid.send(:daemon_task_targets, [])
+    end
+    assert_includes error.message, "registered-project:task-slug"
+  end
+
   def test_json_payload_exposes_resolved_clean_exit_config
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -166,7 +432,7 @@ class CommandsStatusTest < Minitest::Test
       "agents" => {
         "opencode" => {
           "config_path" => "/tmp/opencode.json",
-          "credential_env" => [], "plugins" => [], "isolation" => "hermetic"
+          "credential_env" => [], "plugins" => []
         }
       },
       "execute" => { "agent" => "opencode", "model" => execute.fetch("model") },
@@ -1246,7 +1512,7 @@ class CommandsStatusTest < Minitest::Test
       task = Hive::Task.new(folder)
       marker = Hive::Markers.current(task.state_file)
       broken_store = Object.new
-      broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
+      broken_store.define_singleton_method(:read_cached) { |**| raise Errno::EACCES, "blocked" }
 
       _out, err = capture_io do
         with_replaced_singleton_method(
@@ -1262,6 +1528,87 @@ class CommandsStatusTest < Minitest::Test
       end
       assert_match(/condition projection failed/, err)
     end
+  end
+
+  def test_status_projection_reuses_one_attempt_store_across_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      tasks = %w[first second].map do |name|
+        folder = write_status_task(
+          hive_state, "4-execute", "#{name}-projection-260822-abcd",
+          state_file: "task.md", marker: "EXECUTE_COMPLETE"
+        )
+        Hive::Task.new(folder)
+      end
+      stores = []
+      original_new = Hive::Attempts::Store.method(:new)
+
+      with_replaced_singleton_method(
+        Hive::Attempts::Store, :new,
+        lambda do |**kwargs|
+          stores << kwargs unless kwargs.key?(:root)
+          original_new.call(**kwargs)
+        end
+      ) do
+        command = Hive::Commands::Status.new
+        command.send(:with_status_attempt_store) do
+          tasks.each do |task|
+            marker = Hive::Markers.current(task.state_file)
+            command.send(:status_projection, task, marker)
+          end
+        end
+      end
+
+      assert_equal 1, stores.length,
+                   "one status scan must not rebuild the global Attempts store per task"
+    end
+  end
+
+  def test_daemon_task_scan_reuses_one_attempt_store_across_projects
+    with_tmp_dir do |root|
+      slug = "fast-tick-260823-abcd"
+      projects = %w[demo other].map do |name|
+        project_root = File.join(root, name)
+        hive_state = File.join(project_root, ".hive-state")
+        write_status_task(hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING")
+        { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
+      end
+      opens = 0
+      original_runtime = Hive::Attempts::Store.method(:runtime)
+
+      with_replaced_singleton_method(
+        Hive::Attempts::Store, :runtime,
+        lambda do |**kwargs|
+          opens += 1
+          original_runtime.call(**kwargs)
+        end
+      ) do
+        command = Hive::Commands::Status.new(
+          json: true, daemon_tasks: projects.map { |project| "#{project.fetch('name')}:#{slug}" }
+        )
+        command.daemon_task_payload(projects, now: Time.utc(2026, 8, 23))
+      end
+
+      assert_equal 1, opens,
+                   "one bounded daemon status scan must not rebuild the global Attempts store per project"
+    end
+  end
+
+  def test_each_json_scan_opens_a_fresh_attempt_store_even_without_tasks
+    opens = 0
+    store = Object.new
+    store.define_singleton_method(:projection_reader) { self }
+    factory = lambda do |**|
+      opens += 1
+      store
+    end
+
+    with_replaced_singleton_method(Hive::Attempts::Store, :runtime, factory) do
+      command = Hive::Commands::Status.new
+      2.times { command.send(:json_payload, []) }
+    end
+
+    assert_equal 2, opens
   end
 
   def test_collect_rows_skips_old_stage_entry_that_vanishes_mid_read
@@ -2352,8 +2699,7 @@ class CommandsStatusTest < Minitest::Test
       assert_equal true, cmd.send(:pid_alive?, 12_345)
     end
 
-    holder = { "pid" => 12_345, "process_start_time" => "recorded" }
-    cmd.define_singleton_method(:pid_alive?) { |_pid| true }
+    holder = { "pid" => Process.pid, "process_start_time" => "recorded" }
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise RuntimeError, "blocked" }) do
       _out, err = capture_io do
         assert_nil cmd.send(:live_task_lock_holder, holder)
@@ -2581,6 +2927,27 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_operational_heading_exposes_cached_graph_age
+    payload = {
+      "completeness" => "complete",
+      "source" => {
+        "task_graph" => { "provenance" => "daemon_cache", "age_seconds" => 31.6 }
+      },
+      "summary" => {
+        "projects_total" => 0, "active" => 0, "archived" => 0,
+        "hidden_archived_task_count" => 0
+      },
+      "issues" => [], "tasks" => []
+    }
+
+    output, = capture_io do
+      Hive::Commands::Status.new.send(:render_operational, payload)
+    end
+
+    assert_includes output,
+                    "SNAPSHOT COMPLETE — 0 active · 0 archived · task graph cached 32s ago"
+  end
+
   def test_operational_project_context_fails_closed_when_config_is_unreadable
     project = { "name" => "demo", "path" => "/tmp/unreadable-hive-project" }
     context = with_replaced_singleton_method(
@@ -2590,6 +2957,373 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_equal false, context.dig("demo", "daemon_enabled")
+  end
+
+  def test_operational_payload_reuses_captured_project_config_for_daemon_context
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "daemon" => { "enabled" => true } }.to_yaml
+      )
+      project = status_project(project_root, hive_state)
+      original_load = Hive::Config.method(:load)
+      config_loads = 0
+
+      payload = with_replaced_singleton_method(
+        Hive::Config,
+        :load,
+        lambda do |path|
+          config_loads += 1
+          original_load.call(path)
+        end
+      ) do
+        Hive::Commands::Status.new.operational_payload(
+          [ project ], scheduler_snapshot: nil
+        )
+      end
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+      assert_equal 1, config_loads,
+                   "a full operational scan must parse each project config once"
+    end
+  end
+
+  def test_operational_payload_reuses_the_daemon_full_status_cache_without_rescanning_tasks
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => "a" * 40,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-aaaaaaaaa"
+    }).to_h
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true,
+      "generated_at" => (now - 2).iso8601(6),
+      "projects" => [ {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state",
+        "legacy_stage_dirs" => [], "hidden_archived_task_count" => 0,
+        "tasks" => []
+      } ]
+    }
+    snapshot = {
+      "status" => "current", "phase" => "complete", "tick_sequence" => 9,
+      "observed_at" => (now - 1).iso8601(6),
+      "valid_until" => (now + 60).iso8601(6),
+      "source_window" => {
+        "started_at" => (now - 3).iso8601(6),
+        "completed_at" => (now - 1).iso8601(6)
+      },
+      "capacity" => {}, "queue" => {}, "provider_holds" => [], "tasks" => [],
+      "status_cache" => {
+        "tick_sequence" => 9,
+        "valid_until" => (now + 60).iso8601(6),
+        "runtime" => runtime,
+        "payload" => cached_payload
+      }
+    }
+    project = { "name" => "demo", "path" => "/tmp/demo" }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    command.define_singleton_method(:json_payload) do |*|
+      raise "concise status must not rescan task folders when the daemon cache is current"
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { { "daemon" => { "enabled" => true } } }
+    ) do
+      command.operational_payload(
+        [ project ], scheduler_snapshot: snapshot, now: now
+      )
+    end
+
+    assert_equal "complete", payload.fetch("completeness")
+    assert_equal "current", payload.dig("scheduler", "status")
+    assert_equal cached_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+    assert_equal "daemon_cache", payload.dig("source", "task_graph", "provenance")
+    assert_equal 2.0, payload.dig("source", "task_graph", "age_seconds")
+    assert_equal runtime, payload.fetch("runtime")
+  end
+
+  def test_operational_payload_marks_a_legacy_daemon_cache_runtime_unknown
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 2).iso8601(6),
+      "projects" => [ {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state", "legacy_stage_dirs" => [],
+        "hidden_archived_task_count" => 0, "tasks" => []
+      } ]
+    }
+    snapshot = {
+      "status" => "current", "phase" => "complete", "tick_sequence" => 9,
+      "observed_at" => (now - 1).iso8601(6),
+      "valid_until" => (now + 60).iso8601(6),
+      "source_window" => {
+        "started_at" => (now - 3).iso8601(6),
+        "completed_at" => (now - 1).iso8601(6)
+      },
+      "capacity" => {}, "queue" => {}, "provider_holds" => [], "tasks" => [],
+      "status_cache" => {
+        "tick_sequence" => 9, "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |record, **|
+      record.fetch("status_cache")
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Config, :load, ->(*) { { "daemon" => { "enabled" => true } } }
+    ) do
+      command.operational_payload(
+        [ { "name" => "demo", "path" => "/tmp/demo" } ],
+        scheduler_snapshot: snapshot, now: now
+      )
+    end
+
+    assert_equal "unknown", payload.dig("runtime", "channel")
+  end
+
+  def test_operational_payload_falls_back_to_a_fresh_scan_after_the_daemon_cache_expires
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    snapshot = {
+      "status" => "stale", "reason" => "snapshot_expired",
+      "status_cache" => {
+        "tick_sequence" => 8,
+        "valid_until" => (now - 1).iso8601(6),
+        "payload" => { "schema" => "hive-status", "ok" => true }
+      }
+    }
+    fresh_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => now.iso8601(6), "projects" => []
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload([], scheduler_snapshot: snapshot, now: now)
+
+    assert_equal 1, scans
+    assert_equal fresh_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+  end
+
+  def test_operational_payload_rejects_a_cache_from_an_invalid_snapshot
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 2).iso8601(6), "projects" => []
+    }
+    snapshot = {
+      "status" => "invalid", "reason" => "snapshot_invalid",
+      "tick_sequence" => 1,
+      "status_cache" => {
+        "tick_sequence" => 2,
+        "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    fresh_payload = cached_payload.merge("generated_at" => now.iso8601(6))
+    command = Hive::Commands::Status.new(operational: true)
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload([], scheduler_snapshot: snapshot, now: now)
+
+    assert_equal 1, scans
+    assert_equal fresh_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+  end
+
+  def test_operational_payload_falls_back_when_cache_metadata_is_malformed
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    snapshot = {
+      "status" => "current", "tick_sequence" => 1,
+      "status_cache" => {
+        "tick_sequence" => 1, "valid_until" => (now + 60).iso8601(6),
+        "payload" => {
+          "schema" => "hive-status",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+          "ok" => true, "generated_at" => "not-a-time", "projects" => []
+        }
+      }
+    }
+    fresh_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => now.iso8601(6), "projects" => []
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload([], scheduler_snapshot: snapshot, now: now)
+
+    assert_equal 1, scans
+    assert_equal fresh_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+  end
+
+  def test_operational_payload_uses_the_prior_cache_while_the_next_tick_is_running
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 31).iso8601(6),
+      "projects" => [ {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state",
+        "legacy_stage_dirs" => [], "hidden_archived_task_count" => 0,
+        "tasks" => []
+      } ]
+    }
+    snapshot = {
+      "status" => "unavailable", "reason" => "tick_started",
+      "phase" => "started", "tick_sequence" => 10,
+      "status_cache" => {
+        "tick_sequence" => 9,
+        "valid_until" => (now + 59).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    command.define_singleton_method(:json_payload) do |*|
+      raise "a valid prior graph must remain cheap during the next full scan"
+    end
+
+    payload = with_replaced_singleton_method(
+      Hive::Config, :load, ->(_path) { { "daemon" => { "enabled" => true } } }
+    ) do
+      command.operational_payload(
+        [ { "name" => "demo", "path" => "/tmp/demo" } ],
+        scheduler_snapshot: snapshot, now: now
+      )
+    end
+
+    assert_equal cached_payload.fetch("generated_at"),
+                 payload.dig("source", "task_graph", "generated_at")
+    assert_equal "unavailable", payload.dig("scheduler", "status")
+  end
+
+  def test_operational_payload_falls_back_when_cached_projects_do_not_match_the_registry
+    now = Time.utc(2026, 8, 24, 10, 0, 2)
+    cached_payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true, "generated_at" => (now - 2).iso8601(6),
+      "projects" => [ { "name" => "old", "path" => "/tmp/old", "tasks" => [] } ]
+    }
+    snapshot = {
+      "status" => "current", "tick_sequence" => 9,
+      "status_cache" => {
+        "tick_sequence" => 9, "valid_until" => (now + 60).iso8601(6),
+        "payload" => cached_payload
+      }
+    }
+    fresh_payload = cached_payload.merge(
+      "generated_at" => now.iso8601(6),
+      "projects" => [ { "name" => "new", "path" => "/tmp/new", "tasks" => [] } ]
+    )
+    command = Hive::Commands::Status.new(operational: true)
+    command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
+      snapshot.fetch("status_cache")
+    end
+    scans = 0
+    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+      scans += 1
+      fresh_payload
+    end
+
+    payload = command.operational_payload(
+      [ { "name" => "new", "path" => "/tmp/new" } ],
+      scheduler_snapshot: snapshot, now: now
+    )
+
+    assert_equal 1, scans
+    assert_equal "fresh_scan", payload.dig("source", "task_graph", "provenance")
+    assert_equal 1, payload.dig("summary", "projects_total")
+  end
+
+  def test_operational_payload_falls_back_to_config_after_generation_capture_failure
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        { "daemon" => { "enabled" => true } }.to_yaml
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new
+      command.define_singleton_method(:capture_workflow_generations) do |_projects|
+        { File.expand_path(project_root) => RuntimeError.new("generation failed") }
+      end
+      original_load = Hive::Config.method(:load)
+      config_loads = 0
+
+      payload = with_replaced_singleton_method(
+        Hive::Config,
+        :load,
+        lambda do |path|
+          config_loads += 1
+          original_load.call(path)
+        end
+      ) do
+        command.operational_payload([ project ], scheduler_snapshot: nil)
+      end
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+      assert_equal 1, config_loads
+    end
+  end
+
+  def test_operational_payload_falls_back_to_config_when_generation_capture_skips_project
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      config_path = File.join(hive_state, "config.yml")
+      File.write(config_path, { "daemon" => { "enabled" => true } }.to_yaml)
+      project = status_project(
+        project_root, File.join(project_root, "missing-state")
+      )
+      command = Hive::Commands::Status.new
+
+      payload = command.operational_payload([ project ], scheduler_snapshot: nil)
+
+      assert_equal "unavailable", payload.dig("scheduler", "status")
+
+      File.write(config_path, { "unsupported_root_key" => true }.to_yaml)
+      assert_raises(Hive::UnsupportedProjectConfigError) do
+        command.operational_payload([ project ], scheduler_snapshot: nil)
+      end
+    end
   end
 
   # Retry policy is no longer read from global config here, so a broken global

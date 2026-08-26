@@ -18,19 +18,40 @@ candidates:
 # a review contract rather than a hive_run.rb flag.
 effort_pins: {}
 
+# Opt in when a benchmark row is valid only if every cell completes Hive's
+# execute stage normally. Failed cells with preserved patches are rerun and
+# cannot enter judging. The default keeps paid-patch recovery compatibility.
+require_successful_execution: false
+
+# Published local campaigns should use a Docker `--internal` network whose only
+# dual-homed peer is a CONNECT proxy that permits the configured model provider
+# and denies GitHub/the public internet. With this enabled, generation fails
+# closed unless both values are present; each cell records `provider-allowlist`
+# in its generation identity. Candidate repositories are independently created
+# as depth-one, base-only clones so future/reference Git objects are absent.
+isolation:
+  require_provider_egress: false
+  # docker_network: hive-bench-provider-only
+  # https_proxy: http://hive-bench-egress-proxy:3128
+
 # Judge samples. Use at least 3 for published results.
 seeds: 3
 
 # Judge backends and exact invocation provenance. The default mirrors the
 # maintained campaign: Fable plus GPT-5.6 Sol at ultra. Set a backend to null
 # to disable it; keep at least two enabled for blind cross-checking and
-# deliberation. OpenRouter is optional and disabled by default.
+# deliberation. A separate OpenRouter judge is optional and disabled by default;
+# the Codex judge also has an explicit OpenRouter transport fallback below.
 judges:
   claude:
     model: claude-fable-5
   codex:
     model: gpt-5.6-sol
     reasoning_effort: ultra
+    # Default: chatgpt. To preserve the judge identity while routing the Codex
+    # CLI through OpenRouter, set provider: openrouter and explicitly pin the
+    # provider_model (for example openai/gpt-5.6-sol).
+    provider: chatgpt
   openrouter:
 
 # Review-enforced caps. The current harness does not enforce these as per-run

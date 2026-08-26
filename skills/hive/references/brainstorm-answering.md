@@ -45,9 +45,8 @@ interpolate an answer into shell text and never edit `brainstorm.md` directly.
 
 ## Discover the waiting set
 
-1. Take one fresh full snapshot with `hive status --json`. This full
-   `hive-status` graph, rather than operational-status prose, defines the
-   traversal set and order for this pass.
+1. Take one fresh `hive status --operational --json` snapshot. Its typed task
+   rows define the traversal set and order for this pass.
 2. Require a successful top-level document. Preserve the returned project and task order
    exactly; do not re-sort by age, slug, project, or inferred priority.
 3. Treat every project row carrying `missing_project_path`, `not_initialised`,
@@ -144,7 +143,7 @@ fresh discovery and an explicit answering reply.
 
 ## YOLO flow
 
-Start from one fresh full-status waiting set. Scan every unanswered slot in the
+Start from one fresh operational-status waiting set. Scan every unanswered slot in the
 preserved task and physical document order. Count a slot as scanned when its
 current question and evidence have been evaluated.
 
@@ -160,9 +159,9 @@ For each slot:
    matched, or was answered differently, do not write it.
 3. Pass the chosen literal text through stdin to the bound `hive answer`
    command. Parse its closed outcome, acknowledge it briefly, then take a fresh
-   `hive status --json` snapshot after every write before considering another
+   `hive status --operational --json` snapshot after every write before considering another
    mutation. Do not carry a status traversal row forward as write authority.
-4. The original full-status order remains the traversal authority for this
+4. The original operational-status order remains the traversal authority for this
    pass. A fresh status may validate or remove an original task, but it never
    reorders the remaining tasks or adds a newly appeared task to the pass. Do
    not retry a closed refusal by bypassing the binding or by editing the file.
@@ -209,7 +208,7 @@ changed.
 
 ## Completion and lifecycle
 
-Take a fresh `hive status --json` snapshot after every write attempt. Use a fresh answer
+Take a fresh `hive status --operational --json` snapshot after every write attempt. Use a fresh answer
 inventory when the task remains at `2-brainstorm`; only its
 `unanswered_count: 0` and `complete: true` prove that every required slot is
 answered. Report completion only after that proof. If status shows the task

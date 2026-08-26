@@ -11,6 +11,19 @@ class ReleaseCandidateFixedPhaseExecutorTest < Minitest::Test
   CATALOG = File.join(ROOT, "packaging/release_candidate/baselines.yml").freeze
   FIXTURE = File.join(ROOT, "test/release_candidate/upgrade/fake-installed-hive").freeze
 
+  def test_candidate_after_phase_checks_operational_status
+    commands = HiveReleaseCandidate::UpgradeSurvivor::FixedPhaseExecutor::COMMANDS
+
+    assert_equal(
+      [ [ "status", "--operational", "--json" ] ],
+      commands.dig("latest-stable", "after")
+    )
+    assert_equal(
+      [ [ "status", "--operational", "--json" ] ],
+      commands.dig("legacy-bench-v041", "after")
+    )
+  end
+
   def test_real_producer_contract_runs_v041_init_then_exact_legacy_install_then_task_creation
     with_tmp_dir do |dir|
       baseline = target(

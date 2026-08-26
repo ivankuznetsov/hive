@@ -1726,6 +1726,15 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_canonical_root_accepts_preloaded_project_config
+    config = { "worktree_root" => "/tmp/preloaded-worktrees" }
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_root) { flunk "config reloaded" }) do
+      assert_equal "/tmp/preloaded-worktrees",
+                   Hive::Worktree.canonical_root("/tmp/project", config: config)
+    end
+  end
+
   def test_master_log_clean_after_feature_commits
     with_initialized_project do |dir, root|
       wt = Hive::Worktree.new(dir, "feat-q", worktree_root: root)

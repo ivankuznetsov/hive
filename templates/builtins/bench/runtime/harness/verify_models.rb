@@ -29,9 +29,9 @@ module HiveBench
       "all_glm_5_2" => /glm-5\.2/,
       "all_kimi_k2_7_code" => /kimi-k2\.7-code/,
       "glm_plan_kimi_exec" => /glm-5\.2|kimi-k2\.7-code/,
-      "all_ox_alpha_high" => /stealth\/ox-alpha/,
-      "all_ox_alpha_max" => /stealth\/ox-alpha/,
-      "all_ox_alpha_opencode_high" => /stealth\/ox-alpha/
+      "all_ox_alpha_high" => %r{stealth/ox-alpha|z-ai/glm-5\.3-flash},
+      "all_ox_alpha_max" => %r{stealth/ox-alpha|z-ai/glm-5\.3-flash},
+      "all_ox_alpha_opencode_high" => %r{stealth/ox-alpha|z-ai/glm-5\.3-flash}
     }.freeze
 
     # Models a CLI may invoke for its own utilities regardless of the pin.

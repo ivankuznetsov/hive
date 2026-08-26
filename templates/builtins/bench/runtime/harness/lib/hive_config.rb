@@ -27,15 +27,16 @@ module HiveBench
     DEFAULT_BRANCH = "main"
     PARALLEL_ATTEMPT_STARTUP_TIMEOUT_SEC = 300
     OPENCODE_PLUGIN = "/opt/compound-engineering"
+    OPENCODE_OX_ALPHA_MODEL_ID = "z-ai/glm-5.3-flash"
     OPENCODE_OX_ALPHA_MODEL = {
-      "name" => "Ox Alpha",
-      "family" => "alpha",
-      "release_date" => "2026-08-20",
+      "name" => "Ox Alpha (Z.ai GLM 5.3 Flash)",
+      "family" => "glm",
+      "release_date" => "2026-08-26",
       "attachment" => true,
       "reasoning" => true,
       "temperature" => true,
       "tool_call" => true,
-      "cost" => { "input" => 0, "output" => 0 },
+      "cost" => { "input" => 0.075, "output" => 0.25 },
       "limit" => { "context" => 1_048_576, "output" => 131_072 },
       "modalities" => { "input" => %w[text image], "output" => ["text"] },
       "status" => "active",
@@ -81,7 +82,7 @@ module HiveBench
             "config" => {
               "provider" => {
                 "openrouter" => {
-                  "models" => { "stealth/ox-alpha" => OPENCODE_OX_ALPHA_MODEL }
+                  "models" => { OPENCODE_OX_ALPHA_MODEL_ID => OPENCODE_OX_ALPHA_MODEL }
                 }
               }
             },

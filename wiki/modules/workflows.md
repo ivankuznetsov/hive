@@ -173,6 +173,10 @@ the harness recovers its normalized input, output, cache-read, and cache-write
 totals from the cell-local Hive usage database when no stream tokens exist.
 The runner image carries the pinned OpenCode CLI and Compound Engineering
 package, while Pi receives the minimal pinned OpenRouter model catalog.
+OpenRouter disclosed Ox Alpha as Z.ai GLM 5.3 Flash and retired the stealth
+inference route on 2026-08-26. The maintained profiles therefore keep their Ox
+Alpha candidate ids for lineage while routing the revealed model through
+`z-ai/glm-5.3-flash`; model-version receipts name GLM 5.3 Flash explicitly.
 The generated OpenCode profile uses only Hive-supported override keys; OS and
 network containment belong to the disposable runner rather than the retired
 `agents.opencode.isolation` setting. Its scoped permission document grants the

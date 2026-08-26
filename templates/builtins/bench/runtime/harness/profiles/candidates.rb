@@ -25,9 +25,12 @@ module HiveBench
     OPUS = "opus"
     SOL = "gpt-5.6-sol"
     TERRA = "gpt-5.6-terra"
-    PI_OX_ALPHA = "openrouter/stealth/ox-alpha:high"
-    PI_OX_ALPHA_MAX = "openrouter/stealth/ox-alpha:max"
-    OPENCODE_OX_ALPHA = "openrouter/stealth/ox-alpha"
+    # OpenRouter disclosed and retired the stealth route on 2026-08-26. Keep
+    # the Ox Alpha candidate ids for benchmark lineage, but route the revealed
+    # model through its stable public id.
+    PI_OX_ALPHA = "openrouter/z-ai/glm-5.3-flash:high"
+    PI_OX_ALPHA_MAX = "openrouter/z-ai/glm-5.3-flash:max"
+    OPENCODE_OX_ALPHA = "openrouter/z-ai/glm-5.3-flash"
 
     def all
       [all_opus, all_codex, opus_plan_codex_exec,
@@ -258,7 +261,7 @@ module HiveBench
                                   "execute" => PI_OX_ALPHA,
                                   "review" => PI_OX_ALPHA
                                 },
-                                model_version: "ox-alpha-high")
+                                model_version: "glm-5.3-flash-high")
     end
 
     # A separate Pi-only row at Ox Alpha's maximum reasoning tier. Keeping the
@@ -271,7 +274,7 @@ module HiveBench
                                  "execute" => PI_OX_ALPHA_MAX,
                                  "review" => PI_OX_ALPHA_MAX
                                },
-                               model_version: "ox-alpha-max")
+                               model_version: "glm-5.3-flash-max")
     end
 
     # Same model and reasoning tier through Hive's OpenCode profile. The
@@ -284,7 +287,7 @@ module HiveBench
              "execute" => OPENCODE_OX_ALPHA,
              "review" => OPENCODE_OX_ALPHA
            },
-           opencode_effort: "high", model_version: "ox-alpha-high")
+           opencode_effort: "high", model_version: "glm-5.3-flash-high")
     end
   end
 end

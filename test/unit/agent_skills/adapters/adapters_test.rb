@@ -392,6 +392,24 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_claude_alias_path_follows_the_profile_configuration_root
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "claude")
+      row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
+                       health: "missing", bin: "/fake/claude")
+      prerequisite = inspection(
+        agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "healthy", bin: "/fake/claude"
+      )
+      adapter = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir,
+                        environment: { "CLAUDE_CONFIG_DIR" => override })
+      plan = adapter.plan([ prerequisite, row ])
+      alias_operation = plan.operations.find { |operation| operation.kind == "alias_write" }
+
+      assert_equal [ File.join(override, "commands", "plan.md") ], alias_operation.files
+    end
+  end
+
   def test_declared_package_prerequisite_orders_llm_wiki_after_compound_engineering
     with_tmp_dir do |dir|
       ce = inspection(agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",

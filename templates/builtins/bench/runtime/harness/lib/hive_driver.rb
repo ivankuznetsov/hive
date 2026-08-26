@@ -419,7 +419,7 @@ module HiveBench
     end
 
     def active_hive_runtime
-      bin = File.realpath(ENV.fetch("HB_HIVE_BIN") { find_hive_executable })
+      bin = active_hive_binary
       root = File.expand_path("..", File.dirname(bin))
       canonical_bin = File.join(root, "bin", "hive")
       hive_lib = File.join(root, "lib", "hive.rb")
@@ -440,6 +440,61 @@ module HiveBench
       { root:, gem_home:, version: }.freeze
     rescue Errno::ENOENT, Errno::EACCES => e
       raise "active hive runtime is unavailable: #{e.message}"
+    end
+
+    # A normal installation puts `hive` beside lib/hive.rb. Dogfood instead
+    # exposes a stable PATH wrapper which selects an immutable deployment and
+    # exports its identity before exec. Preserve explicit HB_HIVE_BIN behavior,
+    # but when PATH resolves to that wrapper, recover the exact deployment named
+    # by the inherited identity rather than following the mutable current link.
+    def active_hive_binary
+      explicit = ENV["HB_HIVE_BIN"].to_s.strip
+      return File.realpath(explicit) unless explicit.empty?
+
+      discovered = File.realpath(find_hive_executable)
+      return discovered if complete_runtime_binary?(discovered)
+
+      dogfood_runtime_binary || discovered
+    end
+
+    def complete_runtime_binary?(bin)
+      root = File.expand_path("..", File.dirname(bin))
+      File.file?(File.join(root, "bin", "hive")) &&
+        File.executable?(File.join(root, "bin", "hive")) &&
+        File.file?(File.join(root, "lib", "hive.rb"))
+    end
+
+    def dogfood_runtime_binary
+      return unless ENV["HIVE_RUNTIME_CHANNEL"] == "dogfood"
+
+      deployment_id = ENV["HIVE_RUNTIME_DEPLOYMENT_ID"].to_s
+      build_sha = ENV["HIVE_RUNTIME_BUILD_SHA"].to_s
+      unless deployment_id.match?(/\Ahive-dogfood-[0-9a-f]{9}\z/) &&
+             build_sha.match?(/\A[0-9a-f]{40}\z/) &&
+             deployment_id == "hive-dogfood-#{build_sha[0, 9]}"
+        raise "dogfood hive runtime identity is invalid"
+      end
+
+      state_root = ENV["HIVE_DOGFOOD_STATE_ROOT"].to_s
+      if state_root.empty?
+        state_home = ENV["XDG_STATE_HOME"].to_s
+        state_home = File.expand_path("~/.local/state") if state_home.empty?
+        state_root = File.join(state_home, "hive")
+      end
+      deployments = File.realpath(File.join(state_root, "deployments"))
+      root = File.realpath(File.join(deployments, deployment_id))
+      unless File.dirname(root) == deployments && File.basename(root) == deployment_id
+        raise "dogfood hive runtime escapes managed deployments: #{root}"
+      end
+
+      out, err, status = Open3.capture3("git", "-C", root, "rev-parse", "--verify", "HEAD^{commit}")
+      actual_sha = out.strip
+      unless status.success? && actual_sha == build_sha
+        detail = err.strip.empty? ? actual_sha : err.strip
+        raise "dogfood hive runtime identity mismatch: #{detail}"
+      end
+
+      File.join(root, "bin", "hive")
     end
 
     def find_hive_executable

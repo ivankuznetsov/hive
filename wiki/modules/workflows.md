@@ -173,6 +173,11 @@ the harness recovers its normalized input, output, cache-read, and cache-write
 totals from the cell-local Hive usage database when no stream tokens exist.
 The runner image carries the pinned OpenCode CLI and Compound Engineering
 package, while Pi receives the minimal pinned OpenRouter model catalog.
+The generated OpenCode profile uses only Hive-supported override keys; OS and
+network containment belong to the disposable runner rather than the retired
+`agents.opencode.isolation` setting. Its scoped permission document grants the
+qualified `Bash(*)` tool so OpenCode and Pi can both run repository diagnostics
+and tests.
 Candidate source preparation fetches only the exact historical base at depth
 one. This keeps descendant/reference objects, source refs, tags, and reflogs out
 of the candidate repository instead of relying on `remote remove` to hide them.
@@ -181,6 +186,13 @@ attaches to a named internal Docker network and receives a credential-free
 CONNECT-proxy URL; partial or missing strict configuration fails before model
 spend. The base-only and egress modes are bound into generation identity, so an
 older unrestricted artifact cannot be silently reused as strict evidence.
+When the control plane is invoked through the dogfood wrapper, the packaged
+driver resolves the exact immutable deployment named by
+`HIVE_RUNTIME_DEPLOYMENT_ID` and verifies its full commit against
+`HIVE_RUNTIME_BUILD_SHA`. It does not treat the stable wrapper as a source
+runtime or follow the mutable `dogfood-current` pointer after the task starts;
+an explicit `HB_HIVE_BIN` override still takes precedence and fails closed.
+
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
 

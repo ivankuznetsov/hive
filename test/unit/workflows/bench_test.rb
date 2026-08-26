@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "open3"
+require "sqlite3"
 require "time"
 require "hive/workflow_selection"
 require "hive/workflows/bench"
@@ -79,8 +80,188 @@ class WorkflowsBenchTest < Minitest::Test
 
     assert_path_exists File.join(runtime, "harness", "hive_run.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "judge_slate.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_runtime.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "pi_bench_launcher.sh")
+    assert_path_exists File.join(runtime, "harness", "lib", "provider_egress_proxy.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "token_report.rb")
+    assert_path_exists File.join(runtime, "harness", "profiles", "pi_openrouter_models.json")
     assert_path_exists File.join(runtime, "campaign.yml.example")
     assert_path_exists File.join(runtime, "Dockerfile.runner")
+  end
+
+  def test_packaged_runtime_routes_ox_alpha_max_through_pi_without_plan_review
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "json"
+      require "profiles/candidates"
+      require "lib/hive_config"
+      candidate = HiveBench::Candidates.by_id("all-ox-alpha@max")
+      abort "missing max candidate" unless candidate
+      puts JSON.generate(
+        "candidate" => candidate.to_h,
+        "config" => HiveBench::HiveConfig.to_h(candidate)
+      )
+    RUBY
+
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
+
+    assert status.success?, out + err
+    payload = JSON.parse(out)
+    candidate = payload.fetch("candidate")
+    config = payload.fetch("config")
+    assert_equal "ox-alpha-max", candidate.fetch("model_version")
+    assert_equal %w[pi pi pi], candidate.values_at("plan", "execute", "review")
+    %w[plan execute open_pr review_ci review_triage review_fix].each do |stage|
+      assert_equal "openrouter/stealth/ox-alpha:max", config.dig("models", stage, "model")
+    end
+    assert_equal false, config.dig("plan_review", "enabled")
+  end
+
+  def test_packaged_runtime_recovers_redacted_opencode_usage_from_hive_database
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    Dir.mktmpdir("hive-bench-opencode-usage") do |target|
+      db_path = File.join(target, ".hb", "hive-home", "usage.db")
+      FileUtils.mkdir_p(File.dirname(db_path))
+      SQLite3::Database.new(db_path) do |db|
+        db.execute <<~SQL
+          CREATE TABLE token_usage (
+            agent TEXT NOT NULL, model TEXT, actual_backend TEXT, actual_model TEXT,
+            stage TEXT, input INTEGER, output INTEGER, cached INTEGER,
+            cache_read INTEGER, cache_write INTEGER,
+            input_available INTEGER, output_available INTEGER, cached_available INTEGER,
+            cache_read_available INTEGER, cache_write_available INTEGER
+          )
+        SQL
+        db.execute(
+          "INSERT INTO token_usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [ "opencode", "openrouter/stealth/ox-alpha", "openrouter", "stealth/ox-alpha",
+            "3-plan", 2_392, 130, 13_440, 13_440, 0, 1, 1, 1, 1, 1 ]
+        )
+      end
+      script = <<~'RUBY'
+        require "json"
+        require "lib/token_report"
+        puts JSON.generate(HiveBench::TokenReport.scan_cell(ARGV.fetch(0)))
+      RUBY
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{harness}", "-e", script, target
+      )
+
+      assert status.success?, out + err
+      usage = JSON.parse(out).fetch("openrouter/stealth/ox-alpha")
+      assert_equal 2_392, usage.fetch("input")
+      assert_equal 130, usage.fetch("output")
+      assert_equal 13_440, usage.fetch("cache_read")
+      assert_equal 0, usage.fetch("cache_write")
+    end
+  end
+
+  def test_packaged_runtime_gives_opencode_the_same_shell_capability_as_pi
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "json"
+      require "profiles/candidates"
+      require "lib/hive_config"
+      candidate = HiveBench::Candidates.by_id("all-ox-alpha-opencode@high")
+      puts JSON.generate(HiveBench::HiveConfig.to_h(candidate).fetch("permissions"))
+    RUBY
+
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
+
+    assert status.success?, out + err
+    permissions = JSON.parse(out)
+    assert_equal "scoped", permissions.fetch("preset")
+    assert_equal [ "Read", "Write", "Edit", "Bash(*)" ], permissions.fetch("tools")
+  end
+
+  def test_packaged_runtime_gives_candidates_only_the_historical_base_git_object
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    Dir.mktmpdir("hive-bench-source-history") do |source|
+      git = lambda do |*args|
+        out, err, status = Open3.capture3("git", "-C", source, *args)
+        assert status.success?, err
+        out.strip
+      end
+      git.call("init", "-q", "-b", "main")
+      git.call("config", "user.email", "bench@example.com")
+      git.call("config", "user.name", "Bench Test")
+      File.write(File.join(source, "value.txt"), "base\n")
+      git.call("add", "value.txt")
+      git.call("commit", "-qm", "historical base")
+      base = git.call("rev-parse", "HEAD")
+      File.write(File.join(source, "value.txt"), "gold answer\n")
+      git.call("commit", "-qam", "public reference solution")
+      reference = git.call("rev-parse", "HEAD")
+      target = File.join(source, "candidate")
+      script = <<~'RUBY'
+        require "lib/hive_driver"
+        HiveBench::HiveDriver.allocate.send(:setup_repo, *ARGV)
+      RUBY
+
+      _out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{harness}", "-e", script, source, base, target
+      )
+
+      assert status.success?, err
+      shallow, = Open3.capture2("git", "-C", target, "rev-parse", "--is-shallow-repository")
+      assert_equal "true", shallow.strip
+      visible, = Open3.capture2("git", "-C", target, "log", "--all", "--format=%H")
+      assert_equal [ base ], visible.lines.map(&:strip)
+      _missing, _err, reference_status = Open3.capture3(
+        "git", "-C", target, "cat-file", "-e", "#{reference}^{commit}"
+      )
+      refute reference_status.success?, "reference solution object leaked into candidate clone"
+      assert_equal [], Dir.glob(File.join(target, ".git", "refs", "remotes", "**", "*"))
+    end
+  end
+
+  def test_packaged_runtime_records_and_enforces_provider_only_generation_egress
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "json"
+      require "profiles/candidates"
+      require "lib/hive_driver"
+      driver = HiveBench::HiveDriver.allocate
+      candidate = HiveBench::Candidates.by_id("all-ox-alpha@max")
+      identity = driver.send(
+        :generation_identity,
+        { "task_id" => "task" }, candidate, "base",
+        hive_runtime: { version: "test" }
+      )
+      puts JSON.generate(
+        "network" => driver.send(:network_args),
+        "environment" => driver.send(:env_args, candidate),
+        "identity" => identity
+      )
+    RUBY
+    env = {
+      "HB_REQUIRE_EGRESS_ALLOWLIST" => "1",
+      "HB_GEN_NETWORK" => "bench-provider-only",
+      "HB_GEN_HTTPS_PROXY" => "http://bench-egress:3128"
+    }
+
+    out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{harness}", "-e", script)
+
+    assert status.success?, err
+    payload = JSON.parse(out)
+    assert_equal [ "--network", "bench-provider-only" ], payload.fetch("network")
+    proxy_env = payload.fetch("environment")
+    %w[HTTPS_PROXY HTTP_PROXY ALL_PROXY].each do |name|
+      assert_includes proxy_env, "#{name}=http://bench-egress:3128"
+    end
+    assert_includes proxy_env, "NODE_USE_ENV_PROXY=1"
+    assert_equal 2, payload.dig("identity", "schema_version")
+    assert_equal "base-only-shallow", payload.dig("identity", "isolation", "source_history")
+    assert_equal "provider-allowlist", payload.dig("identity", "isolation", "generation_egress")
+
+    _out, missing_err, missing_status = Open3.capture3(
+      { "HB_REQUIRE_EGRESS_ALLOWLIST" => "1", "HB_GEN_NETWORK" => nil,
+        "HB_GEN_HTTPS_PROXY" => nil },
+      RbConfig.ruby, "-I#{harness}", "-e", script
+    )
+    refute missing_status.success?
+    assert_includes missing_err, "benchmark requires provider-only generation egress"
   end
 
   def test_codex_judge_can_route_the_pinned_model_through_openrouter

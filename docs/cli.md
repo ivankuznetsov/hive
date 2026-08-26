@@ -10,7 +10,9 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive web` | Bootstrap and run Hive web in the foreground; this command blocks. | `hive web` |
 | `hive web status [--json]` | Observe installed, enabled, running, and readiness state without mutation. | `hive web status --json` |
 | `hive web install [--force] [--json]` | Install or explicitly repair the managed per-user web service. | `hive web install --force` |
-| `hive status` | See active tasks grouped by next action. | `hive status` |
+| `hive status [--json]` | Poll bounded daemon health and identity-verified live tasks through `hive-running-status.v1`; scan/output truncation is explicit. | `hive status --json` |
+| `hive status --operational [--json]` | Inspect the active workflow queue, blocker ownership, and safe next actions. | `hive status --operational --json` |
+| `hive task TARGET --json` | Inspect one task in depth without materializing every task's details. | `hive task demo:my-task --json` |
 | `hive new PROJECT [--workflow ID] [--idempotency-key KEY] [--json] TEXT` | Capture an idea in the workflow entry stage; optional idempotency makes agent retries return the existing task. | `hive new xbookmark --workflow editorial --idempotency-key creator:42 --json "draft a launch post"` |
 | `hive brainstorm TARGET` | Promote inbox to brainstorm or re-run brainstorm. | `hive brainstorm <slug>` |
 | `hive plan TARGET` | Promote completed brainstorm to plan or re-run plan. | `hive plan <slug> --from 2-brainstorm` |
@@ -126,7 +128,7 @@ Use these when building scripts, recovering a task, or checking idempotency.
 
 ## Daemon
 
-The daemon process is global user infrastructure; dispatch is per-project. Install-time setup runs `hive daemon install` so the service survives login/reboot, while `hive init` or `hive daemon enable` decides which projects it may touch. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
+The daemon process is global user infrastructure; dispatch is per-project. Install-time setup runs `hive daemon install` so the service survives login/reboot, while `hive init` or `hive daemon enable` decides which projects it may touch. It reads Hive's internal scheduler task graph, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
 When a project also has `patrol.enabled: true`, the daemon's patrol scheduler dispatches `hive patrol <project> --json` on the configured slow cadence through the same project-enabled and concurrency gates as other daemon children.
 
 ```bash

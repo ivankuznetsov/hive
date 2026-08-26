@@ -82,12 +82,13 @@ class DropCommandTest < Minitest::Test
 
       child_pid_path = File.join(dir, "nested-agent-child.pid")
       pid = Process.spawn(
-        RbConfig.ruby, "-e", <<~'RUBY', child_pid_path,
+        { "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin") },
+        RbConfig.ruby, "--disable-gems", "-e", <<~'RUBY', child_pid_path,
           child = Process.spawn("sleep", "60", pgroup: true, out: File::NULL, err: File::NULL)
           File.write(ARGV.fetch(0), child)
           sleep 60
         RUBY
-        pgroup: true, out: File::NULL, err: File::NULL
+        pgroup: true, out: File::NULL, err: File::NULL, unsetenv_others: true
       )
       nested_pid = wait_for_pid_file(child_pid_path)
       nested_pgid = Process.getpgid(nested_pid)

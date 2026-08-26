@@ -34,6 +34,26 @@ class PatrolFixWorktreeSnapshotTest < Minitest::Test
     assert_equal DIFF, snapshot.fetch("diff")
   end
 
+  def test_decodes_valid_utf8_diff_bytes_and_rejects_malformed_bytes
+    valid_bytes = "diff --git a/app.rb b/app.rb\n+# fixed — now\n".b
+    valid_fix = deep_copy(FIX)
+    valid_fix.fetch("payload")["diff_digest"] = Digest::SHA256.hexdigest(valid_bytes)
+
+    snapshot = capture(
+      fix: valid_fix, gate: default_gate.merge(diff: ok(valid_bytes))
+    )
+
+    assert_equal Encoding::UTF_8, snapshot.fetch("diff").encoding
+    assert_equal valid_bytes.dup.force_encoding(Encoding::UTF_8), snapshot.fetch("diff")
+
+    invalid_bytes = "diff --git a/app.rb b/app.rb\n+\xFF\n".b
+    invalid_fix = deep_copy(FIX)
+    invalid_fix.fetch("payload")["diff_digest"] = Digest::SHA256.hexdigest(invalid_bytes)
+    assert_stage_error(/diff is not valid UTF-8/) do
+      capture(fix: invalid_fix, gate: default_gate.merge(diff: ok(invalid_bytes)))
+    end
+  end
+
   def test_rejects_every_stale_custody_binding
     stale_owner = OWNER.merge("generation" => 2)
     assert_stage_error(/custody is stale/) { capture(owner: stale_owner) }

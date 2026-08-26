@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-25
 tags: [config, yaml, validation, plan-review, opencode]
 ---
 
@@ -184,7 +184,7 @@ new successful capture emits the provider-neutral v2 manifest.
 
 ## Plan-review policy and routes
 
-`plan_review` is a closed, always-enabled configuration subtree for the
+`plan_review` is a closed, production-enabled configuration subtree for the
 built-in coding plan boundary. It does not extend workflow descriptors or
 activate critique for other workflows. Defaults are:
 
@@ -225,6 +225,13 @@ protected globs must be safe relative patterns, coverage names are unique
 lowercase identifiers, and required/optional coverage cannot overlap. Every
 route is a closed provider/model/family/effort/route receipt and every reviewer
 name must exist in the model-routing registry.
+
+Ordinary project loads still reject `enabled: false`. A benchmark runtime that
+must reproduce pre-plan-review generation may set the process-local
+`HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW=1` grant and explicitly serialize
+`enabled: false`. Without both values the project fails closed. The benchmark
+runner owns this grant; it is not a general production opt-out and does not
+change the default above.
 
 Approval-policy rows are also closed. Their unique ID/version, action, risk,
 relative paths, validity interval, and revocation flag must validate before the
@@ -652,11 +659,13 @@ coarse `models:` route overrides it.
 
 OpenCode adds only typed, non-secret overrides under `agents.opencode`:
 `config_path`, an inline non-secret `config` object, `credential_env` names,
-an optional `credential_file`, explicit `plugins`, and `isolation: hermetic`.
+and explicit `plugins`.
 Relative source paths resolve against `project_root`. Credential values, raw
 argv, raw environment maps, unknown agent blocks, and unknown override keys
-are rejected during config validation. The selected config remains read-only;
-Hive prepares and later removes a private per-invocation overlay.
+are rejected during config validation. Native OpenCode config, plugins,
+project discovery, sessions, and login are used in place. A non-empty
+`credential_env` explicitly selects environment authentication; Hive never
+accepts or stages a credential file.
 
 Every `ROLE_AGENT_PATHS` entry accepts `agent: opencode`, but none of
 `DEFAULT_GLOBAL_AGENTS`, stage defaults, reviewer councils, or fallback lists

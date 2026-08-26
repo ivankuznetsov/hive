@@ -104,6 +104,16 @@ class EventsTest < Minitest::Test
     refute_includes data.fetch(:paths).first, "\n"
   end
 
+  def test_clean_exit_paths_redacts_before_byte_bounding
+    path = "p" * 105 + "/aws_secret_access_key=#{'A' * 40}.dat"
+
+    diagnostic = Hive::Events.clean_exit_paths([ path ]).fetch(0)
+
+    assert_includes diagnostic, "[REDACTED:"
+    refute_includes diagnostic, "aws_secret_access_key=#{'A' * 38}"
+    assert_operator diagnostic.bytesize, :<=, Hive::Events::MAX_EVENT_PATH_BYTES
+  end
+
   def test_clean_exit_data_redacts_secret_shaped_paths
     secret = "AKIAABCDEFGHIJKLMNOP"
 

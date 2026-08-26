@@ -119,19 +119,27 @@ class HiveRegressionRedundantRedispatchTest < Minitest::Test
     )
     @dispatcher.define_singleton_method(:project_enabled?) { |_| true }
     @original_find_project = Hive::Config.method(:find_project)
+    @original_registered_projects = Hive::Config.method(:registered_projects)
     project = @project
     state_home = @state_home
     hive_state = @hive_state_path
+    project_entry = { "name" => project, "path" => state_home, "hive_state_path" => hive_state }
     Hive::Config.define_singleton_method(:find_project) do |name|
       next nil unless name == project
 
-      { "name" => project, "path" => state_home, "hive_state_path" => hive_state }
+      project_entry
     end
+    Hive::Config.define_singleton_method(:registered_projects) { [ project_entry ] }
   end
 
   def teardown
     FileUtils.remove_entry(@state_home) if @state_home && File.exist?(@state_home)
     Hive::Config.define_singleton_method(:find_project, @original_find_project) if @original_find_project
+    if @original_registered_projects
+      Hive::Config.define_singleton_method(
+        :registered_projects, @original_registered_projects
+      )
+    end
   end
 
   def needs_input_row(mtime:)

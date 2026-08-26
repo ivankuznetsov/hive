@@ -250,7 +250,10 @@ module Hive
         def policy_compatible_suggestion(slot, suggested, cfg)
           preset = Hive::PermissionScope.parse_spec(slot.permissions, stage: slot.id).fetch("preset")
           profile = Hive::AgentProfiles.lookup(suggested, cfg: cfg)
-          return suggested if preset == Hive::PermissionScope::YOLO || profile.name == :claude
+          support = Hive::AgentSupport.for(profile)
+          runtime = support::Runtime if support&.const_defined?(:Runtime, false)
+          legacy = runtime&.respond_to?(:legacy_policy?) && runtime.legacy_policy?
+          return suggested if preset == Hive::PermissionScope::YOLO || legacy
 
           "claude"
         end
@@ -267,7 +270,8 @@ module Hive
           return nil unless profile.model_argument_builder
 
           value = cfg.dig(role == "planning" ? "plan" : "execute", "model")
-          value ||= cfg.dig("claude", "model") if profile.name == :claude
+          support = Hive::AgentSupport.for(profile)
+          value ||= support.legacy_control(cfg, :model) if support&.respond_to?(:legacy_control)
           normalize_optional(value)
         end
 
@@ -275,7 +279,8 @@ module Hive
           return nil unless profile.effort_argument_builder
 
           value = cfg.dig(role == "planning" ? "plan" : "execute", "effort")
-          value ||= cfg.dig("claude", "effort") if profile.name == :claude
+          support = Hive::AgentSupport.for(profile)
+          value ||= support.legacy_control(cfg, :effort) if support&.respond_to?(:legacy_control)
           normalize_optional(value)
         end
 

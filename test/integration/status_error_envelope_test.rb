@@ -6,13 +6,13 @@ require "hive/commands/status"
 # Pin the agent-callable error contract emitted by `hive status --json`.
 # Status's producer surface is narrow: ConfigError (e.g., HIVE_HOME unreadable)
 # and InternalError (StandardError wrap). Both must produce a parseable
-# ErrorPayload validating against the sole current hive-status schema.
+# ErrorPayload validating against the bounded running-status schema.
 class StatusErrorEnvelopeTest < Minitest::Test
   include HiveTestHelper
 
   def setup
     @schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-running-status")))
     )
   end
 
@@ -21,7 +21,7 @@ class StatusErrorEnvelopeTest < Minitest::Test
     with_tmp_global_config do
       out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
       payload = JSON.parse(out)
-      assert_equal "hive-status", payload["schema"]
+      assert_equal "hive-running-status", payload["schema"]
       assert_equal true, payload["ok"], "SuccessPayload carries `ok: true` so the discriminator is symmetric with ErrorPayload's `ok: false`"
       assert @schemer.valid?(payload),
              "SuccessPayload must validate (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
@@ -43,7 +43,7 @@ class StatusErrorEnvelopeTest < Minitest::Test
         out, err, status = with_captured_exit { cmd.call }
         assert_equal Hive::ExitCodes::CONFIG, status, "ConfigError exits 78"
         payload = JSON.parse(out)
-        assert_equal "hive-status", payload["schema"]
+        assert_equal "hive-running-status", payload["schema"]
         assert_equal false, payload["ok"]
         assert_equal "config", payload["error_kind"]
         assert_equal "ConfigError", payload["error_class"]

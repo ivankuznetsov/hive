@@ -1,4 +1,5 @@
 require "hive/pid_file"
+require "hive/runtime_identity"
 
 class HealthController < ApplicationController
   skip_before_action :require_login
@@ -19,13 +20,16 @@ class HealthController < ApplicationController
   # must turn the container unhealthy, not sit invisible behind a green
   # web tier.
   def show
-    return render json: { ok: true } unless params[:deep].present?
+    runtime = Hive::RuntimeIdentity.new.to_h
+    return render json: { ok: true, runtime: runtime } unless params[:deep].present?
 
     daemon_pid = DaemonProbe.new.read_live_pid
     if daemon_pid
-      render json: { ok: true, daemon: { running: true, pid: daemon_pid } }
+      render json: { ok: true, runtime: runtime, daemon: { running: true, pid: daemon_pid } }
     else
-      render json: { ok: false, daemon: { running: false } }, status: :service_unavailable
+      render json: {
+        ok: false, runtime: runtime, daemon: { running: false }
+      }, status: :service_unavailable
     end
   end
 end

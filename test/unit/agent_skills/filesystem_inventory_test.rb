@@ -2,6 +2,7 @@ require "test_helper"
 
 require "hive/agent_skills/filesystem_inventory"
 require "hive/agent_skills/manifest"
+require "hive/agent_support/pi"
 
 class AgentSkillsFilesystemInventoryTest < Minitest::Test
   include HiveTestHelper
@@ -60,6 +61,12 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
         {},
         { "enabledPlugins" => { "package@market" => "yes" } },
         /enabledPlugins entry .* must be boolean/
+      ],
+      [
+        { "plugins" => { "package@market" => {} } },
+        {},
+        {},
+        /entry .* must be an array/
       ]
     ]
 
@@ -97,7 +104,9 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
       invalid = File.join(root, "plugins", "cache", "market", "package", "not a version!")
       FileUtils.mkdir_p(invalid)
 
-      path = inventory.send(:codex_install_path, root, spec)
+      path = Hive::AgentSupport.for(:codex)::Skills.send(
+        :install_path, root, spec, inventory.method(:package_version_from)
+      )
 
       assert_nil path
     end
@@ -113,7 +122,9 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
       assert_empty result.fetch("issues")
       assert_nil result.fetch("package")
 
-      assert_nil inventory.send(:direct_pi_install_path, File.join(root, "git"), "https://bad host/%")
+      assert_nil Hive::AgentSupport::Pi::Skills.direct_install_path(
+        File.join(root, "git"), "https://bad host/%"
+      )
     end
 
     with_tmp_dir do |root|
@@ -203,8 +214,6 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
     )
 
     with_tmp_dir do |root|
-      write_json(File.join(root, "installed-plugins", "registry.json"), "repos" => {})
-
       missing = inspect_provider(spec, root)
 
       assert_empty missing.fetch("issues")
@@ -224,6 +233,15 @@ class AgentSkillsFilesystemInventoryTest < Minitest::Test
       malformed = inspect_provider(spec, root)
 
       assert_match(/plugin "compound-engineering" must be an object/, malformed.fetch("issues").first.last)
+    end
+  end
+
+  def test_opencode_missing_config_is_an_empty_inventory
+    with_tmp_dir do |root|
+      result = inspect_provider(native_spec(provider: "opencode"), root)
+
+      assert_empty result.fetch("issues")
+      assert_nil result.fetch("package")
     end
   end
 

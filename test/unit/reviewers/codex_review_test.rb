@@ -43,7 +43,7 @@ class ReviewersCodexReviewTest < Minitest::Test
   def build_reviewer(dir, overrides = {})
     ctx = make_ctx(dir)
     FileUtils.mkdir_p(ctx.task_folder)
-    Hive::Reviewers::CodexReview.new(make_spec(overrides), ctx)
+    Hive::AgentSupport.for(:codex)::Reviewer.new(make_spec(overrides), ctx)
   end
 
   # --- argv construction -------------------------------------------------
@@ -79,7 +79,7 @@ class ReviewersCodexReviewTest < Minitest::Test
       ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
       ctx = make_ctx(dir)
       FileUtils.mkdir_p(ctx.task_folder)
-      reviewer = Hive::Reviewers::CodexReview.new(
+      reviewer = Hive::AgentSupport.for(:codex)::Reviewer.new(
         make_spec,
         ctx,
         cfg: {
@@ -278,7 +278,7 @@ class ReviewersCodexReviewTest < Minitest::Test
       body = File.read(reviewer.output_path)
       assert body.start_with?("## High"), "retained findings must start at the first severity header"
       assert_includes body, "big: overflow case"
-      assert_operator File.size(reviewer.output_path), :<=, Hive::Reviewers::CodexReview::MAX_OUTPUT_BYTES,
+      assert_operator File.size(reviewer.output_path), :<=, Hive::Reviewers::Runtime::MAX_OUTPUT_BYTES,
                       "retained output must not exceed the cap"
     end
   end
@@ -850,9 +850,9 @@ class ReviewersCodexReviewTest < Minitest::Test
       sleep 0.2
 
       # terminate must not raise even though TERM is ignored.
-      reviewer.send(:terminate, pid)
+      Hive::Reviewers::Runtime.terminate(pid)
       # The process group must be gone after KILL escalation + reap.
-      refute reviewer.send(:process_group_alive?, Process.getpgid(pid)),
+      refute Hive::Reviewers::Runtime.process_group_alive?(Process.getpgid(pid)),
              "process group must be torn down by the KILL escalation"
     rescue Errno::ESRCH
       # getpgid after reap can race to ESRCH — that itself proves the group
@@ -866,7 +866,7 @@ class ReviewersCodexReviewTest < Minitest::Test
       reviewer = build_reviewer(dir)
       pid = Process.spawn("sleep 30", pgroup: true)
       begin
-        assert reviewer.send(:process_group_alive?, Process.getpgid(pid)),
+        assert Hive::Reviewers::Runtime.process_group_alive?(Process.getpgid(pid)),
                "a running group must report alive"
       ensure
         Process.kill("KILL", pid)
@@ -885,7 +885,7 @@ class ReviewersCodexReviewTest < Minitest::Test
       pgid = Process.getpgid(pid)
       Process.wait(pid)
 
-      refute reviewer.send(:process_group_alive?, pgid),
+      refute Hive::Reviewers::Runtime.process_group_alive?(pgid),
              "a reaped group must report not-alive"
     end
   end
@@ -899,7 +899,7 @@ class ReviewersCodexReviewTest < Minitest::Test
       original = Process.method(:kill)
       Process.singleton_class.send(:define_method, :kill) { |*| raise Errno::EPERM }
       begin
-        assert reviewer.send(:process_group_alive?, 12_345),
+        assert Hive::Reviewers::Runtime.process_group_alive?(12_345),
                "EPERM (exists but unsignalable) must be treated as alive"
       ensure
         Process.singleton_class.send(:define_method, :kill, original)
@@ -916,9 +916,9 @@ class ReviewersCodexReviewTest < Minitest::Test
       pid = Process.spawn("true", pgroup: true)
       Process.wait(pid)
 
-      assert_nil reviewer.send(:terminate, pid),
+      assert_nil Hive::Reviewers::Runtime.terminate(pid),
                  "terminate must be a no-op for an already-reaped pid"
-      assert_nil reviewer.send(:reap, pid),
+      assert_nil Hive::Reviewers::Runtime.reap(pid),
                  "reap must swallow ECHILD for an already-reaped pid"
     end
   end
@@ -990,7 +990,7 @@ class ReviewersCodexReviewTest < Minitest::Test
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)
       adapter = Hive::Reviewers.dispatch(make_spec, ctx)
-      assert_instance_of Hive::Reviewers::CodexReview, adapter
+      assert_instance_of Hive::AgentSupport.for(:codex)::Reviewer, adapter
     end
   end
 

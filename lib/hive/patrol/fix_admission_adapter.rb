@@ -104,16 +104,6 @@ module Hive
       def fetch(occurrence_id) = store.fetch(occurrence_id)
       def published?(occurrence_id) = !fetch(occurrence_id).nil?
 
-      def publish_finding!(finding, accepted_at: Time.now.utc)
-        return nil unless admitted?(finding)
-
-        snapshot = self.class.snapshot_for(finding, accepted_at: accepted_at)
-        store.reserve!(
-          occurrence_id: occurrence_id(finding, snapshot), snapshot: snapshot,
-          now: accepted_at
-        )
-      end
-
       def occurrence_id_for(finding)
         snapshot = self.class.snapshot_for(finding, accepted_at: Time.now.utc)
         occurrence_id(finding, snapshot)
@@ -121,6 +111,23 @@ module Hive
 
       def published_for_finding?(finding)
         published?(occurrence_id_for(finding))
+      end
+
+      def reservation_for(finding, accepted_at: Time.now.utc)
+        return nil unless admitted?(finding)
+
+        snapshot = self.class.snapshot_for(finding, accepted_at: accepted_at)
+        { occurrence_id: occurrence_id(finding, snapshot), snapshot: snapshot }.freeze
+      end
+
+      def publish_finding!(finding, accepted_at: Time.now.utc)
+        reservation = reservation_for(finding, accepted_at: accepted_at)
+        return nil unless reservation
+
+        store.reserve!(
+          occurrence_id: reservation.fetch(:occurrence_id),
+          snapshot: reservation.fetch(:snapshot), now: accepted_at
+        )
       end
 
       private

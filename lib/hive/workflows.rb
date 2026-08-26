@@ -68,6 +68,16 @@ module Hive
 
     module_function
 
+    # DescriptorParser accepts an alphanumeric-or-hyphen stage name and
+    # Workflow::Stage prefixes it with a positive one-based index. Keep the
+    # on-disk predicate here so lightweight scanners do not invent narrower
+    # stage vocabularies than workflow descriptors allow.
+    def stage_dir?(value)
+      index, name = value.to_s.split("-", 2)
+      /\A[1-9]\d*\z/.match?(index) &&
+        Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(name.to_s)
+    end
+
     def for_verb(verb)
       VERBS.fetch(verb)
     end

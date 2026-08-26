@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/agent_support"
 
 module Hive
   # Registry for the AgentProfile instances hive ships and any custom ones
@@ -37,12 +38,17 @@ module Hive
         entry = @mutex.synchronize { @profiles[sym] }
         raise UnknownAgent, "unknown agent profile: #{name.inspect} (registered: #{registered_names.inspect})" if entry.nil?
 
+        support = Hive::AgentSupport.for(entry)
+        if support&.respond_to?(:configuration) && !entry.support_configuration
+          entry = entry.with_support_configuration(support.configuration)
+        end
+
         return entry if cfg.nil?
 
         overrides = cfg.dig("agents", name.to_s)
         return entry if overrides.nil? || overrides.empty?
 
-        entry.with_overrides(resolve_project_paths(name, overrides, cfg))
+        entry.with_overrides(resolve_project_paths(entry, overrides, cfg))
       rescue ArgumentError => e
         raise Hive::ConfigError,
               "agents.#{name} configuration is invalid: #{e.message}", cause: e
@@ -56,9 +62,7 @@ module Hive
         @mutex.synchronize { @profiles.keys }
       end
 
-      def grok_auth_path(home: nil)
-        AgentCliRuntime::Profiles.grok_auth_path(home:, env: ENV)
-      end
+      def support_for(profile) = Hive::AgentSupport.for(profile)
 
       def logged_in?(name, home: nil)
         # Probe the specific credential artifact each CLI writes on a
@@ -66,24 +70,8 @@ module Hive
         # and codex create ~/.claude / ~/.codex (settings, cache, history)
         # the first time they run, *before* any token exists, so a dir check
         # reports a green "Logged in" on a box that has no credential.
-        case name.to_sym
-        when :claude
-          credential_present?(File.join(home || Dir.home, ".claude", ".credentials.json"))
-        when :codex
-          credential_present?(File.join(home || Dir.home, ".codex", "auth.json"))
-        when :pi
-          credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
-        when :grok
-          credential_present?(grok_auth_path(home:))
-        when :opencode
-          credential_present?(
-            AgentCliRuntime::Profiles.opencode_auth_path(
-              home: home || Dir.home, env: ENV
-            )
-          )
-        else
-          false
-        end
+        support = Hive::AgentSupport.for(name)
+        support && credential_present?(support.credential_path(home:))
       rescue SystemCallError, ArgumentError
         false
       end
@@ -102,19 +90,15 @@ module Hive
 
       private
 
-      def resolve_project_paths(name, overrides, cfg)
-        return overrides unless name.to_sym == :opencode
+      def resolve_project_paths(profile, overrides, cfg)
         return overrides unless overrides.is_a?(Hash)
 
-        root = cfg["project_root"].to_s
-        overrides.to_h do |key, value|
-          if %w[config_path credential_file].include?(key.to_s) &&
-             !value.to_s.empty? && !File.absolute_path?(value.to_s) && !root.empty?
-            [ key, File.expand_path(value.to_s, root) ]
-          else
-            [ key, value ]
-          end
-        end
+        configuration = profile.support_configuration
+        return overrides unless configuration&.respond_to?(:resolve_project_paths)
+
+        configuration.resolve_project_paths(
+          overrides, root: cfg["project_root"].to_s
+        )
       end
     end
   end

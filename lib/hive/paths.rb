@@ -34,6 +34,12 @@ module Hive
       File.join(root, "operational", "daemon-snapshot.json")
     end
 
+    # The daemon's last validated full status graph. Kept separate from the
+    # small scheduler snapshot so unrelated readers never parse the fleet.
+    def operational_status_cache_path(root = state_home)
+      File.join(root, "operational", "daemon-status-cache.json")
+    end
+
     # Owner-private, host-global provider-account and exact-model health.
     # Explicit routing alone consults this state; legacy attempts bypass it.
     def provider_health_root

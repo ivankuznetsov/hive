@@ -310,7 +310,10 @@
         "admission_observation"
       ],
       "properties": {
-        "variant": { "type": "string", "enum": ["marker", "admission_failure"] },
+        "variant": {
+          "type": "string",
+          "enum": ["marker", "admission_failure", "markerless_failure"]
+        },
         "phase": {
           "type": "string",
           "enum": ["admitted", "cleared", "dispatched", "terminal"]
@@ -385,12 +388,24 @@
             }
           },
           "else": {
-            "properties": {
-              "observed_marker_generation": { "type": "null" },
-              "expected_marker_attrs": { "maxProperties": 0 },
-              "policy_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-              "source_receipt": { "type": "null" },
-              "admission_observation": { "$ref": "#/$defs/AdmissionObservation" }
+            "if": { "properties": { "variant": { "const": "admission_failure" } } },
+            "then": {
+              "properties": {
+                "observed_marker_generation": { "type": "null" },
+                "expected_marker_attrs": { "maxProperties": 0 },
+                "policy_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "source_receipt": { "type": "null" },
+                "admission_observation": { "$ref": "#/$defs/AdmissionObservation" }
+              }
+            },
+            "else": {
+              "properties": {
+                "observed_marker_generation": { "type": "null" },
+                "expected_marker_attrs": { "maxProperties": 0 },
+                "policy_digest": { "type": "null" },
+                "source_receipt": { "type": "null" },
+                "admission_observation": { "type": "null" }
+              }
             }
           }
         },

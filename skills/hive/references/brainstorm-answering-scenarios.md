@@ -2,8 +2,8 @@
 
 These transport-neutral transcripts make the policy in
 `brainstorm-answering.md` concrete. They are regression cases, not permission
-to replace current evidence with canned answers. In every case, the full
-`hive status --json` snapshot supplies traversal order, `hive answer` inventory
+to replace current evidence with canned answers. In every case, the
+`hive status --operational --json` snapshot supplies traversal order, `hive answer` inventory
 supplies slot truth, and only the bound write form may persist final text.
 
 The symbolic bindings `b1`, `b2`, and so on stand for opaque tokens returned by

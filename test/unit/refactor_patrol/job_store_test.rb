@@ -598,6 +598,31 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_v3_discovery_accepts_a_compact_partial_source_reference
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      v3 = v3_manifest
+      enqueue_manifest(store, v3, policy: intake_policy, now: T0)
+      token = store.claim_discovery!(
+        v3.fetch("job_id"), owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 60
+      )
+      envelope = complete_zero_envelope(dir).merge(
+        "job_id" => v3.fetch("job_id"),
+        "source_pr" => Hive::RefactorPatrol::PrManifest.source_reference(v3),
+        "complete" => false, "zero_reason" => nil
+      )
+
+      checkpoint = store.checkpoint_discovery!(
+        token, envelope: envelope, now: T0 + 1, backoff_sec: 60
+      )
+
+      assert_equal "blocked", checkpoint.fetch("state")
+      assert_equal "partial_review", checkpoint.fetch("attempts").last.fetch("outcome")
+      assert_equal v3.fetch("provenance"), checkpoint.dig("source", "provenance")
+    end
+  end
+
   def test_accepted_thesis_completes_discovery_without_legacy_actions
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -3251,6 +3276,28 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "changed_paths" => [ "lib/checkout.rb" ],
       "manifest_checksum" => "a" * 64
     }.merge(overrides)
+  end
+
+  def v3_manifest
+    source = manifest.fetch("source")
+    classification = {
+      "occurrence_id" => "c" * 64, "snapshot_digest" => "d" * 64,
+      "changed_paths_digest" => "e" * 64, "decision" => "feature",
+      "reason" => "llm", "rationale" => "New capability",
+      "evidence" => [ "Feature behavior" ], "model_receipt" => "fake:model",
+      "attempts" => 1, "classified_at" => "2026-08-20T12:00:00Z",
+      "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
+    }
+    provenance = {
+      "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
+        "classification_occurrence_id" => classification.fetch("occurrence_id"),
+        "path_mappings" => [ { "path" => "lib/checkout.rb", "slice_ids" => [ "slice" ] } ]
+      ) ]
+    }
+    Hive::RefactorPatrol::PrManifest.build(
+      source: source, files: [ { "path" => "lib/checkout.rb", "status" => "modified" } ],
+      lane: "post_merge", classification: classification, provenance: provenance
+    )
   end
 
   def intake_policy

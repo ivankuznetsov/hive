@@ -1,4 +1,5 @@
 require "hive/attempts/capability"
+require "hive/attempts/command_progress"
 require "hive/attempts/evidence_channel"
 require "hive/attempts/store"
 require "hive/stringify_keys"
@@ -232,9 +233,16 @@ module Hive
         return true if @generation_validated
 
         require "hive/attempts/generation"
-        current = Generation.resolve(
+        generation_options = {
           task: task, project: project, intended_stage: intended_stage
-        )
+        }
+        if CommandProgress.task_progress?(task)
+          fallback = Generation.artifact_token(task)
+          generation_options[:progress_token] = CommandProgress.task_token_for(
+            task: task, fallback: fallback
+          )
+        end
+        current = Generation.resolve(**generation_options)
         ownership_matches = current.ownership_generation == ownership_generation
         successor_progress_matches = !predecessor_attempt_id.to_s.empty? &&
                                      !progress_token.to_s.empty? &&

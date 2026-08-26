@@ -26,7 +26,7 @@ module Hive
 
       SCHEMA = "hive-answer-digest".freeze
 
-      # `hive status --json` came back unusable. A distinct, retryable failure
+      # the internal task graph came back unusable. A distinct, retryable failure
       # so a --json agent can tell a transient upstream outage (retry) from a
       # misconfiguration (fix) by EXIT CODE alone, not just the error_kind
       # string. Inherits Hive::UnavailableError's exit 69 (EX_UNAVAILABLE, "a

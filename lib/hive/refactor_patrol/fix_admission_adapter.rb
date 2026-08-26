@@ -22,13 +22,25 @@ module Hive
       def fetch(occurrence_id) = store.fetch(occurrence_id)
       def published?(occurrence_id) = !fetch(occurrence_id).nil?
 
-      def publish_disposition!(aggregate, disposition, accepted_at: Time.now.utc)
+      def reservation_for(aggregate, disposition, accepted_at: Time.now.utc)
         return nil unless actionable?(disposition)
 
         snapshot = source_snapshot(aggregate, disposition, accepted_at: accepted_at)
-        store.reserve!(
+        {
           occurrence_id: occurrence_id(aggregate, disposition, snapshot),
-          snapshot: snapshot, now: accepted_at
+          snapshot: snapshot
+        }.freeze
+      end
+
+      def publish_disposition!(aggregate, disposition, accepted_at: Time.now.utc)
+        reservation = reservation_for(
+          aggregate, disposition, accepted_at: accepted_at
+        )
+        return nil unless reservation
+
+        store.reserve!(
+          occurrence_id: reservation.fetch(:occurrence_id),
+          snapshot: reservation.fetch(:snapshot), now: accepted_at
         )
       end
 

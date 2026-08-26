@@ -440,10 +440,24 @@ class WebSupervisorTest < Minitest::Test
   def test_supervisor_loads_standalone_without_a_preceding_require_hive
     lib = File.expand_path("../../../../lib", __FILE__)
     script = 'require "hive/web/supervisor"; print Hive::Web::Supervisor.name'
-    out = IO.popen([ RbConfig.ruby, "-I", lib, "-e", script ], err: %i[child out], &:read)
+    # This suite overrides HOME to a throwaway dir, which the spawned child
+    # inherits; its fresh RubyGems would then resolve the USER gem dir under
+    # the throwaway HOME (and, under `bundle exec`, re-run bundler setup via
+    # RUBYOPT) and fail to find hive's dependencies. Pin the parent's already-
+    # cached gem paths and strip bundler bootstrapping instead.
+    child_env = {
+      "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR),
+      "RUBYOPT" => nil,
+      "BUNDLE_GEMFILE" => nil,
+      "BUNDLE_BIN_PATH" => nil,
+      "BUNDLER_SETUP" => nil,
+      "RUBYGEMS_GEMDEPS" => nil
+    }
+    out = IO.popen([ child_env, RbConfig.ruby, "-I", lib, "-e", script ],
+                   err: %i[child out], &:read)
 
     assert_equal 0, $?.exitstatus,
-                 "supervisor must load standalone (entrypoint does `ruby -rhive...`): #{out}"
+                 "supervisor must load standalone (entrypoint does `ruby -rhive...`): #{out[0, 400]}"
     assert_equal "Hive::Web::Supervisor", out, "expected a clean load with no NameError: #{out}"
   end
 

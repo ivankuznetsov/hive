@@ -34,6 +34,7 @@ module HiveBench
     STAGES_SH = File.expand_path("hive_stages.sh", __dir__)
     RESUME_EXECUTE_SH = File.expand_path("hive_resume_execute.sh", __dir__)
     OPENCODE_BENCH_RUNTIME = File.expand_path("opencode_bench_runtime.rb", __dir__)
+    OPENCODE_BENCH_LAUNCHER = File.expand_path("opencode_bench_launcher.sh", __dir__)
     PI_BENCH_LAUNCHER = File.expand_path("pi_bench_launcher.sh", __dir__)
     PI_TOOL_STREAM = File.expand_path("pi_tool_stream.ts", __dir__)
     PI_OPENROUTER_MODELS = File.expand_path("../profiles/pi_openrouter_models.json", __dir__)
@@ -41,6 +42,9 @@ module HiveBench
     HOME = "/home/asterio"
     HIVE_RUNTIME_CONTAINER_ROOT = "/opt/hb/hive-current"
     HIVE_GEM_HOME_CONTAINER_ROOT = "/usr/local/bundle"
+    HIVE_CONTROL_GEM_HOME = "/opt/hb/control-bundle"
+    CANDIDATE_GEM_HOME = "/usr/local/bundle"
+    SEALED_RUNTIME_VISIBILITY = "sealed-control-bundle-v1"
     HIVE_RUNTIME_RUBYLIB = [
       "#{HIVE_RUNTIME_CONTAINER_ROOT}/components/agent-cli-runtime/lib",
       "#{HIVE_RUNTIME_CONTAINER_ROOT}/lib"
@@ -67,10 +71,11 @@ module HiveBench
     PLAN_TIMEOUT = Integer(ENV.fetch("HB_HIVE_TIMEOUT", "5400")) # per container run, sec
 
     def initialize(reuse_existing:, reuse_unverified:, clock: -> { Time.now.utc }, runner: nil,
-                   hive_runtime: nil)
+                   hive_runtime: nil, image_inspector: nil)
       @clock = clock
       @runner = runner # injectable container runner for tests; default shells docker
       @hive_runtime = hive_runtime
+      @image_inspector = image_inspector
       @reuse_existing = reuse_existing
       @reuse_unverified = reuse_unverified
     end
@@ -243,15 +248,18 @@ module HiveBench
 
     def generation_identity(entry, candidate, base, hive_runtime: resolved_hive_runtime)
       egress = generation_egress
+      runtime = { "version" => hive_runtime.fetch(:version) }
+      runtime["build_sha"] = hive_runtime[:build_sha] if hive_runtime[:build_sha]
       JSON.parse(JSON.generate(
                    "schema" => "hive-bench-generation-identity",
-                   "schema_version" => 2,
+                   "schema_version" => 3,
                    "task_id" => entry.fetch("task_id"),
                    "base_commit" => base,
-                   "hive_runtime" => { "version" => hive_runtime.fetch(:version) },
+                   "hive_runtime" => runtime,
                    "isolation" => {
                      "source_history" => "base-only-shallow",
-                     "generation_egress" => egress.fetch(:mode)
+                     "generation_egress" => egress.fetch(:mode),
+                     "runtime_visibility" => sealed_agent_runtime? ? SEALED_RUNTIME_VISIBILITY : "host-mounted"
                    },
                    "candidate" => candidate.to_h
                  ))
@@ -366,6 +374,7 @@ module HiveBench
     def run_container(slug, base, work, candidate, out_dir, resume_marker_id: nil,
                       resume_review: false,
                       hive_runtime: resolved_hive_runtime)
+      verify_sealed_runtime!(candidate, hive_runtime) if sealed_agent_runtime?
       cmd = ["docker", "run", "--rm",
              "-e", "HOME=#{HOME}",
              "-e", "HIVE_HOME=#{HIVE_HOME}",
@@ -380,6 +389,7 @@ module HiveBench
              "--cpus", ENV.fetch("HB_CPUS", "4"),
              "--memory", ENV.fetch("HB_MEMORY", "8g"),
              "--pids-limit", ENV.fetch("HB_PIDS", "4096"),
+             *(sealed_agent_runtime? ? ["--user", "0:0", "--security-opt", "no-new-privileges:true"] : []),
              *network_args,
              "--tmpfs", "#{HOME}:exec,mode=1777",
              # .claude must be WRITABLE (claude's Bash tool mkdir's session-env
@@ -389,7 +399,7 @@ module HiveBench
              "-v", "#{STAGES_SH}:/hive_stages.sh:ro",
              "-v", "#{RESUME_EXECUTE_SH}:/hive_resume_execute.sh:ro",
              "-v", "#{work}:/work",
-             *hive_runtime_mounts(hive_runtime),
+             *hive_runtime_args(hive_runtime),
              *opencode_runtime_args(candidate),
              *auth_mounts(candidate, out_dir),
              *env_args(candidate),
@@ -402,9 +412,22 @@ module HiveBench
       (@runner || method(:capture)).call(cmd)
     end
 
-    # The image owns the OS and toolchain. Mount the selected host Hive runtime
-    # so a cell cannot silently execute an older gem baked into the image.
-    def hive_runtime_mounts(runtime = resolved_hive_runtime)
+    # Legacy campaigns mount the active runtime. Strict campaigns instead use a
+    # commit-labelled, root-only bundle baked into the image: the controller can
+    # run Hive, while the uid-1000 model processes cannot read its implementation.
+    def hive_runtime_args(runtime = resolved_hive_runtime)
+      if sealed_agent_runtime?
+        build_sha = runtime.fetch(:build_sha)
+        return [
+          "-e", "GEM_HOME=#{HIVE_CONTROL_GEM_HOME}",
+          "-e", "GEM_PATH=#{HIVE_CONTROL_GEM_HOME}:#{CANDIDATE_GEM_HOME}:/usr/local/lib/ruby/gems/3.4.0",
+          "-e", "HB_HIVE_VERSION=#{runtime.fetch(:version)}",
+          "-e", "HB_HIVE_BUILD_SHA=#{build_sha}",
+          "-e", "HB_SEALED_AGENT_RUNTIME=1",
+          "-e", "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW=1"
+        ]
+      end
+
       [
         "-v", "#{runtime.fetch(:root)}:#{HIVE_RUNTIME_CONTAINER_ROOT}:ro",
         "-v", "#{runtime.fetch(:gem_home)}:#{HIVE_GEM_HOME_CONTAINER_ROOT}:ro",
@@ -437,7 +460,8 @@ module HiveBench
         raise "cannot identify active hive runtime version: #{detail}"
       end
 
-      { root:, gem_home:, version: }.freeze
+      build_sha = runtime_build_sha(root)
+      { root:, gem_home:, version:, build_sha: }.compact.freeze
     rescue Errno::ENOENT, Errno::EACCES => e
       raise "active hive runtime is unavailable: #{e.message}"
     end
@@ -503,6 +527,53 @@ module HiveBench
         return candidate if File.file?(candidate) && File.executable?(candidate)
       end
       raise "active hive executable is not on PATH (set HB_HIVE_BIN)"
+    end
+
+    def runtime_build_sha(root)
+      out, _err, status = Open3.capture3("git", "-C", root, "rev-parse", "--verify", "HEAD^{commit}")
+      sha = out.strip
+      status.success? && sha.match?(/\A[0-9a-f]{40}\z/) ? sha : nil
+    end
+
+    def sealed_agent_runtime?
+      ENV["HB_REQUIRE_SEALED_AGENT_RUNTIME"] == "1"
+    end
+
+    def verify_sealed_runtime!(candidate, runtime)
+      build_sha = runtime[:build_sha].to_s
+      unless build_sha.match?(/\A[0-9a-f]{40}\z/)
+        raise "sealed benchmark runtime requires an exact 40-character Hive build SHA"
+      end
+
+      unsupported = agent_ids(candidate) - %w[pi opencode]
+      unless unsupported.empty?
+        raise "sealed benchmark runtime does not yet support candidate agent(s): #{unsupported.join(", ")}"
+      end
+
+      image = runner_image(candidate)
+      labels = inspect_image_labels(image)
+      actual_sha = labels["io.hive.bench.hive-build-sha"].to_s
+      visibility = labels["io.hive.bench.runtime-visibility"].to_s
+      unless actual_sha == build_sha && visibility == SEALED_RUNTIME_VISIBILITY
+        raise "runner image #{image} is not the sealed Hive build #{build_sha}: " \
+              "build_sha=#{actual_sha.inspect} runtime_visibility=#{visibility.inspect}"
+      end
+    end
+
+    def inspect_image_labels(image)
+      return @image_inspector.call(image) if @image_inspector
+
+      out, err, status = Open3.capture3(
+        "docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image
+      )
+      raise "cannot inspect benchmark runner image #{image}: #{err.strip}" unless status.success?
+
+      labels = JSON.parse(out)
+      raise "benchmark runner image #{image} has no labels" unless labels.is_a?(Hash)
+
+      labels
+    rescue JSON::ParserError => e
+      raise "cannot parse benchmark runner image labels for #{image}: #{e.message}"
     end
 
     # Generation needs model-API egress, so `--network none` is impossible. A
@@ -701,6 +772,8 @@ module HiveBench
 
       [
         "-v", "#{OPENCODE_BENCH_RUNTIME}:/opt/hb/opencode_bench_runtime.rb:ro",
+        "-v", "#{OPENCODE_BENCH_LAUNCHER}:/opt/hb/opencode-bench-launcher:ro",
+        "-e", "HIVE_OPENCODE_BIN=/opt/hb/opencode-bench-launcher",
         "-e", "HB_OPENCODE_CE_PREFLIGHT=1",
         "-e", "HB_OPENCODE_PROBE_TIMEOUT_SEC=300",
         "-e", "RUBYOPT=-r/opt/hb/opencode_bench_runtime"
@@ -708,11 +781,15 @@ module HiveBench
     end
 
     def uses?(candidate, agent)
+      agent_ids(candidate).include?(agent)
+    end
+
+    def agent_ids(candidate)
       stage_agents = [candidate.plan, candidate.execute, candidate.review]
       reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
         reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
       end
-      (stage_agents + reviewer_agents).include?(agent)
+      (stage_agents + reviewer_agents).compact.map(&:to_s).uniq
     end
 
     # Candidate model and effort live in Hive's stage routes, not the operator's

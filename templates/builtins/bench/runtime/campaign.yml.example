@@ -23,16 +23,14 @@ effort_pins: {}
 # cannot enter judging. The default keeps paid-patch recovery compatibility.
 require_successful_execution: false
 
-# Published local campaigns should use a Docker `--internal` network whose only
-# dual-homed peer is a CONNECT proxy that permits the configured model provider
-# and denies GitHub/the public internet. With this enabled, generation fails
-# closed unless both values are present; each cell records `provider-allowlist`
-# in its generation identity. Candidate repositories are independently created
-# as depth-one, base-only clones so future/reference Git objects are absent.
+# Publication-grade local campaigns seal the controller runtime from the model,
+# use a base-only shallow repository, and attach to a provider-only Docker
+# network. The runner image must be built from the exact active Hive commit.
 isolation:
-  require_provider_egress: false
-  # docker_network: hive-bench-provider-only
-  # https_proxy: http://hive-bench-egress-proxy:3128
+  sealed_agent_runtime: true
+  require_provider_egress: true
+  docker_network: hive-bench-provider-only
+  https_proxy: http://hive-bench-egress-proxy:3128
 
 # Judge samples. Use at least 3 for published results.
 seeds: 3

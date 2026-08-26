@@ -17,7 +17,22 @@ BASE="$2"
 export HOME=/home/asterio
 git config --global --add safe.directory '*' 2>/dev/null
 mkdir -p /work/.hb/bin
-HIVE_RUNTIME_BIN=/opt/hb/hive-current/bin
+if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+  HIVE_RUNTIME_BIN=/opt/hb/control-bundle/bin
+  if [ -z "${HB_HIVE_BUILD_SHA:-}" ]; then
+    echo "HB_ERROR hive_runtime_build_missing" >&2
+    exit 4
+  fi
+  if setpriv --reuid=1000 --regid=1000 --init-groups \
+       --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+       test -r "$HIVE_RUNTIME_BIN/hive" 2>/dev/null; then
+    echo "HB_ERROR hive_runtime_visible_to_candidate" >&2
+    exit 4
+  fi
+  echo "HB_NOTE hive_runtime_visibility sealed build=$HB_HIVE_BUILD_SHA"
+else
+  HIVE_RUNTIME_BIN=/opt/hb/hive-current/bin
+fi
 if [ ! -x "$HIVE_RUNTIME_BIN/hive" ] || [ -z "${HB_HIVE_VERSION:-}" ]; then
   echo "HB_ERROR hive_runtime_missing" >&2
   exit 4
@@ -51,13 +66,13 @@ preflight_opencode_ce_skills() {
 
   if ! timeout 90 env \
     OPENCODE_CONFIG_CONTENT='{"plugin":["/opt/compound-engineering"]}' \
-    opencode debug config >"$config_out"; then
+    "${HIVE_OPENCODE_BIN:-opencode}" debug config >"$config_out"; then
     echo "HB_ERROR opencode_ce_skills config_probe_failed" >&2
     return 1
   fi
   if ! timeout 90 env \
     OPENCODE_CONFIG_CONTENT='{"plugin":["/opt/compound-engineering"]}' \
-    opencode debug skill >"$skills_out"; then
+    "${HIVE_OPENCODE_BIN:-opencode}" debug skill >"$skills_out"; then
     echo "HB_ERROR opencode_ce_skills discovery_probe_failed" >&2
     return 1
   fi

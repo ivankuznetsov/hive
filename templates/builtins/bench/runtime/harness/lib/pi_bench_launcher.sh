@@ -17,4 +17,24 @@ if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
   exit 0
 fi
 
+if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "pi benchmark launcher: sealed mode requires the root controller" >&2
+    exit 1
+  fi
+  candidate_uid="${HB_CANDIDATE_UID:-1000}"
+  candidate_gid="${HB_CANDIDATE_GID:-1000}"
+  chown -R "$candidate_uid:$candidate_gid" /work "$HOME/.pi" 2>/dev/null || {
+    echo "pi benchmark launcher: cannot hand the worktree to the candidate user" >&2
+    exit 1
+  }
+  exec setpriv --reuid="$candidate_uid" --regid="$candidate_gid" --init-groups \
+    --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+    env -u BUNDLE_GEMFILE \
+      GEM_HOME=/usr/local/bundle \
+      GEM_PATH=/usr/local/bundle:/usr/local/lib/ruby/gems/3.4.0 \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      "$REAL_PI" "$@"
+fi
+
 exec "$REAL_PI" "$@"

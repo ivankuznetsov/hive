@@ -151,7 +151,7 @@ module Hive
     # older revision (e.g. for back-compat tests against pinned
     # consumers).
     def self.schema_dir
-      File.expand_path("../schemas", __dir__)
+      File.expand_path("../../schemas", __dir__)
     end
 
     def self.schema_path(name, version: nil)

@@ -110,10 +110,10 @@ class WorkflowsBenchTest < Minitest::Test
     payload = JSON.parse(out)
     candidate = payload.fetch("candidate")
     config = payload.fetch("config")
-    assert_equal "ox-alpha-max", candidate.fetch("model_version")
+    assert_equal "glm-5.3-flash-max", candidate.fetch("model_version")
     assert_equal %w[pi pi pi], candidate.values_at("plan", "execute", "review")
     %w[plan execute open_pr review_ci review_triage review_fix].each do |stage|
-      assert_equal "openrouter/stealth/ox-alpha:max", config.dig("models", stage, "model")
+      assert_equal "openrouter/z-ai/glm-5.3-flash:max", config.dig("models", stage, "model")
     end
     assert_equal false, config.dig("plan_review", "enabled")
   end
@@ -174,6 +174,25 @@ class WorkflowsBenchTest < Minitest::Test
     permissions = JSON.parse(out)
     assert_equal "scoped", permissions.fetch("preset")
     assert_equal [ "Read", "Write", "Edit", "Bash(*)" ], permissions.fetch("tools")
+  end
+
+  def test_packaged_runtime_routes_ox_alpha_opencode_through_disclosed_model
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "json"
+      require "profiles/candidates"
+      require "lib/hive_config"
+      candidate = HiveBench::Candidates.by_id("all-ox-alpha-opencode@high")
+      puts JSON.generate(HiveBench::HiveConfig.to_h(candidate))
+    RUBY
+
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
+
+    assert status.success?, out + err
+    config = JSON.parse(out)
+    assert config.dig("agents", "opencode", "config", "provider", "openrouter", "models", "z-ai/glm-5.3-flash")
+    assert_equal "openrouter/z-ai/glm-5.3-flash", config.dig("models", "plan", "model")
+    assert_equal "high", config.dig("models", "plan", "effort")
   end
 
   def test_packaged_runtime_seals_hive_source_from_pi_and_opencode

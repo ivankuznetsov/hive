@@ -3,17 +3,17 @@
     "openrouter": {
       "models": [
         {
-          "id": "stealth/ox-alpha",
-          "name": "Ox Alpha",
+          "id": "z-ai/glm-5.3-flash",
+          "name": "Ox Alpha (Z.ai GLM 5.3 Flash)",
           "api": "openai-completions",
           "reasoning": true,
           "input": ["text"],
           "contextWindow": 1048576,
           "maxTokens": 131072,
           "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
+            "input": 0.075,
+            "output": 0.25,
+            "cacheRead": 0.015,
             "cacheWrite": 0
           },
           "compat": {

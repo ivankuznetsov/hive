@@ -1867,11 +1867,20 @@ class RefactorPatrolCommandTest < Minitest::Test
       raw["default_workflow"] = "content"
       File.write(config_path, raw.to_yaml)
       store = FakeArchiveStore.new
+      capability_calls = []
+      capabilities = Object.new
+      capabilities.define_singleton_method(:require_filesystem_read!) do |path|
+        capability_calls << [ :read, path ]
+      end
+      capabilities.define_singleton_method(:require_filesystem_write!) do |path|
+        capability_calls << [ :write, path ]
+      end
 
       out, = capture_io do
         Hive::Commands::RefactorPatrol.new(
           "demo", json: true, archive: "pr-1015-legacy",
-          job_store_factory: ->(_project_root) { store }
+          job_store_factory: ->(_project_root) { store },
+          capability_context: capabilities
         ).call
       end
 
@@ -1883,6 +1892,59 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal "unified_patrol_fix_cutover",
                    payload.dig("job", "actions", 0, "receipts", "archive", "reason")
       assert_equal [ "pr-1015-legacy" ], store.archived_job_ids
+      assert_equal [
+        [ :read, ".hive-state/refactor_patrol/**" ],
+        [ :write, ".hive-state/refactor_patrol/**" ]
+      ], capability_calls
+
+      text, = capture_io do
+        Hive::Commands::RefactorPatrol.new(
+          "demo", archive: "pr-1015-legacy",
+          job_store_factory: ->(_project_root) { store }
+        ).call
+      end
+      assert_includes text,
+                      "hive refactor-patrol archive: archived archived_actions=12"
+      assert_includes text,
+                      "hive refactor-patrol job: pr-1015-legacy"
+      assert_includes text, "state=complete complete=true"
+    end
+  end
+
+  def test_archive_errors_use_the_jobs_contract
+    with_refactor_patrol_project do
+      cases = [
+        [
+          Hive::RefactorPatrol::JobStore::RecordNotFound.new("missing"),
+          Hive::RefactorPatrol::JobQuery::NotFound,
+          "not_found"
+        ],
+        [
+          Hive::RefactorPatrol::JobStore::InconsistentRecord.new("still live"),
+          Hive::ConfigError,
+          "config"
+        ]
+      ]
+
+      cases.each do |store_error, expected_error, error_kind|
+        store = Object.new
+        store.define_singleton_method(:archive_legacy_actions!) do |_job_id|
+          raise store_error
+        end
+
+        out, = capture_io do
+          assert_raises(expected_error) do
+            Hive::Commands::RefactorPatrol.new(
+              "demo", json: true, archive: "pr-1015-legacy",
+              job_store_factory: ->(_project_root) { store }
+            ).call
+          end
+        end
+        payload = JSON.parse(out)
+        assert_empty job_query_schemer.validate(payload).to_a
+        assert_equal "show", payload.fetch("action")
+        assert_equal error_kind, payload.fetch("error_kind")
+      end
     end
   end
 

@@ -140,6 +140,24 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         assert_equal "unified_patrol_fix_cutover", receipt.fetch("reason")
         assert_equal (T0 + 2).iso8601, receipt.fetch("archived_at")
       end
+      invalid_reason = JSON.parse(JSON.generate(archived))
+      invalid_reason.dig("actions", 0, "receipts", "archive")["reason"] =
+        "different_cutover"
+      reason_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.send(:validate_job!, invalid_reason, path: "/tmp/job.json")
+      end
+      assert_match(/archive receipt identity/, reason_error.message)
+
+      invalid_outcome = JSON.parse(JSON.generate(archived))
+      invalid_outcome.dig("actions", 0)["terminal"] = false
+      outcome_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.send(:validate_job!, invalid_outcome, path: "/tmp/job.json")
+      end
+      assert_match(/terminal outcome/, outcome_error.message)
       assert_empty store.actionable_jobs(now: T0 + 10)
 
       repeated = store.archive_legacy_actions!("job-1", now: T0 + 3)
@@ -217,6 +235,17 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
   def test_legacy_action_archive_requires_a_revoked_legacy_action_fence
     with_tmp_dir do |dir|
+      empty_store = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "empty")
+      )
+      empty_store.write_job!(classified_job)
+      empty_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        empty_store.archive_legacy_actions!("job-1", now: T0 + 1)
+      end
+      assert_match(/pending historical actions/, empty_error.message)
+
       store = initialized_store(dir)
 
       error = assert_raises(

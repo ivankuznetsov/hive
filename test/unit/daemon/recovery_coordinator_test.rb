@@ -1218,7 +1218,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         request: request, decision: decision, now: NOW + 1
       )
 
-      assert_equal "cooldown", first.status
+      assert_equal "cooldown", first.status, first.to_h.inspect
       assert_equal first.request_id, replay.request_id
       assert_equal 1, first.retry_count
       assert_equal 1, replay.retry_count
@@ -1237,6 +1237,145 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "queued", resumed.status
       assert_equal "cleared", resumed.phase
       assert_equal "waiting", Hive::Markers.current(row.state_file).name.to_s
+    end
+  end
+
+  def test_markerless_controller_failure_is_idempotent_and_never_mutates_state
+    Dir.mktmpdir("hive-markerless-recovery") do |dir|
+      folder = File.join(dir, "task")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "patrol-fix-manifest.json")
+      File.write(state_file, "{\"schema\":\"controller-state\"}\n")
+      original = File.binread(state_file)
+      task = FakeTask.new(
+        id: 817, slug: "demo-task", folder: folder, state_file: state_file,
+        stage_index: 2, stage_name: "fix"
+      )
+      row = FakeRow.new(
+        project: "hive", slug: task.slug, folder: folder, state_file: state_file,
+        stage: "2-fix", workflow: "patrol-fix", marker: "none",
+        marker_attrs: {}, state_file_mtime: NOW - 60, live_task_lock: false,
+        attempt_id: "attempt-1", task_generation: nil,
+        suggested_command: "hive run demo-task --project hive --stage 2-fix --json"
+      )
+      coordinator = fixture_coordinator(dir: dir, task: task)
+
+      first = coordinator.request_markerless_failure(
+        row: row, requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW
+      )
+      replay = coordinator.request_markerless_failure(
+        row: row, requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW + 1
+      )
+
+      assert_equal "cooldown", first.status, first.to_h.inspect
+      assert_equal first.request_id, replay.request_id
+      assert_equal 1, first.retry_count
+      assert_equal 1, Q.pending(state_home: dir).size
+      request = Q.fetch(first.request_id, state_home: dir)
+      assert_equal "markerless_failure", request.recovery.fetch("variant")
+      assert_nil request.expected_marker_name
+      assert_empty request.recovery.fetch("expected_marker_attrs")
+      assert_nil request.recovery.fetch("policy_digest")
+      assert_equal original, File.binread(state_file)
+
+      resumed = coordinator.resume(
+        request: request, row: row, now: Time.iso8601(first.next_eligible_at)
+      )
+      assert_equal "queued", resumed.status
+      assert_equal "cleared", resumed.phase
+      assert_equal original, File.binread(state_file)
+    end
+  end
+
+  def test_terminal_markerless_controller_failure_rearms_same_request
+    Dir.mktmpdir("hive-markerless-rearm") do |dir|
+      folder = File.join(dir, "task")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "patrol-fix-manifest.json")
+      File.write(state_file, "{\"schema\":\"controller-state\"}\n")
+      original = File.binread(state_file)
+      task = FakeTask.new(
+        id: 817, slug: "demo-task", folder: folder, state_file: state_file,
+        stage_index: 2, stage_name: "fix"
+      )
+      row = FakeRow.new(
+        project: "hive", slug: task.slug, folder: folder, state_file: state_file,
+        stage: "2-fix", workflow: "patrol-fix", marker: "none",
+        marker_attrs: {}, state_file_mtime: NOW - 60, live_task_lock: false,
+        attempt_id: "attempt-1", task_generation: nil,
+        suggested_command: "hive run demo-task --project hive --stage 2-fix --json"
+      )
+      coordinator = fixture_coordinator(dir: dir, task: task)
+      admitted = coordinator.request_markerless_failure(
+        row: row, requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW
+      )
+      request = Q.fetch(admitted.request_id, state_home: dir)
+      coordinator.resume(
+        request: request, row: row, now: Time.iso8601(admitted.next_eligible_at)
+      )
+      request = Q.fetch(admitted.request_id, state_home: dir)
+      coordinator.mark_dispatched(request, attempt_id: "attempt-2", now: NOW + 6)
+      request = Q.fetch(admitted.request_id, state_home: dir)
+      coordinator.mark_dispatched(
+        request, attempt_id: "attempt-2", terminal: true,
+        outcome: "failed", now: NOW + 7
+      )
+      request = Q.fetch(admitted.request_id, state_home: dir)
+      refute coordinator.repair_failed_terminal_marker(request)
+      assert_equal original, File.binread(state_file)
+
+      rearmed = coordinator.request_markerless_failure(
+        row: row.with(attempt_id: "attempt-2"), requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW + 8
+      )
+
+      assert_equal admitted.request_id, rearmed.request_id
+      assert_equal "cooldown", rearmed.status
+      assert_equal "admitted", rearmed.phase
+      assert_equal 2, rearmed.retry_count
+      persisted = Q.fetch(admitted.request_id, state_home: dir)
+      assert_nil persisted.recovery.fetch("attempt_id")
+      assert_nil persisted.recovery.fetch("terminal_outcome")
+      assert_equal original, File.binread(state_file)
+    end
+  end
+
+  def test_markerless_controller_failure_obeys_recovery_safety_without_writing
+    Dir.mktmpdir("hive-markerless-safety") do |dir|
+      folder = File.join(dir, "task")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "patrol-fix-manifest.json")
+      File.write(state_file, "{\"schema\":\"controller-state\"}\n")
+      original = File.binread(state_file)
+      task = FakeTask.new(
+        id: 817, slug: "demo-task", folder: folder, state_file: state_file,
+        stage_index: 2, stage_name: "fix"
+      )
+      row = FakeRow.new(
+        project: "hive", slug: task.slug, folder: folder, state_file: state_file,
+        stage: "2-fix", workflow: "patrol-fix", marker: "none",
+        marker_attrs: {}, state_file_mtime: NOW - 60, live_task_lock: false,
+        attempt_id: "attempt-1", task_generation: nil,
+        suggested_command: "hive run demo-task --project hive --stage 2-fix --json"
+      )
+      coordinator = fixture_coordinator(
+        dir: dir, task: task,
+        safety: ->(_observation) { [ false, "repair controller worktree" ] }
+      )
+
+      receipt = coordinator.request_markerless_failure(
+        row: row, requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "safety_blocked", receipt.reason
+      assert_equal "repair controller worktree", receipt.remediation
+      assert_empty Q.pending(state_home: dir)
+      assert_equal original, File.binread(state_file)
     end
   end
 

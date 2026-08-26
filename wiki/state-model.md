@@ -470,10 +470,11 @@ recovery: null
 Current producers write `hive-dispatch-request.v5`. Ordinary requests leave
 `recovery` null. Coordinator requests persist canonical task/marker/generation
 identity, owner/remediation, retry count, terminal outcome/time, and the
-`admitted → cleared → dispatched → terminal` phase. Consumers accept v4 only.
-Daemon/bot startup and explicit `hive migrate` run the one-off global recovery
-migration before opening the queue, rewriting pending v1-v3 requests to v4 and
-v1 results to v2. Queue and claim sidecars
+`admitted → cleared → dispatched → terminal` phase. Recovery variants cover
+marker-bound failures, markerless provider admission, and markerless controller
+failures bound directly to an unchanged task generation. Runtime consumers
+accept v5 only; `hive migrate` owns the one-off upgrade of older pending queue
+records. Queue and claim sidecars
 remain delivery records: after admission the claim stores the attempt
 ID/generation, follows a loss successor, and completes from its terminal
 receipt.
@@ -481,10 +482,11 @@ receipt.
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
-Ordinary pending requests expire after `EXPIRY_SEC = 600`. V4 recovery
+Ordinary pending requests expire after `EXPIRY_SEC = 600`. V5 recovery
 requests instead persist `admitted → cleared → dispatched → terminal`, bound
-to canonical task/stage/marker/generation identity plus owner/remediation and
-terminal outcome/time. Nonterminal recovery never expires or generic-prunes,
+to canonical task/stage/generation identity and, where applicable, marker or
+routing-policy evidence, plus owner/remediation and terminal outcome/time.
+Nonterminal recovery never expires or generic-prunes,
 and a bounded request-keyed lock shard serializes claim, phase CAS, and
 pruning; request IDs are bounded filesystem-safe identifiers. On dispatch, the daemon
 renames the file to `<id>.json.claimed` and writes

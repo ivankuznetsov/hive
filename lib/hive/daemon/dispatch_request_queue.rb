@@ -48,7 +48,7 @@ module Hive
       QUARANTINE_DIRNAME = "quarantine".freeze
 
       RECOVERY_PHASES = %w[admitted cleared dispatched terminal].freeze
-      RECOVERY_VARIANTS = %w[marker admission_failure].freeze
+      RECOVERY_VARIANTS = %w[marker admission_failure markerless_failure].freeze
       RECOVERY_KEYS = %w[
         variant phase observed_marker_generation expected_marker_attrs
         canonical_task_folder expected_post_clear_progress_fingerprint
@@ -571,6 +571,22 @@ module Hive
         end.min_by { |request| [ request.created_at, request.request_id ] }
       end
 
+      # Controller workflows do not use inline compatibility markers. Their
+      # unchanged-generation failures therefore bind directly to the task
+      # generation and failure origin instead of inventing a marker identity.
+      def find_markerless_recovery(project:, slug:, task_generation:, failure_origin:,
+                                   state_home: Hive::Paths.state_home)
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next unless parsed.recovery.is_a?(Hash)
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next unless parsed.recovery["variant"] == "markerless_failure"
+          next unless parsed.task_generation.to_s == task_generation.to_s
+          next unless parsed.recovery["failure_origin"].to_s == failure_origin.to_s
+
+          parsed
+        end.min_by { |request| [ request.created_at, request.request_id ] }
+      end
+
       # Highest durable retry count already recorded for this task stage. A
       # successful workflow transition starts a new failure series; plan-stage
       # recovery history must not put the first execute failure at the hourly
@@ -1054,6 +1070,10 @@ module Hive
                    recovery["policy_digest"]
               raise ArgumentError, "admission-failure policy digest does not match observation"
             end
+          elsif recovery["variant"] == "markerless_failure"
+            unless recovery["source_receipt"].nil? && recovery["admission_observation"].nil?
+              raise ArgumentError, "markerless-failure recovery cannot carry route evidence"
+            end
           elsif recovery["failure_origin"] == "provider_route_failed" &&
                 recovery["source_receipt"].nil?
             raise ArgumentError, "provider-route recovery requires a source receipt"
@@ -1073,12 +1093,12 @@ module Hive
         end
 
         def validate_recovery_variant!(recovery)
-          marker = recovery["variant"] == "marker"
+          variant = recovery["variant"]
           generation = recovery["observed_marker_generation"]
           attrs = recovery["expected_marker_attrs"]
           policy_digest = recovery["policy_digest"]
 
-          if marker
+          if variant == "marker"
             unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(generation.to_s)
               raise ArgumentError, "observed_marker_generation must be a sha256"
             end
@@ -1089,12 +1109,19 @@ module Hive
             unless policy_digest.nil?
               raise ArgumentError, "marker recovery cannot carry policy_digest"
             end
-          else
+          elsif variant == "admission_failure"
             unless generation.nil? && attrs.empty?
               raise ArgumentError, "admission-failure recovery cannot carry marker identity"
             end
             unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(policy_digest.to_s)
               raise ArgumentError, "admission-failure policy_digest must be a sha256"
+            end
+          else
+            unless generation.nil? && attrs.empty?
+              raise ArgumentError, "markerless-failure recovery cannot carry marker identity"
+            end
+            unless policy_digest.nil?
+              raise ArgumentError, "markerless-failure recovery cannot carry policy_digest"
             end
           end
         end

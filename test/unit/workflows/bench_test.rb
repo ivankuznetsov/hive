@@ -210,7 +210,7 @@ class WorkflowsBenchTest < Minitest::Test
       staging = File.join(state_root, "deployments", "staging")
       gem_home = File.join(tmp, "gem-home")
       wrapper_dir = File.join(tmp, "bin")
-      FileUtils.mkdir_p([File.join(staging, "bin"), File.join(staging, "lib"), gem_home, wrapper_dir])
+      FileUtils.mkdir_p([ File.join(staging, "bin"), File.join(staging, "lib"), gem_home, wrapper_dir ])
       File.write(File.join(staging, "bin", "hive"), "#!/bin/sh\nprintf '0.7.2\\n'\n")
       FileUtils.chmod(0o755, File.join(staging, "bin", "hive"))
       File.write(File.join(staging, "lib", "hive.rb"), "# complete runtime\n")

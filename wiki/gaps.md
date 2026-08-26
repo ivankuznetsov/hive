@@ -53,6 +53,14 @@ Keep release/dogfood incomplete until the opt-in historical corpus has actual
 provider/model receipts and one naturally discovered finding reaches `done`
 with an exact PR and zero duplicate replay.
 
+An August 26 dogfood run exercised the real Pi/Ox Alpha Fix launch and durable
+markerless recovery, but exposed that pre-fix first-generation worktrees had
+treated Inbox's local checkout `HEAD` as their creation base. On a divergent
+operator checkout this carried unrelated local commits into the resulting PR.
+New first generations now fail closed onto exact `origin/<default>` OIDs; the
+remaining live-delivery proof must come from a task admitted after that cutover
+and reach one focused hosted PR.
+
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## OpenCode live validation (updated 2026-08-21)

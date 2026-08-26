@@ -92,15 +92,29 @@ module Hive
         else
           :clean
         end
+        status = result.is_a?(Hash) ? result[:status] : :error
+        status = :ok if recovered_provider_retry?(result, report)
         {
-          status: result.is_a?(Hash) ? result[:status] : :error,
+          status: status,
           custody: custody_status,
           diagnostic: report&.diagnostic
         }
       end
 
+      # Pi can emit a failed message_end, retry that provider turn internally,
+      # then exit zero after writing the current report. Agent keeps the first
+      # provider failure fail-closed because :exit_code_only has no artifact
+      # evidence. This outer boundary does: a clean custody report proves the
+      # required output exists and no controller anchor changed, so the later
+      # successful result wins just as it does in :output_file_exists mode.
+      def recovered_provider_retry?(result, report)
+        result.is_a?(Hash) && provider_retry_candidate?(result) && report&.valid?
+      end
+      private_class_method :recovered_provider_retry?
+
       def materialize_exact_final_json(result, output_path)
-        return unless result.is_a?(Hash) && result[:status] == :ok
+        return unless result.is_a?(Hash) &&
+          (result[:status] == :ok || provider_retry_candidate?(result))
         return if result[:final_message_truncated] == true
         return if File.exist?(output_path) || File.symlink?(output_path)
 
@@ -112,6 +126,13 @@ module Hive
         nil
       end
       private_class_method :materialize_exact_final_json
+
+      def provider_retry_candidate?(result)
+        result[:status] == :error && result[:error_reason] == "provider_error" &&
+          result[:provider_error].is_a?(Hash) &&
+          result[:exit_code] == 0 && result[:timed_out] != true
+      end
+      private_class_method :provider_retry_candidate?
 
       def fix_model_routing_current(cfg, fix, fix_agent)
         patrol = Hive::Stages::Base.model_routing_current(cfg["patrol"])

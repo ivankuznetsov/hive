@@ -80,6 +80,66 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
+  def test_launch_agent_accepts_clean_output_after_pi_retries_a_provider_error
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      report = {
+        "schema" => "hive-patrol-fix-inbox-report",
+        "schema_version" => 1,
+        "route" => "reject"
+      }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error,
+            exit_code: 0,
+            timed_out: false,
+            error_reason: "provider_error",
+            final_message: JSON.generate(report),
+            final_message_truncated: false,
+            provider_error: {
+              kind: :provider_error,
+              provider: :pi,
+              message: "Stream ended without finish_reason"
+            }
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :clean, result.fetch(:custody)
+      assert_equal report, JSON.parse(File.read(output))
+    end
+  end
+
+  def test_launch_agent_does_not_accept_a_provider_retry_without_clean_output
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error,
+            exit_code: 0,
+            timed_out: false,
+            error_reason: "provider_error",
+            provider_error: { kind: :provider_error, provider: :pi }
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :invalid_output, result.fetch(:custody)
+    end
+  end
+
   def test_launch_agent_does_not_replace_a_dangling_report_symlink_from_final_json
     with_task do |task|
       output = File.join(task.folder, "patrol-fix-inbox-report.json")

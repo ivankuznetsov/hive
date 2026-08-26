@@ -18,10 +18,11 @@ require "hive/task_resolver"
 
 module Hive
   module Daemon
-    # Sole producer and transition owner for ERROR / REVIEW_ERROR recovery.
-    # Adapters submit an observed row; this coordinator re-resolves it under
-    # the task lock, applies the shared cooldown and safety policy, then
-    # persists one restartable v5 request before any marker mutation.
+    # Sole producer and transition owner for ERROR / REVIEW_ERROR, provider
+    # admission, and controller-markerless recovery. Adapters submit an
+    # observed row; this coordinator re-resolves it under the task lock,
+    # applies the shared cooldown and safety policy, then persists one
+    # restartable v5 request before any marker mutation.
     class RecoveryCoordinator
       LIFECYCLE_STATES = %w[
         queued cooldown running blocked terminal unavailable
@@ -567,6 +568,153 @@ module Hive
         )
       end
 
+      # Controller workflows keep their state in structured receipts rather
+      # than inline markers. Admit an unchanged markerless exit against the
+      # immutable task generation so recovery is restartable without corrupting
+      # the controller's JSON state file.
+      def request_markerless_failure(row:, requestor:, reason:, now: Time.now.utc)
+        now = now.utc
+        project = value(row, :project).to_s
+        failure_origin = reason.to_s
+        retry_count = durable_retry_count(row)
+        task = resolve_task_for(row)
+
+        Hive::Lock.with_task_lock(task.folder, "operation" => "markerless_recovery_admission") do
+          locked_task = resolve_task_for(row)
+          unless same_task_identity?(task, locked_task) &&
+                 observed_task_identity_matches?(row, locked_task)
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "operator",
+              reason: "task_identity_conflict",
+              remediation: "refresh status; the canonical task changed before recovery admission",
+              retry_count: retry_count
+            )
+          end
+
+          marker = Hive::Markers.current(locked_task.state_file)
+          unless marker.none?
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "operator",
+              reason: "generation_conflict",
+              remediation: "refresh status; controller state changed before recovery admission",
+              retry_count: retry_count
+            )
+          end
+          locked_safe, locked_safety_reason = @safety.call(
+            safety_observation(row, locked_task, marker)
+          )
+          unless locked_safe == true
+            assessment = { safety_reason: locked_safety_reason.to_s }
+            return receipt(
+              "blocked", failure_origin: failure_origin,
+              owner: safety_owner(assessment), reason: "safety_blocked",
+              remediation: locked_safety_reason.to_s,
+              retry_count: retry_count
+            )
+          end
+          if locked_task.id.to_s.empty?
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "hive",
+              reason: "missing_task_id",
+              remediation: "wait for Hive to assign the task id, then retry from fresh status",
+              retry_count: retry_count
+            )
+          end
+
+          generation = current_generation(
+            locked_task, project: project, intended_stage: value(row, :stage)
+          )
+          existing = @request_queue.find_markerless_recovery(
+            project: project, slug: value(row, :slug),
+            task_generation: generation.task_generation,
+            failure_origin: failure_origin, state_home: @state_home
+          )
+          if existing
+            existing = rearm_markerless_recovery(
+              existing, row: row, reason: failure_origin, now: now
+            ) if existing.recovery&.fetch("phase", nil) == "terminal"
+            return receipt_for_request(existing, now: now)
+          end
+
+          failure_evidence = failure_evidence_for(
+            row, retry_count: retry_count,
+            marker_attrs: {
+              "reason" => failure_origin,
+              "attempt_id" => value(row, :attempt_id).to_s
+            }
+          )
+          request_id = deterministic_markerless_request_id(
+            row, locked_task, failure_origin, generation.task_generation
+          )
+          recovery = {
+            "variant" => "markerless_failure",
+            "phase" => "admitted",
+            "observed_marker_generation" => nil,
+            "expected_marker_attrs" => {},
+            "canonical_task_folder" => canonical_path(locked_task.folder),
+            "expected_post_clear_progress_fingerprint" => generation.progress_token,
+            "dispatch_generation" => generation.task_generation,
+            "failure_origin" => failure_origin,
+            "next_eligible_at" => (now + retry_delay_sec(retry_count)).iso8601(6),
+            "owner" => "scheduler",
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil,
+            "retry_count" => retry_count + 1,
+            "failure_fingerprint" => failure_evidence.fetch("fingerprint"),
+            "identical_failure_count" => failure_evidence.fetch("count"),
+            "failure_attempt_history" => failure_evidence.fetch("attempts"),
+            "provider_hint" => provider_hint(row),
+            "policy_digest" => nil,
+            "source_receipt" => nil,
+            "admission_observation" => nil
+          }
+          if failure_evidence.fetch("deterministic")
+            recovery.merge!(
+              "blocked_reason" => "deterministic_failure",
+              "blocked_remediation" =>
+                "change the failing input, provider, or implementation before retrying",
+              "owner" => "operator"
+            )
+          end
+          @request_queue.write_request!(
+            project: project, slug: value(row, :slug), argv: markerless_retry_argv(row),
+            requestor: requestor, trigger: "recovery/markerless_failure",
+            request_id: request_id, task_generation: generation.task_generation,
+            task_id: locked_task.id, expected_stage: value(row, :stage),
+            expected_marker_name: nil, expected_marker_id: nil,
+            recovery: recovery, state_home: @state_home, now: now
+          )
+          @request_queue.remove_terminal_recoveries(
+            project: project, slug: value(row, :slug),
+            expected_stage: value(row, :stage), except_request_id: request_id,
+            state_home: @state_home
+          )
+          persisted = @request_queue.fetch(request_id, state_home: @state_home)
+          persisted ? receipt_for_request(persisted, now: now) :
+            receipt(
+              "unavailable", failure_origin: failure_origin, owner: "hive",
+              reason: "request_disappeared_after_admission",
+              remediation: "retry markerless recovery on the next daemon tick",
+              retry_count: retry_count
+            )
+        end
+      rescue Hive::ConcurrentRunError => e
+        holder = e.respond_to?(:holder) ? e.holder : nil
+        receipt(
+          "running", attempt_id: holder && holder["attempt_id"],
+          failure_origin: failure_origin, owner: "agent",
+          reason: "existing_live",
+          remediation: "attach to the current owner and wait for its terminal receipt",
+          retry_count: retry_count
+        )
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError => e
+        receipt(
+          "unavailable", failure_origin: failure_origin, owner: "hive",
+          reason: "recovery_unavailable", remediation: "#{e.class}: #{e.message}",
+          retry_count: retry_count
+        )
+      end
+
       # Attach a routed admission result to the same durable recovery request.
       # Capacity remains neutral (no deadline change); exhaustion uses the
       # coordinator's existing cadence without another request or charge.
@@ -682,6 +830,11 @@ module Hive
                   current_request, "generation_conflict",
                   owner: "operator", request_locked: true
                 ) if recoverable_marker?(marker) || !generation_matches?(generation, recovery)
+              elsif markerless_failure_recovery?(recovery)
+                return block_request(
+                  current_request, "generation_conflict",
+                  owner: "operator", request_locked: true
+                ) unless marker.none? && generation_matches?(generation, recovery)
               elsif marker.none?
                 return block_request(
                   current_request, "generation_conflict",
@@ -831,6 +984,7 @@ module Hive
         recovery = current.recovery || {}
         return false unless recovery["phase"] == "terminal"
         return false unless RETRYABLE_TERMINAL_OUTCOMES.include?(recovery["terminal_outcome"])
+        return false if markerless_failure_recovery?(recovery)
 
         task = @task_resolver.call(
           project: current.project,
@@ -1000,6 +1154,38 @@ module Hive
           "status_code" => (attrs["status_code"] || attrs["status"]).to_s,
           "message_digest" => Digest::SHA256.hexdigest(normalized_message)
         ))
+      end
+
+      def rearm_markerless_recovery(request, row:, reason:, now:)
+        recovery = request.recovery || {}
+        retry_count = recovery["retry_count"].to_i
+        evidence = failure_evidence_for(
+          row, retry_count: retry_count,
+          marker_attrs: {
+            "reason" => reason,
+            "attempt_id" => recovery["attempt_id"].to_s
+          }
+        )
+        changes = {
+          "phase" => "admitted",
+          "next_eligible_at" => (now + retry_delay_sec(retry_count)).iso8601(6),
+          "owner" => evidence.fetch("deterministic") ? "operator" : "scheduler",
+          "blocked_reason" => evidence.fetch("deterministic") ? "deterministic_failure" : nil,
+          "blocked_remediation" => evidence.fetch("deterministic") ?
+            "change the failing input, provider, or implementation before retrying" : nil,
+          "retry_count" => retry_count + 1,
+          "failure_fingerprint" => evidence.fetch("fingerprint"),
+          "identical_failure_count" => evidence.fetch("count"),
+          "failure_attempt_history" => evidence.fetch("attempts"),
+          "attempt_id" => nil,
+          "terminal_outcome" => nil,
+          "terminal_at" => nil
+        }
+        @request_queue.update_recovery!(
+          request.request_id, expected_phase: "terminal", changes: changes,
+          state_home: @state_home
+        )
+        @request_queue.fetch(request.request_id, state_home: @state_home) || request
       end
 
       def source_receipt_for(marker:, task:, project:)
@@ -1255,7 +1441,8 @@ module Hive
       # bypassed merely by restarting the daemon.
       def recovery_safety_marker(request, marker)
         recovery = request.recovery || {}
-        return marker if admission_failure_recovery?(recovery)
+        return marker if admission_failure_recovery?(recovery) ||
+                         markerless_failure_recovery?(recovery)
         return marker unless marker.none?
         return marker unless %w[admitted cleared].include?(recovery["phase"].to_s)
 
@@ -1334,6 +1521,10 @@ module Hive
         recovery["variant"].to_s == "admission_failure"
       end
 
+      def markerless_failure_recovery?(recovery)
+        recovery["variant"].to_s == "markerless_failure"
+      end
+
       def cleared_marker_state_valid?(marker, recovery)
         if admission_failure_recovery?(recovery)
           !recoverable_marker?(marker)
@@ -1368,6 +1559,15 @@ module Hive
         raise Hive::Error, "invalid retry command for #{value(row, :slug)}"
       end
 
+      def markerless_retry_argv(row)
+        argv = Shellwords.split(value(row, :suggested_command).to_s)
+        return argv if @request_queue.valid_argv?(argv) && argv[1] != "markers"
+
+        raise Hive::Error, "markerless recovery requires the current runnable command"
+      rescue ArgumentError
+        raise Hive::Error, "invalid retry command for #{value(row, :slug)}"
+      end
+
       def deterministic_request_id(row, task, marker_generation, dispatch_generation,
                                    source_receipt: nil)
         identity = if source_receipt
@@ -1382,6 +1582,15 @@ module Hive
           [
             "hive-recovery-request-v2", value(row, :project), task.id || task.slug,
             value(row, :stage), *identity
+          ].join("\0")
+        )[0, 32]
+      end
+
+      def deterministic_markerless_request_id(row, task, reason, dispatch_generation)
+        ::Digest::SHA256.hexdigest(
+          [
+            "hive-markerless-recovery-v1", value(row, :project), task.id || task.slug,
+            value(row, :stage), reason, dispatch_generation
           ].join("\0")
         )[0, 32]
       end

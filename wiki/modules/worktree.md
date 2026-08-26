@@ -173,6 +173,16 @@ reattaches the already-validated branch. A symlinked path, failed quarantine,
 registration that remains after targeted removal, or a second unresolved
 quarantine for the same slug fails closed instead of growing disk use.
 
+Patrol Fix resolves a first-generation coding checkout through
+`fetch_strict_origin_base!` before passing the returned OID to `create_exact!`.
+The inbox decision's observed local `HEAD` remains evidence about the snapshot
+the reviewer saw; it is never branch ancestry authority. A missing origin or
+failed fetch parks the stage without launching an agent, so dirty, stale, or
+locally divergent primary checkouts cannot leak unrelated commits into a fix
+branch. Same-generation retries and rework continue in the exact worktree bound
+by the existing custody receipt rather than refetching or moving its recorded
+base.
+
 ## `exists?`
 
 Two checks: `File.directory?(path)` AND `path ∈ git worktree list --porcelain`. Both must be true. This catches the "directory deleted via Finder/`rm -rf`" case where git still thinks the worktree exists but the filesystem doesn't, and also the inverse (filesystem dir but no git registration).

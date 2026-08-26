@@ -4665,6 +4665,22 @@ def test_incremental_row_removal_resets_an_empty_probe_cursor
   assert_equal 0, dispatcher.instance_variable_get(:@tracked_state_file_cursor)
 end
 
+def test_incremental_status_replacement_keeps_a_terminal_advance_row_prioritized
+  dispatcher, = make_dispatcher(rows: [])
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance"
+  )
+  fresh = row(slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix")
+
+  dispatcher.send(
+    :replace_incremental_status_rows, [ [ "p1", "accepted-finding" ] ], [ accepted ]
+  )
+
+  assert_equal [ "accepted-finding", "new-finding" ],
+               dispatcher.send(:incremental_dispatch_rows, [ fresh ]).map(&:slug)
+end
+
 def test_changed_task_ticks_do_not_delay_the_periodic_full_repair_scan
   status_row = row(action: nil, command: nil)
   dispatcher, = make_dispatcher(rows: [ status_row ], clock: -> { T0 })

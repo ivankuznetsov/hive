@@ -57,7 +57,10 @@ module Hive
     # process_start_time: nil, "_legacy" => true}`. Returns nil when the
     # document is corrupt or not a payload the owner could have written.
     def self.parse_payload(raw)
-      parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
+      parsed = YAML.safe_load(raw, permitted_classes: [ Time ])
+    rescue Psych::Exception, SystemStackError, NoMemoryError
+      nil
+    else
       return parsed if parsed.is_a?(Hash) && parsed["pid"]
 
       if raw.strip =~ /\A\d+\z/

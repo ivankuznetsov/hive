@@ -27,15 +27,6 @@ module Hive
                             Hive::GithubPublication::MAX_BODY_BYTES + 1_024
       Authoring = Data.define(:title, :body)
 
-      # An OpenCode author needs to write only the controller-consumed draft.
-      # Keep it from inheriting project shell access or a writable worktree.
-      def opencode_authoring_permissions(path)
-        {
-          "preset" => "scoped",
-          "tools" => [ "Edit(#{File.expand_path(path)})" ]
-        }
-      end
-
       def run!(task, cfg, git_gateway: nil, github_gateway: nil, controller: nil)
         pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
         authoring = if File.exist?(authoring_path(task))
@@ -149,15 +140,19 @@ module Hive
         launch_arguments ||=
           Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         expected_output ||= authoring_path(task)
-        permission_kwargs = if profile.name == :opencode
-          { explicit_permission_spec: opencode_authoring_permissions(expected_output) }
+        support = Hive::AgentSupport.for(profile)
+        provider_launch = if support&.respond_to?(:open_pr_launch_kwargs)
+          support.open_pr_launch_kwargs(
+            expected_output:,
+            completion_probe: -> { complete_authoring_file?(expected_output) }
+          )
         else
           {}
         end
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
-          **permission_kwargs
+          **provider_launch.fetch(:permission_kwargs, {})
         )
         kwargs = {
           prompt: prompt,
@@ -172,14 +167,9 @@ module Hive
           expected_output: expected_output,
           status_mode: :output_file_exists,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
+          **provider_launch.fetch(:agent_kwargs, {}),
           **launch_arguments
         }
-        # OpenCode can leave a detached interactive session alive after the
-        # controller-owned authoring file is complete. The bounded probe lets
-        # Agent terminate that session without teaching other providers this
-        # provider-specific completion contract.
-        kwargs[:completion_probe] = -> { complete_authoring_file?(expected_output) } if
-          profile.name == :opencode
         if Hive::AgentSupport.supports?(profile, :Interactive)
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task, cfg, **kwargs,

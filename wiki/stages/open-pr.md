@@ -34,8 +34,10 @@ outside `pr-draft.json`. The agent never writes `pr.md` or a completion marker.
 For OpenCode, that contract is enforced independently of project permissions:
 the generated invocation allows an edit only to the exact `pr-draft.json`
 path and denies Bash. This prevents a broad project-level shell rule from
-bypassing OpenCode's external-directory policy to reach host Git credentials
-or perform a second publication path. A strictly parsed, complete draft is
+bypassing its external-directory policy to reach host Git credentials
+or perform a second publication path. The provider-support facade supplies
+that provider-specific scope and completion policy, leaving the stage
+provider-neutral. A strictly parsed, complete draft is
 also a controller-owned completion signal: Hive gives OpenCode five seconds to
 exit normally, then terminates a trailing empty provider turn and continues
 without waiting for the stage timeout. Partial or invalid JSON cannot trigger

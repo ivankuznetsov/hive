@@ -70,6 +70,33 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     assert_equal %w[project-3 project-4 project-5 project-6 project-7 project-8], visible.map(&:name)
   end
 
+  # Regression: with a populated snapshot and a project name whose cursor
+  # row exceeds the terminal width, every rendered row must stay within
+  # its visible cell budget. Truncation runs after styling in render(),
+  # so it has to measure escape bytes as zero-width cells rather than
+  # counting them as visible output.
+  def test_render_rows_fit_visible_width_when_project_name_overflows
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-17T00:00:00Z",
+      "projects" => [
+        { "name" => "a-very-long-project-name-that-overflows-narrow-views", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea_project,
+      snapshot: snap,
+      new_idea_project_cursor: 0
+    )
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model, width: 30)
+
+    out.each_line(chomp: true).each do |line|
+      assert_operator Hive::Tui::Views::Format.display_width(line), :<=, 30,
+        "row #{line.inspect} exceeds the render width"
+    end
+    assert_includes out, "a-very-long-pro", "visible prefix must survive the cut"
+  end
+
   def test_truncate_leaves_line_unchanged_when_width_is_not_positive
     line = "Choose project for new idea: hive"
 

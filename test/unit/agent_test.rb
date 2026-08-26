@@ -2197,6 +2197,45 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_wait_for_process_completes_after_the_probe_grace_period
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      status = Object.new
+      now = Time.now
+      agent.define_singleton_method(:kill_group) { |_pgid| nil }
+      agent.define_singleton_method(:sleep_grace_then_kill) { |_pgid, _pid| nil }
+
+      with_replaced_singleton_method(Time, :now, -> { now }) do
+        with_replaced_singleton_method(
+          Process, :wait2, ->(_pid, flags = nil) { flags ? nil : [ 123, status ] }
+        ) do
+          assert_equal [ false, status, true ], agent.send(
+            :wait_for_process, 123, 123, 5,
+            completion_probe: -> { true }, completion_grace_seconds: 0
+          )
+        end
+      end
+    end
+  end
+
+  def test_cleanup_failure_is_a_terminal_state_marker_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      agent = Hive::Agent.new(task:, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        process_cleanup_completed: false,
+        process_cleanup_error: "synthetic cleanup failure"
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "process_cleanup_failed", result.fetch(:error_reason)
+      assert_equal "synthetic cleanup failure", result.fetch(:error_message)
+      assert_equal "process_cleanup_failed", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+    end
+  end
+
   def test_state_file_marker_nil_exit_without_marker_sets_error
     with_tmp_dir do |dir|
       task = make_task(dir)

@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/agent"
 require "hive/agent_profile"
 require "hive/agent_support/opencode"
+require "hive/invocation_process_custody"
 require "hive/task"
 
 class OpenCodeAgentLifecycleTest < Minitest::Test
@@ -381,6 +382,31 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
       assert_equal :ok, result.fetch(:status)
       assert_equal result.fetch(:pid), result.fetch(:pgid)
+    end
+  end
+
+  def test_process_cleanup_failure_is_returned_and_warned_during_unwind
+    with_fixture do |fixture|
+      custody = Object.new
+      custody.define_singleton_method(:environment) { {} }
+      custody.define_singleton_method(:cleanup!) do
+        raise Hive::InvocationProcessCustody::CleanupError, "synthetic cleanup failure"
+      end
+
+      stderr = with_replaced_singleton_method(
+        Hive::InvocationProcessCustody, :new, -> { custody }
+      ) do
+        capture_io do
+          @result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            build_agent(make_task(fixture.fetch(:dir)), fixture).run!
+          end
+        end.last
+      end
+
+      assert_equal :error, @result.fetch(:status)
+      assert_equal "process_cleanup_failed", @result.fetch(:error_reason)
+      assert_match(/synthetic cleanup failure/, @result.fetch(:process_cleanup_error))
+      assert_match(/OpenCode process cleanup failed/, stderr)
     end
   end
 

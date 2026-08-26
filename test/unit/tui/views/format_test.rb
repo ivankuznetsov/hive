@@ -53,6 +53,26 @@ class HiveTuiViewsFormatTest < Minitest::Test
     assert_equal "#{REVERSE}a#{RESET}", out
   end
 
+  # A wide grapheme that does not fit must end visible consumption: the
+  # cut is a prefix cut, so no later text token may leak past it — even
+  # when mid-line SGR sequences split the line into several text tokens.
+  def test_truncate_stops_visible_consumption_at_first_non_fitting_grapheme_across_tokens
+    robot = "🤖" # display width 2
+    line = "#{REVERSE}a#{robot}#{REVERSE}bold#{RESET}tail#{RESET}"
+
+    out = Hive::Tui::Views::Format.truncate(line, 3)
+
+    assert_equal "a…", Hive::Tui::Views::Format.strip_ansi(out),
+      "text after a non-fitting wide grapheme must not leak into the cut"
+    assert_includes out, RESET, "any style left open by the cut must be closed"
+  end
+
+  def test_truncate_plain_text_prefix_semantics_with_wide_grapheme
+    out = Hive::Tui::Views::Format.truncate("a🤖Z", 3)
+
+    assert_equal "a…", out
+  end
+
   def test_ljust_cells_pads_by_visible_width_for_styled_strings
     assert_equal "#{REVERSE}ab#{RESET}   ",
       Hive::Tui::Views::Format.ljust_cells("#{REVERSE}ab#{RESET}", 5)

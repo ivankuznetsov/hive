@@ -149,6 +149,27 @@ module Hive
       unsafe!
     end
 
+    # Reuses one verified, non-creating root session across nested reads.
+    def with_read_session(missing: false)
+      with_session(create_root: false) do
+        begin
+          yield
+        rescue SystemCallError, IOError, ArgumentError, TypeError => error
+          raise YieldFailure.new(error)
+        end
+      end
+    rescue YieldFailure => failure
+      raise failure.error
+    rescue MissingEntry
+      return nil if missing
+
+      unsafe!
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
     def read(relative, max_bytes:, missing: false)
       snapshot = read_with_metadata(
         relative, max_bytes: max_bytes, missing: missing
@@ -166,29 +187,43 @@ module Hive
 
       with_session(create_root: false) do |session|
         session.with_directory(parent_components, missing: missing) do |parent|
-          opened = session.open_regular(parent, name, missing: missing)
-          next nil unless opened
+          read_snapshot(session, parent, name, limit, missing: missing)
+        end
+      end
+    rescue MissingEntry
+      return nil if missing
 
-          file, before = opened
-          begin
-            unsafe! if before.size > limit
-            bytes = file.read(limit + 1)
-            bytes = "".b if bytes.nil? && before.size.zero?
-            after = file.stat
-            unsafe! unless unchanged_file?(before, after)
-            unsafe! if bytes.nil? || bytes.bytesize > limit
-            unsafe! unless regular_snapshot(before) ==
-              session.regular_snapshot_at(parent, name)
-            {
-              bytes: bytes.b.freeze,
-              mode: before.mode & 0o777,
-              mtime: before.mtime.utc
-            }.freeze
-          ensure
-            file.close
+      unsafe!
+    rescue Errno::ENOENT
+      unsafe!
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Streams a caller-validated list through one opened parent directory.
+    # This keeps per-file validation identical to #read_with_metadata without
+    # reopening the directory path for every child.
+    def read_children(relative, names:, max_bytes:, missing: false)
+      return enum_for(
+        __method__, relative, names: names, max_bytes: max_bytes, missing: missing
+      ) unless block_given?
+
+      limit = Integer(max_bytes)
+      unsafe! if limit.negative?
+      children = Array(names).map { |name| validated_child_name(name) }.freeze
+      components = relative_components(relative)
+
+      with_session(create_root: false) do |session|
+        session.with_directory(components, missing: missing) do |parent|
+          children.each do |name|
+            snapshot = read_snapshot(session, parent, name, limit, missing: missing)
+            yield name, snapshot && snapshot.fetch(:bytes)
           end
         end
       end
+      nil
     rescue MissingEntry
       return nil if missing
 
@@ -364,6 +399,37 @@ module Hive
     end
 
     private
+
+    def read_snapshot(session, parent, name, limit, missing:)
+      opened = session.open_regular(parent, name, missing: missing)
+      return nil unless opened
+
+      file, before = opened
+      begin
+        unsafe! if before.size > limit
+        bytes = file.read(limit + 1)
+        bytes = "".b if bytes.nil? && before.size.zero?
+        after = file.stat
+        unsafe! unless unchanged_file?(before, after)
+        unsafe! if bytes.nil? || bytes.bytesize > limit
+        unsafe! unless regular_snapshot(before) ==
+          session.regular_snapshot_at(parent, name)
+        {
+          bytes: bytes.b.freeze,
+          mode: before.mode & 0o777,
+          mtime: before.mtime.utc
+        }.freeze
+      ensure
+        file.close
+      end
+    end
+
+    def validated_child_name(name)
+      components = relative_components(name)
+      unsafe! unless components.length == 1
+
+      components.fetch(0)
+    end
 
     def atomic_write_temporary_name(target)
       ".#{target}.tmp.#{Process.pid}.#{SecureRandom.hex(6)}"

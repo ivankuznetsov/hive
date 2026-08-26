@@ -16,6 +16,7 @@
         "schema_version": { "const": 7 },
         "ok": { "const": true },
         "generated_at": { "type": "string", "format": "date-time" },
+        "partial": { "type": "boolean" },
         "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } }
       }
     },

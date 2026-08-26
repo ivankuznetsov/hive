@@ -76,7 +76,8 @@ module Hive
 
       def command_prefix
         parent_dirs = Hive::WorkflowPackage::RuntimePolicy.sandbox_parent_dirs(
-          [ @source_root, @runtime_root, *runtime_mounts ]
+          [ @source_root, @runtime_root, *runtime_mounts ],
+          excluded: %w[/tmp /usr /etc /proc /dev]
         )
         argv = [
           @sandbox_binary,

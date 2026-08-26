@@ -26,7 +26,7 @@ module Hive
     #
     # mtimes are serialized with `iso8601(6)` — microsecond resolution. That
     # preserves the daemon's local `File.mtime` baseline precision; the public
-    # `hive status --json` payload is still whole-second ISO8601, but
+    # The internal task-graph payload is still whole-second ISO8601, but
     # `StatusConsumer` re-stats local state files before `Policy#decide_edit`
     # compares them. If baseline precision ever needs nanoseconds, move this
     # field to two integers (`tv_sec` + `tv_nsec`) to stay strictly faithful.
@@ -267,7 +267,7 @@ module Hive
       end
 
       # Microsecond resolution. See class doc for why persisted baselines keep
-      # more precision than the public `hive status --json` mtime string.
+      # more precision than the internal task-graph mtime string.
       def timestamp(time)
         time.utc.iso8601(6)
       end

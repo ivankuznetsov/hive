@@ -22,16 +22,18 @@ module Hive
         @path = File.join(@task_folder, FILENAME)
       end
 
-      def prepare!(generation:, evidence_digest:, base_revision:)
-        expected = identity(generation, evidence_digest, base_revision)
+      def prepare!(generation:, evidence_digest:, base_revision: nil)
         if File.exist?(@path) || File.symlink?(@path)
           current = read
-          reusable = current.values_at("generation", "evidence_digest", "base_revision") ==
-            [ generation, evidence_digest, base_revision ]
+          reusable = current.values_at("generation", "evidence_digest") ==
+            [ generation, evidence_digest ]
+          reusable &&= current.fetch("base_revision") == base_revision if base_revision
           invalid!("worktree ownership conflicts with the current generation") unless reusable
           validate!(current)
           return current
         end
+        base_revision ||= yield if block_given?
+        expected = identity(generation, evidence_digest, base_revision)
         worktree(expected).create_exact!(expected.fetch("branch"), base_sha: base_revision)
         validate!(expected)
         Hive::AtomicFile.write(@path, Hive::PatrolFix.canonical_json(expected), mode: 0o600)

@@ -1,8 +1,8 @@
-require "json"
 require "pty"
 require "securerandom"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/agent_support"
 require "hive/atomic_file"
 
 module Hive
@@ -184,8 +184,9 @@ module Hive
       end
 
       def write_pi_token(raw_json)
-        parsed = JSON.parse(raw_json.to_s)
-        raise Hive::Error, "pi token JSON must be a non-empty object" unless parsed.is_a?(Hash) && parsed.any?
+        support = Hive::AgentSupport.for(:pi)
+        content = support.parse_token(raw_json)
+        path = support.credential_path
 
         # AtomicFile replaces the target through a same-directory tempfile
         # created at 0600 and renames it over the destination, so the
@@ -193,10 +194,7 @@ module Hive
         # lifetime — File.write's perm: only applies through O_CREAT on first
         # creation and would silently keep looser modes on an existing auth.json
         # while persisting fresh secrets into it.
-        Hive::AtomicFile.write(File.expand_path("~/.pi/agent/auth.json"),
-                               JSON.pretty_generate(parsed), mode: 0o600)
-      rescue JSON::ParserError => e
-        raise Hive::Error, "pi token JSON is invalid: #{e.message}"
+        Hive::AtomicFile.write(path, content, mode: 0o600)
       end
 
       private

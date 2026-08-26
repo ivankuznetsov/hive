@@ -1,6 +1,7 @@
 require "json"
 require "time"
 require "hive/patrol_fix"
+require "hive/canonical_json"
 
 module Hive
   module PatrolFix
@@ -54,6 +55,21 @@ module Hive
           invalid!("terminal receipt tuples must be unique")
         end
         PatrolFix.deep_freeze(receipts)
+      end
+
+      # Semantic progress owned by the append-only Patrol Fix state machine.
+      # The task manifest intentionally stays immutable while stage controllers
+      # append receipts, so attempt generations must include this projection to
+      # distinguish the next controller action from the one that just finished.
+      def progress_token
+        Hive::CanonicalJSON.digest(
+          "owner" => "patrol_fix",
+          "receipts" => read_all
+        )
+      rescue InvalidReceipt, JSON::GeneratorError, ArgumentError => e
+        Hive::CanonicalJSON.digest(
+          "owner" => "patrol_fix", "state" => "unreadable", "error" => e.class.name
+        )
       end
 
       def append!(document)

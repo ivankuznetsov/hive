@@ -23,12 +23,12 @@ an agent, declare `permissions:` on a pipeline stage or a review reviewer.
 ## Caveat
 
 Permission scoping is application-level enforcement. Claude uses its native
-tool rules; OpenCode receives an invocation-owned deny-first permission
-configuration plus private config/data/cache/state homes. Neither is an OS
-sandbox. The agent runs as the same OS user; `read-only` limits accidental
-over-reach, but it does not contain a determined or compromised runtime. For
-real isolation, run Hive under a sandboxed user or choose the [Hivebox
-container distribution](../packaging/docker/README.md).
+tool rules; OpenCode receives a per-process deny-first permission document
+through `OPENCODE_PERMISSION` while retaining its native config, login, and
+state. Neither is an OS sandbox. The agent runs as the same OS user;
+`read-only` limits accidental over-reach, but it does not contain a determined
+or compromised runtime. For real isolation, run Hive under a sandboxed user or
+choose the [Hivebox container distribution](../packaging/docker/README.md).
 
 ## Managed Honeycomb Policy
 
@@ -62,10 +62,11 @@ or bypass flag without a deny-first generated policy.
 ## OpenCode Enforcement
 
 An OpenCode stage must select `read-only` or `scoped`; the project-default
-`yolo` value is rejected before preparation. Hive resolves the real working
-directory and every declared extra root, rejects unsafe symlinks/ownership,
-and writes OpenCode's stable `permission` grammar into a private per-invocation
-config. Last-match rules deny by default.
+`yolo` value is rejected before launch. Hive maps the working directory
+and the workflow's declared roots into OpenCode's stable
+`permission` grammar through `OPENCODE_PERMISSION` for that process. Native
+config, plugins, project discovery, sessions, and authentication remain in
+their normal locations. Last-match rules deny by default.
 
 `read-only` permits bounded read/list/glob/grep/LSP operations and the selected
 native skill, then denies edits, Bash, task delegation, web tools, questions,
@@ -78,13 +79,10 @@ only those exact OpenCode permission patterns over a deny-first base. Bare
 `Bash` remains invalid. `Bash(*)` is an explicit full-shell opt-in, not
 filesystem confinement: commands run with the Hive OS user's authority.
 
-The selected source config and credentials remain caller-owned and read-only.
-Hive redirects OpenCode config, data, cache, and state into owner-private paths,
-forwards only named credential variables (or an explicitly selected staged auth
-file), disables ambient project/default discovery and remote model refresh,
-and removes only those invocation-owned paths from the process owner's
-`ensure`. Cleanup is idempotent. See the [OpenCode opt-in
-example](getting-started.md#optional-opencode-profile).
+The native config and auth file remain OpenCode-owned and are used in place.
+Hive scrubs ambient provider API-key variables, restores only explicitly named
+`credential_env` values, and never stages a credential file. See the
+[OpenCode opt-in example](getting-started.md#optional-opencode-profile).
 
 ## YAML Forms
 

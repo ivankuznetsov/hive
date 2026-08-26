@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/agent_support"
 require "hive/agent_runtime"
 require "hive/config"
 require "hive/permission_scope"
@@ -30,16 +31,9 @@ module Hive
 
       def launch_kwargs(profile:, workspace:, role:, output_path: nil)
         return workspace_write_kwargs(profile) if profile.workspace_write_supported?
-        return opencode_kwargs if profile.name == :opencode
-
-        # Pi's managed-workflow wrapper is deliberately read-only and cannot
-        # expose Bash or network access. Those are both required here: the
-        # reviewer must inspect the repository and referenced documentation,
-        # and its finding format requires SHA-256. Plan review uses the same
-        # disposable-worktree and ArtifactFirewall boundaries, so launch Pi
-        # directly instead of pretending its managed output wrapper can
-        # enforce this broader review contract.
-        return unrestricted_kwargs if profile.name == :pi
+        if (support = Hive::AgentSupport.for(profile))&.respond_to?(:plan_review_launch_kwargs)
+          return support.plan_review_launch_kwargs(workspace:, role:, output_path:)
+        end
 
         tools = REVIEW_TOOLS + write_tools(workspace)
         scope = Hive::PermissionScope.resolve(
@@ -55,52 +49,13 @@ module Hive
         }
       end
 
-      # Codex and Grok carry a real filesystem sandbox, which confines writes
-      # to the disposable Git worktree while leaving reads, shell and network
-      # intact. The cwd is now a real checkout, so Codex needs no repository-
-      # shape bypass.
+      # Profiles that advertise workspace-write support confine writes to the
+      # disposable Git worktree while leaving review capabilities intact.
       def workspace_write_kwargs(_profile)
         {
           permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
           allowed_tools: nil,
           disallowed_tools: nil
-        }
-      end
-
-      def unrestricted_kwargs
-        {
-          permission_mode: nil,
-          allowed_tools: nil,
-          disallowed_tools: nil
-        }
-      end
-
-      # OpenCode deliberately rejects Claude-style allowed_tools: its
-      # hermetic launcher accepts only a typed permission overlay. Plan
-      # review is the exceptional role that needs both shell (including the
-      # SHA-256 required by typed findings) and network access. The reviewer
-      # already runs with the detached checkout as cwd, so deny external
-      # directories and allow edits only beneath that checkout while the
-      # ArtifactFirewall retains custody of controller-owned artifacts.
-      def opencode_kwargs
-        policy = Hive::AgentRuntime::OpenCodePermissionPolicy.new(
-          "*" => "deny",
-          "read" => {
-            "*" => "allow", "*.env" => "deny", "*.env.*" => "deny",
-            "*.env.example" => "allow"
-          },
-          "glob" => "allow", "grep" => "allow", "list" => "allow",
-          "lsp" => "allow", "skill" => "allow",
-          "external_directory" => { "*" => "deny" },
-          "edit" => { "*" => "deny", "**" => "allow" },
-          "bash" => "allow", "webfetch" => "allow", "websearch" => "allow",
-          "task" => "deny", "question" => "deny"
-        )
-        {
-          permission_mode: nil,
-          allowed_tools: nil,
-          disallowed_tools: nil,
-          opencode_permission_policy: policy
         }
       end
 
@@ -110,8 +65,7 @@ module Hive
         [ "Edit(#{File.expand_path(workspace.to_s)}/**)" ]
       end
 
-      private_class_method :opencode_kwargs, :unrestricted_kwargs,
-                           :workspace_write_kwargs, :write_tools
+      private_class_method :workspace_write_kwargs, :write_tools
     end
   end
 end

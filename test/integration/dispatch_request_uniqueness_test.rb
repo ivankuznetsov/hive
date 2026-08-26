@@ -72,16 +72,26 @@ class HiveDispatchRequestUniquenessTest < Minitest::Test
     )
     @dispatcher.define_singleton_method(:project_enabled?) { |_| true }
     @original_find_project = Hive::Config.method(:find_project)
+    @original_registered_projects = Hive::Config.method(:registered_projects)
     project = @project
     state_home = @state_home
+    project_entry = {
+      "name" => project, "path" => state_home, "hive_state_path" => state_home
+    }
     Hive::Config.define_singleton_method(:find_project) do |name|
-      name == project ? { "name" => project, "path" => state_home, "hive_state_path" => state_home } : nil
+      name == project ? project_entry : nil
     end
+    Hive::Config.define_singleton_method(:registered_projects) { [ project_entry ] }
   end
 
   def teardown
     FileUtils.remove_entry(@state_home) if @state_home && File.exist?(@state_home)
     Hive::Config.define_singleton_method(:find_project, @original_find_project) if @original_find_project
+    if @original_registered_projects
+      Hive::Config.define_singleton_method(
+        :registered_projects, @original_registered_projects
+      )
+    end
   end
 
   def queue_files

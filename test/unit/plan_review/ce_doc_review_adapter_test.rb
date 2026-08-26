@@ -18,7 +18,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_includes anchored, "plan.md"
   end
 
-  def test_hive_runner_capability_probe_uses_the_project_prepared_opencode_plugin
+  def test_hive_runner_capability_probe_uses_the_project_configured_opencode_plugin
     plugin = "compound-engineering@git+https://github.com/EveryInc/" \
       "compound-engineering-plugin.git#compound-engineering-v3.21.4"
     runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
@@ -32,7 +32,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     adapter = Hive::PlanReview::Adapters::CeDocReview.new(runner:)
 
     assert_equal "present", result.fetch("status")
-    assert_includes result.fetch("diagnostic"), "prepared pinned plugin"
+    assert_includes result.fetch("diagnostic"), "configured native plugin"
     assert_equal runner, adapter.instance_variable_get(:@capability_probe).receiver
   end
 

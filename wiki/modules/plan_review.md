@@ -68,9 +68,9 @@ route. Neither reviewer can publish canonical `plan.md`; malformed or free-form
 output has no clearance authority.
 
 The committed capability manifest exposes `ce-doc-review` through every
-Compound Engineering host Hive can route here, including OpenCode's prepared
-plugin overlay. Capability probing uses the same project-prepared profile as
-the reviewer launch, so `agents.opencode.plugins` is visible even when the
+Compound Engineering host Hive can route here, including OpenCode's native
+plugin configuration. Capability probing uses the same project profile
+as the reviewer launch, so `agents.opencode.plugins` is visible even when the
 ambient OpenCode configuration does not contain the plugin. Provider selection
 therefore cannot pass configuration and runtime probing only to fail later
 because the review skill contract omitted or ignored that supported host.
@@ -233,6 +233,16 @@ receipt under the task lock immediately before movement. `StageAction`,
 `Approve`, daemon plan approval, and execute entry all use this guard. A stale,
 missing, corrupt, blocked, or changed observation raises a typed
 `PlanReview::TransitionBlocked`; `--force` does not bypass it.
+
+The benchmark-only configuration grant documented in [[modules/config]] also
+disables this transition boundary. With the grant and `enabled: false`, plan to
+execute returns without initializing the orchestrator, requiring an
+observation, or creating execute-entry adoption evidence. This exception is
+unreachable to ordinary project loads because configuration validation rejects
+the disabled value without the process-local benchmark grant.
+Task-action and stage-action `next_action` projections honor the same disabled
+boundary, so a benchmark plan cannot appear blocked on evidence the transition
+will not read.
 
 ## Automation and operator actions
 

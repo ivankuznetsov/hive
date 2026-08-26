@@ -8,6 +8,13 @@ module Hive
   # skills. Hive configuration resolves which projections are needed above
   # this facade; this boundary owns deterministic bytes and stale-safe writes.
   module AgentSkills
+    RUNNER_ENVIRONMENT_KEYS = %w[
+      HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
+      OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
+    ].freeze
+
+    autoload :Adapter, "hive/agent_skills/adapters/base"
+
     Projection = CanonicalSkill::Projection
     ProjectionReport = DirectoryPublisher::Report
 
@@ -136,14 +143,6 @@ module Hive
     def capability(id, agent)
       require "hive/agent_skills/manifest"
       Manifest.load.capability(id).agent(agent)
-    end
-
-    def same_source?(actual, expected)
-      normalize_source(actual) == normalize_source(expected)
-    end
-
-    def normalize_source(value)
-      value.to_s.strip.sub(%r{\Ahttps://github\.com/}i, "").sub(/\.git\z/i, "").downcase
     end
 
     def publisher(root:, trusted_root:, projection:)

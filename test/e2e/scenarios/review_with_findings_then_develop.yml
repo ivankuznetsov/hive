@@ -29,7 +29,7 @@ steps:
     path: "{task_dir:4-execute}/reviews/ce-review-01.md"
     contains: "- [ ] Third issue"
   - kind: json_assert
-    args: [status, --json]
-    schema: hive-status
-    pick: [projects, 0, tasks, 0, action]
+    args: [status, --operational, --json]
+    schema: hive-operational-status
+    pick: [tasks, 0, evidence, task_action]
     equals: recover_execute

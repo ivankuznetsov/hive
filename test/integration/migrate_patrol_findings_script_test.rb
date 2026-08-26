@@ -1,7 +1,9 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/patrol/finding"
+require "hive/patrol/fix_admission_adapter"
 require "hive/patrol_fix/admission_store"
+require "hive/patrol_fix/source_snapshot"
 require "hive/refactor_patrol/job_store"
 require "open3"
 
@@ -10,7 +12,7 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
 
   SCRIPT = File.expand_path("../../script/migrate_patrol_findings.rb", __dir__)
 
-  def test_migrates_active_findings_and_is_idempotent
+  def test_reserves_active_findings_without_materializing_tasks_and_is_idempotent
     with_tmp_global_config do
       with_tmp_git_repo do |project|
         capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
@@ -29,20 +31,27 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(finding_path))
         File.write(finding_path, JSON.generate(finding.to_h))
 
+        dry_out, dry_err, dry_status = run_script(project, "--dry-run")
+        assert dry_status.success?, dry_err
+        assert_includes dry_out, "ordinary: would migrate 1, already present 0"
+        assert_empty task_folders(project)
+        assert_empty admissions(project)
+
         first_out, first_err, first_status = run_script(project)
         assert first_status.success?, first_err
         assert_includes first_out, "migrated 1, already present 0"
 
-        folders = Dir.glob(File.join(project, ".hive-state", "stages", "*", "*"))
-        assert_equal 1, folders.length
-        manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folders.first).read
-        assert_equal "finding-1", manifest.dig("sources", 0, "identity")
-        assert_equal "ordinary_finding", manifest.dig("aliases", 0, "kind")
+        assert_empty task_folders(project)
+        records = admissions(project)
+        assert_equal 1, records.length
+        assert_equal "ordinary_patrol", records.first.dig("source", "engine")
+        assert_equal "finding-1", records.first.dig("source", "identity")
 
         second_out, second_err, second_status = run_script(project)
         assert second_status.success?, second_err
         assert_includes second_out, "migrated 0, already present 1"
-        assert_equal 1, Dir.glob(File.join(project, ".hive-state", "stages", "*", "*", "patrol-fix-manifest.json")).length
+        assert_empty task_folders(project)
+        assert_equal 1, admissions(project).length
       end
     end
   end
@@ -64,23 +73,46 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
     end
   end
 
-  def test_conflicting_candidate_patrol_fix_metadata_fails_closed
+  def test_conflicting_ordinary_admission_fails_closed
     with_tmp_global_config do
       with_tmp_git_repo do |project|
         capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
         write_finding(project)
-        candidate = File.join(project, ".hive-state", "stages", "1-inbox", "candidate")
-        Hive::TaskMeta.write(
-          candidate, id: 99, slug: "candidate", display_name: nil,
-          workflow: "patrol-fix",
-          idempotency_key: "patrol-fix:legacy-finding:finding-1",
-          input_fingerprint: "f" * 64
+        finding = stored_finding(project)
+        snapshot = Hive::Patrol::FixAdmissionAdapter.snapshot_for(
+          finding, accepted_at: Time.at(0).utc
+        )
+        occurrence_id = "ordinary:#{finding.id}:#{snapshot.evidence_digest[0, 24]}"
+        conflicting = Hive::PatrolFix::SourceSnapshot.new(
+          snapshot.to_h.merge("title" => "Different source bytes")
+        )
+        admission_store(project).reserve!(
+          occurrence_id: occurrence_id, snapshot: conflicting, now: Time.at(0).utc
         )
 
         _out, err, status = run_script(project)
 
         refute status.success?
-        assert_includes err, "different data for Patrol finding finding-1"
+        assert_includes err, "different data for ordinary Patrol occurrence"
+      end
+    end
+  end
+
+  def test_duplicate_ordinary_finding_ids_fail_before_writes
+    with_tmp_global_config do
+      with_tmp_git_repo do |project|
+        capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
+        write_finding(project)
+        findings = File.join(project, ".hive-state", "patrol", "findings")
+        duplicate = JSON.parse(File.binread(File.join(findings, "finding-1.json")))
+        duplicate["title"] = "Conflicting duplicate"
+        File.write(File.join(findings, "duplicate.json"), JSON.generate(duplicate))
+
+        _out, err, status = run_script(project)
+
+        refute status.success?
+        assert_includes err, "duplicate Patrol finding id finding-1"
+        assert_empty admissions(project)
       end
     end
   end
@@ -96,9 +128,9 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
         _out, err, status = run_script(project)
 
         assert status.success?, err
-        folder = Dir.glob(File.join(project, ".hive-state", "stages", "*", "*")).fetch(0)
-        manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read
-        assert_equal [ "lib/hive/patrol.rb" ], manifest.dig("sources", 0, "affected_code")
+        assert_equal [ "lib/hive/patrol.rb" ],
+                     admissions(project).fetch(0).dig("source", "affected_code")
+        assert_empty task_folders(project)
       end
     end
   end
@@ -113,9 +145,25 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
 
         assert status.success?, err
         assert_includes out, "ordinary: migrated 1, already present 0"
-        folder = Dir.glob(File.join(project, ".hive-state", "stages", "*", "*")).fetch(0)
-        manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read
-        assert_equal git_head(project), manifest.fetch("target_revision")
+        assert_equal git_head(project),
+                     admissions(project).fetch(0).dig("source", "target_revision")
+        assert_empty task_folders(project)
+      end
+    end
+  end
+
+  def test_normalizes_an_unknown_active_legacy_reason_for_admission
+    with_tmp_global_config do
+      with_tmp_git_repo do |project|
+        capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
+        write_finding(project, lifecycle_reason: "legacy_import")
+
+        out, err, status = run_script(project)
+
+        assert status.success?, err
+        assert_includes out, "ordinary: migrated 1, already present 0"
+        assert_equal "finding-1", admissions(project).fetch(0).dig("source", "identity")
+        assert_empty task_folders(project)
       end
     end
   end
@@ -136,21 +184,18 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
 
         assert first_status.success?, first_err
         assert_includes first_out, "architecture: migrated 2, already present 0"
-        admissions = Hive::PatrolFix::AdmissionStore.new(
-          root: File.join(project, ".hive-state", "patrol-fix", "admissions")
-        ).pending(limit: 64)
-        assert_equal 2, admissions.length
-        assert_equal [ "architecture_patrol" ], admissions.map { |item| item.dig("source", "engine") }.uniq
+        records = admissions(project)
+        assert_equal 2, records.length
+        assert_equal [ "architecture_patrol" ], records.map { |item| item.dig("source", "engine") }.uniq
         assert_equal %w[job-legacy:discuss-1 job-legacy:fix-1],
-                     admissions.map { |item| item.dig("source", "identity") }.sort
+                     records.map { |item| item.dig("source", "identity") }.sort
 
         second_out, second_err, second_status = run_script(project)
 
         assert second_status.success?, second_err
         assert_includes second_out, "architecture: migrated 0, already present 2"
-        assert_equal 2, Hive::PatrolFix::AdmissionStore.new(
-          root: File.join(project, ".hive-state", "patrol-fix", "admissions")
-        ).pending(limit: 64).length
+        assert_equal 2, admissions(project).length
+        assert_empty task_folders(project)
       end
     end
   end
@@ -166,22 +211,42 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
 
         assert status.success?, err
         assert_includes out, "ordinary: migrated 1, already present 0"
-        folder = Dir.glob(File.join(project, ".hive-state", "stages", "*", "*")).fetch(0)
-        manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read
-        refute_includes JSON.generate(manifest), secret
-        assert_includes JSON.generate(manifest), "[REDACTED:"
+        source = admissions(project).fetch(0).fetch("source")
+        refute_includes JSON.generate(source), secret
+        assert_includes JSON.generate(source), "[REDACTED:"
+        assert_empty task_folders(project)
       end
     end
   end
 
   private
 
+  def admission_store(project)
+    Hive::PatrolFix::AdmissionStore.new(
+      root: File.join(project, ".hive-state", "patrol-fix", "admissions")
+    )
+  end
+
+  def admissions(project)
+    admission_store(project).pending(limit: 64)
+  end
+
+  def task_folders(project)
+    Dir.glob(File.join(project, ".hive-state", "stages", "*", "*"))
+       .select { |path| File.directory?(path) }
+  end
+
+  def stored_finding(project)
+    path = File.join(project, ".hive-state", "patrol", "findings", "finding-1.json")
+    Hive::Patrol::Finding.from_h(JSON.parse(File.binread(path)))
+  end
+
   def run_script(project, *arguments)
     Open3.capture3(RbConfig.ruby, SCRIPT, project, *arguments)
   end
 
   def write_finding(project, scope: { "paths" => [ "lib/hive/patrol.rb" ] }, evidence: nil,
-                    target_sha: git_head(project))
+                    target_sha: git_head(project), lifecycle_reason: nil)
     finding = Hive::Patrol::Finding.new(
       id: "finding-1", feature_id: "feature", category: "bug",
       severity: "medium", confidence: "high", title: "Refresh state",
@@ -190,6 +255,7 @@ class MigratePatrolFindingsScriptTest < Minitest::Test
       root_cause: "The refresh writes stale state.",
       reproduction: "Run the refresh twice.", evidence: evidence, fingerprint: "refresh-root",
       target_sha: target_sha, lifecycle_state: "active",
+      lifecycle_reason: lifecycle_reason,
       lifecycle_updated_at: "2026-08-21T00:00:00Z"
     )
     path = File.join(project, ".hive-state", "patrol", "findings", "finding-1.json")

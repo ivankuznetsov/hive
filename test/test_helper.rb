@@ -37,6 +37,9 @@ unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
   ENV["HOME"] = test_home
   %w[
     HIVE_HOME
+    HIVE_RUNTIME_CHANNEL
+    HIVE_RUNTIME_BUILD_SHA
+    HIVE_RUNTIME_DEPLOYMENT_ID
     XDG_CONFIG_HOME
     XDG_DATA_HOME
     XDG_STATE_HOME
@@ -53,6 +56,11 @@ end
 
 require "hive"
 require_relative "support/workflow_helpers"
+require_relative "support/failure_evidence"
+
+# CI failure evidence: registers on every suite; emits only when running on a
+# hosted runner (CI + GITHUB_STEP_SUMMARY) and only when tests failed.
+Minitest.extensions << HiveFailureEvidence
 
 if ENV.delete("HIVE_REQUIRE_TEST_RUNS") == "1"
   module HiveCiGateRunGuard

@@ -14,6 +14,7 @@ module Hive
                      command_factory: nil,
                      global_migration: Hive::Recovery::Migration.method(:ensure!),
                      daemon_restarter: Hive::Commands::Migrate.method(:restart_daemon_if_running!),
+                     daemon_cutover: Hive::Commands::Migrate.method(:restart_daemon_for_patrol_index_cutover!),
                      binary: nil, env: ENV)
         @projects = projects
         @output = output
@@ -21,8 +22,10 @@ module Hive
         @command_factory = command_factory || method(:project_migration)
         @global_migration = global_migration
         @daemon_restarter = daemon_restarter
+        @daemon_cutover = daemon_cutover
         @binary = binary || resolve_binary(env)
         @daemon_restart_required = false
+        @daemon_cutover_completed = false
       end
 
       def call
@@ -82,7 +85,8 @@ module Hive
         Hive::Commands::Migrate.new(
           path,
           global_migration: SKIP_GLOBAL_MIGRATION,
-          daemon_restarter: method(:request_daemon_restart)
+          daemon_restarter: method(:request_daemon_restart),
+          daemon_cutover: method(:cutover_daemon_now)
         )
       end
 
@@ -133,7 +137,17 @@ module Hive
         @daemon_restart_required = true
       end
 
+      def cutover_daemon_now
+        return true if @daemon_cutover_completed
+
+        restarted = @daemon_cutover.call
+        @daemon_cutover_completed ||= restarted
+        restarted
+      end
+
       def restart_daemon_after_successful_fleet!
+        return if @daemon_cutover_completed && !@daemon_restart_required
+
         @daemon_restarter.call
       end
 

@@ -21,6 +21,18 @@ class CommandsStatusConciseTest < Minitest::Test
       }
     end
 
+    def running_payload(_projects, **)
+      @routes << :running_payload
+      {
+        "daemon" => { "running" => false, "pid" => nil, "uptime_sec" => nil },
+        "complete" => true, "source" => {}, "tasks" => []
+      }
+    end
+
+    def render_running(_payload)
+      @routes << :running
+    end
+
     def render_operational(_payload)
       @routes << :concise
     end
@@ -39,20 +51,24 @@ class CommandsStatusConciseTest < Minitest::Test
     end
   end
 
-  def test_default_human_is_concise_full_is_legacy_and_json_stays_v6
+  def test_default_is_bounded_and_internal_graph_and_operational_are_explicit
     project = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
     with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
-      concise = RoutingStatus.new
-      capture_io { concise.call }
-      assert_equal %i[operational_payload concise], concise.routes
+      running = RoutingStatus.new
+      capture_io { running.call }
+      assert_equal %i[running_payload running], running.routes
 
       full = RoutingStatus.new(full: true)
       capture_io { full.call }
       assert_equal [ :full ], full.routes
 
-      legacy_json = RoutingStatus.new(json: true)
-      capture_io { legacy_json.call }
-      assert_equal [ :legacy_json ], legacy_json.routes
+      running_json = RoutingStatus.new(json: true)
+      capture_io { running_json.call }
+      assert_equal [ :running_payload ], running_json.routes
+
+      internal_json = RoutingStatus.new(json: true, full: true)
+      capture_io { internal_json.call }
+      assert_equal [ :legacy_json ], internal_json.routes
 
       operational_json = RoutingStatus.new(json: true, operational: true)
       capture_io { operational_json.call }
@@ -62,7 +78,6 @@ class CommandsStatusConciseTest < Minitest::Test
 
   def test_invalid_mode_combinations_are_usage_errors
     invalid = [
-      { full: true, json: true },
       { full: true, operational: true },
       { full: true, diagnose: "task" },
       { operational: true, diagnose: "task" },
@@ -97,7 +112,7 @@ class CommandsStatusConciseTest < Minitest::Test
     assert_includes out, "\\x1B"
     assert_includes out, "\\x0A"
     refute_includes out, "\e"
-    assert_includes out, "+1 more — run `hive status --full`"
+    assert_includes out, "+1 more — run `hive tui`"
     assert_equal 5, lines.count { |line| line.start_with?("  ") && line.include?("task-") }
   end
 
@@ -122,7 +137,7 @@ class CommandsStatusConciseTest < Minitest::Test
     assert_match(/hive init <path>/, empty_out)
     assert_match(/SNAPSHOT COMPLETE — 0 active · 3 archived/, archive_out)
     assert_match(/ARCHIVE ONLY/, archive_out)
-    assert_match(/hive status --full/, archive_out)
+    assert_match(/hive archive/, archive_out)
     assert_match(/IDLE — no active work/, idle_out)
     assert_equal "SNAPSHOT PARTIAL — 1 active · 0 archived", partial_out.lines.first.chomp
     assert_operator partial_out.index("scheduler unavailable"), :<, partial_out.index("READY / IDLE")

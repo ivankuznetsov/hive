@@ -72,7 +72,7 @@ The built-in coding workflow captures one concrete implementation identity befor
 
 PR creation and repair work follow that owner automatically. `open_pr` stays on the same provider and uses Claude `sonnet`, Codex `gpt-5.6-terra`, or the normal pi/grok provider default with `medium` effort. `review.fix` and `review.ci` use the exact execute model with `high` effort. Authored `agent`, `model`, or `effort` fields under one of those downstream stages override only the authored fields. Reviewers, triage, and browser tests remain independently configured.
 
-`hive status --json`, the TUI (`I` on a selected task), and Hivebox expose the projected owner. An effort can be requested without being applied when a provider has no verified native effort control; those surfaces say so explicitly.
+`hive task TARGET --json`, the TUI (`I` on a selected task), and Hivebox expose the projected owner. An effort can be requested without being applied when a provider has no verified native effort control; those surfaces say so explicitly.
 
 ## Markers As The Protocol
 

@@ -1,6 +1,14 @@
 # frozen_string_literal: true
 
 module HiveBench
+  # A provider/transport layer raises this only from trusted quota evidence.
+  # Judge/model output must never manufacture an automatic-retry decision.
+  class ProviderLimitError < StandardError
+    def initialize(message)
+      super("limits_reached: #{message}")
+    end
+  end
+
   # Detects when a candidate run hit a provider usage/credit/rate limit rather
   # than genuinely failing. A limit is not a clean exit code — it surfaces as a
   # message in the agent's stream ("you've hit your usage limit", a 429, quota

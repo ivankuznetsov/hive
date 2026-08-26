@@ -543,6 +543,15 @@ class HiveDaemonPolicyTest < Minitest::Test
                         answers_complete: true)
   end
 
+  def test_ready_to_run_stays_braked_when_baseline_is_newer_than_current_state
+    assert_equal :markerless_stalled,
+                 decide(action: "ready_to_run",
+                        command: "hive run slug-a --json",
+                        state_file_mtime: T0 - 600,
+                        last_dispatched_state_file_mtime: T0 - 60),
+                 "Policy cannot infer replacement from mtime ordering alone"
+  end
+
   def test_blocked_takes_precedence_over_answers_pending_on_debounced_resume
     # A debounced edit-resume row that is BOTH dependency-blocked and has
     # unanswered Q&A must resolve to the dependency gate, not the Q&A hold —

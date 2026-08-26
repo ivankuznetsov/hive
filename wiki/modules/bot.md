@@ -9,7 +9,7 @@ tags: [bot, telegram, module, mobile]
 
 **TLDR**: `Hive::Bot::*` is the Telegram operator surface for daemon
 human-input gates and first-contact pairing. The supervisor has three loops: Telegram long-poll,
-`hive status --json` notification polling, and child reaping. Pure
+hidden internal task-graph notification polling, and child reaping. Pure
 routing/parsing logic is split away from Telegram, filesystem,
 and subprocess I/O. (The earlier "Codex draft-assist" brainstorm flow —
 where Path A spawned Codex to draft answers — has been retired; brainstorm
@@ -30,7 +30,7 @@ answering is now deterministic Q-by-Q.)
 | `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, voice-origin and transcript-confirm phases, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
 | `IdeaAttachmentPolicy` | `lib/hive/bot/idea_attachment_policy.rb` | Pure classifier for Telegram photo/document attachments. Allows jpg/jpeg/png/webp/gif/pdf/txt/md/docx, enforces count/byte caps, and normalizes extensions through `Hive::Tui::ComposerStaging`. |
 | `Transcriber` | `lib/hive/bot/transcriber.rb` | OpenAI-compatible audio transcription client for Telegram voice notes used by idea capture and audio answers. Posts `multipart/form-data` to `bot.transcription.endpoint` with `model`, retries transient failures, maps empty/high no-speech-prob results to `:no_speech`, applies `supported_languages`, and logs failures through the bot logger. |
-| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows carrying slug/id/display_name/`pr_url`/`auto_residue` plus project-level legacy-stage warnings. |
+| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Reads Hive's hidden internal task graph, validates the envelope, and returns typed task rows carrying slug/id/display_name/`pr_url`/`auto_residue` plus project-level legacy-stage warnings. |
 | `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery rows, daemon-disabled ready approvals, and project-level legacy-stage warnings through a persistent alert lifecycle store. Ready notifications are suppressed when the daemon is enabled for that project; recovery rows get one confirmation when they leave the active set, same-task recovery fingerprint changes are treated as superseded rather than recovered, and unchanged recovery rows get one reminder. A stored recovery alert is held while the current raw snapshot still has the same project/slug/stage at `action=agent_running`; that live-agent hold prevents a stale marker suppressed by `NotificationBuilders` from producing a premature "Recovered" message while a retry is still running. Persistent `AlertStore` entries still dedupe delivery; in-memory per-dispatcher sets now separately dedupe the `notification_skipped_dedupe` and `notification_skipped_backoff` log lines so each active fingerprint logs the debug/noise skip only on state entry, after a fingerprint change, or after the row leaves and returns. **`needs_input` (brainstorm/review "waiting") pushes are suppressed for a project+slug with an active answer conversation** (`ConversationStore#active_for_slug?(slug, project:)`, injected): the operator is already answering, so a row that briefly flaps out of and back into `WAITING` (e.g. a mid-answer daemon resume) won't re-fire the "questions waiting" push. Suppression is lenient when either side lacks a project, but two fully resolved different projects sharing a slug do not cross-suppress. The first alert still fires (no conversation exists until the operator taps **Answer in chat**), error/recovery alerts are never gated this way, and a TTL-expired/abandoned conversation stops suppressing (re-engaging the operator). Suppressed rows are logged as `notification_skipped_active_conversation` and never enter the alert store, so ending the conversation can re-alert if the task is still waiting. |
 | `AlertStore` | `lib/hive/bot/alert_store.rb` | JSON sidecar for alert fingerprints, first-seen timestamps, reminder timestamps, and row snapshots. Corrupt files are renamed aside so the bot keeps running. |
 | `RowActions` | `lib/hive/bot/row_actions.rb` | Canonical pure resolver from a status row to Telegram chat action descriptors. Both push notifications and `/status` buttons consume this resolver so needs-input rows cannot drift between surfaces. |
@@ -59,7 +59,7 @@ hive bot start
        ├─ writes ~/.local/state/hive/.bot.pid
        └─ Hive::Bot::Supervisor.run_forever
             ├─ poll loop: Telegram.getUpdates → Router → handler descriptors
-            ├─ status loop: hive status --json → NotificationDispatcher
+            ├─ status loop: internal task graph → NotificationDispatcher
             └─ reaper loop: ChildSupervisor.reap_all + notice drains → Telegram reply
 ```
 
@@ -67,7 +67,7 @@ Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <displa
 
 `RowActions.resolve(row)` is the source of truth for Telegram buttons. Notable needs-input mappings: coding brainstorm `waiting` -> Answer; coding plan `waiting` -> Approve + Details; `review_waiting` -> Accept all / Reject all + Details (fix guardrail is Details-only); `execute_waiting` -> Re-run develop + Details; finalize `waiting` -> Run finalize + Details; generic needs-input -> Run. Rows that pair `needs_input` with `marker=none` or `marker=complete` are suppressed as incoherent presentation-layer backstops for [[modules/task_action]].
 
-The Details button and `/details <slug>` route through the cached `hive status --json` snapshot and `Supervisor#render_details`, not `hive status --diagnose`. Replies include the same row summary as `/status <slug>` plus a next-step hint derived from `RowActions` ("tap Re-run", "tap Approve", or "open on a laptop" for terminal Details/manual-only states). `refresh_diagnose:` remains the explicit path that runs `hive status --diagnose --write --force` for recovery diagnostics.
+The Details button and `/details <slug>` route through the bot's cached internal row snapshot and `Supervisor#render_details`, not `hive status --diagnose`. Replies include the same row summary as `/status <slug>` plus a next-step hint derived from `RowActions` ("tap Re-run", "tap Approve", or "open on a laptop" for terminal Details/manual-only states). `refresh_diagnose:` remains the explicit path that runs `hive status --diagnose --write --force` for recovery diagnostics.
 
 `Router::Result` is the handoff API between pure routing and side
 effects. The normal command actions remain `reply`,

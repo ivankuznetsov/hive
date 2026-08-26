@@ -16,9 +16,11 @@ FROM ruby:3.4-slim
 # Node powers the candidate agent CLI (pi). Pi is pinned to match the host CLI
 # so a fresh container reproduces local results.
 ARG NODE_VERSION=26.3.1
-ARG PI_VERSION=0.80.2
+ARG PI_VERSION=0.84.2
 ARG CLAUDE_VERSION=2.1.191
 ARG CODEX_VERSION=0.142.2
+ARG OPENCODE_VERSION=1.18.18
+ARG COMPOUND_ENGINEERING_VERSION=3.22.4
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates curl xz-utils libatomic1 \
@@ -46,7 +48,18 @@ RUN curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash -s
 RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" \
   && npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
   && npm install -g "@openai/codex@${CODEX_VERSION}" \
-  && pi --version && claude --version && codex --version
+  && npm install -g "opencode-ai@${OPENCODE_VERSION}" \
+  && pi --version && claude --version && codex --version && opencode --version
+
+# OpenCode's hermetic profile gives every invocation a fresh XDG cache. Bake a
+# pinned local CE package so route inspection never installs a plugin from the
+# network inside its bounded probe deadline.
+RUN git clone --depth 1 \
+      --branch "compound-engineering-v${COMPOUND_ENGINEERING_VERSION}" \
+      https://github.com/EveryInc/compound-engineering-plugin.git \
+      /opt/compound-engineering \
+  && rm -rf /opt/compound-engineering/.git \
+  && chmod -R a+rX /opt/compound-engineering
 
 # --- Real hive CLI (v2 drives ACTUAL hive stages, not a reimplementation) ---
 # Build deps for hive's native gems: bigdecimal compiles from source; sqlite3 and

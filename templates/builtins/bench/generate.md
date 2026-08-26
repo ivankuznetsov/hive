@@ -125,6 +125,16 @@ ruby -ryaml -rjson -e '
   if data.key?("require_successful_execution")
     abort("require_successful_execution must be true or false") unless [true, false].include?(data["require_successful_execution"])
   end
+  isolation = data.fetch("isolation", {})
+  abort("isolation must be a mapping") unless isolation.is_a?(Hash)
+  if isolation["require_provider_egress"] == true
+    network = isolation["docker_network"]
+    proxy = isolation["https_proxy"]
+    abort("isolation.docker_network must be a safe Docker network name") unless network.is_a?(String) && network.match?(/\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/)
+    abort("isolation.https_proxy must be a credential-free internal http://host:port URL") unless proxy.is_a?(String) && proxy.match?(%r{\Ahttp://[a-zA-Z0-9][a-zA-Z0-9.-]{0,126}:[1-9]\d{0,4}\z})
+  elsif isolation.key?("require_provider_egress")
+    abort("isolation.require_provider_egress must be true or false") unless isolation["require_provider_egress"] == false
+  end
   abort("seeds must be a positive integer") unless data["seeds"].is_a?(Integer) && data["seeds"].positive?
   judges = data["judges"]
   abort("judges must be a mapping") unless judges.is_a?(Hash)
@@ -255,6 +265,12 @@ ruby -ryaml -rshellwords -rjson -e '
       # Timeout comes from the pre-registered contract (timeouts.hive_seconds);
       # when unset, harness defaults apply, as campaign.yml.example documents.
       env << "HB_HIVE_TIMEOUT=#{hive_timeout}" if hive_timeout
+      isolation = data.fetch("isolation", {})
+      if isolation["require_provider_egress"] == true
+        env << "HB_REQUIRE_EGRESS_ALLOWLIST=1"
+        env << "HB_GEN_NETWORK=#{isolation.fetch("docker_network")}"
+        env << "HB_GEN_HTTPS_PROXY=#{isolation.fetch("https_proxy")}"
+      end
       profile = HiveBench::Candidates.by_id(candidate.to_s)
       if profile
         codex_models = []

@@ -165,6 +165,23 @@ The upgrade path was live-smoked on the existing hive-bench state checkout on
 `coding` tasks all remained resolvable, with all nine pre-migration status rows
 still visible and the unrelated dirty-state fingerprint unchanged.
 
+The packaged runtime includes the single-family Ox Alpha routes used by the
+maintained comparison: Pi at explicit `high` and `max` reasoning, plus OpenCode
+at `high`. All three routes keep benchmark plan review disabled under the
+process-local grant. OpenCode's provider events remain redacted in Hive logs;
+the harness recovers its normalized input, output, cache-read, and cache-write
+totals from the cell-local Hive usage database when no stream tokens exist.
+The runner image carries the pinned OpenCode CLI and Compound Engineering
+package, while Pi receives the minimal pinned OpenRouter model catalog.
+Candidate source preparation fetches only the exact historical base at depth
+one. This keeps descendant/reference objects, source refs, tags, and reflogs out
+of the candidate repository instead of relying on `remote remove` to hide them.
+Published local campaigns can also require provider-only egress: generation
+attaches to a named internal Docker network and receives a credential-free
+CONNECT-proxy URL; partial or missing strict configuration fails before model
+spend. The base-only and egress modes are bound into generation identity, so an
+older unrestricted artifact cannot be silently reused as strict evidence.
+
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
 
 ## Managed workflow packages

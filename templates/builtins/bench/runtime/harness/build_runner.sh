@@ -7,6 +7,10 @@
 # the hive checkout to pin (default ~/Dev/hive).
 #
 #   HIVE_SRC=~/Dev/hive harness/build_runner.sh
+#
+# The image contains both Pi and OpenCode, but the harness keeps a distinct
+# OpenCode tag so agent-specific runner selection remains explicit. Override
+# either tag independently with IMAGE_TAG / OPENCODE_IMAGE_TAG.
 set -euo pipefail
 
 HIVE_SRC="${HIVE_SRC:-$HOME/Dev/hive}"
@@ -21,6 +25,11 @@ git -C "$HIVE_SRC" archive --format=tar HEAD >hive-src.tar
 trap 'rm -f hive-src.tar' EXIT
 
 IMAGE_TAG="${IMAGE_TAG:-hive-bench-runner:latest}"
+OPENCODE_IMAGE_TAG="${OPENCODE_IMAGE_TAG:-hive-bench-runner:opencode}"
 read -r -a image_build_args <<< "${IMAGE_BUILD_ARGS:-}"
-docker build -f Dockerfile.runner -t "$IMAGE_TAG" "${image_build_args[@]}" .
-echo "built $IMAGE_TAG with hive tool @ $rev"
+image_tag_args=(-t "$IMAGE_TAG")
+if [ -n "$OPENCODE_IMAGE_TAG" ] && [ "$OPENCODE_IMAGE_TAG" != "$IMAGE_TAG" ]; then
+  image_tag_args+=(-t "$OPENCODE_IMAGE_TAG")
+fi
+docker build -f Dockerfile.runner "${image_tag_args[@]}" "${image_build_args[@]}" .
+echo "built ${IMAGE_TAG}${OPENCODE_IMAGE_TAG:+ and ${OPENCODE_IMAGE_TAG}} with hive tool @ $rev"

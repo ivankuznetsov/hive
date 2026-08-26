@@ -101,7 +101,7 @@ class MarkersCommandTest < Minitest::Test
     File.write(state, "# custom task\n\nwip\n")
     Hive::Markers.set(state, :review_stale)
 
-    [project, folder, "custom-task", state]
+    [ project, folder, "custom-task", state ]
   end
 
   def test_slug_resolution_error_includes_project_hint

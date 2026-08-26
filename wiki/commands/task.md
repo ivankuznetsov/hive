@@ -13,7 +13,7 @@ document used by normal Hive Web task HTML. It is the native agent inspection
 surface for the task's canonical headline/action, workflow result and primary
 artifact, applicable evidence, exactly attributed usage, API-equivalent price
 coverage, and receipt-correlated diagnostic-log reference. It is read-only and
-does not expand fleet `hive status --json`.
+does not expand the former fleet-wide status graph.
 `hive task TARGET --project NAME --log` re-resolves a current diagnostic and
 prints only its integrity-checked bounded receipt-correlated tail.
 

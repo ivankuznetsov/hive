@@ -508,7 +508,7 @@ module Hive
           )
           scan.fetch("enqueued_prs") << item.fetch("number") if result["job_id"]
           scan["enqueued_prs"].uniq!
-        rescue Hive::GhError => e
+        rescue Hive::GhError, Hive::RefactorPatrol::MergeClassifier::Conflict => e
           raise GithubFailure, e
         rescue Hive::RefactorPatrol::MergeClassifier::Retryable => e
           raise GithubFailure.new(e, retry_at: e.retry_at)

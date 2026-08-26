@@ -1,6 +1,9 @@
 require "test_helper"
+require "hive/attempts/context"
 require "hive/attempts/dispatcher"
 require "hive/attempts/reconciler"
+require "hive/patrol_fix/receipt_store"
+require "hive/workflows/patrol_fix"
 
 class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
@@ -110,6 +113,56 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :accepted, retry_result.status
       refute_equal first.attempt.task_generation, retry_result.attempt.task_generation
       assert_equal 2, launcher.launched.length
+    end
+  end
+
+  def test_patrol_fix_attempt_generation_advances_with_receipt_journal
+    with_dispatcher do |dispatcher, launcher, task, store|
+      task.stage_index = 1
+      task.stage_name = "inbox"
+      task.folder = File.dirname(task.state_file)
+      task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
+      patrol_store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
+
+      first = dispatcher.dispatch(
+        task: task, project: "demo", intended_stage: "1-inbox",
+        argv: [ "hive", "run", task.slug ], request_id: "patrol-run",
+        provider: "pi", interactive: false, now: NOW
+      )
+      terminalize_attempt(
+        store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3
+      )
+      replay = dispatcher.dispatch(
+        task: task, project: "demo", intended_stage: "1-inbox",
+        argv: [ "hive", "approve", task.slug, "--from", "1-inbox", "--force" ],
+        request_id: "patrol-advance-before-receipt", provider: "pi",
+        interactive: false, now: NOW + 4
+      )
+      patrol_store.append!(patrol_fix_decision_receipt(task.slug))
+      advance = dispatcher.dispatch(
+        task: task, project: "demo", intended_stage: "1-inbox",
+        argv: [ "hive", "approve", task.slug, "--from", "1-inbox", "--force" ],
+        request_id: "patrol-advance-after-receipt", provider: "pi",
+        interactive: false, now: NOW + 5
+      )
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal :accepted, advance.status
+      refute_equal first.attempt.task_generation, advance.attempt.task_generation
+      assert_equal 2, launcher.launched.length
+      worker_context = Hive::Attempts::Context.send(
+        :new,
+        attempt_id: advance.attempt.attempt_id,
+        task_generation: advance.attempt.task_input_epoch,
+        ownership_generation: advance.attempt.ownership_generation,
+        project: "demo", task_slug: task.slug, intended_stage: "1-inbox",
+        progress_token: advance.attempt["progress_token"]
+      )
+      with_replaced_singleton_method(
+        Hive::Attempts::Generation, :default_attempt_store, -> { store }
+      ) do
+        assert worker_context.validate_generation!(task)
+      end
     end
   end
 
@@ -1246,5 +1299,20 @@ class AttemptsDispatcherTest < Minitest::Test
       },
       now: now
     )
+  end
+
+  def patrol_fix_decision_receipt(slug)
+    {
+      "schema" => "hive-patrol-fix-receipt", "schema_version" => 1,
+      "receipt_id" => "decision-1", "kind" => "decision", "stage" => "inbox",
+      "task" => { "slug" => slug, "generation" => 1 },
+      "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 },
+      "recorded_at" => "2026-08-20T12:00:00Z",
+      "payload" => {
+        "route" => "fix", "rationale" => "The finding requires a bounded fix.",
+        "evidence" => [ "The focused reproduction still fails." ],
+        "blocker_owner" => "inbox_gate", "head_revision" => "b" * 40
+      }
+    }
   end
 end

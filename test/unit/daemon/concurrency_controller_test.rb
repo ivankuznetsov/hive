@@ -401,6 +401,19 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal initial, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
   end
 
+  def test_forget_state_file_mtime_removes_and_persists_the_baseline
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0)
+
+      c.forget_state_file_mtime(project: "p1", slug: "s1")
+
+      assert_nil c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_nil revived.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+    end
+  end
+
   # ── in_flight bookkeeping ─────────────────────────────────────────────
 
   def test_running_count_for_includes_internal_and_external_project_counts
@@ -580,7 +593,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
   # rather than the controller — see dispatch_baselines_test.rb's
   # test_write_catches_unexpected_error_and_logs_typed_event for the contract pin.
 
-  # `hive status --json` skips projects with `error: not_initialised` (NFS
+  # The internal task graph skips projects with `error: not_initialised` (NFS
   # hiccup, project being re-bootstrapped, transient race with `hive forget`)
   # — so their tasks disappear from `result.rows` even though the overall
   # fetch is still ok. Without a per-project scope guard the prune would

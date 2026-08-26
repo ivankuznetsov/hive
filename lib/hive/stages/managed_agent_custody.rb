@@ -1,4 +1,6 @@
 require "open3"
+require "json"
+require "hive/atomic_file"
 require "hive/artifact_firewall"
 require "hive/stages/base"
 
@@ -27,11 +29,28 @@ module Hive
         fix = cfg.dig("patrol", "fix")
         fix = {} unless fix.is_a?(Hash)
         fix_agent = fix["agent"]
+        fixing = actor == "patrol_fix"
         profile = Hive::Stages::Base.stage_profile(
-          cfg, "patrol", explicit_agent: fix_agent
+          cfg, "patrol", explicit_agent: fixing ? fix_agent : nil
         )
-        prompt, scope = if profile.name == :opencode
-          [ prompt, opencode_scope(task, actor, cwd, add_dirs, output_path) ]
+        model_actor = fixing ? "patrol_fix" : actor
+        model_current = if fixing
+          fix_model_routing_current(cfg, fix, fix_agent)
+        else
+          Hive::Stages::Base.model_routing_current(cfg["patrol"])
+        end
+        prompt = <<~PROMPT
+          #{prompt.rstrip}
+
+          After writing the required report, stop using tools.
+          Return that same JSON object as your complete final response.
+          Do not wrap it in Markdown or add prose.
+        PROMPT
+        support = Hive::AgentProfiles.support_for(profile)
+        prompt, scope = if support&.const_defined?(:LaunchPolicy, false)
+          support::LaunchPolicy.custody_scope(
+            prompt:, task_root: task.folder, actor:, cwd:, add_dirs:, output_path:
+          )
         else
           Hive::Stages::Base.actor_prompt_and_scope(
             cfg, actor, task, profile,
@@ -48,7 +67,10 @@ module Hive
             root: task.folder, worktree_path: cwd,
             protected_task_paths: protected_task_paths,
             required_outputs: { output_label => output_path }
-          )
+          ),
+          before_validation: lambda { |result|
+            materialize_exact_final_json(result, output_path)
+          }
         )
         result = Hive::Stages::Base.spawn_agent(
           task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: cwd,
@@ -57,8 +79,7 @@ module Hive
           ),
           log_label: log_label, profile: profile,
           **Hive::Stages::Base.model_launch_arguments(
-            cfg, "patrol_fix", profile,
-            current: fix_model_routing_current(cfg, fix, fix_agent)
+            cfg, model_actor, profile, current: model_current
           ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
@@ -71,12 +92,47 @@ module Hive
         else
           :clean
         end
+        status = result.is_a?(Hash) ? result[:status] : :error
+        status = :ok if recovered_provider_retry?(result, report)
         {
-          status: result.is_a?(Hash) ? result[:status] : :error,
+          status: status,
           custody: custody_status,
           diagnostic: report&.diagnostic
         }
       end
+
+      # Pi can emit a failed message_end, retry that provider turn internally,
+      # then exit zero after writing the current report. Agent keeps the first
+      # provider failure fail-closed because :exit_code_only has no artifact
+      # evidence. This outer boundary does: a clean custody report proves the
+      # required output exists and no controller anchor changed, so the later
+      # successful result wins just as it does in :output_file_exists mode.
+      def recovered_provider_retry?(result, report)
+        result.is_a?(Hash) && provider_retry_candidate?(result) && report&.valid?
+      end
+      private_class_method :recovered_provider_retry?
+
+      def materialize_exact_final_json(result, output_path)
+        return unless result.is_a?(Hash) &&
+          (result[:status] == :ok || provider_retry_candidate?(result))
+        return if result[:final_message_truncated] == true
+        return if File.exist?(output_path) || File.symlink?(output_path)
+
+        value = JSON.parse(result[:final_message].to_s)
+        return unless value.is_a?(Hash)
+
+        Hive::AtomicFile.write(output_path, JSON.generate(value) + "\n", mode: 0o600)
+      rescue JSON::ParserError
+        nil
+      end
+      private_class_method :materialize_exact_final_json
+
+      def provider_retry_candidate?(result)
+        result[:status] == :error && result[:error_reason] == "provider_error" &&
+          result[:provider_error].is_a?(Hash) &&
+          result[:exit_code] == 0 && result[:timed_out] != true
+      end
+      private_class_method :provider_retry_candidate?
 
       def fix_model_routing_current(cfg, fix, fix_agent)
         patrol = Hive::Stages::Base.model_routing_current(cfg["patrol"])
@@ -87,31 +143,6 @@ module Hive
         patrol.merge(Hive::Stages::Base.model_routing_current(fix))
       end
       private_class_method :fix_model_routing_current
-
-      def opencode_scope(task, actor, cwd, add_dirs, output_path)
-        task_root = File.expand_path(task.folder)
-        worktree = File.expand_path(cwd)
-        output = File.expand_path(output_path)
-
-        write_roots = [ task_root ]
-        edit_patterns = [ output ]
-        bash_patterns = []
-        if actor == "patrol_fix"
-          write_roots.unshift(worktree)
-          edit_patterns.unshift(File.join(worktree, "**"))
-          bash_patterns << "*"
-        end
-
-        {
-          add_dirs: Array(add_dirs), permission_mode: "workspace-write",
-          allowed_tools: nil, disallowed_tools: nil,
-          additional_read_roots: Array(add_dirs),
-          additional_write_roots: write_roots,
-          opencode_edit_patterns: edit_patterns,
-          opencode_bash_patterns: bash_patterns
-        }
-      end
-      private_class_method :opencode_scope
 
       def validate_regular_or_absent!(root, names)
         names.each do |name|

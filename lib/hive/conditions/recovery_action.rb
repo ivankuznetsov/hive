@@ -20,7 +20,7 @@ module Hive
             "condition" => diagnostic["condition"],
             "condition_state" => diagnostic["state"],
             "diagnostic_code" => diagnostic["code"],
-            "instructions" => "condition evidence is not current yet; re-read `hive status --json` " \
+            "instructions" => "condition evidence is not current yet; re-read `hive status --operational --json` " \
                               "after the execute reconciler or daemon publishes a new observation"
           }
         end

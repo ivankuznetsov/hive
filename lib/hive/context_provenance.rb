@@ -235,6 +235,9 @@ module Hive
     end
 
     def prompt_appendix(task, context)
+      candidate_path = File.expand_path(
+        candidate_reference(context.attempt_id), task.folder
+      )
       example = {
         "schema" => "hive-context-receipt", "schema_version" => 1,
         "kind" => "agent_selection",
@@ -254,13 +257,14 @@ module Hive
         ## Optional context provenance receipt
 
         This receipt is optional and does not change the required stage artifact, outcome, or terminal marker.
-        If you select repository or Wiki context for this attempt, write one JSON object to the task-relative path
-        `#{candidate_reference(context.attempt_id)}` (maximum #{MAX_RECEIPT_BYTES} bytes) before exiting.
+        If you select repository or Wiki context for this attempt, write one JSON object to the exact task-artifact path
+        `#{candidate_path}` (maximum #{MAX_RECEIPT_BYTES} bytes) before exiting.
         Start from this exact shape (replace the timestamp, rationale, references, and queries):
         `#{JSON.generate(example)}`
         `selection` contains only project-relative selected references (`path`, `kind`, `label`), bounded
         query/result labels, and a short rationale. Do not include file contents, prompts, argv, credentials,
-        tokens, or absolute paths. Hive presents this as an agent assertion, not proof of consumption.
+        tokens, or absolute paths inside the receipt JSON. Hive presents this as an agent assertion, not proof
+        of consumption.
       APPENDIX
     end
 

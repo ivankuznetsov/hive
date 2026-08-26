@@ -198,6 +198,17 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_pi_terminal_event_supplies_the_display_name
+    script = <<~'SH'
+      #!/bin/sh
+      printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Readable Pi name"}]}]}'
+    SH
+
+    with_generator(agent: "pi", script: script, commit: false) do |gen|
+      assert_equal "Readable Pi name", gen.send(:generate_name)
+    end
+  end
+
   private
 
   # Builds a real task folder (valid PATH_RE) plus a config that points the

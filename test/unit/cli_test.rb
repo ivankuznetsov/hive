@@ -162,6 +162,30 @@ class HiveCliTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_version_json_identifies_the_active_dogfood_build
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    out, _err = with_env(
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    ) do
+      capture_io { Hive::CLI.start([ "version", "--json" ]) }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-version", payload.fetch("schema")
+    assert_equal 1, payload.fetch("schema_version")
+    assert_equal true, payload.fetch("ok")
+    assert_equal "dogfood", payload.dig("runtime", "channel")
+    assert_equal sha, payload.dig("runtime", "build_sha")
+    assert_equal "#{Hive::VERSION}+dogfood.0864de726",
+                 payload.dig("runtime", "display_version")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-version"))))
+    assert_empty schema.validate(payload).to_a
+  end
+
   def test_init_forget_prune_update_uninstall_and_migrate_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
@@ -495,7 +519,7 @@ class HiveCliTest < Minitest::Test
         {
           project: "proj", stage: "review", json: true,
           paths: [ "wiki/a.md", "wiki/b.md" ],
-          message: "preserve residue", strategy: "commit"
+          message: "preserve residue", complete_execute: false, strategy: "commit"
         },
         calls.first.fetch(:kwargs)
       )
@@ -803,8 +827,17 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
       assert_equal({
         json: true, diagnose: "slug", project: "proj", stage: "2-gather",
-        write: true, force: true, operational: false, full: false
+        write: true, force: true, operational: false, full: false,
+        daemon_tasks: nil
       }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([
+        "status", "--json", "--daemon-task", "demo:first-task", "demo:second-task"
+      ])
+      assert_equal [ "demo:first-task", "demo:second-task" ],
+                   calls.first.dig(:kwargs, :daemon_tasks)
     end
 
     with_command_new_stub(Hive::Commands::Status) do |calls|
@@ -814,7 +847,7 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::Status) do |calls|
-      Hive::CLI.start([ "status", "--full" ])
+      Hive::CLI.start([ "status", "--internal-task-graph", "--json" ])
       assert_equal true, calls.first.dig(:kwargs, :full)
     end
 
@@ -897,12 +930,16 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_status_help_documents_concise_full_and_operational_modes
+  def test_status_help_documents_bounded_default_and_operational_mode
     out, = capture_io { Hive::CLI.start([ "help", "status" ]) }
 
-    assert_match(/concise operational snapshot/, out)
-    assert_match(/--full/, out)
+    assert_match(/bounded.*running/i, out)
+    refute_match(/--full/, out)
+    refute_match(/--internal-task-graph/, out)
+    refute_match(/--daemon-task/, out)
     assert_match(/--operational/, out)
+    refute_match(/--running/, out)
+    assert_match(/hive-running-status/, out)
   end
 
   def test_watch_passes_bounded_stream_options_and_documents_json_lines

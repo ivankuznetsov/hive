@@ -316,8 +316,13 @@ module Hive
     class AgentCustody
       attr_reader :report
 
-      def initialize(manifest)
+      def initialize(manifest, before_validation: nil)
+        if before_validation && !before_validation.respond_to?(:call)
+          raise ArgumentError, "before_validation must respond to call"
+        end
+
         @manifest = manifest
+        @before_validation = before_validation
         @called = false
         @report = nil
       end
@@ -329,7 +334,9 @@ module Hive
         @called = true
         snapshot = ArtifactFirewall.capture(@manifest)
         begin
-          yield
+          result = yield
+          @before_validation&.call(result)
+          result
         ensure
           @report = ArtifactFirewall.validate_and_restore(@manifest, snapshot)
         end

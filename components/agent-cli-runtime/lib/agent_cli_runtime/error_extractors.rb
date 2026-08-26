@@ -43,6 +43,18 @@ module AgentCliRuntime
       end
     end
 
+    # OpenCode keeps provider failures under error.data.message rather than
+    # the top-level/message and error.message shapes used by the default
+    # extractor. Read only the dedicated error event so ordinary model text
+    # cannot forge a provider-limit signal.
+    OPENCODE = lambda do |event|
+      next nil unless event.is_a?(Hash) && event["type"] == "error"
+
+      data = event.dig("error", "data")
+      message = data["message"] if data.is_a?(Hash)
+      message if message.is_a?(String) && !message.strip.empty?
+    end
+
     def message_from(event)
       return nil unless event.is_a?(Hash)
 

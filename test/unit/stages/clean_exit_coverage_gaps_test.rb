@@ -75,6 +75,32 @@ class CleanExitCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_enforce_clean_exit_surfaces_escaping_config_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      worktree = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(task.worktree_yml_path, "path: #{worktree}\n")
+
+      result = nil
+      with_replaced_singleton_method(Hive::Stages::CleanExit, :run!, lambda { |**_kwargs|
+        raise Hive::ConfigError, "bad sign policy"
+      }) do
+        _out, err = capture_io do
+          result = Hive::Stages::Base.send(:enforce_clean_exit!, task, {}, "8-finalize")
+        end
+
+        assert_match(/ensure_clean_on_exit invalid config: bad sign policy/, err)
+      end
+
+      assert_equal({ status: :git_failed, overwrote_marker: true }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "ensure_clean_on_exit_failed", marker.attrs.fetch("reason")
+      assert_equal "git_failed", marker.attrs.fetch("failure_kind")
+    end
+  end
+
   # --- base.rb:269 — safe_current_marker rescues StandardError ---
 
   def test_safe_current_marker_rescues_and_returns_nil
@@ -167,6 +193,31 @@ class CleanExitCoverageGapsTest < Minitest::Test
           assert_match(/git diff --cached failed/, out[:message])
         end
       end
+    end
+  end
+
+  def test_clean_exit_persist_residue_paths_returns_false_when_write_fails
+    directory = Object.new
+    directory.define_singleton_method(:atomic_write) do |*|
+      raise IOError, "disk unavailable"
+    end
+
+    with_replaced_singleton_method(Hive::Stages::CleanExit, :residue_directory,
+                                   ->(_folder) { directory }) do
+      refute Hive::Stages::CleanExit.send(:persist_residue_paths, "/task", "[]")
+    end
+  end
+
+  def test_clean_exit_porcelain_status_rejects_malformed_record
+    capture = lambda do |_argv, **_kwargs|
+      { success: true, stdout: "M malformed\0" }
+    end
+
+    with_replaced_singleton_method(Hive::Stages::AutoCommit, :capture_git_with_timeout, capture) do
+      result = Hive::Stages::CleanExit.send(:porcelain_status, "/worktree")
+
+      assert_equal :git_failed, result.fetch(:status)
+      assert_match(/malformed porcelain data/, result.fetch(:message))
     end
   end
 

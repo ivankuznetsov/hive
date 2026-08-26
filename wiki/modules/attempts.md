@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-20
+updated: 2026-08-22
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
 ---
 
@@ -20,7 +20,7 @@ task agents.
 |--------|----------------|
 | `API` | Provide Hive commands, bot delivery, daemon recovery, and module-hook delivery with the stable admission operations `dispatch`, `dispatch_request`, `dispatch_successor`, and `dispatch_module_hook`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
-| `Record`, `Store` | Read and write schema-v4 records in the physical v4 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store opens only v4 after the forward-only recovery migration. |
+| `Record`, `Store` | Read and write schema-v4 records in the physical v4 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. `Store::ProjectionReader` is a read-only scan-scoped view that caches each immutable projection binding once without making the long-lived runtime store stale. The default store opens only v4 and contains no migration trigger or legacy-layout monitor. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose the immutable admitted route plus process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
@@ -84,7 +84,8 @@ other candidate entry points.
 Hive still has narrow, cataloged internal construction sites: the daemon
 composition root wires reconciliation and loss processing, the private
 supervisor argv adapter starts the owner wrapper, module inspection and
-dry-run preview open the canonical store read-only, and compatibility adapters
+dry-run preview open the canonical store read-only, the `hive status` scan
+hoists one read-only store for the whole scan, and compatibility adapters
 plus `TaskClosure`'s active-attempt verification do the same. These sites are
 not alternate admission producers. The component-boundary test pins each
 file/constant pair and rejects the same construction from any newly listed
@@ -109,7 +110,10 @@ tree to v4; malformed hot bytes remain exact capacity reservations, while an
 unreadable immutable proof aborts the cutover. Its exact-parity gate rebuilds
 same-day admission accounting from both the bounded hot set and permanent
 proofs, because finalization may promote a terminal attempt before an
-interrupted cutover resumes.
+interrupted cutover resumes. Only `hive migrate` and `hive migrate --all` invoke
+that migration. Store construction, status, daemon startup, and bot startup do
+not inspect, convert, or monitor old state; operators run the command before
+starting current runtime processes.
 
 Both subjects share the same CAS record store, leases, capabilities,
 heartbeats, detached ownership, bounded retry accounting, receipts, output
@@ -257,6 +261,18 @@ without changing `plan.md` or its completion marker. An unchanged projection
 still replays the successful orchestration attempt, while a changed projection
 advances generation so the daemon can run the next review step instead of
 replaying the earlier success forever.
+
+Patrol Fix task generations likewise bind the validated append-only
+`patrol-fix-receipts.jsonl` projection in addition to the immutable task
+manifest. Each controller stage records its outcome as a receipt before the
+separate advance action moves the task. An unchanged journal still replays the
+successful controller attempt, while a newly appended receipt advances
+generation so the daemon can admit the corresponding stage transition.
+Malformed journals contribute a stable unreadable-owner token and remain
+fail-closed in the Patrol Fix projection. Ordinary dispatch, worker-side
+generation fencing, and recovery generation resolution all use this same
+task-owned token; they cannot partition one Patrol task into separate
+generation namespaces.
 
 A terminal explicit attempt with a trusted provider-evidence receipt is also a
 valid, narrowly scoped successor predecessor. `RecoveryCoordinator` alone puts

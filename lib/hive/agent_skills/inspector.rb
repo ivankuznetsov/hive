@@ -417,7 +417,7 @@ module Hive
         alias_path = nil
         invocation = contract.invocation
         if contract.alias_spec
-          alias_path = alias_path_for(contract.alias_spec)
+          alias_path = alias_path_for(contract.alias_spec, agent: contract.agent)
           if File.exist?(alias_path)
             actual = File.read(alias_path)
             unless actual == Manifest.alias_content(contract.alias_spec)
@@ -643,12 +643,10 @@ module Hive
         )
       end
 
-      def alias_path_for(alias_spec)
-        home = @environment["HOME"] || Dir.home
-        config_root = @environment["CLAUDE_CONFIG_DIR"].to_s
-        config_root = File.join(home, ".claude") if config_root.empty?
-        relative = alias_spec.path.delete_prefix(".claude/")
-        File.join(config_root, relative)
+      def alias_path_for(alias_spec, agent:)
+        profile = Hive::AgentProfiles.lookup(agent)
+        relative = alias_spec.path.delete_prefix("#{profile.default_configuration_directory}/")
+        File.join(profile.configuration_directory(environment: @environment), relative)
       end
 
       def resolution_hash(resolution)

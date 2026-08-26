@@ -114,6 +114,11 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         runtime_root = Dir.mktmpdir("patrol-fix-lifecycle")
         (@runtime_roots ||= []) << runtime_root
         worktree_root = File.join(runtime_root, "worktrees")
+        remote = File.join(runtime_root, "remote.git")
+        capture("git", "init", "--bare", remote)
+        git(project, "remote", "add", "origin", remote)
+        base_branch = git(project, "branch", "--show-current").strip
+        git(project, "push", "origin", base_branch)
         run_fix(task, worktree_root, "puts :fixed_once\n")
         task = advance(task, "3-validate")
         run_validation(task, worktree_root)
@@ -130,11 +135,6 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         run_review(task, worktree_root, "publish")
         task = advance(task, "5-publish")
 
-        remote = File.join(runtime_root, "remote.git")
-        capture("git", "init", "--bare", remote)
-        git(project, "remote", "add", "origin", remote)
-        base_branch = git(project, "branch", "--show-current").strip
-        git(project, "push", "origin", base_branch)
         git_gateway = LocalGit.new
         github = FakeGithub.new
         first = Hive::Stages::PatrolFix::Publish.run!(

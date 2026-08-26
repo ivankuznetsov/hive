@@ -232,8 +232,15 @@ module Hive
           end
           wait_for = [ wait_for, post_exit_deadline - now_mono ].min if post_exit_deadline
           wait_for = 0 if wait_for.negative?
-          ready = readers.empty? ? nil : IO.select(readers.keys, nil, nil, wait_for)
-          Array(ready&.first).each { |io| drain_reader(io, readers, log) }
+          if readers.empty?
+            # With every output pipe at EOF there is nothing to select on, but
+            # the loop may still be awaiting worker exit or a lingering group.
+            # Sleep the computed budget so WNOHANG polling does not busy-spin.
+            sleep(wait_for) if wait_for.positive?
+          else
+            ready = IO.select(readers.keys, nil, nil, wait_for)
+            Array(ready&.first).each { |io| drain_reader(io, readers, log) }
+          end
 
           if status.nil?
             waited = Process.wait2(@worker_pid, Process::WNOHANG)

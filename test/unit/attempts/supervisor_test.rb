@@ -72,6 +72,28 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_supervisor_does_not_busy_spin_after_output_pipes_close
+    worker_argv = [ "/bin/sh", "-c", "exec 1>&- 2>&-; sleep 1" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 5, stale_sec: 30, first_heartbeat_timeout_sec: 30
+      )
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      cpu_started = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID)
+      assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      cpu_used = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID) - cpu_started
+
+      assert_operator elapsed, :>=, 1.0, "supervisor must await worker exit"
+      assert_operator cpu_used / elapsed, :<, 0.5,
+                      "supervisor must not spin at full CPU while pipes are at EOF"
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
   def test_clean_leader_exit_terminates_a_lingering_descendant_group
     worker_argv = [ "/bin/sh", "-c", "(sleep 10) & exit 0" ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|

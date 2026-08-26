@@ -186,6 +186,15 @@ attaches to a named internal Docker network and receives a credential-free
 CONNECT-proxy URL; partial or missing strict configuration fails before model
 spend. The base-only and egress modes are bound into generation identity, so an
 older unrestricted artifact cannot be silently reused as strict evidence.
+Campaigns can additionally require `isolation.sealed_agent_runtime: true`.
+The runner image is labelled with the exact Hive build SHA and splits Ruby gems
+into a root-only Hive control bundle plus a candidate bundle with `hive-cli`
+removed. The container controller runs as root, but the Pi/OpenCode launchers
+chown `/work`, drop the model process to uid 1000, remove its Linux capabilities,
+and reset its gem path. The driver omits all host Hive source/gem mounts and
+refuses model spend when the image label does not match the active immutable
+dogfood deployment. Runtime visibility joins base history and egress in the
+generation identity, so unsealed artifacts cannot satisfy a sealed campaign.
 When the control plane is invoked through the dogfood wrapper, the packaged
 driver resolves the exact immutable deployment named by
 `HIVE_RUNTIME_DEPLOYMENT_ID` and verifies its full commit against

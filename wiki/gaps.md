@@ -126,15 +126,26 @@ provider-only proxy egress into generation identity. Training-time memorization
 of a public solution remains outside container control; post-run patch
 similarity and private/newer corpus tasks are still needed for that risk.
 
+The first post-audit replacement attempt still exposed a second local answer
+surface: the active dogfood Hive checkout was bind-mounted read-only and the
+runner's normal gem tree contained the installed `hive-cli` source. Candidate
+uid 1000 could read both even though logs show no Pi command opening the active
+checkout. Sealed campaigns now use a commit-labelled, root-only Hive control
+bundle, remove `hive-cli` from the candidate bundle, and drop Pi/OpenCode to an
+uncapable uid 1000 process. A real container proof established that boundary;
+the remaining gap is a fresh six-cell Pi/OpenCode generation and judgment run
+created after the sealed dogfood deployment.
+
 The same audit found a separate OpenCode fairness defect in the completed high
 campaign: its benchmark config granted only `Read`, `Write`, and `Edit`, while
 Pi retained shell access inside the disposable generation container. OpenCode
 could change files but could not run tests, inspect repository state through
 normal shell diagnostics, or verify its work; all six review attempts ended
 without an accepted review patch. The packaged runtime now adds the explicitly
-qualified `Bash(*)` permission. The container, exact-base checkout, and
-provider-only proxy remain the isolation boundary. The old OpenCode score is
-superseded pending a clean six-cell rerun with that parity grant.
+qualified `Bash(*)` permission. The container, exact-base checkout,
+provider-only proxy, and sealed controller bundle remain the isolation
+boundary. The old OpenCode score is superseded pending a sealed six-cell rerun
+with that parity grant.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

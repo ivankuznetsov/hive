@@ -127,6 +127,9 @@ ruby -ryaml -rjson -e '
   end
   isolation = data.fetch("isolation", {})
   abort("isolation must be a mapping") unless isolation.is_a?(Hash)
+  if isolation.key?("sealed_agent_runtime")
+    abort("isolation.sealed_agent_runtime must be true or false") unless [true, false].include?(isolation["sealed_agent_runtime"])
+  end
   if isolation["require_provider_egress"] == true
     network = isolation["docker_network"]
     proxy = isolation["https_proxy"]
@@ -266,6 +269,7 @@ ruby -ryaml -rshellwords -rjson -e '
       # when unset, harness defaults apply, as campaign.yml.example documents.
       env << "HB_HIVE_TIMEOUT=#{hive_timeout}" if hive_timeout
       isolation = data.fetch("isolation", {})
+      env << "HB_REQUIRE_SEALED_AGENT_RUNTIME=1" if isolation["sealed_agent_runtime"] == true
       if isolation["require_provider_egress"] == true
         env << "HB_REQUIRE_EGRESS_ALLOWLIST=1"
         env << "HB_GEN_NETWORK=#{isolation.fetch("docker_network")}"

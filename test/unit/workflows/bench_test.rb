@@ -81,6 +81,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_path_exists File.join(runtime, "harness", "hive_run.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "judge_slate.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_runtime.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "pi_bench_launcher.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "provider_egress_proxy.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "token_report.rb")
@@ -173,6 +174,67 @@ class WorkflowsBenchTest < Minitest::Test
     permissions = JSON.parse(out)
     assert_equal "scoped", permissions.fetch("preset")
     assert_equal [ "Read", "Write", "Edit", "Bash(*)" ], permissions.fetch("tools")
+  end
+
+  def test_packaged_runtime_seals_hive_source_from_pi_and_opencode
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    dockerfile = File.read(File.join(runtime, "Dockerfile.runner"))
+    driver = File.read(File.join(runtime, "harness", "lib", "hive_driver.rb"))
+    stages = File.read(File.join(runtime, "harness", "lib", "hive_stages.sh"))
+    pi_launcher = File.read(File.join(runtime, "harness", "lib", "pi_bench_launcher.sh"))
+    opencode_launcher = File.read(File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh"))
+
+    assert_includes dockerfile, 'io.hive.bench.hive-build-sha="${HIVE_BUILD_SHA}"'
+    assert_includes dockerfile, "chmod -R go-rwx /opt/hb/control-bundle"
+    assert_includes dockerfile, "rm -rf /usr/local/bundle/gems/hive-cli-*"
+    assert_includes driver, "HB_REQUIRE_SEALED_AGENT_RUNTIME"
+    assert_includes driver, 'runner image #{image} is not the sealed Hive build'
+    assert_includes driver, '"--user", "0:0"'
+    assert_includes stages, "HB_ERROR hive_runtime_visible_to_candidate"
+    [ pi_launcher, opencode_launcher ].each do |launcher|
+      assert_includes launcher, "--bounding-set=-all --inh-caps=-all --ambient-caps=-all"
+      assert_includes launcher, "GEM_HOME=/usr/local/bundle"
+    end
+
+    harness = File.join(runtime, "harness")
+    script = <<~'RUBY'
+      require "json"
+      require "profiles/candidates"
+      require "lib/hive_driver"
+      sha = "a" * 40
+      labels = {
+        "io.hive.bench.hive-build-sha" => sha,
+        "io.hive.bench.runtime-visibility" => "sealed-control-bundle-v1"
+      }
+      hive_runtime = { root: "/host/hive", gem_home: "/host/gems", version: "0.7.2", build_sha: sha }
+      driver = HiveBench::HiveDriver.new(
+        reuse_existing: false,
+        reuse_unverified: false,
+        hive_runtime: hive_runtime,
+        image_inspector: ->(_image) { labels }
+      )
+      candidate = HiveBench::Candidates.by_id("all-ox-alpha@max")
+      driver.send(:verify_sealed_runtime!, candidate, hive_runtime)
+      puts JSON.generate(driver.send(:hive_runtime_args, hive_runtime))
+    RUBY
+    out, err, status = Open3.capture3(
+      { "HB_REQUIRE_SEALED_AGENT_RUNTIME" => "1" },
+      RbConfig.ruby, "-I#{harness}", "-e", script
+    )
+
+    assert status.success?, err
+    args = JSON.parse(out)
+    assert_includes args, "GEM_HOME=/opt/hb/control-bundle"
+    assert_includes args, "HB_SEALED_AGENT_RUNTIME=1"
+    refute args.any? { |arg| arg.include?("/host/hive") || arg.include?("/host/gems") }
+  end
+
+  def test_generate_exports_campaign_sealed_runtime_requirement
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+
+    assert_includes instruction, "isolation.sealed_agent_runtime must be true or false"
+    assert_includes instruction,
+                    'env << "HB_REQUIRE_SEALED_AGENT_RUNTIME=1" if isolation["sealed_agent_runtime"] == true'
   end
 
   def test_packaged_runtime_emits_a_hive_valid_opencode_config
@@ -327,9 +389,10 @@ class WorkflowsBenchTest < Minitest::Test
       assert_includes proxy_env, "#{name}=http://bench-egress:3128"
     end
     assert_includes proxy_env, "NODE_USE_ENV_PROXY=1"
-    assert_equal 2, payload.dig("identity", "schema_version")
+    assert_equal 3, payload.dig("identity", "schema_version")
     assert_equal "base-only-shallow", payload.dig("identity", "isolation", "source_history")
     assert_equal "provider-allowlist", payload.dig("identity", "isolation", "generation_egress")
+    assert_equal "host-mounted", payload.dig("identity", "isolation", "runtime_visibility")
 
     _out, missing_err, missing_status = Open3.capture3(
       { "HB_REQUIRE_EGRESS_ALLOWLIST" => "1", "HB_GEN_NETWORK" => nil,

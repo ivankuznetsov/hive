@@ -21,6 +21,10 @@ ARG CLAUDE_VERSION=2.1.191
 ARG CODEX_VERSION=0.142.2
 ARG OPENCODE_VERSION=1.18.18
 ARG COMPOUND_ENGINEERING_VERSION=3.22.4
+ARG HIVE_BUILD_SHA=unknown
+
+LABEL io.hive.bench.hive-build-sha="${HIVE_BUILD_SHA}" \
+      io.hive.bench.runtime-visibility="sealed-control-bundle-v1"
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates curl xz-utils libatomic1 \
@@ -81,8 +85,19 @@ RUN mkdir -p /tmp/hive-build \
   && cd /tmp/hive-build \
   && gem build hive.gemspec \
   && gem install ./hive-cli-*.gem --no-document \
-  && ln -sf /usr/local/bundle/bin/hive /usr/local/bin/hive \
-  && hive --version \
+  && mkdir -p /opt/hb \
+  && mv /usr/local/bundle /opt/hb/control-bundle \
+  && cp -a /opt/hb/control-bundle /usr/local/bundle \
+  && rm -rf /usr/local/bundle/gems/hive-cli-* \
+            /usr/local/bundle/specifications/hive-cli-*.gemspec \
+            /usr/local/bundle/cache/hive-cli-*.gem \
+  && rm -f /usr/local/bundle/bin/hive \
+  && ! find /usr/local/bundle -iname '*hive-cli*' -print -quit | grep -q . \
+  && chmod -R go-rwx /opt/hb/control-bundle \
+  && ln -sf /opt/hb/control-bundle/bin/hive /usr/local/bin/hive \
+  && GEM_HOME=/opt/hb/control-bundle \
+     GEM_PATH=/opt/hb/control-bundle:/usr/local/bundle:/usr/local/lib/ruby/gems/3.4.0 \
+     /opt/hb/control-bundle/bin/hive --version \
   && rm -rf /tmp/hive-build /tmp/hive-src.tar
 
 # Non-root: the candidate's code and the gate's tests run unprivileged. uid 1000

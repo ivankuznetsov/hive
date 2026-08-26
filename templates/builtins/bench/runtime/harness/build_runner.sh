@@ -17,8 +17,9 @@ HIVE_SRC="${HIVE_SRC:-$HOME/Dev/hive}"
 cd "$(dirname "$0")/.."
 
 [ -e "$HIVE_SRC/.git" ] || { echo "HIVE_SRC=$HIVE_SRC is not a git checkout" >&2; exit 1; }
-rev="$(git -C "$HIVE_SRC" rev-parse --short HEAD)"
-echo "pinning hive tool from $HIVE_SRC @ $rev"
+full_rev="$(git -C "$HIVE_SRC" rev-parse HEAD)"
+short_rev="$(git -C "$HIVE_SRC" rev-parse --short HEAD)"
+echo "pinning hive tool from $HIVE_SRC @ $short_rev"
 
 # Clean source only (no vendor/bundle, .hive-state, worktrees) — see .dockerignore.
 git -C "$HIVE_SRC" archive --format=tar HEAD >hive-src.tar
@@ -31,5 +32,6 @@ image_tag_args=(-t "$IMAGE_TAG")
 if [ -n "$OPENCODE_IMAGE_TAG" ] && [ "$OPENCODE_IMAGE_TAG" != "$IMAGE_TAG" ]; then
   image_tag_args+=(-t "$OPENCODE_IMAGE_TAG")
 fi
-docker build -f Dockerfile.runner "${image_tag_args[@]}" "${image_build_args[@]}" .
-echo "built ${IMAGE_TAG}${OPENCODE_IMAGE_TAG:+ and ${OPENCODE_IMAGE_TAG}} with hive tool @ $rev"
+docker build -f Dockerfile.runner --build-arg "HIVE_BUILD_SHA=$full_rev" \
+  "${image_tag_args[@]}" "${image_build_args[@]}" .
+echo "built ${IMAGE_TAG}${OPENCODE_IMAGE_TAG:+ and ${OPENCODE_IMAGE_TAG}} with hive tool @ $short_rev"

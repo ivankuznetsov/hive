@@ -37,7 +37,8 @@ module Hive
 
       def initialize(browser_bundle: nil, tool_resolver: nil, hive_executable: nil,
                      web_server_factory: nil, browser_command_runner: nil,
-                     runtime_resolver: nil, project_sandbox_factory: nil)
+                     runtime_resolver: nil, codex_runtime_resolver: nil,
+                     project_sandbox_factory: nil)
         @browser_bundle = browser_bundle || Hive::Web::BrowserBundle.new
         @tool_resolver = tool_resolver || ->(name) { Hive::InvokedBinary.which(name) }
         @hive_executable = File.expand_path(
@@ -45,7 +46,7 @@ module Hive
         )
         @web_server_factory = web_server_factory
         @browser_command_runner = browser_command_runner || method(:run_browser_command)
-        @runtime_resolver = runtime_resolver
+        @runtime_resolver = runtime_resolver || codex_runtime_resolver
         @project_sandbox_factory = project_sandbox_factory || lambda do |**attributes|
           Hive::Artifacts::ProjectCommandSandbox.new(**attributes)
         end

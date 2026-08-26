@@ -85,7 +85,7 @@
         "stage_family": "fix_or_review",
         "typed_detail_present": false
       },
-      "expected_normalized_code": "agent_result_generic"
+      "expected_normalized_code": "agent_exit_nonzero"
     },
     {
       "cohort": "diagnostic_missing",
@@ -104,7 +104,7 @@
         "custody_status": "unknown",
         "diagnostic_present": false
       },
-      "expected_normalized_code": "diagnostic_missing"
+      "expected_normalized_code": "agent_exit_nonzero"
     },
     {
       "cohort": "protected_git_config_mutation",
@@ -124,7 +124,7 @@
         "protected_git_config_changed": true,
         "restore_status": "restored"
       },
-      "expected_normalized_code": "protected_git_config_mutation"
+      "expected_normalized_code": "protected_git_config_tamper"
     },
     {
       "cohort": "state_git_index_lock",

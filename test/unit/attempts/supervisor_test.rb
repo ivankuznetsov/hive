@@ -1,6 +1,9 @@
 require "test_helper"
 require "timeout"
+require "hive/attempts/diagnostic_channel"
 require "hive/attempts/supervisor"
+require "hive/patrol_fix/attempt_diagnostic"
+require "hive/task_resolver"
 
 class AttemptsSupervisorTest < Minitest::Test
   include HiveTestHelper
@@ -146,6 +149,344 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_provider_signal_owns_missing_frame_patrol_diagnostic
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, routing: explicit_routing,
+      intended_stage: "2-fix", workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      signal = {
+        "failure_class" => "model_capacity",
+        "scope" => {
+          "kind" => "model", "provider_account_id" => "account-a", "model" => "model-a"
+        },
+        "provenance" => "codex_jsonl_transport",
+        "reset_hint_seconds" => 30
+      }
+      worker = <<~RUBY
+        evidence = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_EVIDENCE_FD")), "w")
+        evidence.write(#{JSON.generate("#{JSON.generate(signal)}\n")})
+        evidence.close
+        exit 0
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
+      assert_equal "model_capacity", diagnostic.fetch("code")
+      assert_equal "provider", diagnostic.fetch("owner")
+      assert_equal "codex", diagnostic.dig("provider", "name")
+      assert_equal "model_capacity", diagnostic.dig("provider", "failure_class")
+      assert_equal "codex_jsonl_transport", diagnostic.dig("provider", "provenance")
+      assert_equal "30", diagnostic.dig("provider", "retry_hint")
+      assert_equal "missing", diagnostic.fetch("transport_status")
+    end
+  end
+
+  def test_failed_bench_publish_does_not_receive_a_patrol_diagnostic
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "5-publish",
+      workflow_controller: :benchmark
+    ) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", "exit 7" ]
+      end
+
+      assert_equal 7, Timeout.timeout(2) { supervisor.run }
+      assert_empty store.fetch(attempt.attempt_id).receipt.fetch("output_references")
+    end
+  end
+
+  def test_failed_patrol_inbox_receives_a_bound_diagnostic
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "1-inbox",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", "exit 8" ]
+      end
+
+      assert_equal 8, Timeout.timeout(2) { supervisor.run }
+      diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
+      assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
+      assert_equal "1-inbox", diagnostic.fetch("stage")
+    end
+  end
+
+  def test_patrol_diagnostic_pipe_binds_one_artifact_and_exact_log_to_terminal_receipt
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "4-review",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      draft = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        {
+          "status" => "error", "exit_code" => 7, "timed_out" => false,
+          "cancelled" => false, "signal" => nil,
+          "report_status" => "unknown", "firewall_status" => "clean",
+          "custody_status" => "clean", "detail" => "agent exited without a report"
+        },
+        stage: "4-review",
+        task_generation: attempt.task_generation,
+        attempt_id: attempt.attempt_id,
+        recorded_at: NOW
+      )
+      secret = "github" + "_pat_" + ("A" * 24)
+      draft = draft.merge("detail" => "\e[31magent failed #{secret}")
+      worker = <<~RUBY
+        diagnostic = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_DIAGNOSTIC_FD")), "w")
+        diagnostic.write(#{JSON.generate("#{JSON.generate(draft)}\n")})
+        diagnostic.close
+        warn "private provider body"
+        exit 7
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal 7, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      references = terminal.receipt.fetch("output_references")
+      assert_equal 1, references.length
+      reference = references.fetch(0)
+      assert Hive::Attempts::OutputReference.verify(reference, root: store.root)
+      diagnostic = JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
+      assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
+      assert_equal attempt.attempt_id, diagnostic.fetch("correlation_id")
+      assert_equal terminal.receipt.fetch("log_reference"), diagnostic.fetch("log_reference")
+      assert_equal "malformed", diagnostic.fetch("transport_status")
+      assert_nil diagnostic.fetch("detail")
+      refute_includes JSON.generate(diagnostic), secret
+      refute_includes JSON.generate(diagnostic), "\e[31m"
+      refute_includes JSON.generate(diagnostic), "private provider body"
+    end
+  end
+
+  def test_diagnostic_pipe_is_single_frame_bounded_and_fails_closed
+    assert_operator Hive::Attempts::DiagnosticChannel::MAX_FRAME_BYTES, :<, 4_096
+
+    missing = Hive::Attempts::DiagnosticChannel.read(StringIO.new(""))
+    assert_nil missing.document
+    assert_equal "missing", missing.status
+
+    malformed = Hive::Attempts::DiagnosticChannel.read(StringIO.new("{\n"))
+    assert_nil malformed.document
+    assert_equal "malformed", malformed.status
+
+    duplicate = Hive::Attempts::DiagnosticChannel.read(StringIO.new("{}\n{}\n"))
+    assert_nil duplicate.document
+    assert_equal "duplicate", duplicate.status
+
+    oversized = Hive::Attempts::DiagnosticChannel.read(
+      StringIO.new("x" * (Hive::Attempts::DiagnosticChannel::MAX_FRAME_BYTES + 1))
+    )
+    assert_nil oversized.document
+    assert_equal "oversized", oversized.status
+  end
+
+  def test_existing_diagnostic_collision_is_read_with_a_strict_bound_and_no_symlinks
+    with_tmp_dir do |root|
+      path = File.join(root, Hive::PatrolFix::AttemptDiagnostic::FILENAME)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: Object.new, attempt_id: "attempt-1",
+        claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+      File.binwrite(
+        path, "x" * (Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES + 1)
+      )
+      error = assert_raises(Hive::Attempts::StoreError) do
+        supervisor.send(:persist_diagnostic_once, path, {})
+      end
+      assert_match(/size limit/, error.message)
+
+      target = File.join(root, "target")
+      File.binwrite(target, "{}")
+      File.unlink(path)
+      File.symlink(target, path)
+      assert_raises(Hive::Attempts::StoreError) do
+        supervisor.send(:persist_diagnostic_once, path, {})
+      end
+    end
+  end
+
+  def test_failed_patrol_attempt_synthesizes_bound_diagnostic_when_frame_is_malformed
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "4-review",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      worker = <<~'RUBY'
+        diagnostic = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_DIAGNOSTIC_FD")), "w")
+        diagnostic.write("{malformed\n")
+        diagnostic.close
+        exit 9
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal 9, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      references = terminal.receipt.fetch("output_references")
+      assert_equal 1, references.length
+      diagnostic = JSON.parse(File.binread(File.join(store.root, references.fetch(0).fetch("path"))))
+      assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
+      assert_equal "malformed", diagnostic.fetch("transport_status")
+      assert_equal attempt.task_generation, diagnostic.fetch("task_generation")
+      assert_equal terminal.receipt.fetch("log_reference"), diagnostic.fetch("log_reference")
+    end
+  end
+
+  def test_secret_bearing_metadata_frame_is_replaced_by_safe_fallback
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "4-review",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      draft = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        {
+          "status" => "error", "exit_code" => 9,
+          "provider" => "codex", "provider_failure" => "provider_error",
+          "provider_provenance" => "codex_jsonl_transport"
+        },
+        stage: "4-review", task_generation: attempt.task_generation,
+        attempt_id: attempt.attempt_id, recorded_at: NOW
+      )
+      secret = "github" + "_pat_" + ("A" * 24)
+      draft = JSON.parse(JSON.generate(draft))
+      draft.fetch("provider")["provenance"] = secret
+      worker = <<~RUBY
+        diagnostic = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_DIAGNOSTIC_FD")), "w")
+        diagnostic.write(#{JSON.generate("#{JSON.generate(draft)}\n")})
+        diagnostic.close
+        exit 9
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal 9, Timeout.timeout(2) { supervisor.run }
+      diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
+      assert_equal "malformed", diagnostic.fetch("transport_status")
+      assert_nil diagnostic.fetch("provider")
+      refute_includes JSON.generate(diagnostic), secret
+    end
+  end
+
+  def test_cancelled_patrol_attempt_synthesizes_diagnostic_when_frame_is_missing
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "4-review",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        timeout_sec: 0.03, kill_grace_sec: 0.03
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", "sleep 10" ]
+      end
+
+      assert_equal 124, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      references = terminal.receipt.fetch("output_references")
+      assert_equal 1, references.length
+      diagnostic = JSON.parse(File.binread(File.join(store.root, references.fetch(0).fetch("path"))))
+      assert_equal "agent_timeout", diagnostic.fetch("code")
+      assert_equal true, diagnostic.fetch("timed_out")
+      assert_equal true, diagnostic.fetch("cancelled")
+      assert_equal "missing", diagnostic.fetch("transport_status")
+      assert_equal terminal.receipt.fetch("log_reference"), diagnostic.fetch("log_reference")
+    end
+  end
+
+  def test_signalled_patrol_attempt_synthesizes_artifact_and_log_reference
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "2-fix",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", 'Process.kill("KILL", Process.pid)' ]
+      end
+
+      assert_equal 137, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      diagnostic = diagnostic_from_terminal(store, terminal)
+      assert_equal "agent_signalled", diagnostic.fetch("code")
+      assert_equal "KILL", diagnostic.fetch("signal")
+      assert_equal terminal.receipt.fetch("log_reference"), diagnostic.fetch("log_reference")
+    end
+  end
+
+  def test_cancel_signal_synthesizes_cancelled_artifact_and_log_reference
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "2-fix",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.03
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", "sleep 10" ]
+      end
+      supervisor.instance_variable_set(:@cancel_reason, :signal)
+      supervisor.instance_variable_set(:@cancel_signal, "TERM")
+
+      assert_equal 143, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      diagnostic = diagnostic_from_terminal(store, terminal)
+      assert_equal "agent_cancelled", diagnostic.fetch("code")
+      assert_equal true, diagnostic.fetch("cancelled")
+      assert_equal "TERM", diagnostic.fetch("signal")
+      assert_equal terminal.receipt.fetch("log_reference"), diagnostic.fetch("log_reference")
+    end
+  end
+
   def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
     worker_argv = [
       "/bin/sh", "-c",
@@ -236,6 +577,27 @@ class AttemptsSupervisorTest < Minitest::Test
       assert_equal "terminal", terminal.state
       assert_equal "failed", terminal.outcome
       assert_includes ready.string, '"claimed":true'
+    end
+  end
+
+  def test_unexpected_patrol_supervisor_failure_still_binds_synthetic_diagnostic
+    with_attempt(
+      worker_argv: [ "hive", "run", "durable-task" ], intended_stage: "4-review",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+      supervisor.define_singleton_method(:run_worker) { |_record, _log| raise "boom" }
+
+      assert_equal Hive::ExitCodes::SOFTWARE, supervisor.run
+      terminal = store.fetch(attempt.attempt_id)
+      reference = terminal.receipt.fetch("output_references").fetch(0)
+      diagnostic = JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
+      assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
+      assert_equal "missing", diagnostic.fetch("transport_status")
+      assert_equal terminal.receipt.fetch("log_reference"), diagnostic.fetch("log_reference")
     end
   end
 
@@ -351,19 +713,38 @@ class AttemptsSupervisorTest < Minitest::Test
 
   private
 
-  def with_attempt(worker_argv:, routing: { "mode" => "legacy" })
+  def diagnostic_from_terminal(store, terminal)
+    reference = terminal.receipt.fetch("output_references").find do |candidate|
+      File.basename(candidate.fetch("path")) == Hive::PatrolFix::AttemptDiagnostic::FILENAME
+    end
+    JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
+  end
+
+  def with_attempt(worker_argv:, routing: { "mode" => "legacy" }, intended_stage: "4-execute",
+                   workflow_controller: nil)
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       attempt = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task",
-        intended_stage: "4-execute", task_generation: "generation-1",
+        intended_stage: intended_stage, task_generation: "generation-1",
         progress_token: "progress-1", provider: "codex", worker_argv: worker_argv,
         claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
         retry_charge: 0, inherited_outputs: [], routing: routing,
         launch_timeout_sec: 30, now: Time.now.utc
       )
-      yield store, attempt
+      unless workflow_controller
+        yield store, attempt
+        next
+      end
+
+      workflow = Struct.new(:controller).new(workflow_controller)
+      task = Struct.new(:workflow).new(workflow)
+      resolver = Object.new
+      resolver.define_singleton_method(:resolve) { task }
+      with_replaced_singleton_method(
+        Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }
+      ) { yield store, attempt }
     end
   end
 

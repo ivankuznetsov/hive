@@ -3,6 +3,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/errors"
+require "hive/patrol_fix/attempt_diagnostic"
 require "hive/secret_patterns"
 
 module HiveTestSupport
@@ -48,19 +49,22 @@ module HiveTestSupport
 
       failure_counts = attempts.filter_map { |attempt| attempt["failure_code"] }
                                .tally.sort.to_h.freeze
-      expected_failures = failure_cohorts.to_h do |cohort|
-        [ cohort.fetch("expected_normalized_code"), cohort.fetch("count") ]
-      end.sort.to_h
+      expected_failures = failure_cohorts.group_by do |cohort|
+        cohort.fetch("expected_normalized_code")
+      end.transform_values { |cohorts| cohorts.sum { |cohort| cohort.fetch("count") } }
+        .sort.to_h
       unless failure_counts == expected_failures
         raise InvalidFixture, "replayed failure counts differ from expected cohorts"
       end
 
-      canonical = canonicalize("attempts" => attempts, "metrics" => metrics)
+      canonical = Hive::PatrolFix.canonical_json(
+        "attempts" => attempts, "metrics" => metrics
+      ).delete_suffix("\n")
       Result.new(
         attempts: attempts,
         metrics: metrics,
         failure_counts: failure_counts,
-        digest: Digest::SHA256.hexdigest(JSON.generate(canonical))
+        digest: Digest::SHA256.hexdigest(canonical)
       )
     end
 
@@ -208,8 +212,15 @@ module HiveTestSupport
       failed_remaining = document.fetch("stage_outcomes").to_h do |entry|
         [ entry.fetch("stage"), entry.fetch("failed") ]
       end
-      failure_codes = failure_cohorts.flat_map do |cohort|
-        [ cohort.fetch("expected_normalized_code") ] * cohort.fetch("count")
+      failure_codes = failure_cohorts.each_with_index.flat_map do |cohort, index|
+        diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+          cohort.fetch("terminal_envelope"),
+          stage: "incident-replay",
+          task_generation: "incident-generation",
+          attempt_id: format("incident-attempt-%03d", index + 1),
+          recorded_at: Time.utc(2026, 8, 26)
+        )
+        [ diagnostic.fetch("code") ] * cohort.fetch("count")
       end
       sequence = 0
       groups.flat_map do |group|
@@ -248,17 +259,6 @@ module HiveTestSupport
         "repeated_generation_stage_identities" => identities.count { |_, entries| entries.length > 1 },
         "max_attempts_for_identity" => identities.values.map(&:length).max
       }
-    end
-
-    def canonicalize(value)
-      case value
-      when Hash
-        value.keys.sort.to_h { |key| [ key, canonicalize(value.fetch(key)) ] }
-      when Array
-        value.map { |entry| canonicalize(entry) }
-      else
-        value
-      end
     end
   end
 end

@@ -54,7 +54,7 @@ module Hive
                   "inbox agent changed the controller-selected repository snapshot; preserving bytes for recovery"
           end
 
-          report = Hive::PatrolFix::InboxReport.read(output_path)
+          report = read_report!(output_path)
           receipt = store.append!(decision_receipt(manifest, report, head))
           finish_route(task, receipt, successor_materializer)
         rescue Hive::AgentGitGate::Error => e
@@ -94,6 +94,14 @@ module Hive
           end
         end
         private_class_method :current_decision
+
+        def read_report!(path)
+          Hive::Stages::ManagedAgentCustody.read_report(
+            stage: "inbox", parser: "inbox_report",
+            invalid_report: Hive::PatrolFix::InboxReport::InvalidReport
+          ) { Hive::PatrolFix::InboxReport.read(path) }
+        end
+        private_class_method :read_report!
 
         def decision_receipt(manifest, report, head)
           payload = {
@@ -139,10 +147,13 @@ module Hive
 
         def validate_agent_run!(run)
           unless run.is_a?(Hash) && run[:status] == :ok
-            raise Hive::StageError, "inbox agent did not produce a successful structured result"
+            code = run.is_a?(Hash) && run.dig(:attempt_diagnostic, "code")
+            suffix = code ? "; diagnostic=#{code}" : ""
+            raise Hive::StageError,
+                  "inbox agent did not produce a successful structured result#{suffix}"
           end
           unless run[:custody] == :clean
-            diagnostic = run[:diagnostic].to_s[0, 256]
+            diagnostic = run.dig(:attempt_diagnostic, "code") || run[:diagnostic].to_s[0, 256]
             raise Hive::StageError,
                   "inbox agent modified controller authority or omitted its report; #{diagnostic}".rstrip
           end

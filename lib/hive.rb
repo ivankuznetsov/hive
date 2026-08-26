@@ -79,6 +79,7 @@ module Hive
       "hive-patrol-fix-receipt" => 1,
       "hive-patrol-fix-projection" => 1,
       "hive-patrol-fix-dogfood-report" => 1,
+      "hive-patrol-fix-attempt-diagnostic" => 1,
       "hive-refactor-patrol" => 4,
       "hive-refactor-patrol-jobs" => 2,
       "hive-refactor-patrol-thesis" => 4,

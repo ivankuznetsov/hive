@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-25
+updated: 2026-08-26
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -179,6 +179,22 @@ the controller may materialize only that exact, untruncated JSON object before
 Artifact Firewall validation. Prose, arrays, truncated output, and any existing
 path are not accepted; in particular, a dangling report symlink remains a
 custody violation rather than being replaced by the fallback.
+
+Managed Inbox, Fix, and Review failures normalize the existing agent process,
+provider, parser, and Artifact Firewall facts into the versioned Patrol Fix
+attempt-diagnostic schema before custody returns. The artifact records the
+opaque attempt ownership generation (not the numeric task input epoch), a
+snake-case failure code and owner, process termination state, provider class
+and retry hint without provider response text, report/parser state, firewall
+restoration, and bounded publication-policy-redacted detail. A clean report
+after Pi's recovered internal provider retry remains successful and emits no
+failure frame. Invalid Fix reports emit `fix_report_invalid`; invalid reports
+from the other managed stages emit `agent_report_invalid`. Silent failures
+receive a supervisor-authored terminal diagnostic. The first-party controller
+also publishes semantic failure facts before reraising known worktree head
+drift, dirty worktrees, validation mutation, publication secret blocks, and
+Hive-state Git index-lock conflicts, so those failures retain their typed
+cohort codes even when no managed agent seam ran.
 
 Independent review hashes the bounded Git diff as raw bytes, then validates and
 labels a copy as UTF-8 before placing it in the canonical prompt context. Valid

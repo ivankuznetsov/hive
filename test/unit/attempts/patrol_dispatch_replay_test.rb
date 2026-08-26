@@ -1,5 +1,7 @@
 require "test_helper"
+require "json_schemer"
 require "support/patrol_dispatch_replay"
+require "hive/patrol_fix/attempt_diagnostic"
 
 class PatrolDispatchReplayTest < Minitest::Test
   include HiveTestHelper
@@ -36,11 +38,10 @@ class PatrolDispatchReplayTest < Minitest::Test
     )
     assert_equal(
       {
-        "agent_result_generic" => 53,
-        "diagnostic_missing" => 18,
+        "agent_exit_nonzero" => 71,
         "fix_report_invalid" => 2,
         "fix_worktree_dirty" => 2,
-        "protected_git_config_mutation" => 11,
+        "protected_git_config_tamper" => 11,
         "secret_policy_publish_blocked" => 3,
         "state_git_index_lock" => 4,
         "validation_mutation" => 1,
@@ -65,7 +66,7 @@ class PatrolDispatchReplayTest < Minitest::Test
   end
 
   def test_terminal_envelopes_are_separate_from_expected_normalized_codes
-    replay.failure_cohorts.each do |cohort|
+    replay.failure_cohorts.each_with_index do |cohort, index|
       envelope = cohort.fetch("terminal_envelope")
 
       refute envelope.key?("failure_code")
@@ -75,6 +76,156 @@ class PatrolDispatchReplayTest < Minitest::Test
         report_status firewall_status custody_status
       ].each { |key| assert envelope.key?(key), "#{cohort.fetch("cohort")} missing #{key}" }
       assert_match(/\A[a-z][a-z0-9_]*\z/, cohort.fetch("expected_normalized_code"))
+      diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        envelope,
+        stage: "incident-replay",
+        task_generation: "incident-generation",
+        attempt_id: format("incident-attempt-%03d", index + 1),
+        recorded_at: Time.utc(2026, 8, 26)
+      )
+      assert_equal cohort.fetch("expected_normalized_code"), diagnostic.fetch("code")
+    end
+  end
+
+  def test_normalizer_bounds_and_redacts_detail_and_omits_it_when_redaction_fails
+    token = "github" + "_pat_" + ("A" * 24)
+    detail = "\e[31mprovider failed #{token} \xFF".b + ("x" * 8_000)
+    diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      {
+        "status" => "error", "exit_code" => 1, "timed_out" => false,
+        "cancelled" => false, "signal" => nil, "detail" => detail
+      },
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-1",
+      recorded_at: Time.utc(2026, 8, 26)
+    )
+
+    assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
+    assert_operator diagnostic.fetch("detail").bytesize, :<=,
+                    Hive::PatrolFix::AttemptDiagnostic::MAX_DETAIL_BYTES
+    assert diagnostic.fetch("detail").valid_encoding?
+    refute_includes diagnostic.fetch("detail"), "\e[31m"
+    refute_includes diagnostic.fetch("detail"), token
+    assert_includes diagnostic.fetch("detail"), "[REDACTED:github_fine_grained_pat]"
+
+    failed = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      {
+        "status" => "error", "exit_code" => 1, "timed_out" => false,
+        "cancelled" => false, "signal" => nil, "detail" => "private detail"
+      },
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-2",
+      recorded_at: Time.utc(2026, 8, 26),
+      redactor: ->(_text) { raise "redactor unavailable" }
+    )
+    assert_equal "agent_exit_nonzero", failed.fetch("code")
+    assert_nil failed.fetch("detail")
+    assert_equal "failed", failed.fetch("redaction_status")
+  end
+
+  def test_failure_code_must_be_snake_case
+    assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+      Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error", "provider_failure" => "Capacity.Exhausted" },
+        stage: "2-fix", task_generation: "generation-1",
+        attempt_id: "attempt-1",
+        recorded_at: Time.utc(2026, 8, 26)
+      )
+    end
+  end
+
+  def test_transport_status_must_be_from_the_closed_protocol
+    assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+      Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error", "exit_code" => 1 },
+        stage: "2-fix", task_generation: "generation-1",
+        attempt_id: "attempt-1", recorded_at: Time.utc(2026, 8, 26),
+        transport_status: "future_state"
+      )
+    end
+  end
+
+  def test_secret_shaped_metadata_invalidates_the_entire_diagnostic
+    secret = "github" + "_pat_" + ("A" * 24)
+    base = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      {
+        "phase" => "managed_agent", "status" => "error", "exit_code" => 1,
+        "provider" => "codex", "provider_failure" => "provider_error",
+        "provider_provenance" => "codex_jsonl_transport",
+        "retry_at" => 30, "report_parser" => "fix_report"
+      },
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-1", recorded_at: Time.utc(2026, 8, 26)
+    )
+    mutations = [
+      ->(row) { row.fetch("provider")["name"] = secret },
+      ->(row) { row.fetch("provider")["failure_class"] = secret },
+      ->(row) { row.fetch("provider")["retry_hint"] = secret },
+      ->(row) { row.fetch("provider")["provenance"] = secret },
+      ->(row) { row["agent_reason"] = secret },
+      ->(row) { row["report_parser"] = secret },
+      ->(row) { row["status"] = secret }
+    ]
+
+    mutations.each do |mutate|
+      candidate = JSON.parse(JSON.generate(base))
+      mutate.call(candidate)
+      error = assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+        Hive::PatrolFix::AttemptDiagnostic.validate!(
+          candidate, require_log_reference: false
+        )
+      end
+      assert_match(/secret-pattern text/, error.message)
+    end
+  end
+
+  def test_validator_rejects_wrong_scalar_types_that_the_schema_rejects
+    base = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      {
+        "status" => "error", "exit_code" => 1, "provider" => "codex",
+        "provider_failure" => "provider_error"
+      },
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-1", recorded_at: Time.utc(2026, 8, 26)
+    )
+    mutations = [
+      ->(row) { row["status"] = 7 },
+      ->(row) { row["agent_reason"] = 7 },
+      ->(row) { row.fetch("provider")["name"] = 7 },
+      ->(row) { row.fetch("provider")["retry_hint"] = 7 }
+    ]
+    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path(
+      "../../../schemas/hive-patrol-fix-attempt-diagnostic.v1.json", __dir__
+    ))))
+
+    mutations.each do |mutate|
+      candidate = JSON.parse(JSON.generate(base))
+      mutate.call(candidate)
+      refute schema.valid?(candidate)
+      assert_raises(Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic) do
+        Hive::PatrolFix::AttemptDiagnostic.validate!(
+          candidate, require_log_reference: false
+        )
+      end
+    end
+  end
+
+  def test_terminal_process_states_normalize_to_distinct_codes
+    cases = {
+      "agent_timeout" => { "timed_out" => true, "cancelled" => true, "exit_code" => 124 },
+      "agent_cancelled" => { "cancelled" => true, "exit_code" => 143 },
+      "agent_signalled" => { "signal" => "KILL", "exit_code" => 137 },
+      "agent_exit_nonzero" => { "exit_code" => 23 }
+    }
+
+    cases.each_with_index do |(code, fields), index|
+      diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "status" => "error", **fields },
+        stage: "2-fix", task_generation: "generation-1",
+        attempt_id: "attempt-#{index}",
+        recorded_at: Time.utc(2026, 8, 26)
+      )
+      assert_equal code, diagnostic.fetch("code")
     end
   end
 

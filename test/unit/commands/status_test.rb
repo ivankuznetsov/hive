@@ -6,6 +6,92 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_patrol_attempt_diagnostic_projection_is_receipt_bound_and_rejects_stale_identity
+    log_reference = {
+      "path" => "logs/attempt-1.frames", "size" => 12, "sha256" => "a" * 64
+    }
+    diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      {
+        "phase" => "managed_agent", "status" => "error",
+        "error_reason" => "agent_exit", "exit_code" => 7,
+        "report_status" => "invalid", "report_parser" => "review_report",
+        "firewall_status" => "clean", "custody_status" => "clean"
+      },
+      stage: "4-review", task_generation: "generation-1",
+      attempt_id: "attempt-1", recorded_at: Time.now.utc,
+      log_reference: log_reference
+    )
+    reference = {
+      "path" => "outputs/attempt-1/patrol-fix-attempt-diagnostic.v1.json",
+      "size" => JSON.generate(diagnostic).bytesize, "sha256" => "b" * 64
+    }
+    receipt = {
+      "output_references" => [ reference ], "log_reference" => log_reference
+    }
+    binding = {
+      "attempt_id" => "attempt-1", "stage" => "4-review",
+      "task_generation" => "generation-1", "receipt" => receipt
+    }
+    reader = Struct.new(:binding, :bytes, :fetches) do
+      def fetch_terminal_diagnostic_binding(_attempt_id)
+        self.fetches += 1
+        binding
+      end
+      def read_output(_reference, max_bytes:)
+        raise "unbounded read" unless max_bytes == Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
+        bytes
+      end
+    end.new(binding, JSON.generate(diagnostic), 0)
+    command = Hive::Commands::Status.new(json: true)
+    command.instance_variable_set(:@status_attempt_store, reader)
+    task_projection = Hive::TaskProjection.from_data(
+      "schema" => Hive::TaskProjection::SCHEMA,
+      "schema_version" => Hive::TaskProjection::SCHEMA_VERSION,
+      "identity" => { "attempt_id" => "attempt-1", "task_generation" => 9 },
+      "journal" => {
+        "attempts" => [
+          { "attempt_id" => "attempt-1", "state" => "terminal", "outcome" => "failed" }
+        ]
+      }
+    )
+    row = {
+      workflow: "patrol-fix", stage: "4-review",
+      projection_data: task_projection.to_h
+    }
+
+    projected = command.send(:attempt_diagnostic_for, row)
+    assert_equal "agent_exit_nonzero", projected.fetch("code")
+    assert_equal "agent", projected.fetch("owner")
+    assert_equal "managed_agent", projected.fetch("phase")
+    assert_equal "error", projected.fetch("status")
+    assert_equal "agent_exit", projected.fetch("agent_reason")
+    assert_equal 7, projected.fetch("exit_code")
+    assert_equal false, projected.fetch("timed_out")
+    assert_equal false, projected.fetch("cancelled")
+    assert_nil projected.fetch("signal")
+    assert_nil projected.fetch("provider")
+    assert_equal "review_report", projected.fetch("report_parser")
+    assert_nil projected.fetch("firewall_restoration")
+    assert_equal reference.fetch("sha256"), projected.fetch("diagnostic_digest")
+    assert_equal reference, projected.fetch("diagnostic_reference")
+    assert_equal log_reference, projected.fetch("log_reference")
+
+    stale = Marshal.load(Marshal.dump(row))
+    stale[:projection_data]["identity"]["attempt_id"] = "attempt-stale"
+    assert_nil command.send(:attempt_diagnostic_for, stale)
+    reader.binding = binding.merge("task_generation" => "generation-2")
+    assert_nil command.send(:attempt_diagnostic_for, row)
+    reader.binding = binding
+    reader.bytes = JSON.generate(diagnostic.merge("log_reference" => log_reference.merge("size" => 99)))
+    assert_nil command.send(:attempt_diagnostic_for, row)
+
+    running = Marshal.load(Marshal.dump(row))
+    running[:projection_data]["journal"]["attempts"][0]["state"] = "running"
+    reader.fetches = 0
+    assert_nil command.send(:attempt_diagnostic_for, running)
+    assert_equal 0, reader.fetches
+  end
+
   def test_default_json_call_uses_compact_producer_without_building_full_graph
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

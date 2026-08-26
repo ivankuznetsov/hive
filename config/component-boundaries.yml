@@ -249,6 +249,7 @@ components:
         - Hive::PatrolFix::ReviewReceipt
         - Hive::PatrolFix::Transition
         - Hive::PatrolFix::SuccessorMaterializer
+        - Hive::PatrolFix::AttemptDiagnostic
       errors:
         - Hive::PatrolFix::AdmissionStore::Error
         - Hive::PatrolFix::SourceSnapshot::InvalidSnapshot
@@ -262,6 +263,7 @@ components:
         - Hive::PatrolFix::ReviewReceipt::InvalidReport
         - Hive::PatrolFix::Transition::InvalidTransition
         - Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor
+        - Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic
     owned_paths:
       - lib/hive/patrol_fix.rb
       - lib/hive/patrol_fix/task_manifest.rb
@@ -281,11 +283,13 @@ components:
       - lib/hive/patrol_fix/review_receipt.rb
       - lib/hive/patrol_fix/transition.rb
       - lib/hive/patrol_fix/successor_materializer.rb
+      - lib/hive/patrol_fix/attempt_diagnostic.rb
       - schemas/hive-patrol-fix-decision.v1.json
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
       - schemas/hive-patrol-fix-projection.v1.json
       - schemas/hive-patrol-fix-dogfood-report.v1.json
+      - schemas/hive-patrol-fix-attempt-diagnostic.v1.json
     state_contracts:
       - "The strict task manifest binds every source revision and one canonical task generation while append-only receipts bind exact evidence generation"
       - "Equivalent evidence may add provenance within a generation; materially changed evidence advances exactly one generation and invalidates old receipts"
@@ -304,6 +308,7 @@ components:
       - "Source provenance includes source engine, identity, target revision, evidence, affected code, reproduction guidance, discovery run, and semantic lineage"
       - "Source snapshots and admission records are canonical, size bounded, digest bound, and reject secret-like material"
       - "Dogfood reports bind one source occurrence through ordered workflow observations to one exact publication receipt and zero-duplicate replay counts"
+      - "Attempt diagnostics are append-only, receipt-bound, secret-redacted typed records with exact attempt, ownership generation, phase, and private log identity"
     lock_contracts:
       - "Manifest replacement is atomic and receipts append under a task-local journal lock"
       - "Patrol-fix moves also hold a stable slug lock outside the moving task folder and journal intent before move plus committed reconciliation afterward"
@@ -315,10 +320,12 @@ components:
       - hive/atomic_file
       - hive/agent_git_gate
       - hive/git_ops
+      - hive/github_publication
       - hive/gh/repository_identity
       - hive/git_ref
       - hive/lock
       - hive/managed_directory
+      - hive/output_reference
       - hive/secret_patterns
       - hive/task
       - hive/task_capture
@@ -363,6 +370,7 @@ components:
       - test/unit/patrol_fix/review_receipt_test.rb
       - test/unit/patrol_fix/transition_test.rb
       - test/unit/patrol_fix/successor_materializer_test.rb
+      - test/unit/attempts/patrol_dispatch_replay_test.rb
       - test/unit/stages/patrol_fix/publish_test.rb
     migration_exceptions: []
 

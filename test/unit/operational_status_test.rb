@@ -39,6 +39,33 @@ class OperationalStatusTest < Minitest::Test
     refute result.fetch("tasks").any? { |row| row.dig("identity", "slug") == "archived" }
   end
 
+  def test_typed_attempt_diagnostic_owner_and_digest_are_preserved_before_retry_projection
+    diagnostic = {
+      "summary" => "provider_rate_limited (provider)",
+      "detail" => "No provider-safe detail was emitted.",
+      "source" => "artifact", "source_path" => "outputs/attempt-1/diagnostic.json",
+      "artifact_paths" => [ "outputs/attempt-1/diagnostic.json", "logs/attempt-1.frames" ],
+      "generated_by" => "local", "marker_signature" => "c" * 64,
+      "suggested_next_action" => nil, "updated_at" => "2026-07-20T10:00:00Z",
+      "code" => "provider_rate_limited", "owner" => "provider",
+      "diagnostic_digest" => "d" * 64
+    }
+    row = task(action: "error", slug: "patrol", marker: "error").merge(
+      "workflow" => "patrol-fix", "diagnostic" => diagnostic
+    )
+
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_provider_or_scheduler", projected.fetch("state")
+    assert_equal "provider", projected.fetch("blocker_owner")
+    assert_equal "provider_rate_limited", projected.dig("reasons", 0, "code")
+    assert_equal "attempt_diagnostic", projected.dig("reasons", 0, "source")
+    assert_equal diagnostic, projected.dig("evidence", "diagnostic")
+  end
+
   def test_operational_snapshot_identifies_the_active_dogfood_build
     sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
     result = Hive::OperationalStatus.new(

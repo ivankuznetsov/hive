@@ -1,6 +1,8 @@
 require "test_helper"
 require "open3"
 require "hive/task"
+require "hive/attempts/context"
+require "hive/attempts/diagnostic_channel"
 require "hive/stages/managed_agent_custody"
 
 class ManagedAgentCustodyTest < Minitest::Test
@@ -177,6 +179,127 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
+  def test_failed_agent_publishes_typed_process_diagnostic_through_attempt_context
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error, exit_code: 17, timed_out: false,
+            cancelled: false, signal: nil, error_reason: "agent_exit"
+          }
+        end
+      end
+
+      result, frame = capture_diagnostic(stage: "1-inbox") do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          launch(task, output)
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "valid", frame.status
+      assert_equal "agent_exit_nonzero", frame.document.fetch("code")
+      assert_equal 17, frame.document.fetch("exit_code")
+      assert_equal "opaque-generation", frame.document.fetch("task_generation")
+      assert_nil frame.document.fetch("log_reference")
+    end
+  end
+
+  def test_provider_failure_keeps_class_hint_and_provenance_without_raw_message
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      secret = "provider raw token github" + "_pat_" + ("A" * 24)
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error, exit_code: 1, timed_out: false,
+            provider_error: {
+              kind: :rate_limited, provider: :pi, retry_after: 45,
+              provenance: "pi_jsonl", message: secret
+            }
+          }
+        end
+      end
+
+      _result, frame = capture_diagnostic(stage: "1-inbox") do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          launch(task, output)
+        end
+      end
+
+      assert_equal "provider_rate_limited", frame.document.fetch("code")
+      assert_equal "provider", frame.document.fetch("owner")
+      assert_equal "45", frame.document.dig("provider", "retry_hint")
+      assert_equal "pi_jsonl", frame.document.dig("provider", "provenance")
+      refute_includes JSON.generate(frame.document), secret
+    end
+  end
+
+  def test_invalid_fix_and_review_parser_results_publish_typed_report_diagnostics
+    {
+      "2-fix" => [ "fix_report", "fix_report_invalid" ],
+      "4-review" => [ "review_report", "agent_report_invalid" ]
+    }.each do |stage, (parser, code)|
+      _result, frame = capture_diagnostic(stage: stage) do
+        Hive::Stages::ManagedAgentCustody.publish_report_invalid(
+          stage: stage, parser: parser, detail: "malformed report"
+        )
+      end
+
+      assert_equal code, frame.document.fetch("code")
+      assert_equal "invalid", frame.document.fetch("report_status")
+      assert_equal parser, frame.document.fetch("report_parser")
+    end
+  end
+
+  def test_attempt_diagnostic_publication_fails_closed_when_transport_is_unavailable
+    context = Struct.new(:intended_stage, :ownership_generation, :attempt_id) do
+      def publish_attempt_diagnostic(_diagnostic)
+        raise IOError, "diagnostic pipe closed"
+      end
+    end.new("2-fix", "opaque-generation", "attempt-1")
+
+    result = with_replaced_singleton_method(
+      Hive::Attempts::Context, :current, -> { context }
+    ) do
+      Hive::Stages::ManagedAgentCustody.publish_attempt_diagnostic(
+        { "status" => "error", "exit_code" => 1 }, stage: "fix"
+      )
+    end
+
+    assert_nil result
+  end
+
+  def test_git_config_firewall_tamper_normalizes_restoration_state
+    restoration = Hive::ArtifactFirewall::Restoration.new(
+      attempted: true, succeeded: true, diagnostic: "restored"
+    )
+    violation = Hive::ArtifactFirewall::Violation.new(
+      kind: :protected_changed, label: "repository config",
+      path: "/private/repository/config", diagnostic: "changed"
+    )
+    report = Hive::ArtifactFirewall::Report.new(
+      snapshot_id: "snapshot", status: :tampered_restored,
+      violations: [ violation ], restoration: restoration,
+      diagnostic: "repository config restored"
+    )
+    envelope = Hive::Stages::ManagedAgentCustody.send(
+      :diagnostic_envelope,
+      { status: :ok, exit_code: 0, timed_out: false }, report,
+      status: :ok, custody_status: :tampered, provider: :pi
+    )
+    diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      envelope,
+      stage: "2-fix", task_generation: "generation-1",
+      attempt_id: "attempt-1", recorded_at: Time.now.utc
+    )
+
+    assert_equal "protected_git_config_tamper", diagnostic.fetch("code")
+    assert_equal "tampered_restored", diagnostic.fetch("firewall_status")
+    assert_equal "restored", diagnostic.fetch("firewall_restoration")
+  end
+
   def test_launch_agent_does_not_recover_rate_limits_without_a_clean_process_exit
     [
       { exit_code: 1, timed_out: false },
@@ -344,6 +467,28 @@ class ManagedAgentCustodyTest < Minitest::Test
   end
 
   private
+
+  def capture_diagnostic(stage:)
+    reader, writer = IO.pipe
+    diagnostic_writer = Hive::Attempts::DiagnosticChannel::Writer.new(writer)
+    context = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-managed", task_generation: 9,
+      ownership_generation: "opaque-generation", intended_stage: stage,
+      diagnostic_writer: diagnostic_writer
+    )
+    result = with_replaced_singleton_method(
+      Hive::Attempts::Context, :current, -> { context }
+    ) { yield }
+    [ result, Hive::Attempts::DiagnosticChannel.read(reader) ]
+  ensure
+    context&.close
+    [ reader, writer ].compact.each do |io|
+      io.close unless io.closed?
+    rescue Errno::EBADF
+      nil
+    end
+  end
 
   def launch(task, output, cfg: {}, actor: "patrol_review", stage: "inbox",
              log_label: "patrol-fix-inbox")

@@ -245,8 +245,10 @@ module Hive
       # workflow is rejected at this early gate (see validate_stage_refs!).
       def known_stage_ref?(ref)
         !Hive::Workflows.resolve_stage_ref_across_workflows(ref).nil?
-      rescue Hive::InvalidTaskPath => e
-        e.message.start_with?("ambiguous stage")
+      rescue Hive::Workflows::AmbiguousStageRef
+        true
+      rescue Hive::InvalidTaskPath
+        false
       end
 
       # ── Destination resolution ──────────────────────────────────────────

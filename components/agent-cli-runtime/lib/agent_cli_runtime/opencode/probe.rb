@@ -125,6 +125,11 @@ module AgentCliRuntime
                 "requested OpenCode variant is unavailable for the exact route"
         end
         evidence << evidence(profile, :model_route, [ request.route.to_s ])
+        if inventory_variants.nil?
+          evidence << evidence(
+            profile, :configured_model_route, [ request.route.to_s ]
+          )
+        end
         evidence << evidence(profile, :model_variant, [ request.variant ]) if
           request.variant
 

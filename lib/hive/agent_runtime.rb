@@ -313,12 +313,8 @@ module Hive
 
     def require_auth_configuration!(profile)
       environment = ENV.to_h
-      if profile.name == :grok
-        # Hive binds CLI subscription/session state. API-key support remains a
-        # package compatibility feature for independent consumers.
-        environment.delete("XAI_API_KEY")
-        environment.delete("GROK_CODE_XAI_API_KEY")
-      end
+      support = Hive::AgentSupport.for(profile)
+      environment = support.auth_environment(environment) if support&.respond_to?(:auth_environment)
       auth = profile.auth_configuration(env: environment)
       return if auth.configured?
 

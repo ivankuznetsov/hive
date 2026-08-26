@@ -134,6 +134,21 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_accepts_disabled_plan_review_only_for_explicit_benchmark_runtime
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "plan_review:\n  enabled: false\n")
+
+      with_env("HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW" => "1") do
+        assert_equal false, Hive::Config.load(dir).dig("plan_review", "enabled")
+      end
+
+      assert_match(/cannot be disabled/i,
+                   assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message)
+    end
+  end
+
   def test_registry_round_trips_repository_identity
     with_tmp_global_config do
       with_tmp_git_repo do |repo|
@@ -5425,8 +5440,7 @@ class ConfigTest < Minitest::Test
           "agents" => {
             "opencode" => {
               "config_path" => "opencode.json",
-              "credential_env" => [ "ANTHROPIC_API_KEY" ],
-              "isolation" => "hermetic"
+              "credential_env" => [ "ANTHROPIC_API_KEY" ]
             }
           }
         )
@@ -5437,7 +5451,7 @@ class ConfigTest < Minitest::Test
         assert_equal "opencode", loaded.dig(*path), path.join(".")
         assert_equal File.join(project, "opencode.json"),
                      Hive::AgentProfiles.lookup(:opencode, cfg: loaded)
-                       .opencode_configuration_path
+                       .support_configuration.configuration_path
       end
     end
   end

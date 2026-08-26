@@ -11,7 +11,11 @@ Execute the `<!-- bench-stage-script -->` bash block below verbatim with
 reimplement its steps, improvise around failing commands, or hand-write a
 `<!-- WAITING -->`/`<!-- ERROR -->`/`<!-- COMPLETE -->` marker yourself —
 every guard in this stage lives in the script, and the script ends every path
-with exactly one marker.
+with exactly one marker. Do not end the stage while the script is running. If
+the command tool reports `Script running with cell ID ...`, call
+`functions.wait` and keep waiting until it completes; if it returns a session
+id, use the matching session wait operation until exit. A yielded shell is not
+a completed benchmark stage.
 
 <!-- bench-stage-script -->
 ```bash
@@ -22,7 +26,7 @@ STATE_FILE="generate.md"
 # Scratch outputs are folded into the state file below; never leave them behind
 # to be swept into hive-state commits (.generate-commands carries absolute
 # source paths).
-trap 'rm -f .generate-validate.out .generate-validate.err .generate-campaign.out .generate-campaign.err .generate-commands .generate-commands.err .generate-cmd.err .generate-run.err .generate-outcome.out .generate-outcome.err .generate-merge.out .generate-merge.err' EXIT
+trap 'rm -f .generate-validate.out .generate-validate.err .generate-campaign.out .generate-campaign.err .generate-commands .generate-commands.err .generate-cmd-*.err .generate-run.err .generate-outcome.out .generate-outcome.err .generate-merge.out .generate-merge.err' EXIT
 
 write_waiting() {
   {
@@ -118,6 +122,22 @@ ruby -ryaml -rjson -e '
   abort("corpus_version must be a single-line scalar; got #{cv.inspect}") unless (cv.is_a?(String) || cv.is_a?(Integer)) && !cv.to_s.include?("\n")
   abort("tasks must be a non-empty array") unless data["tasks"].is_a?(Array) && !data["tasks"].empty?
   abort("candidates must be a non-empty array") unless data["candidates"].is_a?(Array) && !data["candidates"].empty?
+  if data.key?("require_successful_execution")
+    abort("require_successful_execution must be true or false") unless [true, false].include?(data["require_successful_execution"])
+  end
+  isolation = data.fetch("isolation", {})
+  abort("isolation must be a mapping") unless isolation.is_a?(Hash)
+  if isolation.key?("sealed_agent_runtime")
+    abort("isolation.sealed_agent_runtime must be true or false") unless [true, false].include?(isolation["sealed_agent_runtime"])
+  end
+  if isolation["require_provider_egress"] == true
+    network = isolation["docker_network"]
+    proxy = isolation["https_proxy"]
+    abort("isolation.docker_network must be a safe Docker network name") unless network.is_a?(String) && network.match?(/\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/)
+    abort("isolation.https_proxy must be a credential-free internal http://host:port URL") unless proxy.is_a?(String) && proxy.match?(%r{\Ahttp://[a-zA-Z0-9][a-zA-Z0-9.-]{0,126}:[1-9]\d{0,4}\z})
+  elsif isolation.key?("require_provider_egress")
+    abort("isolation.require_provider_egress must be true or false") unless isolation["require_provider_egress"] == false
+  end
   abort("seeds must be a positive integer") unless data["seeds"].is_a?(Integer) && data["seeds"].positive?
   judges = data["judges"]
   abort("judges must be a mapping") unless judges.is_a?(Hash)
@@ -181,6 +201,7 @@ ruby -ryaml -rshellwords -rjson -e '
   require File.join(runtime, "harness/profiles/candidates")
   data = YAML.safe_load_file("campaign.yml")
   terminal = %w[generated empty_diff].freeze
+  require_successful_execution = data["require_successful_execution"] == true
   exclusions = data.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
   # A cell is BOUGHT once generation reached a terminal status — or once ANY
   # candidate diff was captured on disk, regardless of which bucket
@@ -205,6 +226,8 @@ ruby -ryaml -rshellwords -rjson -e '
       cell = (result["cells"] || []).first
       next true if cell && terminal.include?(cell["run_status"])
     end
+    next false if require_successful_execution
+
     !Dir.glob(File.join(repo, out_dir, "*", "*", "target", "candidate.patch")).empty?
   end
   hive_timeout = data.fetch("timeouts", {})["hive_seconds"]
@@ -245,6 +268,13 @@ ruby -ryaml -rshellwords -rjson -e '
       # Timeout comes from the pre-registered contract (timeouts.hive_seconds);
       # when unset, harness defaults apply, as campaign.yml.example documents.
       env << "HB_HIVE_TIMEOUT=#{hive_timeout}" if hive_timeout
+      isolation = data.fetch("isolation", {})
+      env << "HB_REQUIRE_SEALED_AGENT_RUNTIME=1" if isolation["sealed_agent_runtime"] == true
+      if isolation["require_provider_egress"] == true
+        env << "HB_REQUIRE_EGRESS_ALLOWLIST=1"
+        env << "HB_GEN_NETWORK=#{isolation.fetch("docker_network")}"
+        env << "HB_GEN_HTTPS_PROXY=#{isolation.fetch("https_proxy")}"
+      end
       profile = HiveBench::Candidates.by_id(candidate.to_s)
       if profile
         codex_models = []
@@ -289,22 +319,40 @@ fi
 
 generate_status=0
 : >.generate-run.err
+generate_pids=()
+generate_errs=()
+generate_commands=()
+generate_index=0
 while IFS= read -r command; do
-  set +e
+  generate_index=$((generate_index + 1))
+  err_path=".generate-cmd-${generate_index}.err"
+  generate_errs+=("$err_path")
+  generate_commands+=("$command")
   # </dev/null: a stdin-reading descendant must not swallow queued command lines.
   # bash -c, not -lc: the stage exports everything the harness needs, and a
   # login profile would feed unattributable noise/failures into per-cell status.
-  # stderr is captured per command so a pre-spend abort (e.g. a missing judge
+  # Stderr is captured per cell so a pre-spend abort (e.g. a missing judge
   # key) can be surfaced next to the "missing" cell it caused.
-  (cd "$REPO_ROOT" && bash -c "$command" </dev/null) 2>.generate-cmd.err
+  (cd "$REPO_ROOT" && bash -c "$command" </dev/null) 2>"$err_path" &
+  generate_pids+=("$!")
+done <.generate-commands
+
+# Start the complete matrix before waiting so independent benchmark cells use
+# the provider allowance concurrently. Still reap every child and retain each
+# cell's diagnostics before classifying the campaign result.
+for index in "${!generate_pids[@]}"; do
+  set +e
+  wait "${generate_pids[$index]}"
   status=$?
   set -e
-  cat .generate-cmd.err >&2
-  { printf -- '--- exit %s: %s\n' "$status" "$command"; tail -n 5 .generate-cmd.err; } >>.generate-run.err
+  err_path="${generate_errs[$index]}"
+  command="${generate_commands[$index]}"
+  cat "$err_path" >&2
+  { printf -- '--- exit %s: %s\n' "$status" "$command"; tail -n 5 "$err_path"; } >>.generate-run.err
   if [ "$status" -ne 0 ]; then
     generate_status="$status"
   fi
-done <.generate-commands
+done
 
 run_note=""
 if [ "$generate_status" -ne 0 ]; then
@@ -316,6 +364,7 @@ ruby -ryaml -rjson -e '
   repo = ARGV.fetch(0)
   data = YAML.safe_load_file("campaign.yml")
   terminal = %w[generated empty_diff].freeze
+  require_successful_execution = data["require_successful_execution"] == true
   exclusions = data.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
   bad = []
   quota_only = true
@@ -346,7 +395,17 @@ ruby -ryaml -rjson -e '
         quota_only = false
         next
       end
-      unless Dir.glob(File.join(dir, "*", "*", "target", "candidate.patch")).empty?
+      patches = Dir.glob(File.join(dir, "*", "*", "target", "candidate.patch"))
+      if !require_successful_execution && cell && pending.empty? && failed.empty? && patches.any? { |path| File.size?(path) }
+        # The generation outcome remains honest (for example execute_failed),
+        # but a non-empty paid diff is sufficient input for the judge stage.
+        # Merge it into the campaign root below; judge will backfill the exact
+        # configured slate without re-running the candidate.
+        next
+      end
+      if require_successful_execution
+        status = "#{status} — campaign requires successful execution"
+      elsif !patches.empty?
         # Applies to every bucket a walled cell can land in (pending, failed,
         # or a non-terminal cells[] record): the diff is paid for either way.
         status = "judges_pending (was: #{status}) — diff already captured; do NOT regenerate. Backfill judges with harness/rejudge.rb against the campaign-root runs/#{data.fetch("campaign_id")}/results.json only — never point rejudge --out at this cell'"'"'s results.json (that erases pending[] and re-arms regeneration)"
@@ -397,5 +456,5 @@ fi
   exit 0
 }
 
-write_complete "${run_note}Every non-excluded campaign cell has a per-cell \`run_status\` of \`generated\` or \`empty_diff\` with empty pending/failed buckets; merged campaign results written to \`runs/$CAMPAIGN_ID/results.json\`."
+write_complete "${run_note}Every non-excluded campaign cell satisfies its execution policy, with empty pending/failed buckets; merged campaign results written to \`runs/$CAMPAIGN_ID/results.json\` for judge backfill."
 ```

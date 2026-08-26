@@ -27,6 +27,45 @@ class HiveDaemonPatrolFixRuntimeTest < Minitest::Test
     end
   end
 
+  def test_reuses_admission_store_while_registry_entry_is_unchanged
+    with_tmp_dir do |dir|
+      entry = {
+        "name" => "alpha", "path" => File.join(dir, "alpha"),
+        "hive_state_path" => File.join(dir, "alpha", ".hive-state")
+      }
+      runtime = Hive::Daemon::PatrolFixRuntime.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { {} }
+      )
+
+      first = runtime.sources.fetch(0).store
+      second = runtime.sources.fetch(0).store
+
+      assert_same first, second,
+                  "full daemon ticks should retain the validated admission-record cache"
+    end
+  end
+
+  def test_discards_admission_store_after_registry_entry_is_removed
+    with_tmp_dir do |dir|
+      entry = {
+        "name" => "alpha", "path" => File.join(dir, "alpha"),
+        "hive_state_path" => File.join(dir, "alpha", ".hive-state")
+      }
+      entries = [ entry ]
+      runtime = Hive::Daemon::PatrolFixRuntime.new(
+        registry: -> { entries }, config_loader: ->(_path) { {} }
+      )
+      original = runtime.sources.fetch(0).store
+
+      entries.clear
+      assert_empty runtime.sources
+      entries << entry
+
+      refute_same original, runtime.sources.fetch(0).store,
+                  "re-registering a project must not revive its discarded record cache"
+    end
+  end
+
   def test_provider_is_constructed_only_by_reserved_child_execution
     with_tmp_git_repo do |project_root|
       hive_state = File.join(project_root, ".hive-state")

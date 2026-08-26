@@ -6,6 +6,7 @@ require "yaml"
 
 require "hive/version"
 require "hive/agent_skills/errors"
+require "hive/agent_support"
 
 module Hive
   module AgentSkills
@@ -172,8 +173,10 @@ module Hive
         reference_paths.each do |path|
           files[path] = normalize(render_template(read_source(path)))
         end
-        if platform == "codex"
-          files["agents/openai.yaml"] = normalize(render_template(read_source("agents/openai.yaml")))
+        support = Hive::AgentSupport.for(platform)
+        sources = support&.respond_to?(:projection_sources) ? support.projection_sources : []
+        sources.each do |path|
+          files[path] = normalize(render_template(read_source(path)))
         end
         files[".hive-skill.json"] = projection_manifest(platform, config, files)
         files = files.sort.to_h.transform_values(&:freeze).freeze

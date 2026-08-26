@@ -7,6 +7,7 @@ require "open3"
 require "lib/hive_config"
 require "lib/agent_limit"
 require "lib/pricing"
+require "lib/token_report"
 
 module HiveBench
   # Drives REAL hive (plan -> execute) for one (task x candidate) in the
@@ -29,11 +30,25 @@ module HiveBench
                        :diff_path, :telemetry, :reason)
 
     IMAGE = ENV.fetch("HB_RUNNER_IMAGE", "hive-bench-runner:latest")
+    OPENCODE_IMAGE = ENV.fetch("HB_OPENCODE_RUNNER_IMAGE", "hive-bench-runner:opencode")
     STAGES_SH = File.expand_path("hive_stages.sh", __dir__)
     RESUME_EXECUTE_SH = File.expand_path("hive_resume_execute.sh", __dir__)
+    OPENCODE_BENCH_RUNTIME = File.expand_path("opencode_bench_runtime.rb", __dir__)
+    OPENCODE_BENCH_LAUNCHER = File.expand_path("opencode_bench_launcher.sh", __dir__)
+    PI_BENCH_LAUNCHER = File.expand_path("pi_bench_launcher.sh", __dir__)
     PI_TOOL_STREAM = File.expand_path("pi_tool_stream.ts", __dir__)
+    PI_OPENROUTER_MODELS = File.expand_path("../profiles/pi_openrouter_models.json", __dir__)
     CLAUDE_DIR = File.expand_path("~/.claude")
     HOME = "/home/asterio"
+    HIVE_RUNTIME_CONTAINER_ROOT = "/opt/hb/hive-current"
+    HIVE_GEM_HOME_CONTAINER_ROOT = "/usr/local/bundle"
+    HIVE_CONTROL_GEM_HOME = "/opt/hb/control-bundle"
+    CANDIDATE_GEM_HOME = "/usr/local/bundle"
+    SEALED_RUNTIME_VISIBILITY = "sealed-control-bundle-v1"
+    HIVE_RUNTIME_RUBYLIB = [
+      "#{HIVE_RUNTIME_CONTAINER_ROOT}/components/agent-cli-runtime/lib",
+      "#{HIVE_RUNTIME_CONTAINER_ROOT}/lib"
+    ].join(":").freeze
     GROK_AUTH_DIR = File.expand_path(
       ENV.fetch("HB_GROK_AUTH_DIR", "~/.local/state/hive-bench/grok-auth")
     )
@@ -45,12 +60,22 @@ module HiveBench
       failed\ to\ lookup\ address\ information:.*|
       error\ sending\ request\ for\ url\ \(https://chatgpt\.com/backend-api/codex/responses\)
     )\z}ix
+    PI_RESUMABLE_EXECUTE_FAILURE = /\A(?:
+      JSON\ error\ injected\ into\ SSE\ stream|
+      Upstream\ idle\ timeout\ exceeded|
+      Stream\ ended\ without\ finish_reason
+    )\z/ix
+    PI_RESUMABLE_PREFLIGHT_FAILURE =
+      /\Apreflight failed: agent profile :pi probe failed: pi version check timed out after [1-9]\d*s: pi\z/i
     AUTH_FAILURE = /(?:\b401\b|unauthorized|authentication failed|login required|missing bearer)/i
     PLAN_TIMEOUT = Integer(ENV.fetch("HB_HIVE_TIMEOUT", "5400")) # per container run, sec
 
-    def initialize(reuse_existing:, reuse_unverified:, clock: -> { Time.now.utc }, runner: nil)
+    def initialize(reuse_existing:, reuse_unverified:, clock: -> { Time.now.utc }, runner: nil,
+                   hive_runtime: nil, image_inspector: nil)
       @clock = clock
       @runner = runner # injectable container runner for tests; default shells docker
+      @hive_runtime = hive_runtime
+      @image_inspector = image_inspector
       @reuse_existing = reuse_existing
       @reuse_unverified = reuse_unverified
     end
@@ -63,28 +88,37 @@ module HiveBench
       base = entry.dig("source", "base_commit") or raise ArgumentError, "entry has no source.base_commit"
       source = entry["checkout_source"] or raise ArgumentError, "entry has no checkout_source"
       work = File.expand_path(File.join(out_dir, "target")) # absolute: docker -v needs it
-      identity = generation_identity(entry, candidate, base)
+      hive_runtime = resolved_hive_runtime
+      identity = generation_identity(entry, candidate, base, hive_runtime:)
 
-      if @reuse_existing && (recovered = recover_cell(entry, candidate, work, base, identity))
+      resume_review = @reuse_existing && resumable_review?(entry, work, identity)
+      if !resume_review && @reuse_existing &&
+         (recovered = recover_cell(entry, candidate, work, base, identity))
         return recovered
       end
 
-      resume_marker_id = @reuse_existing && resumable_execute_marker(entry, candidate, work, identity)
-      unless resume_marker_id
+      resume_marker_id =
+        !resume_review && @reuse_existing &&
+        resumable_execute_marker(entry, candidate, work, identity)
+      unless resume_review || resume_marker_id
         setup_repo(source, base, work)
         seed_task(entry, slug, work)
         File.write(File.join(work, ".hive-state", "config.yml"), HiveConfig.to_yaml(candidate))
         init_state_repo(work)
         persist_generation_identity(work, identity)
+      else
+        refresh_resume_attempt_timers(work, candidate)
       end
       seed_project_enrollment(work)
 
-      log_baseline = stream_log_baseline(work)
       started = @clock.call
-      stdout = run_container(slug, base, work, candidate, out_dir, resume_marker_id: resume_marker_id)
+      stdout = run_container(
+        slug, base, work, candidate, out_dir,
+        resume_marker_id: resume_marker_id, resume_review:, hive_runtime:
+      )
       wall = (@clock.call - started).round(2)
 
-      build_cell(entry, candidate, work, stdout, wall, log_baseline: log_baseline)
+      build_cell(entry, candidate, work, stdout, wall)
     end
 
     private
@@ -94,10 +128,13 @@ module HiveBench
     # persisted transcript and captured patch classify as a generated cell.
     def recover_cell(entry, candidate, work, base, identity)
       transcript = File.join(work, ".hb", "stages.out")
-      patch = File.join(work, "candidate.patch")
-      return unless File.file?(transcript) && File.file?(patch)
+      return unless File.file?(transcript)
 
       stdout = File.read(transcript)
+      promote_execute_patch_after_timeout(work, stdout)
+      patch = File.join(work, "candidate.patch")
+      return unless File.file?(patch)
+
       diff = File.read(patch)
       status, = classify(stdout, work, diff)
       return unless status == "generated"
@@ -113,11 +150,12 @@ module HiveBench
       build_cell(entry, candidate, work, stdout, nil, recovered: provenance)
     end
 
-    # Resume only a provenance-matched Hive task whose final Codex turn failed
-    # because model transport disappeared. Auth/usage limits and ordinary
-    # implementation failures deliberately remain ineligible.
+    # Resume only a provenance-matched Hive task with a recovery-safe terminal
+    # state. This covers exact Codex/Pi transport failures and Hive's
+    # dirty_worktree marker whose residue can be committed through Hive's
+    # guarded worktree recovery command inside the resumed container.
+    # Auth/usage limits and ordinary implementation failures remain ineligible.
     def resumable_execute_marker(entry, candidate, work, identity)
-      return unless candidate.execute == "codex"
       return unless generation_identity_matches?(work, identity)
 
       slug = entry.fetch("task_id")
@@ -125,33 +163,104 @@ module HiveBench
       return unless File.file?(task_md)
 
       marker = File.read(task_md)[/<!-- ERROR\b[^>]*-->/]
-      return unless marker&.match?(/\breason=implementer_failed\b/)
+      reason = marker&.[](/\breason=([^\s>]+)/, 1)
+      return unless %w[dirty_worktree implementer_failed provider_error].include?(reason)
 
       marker_id = marker[/\bmarker_id=([^\s>]+)/, 1]
       return unless marker_id
+      return marker_id if reason == "dirty_worktree"
 
-      logs = Dir.glob(File.join(work, ".hive-state", "logs", slug, "execute-*.log"))
-      latest = logs.max_by { |path| File.mtime(path) }
-      return unless latest
+      marker_message = marker[/\bmessage="([^"]*)"/, 1]
+      marker_provider = marker[/\bprovider=([^\s>]+)/, 1]
+      if candidate.execute == "pi" && marker_provider == "pi" &&
+         marker_message&.match?(PI_RESUMABLE_PREFLIGHT_FAILURE)
+        return marker_id
+      end
 
-      terminal = File.foreach(latest).filter_map { |line| stream_json(line) }
-                                     .reverse_each.find { |event| event["type"].to_s.start_with?("turn.") }
-      return unless terminal&.fetch("type", nil) == "turn.failed"
-
-      message = terminal.dig("error", "message").to_s
+      terminal = latest_execute_terminal(work, slug)
+      message = resumable_terminal_message(candidate.execute, terminal)
+      return if message.to_s.empty?
       return if AgentLimit.limit_hit?(message) || message.match?(AUTH_FAILURE)
 
-      marker_id if message.match?(RESUMABLE_EXECUTE_FAILURE)
+      return if marker_message && marker_message != message
+
+      marker_id
     rescue SystemCallError
       nil
     end
 
-    def generation_identity(entry, candidate, base)
+    # Review is natively restartable from its durable phase/pass state. Resume
+    # only a provenance-matched, terminally failed full-cycle transcript that
+    # retained the pre-review execute patch; active or auth/limit failures are
+    # deliberately ineligible.
+    def resumable_review?(entry, work, identity)
+      return false unless generation_identity_matches?(work, identity)
+
+      slug = entry.fetch("task_id")
+      task = File.join(work, ".hive-state", "stages", "6-review", slug)
+      transcript = File.join(work, ".hb", "stages.out")
+      error_log = File.join(work, ".hb", "stage.err")
+      execute_patch = File.join(work, "candidate-execute.patch")
+      return false unless File.directory?(task) && File.file?(transcript)
+      return false unless File.file?(execute_patch) && File.size?(execute_patch)
+
+      stdout = File.read(transcript)
+      return false unless stdout.match?(/^HB_STAGE review rc=[1-9]\d*$/)
+      return false unless stdout.match?(/^HB_EXIT rc=\d+$/)
+
+      diagnostic = File.file?(error_log) ? File.read(error_log) : ""
+      return false if AgentLimit.limit_hit?(diagnostic) || diagnostic.match?(AUTH_FAILURE)
+
+      true
+    rescue SystemCallError
+      false
+    end
+
+    def latest_execute_terminal(work, slug)
+      logs = Dir.glob(File.join(work, ".hive-state", "logs", slug, "execute-*.log"))
+      latest = logs.max_by { |path| File.mtime(path) }
+      return unless latest
+
+      terminal = nil
+      File.foreach(latest) do |line|
+        event = stream_json(line)
+        type = event&.fetch("type", "").to_s
+        terminal = event if type.start_with?("turn.") || type == "turn_end"
+      end
+      terminal
+    end
+
+    def resumable_terminal_message(agent, terminal)
+      case agent
+      when "codex"
+        return unless terminal&.fetch("type", nil) == "turn.failed"
+
+        message = terminal.dig("error", "message").to_s
+        message if message.match?(RESUMABLE_EXECUTE_FAILURE)
+      when "pi"
+        return unless terminal&.fetch("type", nil) == "turn_end"
+        return unless terminal.dig("message", "stopReason") == "error"
+
+        message = terminal.dig("message", "errorMessage").to_s
+        message if message.match?(PI_RESUMABLE_EXECUTE_FAILURE)
+      end
+    end
+
+    def generation_identity(entry, candidate, base, hive_runtime: resolved_hive_runtime)
+      egress = generation_egress
+      runtime = { "version" => hive_runtime.fetch(:version) }
+      runtime["build_sha"] = hive_runtime[:build_sha] if hive_runtime[:build_sha]
       JSON.parse(JSON.generate(
                    "schema" => "hive-bench-generation-identity",
-                   "schema_version" => 1,
+                   "schema_version" => 3,
                    "task_id" => entry.fetch("task_id"),
                    "base_commit" => base,
+                   "hive_runtime" => runtime,
+                   "isolation" => {
+                     "source_history" => "base-only-shallow",
+                     "generation_egress" => egress.fetch(:mode),
+                     "runtime_visibility" => sealed_agent_runtime? ? SEALED_RUNTIME_VISIBILITY : "host-mounted"
+                   },
                    "candidate" => candidate.to_h
                  ))
     end
@@ -162,9 +271,29 @@ module HiveBench
       File.write(File.join(dir, GENERATION_IDENTITY), "#{JSON.pretty_generate(identity)}\n")
     end
 
-    # Hive 0.7+ validates every stage action against the global project
-    # registry. Keep that registry inside the cell so no host enrollment leaks
-    # into the benchmark and the container sees exactly one project: /work.
+    # Resume can reuse a target created by an older harness revision. Refresh
+    # only the startup lease timers that make detached Hive workers robust to
+    # parallel host load; candidate routing and all task artifacts stay frozen.
+    def refresh_resume_attempt_timers(work, candidate)
+      state = File.join(work, ".hive-state")
+      path = File.join(state, "config.yml")
+      config = YAML.safe_load(File.read(path))
+      desired = HiveConfig.to_h(candidate)
+      keys = %w[attempt_launch_timeout_sec attempt_first_heartbeat_timeout_sec]
+      return unless keys.any? { |key| config[key] != desired.fetch(key) }
+
+      keys.each { |key| config[key] = desired.fetch(key) }
+      File.write(path, YAML.dump(config))
+      git("-C", state, "add", "config.yml")
+      git(
+        "-C", state, "-c", "commit.gpgsign=false", "commit", "-qm",
+        "bench: refresh resume attempt timers"
+      )
+    end
+
+    # Hive validates stage actions against its global project registry. Keep a
+    # one-project registry inside each cell so host enrollment cannot influence
+    # task resolution or durable attempts in the benchmark container.
     def seed_project_enrollment(work)
       home = File.join(work, ".hb", "hive-home")
       FileUtils.mkdir_p(home)
@@ -173,8 +302,7 @@ module HiveBench
         YAML.dump(
           "registered_projects" => [
             {
-              "name" => "work",
-              "path" => "/work",
+              "name" => "work", "path" => "/work",
               "hive_state_path" => "/work/.hive-state"
             }
           ]
@@ -198,13 +326,21 @@ module HiveBench
       status.success? && head.strip == base && File.file?(config) && File.read(config) == HiveConfig.to_yaml(candidate)
     end
 
-    # Clone the target, reset local main to the task's base_commit, drop origin so
-    # the execute worktree branches off base_commit (not origin/main).
+    # Fetch only the exact historical base into a depth-one repository. Cloning a
+    # current source checkout and then resetting it leaves newer objects/refs in
+    # .git; a candidate can recover the public gold with `git log --all`, reflogs,
+    # or object enumeration even when origin is removed. A depth-one SHA fetch
+    # contains the base tree and no descendants, so the reference solution is not
+    # merely hidden by refs: it is absent from the candidate filesystem.
     def setup_repo(source, base, work)
       FileUtils.rm_rf(work)
-      git("clone", "--quiet", "--no-local", source, work)
-      git("-C", work, "checkout", "-q", "-B", "main", base)
-      git("-C", work, "remote", "remove", "origin")
+      FileUtils.mkdir_p(work)
+      git("-C", work, "init", "-q", "-b", "main")
+      git("-C", work, "-c", "protocol.file.allow=always", "fetch", "--quiet",
+          "--depth=1", "--no-tags", source, base)
+      git("-C", work, "checkout", "-q", "-B", "main", "FETCH_HEAD")
+      git("-C", work, "config", "user.email", "bench@hive-bench")
+      git("-C", work, "config", "user.name", "hive-bench")
     end
 
     def seed_task(entry, slug, work)
@@ -235,11 +371,15 @@ module HiveBench
       FileUtils.cp_r(src, File.join(tdir, "assets"))
     end
 
-    def run_container(slug, base, work, candidate, out_dir, resume_marker_id: nil)
+    def run_container(slug, base, work, candidate, out_dir, resume_marker_id: nil,
+                      resume_review: false,
+                      hive_runtime: resolved_hive_runtime)
+      verify_sealed_runtime!(candidate, hive_runtime) if sealed_agent_runtime?
       cmd = ["docker", "run", "--rm",
              "-e", "HOME=#{HOME}",
              "-e", "HIVE_HOME=#{HIVE_HOME}",
              *(resume_marker_id ? ["-e", "HB_RESUME_EXECUTE=1", "-e", "HB_RESUME_MARKER_ID=#{resume_marker_id}"] : []),
+             *(resume_review ? ["-e", "HB_RESUME_REVIEW=1"] : []),
              # Full-cycle by default (plan->execute->open-pr->review, the real
              # hive pipeline); HB_REVIEW=0 falls back to plan+execute only.
              "-e", "HB_REVIEW=#{ENV.fetch("HB_REVIEW", "1")}",
@@ -249,6 +389,7 @@ module HiveBench
              "--cpus", ENV.fetch("HB_CPUS", "4"),
              "--memory", ENV.fetch("HB_MEMORY", "8g"),
              "--pids-limit", ENV.fetch("HB_PIDS", "4096"),
+             *(sealed_agent_runtime? ? ["--user", "0:0", "--security-opt", "no-new-privileges:true"] : []),
              *network_args,
              "--tmpfs", "#{HOME}:exec,mode=1777",
              # .claude must be WRITABLE (claude's Bash tool mkdir's session-env
@@ -258,9 +399,11 @@ module HiveBench
              "-v", "#{STAGES_SH}:/hive_stages.sh:ro",
              "-v", "#{RESUME_EXECUTE_SH}:/hive_resume_execute.sh:ro",
              "-v", "#{work}:/work",
+             *hive_runtime_args(hive_runtime),
+             *opencode_runtime_args(candidate),
              *auth_mounts(candidate, out_dir),
              *env_args(candidate),
-             IMAGE,
+             runner_image(candidate),
              # HB_EXIT lets classify() tell a timeout (rc=124) from a stage
              # failure; tee persists the markers so a driver crash after the
              # (expensive) container run can never lose the classification.
@@ -269,14 +412,201 @@ module HiveBench
       (@runner || method(:capture)).call(cmd)
     end
 
-    # Generation needs model-API egress, so `--network none` is impossible here —
-    # but the default bridge leaves the answer key (the public reference PR)
-    # fetchable. HB_GEN_NETWORK names a docker network (e.g. one behind an egress
-    # allowlist proxy) to attach instead; until that's standing, the post-run
-    # answer-key scan (`answer_key_suspect?`) is the detection layer.
+    # Legacy campaigns mount the active runtime. Strict campaigns instead use a
+    # commit-labelled, root-only bundle baked into the image: the controller can
+    # run Hive, while the uid-1000 model processes cannot read its implementation.
+    def hive_runtime_args(runtime = resolved_hive_runtime)
+      if sealed_agent_runtime?
+        build_sha = runtime.fetch(:build_sha)
+        return [
+          "-e", "GEM_HOME=#{HIVE_CONTROL_GEM_HOME}",
+          "-e", "GEM_PATH=#{HIVE_CONTROL_GEM_HOME}:#{CANDIDATE_GEM_HOME}:/usr/local/lib/ruby/gems/3.4.0",
+          "-e", "HB_HIVE_VERSION=#{runtime.fetch(:version)}",
+          "-e", "HB_HIVE_BUILD_SHA=#{build_sha}",
+          "-e", "HB_SEALED_AGENT_RUNTIME=1",
+          "-e", "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW=1"
+        ]
+      end
+
+      [
+        "-v", "#{runtime.fetch(:root)}:#{HIVE_RUNTIME_CONTAINER_ROOT}:ro",
+        "-v", "#{runtime.fetch(:gem_home)}:#{HIVE_GEM_HOME_CONTAINER_ROOT}:ro",
+        "-e", "RUBYLIB=#{HIVE_RUNTIME_RUBYLIB}",
+        "-e", "HB_HIVE_VERSION=#{runtime.fetch(:version)}",
+        "-e", "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW=1"
+      ]
+    end
+
+    def resolved_hive_runtime
+      @hive_runtime || active_hive_runtime
+    end
+
+    def active_hive_runtime
+      bin = active_hive_binary
+      root = File.expand_path("..", File.dirname(bin))
+      canonical_bin = File.join(root, "bin", "hive")
+      hive_lib = File.join(root, "lib", "hive.rb")
+      unless File.file?(canonical_bin) && File.executable?(canonical_bin) && File.file?(hive_lib)
+        raise "active hive binary is not beside a complete runtime: #{bin}"
+      end
+
+      gem_home = File.realpath(ENV.fetch("HB_HIVE_GEM_HOME", Gem.user_dir))
+      raise "active hive gem home is not a directory: #{gem_home}" unless File.directory?(gem_home)
+
+      out, err, status = Open3.capture3(canonical_bin, "--version")
+      version = out.strip
+      unless status.success? && version.match?(/\A\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.-]+)?\z/)
+        detail = err.strip.empty? ? out.strip : err.strip
+        raise "cannot identify active hive runtime version: #{detail}"
+      end
+
+      build_sha = runtime_build_sha(root)
+      { root:, gem_home:, version:, build_sha: }.compact.freeze
+    rescue Errno::ENOENT, Errno::EACCES => e
+      raise "active hive runtime is unavailable: #{e.message}"
+    end
+
+    # A normal installation puts `hive` beside lib/hive.rb. Dogfood instead
+    # exposes a stable PATH wrapper which selects an immutable deployment and
+    # exports its identity before exec. Preserve explicit HB_HIVE_BIN behavior,
+    # but when PATH resolves to that wrapper, recover the exact deployment named
+    # by the inherited identity rather than following the mutable current link.
+    def active_hive_binary
+      explicit = ENV["HB_HIVE_BIN"].to_s.strip
+      return File.realpath(explicit) unless explicit.empty?
+
+      discovered = File.realpath(find_hive_executable)
+      return discovered if complete_runtime_binary?(discovered)
+
+      dogfood_runtime_binary || discovered
+    end
+
+    def complete_runtime_binary?(bin)
+      root = File.expand_path("..", File.dirname(bin))
+      File.file?(File.join(root, "bin", "hive")) &&
+        File.executable?(File.join(root, "bin", "hive")) &&
+        File.file?(File.join(root, "lib", "hive.rb"))
+    end
+
+    def dogfood_runtime_binary
+      return unless ENV["HIVE_RUNTIME_CHANNEL"] == "dogfood"
+
+      deployment_id = ENV["HIVE_RUNTIME_DEPLOYMENT_ID"].to_s
+      build_sha = ENV["HIVE_RUNTIME_BUILD_SHA"].to_s
+      unless deployment_id.match?(/\Ahive-dogfood-[0-9a-f]{9}\z/) &&
+             build_sha.match?(/\A[0-9a-f]{40}\z/) &&
+             deployment_id == "hive-dogfood-#{build_sha[0, 9]}"
+        raise "dogfood hive runtime identity is invalid"
+      end
+
+      state_root = ENV["HIVE_DOGFOOD_STATE_ROOT"].to_s
+      if state_root.empty?
+        state_home = ENV["XDG_STATE_HOME"].to_s
+        state_home = File.expand_path("~/.local/state") if state_home.empty?
+        state_root = File.join(state_home, "hive")
+      end
+      deployments = File.realpath(File.join(state_root, "deployments"))
+      root = File.realpath(File.join(deployments, deployment_id))
+      unless File.dirname(root) == deployments && File.basename(root) == deployment_id
+        raise "dogfood hive runtime escapes managed deployments: #{root}"
+      end
+
+      out, err, status = Open3.capture3("git", "-C", root, "rev-parse", "--verify", "HEAD^{commit}")
+      actual_sha = out.strip
+      unless status.success? && actual_sha == build_sha
+        detail = err.strip.empty? ? actual_sha : err.strip
+        raise "dogfood hive runtime identity mismatch: #{detail}"
+      end
+
+      File.join(root, "bin", "hive")
+    end
+
+    def find_hive_executable
+      ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
+        candidate = File.join(directory, "hive")
+        return candidate if File.file?(candidate) && File.executable?(candidate)
+      end
+      raise "active hive executable is not on PATH (set HB_HIVE_BIN)"
+    end
+
+    def runtime_build_sha(root)
+      out, _err, status = Open3.capture3("git", "-C", root, "rev-parse", "--verify", "HEAD^{commit}")
+      sha = out.strip
+      status.success? && sha.match?(/\A[0-9a-f]{40}\z/) ? sha : nil
+    end
+
+    def sealed_agent_runtime?
+      ENV["HB_REQUIRE_SEALED_AGENT_RUNTIME"] == "1"
+    end
+
+    def verify_sealed_runtime!(candidate, runtime)
+      build_sha = runtime[:build_sha].to_s
+      unless build_sha.match?(/\A[0-9a-f]{40}\z/)
+        raise "sealed benchmark runtime requires an exact 40-character Hive build SHA"
+      end
+
+      unsupported = agent_ids(candidate) - %w[pi opencode]
+      unless unsupported.empty?
+        raise "sealed benchmark runtime does not yet support candidate agent(s): #{unsupported.join(", ")}"
+      end
+
+      image = runner_image(candidate)
+      labels = inspect_image_labels(image)
+      actual_sha = labels["io.hive.bench.hive-build-sha"].to_s
+      visibility = labels["io.hive.bench.runtime-visibility"].to_s
+      unless actual_sha == build_sha && visibility == SEALED_RUNTIME_VISIBILITY
+        raise "runner image #{image} is not the sealed Hive build #{build_sha}: " \
+              "build_sha=#{actual_sha.inspect} runtime_visibility=#{visibility.inspect}"
+      end
+    end
+
+    def inspect_image_labels(image)
+      return @image_inspector.call(image) if @image_inspector
+
+      out, err, status = Open3.capture3(
+        "docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image
+      )
+      raise "cannot inspect benchmark runner image #{image}: #{err.strip}" unless status.success?
+
+      labels = JSON.parse(out)
+      raise "benchmark runner image #{image} has no labels" unless labels.is_a?(Hash)
+
+      labels
+    rescue JSON::ParserError => e
+      raise "cannot parse benchmark runner image labels for #{image}: #{e.message}"
+    end
+
+    # Generation needs model-API egress, so `--network none` is impossible. A
+    # strict campaign attaches the cell to an internal Docker network whose only
+    # dual-homed peer is an allowlisting CONNECT proxy. The proxy variables make
+    # Node/Pi use that peer; the internal network prevents bypass by unsetting
+    # them. Partial configuration fails closed because a proxy on the ordinary
+    # bridge, or an internal network with no proxy, is not the claimed boundary.
     def network_args
-      net = ENV.fetch("HB_GEN_NETWORK", nil)
-      net ? ["--network", net] : []
+      network = generation_egress.fetch(:network)
+      network ? ["--network", network] : []
+    end
+
+    def generation_egress
+      network = ENV["HB_GEN_NETWORK"].to_s.strip
+      proxy = ENV["HB_GEN_HTTPS_PROXY"].to_s.strip
+      required = ENV["HB_REQUIRE_EGRESS_ALLOWLIST"] == "1"
+      if network.empty? && proxy.empty?
+        raise "benchmark requires provider-only generation egress" if required
+
+        return { mode: "unrestricted", network: nil, proxy: nil }.freeze
+      end
+      if network.empty? || proxy.empty?
+        raise "HB_GEN_NETWORK and HB_GEN_HTTPS_PROXY must be set together"
+      end
+      unless network.match?(/\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/)
+        raise "HB_GEN_NETWORK is not a safe Docker network name"
+      end
+      unless proxy.match?(%r{\Ahttp://[a-zA-Z0-9][a-zA-Z0-9.-]{0,126}:[1-9]\d{0,4}\z})
+        raise "HB_GEN_HTTPS_PROXY must be a credential-free internal http://host:port URL"
+      end
+
+      { mode: "provider-allowlist", network:, proxy: }.freeze
     end
 
     # Mount the auth each used agent needs. claude: creds+settings+plugins at the
@@ -341,7 +671,10 @@ module HiveBench
         raise "pi CE skills missing or not a directory: #{pi_skills}" unless File.directory?(pi_skills)
 
         mounts += ["-v", "#{pi_skills}:/opt/hb/pi-ce-skills:ro",
-                   "-v", "#{PI_TOOL_STREAM}:/opt/hb/pi-tool-stream.ts:ro"]
+                   "-v", "#{PI_BENCH_LAUNCHER}:/opt/hb/pi-bench-launcher:ro",
+                   "-v", "#{PI_TOOL_STREAM}:/opt/hb/pi-tool-stream.ts:ro",
+                   "-v", "#{PI_OPENROUTER_MODELS}:/opt/hb/pi-openrouter-models.json:ro",
+                   "-e", "HIVE_PI_BIN=/opt/hb/pi-bench-launcher"]
       end
       if uses?(candidate, "grok")
         # Keep sessions/config/leader state ephemeral per cell. Only the
@@ -412,10 +745,16 @@ module HiveBench
     end
 
     # Forward credentials only. Candidate identity is declared in Hive's native
-    # `models:` config and compiled by the shared Agent CLI runtime.
+    # `models:` config and compiled by its Agent CLI runtime.
     def env_args(candidate)
       args = []
-      if uses?(candidate, "pi")
+      egress = generation_egress
+      if egress.fetch(:proxy)
+        proxy = egress.fetch(:proxy)
+        args += ["-e", "HTTPS_PROXY=#{proxy}", "-e", "HTTP_PROXY=#{proxy}",
+                 "-e", "ALL_PROXY=#{proxy}", "-e", "NODE_USE_ENV_PROXY=1"]
+      end
+      if uses?(candidate, "pi") || uses?(candidate, "opencode")
         args += ENV["OPENROUTER_API_KEY"] ? ["-e", "OPENROUTER_API_KEY"] : []
       end
       if uses?(candidate, "grok")
@@ -424,17 +763,37 @@ module HiveBench
       args
     end
 
+    def runner_image(candidate)
+      uses?(candidate, "opencode") ? OPENCODE_IMAGE : IMAGE
+    end
+
+    def opencode_runtime_args(candidate)
+      return [] unless uses?(candidate, "opencode")
+
+      [
+        "-v", "#{OPENCODE_BENCH_RUNTIME}:/opt/hb/opencode_bench_runtime.rb:ro",
+        "-v", "#{OPENCODE_BENCH_LAUNCHER}:/opt/hb/opencode-bench-launcher:ro",
+        "-e", "HIVE_OPENCODE_BIN=/opt/hb/opencode-bench-launcher",
+        "-e", "HB_OPENCODE_CE_PREFLIGHT=1",
+        "-e", "HB_OPENCODE_PROBE_TIMEOUT_SEC=300",
+        "-e", "RUBYOPT=-r/opt/hb/opencode_bench_runtime"
+      ]
+    end
+
     def uses?(candidate, agent)
+      agent_ids(candidate).include?(agent)
+    end
+
+    def agent_ids(candidate)
       stage_agents = [candidate.plan, candidate.execute, candidate.review]
       reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
         reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
       end
-      (stage_agents + reviewer_agents).include?(agent)
+      (stage_agents + reviewer_agents).compact.map(&:to_s).uniq
     end
 
-    # Minimal per-cell Codex config: CE plugin registration (the cache is
-    # mounted + linked separately) and trust for /work. Candidate model and
-    # effort never live here; Hive's Agent CLI runtime supplies them per call.
+    # Candidate model and effort live in Hive's stage routes, not the operator's
+    # global Codex config. This file only registers CE and trusts the worktree.
     def codex_config(_candidate)
       <<~TOML
         [marketplaces.compound-engineering-plugin]
@@ -451,7 +810,8 @@ module HiveBench
 
     # ---- result assembly ----
 
-    def build_cell(entry, candidate, work, stdout, wall, recovered: nil, log_baseline: nil)
+    def build_cell(entry, candidate, work, stdout, wall, recovered: nil)
+      timeout_fallback = promote_execute_patch_after_timeout(work, stdout)
       diff_path = File.join(work, "candidate.patch")
       diff = File.file?(diff_path) ? File.read(diff_path) : ""
       tel = telemetry(work).merge("wall_clock_sec" => wall)
@@ -464,19 +824,44 @@ module HiveBench
       # a covariate of the known scope-fork variance; surfaced so it's analyzable.
       tel["plan_forced_complete"] = true if stdout&.match?(/^HB_NOTE plan_forced_complete$/)
       tel["execute_resumed"] = true if stdout&.match?(/^HB_NOTE execute_resumed$/)
+      tel["execute_residue_recovered"] = true if stdout&.match?(/^HB_NOTE execute_residue_recovered$/)
+      tel["review_resumed"] = true if stdout&.match?(/^HB_NOTE review_resumed$/)
       review_telemetry(tel, work, stdout)
+      if timeout_fallback
+        tel["stage_timed_out"] = true
+        tel["review_status"] = "timed_out"
+      end
       if (hit = answer_key_suspect(entry, work, stdout))
         # The agent appears to have touched the held-out reference PR — the score
         # would measure retrieval, not skill. Flag loudly; a curator adjudicates.
         tel["answer_key_access_suspect"] = hit
         warn "hive-bench: ANSWER-KEY ACCESS SUSPECT — #{entry["task_id"]}: #{hit}"
       end
-      status, reason = classify(stdout, work, diff, log_baseline: log_baseline)
-      # `generate` treats candidate.patch as a paid artifact sentinel. A failed
-      # stage can still leave a zero-byte capture behind, so remove only that
-      # nonterminal sentinel; preserve real partial diffs and terminal empty_diff.
+      status, reason = classify(stdout, work, diff)
+      # Failed runs can leave a zero-byte capture that `generate` would mistake
+      # for a paid artifact sentinel. Preserve real diffs and terminal empties.
       FileUtils.rm_f(diff_path) if diff.empty? && !%w[generated empty_diff].include?(status)
       cell(entry, candidate, status, status == "generated" ? diff_path : nil, tel, reason)
+    end
+
+    # The outer timeout can kill hive_stages.sh while review is running, before
+    # it gets a chance to restore the trustworthy execute snapshot over any
+    # partial review diff. Once develop completed, preserve that paid artifact
+    # atomically and let judging proceed with review marked as timed out.
+    def promote_execute_patch_after_timeout(work, stdout)
+      return false unless stdout.to_s.match?(/^HB_EXIT rc=124$/)
+      return false unless stage_ok?(stdout, "plan") && stage_ok?(stdout, "develop")
+
+      execute_patch = File.join(work, "candidate-execute.patch")
+      return false unless File.file?(execute_patch) && File.size?(execute_patch)
+
+      final_patch = File.join(work, "candidate.patch")
+      next_patch = "#{final_patch}.next"
+      FileUtils.cp(execute_patch, next_patch)
+      File.rename(next_patch, final_patch)
+      true
+    ensure
+      FileUtils.rm_f(next_patch) if defined?(next_patch) && next_patch
     end
 
     # Review-cycle telemetry. Review failing must NOT lose a generated cell —
@@ -501,14 +886,21 @@ module HiveBench
 
     # run_status from the stage markers + the captured diff. limit_hit (a provider
     # wall) parks the cell; an empty/failed plan or execute is surfaced honestly.
-    def classify(stdout, work, diff, log_baseline: nil)
+    def classify(stdout, work, diff)
       err = File.file?(f = File.join(work, ".hb", "stage.err")) ? File.read(f) : ""
-      limit_hit = provider_limit_hit?(stdout, work, err, log_baseline: log_baseline)
+      limit_hit = AgentLimit.limit_hit?("#{stdout}\n#{err}")
       # timeout(1) kills the whole stage script — a slow candidate, not one that
-      # cannot plan. HB_EXIT comes from the run_container wrapper; any other
-      # nonzero means the harness itself did not produce a trustworthy artifact.
+      # cannot plan. A completed develop stage retains a trustworthy execute
+      # snapshot even when review overruns the outer bound. HB_EXIT comes from
+      # the run_container wrapper; any other nonzero means the harness itself
+      # did not produce a trustworthy artifact.
       exit_rc = stdout.to_s[/^HB_EXIT rc=(\d+)$/, 1]&.to_i
-      return ["timed_out", "hive run exceeded HB_HIVE_TIMEOUT (#{PLAN_TIMEOUT}s)"] if exit_rc == 124
+      if exit_rc == 124
+        return ["generated", nil] if stage_ok?(stdout, "plan") && stage_ok?(stdout, "develop") &&
+                                     !diff.strip.empty?
+
+        return ["timed_out", "hive run exceeded HB_HIVE_TIMEOUT (#{PLAN_TIMEOUT}s)"]
+      end
       # Review is optional for generation integrity: hive_stages.sh atomically
       # restores candidate-execute.patch when review fails. A review-only limit
       # therefore defers review lift/Fable judging, not the already trustworthy
@@ -522,31 +914,6 @@ module HiveBench
       return ["empty_diff", "execute produced no diff"] if diff.strip.empty?
 
       ["generated", nil]
-    end
-
-    def stream_log_baseline(work)
-      Dir.glob(File.join(work, ".hive-state", "logs", "**", "*.log")).each_with_object({}) do |path, out|
-        stat = File.stat(path)
-        out[path] = [stat.dev, stat.ino, stat.size]
-      rescue SystemCallError
-        next
-      end
-    end
-
-    def provider_limit_hit?(stdout, work, stage_error, log_baseline: nil)
-      return true if AgentLimit.limit_hit?("#{stdout}\n#{stage_error}")
-
-      Dir.glob(File.join(work, ".hive-state", "logs", "**", "*.log")).any? do |path|
-        File.open(path) do |file|
-          stat = file.stat
-          baseline = log_baseline&.fetch(path, nil)
-          offset = baseline && baseline.values_at(0, 1) == [stat.dev, stat.ino] && stat.size >= baseline[2] ? baseline[2] : 0
-          file.seek(offset)
-          file.each_line.any? { |line| AgentLimit.limit_hit?(line) }
-        end
-      rescue SystemCallError
-        false
-      end
     end
 
     # Detects the one leakage that invalidates a cell outright: the candidate
@@ -608,6 +975,12 @@ module HiveBench
           message = obj["message"]
           u = (message["usage"] if message.is_a?(Hash)) || obj["usage"]
           if u.is_a?(Hash)
+            # Pi emits interim message_update usage and repeats each finalized
+            # response on turn_end. Each assistant message_end is one billable
+            # response, so a multi-turn run can contribute several of them.
+            if u.key?("cacheRead") || u.key?("input")
+              next unless obj["type"] == "message_end" && message.is_a?(Hash) && message["role"] == "assistant"
+            end
             # Two stream schemas: claude's snake_case *_tokens and pi's camelCase
             # input/output/cacheRead/cacheWrite — without the aliases, open-model
             # cells recorded zero tokens and no cost.
@@ -621,9 +994,28 @@ module HiveBench
           cost += obj["total_cost_usd"].to_f if obj["type"] == "result"
         end
       end
-      { "input_tokens" => input, "output_tokens" => output, "cached_tokens" => cached,
-        "cache_creation_tokens" => cache_creation,
-        "cost_usd" => cost.round(6) }.reject { |_, v| v.zero? }
+      telemetry = { "input_tokens" => input, "output_tokens" => output,
+                    "cached_tokens" => cached,
+                    "cache_creation_tokens" => cache_creation,
+                    "cost_usd" => cost.round(6) }.reject { |_, v| v.zero? }
+      return telemetry if telemetry.keys.any? { |key| key.end_with?("_tokens") }
+
+      # OpenCode events are intentionally redacted from Hive's stage logs. Hive
+      # still records their normalized usage in its per-cell SQLite database, so
+      # use that canonical store when no stream-token evidence exists.
+      database_usage = TokenReport.scan_usage_db(work)
+      return telemetry if database_usage.empty?
+
+      totals = Hash.new(0)
+      database_usage.each_value do |usage|
+        TokenReport::BUCKETS.each { |bucket| totals[bucket] += usage[bucket] }
+      end
+      telemetry.merge(
+        "input_tokens" => totals["input"],
+        "output_tokens" => totals["output"],
+        "cached_tokens" => totals["cache_read"],
+        "cache_creation_tokens" => totals["cache_write"]
+      )
     end
 
     # Extract the JSON object from a `[stream] <ts> {json}` log line (or a bare

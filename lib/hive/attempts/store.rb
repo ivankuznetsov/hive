@@ -22,20 +22,44 @@ module Hive
     class Store
       DEFAULT_ROOT = Object.new.freeze
 
+      # Read-only, scan-scoped projection view. Task journals and closure
+      # validation commonly ask for the same immutable attempt binding while
+      # projecting one fleet snapshot. Keep that point read coherent and pay
+      # for it once without making the long-lived runtime store cache mutable
+      # hot attempt state across scans.
+      class ProjectionReader
+        def initialize(store)
+          @store = store
+          @bindings = {}
+        end
+
+        def fetch_projection_binding(attempt_id)
+          key = attempt_id.to_s
+          return @bindings[key] if @bindings.key?(key)
+
+          @bindings[key] = @store.fetch_projection_binding(attempt_id)
+        end
+      end
+
       def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
-        root = prepare_default_root!(state_home)
+        root = default_root(state_home)
         new(root: root, create_directories: create_directories)
       end
 
-      def self.prepare_default_root!(state_home)
-        require "hive/recovery/migration"
-        Hive::Recovery::Migration.ensure!(state_home: state_home)
+      def self.runtime(create_directories: true)
+        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
+        return new(create_directories: create_directories) if root.empty?
+
+        new(root: root, create_directories: create_directories)
+      end
+
+      def self.default_root(state_home)
         File.join(File.expand_path(state_home), "attempts", "v4")
       end
-      private_class_method :prepare_default_root!
+      private_class_method :default_root
 
       def initialize(root: DEFAULT_ROOT, create_directories: true)
-        root = self.class.send(:prepare_default_root!, Hive::Paths.state_home) if root.equal?(DEFAULT_ROOT)
+        root = self.class.send(:default_root, Hive::Paths.state_home) if root.equal?(DEFAULT_ROOT)
         @root = File.expand_path(root)
         @create_directories = create_directories
         @records_root = File.join(@root, "records")
@@ -218,6 +242,10 @@ module Hive
         return hot if hot
 
         permanent_proofs.fetch_projection_binding(attempt_id)
+      end
+
+      def projection_reader
+        ProjectionReader.new(self)
       end
 
       def fetch_hot(attempt_id)

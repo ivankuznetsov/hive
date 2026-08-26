@@ -34,7 +34,6 @@ require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
 require "hive/commands/service_installer/result_presenter"
-require "hive/recovery/migration"
 
 module Hive
   module Commands
@@ -145,8 +144,6 @@ module Hive
 
         # Stale PID file from a prior crash → safe to remove.
         File.delete(pid_file) if File.exist?(pid_file)
-        Hive::Recovery::Migration.ensure!(state_home: @hive_home)
-
         if @detach
           Process.daemon(true, true)
         end
@@ -181,7 +178,12 @@ module Hive
         # Write the PID file as YAML with process_start_time so `stop`
         # can detect PID reuse before sending TERM/KILL to a random
         # process that happens to have the same PID. PR-40 review P2 #3.
-        File.write(pid_file, pid_file_payload(Process.pid, own_start_time).to_yaml)
+        File.write(
+          pid_file,
+          pid_file_payload(Process.pid, own_start_time).merge(
+            "runtime" => Hive::RuntimeIdentity.new.to_h
+          ).to_yaml
+        )
 
         # Load the daemon block from ~/Dev/hive/config.yml so operator
         # overrides (max_concurrent_runs, poll_interval_sec, log paths,
@@ -297,6 +299,9 @@ module Hive
         operational_snapshot = Hive::Daemon::OperationalSnapshot::Assembler.new(
           store: Hive::Daemon::OperationalSnapshot::Store.new(
             path: Hive::Paths.operational_snapshot_path(@hive_home)
+          ),
+          status_cache_store: Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
+            path: Hive::Paths.operational_status_cache_path(@hive_home)
           ),
           daemon_identity: Hive::Daemon::OperationalSnapshot.daemon_identity(
             pid: Process.pid, process_start_time: own_start_time

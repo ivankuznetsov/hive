@@ -1735,16 +1735,13 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         end
       end
       assert_includes error.message, "synthetic extension write failure"
-      refute_includes Hive::AgentSupport::Pi::Runtime.evidence_extension(
+      extension = Hive::AgentSupport::Pi::Runtime.evidence_extension(
         source_root: source, task_root: task, writable_root: writable,
         task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
         browser: false
-      ), 'name: "evidence_browser"'
-      refute_includes Hive::WorkflowPackage::RuntimePolicy.pi_evidence_extension(
-        source_root: source, task_root: task, writable_root: writable,
-        task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
-        browser: false
-      ), 'name: "evidence_server"'
+      )
+      refute_includes extension, 'name: "evidence_browser"'
+      refute_includes extension, 'name: "evidence_server"'
     end
   end
 

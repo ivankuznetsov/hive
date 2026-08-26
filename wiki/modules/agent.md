@@ -221,6 +221,14 @@ the strict JSONL run boundary becomes a typed `malformed_output` failure.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
+Controller-managed report stages use `ManagedAgentCustody` with
+`:exit_code_only`, then validate the required report and protected anchors as
+one outer transaction. If Pi reports a failed provider turn, retries it
+internally, and later exits zero with a clean current report, that clean custody
+receipt is terminal completion evidence and the transient failure is recovered.
+Missing output, nonzero exit, timeout, or any protected-anchor change remains a
+failure.
+
 Claude/tmux launches record the managed pane PID in the same per-task lock.
 `Hive::ClaudeLauncher#record_claude_pid` waits for `pane_pid`, then writes both
 `claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the

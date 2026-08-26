@@ -143,11 +143,15 @@ module Hive
         # point — most importantly a trailing SGR reset — so a truncated
         # styled line cannot bleed reverse video / colour into later
         # output. A cut that strands an open SGR style gets a reset
-        # appended before returning.
+        # appended before returning. The cut is a strict prefix cut: once
+        # a visible grapheme does not fit, no later text token may leak
+        # through, even when mid-line escapes split the line into several
+        # visible runs.
         def take_cells(label, max_width)
           remaining = max_width
           result = +""
           style_open = false
+          exhausted = false
           label.to_s.scan(TOKEN_PATTERN) do |token|
             if token.start_with?("\e")
               result << token
@@ -155,7 +159,10 @@ module Hive
             else
               token.each_grapheme_cluster do |cluster|
                 width = display_width(cluster)
-                break if width > remaining
+                if exhausted || width > remaining
+                  exhausted = true
+                  break
+                end
 
                 result << cluster
                 remaining -= width

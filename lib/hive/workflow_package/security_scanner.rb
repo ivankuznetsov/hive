@@ -203,9 +203,14 @@ module Hive
         last
       end
 
+      # MatchData#begin yields a character offset, so every slice and index
+      # here must use String (character) semantics, not byteslice; mixing
+      # domains desynchronizes line/column once multibyte codepoints appear.
       def location(text, offset)
-        before = text.byteslice(0, offset).to_s
-        [ before.count("\n") + 1, before.byteslice((before.rindex("\n") || -1) + 1..)&.length.to_i + 1 ]
+        before = text[0, offset].to_s
+        newline_index = before.rindex("\n")
+        column = newline_index ? before.length - newline_index : before.length + 1
+        [ before.count("\n") + 1, column ]
       end
 
       def referenced_domains(text)

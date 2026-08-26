@@ -1,0 +1,313 @@
+{
+  "schema": "hive-patrol-dispatch-incident-replay",
+  "schema_version": 1,
+  "incident": {
+    "date_utc": "2026-08-26",
+    "source": "sanitized durable Attempts v4 accounting projection",
+    "selection": "first 600 charged project attempts in the incident accounting window",
+    "observed_window_utc": {
+      "start": "2026-08-26T00:00:35Z",
+      "end": "2026-08-26T11:51:13Z"
+    }
+  },
+  "sanitization": {
+    "synthetic_identities": true,
+    "prompts_included": false,
+    "secret_material_included": false,
+    "credentials_included": false,
+    "raw_output_included": false,
+    "absolute_paths_included": false,
+    "stage_failure_pairing": "deterministic synthetic allocation preserving each observed aggregate margin"
+  },
+  "expected_metrics": {
+    "accepted_attempts": 600,
+    "charged_attempts": 600,
+    "patrol_fix_attempts": 598,
+    "coding_attempts": 2,
+    "failed_attempts": 153,
+    "succeeded_attempts": 447,
+    "repeat_launches": 141,
+    "unique_generation_stage_identities": 459,
+    "repeated_generation_stage_identities": 88,
+    "max_attempts_for_identity": 5
+  },
+  "identity_multiplicity": [
+    { "attempts": 1, "identities": 371 },
+    { "attempts": 2, "identities": 44 },
+    { "attempts": 3, "identities": 36 },
+    { "attempts": 4, "identities": 7 },
+    { "attempts": 5, "identities": 1 }
+  ],
+  "stage_outcomes": [
+    { "stage": "1-inbox", "failed": 0, "succeeded": 5 },
+    { "stage": "2-brainstorm", "failed": 0, "succeeded": 2 },
+    { "stage": "2-fix", "failed": 58, "succeeded": 179 },
+    { "stage": "3-validate", "failed": 35, "succeeded": 147 },
+    { "stage": "4-review", "failed": 55, "succeeded": 86 },
+    { "stage": "5-publish", "failed": 5, "succeeded": 28 }
+  ],
+  "failure_cohorts": [
+    {
+      "cohort": "worktree_head_custody_mismatch",
+      "count": 59,
+      "terminal_envelope": {
+        "phase": "post_agent_custody",
+        "status": "error",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": "sanitized_managed_profile",
+        "provider_failure": null,
+        "report_status": "valid",
+        "firewall_status": "clean",
+        "custody_status": "head_drift",
+        "head_relation": "unexpected_movement",
+        "custody_proven": false
+      },
+      "expected_normalized_code": "worktree_head_custody_mismatch"
+    },
+    {
+      "cohort": "agent_result_generic",
+      "count": 53,
+      "terminal_envelope": {
+        "phase": "managed_agent",
+        "status": "error",
+        "exit_code": 1,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": "sanitized_managed_profile",
+        "provider_failure": null,
+        "report_status": "unknown",
+        "firewall_status": "clean",
+        "custody_status": "clean",
+        "stage_family": "fix_or_review",
+        "typed_detail_present": false
+      },
+      "expected_normalized_code": "agent_result_generic"
+    },
+    {
+      "cohort": "diagnostic_missing",
+      "count": 18,
+      "terminal_envelope": {
+        "phase": "terminal_receipt",
+        "status": "error",
+        "exit_code": 1,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": "sanitized_managed_profile",
+        "provider_failure": null,
+        "report_status": "unknown",
+        "firewall_status": "unknown",
+        "custody_status": "unknown",
+        "diagnostic_present": false
+      },
+      "expected_normalized_code": "diagnostic_missing"
+    },
+    {
+      "cohort": "protected_git_config_mutation",
+      "count": 11,
+      "terminal_envelope": {
+        "phase": "protected_anchor_restore",
+        "status": "error",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": "sanitized_managed_profile",
+        "provider_failure": null,
+        "report_status": "valid",
+        "firewall_status": "tampered_restored",
+        "custody_status": "tampered",
+        "protected_git_config_changed": true,
+        "restore_status": "restored"
+      },
+      "expected_normalized_code": "protected_git_config_mutation"
+    },
+    {
+      "cohort": "state_git_index_lock",
+      "count": 4,
+      "terminal_envelope": {
+        "phase": "state_git_write",
+        "status": "error",
+        "exit_code": null,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": null,
+        "provider_failure": null,
+        "report_status": "not_applicable",
+        "firewall_status": "not_applicable",
+        "custody_status": "not_applicable",
+        "relative_lock": ".hive-state/index.lock",
+        "write_status": "lock_conflict"
+      },
+      "expected_normalized_code": "state_git_index_lock"
+    },
+    {
+      "cohort": "secret_policy_publish_blocked",
+      "count": 3,
+      "terminal_envelope": {
+        "phase": "publication",
+        "status": "error",
+        "exit_code": null,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": null,
+        "provider_failure": null,
+        "report_status": "valid",
+        "firewall_status": "clean",
+        "custody_status": "clean",
+        "publication_status": "blocked_by_policy",
+        "matched_bytes_retained": false
+      },
+      "expected_normalized_code": "secret_policy_publish_blocked"
+    },
+    {
+      "cohort": "fix_report_invalid",
+      "count": 2,
+      "terminal_envelope": {
+        "phase": "fix_report_admission",
+        "status": "error",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": "sanitized_managed_profile",
+        "provider_failure": null,
+        "report_status": "invalid",
+        "firewall_status": "clean",
+        "custody_status": "invalid_output"
+      },
+      "expected_normalized_code": "fix_report_invalid"
+    },
+    {
+      "cohort": "fix_worktree_dirty",
+      "count": 2,
+      "terminal_envelope": {
+        "phase": "fix_worktree_preflight",
+        "status": "error",
+        "exit_code": null,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": null,
+        "provider_failure": null,
+        "report_status": "not_applicable",
+        "firewall_status": "not_applicable",
+        "custody_status": "dirty",
+        "worktree_status": "dirty"
+      },
+      "expected_normalized_code": "fix_worktree_dirty"
+    },
+    {
+      "cohort": "validation_mutation",
+      "count": 1,
+      "terminal_envelope": {
+        "phase": "validation_custody",
+        "status": "error",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "signal": null,
+        "provider": null,
+        "provider_failure": null,
+        "report_status": "not_applicable",
+        "firewall_status": "clean",
+        "custody_status": "mutation",
+        "authoritative_state_changed": true
+      },
+      "expected_normalized_code": "validation_mutation"
+    }
+  ],
+  "accounting_cases": [
+    {
+      "name": "started_failure",
+      "accepted": true,
+      "state": "terminal",
+      "started_at": "2026-08-26T00:00:01Z",
+      "exit_status": 1,
+      "expected_charged": true
+    },
+    {
+      "name": "started_success",
+      "accepted": true,
+      "state": "terminal",
+      "started_at": "2026-08-26T00:00:01Z",
+      "exit_status": 0,
+      "expected_charged": true
+    },
+    {
+      "name": "unstarted_loss",
+      "accepted": true,
+      "state": "lost",
+      "started_at": null,
+      "exit_status": null,
+      "expected_charged": false
+    },
+    {
+      "name": "started_tempfail",
+      "accepted": true,
+      "state": "terminal",
+      "started_at": "2026-08-26T00:00:01Z",
+      "exit_status": 75,
+      "expected_charged": false
+    }
+  ],
+  "pending_candidates": [
+    {
+      "class": "patrol_progress_later_stage",
+      "workflow": "patrol_fix",
+      "stage": "4-review",
+      "current_priority": 1
+    },
+    {
+      "class": "patrol_progress_first_attempt",
+      "workflow": "patrol_fix",
+      "stage": "2-fix",
+      "current_priority": 2
+    },
+    {
+      "class": "non_patrol_first_attempt",
+      "workflow": "coding",
+      "stage": "4-execute",
+      "current_priority": 3
+    },
+    {
+      "class": "patrol_retry",
+      "workflow": "patrol_fix",
+      "stage": "2-fix",
+      "current_priority": 4
+    }
+  ],
+  "operational": {
+    "temporary_daily_cap": 1000,
+    "rollback_daily_cap": 600,
+    "portable_fields": [
+      "configured_daily_cap",
+      "accepted_attempt_count",
+      "charged_attempt_count",
+      "utc_accounting_date",
+      "deployed_revision",
+      "runtime_deployment_id"
+    ],
+    "exit_gate": {
+      "requires": "stable_24_hour_final_soak",
+      "then": "restore_cap_and_observe_one_complete_utc_accounting_window"
+    },
+    "rollback": {
+      "preserve_accepted_attempts": true,
+      "block_new_admission_when_usage_is_at_or_above_600": true,
+      "cancel_running_attempts": false
+    }
+  },
+  "non_patrol_demand": {
+    "available": false,
+    "required_window": "seven complete UTC days preceding 2026-08-26",
+    "uncertainty": "Attempts v4 does not durably retain an unambiguous workflow identity for every historical 1-inbox record, so a non-Patrol daily series cannot be reconstructed without inventing classification.",
+    "fallback_policy": "use ten percent of the configured cap until defensible workflow-attributed history exists"
+  }
+}

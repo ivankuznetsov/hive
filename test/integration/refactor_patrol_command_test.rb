@@ -164,6 +164,66 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  class FakeArchiveStore
+    attr_reader :archived_job_ids
+
+    def initialize
+      @archived_job_ids = []
+      @job = nil
+    end
+
+    def archive_legacy_actions!(job_id)
+      @archived_job_ids << job_id
+      @job = {
+        "job_id" => job_id,
+        "state" => "complete",
+        "complete" => true,
+        "source" => {
+          "url" => "https://github.com/acme/demo/pull/1015",
+          "number" => 1015,
+          "repository" => "acme/demo",
+          "registration" => "demo",
+          "base_branch" => "master",
+          "merge_sha" => "a" * 40
+        },
+        "analysis_sha" => "b" * 40,
+        "policy" => {},
+        "dispositions" => {
+          "fix" => [], "discuss" => [], "dismiss" => []
+        },
+        "feature_results" => [],
+        "review_errors" => [],
+        "zero_reason" => nil,
+        "attempts" => [],
+        "actions" => [
+          {
+            "canonical_action_id" => "fix-legacy",
+            "terminal" => true,
+            "receipts" => {
+              "archive" => {
+                "reason" => "unified_patrol_fix_cutover"
+              }
+            },
+            "claims" => []
+          }
+        ],
+        "created_at" => "2026-08-15T12:00:00Z",
+        "updated_at" => "2026-08-26T12:00:00Z"
+      }
+      {
+        status: :archived,
+        archived_actions: 12,
+        job: @job
+      }
+    end
+
+    def read_job(job_id)
+      raise "unexpected job" unless @job&.fetch("job_id") == job_id
+
+      @job
+    end
+  end
+
   def test_json_run_routes_persists_and_rerun_dismisses_seen_theses
     with_refactor_patrol_project do |repo|
       features = [ feature("checkout"), feature("search") ]
@@ -1799,6 +1859,33 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_archives_one_legacy_job_with_a_versioned_mutation_envelope
+    with_refactor_patrol_project do |repo|
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      raw = YAML.safe_load(File.read(config_path))
+      raw.fetch("refactor_patrol")["enabled"] = false
+      raw["default_workflow"] = "content"
+      File.write(config_path, raw.to_yaml)
+      store = FakeArchiveStore.new
+
+      out, = capture_io do
+        Hive::Commands::RefactorPatrol.new(
+          "demo", json: true, archive: "pr-1015-legacy",
+          job_store_factory: ->(_project_root) { store }
+        ).call
+      end
+
+      payload = JSON.parse(out)
+      assert_empty job_query_schemer.validate(payload).to_a
+      assert_equal "show", payload.fetch("action")
+      assert_equal true, payload.dig("job", "complete")
+      assert_equal 0, payload.dig("job", "counts", "pending_actions")
+      assert_equal "unified_patrol_fix_cutover",
+                   payload.dig("job", "actions", 0, "receipts", "archive", "reason")
+      assert_equal [ "pr-1015-legacy" ], store.archived_job_ids
+    end
+  end
+
   def test_job_query_rejects_mutating_or_ambiguous_modes
     command = Hive::Commands::RefactorPatrol.new(
       "demo", json: true, list: true, show: "job-7"
@@ -1839,6 +1926,14 @@ class RefactorPatrolCommandTest < Minitest::Test
       command.send(:validate_mode!)
     end
     assert_match(/cannot be combined with discovery options/, error.message)
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, archive: "job-7", list: true
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/--archive cannot be combined/, error.message)
   end
 
   def test_job_query_usage_is_validated_before_project_resolution

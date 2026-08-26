@@ -63,6 +63,12 @@ module Hive
         family_id claims created_at updated_at
       ]).freeze
       ACTION_KINDS = %w[fix issue].freeze
+      ACTION_ARCHIVE_RECEIPT_KEYS = %w[
+        reason previous_outcome archived_at
+      ].freeze
+      ACTION_ARCHIVE_REASON = "unified_patrol_fix_cutover".freeze
+      ACTION_ARCHIVE_OUTCOME =
+        "archived_after_patrol_fix_cutover".freeze
       TERMINAL_PROOF_KEYS = %w[
         canonical_action_id outcome owner proof proof_digest
       ].freeze
@@ -667,6 +673,94 @@ module Hive
           aggregate["complete"] = !remaining
           aggregate["updated_at"] = timestamp
           [ aggregate, :retired ]
+        end
+      end
+
+      # Explicit one-time cleanup for action-era jobs left behind after
+      # Architecture Patrol cut over to the shared Patrol Fix workflow. The
+      # findings, claims, and publication receipts remain in the aggregate;
+      # only unpublished, authority-revoked legacy actions become terminal.
+      # Any live claim, linked pending action, or pending remote-effect
+      # continuation fails closed so this administrative transition cannot
+      # abandon real work. Already-terminal actions remain immutable evidence.
+      def archive_legacy_actions!(job_id, now: Time.now)
+        mutate_job(job_id) do |aggregate, path|
+          if aggregate.fetch("complete")
+            next [
+              aggregate,
+              {
+                status: :already_complete,
+                archived_actions: 0,
+                job: aggregate
+              }
+            ]
+          end
+
+          actions = aggregate.fetch("actions")
+          pending = actions.reject { |action| action.fetch("terminal") }
+          if actions.empty?
+            raise InconsistentRecord.new(
+              "legacy action archive requires pending historical actions",
+              path: path
+            )
+          end
+          if active_discovery_attempt(aggregate) ||
+             actions.any? { |action| active_action_claim(action) }
+            raise InconsistentRecord.new(
+              "legacy action archive refuses a job with an active claim",
+              path: path
+            )
+          end
+          unless aggregate.fetch("review_errors").empty?
+            raise InconsistentRecord.new(
+              "legacy action archive refuses unresolved review errors",
+              path: path
+            )
+          end
+          unless pending.any? do |action|
+                   action.fetch("outcome") == "authority_revoked"
+                 end
+            raise InconsistentRecord.new(
+              "legacy action archive requires an authority_revoked cutover fence",
+              path: path
+            )
+          end
+          if pending.any? do |action|
+               action.fetch("owner_job_id") != aggregate.fetch("job_id")
+             end
+            raise InconsistentRecord.new(
+              "legacy action archive refuses linked canonical actions",
+              path: path
+            )
+          end
+          if pending.any? { |action| continuation_after_revocation?(action) }
+            raise InconsistentRecord.new(
+              "legacy action archive refuses remote continuation evidence",
+              path: path
+            )
+          end
+
+          timestamp = now.utc.iso8601
+          pending.each do |action|
+            receipts = action.fetch("receipts")
+            receipts["archive"] = {
+              "reason" => ACTION_ARCHIVE_REASON,
+              "previous_outcome" => action.fetch("outcome"),
+              "archived_at" => timestamp
+            }
+            action["outcome"] = ACTION_ARCHIVE_OUTCOME
+            action["terminal"] = true
+            action["updated_at"] = timestamp if action.key?("updated_at")
+          end
+          aggregate["state"] = "complete"
+          aggregate["complete"] = true
+          aggregate["updated_at"] = timestamp
+          result = {
+            status: :archived,
+            archived_actions: pending.size,
+            job: aggregate
+          }
+          [ aggregate, result ]
         end
       end
 

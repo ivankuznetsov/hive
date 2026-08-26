@@ -86,8 +86,7 @@ module HiveBench
               }
             },
             "credential_env" => ["OPENROUTER_API_KEY"],
-            "plugins" => [OPENCODE_PLUGIN],
-            "isolation" => "hermetic"
+            "plugins" => [OPENCODE_PLUGIN]
           }
         }
       end

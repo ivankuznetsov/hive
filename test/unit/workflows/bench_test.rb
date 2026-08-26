@@ -175,6 +175,82 @@ class WorkflowsBenchTest < Minitest::Test
     assert_equal [ "Read", "Write", "Edit", "Bash(*)" ], permissions.fetch("tools")
   end
 
+  def test_packaged_runtime_emits_a_hive_valid_opencode_config
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "profiles/candidates"
+      require "lib/hive_config"
+      puts HiveBench::HiveConfig.to_yaml(
+        HiveBench::Candidates.by_id("all-ox-alpha-opencode@high")
+      )
+    RUBY
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
+    assert status.success?, out + err
+
+    Dir.mktmpdir("hive-bench-opencode-config") do |project|
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), out)
+
+      previous = ENV["HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"]
+      ENV["HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"] = "1"
+      config = Hive::Config.load(project)
+
+      assert_equal [ "Read", "Write", "Edit", "Bash(*)" ], config.dig("permissions", "tools")
+      refute config.dig("agents", "opencode").key?("isolation")
+    ensure
+      ENV["HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"] = previous
+    end
+  end
+
+  def test_packaged_runtime_resolves_the_immutable_inherited_dogfood_deployment
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    Dir.mktmpdir("hive-bench-dogfood-runtime") do |tmp|
+      state_root = File.join(tmp, "state", "hive")
+      staging = File.join(state_root, "deployments", "staging")
+      gem_home = File.join(tmp, "gem-home")
+      wrapper_dir = File.join(tmp, "bin")
+      FileUtils.mkdir_p([ File.join(staging, "bin"), File.join(staging, "lib"), gem_home, wrapper_dir ])
+      File.write(File.join(staging, "bin", "hive"), "#!/bin/sh\nprintf '0.7.2\\n'\n")
+      FileUtils.chmod(0o755, File.join(staging, "bin", "hive"))
+      File.write(File.join(staging, "lib", "hive.rb"), "# complete runtime\n")
+      File.write(File.join(wrapper_dir, "hive"), "#!/bin/sh\nexit 1\n")
+      FileUtils.chmod(0o755, File.join(wrapper_dir, "hive"))
+      system("git", "-C", staging, "init", "-q", "-b", "main", exception: true)
+      system("git", "-C", staging, "config", "user.email", "bench@example.com", exception: true)
+      system("git", "-C", staging, "config", "user.name", "Bench Test", exception: true)
+      system("git", "-C", staging, "add", ".", exception: true)
+      system("git", "-C", staging, "commit", "-qm", "dogfood runtime", exception: true)
+      build_sha, = Open3.capture2("git", "-C", staging, "rev-parse", "HEAD")
+      build_sha = build_sha.strip
+      deployment_id = "hive-dogfood-#{build_sha[0, 9]}"
+      deployment = File.join(state_root, "deployments", deployment_id)
+      FileUtils.mv(staging, deployment)
+
+      script = <<~'RUBY'
+        require "json"
+        require "lib/hive_driver"
+        puts JSON.generate(HiveBench::HiveDriver.allocate.send(:active_hive_runtime))
+      RUBY
+      env = {
+        "PATH" => "#{wrapper_dir}:#{ENV.fetch("PATH")}",
+        "HB_HIVE_BIN" => nil,
+        "HB_HIVE_GEM_HOME" => gem_home,
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => deployment_id,
+        "HIVE_RUNTIME_BUILD_SHA" => build_sha,
+        "HIVE_DOGFOOD_STATE_ROOT" => state_root
+      }
+      out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{harness}", "-e", script)
+
+      assert status.success?, out + err
+      runtime = JSON.parse(out)
+      assert_equal deployment, runtime.fetch("root")
+      assert_equal gem_home, runtime.fetch("gem_home")
+      assert_equal "0.7.2", runtime.fetch("version")
+    end
+  end
+
   def test_packaged_runtime_gives_candidates_only_the_historical_base_git_object
     harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
     Dir.mktmpdir("hive-bench-source-history") do |source|

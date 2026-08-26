@@ -26,6 +26,49 @@ class WorkflowPackageTransactionTest < Minitest::Test
     end
   end
 
+  def test_post_commit_journal_failure_keeps_new_pointer_and_surviving_journal
+    with_transaction_repo do |root, workflows, lock|
+      old = "{\"old\":true}\n"
+      new_bytes = "{\"new\":true}\n"
+      journal_class = Hive::WorkflowPackage::TransactionJournal
+      original_write = journal_class.instance_method(:write)
+      journal_class.define_method(:write) do |data|
+        raise "injected journal failure" if data["phase"] == "commit_completed"
+
+        original_write.bind_call(self, data)
+      end
+
+      begin
+        Hive::WorkflowPackage::Transaction.activate(
+          lock_path: lock, workflows_dir: workflows, new_lock: { "new" => true },
+          commit: lambda {
+            File.write(lock, new_bytes)
+            run!("git", "-C", root, "add", "workflows/demo/honeycomb.lock.json")
+            run!("git", "-C", root, "commit", "-m", "activate", "--quiet")
+          }
+        )
+        flunk "expected the injected journal failure to propagate"
+      rescue RuntimeError => e
+        assert_equal "injected journal failure", e.message
+      ensure
+        journal_class.class_eval { remove_method :write }
+        journal_class.class_eval { define_method(:write) { |data| original_write.bind_call(self, data) } }
+      end
+
+      # The commit is irreversible, so the working pointer must match HEAD
+      # and the commit_started journal must survive for reconciliation.
+      assert_equal new_bytes, File.read(lock)
+      journal = Hive::WorkflowPackage::TransactionJournal.new(workflows)
+      data = journal.read
+      assert_equal "commit_started", data.fetch("phase")
+      assert_equal old, data.fetch("old_lock")
+
+      assert Hive::WorkflowPackage::Transaction.new(lock_path: lock, workflows_dir: workflows).reconcile!
+      assert_equal new_bytes, File.read(lock)
+      refute File.exist?(journal.path)
+    end
+  end
+
   def test_reconcile_restores_old_pointer_after_interrupted_activation
     with_tmp_dir do |dir|
       lock = File.join(dir, "demo", "honeycomb.lock.json")

@@ -128,9 +128,14 @@ module Hive
       private_class_method :materialize_exact_final_json
 
       def provider_retry_candidate?(result)
-        result[:status] == :error && result[:error_reason] == "provider_error" &&
-          result[:provider_error].is_a?(Hash) &&
-          result[:exit_code] == 0 && result[:timed_out] != true
+        provider_error = result[:provider_error]
+        return false unless result[:status] == :error && provider_error.is_a?(Hash)
+
+        reason = result[:error_reason].to_s
+        retry_failure = reason == "provider_error" ||
+          (reason == "limits_reached" &&
+            %i[provider_limit rate_limited].include?(provider_error[:kind].to_s.to_sym))
+        retry_failure && result[:exit_code] == 0 && result[:timed_out] != true
       end
       private_class_method :provider_retry_candidate?
 

@@ -116,6 +116,43 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
+  def test_launch_agent_accepts_clean_output_after_pi_retries_a_rate_limit
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      report = {
+        "schema" => "hive-patrol-fix-inbox-report",
+        "schema_version" => 1,
+        "route" => "reject"
+      }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error,
+            exit_code: 0,
+            timed_out: false,
+            error_reason: "limits_reached",
+            final_message: JSON.generate(report),
+            final_message_truncated: false,
+            provider_error: {
+              kind: :rate_limited,
+              provider: :pi,
+              status_code: 429,
+              message: "provider is temporarily rate-limited"
+            }
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :clean, result.fetch(:custody)
+      assert_equal report, JSON.parse(File.read(output))
+    end
+  end
+
   def test_launch_agent_does_not_accept_a_provider_retry_without_clean_output
     with_task do |task|
       output = File.join(task.folder, "patrol-fix-inbox-report.json")
@@ -137,6 +174,68 @@ class ManagedAgentCustodyTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_equal :invalid_output, result.fetch(:custody)
+    end
+  end
+
+  def test_launch_agent_does_not_recover_rate_limits_without_a_clean_process_exit
+    [
+      { exit_code: 1, timed_out: false },
+      { exit_code: 0, timed_out: true }
+    ].each do |process_result|
+      with_task do |task|
+        output = File.join(task.folder, "patrol-fix-inbox-report.json")
+        spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call do
+            File.write(output, "{}")
+            {
+              status: :error,
+              error_reason: "limits_reached",
+              provider_error: { kind: :rate_limited, provider: :pi },
+              **process_result
+            }
+          end
+        end
+
+        result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          launch(task, output)
+        end
+
+        assert_equal :error, result.fetch(:status), process_result.inspect
+        assert_equal :clean, result.fetch(:custody), process_result.inspect
+      end
+    end
+  end
+
+  def test_launch_agent_does_not_recover_resource_exhaustion_with_provider_evidence
+    [
+      { error_reason: "model_output_limit", provider_kind: :model_output_limit },
+      { error_reason: "turn_limit", provider_kind: :rate_limited }
+    ].each do |failure|
+      with_task do |task|
+        output = File.join(task.folder, "patrol-fix-inbox-report.json")
+        spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call do
+            File.write(output, "{}")
+            {
+              status: :error,
+              exit_code: 0,
+              timed_out: false,
+              error_reason: failure.fetch(:error_reason),
+              provider_error: {
+                kind: failure.fetch(:provider_kind),
+                provider: :pi
+              }
+            }
+          end
+        end
+
+        result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          launch(task, output)
+        end
+
+        assert_equal :error, result.fetch(:status), failure.inspect
+        assert_equal :clean, result.fetch(:custody), failure.inspect
+      end
     end
   end
 

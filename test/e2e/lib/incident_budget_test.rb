@@ -109,7 +109,7 @@ class E2EIncidentBudgetTest < Minitest::Test
       missing_report = File.join(dir, "missing.json")
       File.write(
         slow_report,
-        JSON.generate(report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 11.0) ]))
+        JSON.generate(report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 12.0) ]))
       )
       File.write(
         missing_report,
@@ -123,7 +123,7 @@ class E2EIncidentBudgetTest < Minitest::Test
 
       assert slow_integrity.success?, slow_integrity_error
       refute slow_timing.success?
-      assert_includes slow_timing_error, "slow took 11.000s"
+      assert_includes slow_timing_error, "slow took 12.000s"
       refute missing_integrity.success?
       assert_includes missing_integrity_error, "has no scenario result"
       assert missing_timing.success?, missing_timing_error

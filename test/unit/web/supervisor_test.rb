@@ -157,6 +157,47 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  # Patrol regression: the disable reload deletes @restart_at["bot"] and TERMs
+  # the bot, but reap_once saw a signal (non-success) death and re-added the
+  # restart entry — respawning the bot the operator just disabled. The disable
+  # intent must survive until the TERM death is reaped.
+  def test_reap_does_not_restart_a_bot_stopped_by_a_disable_reload
+    with_tmp_global_config do
+      sup = build
+      sup.send(:start_child, "bot", [ "sh", "-c", "sleep 30" ])
+      sup.instance_variable_set(:@reload_requested, true)
+      sup.send(:handle_reload)
+
+      reap_until_drained(sup)
+      sup.send(:start_due_restarts)
+
+      refute restart_at(sup).key?("bot"),
+             "the signal death of a reload-disabled bot must not be scheduled for restart"
+      child = sup.instance_variable_get(:@children).first
+      assert_nil child.pid, "a bot disabled via reload must stay down after being reaped"
+    end
+  end
+
+  # A disable intent must be consumed once, not leak into later crashes of a
+  # freshly started bot (e.g. operator disables, then re-enables; the new
+  # bot's eventual crash must still respawn).
+  def test_reload_disable_intent_does_not_leak_into_later_crashes
+    with_tmp_global_config do
+      sup = build
+      sup.send(:start_child, "bot", [ "sh", "-c", "sleep 30" ])
+      sup.instance_variable_set(:@reload_requested, true)
+      sup.send(:handle_reload)
+      reap_until_drained(sup)
+
+      # Operator re-enables the bot; it crashes shortly after booting.
+      sup.send(:start_child, "bot", [ "sh", "-c", "exit 1" ])
+      reap_until_drained(sup)
+
+      assert restart_at(sup).key?("bot"),
+             "after a disable was consumed, a restarted bot's crash must respawn normally"
+    end
+  end
+
   def test_handle_reload_is_a_noop_when_bot_disabled
     with_tmp_global_config do
       sup = build

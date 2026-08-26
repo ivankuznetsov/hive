@@ -29,6 +29,10 @@ module Hive
         @stopping = false
         @reload_requested = false
         @restart_at = {}
+        # Names TERMed by a disable reload: their next reap is an
+        # operator-intended stop, not a crash, and must not be respawned.
+        # Cleared on consumption (reap) or on any later start_child.
+        @reload_disabled = []
       end
 
       def run
@@ -93,6 +97,9 @@ module Hive
 
       def start_child(name, argv)
         pid = Process.spawn(*argv, pgroup: true)
+        # A child being started is definitionally wanted again; drop any
+        # leftover disable intent so its eventual death restarts normally.
+        @reload_disabled.delete(name)
         existing = child(name)
         if existing
           existing.pid = pid
@@ -111,6 +118,8 @@ module Hive
       # The restart works by TERMing the group and scheduling an immediate
       # respawn: reap_once collects the signal death and start_due_restarts
       # brings it back up (the pre-seeded @restart_at entry skips backoff).
+      # The disable case instead records intent in @reload_disabled so
+      # reap_once treats the TERM death as operator-intended, not a crash.
       def handle_reload
         @reload_requested = false
         bot = child("bot")
@@ -125,6 +134,7 @@ module Hive
           end
         elsif running
           @restart_at.delete("bot")
+          @reload_disabled << "bot"
           signal_group(bot.pid, "TERM")
         end
       end
@@ -145,6 +155,8 @@ module Hive
           next unless pid
 
           child.pid = nil
+          next if @reload_disabled.delete(child.name)
+
           schedule_restart(child) if should_restart?(status)
         rescue Errno::ECHILD
           # Reaped elsewhere — without a log line this child would silently
@@ -155,14 +167,16 @@ module Hive
       end
 
       # Restart any crashed child (web, daemon, or bot) — a daemon or bot
-      # that died must come back, not silently disappear. Only two deaths
-      # are NOT respawned: anything reaped while we are stopping, and a
-      # clean (success) exit. Signal deaths ARE respawned: the shutdown
+      # that died must come back, not silently disappear. Three deaths are
+      # NOT respawned: anything reaped while we are stopping, a clean
+      # (success) exit, and a child whose death was an operator-intended
+      # reload disable (@reload_disabled, consumed in reap_once). Signal
+      # deaths ARE otherwise respawned: the shutdown
       # race the old signal exemption feared is already excluded by the
       # @stopping check (the trap sets it before terminate_all sends any
       # signal), while the exemption's real-world cost was an OOM-killed
       # daemon silently never coming back. Reload-driven bot TERMs are
-      # likewise safe: handle_reload pre-seeds @restart_at, and a second
+      # likewise safe: the enable path pre-seeds @restart_at, and a second
       # schedule here is harmless.
       def should_restart?(status)
         return false if @stopping

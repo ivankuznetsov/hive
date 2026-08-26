@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-26
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -91,9 +91,13 @@ produced complete parseable JSON. Hive now sends sanitized export stdout to an
 unlinked private regular file, enforces the parser's four-MiB bound while
 reading it, and still fails closed on malformed evidence. Exports retain a
 60-second process deadline, and an inspection failure remains the surfaced task
-diagnostic instead of degrading to a generic missing-evidence message. Final
-six-task generation and dual-judge completion remain open until the benchmark
-artifacts are assembled and validated. The first OpenRouter-backed Sol
+diagnostic instead of degrading to a generic missing-evidence message. The
+strict six-task OpenCode campaign subsequently completed generation, dual
+three-sample judging, deliberation, validation, and publication. Its original
+token gap is an extraction issue rather than missing provider evidence: Hive
+records OpenCode usage in `.hb/hive-home/usage.db` while redacting raw stream
+events. The packaged harness now reads those normalized rows when stream tokens
+are absent. The first OpenRouter-backed Sol
 deliberation also exposed that the pinned npm Codex entrypoint could see a mise
 Node shim but not its active runtime under Hive's narrow agent PATH; the
 harness now prepends that pinned entrypoint's own directory for the child only.
@@ -106,8 +110,31 @@ persistence disabled. A real Ox Alpha probe returned the requested score
 directly through this boundary. The ChatGPT route now uses the same empty
 workspace and ephemeral/config/rules flags while retaining the operator Codex
 home only for subscription authentication; a real Sol-ultra probe returned its
-score directly there. A completed six-cell Sol deliberation remains the live
-proof for the full recovery and provider capacity.
+score directly there. The separate Pi `all-ox-alpha@max` route is source- and
+probe-pinned; its full six-cell campaign remains live evidence until completion.
+
+An August 26 contamination audit found that earlier local campaigns cloned the
+current Hive repository and then reset it to the historical base. That removed
+the remote but retained newer objects/refs; one Ox Alpha Pi review command did
+run `git log --all`, although its captured output did not include that task's
+gold commit. No Pi tool call fetched GitHub or named its own reference PR/hash.
+The old OpenCode streams omitted tool payloads, so the same negative audit is
+not possible for that row. These rows therefore retain a structural
+contamination-risk caveat even without confirmed gold retrieval. New candidate
+repositories fetch only the exact base at depth one, and strict campaigns bind
+provider-only proxy egress into generation identity. Training-time memorization
+of a public solution remains outside container control; post-run patch
+similarity and private/newer corpus tasks are still needed for that risk.
+
+The same audit found a separate OpenCode fairness defect in the completed high
+campaign: its benchmark config granted only `Read`, `Write`, and `Edit`, while
+Pi retained shell access inside the disposable generation container. OpenCode
+could change files but could not run tests, inspect repository state through
+normal shell diagnostics, or verify its work; all six review attempts ended
+without an accepted review patch. The packaged runtime now adds the explicitly
+qualified `Bash(*)` permission. The container, exact-base checkout, and
+provider-only proxy remain the isolation boundary. The old OpenCode score is
+superseded pending a clean six-cell rerun with that parity grant.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

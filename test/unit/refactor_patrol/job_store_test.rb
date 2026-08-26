@@ -90,6 +90,241 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_archives_authority_revoked_legacy_actions_without_losing_history
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "policy" => {
+          "discovery" => true, "auto_fix" => true,
+          "issue_filing" => true
+        }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "fix", "kind" => "fix" },
+          {
+            "thesis_id" => "fix", "kind" => "issue",
+            "family_id" => "af1-#{'f' * 64}"
+          }
+        ],
+        now: T0
+      )
+      fix = initialized.fetch("actions").find do |action|
+        action.fetch("kind") == "fix"
+      end
+      assert_nil store.claim_action!(
+        "job-1", fix.fetch("canonical_action_id"), owner: "retired-runner",
+        authority: false, now: T0 + 1
+      )
+      before = store.read_job("job-1")
+
+      result = store.archive_legacy_actions!("job-1", now: T0 + 2)
+
+      assert_equal :archived, result.fetch(:status)
+      assert_equal 2, result.fetch(:archived_actions)
+      archived = store.read_job("job-1")
+      assert archived.fetch("complete")
+      assert_equal "complete", archived.fetch("state")
+      assert_equal before.fetch("dispositions"), archived.fetch("dispositions")
+      assert_equal before.fetch("attempts"), archived.fetch("attempts")
+      assert archived.fetch("actions").all? { |action| action.fetch("terminal") }
+      assert_equal [ "archived_after_patrol_fix_cutover" ],
+                   archived.fetch("actions").map { |action| action.fetch("outcome") }.uniq
+      assert_equal [ "authority_revoked", "queued" ],
+                   archived.fetch("actions").map { |action|
+                     action.dig("receipts", "archive", "previous_outcome")
+                   }.sort
+      archived.fetch("actions").each do |action|
+        receipt = action.dig("receipts", "archive")
+        assert_equal "unified_patrol_fix_cutover", receipt.fetch("reason")
+        assert_equal (T0 + 2).iso8601, receipt.fetch("archived_at")
+      end
+      invalid_reason = JSON.parse(JSON.generate(archived))
+      invalid_reason.dig("actions", 0, "receipts", "archive")["reason"] =
+        "different_cutover"
+      reason_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.send(:validate_job!, invalid_reason, path: "/tmp/job.json")
+      end
+      assert_match(/archive receipt identity/, reason_error.message)
+
+      invalid_outcome = JSON.parse(JSON.generate(archived))
+      invalid_outcome.dig("actions", 0)["terminal"] = false
+      outcome_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.send(:validate_job!, invalid_outcome, path: "/tmp/job.json")
+      end
+      assert_match(/terminal outcome/, outcome_error.message)
+      assert_empty store.actionable_jobs(now: T0 + 10)
+
+      repeated = store.archive_legacy_actions!("job-1", now: T0 + 3)
+      assert_equal :already_complete, repeated.fetch(:status)
+      assert_equal 0, repeated.fetch(:archived_actions)
+      assert_equal archived, store.read_job("job-1")
+    end
+  end
+
+  def test_legacy_action_archive_refuses_live_or_remote_continuation_work
+    with_tmp_dir do |dir|
+      live_store = initialized_store(File.join(dir, "live"))
+      live_id = fix_action_id(live_store)
+      live_store.claim_action!(
+        "job-1", live_id, owner: "live-runner", now: T0
+      )
+
+      live_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        live_store.archive_legacy_actions!("job-1", now: T0 + 1)
+      end
+      assert_match(/active claim/, live_error.message)
+
+      remote_store = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "remote")
+      )
+      remote_store.write_job!(classified_job(
+        "dispositions" => {
+          "fix" => [
+            disposition("fix", "fp-accepted"),
+            disposition("fix-2", "fp-accepted-2")
+          ],
+          "discuss" => [], "dismiss" => []
+        }
+      ))
+      initialized = remote_store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "fix", "kind" => "fix" },
+          { "thesis_id" => "fix-2", "kind" => "fix" }
+        ],
+        now: T0
+      )
+      remote_id = initialized.dig("actions", 0, "canonical_action_id")
+      revoked_id = initialized.dig("actions", 1, "canonical_action_id")
+      token = remote_store.claim_action!(
+        "job-1", remote_id, owner: "publisher", now: T0
+      )
+      remote_store.record_creation_intent!(
+        token,
+        intent: {
+          "operation" => "create_pr",
+          "branch" => "hive/refactor/#{remote_id}"
+        },
+        now: T0 + 1
+      )
+      remote_store.release_action!(
+        token, outcome: "remote_outcome_unknown", now: T0 + 2,
+        backoff_sec: 0
+      )
+      assert_nil remote_store.claim_action!(
+        "job-1", revoked_id, owner: "retired-runner", authority: false,
+        now: T0 + 3
+      )
+
+      remote_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        remote_store.archive_legacy_actions!("job-1", now: T0 + 4)
+      end
+      assert_match(/remote continuation evidence/, remote_error.message)
+    end
+  end
+
+  def test_legacy_action_archive_requires_a_revoked_legacy_action_fence
+    with_tmp_dir do |dir|
+      empty_store = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "empty")
+      )
+      empty_store.write_job!(classified_job)
+      empty_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        empty_store.archive_legacy_actions!("job-1", now: T0 + 1)
+      end
+      assert_match(/pending historical actions/, empty_error.message)
+
+      store = initialized_store(dir)
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        store.archive_legacy_actions!("job-1", now: T0 + 1)
+      end
+
+      assert_match(/authority_revoked/, error.message)
+      refute store.read_job("job-1").fetch("complete")
+    end
+  end
+
+  def test_legacy_action_archive_refuses_other_unresolved_job_state
+    with_tmp_dir do |dir|
+      review_store = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "review-errors")
+      )
+      review_store.write_job!(classified_job(
+        "review_errors" => [
+          { "feature_id" => "checkout", "error" => "review_failed" }
+        ]
+      ))
+      reviewed = review_store.initialize_actions!(
+        "job-1",
+        specifications: [ { "thesis_id" => "fix", "kind" => "fix" } ],
+        now: T0
+      )
+      assert_nil review_store.claim_action!(
+        "job-1", reviewed.dig("actions", 0, "canonical_action_id"),
+        owner: "retired-runner", authority: false, now: T0 + 1
+      )
+      review_before = review_store.read_job("job-1")
+      review_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        review_store.archive_legacy_actions!("job-1", now: T0 + 2)
+      end
+      assert_match(/review errors/, review_error.message)
+      assert_equal review_before, review_store.read_job("job-1")
+
+      linked_store = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "linked")
+      )
+      linked_store.write_job!(job)
+      linked_store.write_job!(job(
+        "job_id" => "job-2",
+        "source" => source("number" => 8, "merge_sha" => "d" * 40),
+        "state" => "blocked",
+        "complete" => false,
+        "dispositions" => {
+          "fix" => [ disposition("fix-2", "fp-accepted") ],
+          "discuss" => [], "dismiss" => []
+        },
+        "feature_results" => [
+          {
+            "feature_id" => "checkout", "complete" => true,
+            "thesis_ids" => [ "fix-2" ], "errors" => []
+          }
+        ],
+        "actions" => [
+          action.merge(
+            "thesis_id" => "fix-2", "owner_job_id" => "job-1",
+            "outcome" => "authority_revoked", "terminal" => false,
+            "receipts" => {}
+          )
+        ]
+      ))
+      linked_before = linked_store.read_job("job-2")
+      linked_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        linked_store.archive_legacy_actions!("job-2", now: T0 + 2)
+      end
+      assert_match(/linked canonical actions/, linked_error.message)
+      assert_equal linked_before, linked_store.read_job("job-2")
+    end
+  end
+
   def test_obsolete_source_retirement_fails_closed_when_claim_resolution_errors
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)

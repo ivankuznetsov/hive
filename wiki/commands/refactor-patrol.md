@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-21
+updated: 2026-08-26
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -34,12 +34,26 @@ hive refactor-patrol my-project --list
 hive refactor-patrol my-project --list --limit 50 --cursor CURSOR
 hive refactor-patrol my-project --show JOB_ID
 hive refactor-patrol my-project --show JOB_ID --full --json
+
+# One-time action-era cleanup after Patrol Fix import
+hive refactor-patrol my-project --archive JOB_ID --json
 ```
 
 `--changed-since` is only a filter paired with `--feature`, `--entrypoint`, or
 `--path`. PR and job-manifest modes require JSON and cannot be combined with
 scope hints. `--list` and `--show` are read-only and cannot be combined with
 discovery options.
+
+`--archive` is a narrow administrative transition for historical action-era
+jobs after their accepted dispositions have been imported into Patrol Fix. It
+requires an `authority_revoked` cutover fence and refuses active claims,
+linked pending actions, unresolved review errors, or pending remote-effect
+continuation evidence. Already-terminal actions remain immutable evidence. It
+preserves dispositions, claims, and existing receipts, adds an archive receipt
+with the prior outcome to each pending action, and marks the job complete.
+Repeating it for a complete job is a no-op. The command emits
+the final `hive-refactor-patrol-jobs.v2` show projection, so no second archive
+status contract exists.
 
 ## Discovery
 
@@ -90,7 +104,8 @@ It does not revive an Architecture Patrol action lane.
 Discovery emits `hive-refactor-patrol.v4`, including the immutable source,
 analysis SHA, routed dispositions, per-feature completion records, and review
 errors. New records contain no publication attempts or actions. `--list` and
-`--show` emit `hive-refactor-patrol-jobs.v2`.
+`--show` emit `hive-refactor-patrol-jobs.v2`; `--archive` emits the same
+projection after its guarded transition.
 
 ## Backlinks
 

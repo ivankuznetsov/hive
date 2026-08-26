@@ -33,20 +33,49 @@ module Hive
         @environment = environment
       end
 
-      # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
-      def running_state
+      # Liveness plus producer-runtime evidence from the PID file.
+      def running_state(max_pid_bytes: nil, require_start_time: false)
         running = false
         pid = nil
         uptime_sec = nil
+        runtime = Hive::RuntimeIdentity.unknown
+        runtime_observable = true
         if File.exist?(pid_file)
-          payload = read_pid_file_payload
+          payload = read_pid_file_payload(max_bytes: max_pid_bytes)
           pid = payload && payload["pid"]
-          if pid && pid > 0 && pid_alive?(pid) && pid_owned_by_us?(payload, pid)
-            running = true
-            uptime_sec = (Time.now - File.stat(pid_file).mtime).to_i
+          if pid.is_a?(Integer) && pid.positive?
+            if pid_alive?(pid)
+              ownership = pid_ownership(payload, pid)
+              owned = if require_start_time
+                ownership == :verified
+              else
+                pid_owned_by_us?(payload, pid)
+              end
+              # A live PID with legacy/unverified ownership may still be the
+              # daemon. Do not let compact status substitute its caller's
+              # runtime when the producer could not be attributed.
+              runtime_observable = false unless owned || ownership == :reused
+              if owned
+                running = true
+                uptime_sec = (Time.now - File.stat(pid_file).mtime).to_i
+                runtime = Hive::RuntimeIdentity.parse(payload["runtime"]) || runtime
+              end
+            end
+          else
+            runtime_observable = false
           end
         end
-        { running: running, pid: pid, uptime_sec: uptime_sec }
+        {
+          running: running, pid: pid, uptime_sec: uptime_sec, runtime: runtime,
+          runtime_observable: runtime_observable
+        }
+      rescue SystemCallError, IOError
+        raise unless max_pid_bytes
+
+        {
+          running: false, pid: nil, uptime_sec: nil,
+          runtime: Hive::RuntimeIdentity.unknown, runtime_observable: false
+        }
       end
 
       def payload(state = running_state)
@@ -57,6 +86,7 @@ module Hive
           "schema" => "hive-daemon-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
           "ok" => true,
+          "runtime" => state[:runtime] || Hive::RuntimeIdentity.unknown,
           "running" => running,
           "pid" => running ? state[:pid] : nil,
           "uptime_sec" => state[:uptime_sec],

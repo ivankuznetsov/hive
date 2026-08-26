@@ -87,6 +87,26 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     assert_equal "quota exhausted", error[:message]
   end
 
+  def test_opencode_extractor_reads_nested_provider_rate_limit
+    event = {
+      "type" => "error",
+      "sessionID" => "ses_rate_limit",
+      "error" => {
+        "name" => "APIError",
+        "data" => {
+          "message" => "[Stealth] stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly."
+        }
+      }
+    }
+
+    error = AgentCliRuntime.extract_provider_error(:opencode, event)
+
+    assert_equal :rate_limited, error[:kind]
+    assert_equal :opencode, error[:provider]
+    assert_nil error[:status_code]
+    assert_includes error[:message], "temporarily rate-limited upstream"
+  end
+
   def test_ordinary_events_are_not_errors
     [
       { "type" => "result", "is_error" => false, "message" => "done" },

@@ -71,10 +71,21 @@ module AgentCliRuntime
         cleanup = Cleanup.new(root)
         begin
           paths = create_directories(root)
-          permission = permission_rules(
-            preparation, roots, plugins: plugins,
+          permission = Permissions.compile(
+            permission_mode: preparation.request.permission_mode,
+            permission_policy: preparation.permission_policy,
+            working_directory: roots.fetch(:working),
+            additional_read_roots: roots.fetch(:read),
+            additional_write_roots: roots.fetch(:write),
+            edit_patterns: preparation.edit_patterns,
+            bash_patterns: preparation.bash_patterns,
+            plugins: plugins,
             runtime_write_roots: [ paths.fetch(:temporary) ]
           )
+          unless permission
+            raise ConfigurationError,
+                  "OpenCode requires an explicit OpenCode permission policy when permission_mode is nil"
+          end
           pure = preparation.pure && plugins.empty?
           config = generated_configuration(
             source_config, plugins, requested_route, permission
@@ -263,130 +274,6 @@ module AgentCliRuntime
         }.freeze
       end
       private_class_method :resolve_roots
-
-      def permission_rules(preparation, roots, plugins: preparation.plugins,
-                           runtime_write_roots: [])
-        mode = preparation.request.permission_mode
-        if mode.nil?
-          policy = preparation.permission_policy
-          unless policy
-            raise ConfigurationError,
-                  "OpenCode requires an explicit OpenCode permission policy when permission_mode is nil"
-          end
-          return deep_copy(policy.rules)
-        end
-
-        unless %w[read-only workspace-write].include?(mode)
-          raise ConfigurationError,
-                "unsupported OpenCode permission mode"
-        end
-
-        external = { "*" => "deny" }
-        external_roots = [
-          *roots.fetch(:read), *roots.fetch(:write), *runtime_write_roots
-        ].uniq
-        external_roots.each do |root|
-          external[root] = "allow"
-          external["#{root}/**"] = "allow"
-        end
-        common = {
-          "*" => "deny",
-          "read" => {
-            "*" => "allow",
-            "*.env" => "deny",
-            "*.env.*" => "deny",
-            "*.env.example" => "allow"
-          },
-          "glob" => "allow",
-          "grep" => "allow",
-          "list" => "allow",
-          "lsp" => "allow",
-          "skill" => plugins.empty? ? "deny" : "allow",
-          "external_directory" => external
-        }
-        if mode == "read-only"
-          return common.merge(
-            "edit" => "deny", "bash" => "deny", "task" => "deny",
-            "webfetch" => "deny", "websearch" => "deny",
-            "question" => "deny"
-          )
-        end
-
-        # OpenCode applies the last matching permission rule. Start from a
-        # denial and append only the invocation's declared write roots. The
-        # working directory is an implicit write root for workspace-write;
-        # additional read roots remain explicitly denied unless the caller
-        # also declared them writable.
-        writable_roots = [
-          roots.fetch(:working), *roots.fetch(:write), *runtime_write_roots
-        ].uniq
-        edit = { "*" => "deny" }
-        allows = if preparation.edit_patterns.empty?
-          writable_roots.flat_map do |root|
-            edit_patterns(root, working: roots.fetch(:working))
-          end
-        else
-          normalize_declared_edit_patterns(
-            preparation.edit_patterns, writable_roots,
-            working: roots.fetch(:working)
-          )
-        end
-        allows.each do |pattern|
-            edit[pattern] = "allow"
-        end
-        (roots.fetch(:read) - roots.fetch(:write)).each do |root|
-          edit_patterns(root, working: roots.fetch(:working)).each do |pattern|
-            edit[pattern] = "deny"
-          end
-        end
-        bash = { "*" => "deny" }
-        preparation.bash_patterns.each { |pattern| bash[pattern] = "allow" }
-        common.merge(
-          "edit" => edit,
-          "bash" => preparation.bash_patterns.empty? ? "deny" : bash,
-          "task" => "deny",
-          "webfetch" => "deny", "websearch" => "deny",
-          "question" => "deny"
-        )
-      end
-      private_class_method :permission_rules
-
-      def edit_patterns(root, working:)
-        if root == working
-          [ "**" ]
-        elsif root.start_with?(working + File::SEPARATOR)
-          relative = root.delete_prefix(working + File::SEPARATOR)
-          [ relative, "#{relative}/**" ]
-        else
-          [ root, "#{root}/**" ]
-        end
-      end
-      private_class_method :edit_patterns
-
-      def normalize_declared_edit_patterns(patterns, writable_roots, working:)
-        patterns.map do |value|
-          pattern = value.sub(%r{\A//}, "/")
-          unless File.absolute_path?(pattern) && !pattern.include?("\0")
-            raise ConfigurationError,
-                  "OpenCode edit patterns must be absolute path patterns"
-          end
-          literal_prefix = pattern.split(/[*?]/, 2).first.sub(%r{/+\z}, "")
-          unless writable_roots.any? do |root|
-            literal_prefix == root || literal_prefix.start_with?(root + File::SEPARATOR)
-          end
-            raise ConfigurationError,
-                  "OpenCode edit pattern is outside the declared write roots"
-          end
-          if pattern == working
-            "**"
-          elsif pattern.start_with?(working + File::SEPARATOR)
-            pattern.delete_prefix(working + File::SEPARATOR)
-          else
-            pattern
-          end
-        end.uniq.freeze
-      end
-      private_class_method :normalize_declared_edit_patterns
 
       def create_root!(value)
         path = File.expand_path(value)

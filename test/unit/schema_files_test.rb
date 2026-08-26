@@ -170,6 +170,7 @@ class SchemaFilesTest < Minitest::Test
   end
 
   def test_native_web_schema_files_accept_versioned_success_and_error_shapes
+    runtime = Hive::RuntimeIdentity.new(environment: {}).to_h
     service = {
       "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
       "service_installed" => true, "service_enabled" => true,
@@ -185,7 +186,8 @@ class SchemaFilesTest < Minitest::Test
       },
       "hive-web-status" => {
         "schema" => "hive-web-status", "schema_version" => 1,
-        "ok" => true, "mode" => "managed_service", "warnings" => []
+        "ok" => true, "mode" => "managed_service", "runtime" => runtime,
+        "warnings" => []
       }.merge(service),
       "hive-web-install" => {
         "schema" => "hive-web-install", "schema_version" => 1, "ok" => true,
@@ -205,6 +207,8 @@ class SchemaFilesTest < Minitest::Test
           "mode" => "managed_service", "url" => service.fetch("url"),
           "service" => service, "warnings" => []
         }
+      elsif name == "hive-web-status"
+        { "mode" => "managed_service", "runtime" => runtime, "warnings" => [] }.merge(service)
       else
         { "mode" => "managed_service", "warnings" => [] }.merge(service)
       end
@@ -222,13 +226,51 @@ class SchemaFilesTest < Minitest::Test
       schema: "hive-web-status",
       error: Hive::ConfigError.new("invalid web config"),
       error_kind: "config_error",
-      extras: { "mode" => "managed_service", "warnings" => [] }.merge(service)
+      extras: {
+        "mode" => "managed_service", "runtime" => runtime, "warnings" => []
+      }.merge(service)
     )
     status_schema = JSONSchemer.schema(
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-status")))
     )
     assert_empty status_schema.validate(status_error).to_a,
                  "hive web status configuration errors must retain the v1 envelope"
+  end
+
+  def test_runtime_identity_definition_matches_every_status_schema
+    names = %w[
+      hive-version hive-daemon-status hive-running-status
+      hive-operational-status hive-web-status
+    ]
+    definitions = names.to_h do |name|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      [ name, document.dig("$defs", "RuntimeIdentity") ]
+    end
+    canonical = definitions.fetch("hive-version")
+
+    definitions.each do |name, definition|
+      assert_equal canonical, definition, "#{name} runtime identity schema drifted"
+    end
+  end
+
+  def test_runtime_identity_schema_rejects_incomplete_or_contradictory_provenance
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-version"))))
+    release = Hive::RuntimeIdentity.new(environment: {}).to_h
+
+    incomplete_dogfood = release.merge(
+      "channel" => "dogfood",
+      "display_version" => "#{Hive::VERSION}+dogfood.unknown"
+    )
+    contradictory_release = release.merge("build_sha" => "a" * 40)
+
+    refute_empty schema.validate(
+      { "schema" => "hive-version", "schema_version" => 1, "ok" => true,
+        "runtime" => incomplete_dogfood }
+    ).to_a
+    refute_empty schema.validate(
+      { "schema" => "hive-version", "schema_version" => 1, "ok" => true,
+        "runtime" => contradictory_release }
+    ).to_a
   end
 
   def test_native_web_schemas_reject_incomplete_success_unknown_readiness_and_bad_warning
@@ -1873,7 +1915,7 @@ class SchemaFilesTest < Minitest::Test
     # service_* fields are always emitted (null on probe failure), so they
     # are required-but-nullable in the schema.
     producer_required = %w[
-      schema schema_version ok running pid uptime_sec pid_file log_file
+      schema schema_version ok runtime running pid uptime_sec pid_file log_file
       service_installed service_enabled unit_path
       installed_binary expected_binary installed_binary_version cli_version binary_drift
       current_version update_nudge

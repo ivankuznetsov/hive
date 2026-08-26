@@ -10,6 +10,7 @@ jobs:
   shell:
     name: Shell checks
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash -n install.sh
@@ -31,6 +32,7 @@ jobs:
   macos-dry-run:
     name: macOS dry run
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
@@ -53,6 +55,7 @@ jobs:
   arch-dry-run:
     name: Arch dry run
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: |
@@ -62,6 +65,7 @@ jobs:
   die-paths:
     name: install.sh die paths (malformed inputs)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: rejects bogus HIVE_VERSION
@@ -86,6 +90,7 @@ jobs:
   full-smoke:
     name: install.sh full install smoke (against real release)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # Pinned to a known-good release so a PR can't gate on a release
     # not yet cut. Skipped on PRs that change install.sh syntactically
     # but predate a published release.
@@ -124,6 +129,7 @@ jobs:
   verify-release:
     name: verify-release.sh (end-to-end behavior)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Same gate as full-smoke: only runs against a real published
     # release. Skips on PRs that predate the pinned release. The
     # script feature-detects post-pin subcommands (e.g., `daemon
@@ -185,6 +191,7 @@ jobs:
   installer-fixtures:
     name: install.sh fixture regressions
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -361,6 +368,7 @@ jobs:
   unsupported-platforms:
     name: install.sh unsupported platform messages
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Alpine/musl exits tier-3

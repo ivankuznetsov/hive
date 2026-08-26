@@ -105,8 +105,7 @@ module Hive
       def default_attempt_store
         return nil unless @context
 
-        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-        root.empty? ? Hive::Attempts::Store.new : Hive::Attempts::Store.new(root: root)
+        Hive::Attempts::Store.runtime
       end
 
       def verify_context!

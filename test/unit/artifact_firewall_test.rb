@@ -765,6 +765,19 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_agent_custody_rejects_a_non_callable_before_validation_hook
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::ArtifactFirewall::AgentCustody.new(
+          build_manifest(dir),
+          before_validation: Object.new
+        )
+      end
+
+      assert_equal "before_validation must respond to call", error.message
+    end
+  end
+
   def test_manifest_accepts_a_larger_explicit_entry_limit
     with_tmp_dir do |dir|
       count = Hive::ArtifactFirewall::MAX_ENTRIES + 5

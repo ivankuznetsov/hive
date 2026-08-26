@@ -312,6 +312,7 @@ module AgentCliRuntime
       configuration_environment_key: "OPENCODE_CONFIG_DIR",
       default_configuration_directory: ".config/opencode",
       permission_policy_required: true,
+      error_extractor: ErrorExtractors::OPENCODE,
       result_parser: OpenCode::ResultParser,
       cli_capabilities: {
         json_events: [ "run", "--format" ],

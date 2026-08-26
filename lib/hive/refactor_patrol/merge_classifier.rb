@@ -18,7 +18,7 @@ module Hive
       LOCK_FILE = "classifications.lock".freeze
       INDEX_FILE = "eligible-index.json".freeze
       INDEX_SCHEMA = "hive-refactor-patrol-merge-classification-index".freeze
-      MAX_RECORD_BYTES = 1024 * 1024
+      MAX_RECORD_BYTES = 256 * 1024 * 1024
       MAX_RECORDS = 20_000
       MAX_PENDING_RECORDS = 8_192
       MAX_TITLE_BYTES = 512
@@ -27,8 +27,6 @@ module Hive
       MAX_LABEL_BYTES = 256
       MAX_FILES = 10_000
       MAX_PATH_BYTES = 4_096
-      MAX_PATCH_BYTES = 32 * 1024
-      MAX_TOTAL_PATCH_BYTES = 512 * 1024
       MAX_EVIDENCE = 16
       MAX_TEXT_BYTES = 2_000
       TERMINAL_STATUSES = %w[feature skip blocked].freeze
@@ -79,7 +77,7 @@ module Hive
 
       def call(input, now: Time.now.utc, reservation_id: nil)
         instant = normalize_time(now)
-        snapshot = normalize_snapshot(input)
+        snapshot = normalize_snapshot(path_only_snapshot(input))
         digest = snapshot_digest(snapshot)
         occurrence_id = occurrence_id(snapshot)
         prepared = prepare_attempt(
@@ -87,32 +85,33 @@ module Hive
           reservation_id: reservation_id
         )
         return prepared if TERMINAL_STATUSES.include?(prepared.fetch("status"))
+        record_digest = prepared.fetch("snapshot_digest")
 
         normalized = begin
           decision = @decision_provider.call(prompt(snapshot, digest))
           normalize_decision(decision)
         rescue StandardError => error
           return fail_attempt(
-            occurrence_id, digest, prepared.fetch("attempts"), error, now: instant,
+            occurrence_id, record_digest, prepared.fetch("attempts"), error, now: instant,
             reservation_id: reservation_id
           )
         end
         settle_decision(
-          occurrence_id, digest, prepared.fetch("attempts"), normalized,
+          occurrence_id, record_digest, prepared.fetch("attempts"), normalized,
           now: instant, reservation_id: reservation_id
         )
       rescue Retryable, Conflict, Invalid
         raise
       rescue StandardError => error
         fail_attempt(
-          occurrence_id, digest, prepared && prepared["attempts"], error,
+          occurrence_id, record_digest || digest, prepared && prepared["attempts"], error,
           now: instant, reservation_id: reservation_id
         )
       end
 
       def hydrate(input, now: Time.now.utc)
         instant = normalize_time(now)
-        snapshot = normalize_snapshot(input)
+        snapshot = normalize_snapshot(path_only_snapshot(input))
         prepare_attempt(
           occurrence_id(snapshot), snapshot, snapshot_digest(snapshot),
           now: instant, launch: false, reservation_id: nil
@@ -127,7 +126,7 @@ module Hive
       end
 
       def fetch(input)
-        snapshot = normalize_snapshot(input)
+        snapshot = normalize_snapshot(path_only_snapshot(input))
         read_record(occurrence_id(snapshot))
       end
 
@@ -135,7 +134,7 @@ module Hive
       # ambiguous merges are reported as requiring classification without
       # invoking the provider or creating a durable occurrence.
       def preview(input)
-        snapshot = normalize_snapshot(input)
+        snapshot = normalize_snapshot(path_only_snapshot(input))
         missing = missing_metadata(snapshot)
         return {
           "status" => "blocked", "decision" => nil,
@@ -311,7 +310,7 @@ module Hive
         @directory.with_lock(LOCK_FILE) do
           record = read_record(occurrence_id)
           if record
-            unless record.fetch("snapshot_digest") == digest && record.fetch("snapshot") == snapshot
+            unless same_snapshot?(record, snapshot, digest)
               raise Conflict, "merged-PR classification snapshot changed for #{occurrence_id}"
             end
             return Hive::PatrolFix.deep_copy(record) if TERMINAL_STATUSES.include?(record.fetch("status"))
@@ -578,11 +577,10 @@ module Hive
                files.map { |file| file.is_a?(Hash) && file["path"] } == paths
           raise Invalid, "merge classification file scope is invalid"
         end
-        patch_bytes = 0
         files.each do |file|
           allowed_file_keys = %w[patch path status previous_path]
           unless file.is_a?(Hash) && (file.keys - allowed_file_keys).empty? &&
-                 %w[patch path status].all? { |key| file.key?(key) } &&
+                 %w[path status].all? { |key| file.key?(key) } &&
                  paths.include?(file["path"]) && PrManifest::FILE_STATUSES.include?(file["status"])
             raise Invalid, "merge classification file metadata is invalid"
           end
@@ -591,12 +589,12 @@ module Hive
               file["previous_path"].bytesize > MAX_PATH_BYTES)
             raise Invalid, "merge classification previous file path is invalid"
           end
-          patch = bounded_utf8(file["patch"], "file patch", MAX_PATCH_BYTES, allow_empty: true)
-          file["patch"] = patch
-          patch_bytes += patch.bytesize
+          if file.key?("patch") &&
+             (!file["patch"].is_a?(String) || !file["patch"].valid_encoding? ||
+              file["patch"].include?("\0"))
+            raise Invalid, "merge classification file patch is invalid"
+          end
         end
-        raise Invalid, "merge classification patches exceed their aggregate bound" if
-          patch_bytes > MAX_TOTAL_PATCH_BYTES
         provenance = value.fetch("publication_provenance")
         unless provenance.is_a?(Hash) && provenance.keys.sort == %w[kind marker] &&
                %w[none patrol patrol_successor].include?(provenance["kind"]) &&
@@ -617,7 +615,7 @@ module Hive
         end
         raise Invalid, "merge classification publication provenance does not match its body" unless valid_provenance
         value.freeze
-      rescue ArgumentError, TypeError, KeyError => error
+      rescue JSON::GeneratorError, ArgumentError, TypeError, KeyError => error
         raise Invalid, "merge classification snapshot is invalid (#{error.message})"
       end
 
@@ -647,6 +645,21 @@ module Hive
 
       def snapshot_digest(snapshot) = Digest::SHA256.hexdigest(canonical_json(snapshot))
       def record_relative(occurrence_id) = "records/#{occurrence_id}.json"
+
+      def path_only_snapshot(snapshot)
+        return snapshot unless snapshot.is_a?(Hash) && snapshot["files"].is_a?(Array)
+
+        snapshot.merge(
+          "files" => snapshot.fetch("files").map do |file|
+            file.is_a?(Hash) ? file.reject { |key, _value| key == "patch" } : file
+          end
+        )
+      end
+
+      def same_snapshot?(record, snapshot, digest)
+        (record.fetch("snapshot_digest") == digest && record.fetch("snapshot") == snapshot) ||
+          path_only_snapshot(record.fetch("snapshot")) == snapshot
+      end
 
       def read_record(occurrence_id)
         bytes = @directory.read(record_relative(occurrence_id), max_bytes: MAX_RECORD_BYTES, missing: true)
@@ -684,8 +697,12 @@ module Hive
       end
 
       def persist(record)
-        validate_record_for_write!(record)
-        @directory.atomic_write(record_relative(record.fetch("occurrence_id")), canonical_json(record), mode: 0o600)
+        bytes = canonical_json(record)
+        raise Invalid, "merge classification record exceeds its storage bound" if
+          bytes.bytesize > MAX_RECORD_BYTES
+
+        validate_record_for_write!(record, bytes: bytes)
+        @directory.atomic_write(record_relative(record.fetch("occurrence_id")), bytes, mode: 0o600)
       end
 
       def compact_for_capacity!
@@ -713,9 +730,9 @@ module Hive
         end
       end
 
-      def validate_record_for_write!(record)
+      def validate_record_for_write!(record, bytes: canonical_json(record))
         parse_record(
-          canonical_json(record),
+          bytes,
           expected_occurrence_id: record.fetch("occurrence_id")
         )
       end

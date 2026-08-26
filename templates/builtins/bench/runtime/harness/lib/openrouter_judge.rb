@@ -4,6 +4,7 @@ require "net/http"
 require "json"
 require "uri"
 require "lib/judge_output"
+require "lib/agent_limit"
 
 module HiveBench
   # A judge_fn backed by an OpenRouter chat model (e.g. openai/gpt-5.5-pro) — the
@@ -43,7 +44,7 @@ module HiveBench
     # reserves only this much output cost (not the model's full ceiling).
     def build_body(model, seed, prompt, max_tokens)
       { "model" => model, "seed" => seed, "max_tokens" => max_tokens,
-        "messages" => [{ "role" => "user", "content" => prompt.to_s }] }
+        "messages" => [ { "role" => "user", "content" => prompt.to_s } ] }
     end
 
     # POSTs the judge prompt and returns the assistant's text. Raises on transport
@@ -61,7 +62,13 @@ module HiveBench
       req.body = JSON.generate(body)
 
       res = http.request(req)
-      raise Error, "openrouter judge HTTP #{res.code}: #{res.body.to_s.strip[0, 300]}" unless res.code == "200"
+      unless res.code == "200"
+        detail = res.body.to_s.strip
+        limit = %w[402 429].include?(res.code) ||
+                (res.code == "403" && AgentLimit.limit_hit?(detail))
+        error_class = limit ? ProviderLimitError : Error
+        raise error_class, "openrouter judge HTTP #{res.code}: #{detail[0, 300]}"
+      end
 
       parsed = JSON.parse(res.body)
       content = parsed.dig("choices", 0, "message", "content")

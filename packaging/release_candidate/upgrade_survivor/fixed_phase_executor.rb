@@ -13,7 +13,7 @@ module HiveReleaseCandidate
         "latest-stable" => {
           "before" => [ [ "init", "%PROJECT%" ], [ "new", "%PROJECT_NAME%", "release candidate representative task", "--json" ] ],
           "candidate_transition" => [ [ "migrate", "%PROJECT%", "--json" ] ],
-          "after" => [ [ "status", "--json" ] ],
+          "after" => [ [ "status", "--operational", "--json" ] ],
           "idempotency" => [ [ "migrate", "%PROJECT%", "--json" ] ]
         },
         "legacy-bench-v041" => {
@@ -25,7 +25,7 @@ module HiveReleaseCandidate
             [ "new", "%PROJECT_NAME%", "collision observer", "--workflow", "bench", "--json" ]
           ],
           "candidate_transition" => [ [ "init", "%PROJECT%", "--workflow", "bench", "--json" ] ],
-          "after" => [ [ "status", "--json" ] ],
+          "after" => [ [ "status", "--operational", "--json" ] ],
           "idempotency" => [ [ "init", "%PROJECT%", "--workflow", "bench", "--json" ] ]
         }
       }.freeze

@@ -977,6 +977,32 @@ module Hive
 
       def validate_publication_receipts!(action, repository, path)
         receipts = action.fetch("receipts")
+        if (archive = receipts["archive"])
+          strict_hash!(
+            archive,
+            required: constant(:ACTION_ARCHIVE_RECEIPT_KEYS),
+            allowed: constant(:ACTION_ARCHIVE_RECEIPT_KEYS),
+            label: "action archive receipt",
+            path: path
+          )
+          unless archive.fetch("reason") == constant(:ACTION_ARCHIVE_REASON)
+            inconsistent!("action archive receipt identity is invalid", path)
+          end
+          nonempty_string!(
+            archive.fetch("previous_outcome"),
+            "action archive previous_outcome",
+            path
+          )
+          timestamp!(
+            archive.fetch("archived_at"),
+            "action archive archived_at",
+            path
+          )
+          unless action.fetch("terminal") &&
+                 action.fetch("outcome") == constant(:ACTION_ARCHIVE_OUTCOME)
+            inconsistent!("action archive receipt requires its terminal outcome", path)
+          end
+        end
         attempts = receipts[PublicationAttempt::ATTEMPTS_KEY]
         return unless attempts
 

@@ -31,6 +31,8 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal :exit_code_only, captured.fetch(:status_mode)
       assert_includes captured.fetch(:add_dirs), task.project_root
       assert_includes captured.fetch(:add_dirs), task.folder
+      assert_includes captured.fetch(:prompt),
+                      "Return that same JSON object as your complete final response"
     end
   end
 
@@ -48,6 +50,211 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal :ok, result.fetch(:status)
       assert_equal :invalid_output, result.fetch(:custody)
       assert_includes result.fetch(:diagnostic), "required output"
+    end
+  end
+
+  def test_launch_agent_materializes_an_exact_final_json_report_before_validation
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      report = {
+        "schema" => "hive-patrol-fix-inbox-report",
+        "schema_version" => 1,
+        "route" => "reject"
+      }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :ok,
+            final_message: JSON.generate(report),
+            final_message_truncated: false
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :clean, result.fetch(:custody)
+      assert_equal report, JSON.parse(File.read(output))
+    end
+  end
+
+  def test_launch_agent_accepts_clean_output_after_pi_retries_a_provider_error
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      report = {
+        "schema" => "hive-patrol-fix-inbox-report",
+        "schema_version" => 1,
+        "route" => "reject"
+      }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error,
+            exit_code: 0,
+            timed_out: false,
+            error_reason: "provider_error",
+            final_message: JSON.generate(report),
+            final_message_truncated: false,
+            provider_error: {
+              kind: :provider_error,
+              provider: :pi,
+              message: "Stream ended without finish_reason"
+            }
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :clean, result.fetch(:custody)
+      assert_equal report, JSON.parse(File.read(output))
+    end
+  end
+
+  def test_launch_agent_accepts_clean_output_after_pi_retries_a_rate_limit
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      report = {
+        "schema" => "hive-patrol-fix-inbox-report",
+        "schema_version" => 1,
+        "route" => "reject"
+      }
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error,
+            exit_code: 0,
+            timed_out: false,
+            error_reason: "limits_reached",
+            final_message: JSON.generate(report),
+            final_message_truncated: false,
+            provider_error: {
+              kind: :rate_limited,
+              provider: :pi,
+              status_code: 429,
+              message: "provider is temporarily rate-limited"
+            }
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :clean, result.fetch(:custody)
+      assert_equal report, JSON.parse(File.read(output))
+    end
+  end
+
+  def test_launch_agent_does_not_accept_a_provider_retry_without_clean_output
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          {
+            status: :error,
+            exit_code: 0,
+            timed_out: false,
+            error_reason: "provider_error",
+            provider_error: { kind: :provider_error, provider: :pi }
+          }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :invalid_output, result.fetch(:custody)
+    end
+  end
+
+  def test_launch_agent_does_not_recover_rate_limits_without_a_clean_process_exit
+    [
+      { exit_code: 1, timed_out: false },
+      { exit_code: 0, timed_out: true }
+    ].each do |process_result|
+      with_task do |task|
+        output = File.join(task.folder, "patrol-fix-inbox-report.json")
+        spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call do
+            File.write(output, "{}")
+            {
+              status: :error,
+              error_reason: "limits_reached",
+              provider_error: { kind: :rate_limited, provider: :pi },
+              **process_result
+            }
+          end
+        end
+
+        result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          launch(task, output)
+        end
+
+        assert_equal :error, result.fetch(:status), process_result.inspect
+        assert_equal :clean, result.fetch(:custody), process_result.inspect
+      end
+    end
+  end
+
+  def test_launch_agent_does_not_recover_resource_exhaustion_with_provider_evidence
+    [
+      { error_reason: "model_output_limit", provider_kind: :model_output_limit },
+      { error_reason: "turn_limit", provider_kind: :rate_limited }
+    ].each do |failure|
+      with_task do |task|
+        output = File.join(task.folder, "patrol-fix-inbox-report.json")
+        spawn = lambda do |_task, agent_custody:, **|
+          agent_custody.call do
+            File.write(output, "{}")
+            {
+              status: :error,
+              exit_code: 0,
+              timed_out: false,
+              error_reason: failure.fetch(:error_reason),
+              provider_error: {
+                kind: failure.fetch(:provider_kind),
+                provider: :pi
+              }
+            }
+          end
+        end
+
+        result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          launch(task, output)
+        end
+
+        assert_equal :error, result.fetch(:status), failure.inspect
+        assert_equal :clean, result.fetch(:custody), failure.inspect
+      end
+    end
+  end
+
+  def test_launch_agent_does_not_replace_a_dangling_report_symlink_from_final_json
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      spawn = lambda do |_task, agent_custody:, **|
+        agent_custody.call do
+          File.symlink(File.join(task.folder, "missing-target"), output)
+          { status: :ok, final_message: "{}", final_message_truncated: false }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(task, output)
+      end
+
+      assert_equal :invalid_output, result.fetch(:custody)
+      assert File.symlink?(output)
     end
   end
 
@@ -92,18 +299,31 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
-  def test_opencode_review_can_write_only_its_report_without_shell
+  def test_review_does_not_inherit_a_distinct_fix_agent
     with_task do |task|
       output = File.join(task.folder, "patrol-fix-inbox-report.json")
       captured = capture_launch(task, output, cfg: opencode_config)
+
+      assert_equal :codex, captured.fetch(:profile).name
+    end
+  end
+
+  def test_opencode_review_can_write_only_its_report_without_shell
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      cfg = opencode_config
+      cfg.fetch("patrol")["agent"] = "opencode"
+      cfg.fetch("patrol")["model"] = "openrouter/stealth/ox-alpha"
+      cfg.fetch("patrol")["effort"] = "high"
+      captured = capture_launch(task, output, cfg: cfg)
 
       assert_equal "workspace-write", captured.fetch(:permission_mode)
       assert_equal :opencode, captured.fetch(:profile).name
       assert_equal "openrouter/stealth/ox-alpha", captured.fetch(:model)
       assert_equal "high", captured.fetch(:effort)
       assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
-      assert_equal [ output ], captured.fetch(:opencode_edit_patterns)
-      assert_empty captured.fetch(:opencode_bash_patterns)
+      assert_equal [ output ], captured.fetch(:edit_patterns)
+      assert_empty captured.fetch(:bash_patterns)
     end
   end
 
@@ -118,8 +338,8 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_equal [ task.project_root, task.folder ],
                    captured.fetch(:additional_write_roots)
       assert_equal [ File.join(task.project_root, "**"), output ],
-                   captured.fetch(:opencode_edit_patterns)
-      assert_equal [ "*" ], captured.fetch(:opencode_bash_patterns)
+                   captured.fetch(:edit_patterns)
+      assert_equal [ "*" ], captured.fetch(:bash_patterns)
     end
   end
 

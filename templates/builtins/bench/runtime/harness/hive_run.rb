@@ -44,7 +44,8 @@ module HiveBench
                            judges: Driver.judges(opts), withhold_reference: opts[:withhold_reference])
                       .call(entries: entries, profiles: candidates, out_root: opts[:out],
                             corpus_version: opts[:corpus_version])
-      JudgeProvenance.annotate_document!(outcome.results, efforts: Driver.judge_efforts(opts))
+      JudgeProvenance.annotate_document!(outcome.results, efforts: Driver.judge_efforts(opts),
+                                         routes: Driver.judge_routes(opts))
       write_and_report(outcome, opts)
     end
 
@@ -70,6 +71,7 @@ module HiveBench
                corpus_version: "v2", withhold_reference: false, claude_judge: true, judge_bin: "claude",
                judge_model: nil, codex_judge: true,
                codex_judge_model: CodexJudge::DEFAULT_MODEL, codex_judge_effort: CodexJudge::DEFAULT_EFFORT,
+               codex_judge_provider: CodexJudge::DEFAULT_PROVIDER, codex_judge_provider_model: nil,
                openrouter_judge: false, openrouter_judge_model: "openai/gpt-5.5-pro",
                reuse_existing: true, reuse_unverified: ENV["HB_REUSE_UNVERIFIED_ARTIFACTS"] == "1" }
       OptionParser.new do |o|
@@ -91,9 +93,11 @@ module HiveBench
         end
         o.on("--[no-]claude-judge") { |v| opts[:claude_judge] = v }
         o.on("--judge-model M", "claude judge model") { |v| opts[:judge_model] = v }
-        o.on("--[no-]codex-judge", "score through the Codex CLI (subscription)") { |v| opts[:codex_judge] = v }
+        o.on("--[no-]codex-judge", "score through the Codex CLI (subscription by default)") { |v| opts[:codex_judge] = v }
         o.on("--codex-judge-model M") { |v| opts[:codex_judge_model] = v }
         o.on("--codex-judge-effort LEVEL") { |v| opts[:codex_judge_effort] = v }
+        o.on("--codex-judge-provider PROVIDER", CodexJudge::PROVIDERS) { |v| opts[:codex_judge_provider] = v }
+        o.on("--codex-judge-provider-model M") { |v| opts[:codex_judge_provider_model] = v }
         o.on("--[no-]openrouter-judge") { |v| opts[:openrouter_judge] = v }
         o.on("--openrouter-judge-model M") { |v| opts[:openrouter_judge_model] = v }
       end.parse!(argv)
@@ -106,6 +110,10 @@ module HiveBench
       abort("--source <target repo clone> is required") unless opts[:source]
       abort("--source path #{opts[:source]} is not a directory") unless File.directory?(opts[:source])
       abort("OPENROUTER_API_KEY must be set") if opts[:openrouter_judge] && ENV["OPENROUTER_API_KEY"].to_s.empty?
+      if opts[:codex_judge] && opts[:codex_judge_provider] == CodexJudge::OPENROUTER_PROVIDER
+        abort("--codex-judge-provider-model is required for OpenRouter") if opts[:codex_judge_provider_model].to_s.empty?
+        abort("OPENROUTER_API_KEY must be set for the OpenRouter codex judge route") if ENV["OPENROUTER_API_KEY"].to_s.empty?
+      end
     end
 
     def select_candidates(id)

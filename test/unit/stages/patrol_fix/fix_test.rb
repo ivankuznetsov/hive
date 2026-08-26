@@ -68,6 +68,61 @@ class PatrolFixFixStageTest < Minitest::Test
     end
   end
 
+  def test_first_generation_uses_exact_origin_base_instead_of_inbox_local_head
+    PatrolFixStageFixture.with_task(stage: "2-fix") do |task, root, manifest|
+      PatrolFixStageFixture.add_origin(task.project_root, root)
+      File.write(File.join(task.project_root, "local-only.rb"), "puts :unrelated\n")
+      git(task.project_root, "add", "local-only.rb")
+      git(task.project_root, "commit", "-m", "Unrelated local work")
+      local_head = git(task.project_root, "rev-parse", "HEAD").strip
+      remote_head = manifest.fetch("target_revision")
+      Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
+        PatrolFixStageFixture.decision_receipt(
+          manifest, "fix", head_revision: local_head
+        )
+      )
+      runner = lambda do |**kwargs|
+        worktree = kwargs.fetch(:owner).fetch("worktree")
+        refute File.exist?(File.join(worktree, "local-only.rb"))
+        File.write(File.join(worktree, "app.rb"), "puts :fixed\n")
+        git(worktree, "add", "app.rb")
+        git(worktree, "commit", "-m", "Fix defect")
+        File.write(kwargs.fetch(:output_path), JSON.generate(
+          "schema" => "hive-patrol-fix-fix-report", "schema_version" => 1,
+          "status" => "fixed", "summary" => "Fixed from the remote base.",
+          "validation_commands" => []
+        ))
+        { status: :ok, custody: :clean }
+      end
+
+      result = Hive::Stages::PatrolFix::Fix.run!(
+        task, { "default_branch" => "main" }, agent_runner: runner,
+        worktree_root: File.join(root, "worktrees")
+      )
+
+      assert_equal remote_head, result.dig(:receipt, "payload", "base_revision")
+      assert_equal remote_head,
+                   git(task.project_root, "rev-parse", "refs/remotes/origin/main").strip
+      refute_equal local_head, result.dig(:receipt, "payload", "base_revision")
+    end
+  end
+
+  def test_first_generation_has_no_local_fallback_when_origin_is_unavailable
+    with_fix_task do |task, worktree_root|
+      git(task.project_root, "remote", "remove", "origin")
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Fix.run!(
+          task, { "default_branch" => "main" },
+          agent_runner: ->(**) { flunk "must not launch without an exact remote base" },
+          worktree_root: worktree_root
+        )
+      end
+
+      assert_match(/strict worktree requires exactly one origin remote/, error.message)
+    end
+  end
+
   def test_fix_requires_current_controller_authorization
     store = Struct.new(:rows) { def read_all = rows }.new([])
     manifest = {
@@ -100,7 +155,7 @@ class PatrolFixFixStageTest < Minitest::Test
       manifest_store.write!(manifest)
 
       with_replaced_singleton_method(
-        Hive::Stages::PatrolFix::Fix, :fix_authorization, ->(*) { [ Object.new, true ] }
+        Hive::Stages::PatrolFix::Fix, :fix_authorization, ->(*) { true }
       ) do
         error = assert_raises(Hive::StageError) do
           Hive::Stages::PatrolFix::Fix.run!(task, {}, worktree_root: worktree_root)
@@ -114,6 +169,7 @@ class PatrolFixFixStageTest < Minitest::Test
 
   def with_fix_task
     PatrolFixStageFixture.with_task(stage: "2-fix") do |task, root, manifest|
+      PatrolFixStageFixture.add_origin(task.project_root, root)
       Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
         PatrolFixStageFixture.decision_receipt(manifest, "fix")
       )
@@ -145,10 +201,15 @@ module PatrolFixStageFixture
       yield Hive::Task.new(folder), dir, manifest
     end
   end
-  def decision_receipt(manifest, route)
+  def add_origin(repo, root)
+    origin = File.join(root, "origin.git")
+    git(root, "clone", "--bare", repo, origin)
+    git(repo, "remote", "add", "origin", origin)
+  end
+  def decision_receipt(manifest, route, head_revision: manifest.fetch("target_revision"))
     { "schema" => "hive-patrol-fix-receipt", "schema_version" => 1, "receipt_id" => "decision-1", "kind" => "decision", "stage" => "inbox",
       "task" => manifest.fetch("task"), "evidence_revision" => manifest.fetch("evidence_revision"), "recorded_at" => "2026-08-20T12:00:00Z",
-      "payload" => { "route" => route, "rationale" => "current", "evidence" => [ "current" ], "blocker_owner" => "inbox_gate", "head_revision" => manifest.fetch("target_revision") } }
+      "payload" => { "route" => route, "rationale" => "current", "evidence" => [ "current" ], "blocker_owner" => "inbox_gate", "head_revision" => head_revision } }
   end
   def git(path, *args)
     out, err, status = Open3.capture3("git", "-C", path, *args); raise err unless status.success?; out

@@ -25,19 +25,49 @@ module HiveBench
 
     DEFAULT_WORKTREE_ROOT = "/work/.worktrees"
     DEFAULT_BRANCH = "main"
+    PARALLEL_ATTEMPT_STARTUP_TIMEOUT_SEC = 300
+    OPENCODE_PLUGIN = "/opt/compound-engineering"
+    OPENCODE_OX_ALPHA_MODEL_ID = "z-ai/glm-5.3-flash"
+    OPENCODE_OX_ALPHA_MODEL = {
+      "name" => "Ox Alpha (Z.ai GLM 5.3 Flash)",
+      "family" => "glm",
+      "release_date" => "2026-08-26",
+      "attachment" => true,
+      "reasoning" => true,
+      "temperature" => true,
+      "tool_call" => true,
+      "cost" => { "input" => 0.075, "output" => 0.25 },
+      "limit" => { "context" => 1_048_576, "output" => 131_072 },
+      "modalities" => { "input" => %w[text image], "output" => ["text"] },
+      "status" => "active",
+      "variants" => { "high" => { "reasoning" => { "effort" => "high" } } }
+    }.freeze
+    # OpenCode enforces scoped permissions while Pi relies on the surrounding
+    # benchmark container. Give both harnesses the same coding capability: the
+    # disposable container + provider-only network remain the security
+    # boundary, while OpenCode may run the repository diagnostics and tests a
+    # coding benchmark requires. Without Bash the model can edit blindly, which
+    # measures a capability handicap rather than the harness.
+    OPENCODE_PERMISSIONS = {
+      "preset" => "scoped", "tools" => [ "Read", "Write", "Edit", "Bash(*)" ]
+    }.freeze
 
     # candidate: responds to plan, execute, review (agent names: "claude"/"codex"/
     #   "pi"), claude_model (CLI id or nil), review_max_passes, review_wall_clock_sec,
     #   reviewers (Array), ci_command (String or nil).
     def to_h(candidate, worktree_root: DEFAULT_WORKTREE_ROOT, default_branch: DEFAULT_BRANCH)
       config = {
-        # Keep Hive's legacy Claude fields as a fallback for heterogeneous
-        # reviewer panels whose provider-specific identities cannot share one
-        # `models.review_reviewers` route. Live stages still use exact routes.
         "claude" => { "mode" => "headless", "model" => candidate.claude_model,
                       "effort" => candidate.claude_effort }.compact,
         "default_branch" => default_branch,
         "worktree_root" => worktree_root,
+        # A full parallel campaign can put the host under swap pressure while
+        # detached Hive workers boot. Keep the launch claim bounded, but do not
+        # expire it at the production-oriented 30-second default before the
+        # worker can claim its already-admitted attempt.
+        "attempt_launch_timeout_sec" => PARALLEL_ATTEMPT_STARTUP_TIMEOUT_SEC,
+        "attempt_first_heartbeat_timeout_sec" => PARALLEL_ATTEMPT_STARTUP_TIMEOUT_SEC,
+        "plan_review" => { "enabled" => false },
         "plan" => { "agent" => candidate.plan },
         "execute" => { "agent" => candidate.execute },
         # Without this, hive's built-in default (claude) would open the PR even
@@ -45,6 +75,23 @@ module HiveBench
         "open_pr" => { "agent" => candidate.review },
         "review" => review_config(candidate)
       }
+      if uses?(candidate, "opencode")
+        config["permissions"] = OPENCODE_PERMISSIONS
+        config["agents"] = {
+          "opencode" => {
+            "config" => {
+              "provider" => {
+                "openrouter" => {
+                  "models" => { OPENCODE_OX_ALPHA_MODEL_ID => OPENCODE_OX_ALPHA_MODEL }
+                }
+              }
+            },
+            "credential_env" => ["OPENROUTER_API_KEY"],
+            "plugins" => [OPENCODE_PLUGIN]
+          }
+        }
+      end
+
       models = {}
       add_route(models, "plan", route_for(candidate, candidate.plan, "plan"))
       add_route(models, "execute", route_for(candidate, candidate.execute, "execute"))
@@ -54,9 +101,7 @@ module HiveBench
       # exactly so its model cannot leak into a Grok/Claude/Codex peer reviewer.
       review_route = route_for(candidate, candidate.review, "review")
       add_route(models, "open_pr", review_route)
-      %w[review_ci review_triage review_fix].each do |stage|
-        add_route(models, stage, review_route)
-      end
+      %w[review_ci review_triage review_fix].each { |stage| add_route(models, stage, review_route) }
       add_route(models, "review_reviewers", shared_reviewer_route(config.dig("review", "reviewers")))
       config["models"] = models unless models.empty?
       config
@@ -77,11 +122,24 @@ module HiveBench
         }.compact
       when "pi"
         { "model" => candidate.pi_models&.fetch(stage, nil) }.compact
+      when "opencode"
+        {
+          "model" => candidate.opencode_models&.fetch(stage, nil),
+          "effort" => candidate.opencode_effort
+        }.compact
       when "grok"
         { "model" => candidate.grok_model, "effort" => candidate.grok_effort }.compact
       else
         {}
       end
+    end
+
+    def uses?(candidate, agent)
+      stage_agents = [candidate.plan, candidate.execute, candidate.review]
+      reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
+        reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
+      end
+      (stage_agents + reviewer_agents).include?(agent)
     end
 
     # Hive's built-in reviewer identity is one routing key for the whole panel.
@@ -121,7 +179,19 @@ module HiveBench
         "agent" => candidate.review,
         "ci" => { "command" => candidate.ci_command, "max_attempts" => 3, "agent" => candidate.review },
         "triage" => { "enabled" => true, "agent" => candidate.review, "bias" => "courageous" },
-        "fix" => { "agent" => candidate.review, "auto_commit" => { "sign_policy" => "inherit" } },
+        "fix" => {
+          "agent" => candidate.review,
+          "auto_commit" => {
+            "sign_policy" => "inherit",
+            # Benchmark targets are disposable isolated clones and several
+            # corpus tasks legitimately span schemas/, examples/, packaging,
+            # and other repo-specific paths outside Hive's conservative
+            # production review allowlist. Keep symlink and secret-content
+            # safety checks, but let CleanExit preserve the candidate's full
+            # implementation when a tool-only harness cannot run git commit.
+            "scope_check" => { "enabled" => false }
+          }
+        },
         "browser_test" => { "enabled" => false },
         "github_publish" => { "enabled" => false },
         "max_passes" => candidate.review_max_passes,

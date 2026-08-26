@@ -33,6 +33,7 @@ module Hive
         @decision_runner_factory = decision_runner_factory || lambda do |**arguments|
           Hive::Daemon::PatrolFixSemanticDecisionRunner.new(**arguments)
         end
+        @admission_stores = {}
       end
 
       # The project registry is mutable while the one production daemon stays
@@ -96,14 +97,20 @@ module Hive
       end
 
       def build_sources(entries)
-        entries.map do |entry|
+        active_roots = {}
+        sources = entries.map do |entry|
+          admission_root = File.join(
+            entry.fetch("hive_state_path"), "patrol-fix", "admissions"
+          )
+          active_roots[admission_root] = true
           Source.new(
             entry: entry,
-            store: Hive::PatrolFix::AdmissionStore.new(
-              root: File.join(entry.fetch("hive_state_path"), "patrol-fix", "admissions")
-            )
+            store: (@admission_stores[admission_root] ||=
+              Hive::PatrolFix::AdmissionStore.new(root: admission_root))
           )
         end
+        @admission_stores.delete_if { |root, _store| !active_roots.key?(root) }
+        sources
       end
 
       def normalize_entry(raw)

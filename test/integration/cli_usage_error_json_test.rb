@@ -117,14 +117,18 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   def test_status_mode_conflicts_are_usage_errors_with_the_selected_schema
     with_tmp_global_config do |home|
-      out, _err, status = run_hive(home, "status", "--full", "--json")
+      out, _err, status = run_hive(
+        home, "status", "--internal-task-graph", "--operational", "--json"
+      )
 
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       payload = JSON.parse(out)
-      assert_equal "hive-status", payload.fetch("schema")
-      assert_equal 7, payload.fetch("schema_version")
+      assert_equal "hive-operational-status", payload.fetch("schema")
       assert_equal false, payload.fetch("ok")
-      assert_match(/--full cannot be combined with --json/, payload.fetch("message"))
+      assert_match(
+        /--internal-task-graph cannot be combined with --operational/,
+        payload.fetch("message")
+      )
 
       out, _err, status = run_hive(
         home, "status", "--operational", "--diagnose", "task", "--json"
@@ -133,6 +137,18 @@ class CliUsageErrorJsonTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal "hive-status-diagnose", payload.fetch("schema")
       assert_match(/--operational cannot be combined/, payload.fetch("message"))
+
+      out, _err, status = run_hive(home, "status", "--internal-task-graph", "--json")
+      assert status.success?
+      payload = JSON.parse(out)
+      assert_equal "hive-status", payload.fetch("schema")
+      assert_equal 7, payload.fetch("schema_version")
+
+      out, _err, status = run_hive(home, "status", "--full", "--json")
+      refute status.success?
+      payload = JSON.parse(out)
+      assert_equal "hive-running-status", payload.fetch("schema")
+      assert_match(/called with arguments \["--full"\]/, payload.fetch("message"))
     end
   end
 
@@ -458,9 +474,9 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   def test_documented_json_surfaces_wrap_thor_arity_errors
     cases = [
-      [ %w[status extra --json], "hive-status", "error" ],
+      [ %w[status extra --json], "hive-running-status", "error" ],
       [ %w[status --diagnose task extra --json], "hive-status-diagnose", "error" ],
-      [ %w[status --json -- extra --diagnose=task], "hive-status", "error" ],
+      [ %w[status --json -- extra --diagnose=task], "hive-running-status", "error" ],
       [ %w[prune extra --json], "hive-prune", "usage" ],
       [ %w[forget project extra --json], "hive-forget", "usage" ],
       [ %w[metrics rollback-rate extra --json], "hive-metrics-rollback-rate", "error" ],

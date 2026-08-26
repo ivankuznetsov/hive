@@ -87,7 +87,7 @@ Then use the global view:
 
 ```bash
 hive status
-hive status --json
+hive status --operational
 ```
 
 For automation, enroll projects and do a dry run before live dispatch:

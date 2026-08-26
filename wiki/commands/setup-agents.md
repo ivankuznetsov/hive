@@ -175,7 +175,7 @@ final health (`healthy`, `missing`, `stale`, `incompatible`, `conflicting`,
 `unavailable`).
 
 For OpenCode, a successfully configured exact pinned plugin may resolve through
-the invocation-owned prepared overlay before a persistent package directory
+the effective native config before a persistent package cache directory
 exists. Post-verification treats that exact package-bound `configured:`
 identity as healthy instead of asking the operator to repeat an already
 successful plugin configuration.

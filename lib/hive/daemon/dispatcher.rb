@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "json"
+require "set"
 require "shellwords"
 require "time"
 require "hive/config"
@@ -37,6 +38,7 @@ require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
 require "hive/attempts/generation"
+require "hive/dependency_snapshot"
 require "hive/terminal_outcome"
 
 module Hive
@@ -54,7 +56,9 @@ module Hive
       attr_reader :controller, :supervisor, :logger
 
       OperationalQueueState = Data.define(:pending, :claimed, :malformed, :error)
+      FastProbe = Data.define(:task_keys, :full_tick)
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
+      STATE_FILE_PROBE_BATCH_SIZE = 64
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answer_state`).
@@ -188,7 +192,11 @@ module Hive
         @last_reexec_at = nil
         @started_at = nil
         @last_tick_at = nil
-        @tracked_state_file_mtimes = {}
+        @tracked_state_files = {}
+        @tracked_state_file_order = []
+        @tracked_state_file_order_members = Set.new
+        @tracked_state_file_cursor = 0
+        @known_rows_by_key = {}
         @dispatched_today = 0
         reset_active_agent_snapshot
         # Per-tick enable cache. Populated lazily within one tick so
@@ -241,9 +249,12 @@ module Hive
       # handling, no sleep. Public so tests can drive a single tick
       # deterministically.
       def tick(now: Time.now)
+        tick_started = false
+        tick_clock_started_at = nil
         return unless admission_open?
 
-        @last_tick_at = now
+        tick_clock_started_at = full_tick_clock_time
+        tick_started = true
         publish_operational_snapshot(:begin_tick, phase: "started", now: now)
         # PR-40 follow-up #2: clear the per-tick enable cache so a
         # `daemon.enabled` flip in `<project>/.hive-state/config.yml`
@@ -349,7 +360,7 @@ module Hive
         refresh_legacy_layout_projects(result.projects)
         refresh_active_agent_snapshot(result.rows)
 
-        observe_external_running_rows(result.rows)
+        apply_external_running_counts
 
         # Recovery requests require the immutable task id. Assign ids before
         # the healer observes failures so an externally-created legacy task can
@@ -509,16 +520,101 @@ module Hive
           result.rows.map { |row| [ row.project, row.slug ] },
           scope_projects: Array(result.projects).map(&:name)
         )
-        refresh_tracked_state_file_mtimes(result.rows)
+        refresh_status_index(result.rows)
 
         publish_complete_operational_snapshot(
-          initial_rows: result.rows,
-          initial_hidden_archived_task_count: result.hidden_archived_task_count,
+          rows: result.rows,
+          hidden_archived_task_count: result.hidden_archived_task_count,
+          status_payload: result.status_payload,
           now: now
         )
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
+      ensure
+        if tick_started
+          @last_tick_at = full_tick_completion_time(
+            started_at: now, clock_started_at: tick_clock_started_at
+          )
+        end
+      end
+
+      # A fast tick is intentionally task-local. It refreshes only rows whose
+      # state files changed and applies the ordinary row policy. Dependency
+      # rows fail closed in the bounded status projection, so no dependency
+      # graph is needed here. Fleet-wide schedulers, pruning, and operational
+      # publication remain on the 30-second authoritative full tick.
+      def tick_changed(task_keys:, now: Time.now)
+        return false unless admission_open?
+
+        keys = Array(task_keys).map do |project, slug|
+          [ project.to_s, slug.to_s ]
+        end.uniq
+        return true if keys.empty?
+
+        @enabled_cache.clear
+        @logger.event(:tick_begin, now: now.utc.iso8601, scope: "changed_tasks", tasks: keys.length)
+        result = @status_consumer.fetch_tasks(keys)
+        return false unless admission_open?
+        unless result.ok
+          @logger.event(:status_failure, error: result.error, scope: "changed_tasks")
+          @logger.event(:tick_end, now: Time.now.utc.iso8601,
+                                   action: "incremental_status_failure")
+          return false
+        end
+        @logger.event(:status_warning, message: result.warning) if result.warning
+
+        # Agent heartbeat rows carry positive liveness and cannot dispatch.
+        # Reuse the last full attempt snapshot for them. Any row that could
+        # heal or dispatch refreshes attempt ownership first, preserving the
+        # capacity gate without scanning attempt history on every heartbeat.
+        if result.rows.any? { |row| !active_agent_row?(row) } && !reconcile_attempts(now: now)
+          @logger.event(:tick_end, now: Time.now.utc.iso8601,
+                                   action: "incremental_attempt_reconciliation_failed")
+          return false
+        end
+        return false unless admission_open?
+
+        replace_incremental_status_rows(keys, result.rows)
+        apply_external_running_counts
+
+        begin
+          @task_id_backfiller.backfill(result.rows, now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+        begin
+          @stale_agent_healer.heal(
+            rows_eligible_for_error_recovery(result.rows),
+            now: now,
+            legacy_layout_projects: @legacy_layout_projects,
+            daemon_enabled_projects: daemon_enabled_projects_for(result.rows)
+          )
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "stale_agent_healer raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+        begin
+          @display_name_backfiller.backfill(result.rows, now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "display_name_backfiller raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
+        dispatch_priority_order(result.rows).each do |row|
+          break unless admission_open?
+
+          handle_row(row, now: now)
+        end
+        @logger.event(:tick_end, now: Time.now.utc.iso8601,
+                                 action: "incremental",
+                                 in_flight: @controller.in_flight_count,
+                                 tasks: result.rows.length)
+        true
       end
 
       # Run forever: install signal traps, loop tick + interruptible
@@ -565,8 +661,15 @@ module Hive
           end
           if full_tick
             tick(now: now)
-          elsif cheap_probe_requires_full_tick?(now: now)
-            tick(now: Time.now) unless @shutdown || @reload
+          else
+            probe = cheap_probe(now: now)
+            unless @shutdown || @reload
+              if probe.full_tick
+                tick(now: Time.now)
+              elsif !probe.task_keys.empty?
+                tick_changed(task_keys: probe.task_keys, now: Time.now)
+              end
+            end
           end
           interruptible_sleep(@fast_poll_sec)
         end
@@ -733,28 +836,37 @@ module Hive
         @last_tick_at.nil? || (now - @last_tick_at) >= @poll_interval_sec
       end
 
-      def cheap_probe_requires_full_tick?(now:)
-        # When this returns true via `child_exited`, the follow-up `tick`
-        # calls `reap_completed` again. That second sweep is a benign
-        # waitpid no-op: the children were already reaped (and their
-        # completions recorded) here, so `reap_all` finds nothing and
-        # `record_completion` does not re-fire. The redundancy is
-        # intentional — the probe must reap to *learn* whether a full
-        # tick is warranted — not a missed dedup.
-        #
-        # Asymmetry: this probe only reaps real children via
-        # `reap_completed`; `reap_dry_run` runs solely inside the full
-        # `tick`. So dry-run pseudo-child completions are not accelerated
-        # by the fast probe and advance only on the `@poll_interval_sec`
-        # backstop. Harmless — dry-run is not the latency path the AC
-        # targets — but noted to prevent future confusion.
-        child_exited = reap_completed(now: now)
-        state_file_changed = tracked_state_file_mtime_changed?
-        child_exited || state_file_changed
+      def full_tick_completion_time(started_at:, clock_started_at:)
+        elapsed = [ full_tick_clock_time - clock_started_at, 0 ].max
+        started_at.utc + elapsed
+      end
+
+      def full_tick_clock_time
+        @clock ? @clock.call.utc : Time.now.utc
+      end
+
+      def cheap_probe(now:)
+        entries = reap_completed_entries(now: now)
+        matched_entries = entries.filter_map do |entry|
+          key = [ entry.project.to_s, entry.slug.to_s ]
+          key if @known_rows_by_key.key?(key)
+        end
+        changed = matched_entries.dup
+        changed.concat(tracked_state_file_changes)
+        FastProbe.new(
+          task_keys: changed.uniq,
+          full_tick: entries.length != matched_entries.length
+        )
       end
 
       def reap_completed(now:)
-        record_completed(@supervisor.reap_all(now: now), now: now)
+        reap_completed_entries(now: now).any?
+      end
+
+      def reap_completed_entries(now:)
+        entries = Array(@supervisor.reap_all(now: now))
+        record_completed(entries, now: now)
+        entries
       end
 
       def record_completed(entries, now:)
@@ -1114,35 +1226,87 @@ module Hive
         @logger.event(:fatal, message: "#{label} raised: #{signature}", keeping_previous: true)
       end
 
-      # Snapshot each tracked state file's on-disk mtime so the next fast
-      # probe can detect a write. Store the raw `safe_mtime` (which is nil
-      # when the file is absent) rather than falling back to the status
-      # row's mtime: `tracked_state_file_mtime_changed?` re-stats with the
-      # same `safe_mtime`, so a `nil` baseline compares stable against a
-      # `nil` re-stat. Falling back to `row.state_file_mtime` (a Time) for
-      # an absent file made every probe see `Time != nil` and fire a full
-      # tick every second until a full tick re-baselined.
-      #
-      # NOTE: these mtimes are captured POST-dispatch, so a slug freshly
-      # spawned this tick has its pre-dispatch mtime recorded here. When
-      # the spawned agent writes its AGENT_WORKING marker (~1s later) the
-      # next probe sees the bump and forces one redundant full tick. That
-      # re-evaluation is correct (the marker really did change) and
-      # low-frequency, so it's left as-is rather than special-cased.
-      def refresh_tracked_state_file_mtimes(rows)
-        @tracked_state_file_mtimes = {}
+      # Rebuild the bounded fast-probe inventory after an authoritative full
+      # scan. Each one-second probe rotates through at most
+      # STATE_FILE_PROBE_BATCH_SIZE entries, so idle stat work stays constant
+      # as task history grows. The 30-second full tick repairs new, removed,
+      # or otherwise unobserved tasks.
+      def refresh_status_index(rows)
+        previous_cursor = @tracked_state_file_cursor
+        @tracked_state_files = {}
+        @tracked_state_file_order = []
+        @tracked_state_file_order_members = Set.new
         rows.each do |row|
           next if row.state_file.nil? || row.state_file.empty?
 
-          @tracked_state_file_mtimes[row.state_file] = safe_mtime(row.state_file)
+          key = task_key(row)
+          @tracked_state_files[key] = {
+            path: row.state_file, mtime: safe_mtime(row.state_file)
+          }
+          @tracked_state_file_order << key
+          @tracked_state_file_order_members << key
         end
+        @tracked_state_file_cursor = if @tracked_state_file_order.empty?
+          0
+        else
+          previous_cursor % @tracked_state_file_order.length
+        end
+        @known_rows_by_key = rows.to_h { |row| [ task_key(row), row ] }
       end
 
-      def tracked_state_file_mtime_changed?
-        @tracked_state_file_mtimes.any? do |path, previous_mtime|
-          current_mtime = safe_mtime(path)
-          current_mtime != previous_mtime
+      def tracked_state_file_changes
+        size = @tracked_state_file_order.length
+        return [] if size.zero?
+
+        changed = []
+        [ size, STATE_FILE_PROBE_BATCH_SIZE ].min.times do
+          key = @tracked_state_file_order.fetch(@tracked_state_file_cursor % size)
+          @tracked_state_file_cursor = (@tracked_state_file_cursor + 1) % size
+          entry = @tracked_state_files[key]
+          next unless entry
+
+          current_mtime = safe_mtime(entry.fetch(:path))
+          next if current_mtime == entry.fetch(:mtime)
+
+          changed << key
         end
+        changed
+      end
+
+      def replace_incremental_status_rows(task_keys, rows)
+        keys = task_keys.map { |project, slug| [ project.to_s, slug.to_s ] }.uniq
+        keys.each { |key| @known_rows_by_key.delete(key) }
+        rows.each { |row| @known_rows_by_key[task_key(row)] = row }
+
+        keys.each { |key| @tracked_state_files.delete(key) }
+        rows.each do |row|
+          next if row.state_file.nil? || row.state_file.empty?
+
+          key = task_key(row)
+          unless @tracked_state_file_order_members.include?(key)
+            @tracked_state_file_order << key
+            @tracked_state_file_order_members << key
+          end
+          @tracked_state_files[key] = {
+            path: row.state_file, mtime: safe_mtime(row.state_file)
+          }
+        end
+        removed = keys.reject { |key| @tracked_state_files.key?(key) }
+        unless removed.empty?
+          removed_set = removed.to_set
+          @tracked_state_file_order.reject! { |key| removed_set.include?(key) }
+          @tracked_state_file_order_members.subtract(removed_set)
+          @tracked_state_file_cursor = if @tracked_state_file_order.empty?
+            0
+          else
+            @tracked_state_file_cursor % @tracked_state_file_order.length
+          end
+        end
+        update_active_agent_snapshot(keys, rows)
+      end
+
+      def task_key(row)
+        [ row.project.to_s, row.slug.to_s ]
       end
 
       def safe_mtime(path)
@@ -1167,9 +1331,19 @@ module Hive
         path = resolve_post_completion_path(child_entry)
         return unless path && File.exist?(path)
 
+        state_file_mtime = File.mtime(path)
+        return if child_entry.finished_at && state_file_mtime > child_entry.finished_at
+
+        if state_file_in_different_stage?(path, child_entry.stage)
+          @controller.forget_state_file_mtime(
+            project: child_entry.project, slug: child_entry.slug
+          )
+          return
+        end
+
         @controller.observe_state_file_mtime(
           project: child_entry.project, slug: child_entry.slug,
-          mtime: File.mtime(path)
+          mtime: state_file_mtime
         )
       rescue StandardError
         # Stat failure is non-fatal; just don't update.
@@ -1193,6 +1367,12 @@ module Hive
         state_file_mtime = File.mtime(path)
         attempt_ended_at = Time.iso8601(attempt["ended_at"].to_s)
         return if state_file_mtime > attempt_ended_at
+
+        intended_stage = attempt["intended_stage"].to_s
+        if state_file_in_different_stage?(path, intended_stage)
+          @controller.forget_state_file_mtime(project: project, slug: slug)
+          return
+        end
 
         @controller.observe_state_file_mtime(
           project: project, slug: slug, mtime: state_file_mtime
@@ -1260,6 +1440,19 @@ module Hive
         end
       end
 
+      def state_file_stage(path)
+        parts = File.expand_path(path.to_s).split(File::SEPARATOR)
+        stages_index = parts.rindex("stages")
+        return nil unless stages_index
+
+        parts[stages_index + 1]
+      end
+
+      def state_file_in_different_stage?(path, prior_stage)
+        current_stage = state_file_stage(path)
+        !current_stage.nil? && !prior_stage.to_s.empty? && current_stage != prior_stage.to_s
+      end
+
       def handle_row(row, now:)
         return unless admission_open?
 
@@ -1322,12 +1515,19 @@ module Hive
         baseline_mtime = @controller.last_dispatched_state_file_mtime_for(
           project: row.project, slug: row.slug
         )
-        if brainstorm_answers.fetch(:complete) &&
-           @controller.restored_dispatch_baseline_for?(project: row.project, slug: row.slug)
-          # Older daemons could persist a fully answered brainstorm as the
-          # first-sight baseline and strand it forever. Treat a restored,
-          # uncorroborated baseline as first sight exactly once; a successful
-          # dispatch records it in this process and restores the normal brake.
+        restored_baseline = @controller.restored_dispatch_baseline_for?(
+          project: row.project, slug: row.slug
+        )
+        restored_generic_run = row.action == "ready_to_run" &&
+                               row.state_file_mtime && baseline_mtime &&
+                               row.state_file_mtime < baseline_mtime
+        if restored_baseline &&
+           (brainstorm_answers.fetch(:complete) || restored_generic_run)
+          # A baseline loaded from disk may describe an older daemon's
+          # first-sight observation or a replaced workflow state file. Treat
+          # only that uncorroborated baseline as first sight exactly once.
+          # Same-process observations clear restored provenance, so a newer
+          # sibling artifact can never re-arm an unchanged markerless run.
           baseline_mtime = nil
         end
         decision = Policy.decide(
@@ -1413,12 +1613,14 @@ module Hive
         when :markerless_stalled
           # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
           # marker and its state file shows no progress, so it re-classifies to
-          # ready_to_run indefinitely. Log it explicitly (not a bare :skipped)
-          # so the stall is observable rather than silent. The per-project daily
-          # dispatch cap bounds re-dispatch if the file does keep changing.
+          # ready_to_run indefinitely. Convert it to the ordinary recoverable
+          # ERROR lifecycle under the task lock; the next tick submits it to the
+          # sole RecoveryCoordinator. Keep the explicit event for observability.
+          healed = @stale_agent_healer.heal_markerless_stall(row)
           @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
                                               stage: row.stage, action: row.action,
-                                              reason: "agent_exited_without_marker")
+                                              reason: "agent_exited_without_marker",
+                                              healed: healed)
           observe_policy_disposition(row, decision)
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
@@ -1589,14 +1791,14 @@ module Hive
         )
         remember_routing_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
-        if outcome == :attempt_terminal_replay
-          # A successful durable attempt already consumed this exact task
-          # generation. Refresh the edit/run baseline just as a locally
-          # reaped child would, so an unchanged waiting marker does not ask
-          # the attempts layer for the same terminal receipt every tick.
-          # The baseline is persisted by the controller, making the brake
-          # survive daemon restarts while a genuine later edit (newer mtime)
-          # remains eligible for dispatch.
+        if dispatch_result.is_a?(Hive::Attempts::DispatchResult) &&
+           (dispatch_result.accepted? || dispatch_result.status == :terminal_replay)
+          # Durable attempts never enter ChildSupervisor, so consume their
+          # state-file mtime here just as record_dispatch does for a local
+          # child. Acceptance immediately replaces a stale restored baseline;
+          # terminal replay covers a daemon that missed that acceptance. The
+          # persisted brake survives restart while a genuine later edit stays
+          # eligible.
           @controller.observe_state_file_mtime(
             project: row.project, slug: row.slug, mtime: row.state_file_mtime
           )
@@ -1695,26 +1897,18 @@ module Hive
         log_operational_snapshot_failure(phase: "observe", error: e)
       end
 
-      def publish_complete_operational_snapshot(initial_rows:, initial_hidden_archived_task_count: 0, now:)
+      def publish_complete_operational_snapshot(rows:, hidden_archived_task_count: 0,
+                                                status_payload: nil, now:)
         return unless @operational_snapshot
 
-        verification = @status_consumer.fetch
         completed_at = operational_snapshot_now
-        unless verification.ok
-          publish_operational_snapshot(
-            :fail, phase: "failed", reason: "revalidation_status_failure", now: completed_at
-          )
-          return
-        end
-
         queue_state = operational_queue_state
         publish_operational_snapshot(
           :complete,
           phase: "complete",
-          initial_rows: initial_rows,
-          final_rows: verification.rows,
-          initial_hidden_archived_task_count: initial_hidden_archived_task_count,
-          final_hidden_archived_task_count: verification.hidden_archived_task_count,
+          rows: rows,
+          hidden_archived_task_count: hidden_archived_task_count,
+          status_payload: status_payload,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),
           recoveries: operational_recovery_snapshot(queue_state: queue_state),
@@ -1877,11 +2071,9 @@ module Hive
         Hive::Workflows.all_stage_dirs.index(stage.to_s) || -1
       end
 
-      def observe_external_running_rows(rows)
+      def apply_external_running_counts
         per_project = Hash.new(0)
-        rows.each do |row|
-          next unless externally_running?(row)
-          next if @controller.running_task?(project: row.project, slug: row.slug)
+        @external_active_rows.each_value do |row|
           next if durable_row?(row)
 
           per_project[row.project] += 1
@@ -2222,6 +2414,43 @@ module Hive
         @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
           !current_request_ids.key?(request_id)
         end
+        return if pending.empty?
+
+        begin
+          registered_projects = Hive::Config.registered_projects
+          projects_by_name = {}
+          registered_projects.each do |project|
+            projects_by_name[project.fetch("name").to_s] ||= project
+          end
+          project_lookup = projects_by_name.method(:[])
+        rescue StandardError => e
+          registered_projects = nil
+          project_lookup = ->(_name) { raise e }
+        end
+        rows_by_task = {}
+        rows.each do |row|
+          key = [ row.project.to_s, row.slug.to_s ]
+          rows_by_task[key] ||= row
+        end
+        admission_context = nil
+        admission_context_error = nil
+        admission_context_loaded = false
+        admission_context_loader = lambda do
+          unless admission_context_loaded
+            begin
+              admission_context = Hive::DependencySnapshot.admission_context(
+                registered_projects
+              )
+            rescue StandardError => e
+              admission_context_error = e
+            ensure
+              admission_context_loaded = true
+            end
+          end
+          raise admission_context_error if admission_context_error
+
+          admission_context
+        end
 
         # Per-slug in-flight gate within this tick: if we just spawned
         # for (project, slug) on this tick, defer subsequent requests
@@ -2245,7 +2474,11 @@ module Hive
           # the next tick to retry; the failure is logged for
           # operator visibility. Per R-01 from PR #241 ce-code-review.
           begin
-            process_dispatch_request_iteration(req, now: now, rows: rows)
+            process_dispatch_request_iteration(
+              req, now: now, rows: rows,
+              row_index: rows_by_task, project_lookup: project_lookup,
+              admission_context_loader: admission_context_loader
+            )
           rescue StandardError => e
             recovery_receipt = defer_recovery_after_dispatch_failure(req, now: now)
             @logger.event(:dispatch_request_rejected,
@@ -2292,7 +2525,9 @@ module Hive
       # process_dispatch_requests captures any error from the gate
       # checks AND the actual spawn. Returns nil; side effects via
       # @controller, @logger, and the queue's remove() call.
-      def process_dispatch_request_iteration(req, now:, rows:)
+      def process_dispatch_request_iteration(req, now:, rows:, row_index: nil,
+                                             project_lookup: nil,
+                                             admission_context_loader: nil)
         return unless admission_open?
 
         unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
@@ -2310,7 +2545,22 @@ module Hive
           return
         end
 
-        unless Hive::Config.find_project(req.project)
+        project = begin
+          if project_lookup
+            project_lookup.call(req.project.to_s)
+          else
+            Hive::Config.find_project(req.project)
+          end
+        rescue StandardError => e
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "project_registry_unavailable",
+            error: "#{e.class}: #{e.message[0, 200]}"
+          )
+          return
+        end
+        unless project
           if req.recovery.is_a?(Hash)
             log_dispatch_request_once(
               :dispatch_request_blocked,
@@ -2342,11 +2592,15 @@ module Hive
           return
         end
 
-        if req.recovery.is_a?(Hash)
-          row = rows.find do |candidate|
+        row = if row_index
+          row_index[[ req.project.to_s, req.slug.to_s ]]
+        else
+          rows.find do |candidate|
             candidate.project.to_s == req.project.to_s &&
               candidate.slug.to_s == req.slug.to_s
           end
+        end
+        if req.recovery.is_a?(Hash)
           unless row
             log_dispatch_request_once(
               :dispatch_request_blocked,
@@ -2355,7 +2609,21 @@ module Hive
             )
             return
           end
-          recovery_receipt = @recovery_coordinator.resume(request: req, row: row, now: now)
+          resume_options = { request: req, row: row, now: now }
+          if admission_context_loader
+            begin
+              resume_options[:admission_context] = admission_context_loader.call
+            rescue StandardError => e
+              log_dispatch_request_once(
+                :dispatch_request_blocked,
+                request_id: req.request_id, project: req.project,
+                slug: req.slug, reason: "admission_context_unavailable",
+                error: "#{e.class}: #{e.message[0, 200]}"
+              )
+              return
+            end
+          end
+          recovery_receipt = @recovery_coordinator.resume(**resume_options)
           unless recovery_receipt.status == "queued" &&
                  recovery_receipt.phase == "cleared"
             log_dispatch_request_once(
@@ -2374,7 +2642,6 @@ module Hive
         end
 
         if dependency_gated_request?(req)
-          row = rows.find { |candidate| candidate.project == req.project && candidate.slug == req.slug }
           if row&.admission_error
             log_dispatch_request_once(
               :dispatch_request_blocked,
@@ -3288,6 +3555,7 @@ module Hive
       end
 
       def reset_active_agent_snapshot
+        @external_active_rows = {}
         @external_active_agent_total = 0
         @external_active_agent_counts = Hash.new(0)
       end
@@ -3321,7 +3589,26 @@ module Hive
           next unless active_agent_row?(row)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
-          @external_active_agent_total += 1
+          @external_active_rows[task_key(row)] = row
+        end
+        recalculate_active_agent_counts
+      end
+
+      def update_active_agent_snapshot(task_keys, rows)
+        task_keys.each { |key| @external_active_rows.delete(key) }
+        rows.each do |row|
+          next unless active_agent_row?(row)
+          next if @controller.running_task?(project: row.project, slug: row.slug)
+
+          @external_active_rows[task_key(row)] = row
+        end
+        recalculate_active_agent_counts
+      end
+
+      def recalculate_active_agent_counts
+        @external_active_agent_total = @external_active_rows.length
+        @external_active_agent_counts = Hash.new(0)
+        @external_active_rows.each_value do |row|
           @external_active_agent_counts[row.project] += 1
         end
       end
@@ -3344,7 +3631,9 @@ module Hive
       # strict "claude_pid_alive == true" path (which silently dropped
       # live_task_lock-only rows during the pre-claude window).
       def externally_running?(row)
-        return false unless row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
+        active_action = row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
+        fail_closed_action = !row.admission_error.nil?
+        return false unless active_action || fail_closed_action
 
         row.claude_pid_alive == true || row.live_task_lock == true
       end

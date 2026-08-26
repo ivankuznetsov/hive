@@ -457,6 +457,21 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_projection_reader_fetches_each_binding_once_and_caches_missing
+    store = Object.new
+    calls = []
+    store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+      calls << attempt_id
+      attempt_id == "known" ? { "attempt_id" => attempt_id } : nil
+    end
+    reader = Hive::Attempts::Store::ProjectionReader.new(store)
+
+    2.times { assert_equal({ "attempt_id" => "known" }, reader.fetch_projection_binding("known")) }
+    2.times { assert_nil reader.fetch_projection_binding("missing") }
+
+    assert_equal %w[known missing], calls
+  end
+
   private
 
   def with_store

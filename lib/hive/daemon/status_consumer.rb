@@ -5,7 +5,7 @@ require "hive/dependency_admission"
 
 module Hive
   module Daemon
-    # Wraps `hive status --json` invocation. Returns a typed array of
+    # Wraps Hive's internal task-graph invocation. Returns a typed array of
     # task rows the daemon's dispatcher consumes. Surfaces parse failures
     # as a structured `{ok: false}` rather than raising, so a transient
     # status hiccup doesn't crash the daemon.
@@ -18,7 +18,8 @@ module Hive
       # healer and dispatcher both need this so they don't race the runner
       # during the pre-claude window (issue #144).
       Row = Struct.new(:project, :slug, :id, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
-                       :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
+                       :status_payload_mtime, :state_file_mtime,
+                       :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
                        :task_lock_id, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :blocked, :admission_error,
@@ -50,7 +51,7 @@ module Hive
       # `warning` carries a non-fatal advisory the dispatcher logs once per
       # tick. Two sources feed it: (1) a forward schema-version skew that was
       # tolerated and parsed best-effort, and (2) any non-empty stderr from an
-      # otherwise-successful (exit-0) `hive status --json` fetch. In JSON mode
+      # otherwise-successful (exit-0) internal task-graph fetch. In JSON mode
       # stdout carries the payload and stderr is empty on a healthy run, so
       # non-empty stderr is the status command's own degradation breadcrumbs
       # (fail-open dependency gate, dropped depends_on). (The collapsed-stack
@@ -58,9 +59,12 @@ module Hive
       # status command, so it never reaches this channel.)
       # Surfacing it here makes those breadcrumbs observable in daemon.log
       # instead of being silently discarded. nil on a clean fetch.
+      # Full reads also retain the validated source payload so the daemon can
+      # publish the graph it already paid to collect; bounded reads leave it
+      # nil because they are not an authoritative fleet snapshot.
       Result = Struct.new(
         :ok, :rows, :projects, :error, :warning,
-        :hidden_archived_task_count,
+        :hidden_archived_task_count, :status_payload,
         keyword_init: true
       ) do
         def initialize(
@@ -69,7 +73,8 @@ module Hive
           projects: [],
           error: nil,
           warning: nil,
-          hidden_archived_task_count: 0
+          hidden_archived_task_count: 0,
+          status_payload: nil
         )
           super
         end
@@ -82,7 +87,26 @@ module Hive
       end
 
       def fetch
-        out, err, status = Open3.capture3(@extra_env, @hive_bin, "status", "--json")
+        fetch_command("status", "--internal-task-graph", "--json")
+      end
+
+      def fetch_tasks(task_keys)
+        keys = Array(task_keys).map do |project, slug|
+          [ project.to_s, slug.to_s ]
+        end.uniq
+        references = keys.map { |project, slug| "#{project}:#{slug}" }
+        return Result.new(ok: true) if references.empty?
+
+        fetch_command(
+          "status", "--internal-task-graph", "--json", "--daemon-task", *references,
+          require_partial: true, expected_task_keys: keys
+        )
+      end
+
+      private
+
+      def fetch_command(*argv, require_partial: false, expected_task_keys: nil)
+        out, err, status = Open3.capture3(@extra_env, @hive_bin, *argv)
         unless status.success?
           return Result.new(
             ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
@@ -97,6 +121,10 @@ module Hive
         # it into the skew degrade would relabel a genuine "ok=false:
         # <reason>" as a misleading "restart to pick up the new version".
         validate_envelope!(doc)
+        if require_partial && doc["partial"] != true
+          raise ArgumentError, "bounded status response is missing partial=true"
+        end
+        validate_bounded_projects!(doc, expected_task_keys) if require_partial
         skew = schema_skew(doc)
         # An OLDER payload (a stale `hive` on PATH than this daemon
         # expects) can't be trusted to carry the fields the dispatcher
@@ -114,6 +142,7 @@ module Hive
 
         begin
           rows = extract_rows(doc)
+          validate_bounded_rows!(rows, expected_task_keys) if require_partial
           projects = extract_projects(doc)
         rescue StandardError => e
           # ONLY a failure inside best-effort EXTRACTION degrades. On a
@@ -134,7 +163,8 @@ module Hive
         Result.new(
           ok: true, rows: rows, projects: projects, error: nil,
           warning: success_warning(skew, doc, err),
-          hidden_archived_task_count: projects.sum(&:hidden_archived_task_count)
+          hidden_archived_task_count: projects.sum(&:hidden_archived_task_count),
+          status_payload: require_partial ? nil : doc
         )
       rescue JSON::ParserError => e
         Result.new(
@@ -148,8 +178,6 @@ module Hive
         )
       end
 
-      private
-
       # Envelope-shape validation (hard errors) ONLY. A missing/wrong
       # `schema` key or `ok=false` is a malformed/failed envelope and must
       # still raise. Schema VERSION skew is NOT validated here — it is
@@ -162,6 +190,33 @@ module Hive
         return if doc["ok"] == true
 
         raise ArgumentError, "envelope ok=false: #{doc['error_class']} #{doc['message']}"
+      end
+
+      def validate_bounded_projects!(doc, expected_task_keys)
+        expected_projects = Array(expected_task_keys).map(&:first).uniq.sort
+        projects = Array(doc["projects"])
+        actual_projects = projects.map { |project| project["name"].to_s }.uniq.sort
+        unless actual_projects == expected_projects
+          raise ArgumentError,
+                "bounded status response projects do not match requested projects"
+        end
+
+        failed = projects.find { |project| project["error"] }
+        return unless failed
+
+        raise ArgumentError,
+              "bounded status project #{failed['name']} failed: #{failed['error']}"
+      end
+
+      def validate_bounded_rows!(rows, expected_task_keys)
+        expected = Array(expected_task_keys).each_with_object({}) do |key, index|
+          index[key] = true
+        end
+        unexpected = rows.find { |row| !expected[[ row.project.to_s, row.slug.to_s ]] }
+        return unless unexpected
+
+        raise ArgumentError,
+              "bounded status returned unrequested task #{unexpected.project}:#{unexpected.slug}"
       end
 
       # Classify the envelope's schema_version against what THIS daemon was
@@ -236,6 +291,7 @@ module Hive
               marker_attrs: task["attrs"].is_a?(Hash) ? task["attrs"] : {},
               folder: task["folder"],
               state_file: task["state_file"],
+              status_payload_mtime: task["mtime"],
               state_file_mtime: parse_mtime(task["mtime"], task["state_file"]),
               action: admission_error ? "admission_error" : task["action"],
               suggested_command: admission_error ? nil : task["suggested_command"],
@@ -328,7 +384,7 @@ module Hive
       end
 
       def parse_mtime(iso_string, state_file_path)
-        # `hive status --json` serializes mtimes at whole-second ISO8601
+        # The internal task graph serializes mtimes at whole-second ISO8601
         # precision for the public payload, but the daemon's edit-resume
         # baseline is captured from File.mtime with subsecond precision.
         # Prefer the local stat when the path is available so an operator

@@ -143,7 +143,8 @@ Run:
 ```bash
 hive doctor
 hive status
-hive status --json
+hive status --operational
 ```
 
-`hive doctor` checks missing stage and reviewer skills. `hive status` tells you the next safe command for each task.
+`hive doctor` checks missing stage and reviewer skills. Bare `hive status` shows
+what is running now; `hive status --operational` shows blockers and next actions.

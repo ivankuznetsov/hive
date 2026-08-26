@@ -26,7 +26,7 @@ tags:
 
 ## Context
 
-`Hive::Daemon` (ADR-024) auto-advances tasks through the pipeline so an operator-enabled project marches `inbox → brainstorm → plan → execute → review → open-pr → finalize → done` without per-stage approval gestures. The daemon's source of truth is `hive status --json` — each task row carries an `action` field (`ready_to_*`, `needs_input`, etc.) and a `suggested_command` populated by `Hive::TaskAction`. `Hive::Daemon::Policy.decide` classifies each row into one of `:dispatch / :poll_for_merge / :wait_for_debounce / :record_baseline / :skip`.
+`Hive::Daemon` (ADR-024) auto-advances tasks through the pipeline so an operator-enabled project marches `inbox → brainstorm → plan → execute → review → open-pr → finalize → done` without per-stage approval gestures. The daemon's source of truth is its internal task projection — each task row carries an `action` field (`ready_to_*`, `needs_input`, etc.) and a `suggested_command` populated by `Hive::TaskAction`. `Hive::Daemon::Policy.decide` classifies each row into one of `:dispatch / :poll_for_merge / :wait_for_debounce / :record_baseline / :skip`.
 
 Originally `Policy.decide` treated every `needs_input` row identically: apply an mtime baseline + debounce so the daemon dispatches only after the operator visibly edits the state file. This makes sense for brainstorm answers, execute questions, and review decisions — all are Q&A waits where the agent needs typed input. But it produced a stuck-state bug for plan-stage rows.
 
@@ -41,7 +41,7 @@ which the daemon immediately dispatched `hive develop ... --from 3-plan` on its
 next tick.
 
 Symptom signature for future debugging:
-- `hive status --json` reports the row as `stage: "3-plan", action: "needs_input", marker: "waiting"`
+- the internal task projection reports the row as `stage: "3-plan", action: "needs_input", marker: "waiting"`
 - The state file's mtime is days-old
 - Daemon log shows continuous `event: skipped` with no `event: dispatched`
 - Operator did nothing wrong — they generated a plan, expected the daemon to take it forward

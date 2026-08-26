@@ -77,6 +77,10 @@ module Hive
         matches.one? ? matches.first : nil
       end
 
+      def project_path_match_count(path)
+        (@projects_by_path[File.expand_path(path)] || []).length
+      end
+
       # Read-only presentation inventory. Active snapshots precede fallback
       # snapshots so consumers can preserve the same active-shadows-archive
       # semantics without reaching into Context's private indexes or

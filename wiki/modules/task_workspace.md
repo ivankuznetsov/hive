@@ -153,7 +153,11 @@ Git result becomes a panel diagnostic; it cannot turn the task route into a
   context.
 
 The agent writes only the candidate
-`context-receipts/<attempt-id>.json.next`. The controller descriptor-opens,
+`context-receipts/<attempt-id>.json.next` under the task folder. Because an
+agent normally runs from its owned implementation worktree, Hive gives it the
+exact task-artifact path instead of a cwd-relative path; this keeps provenance
+out of the Git worktree and available to the controller for promotion. The
+controller descriptor-opens,
 validates allowlisted repository/Wiki field types as well as
 binding/schema/containment/size, rejects absolute host paths in every receipt
 string, redacts, and publishes with filesystem no-replace semantics. Promotion

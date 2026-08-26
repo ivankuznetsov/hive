@@ -36,6 +36,8 @@ module Hive
         return nil unless transition_applicable?(task, destination)
 
         cfg = config || Hive::Config.load(task.project_root)
+        return nil unless review_enabled?(cfg)
+
         projection = if orchestrator
           orchestrator.call(task:, cfg:, planner_identity: planner_identity || {})
         else
@@ -59,6 +61,8 @@ module Hive
         return nil unless transition_applicable?(task, destination)
 
         cfg = config || Hive::Config.load(task.project_root)
+        return nil unless review_enabled?(cfg)
+
         projection = Projection.load(task_folder: task.folder)
         authorize!(task, projection, cfg:)
         observation(projection)
@@ -71,9 +75,11 @@ module Hive
 
       def verify!(task:, destination:, observation:, config: nil)
         return true unless transition_applicable?(task, destination)
-        raise blocked_error(task, nil, "plan review observation is missing") unless observation
 
         cfg = config || Hive::Config.load(task.project_root)
+        return true unless review_enabled?(cfg)
+        raise blocked_error(task, nil, "plan review observation is missing") unless observation
+
         projection = Projection.load(task_folder: task.folder)
         authorize!(task, projection, cfg:)
         actual = self.observation(projection)
@@ -98,6 +104,9 @@ module Hive
       def validate_execute_entry!(task:, config: nil, clock: -> { Time.now.utc })
         return true unless execute_applicable?(task)
 
+        cfg = config || Hive::Config.load(task.project_root)
+        return true unless review_enabled?(cfg)
+
         root = File.join(task.folder, Store::ROOT_BASENAME)
         unless File.exist?(root) || File.symlink?(root)
           if Hive::TaskMeta.plan_review_required?(task.folder)
@@ -111,7 +120,6 @@ module Hive
         end
         return true if legacy_adoption_valid?(task, root)
 
-        cfg = config || Hive::Config.load(task.project_root)
         authorize!(task, Projection.load(task_folder: task.folder), cfg:)
         true
       rescue InvalidRecord, StaleObservation, Hive::ConfigError,
@@ -128,6 +136,10 @@ module Hive
 
       def execute_applicable?(task)
         coding?(task) && stage_dir(task) == EXECUTE_STAGE
+      end
+
+      def review_enabled?(cfg)
+        cfg.dig("plan_review", "enabled") != false
       end
 
       def authorize!(task, projection, cfg:)

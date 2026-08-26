@@ -50,7 +50,7 @@ shapes and fail-closed reconciliation rules out of unrelated GitHub callers.
 
 | Adapter API | Purpose |
 |-------------|---------|
-| `merged_pr_details` | Resolve one merged PR plus its complete paginated file/status/rename manifest against the checkout's canonical host and repository. Identity lookup, authentication, metadata, and files share one monotonic deadline. |
+| `merged_pr_details` | Resolve one merged PR plus its complete paginated path/status/rename inventory against the checkout's canonical host and repository. GitHub patch bodies are discarded because repository analysis uses the pinned merge worktree. Identity lookup, authentication, metadata, and files share one monotonic deadline. |
 | `merged_prs_page` | Fetch and validate one cursor-addressed GraphQL page of strictly typed merged-PR occurrence identities for catch-up, using stable creation order and one exact ISO timestamp `merged:<lower>..<upper>` qualifier for the fixed merge-time window. |
 
 ## Subprocess Contract

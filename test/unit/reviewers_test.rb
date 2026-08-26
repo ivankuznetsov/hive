@@ -83,7 +83,7 @@ class ReviewersTest < Minitest::Test
         "prompt_template" => "reviewer_codex_native_review.md.erb"
       }
 
-      assert_instance_of Hive::Reviewers::CodexReview,
+      assert_instance_of Hive::AgentSupport.for(:codex)::Reviewer,
                          Hive::Reviewers.dispatch(spec, make_ctx(dir))
     end
   end

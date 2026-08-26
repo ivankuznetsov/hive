@@ -28,6 +28,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status"),
                  result.fetch("schema_version")
     assert_equal true, result.fetch("ok")
+    assert_equal "release", result.dig("runtime", "channel")
     assert_equal 6, result.dig("summary", "active")
     assert_equal 1, result.dig("archive", "count")
     assert_equal 4, result.dig("summary", "hidden_archived_task_count")
@@ -36,6 +37,24 @@ class OperationalStatusTest < Minitest::Test
       running waiting_on_you waiting_on_provider_or_scheduler needs_repair completion_ready idle
     ].sort, result.fetch("tasks").map { |row| row.fetch("state") }.sort
     refute result.fetch("tasks").any? { |row| row.dig("identity", "slug") == "archived" }
+  end
+
+  def test_operational_snapshot_identifies_the_active_dogfood_build
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    result = Hive::OperationalStatus.new(
+      status_payload: status_payload,
+      runtime_identity: Hive::RuntimeIdentity.new(environment: {
+        "HIVE_RUNTIME_CHANNEL" => "dogfood",
+        "HIVE_RUNTIME_BUILD_SHA" => sha,
+        "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+      }).to_h,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).to_h
+
+    assert_equal "dogfood", result.dig("runtime", "channel")
+    assert_equal sha, result.dig("runtime", "build_sha")
+    assert_equal "#{Hive::VERSION}+dogfood.0864de726",
+                 result.dig("runtime", "display_version")
   end
 
   def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
@@ -187,6 +206,25 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "scheduler", automated.fetch("blocker_owner")
     assert_equal "waiting_on_you", manual.fetch("state")
     assert_equal "operator", manual.fetch("blocker_owner")
+  end
+
+  def test_parked_patrol_fix_outcomes_are_completion_ready_without_an_operator_blocker
+    rows = [
+      [ "rejected", "Rejected (parked)" ],
+      [ "blocked", "Blocked (parked)" ],
+      [ "escalated", "Escalated (parked)" ]
+    ].map do |slug, label|
+      task(action: "needs_input", slug:, marker: "none").merge(
+        "workflow" => "patrol-fix", "action_label" => label, "suggested_command" => nil
+      )
+    end
+
+    projected = project(status_payload(*rows)).fetch("tasks")
+
+    assert_equal [ "completion_ready" ], projected.map { |row| row.fetch("state") }.uniq
+    assert_equal [ "none" ], projected.map { |row| row.fetch("blocker_owner") }.uniq
+    assert_equal [ "terminal_parked" ], projected.map { |row| row.dig("reasons", 0, "code") }.uniq
+    assert_equal rows.map { |row| row.fetch("action_label") }, projected.map { |row| row.fetch("reason") }
   end
 
   def test_plan_review_state_owner_reason_and_projection_are_preserved
@@ -476,6 +514,148 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "partial", result.fetch("completeness")
     assert_equal "stale", result.dig("tasks", 0, "freshness", "scheduler_status")
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_stale"
+  end
+
+  def test_task_graph_sampled_before_snapshot_completion_rejects_scheduler_dispositions
+    source_task = task(action: "ready_to_plan", slug: "older-task-graph")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:59Z",
+      "completed_at" => "2026-07-20T10:00:01Z"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_equal "unavailable", result.dig("scheduler", "status")
+    assert_equal "task_graph_predates_scheduler_snapshot",
+                 result.dig("scheduler", "reason")
+    assert_equal "unavailable", result.dig("tasks", 0, "freshness", "scheduler_status")
+  end
+
+  def test_status_cache_from_the_same_tick_accepts_its_scheduler_dispositions
+    source_task = task(action: "ready_to_plan", slug: "cached-task-graph")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:59Z",
+      "completed_at" => "2026-07-20T10:00:01Z"
+    }
+    cached_payload = status_payload(source_task)
+
+    result = Hive::OperationalStatus.new(
+      status_payload: cached_payload,
+      status_payload_tick_sequence: snapshot.fetch("tick_sequence"),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).to_h
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("scheduler", "status")
+    assert_equal "global_cap", result.dig("tasks", 0, "reasons", 0, "code")
+  end
+
+  def test_task_graph_sampled_after_snapshot_completion_accepts_scheduler_dispositions
+    source_task = task(action: "ready_to_plan", slug: "newer-task-graph")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:58Z",
+      "completed_at" => "2026-07-20T09:59:59Z"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("scheduler", "status")
+    assert_equal "global_cap", result.dig("tasks", 0, "reasons", 0, "code")
+  end
+
+  def test_malformed_snapshot_completion_time_fails_the_temporal_fence_closed
+    source_task = task(action: "ready_to_plan", slug: "invalid-source-window")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T09:59:59Z",
+      "completed_at" => "not-a-time"
+    }
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "unavailable", result.dig("scheduler", "status")
+    assert_equal "task_graph_predates_scheduler_snapshot",
+                 result.dig("scheduler", "reason")
+  end
+
+  def test_missing_snapshot_source_window_fails_the_temporal_fence_closed
+    source_task = task(action: "ready_to_plan", slug: "missing-source-window")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.delete("source_window")
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "unavailable", result.dig("scheduler", "status")
+    assert_equal "task_graph_predates_scheduler_snapshot",
+                 result.dig("scheduler", "reason")
+  end
+
+  def test_same_second_task_graph_sampled_after_completion_passes_the_temporal_fence
+    source_task = task(action: "ready_to_plan", slug: "same-second-ordering")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot["source_window"] = {
+      "started_at" => "2026-07-20T10:00:00.100000Z",
+      "completed_at" => "2026-07-20T10:00:00.800000Z"
+    }
+    payload = status_payload(source_task)
+    payload["generated_at"] = "2026-07-20T10:00:00.900000Z"
+
+    result = project(
+      payload,
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("scheduler", "status")
+    assert_equal "global_cap", result.dig("tasks", 0, "reasons", 0, "code")
   end
 
   def test_current_scheduler_snapshot_reports_a_missing_task
@@ -888,6 +1068,119 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_task_mismatch"
   end
 
+  def test_controller_state_file_mtime_does_not_invalidate_payload_identity
+    source_task = task(action: "ready_to_plan", slug: "patrol-controller").merge(
+      "workflow" => "patrol-fix"
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.dig("tasks", 0)["state_file_mtime"] = "2026-07-20T09:55:00.000000Z"
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    refute_includes result.fetch("issues").map { |issue| issue.fetch("code") },
+                    "scheduler_task_mismatch"
+  end
+
+  def test_same_tick_legacy_controller_snapshot_treats_payload_mtime_as_unknown
+    source_task = task(action: "ready_to_plan", slug: "legacy-patrol-controller").merge(
+      "workflow" => "patrol-fix"
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    observed = snapshot.dig("tasks", 0)
+    observed.delete("status_payload_mtime")
+    observed["state_file_mtime"] = "2026-07-20T09:55:00.000000Z"
+
+    result = Hive::OperationalStatus.new(
+      status_payload: status_payload(source_task),
+      status_payload_tick_sequence: snapshot.fetch("tick_sequence"),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).to_h
+
+    assert_equal "complete", result.fetch("completeness")
+    assert_equal "current", result.dig("tasks", 0, "freshness", "scheduler_status")
+    refute_includes result.fetch("issues").map { |issue| issue.fetch("code") },
+                    "scheduler_task_mismatch"
+  end
+
+  def test_fresh_graph_keeps_legacy_controller_mtime_guard
+    source_task = task(action: "ready_to_plan", slug: "stale-legacy-patrol").merge(
+      "workflow" => "patrol-fix"
+    )
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    observed = snapshot.dig("tasks", 0)
+    observed.delete("status_payload_mtime")
+    observed["state_file_mtime"] = "2026-07-20T09:55:00.000000Z"
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") },
+                    "scheduler_task_mismatch"
+  end
+
+  def test_legacy_snapshot_mtime_fallback_accepts_ordinary_rows
+    source_task = task(action: "ready_to_plan", slug: "legacy-coding")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.dig("tasks", 0).delete("status_payload_mtime")
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "complete", result.fetch("completeness")
+    refute_includes result.fetch("issues").map { |issue| issue.fetch("code") },
+                    "scheduler_task_mismatch"
+  end
+
+  def test_current_payload_mtime_change_invalidates_scheduler_decision
+    source_task = task(action: "ready_to_plan", slug: "changed-payload-mtime")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "global_cap",
+      reason: "global dispatch capacity is exhausted"
+    )
+    snapshot.dig("tasks", 0)["status_payload_mtime"] = "2026-07-20T09:55:00.000000Z"
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "partial", result.fetch("completeness")
+    assert_includes result.fetch("issues").map { |issue| issue.fetch("code") },
+                    "scheduler_task_mismatch"
+  end
+
   def test_policy_change_after_daemon_observation_invalidates_scheduler_decision
     observed = task(action: "ready_to_plan", slug: "policy-drift")
     snapshot = scheduler_snapshot_for(
@@ -1141,8 +1434,12 @@ class OperationalStatusTest < Minitest::Test
     {
       "status" => "current",
       "phase" => "complete",
-      "observed_at" => "2026-07-20T10:00:01Z",
+      "observed_at" => "2026-07-20T09:59:59.500000Z",
       "valid_until" => "2026-07-20T10:01:31Z",
+      "source_window" => {
+        "started_at" => "2026-07-20T09:59:58.000000Z",
+        "completed_at" => "2026-07-20T09:59:59.500000Z"
+      },
       "tick_sequence" => 7,
       "daemon" => {
         "generation" => "daemon-generation-1",
@@ -1165,6 +1462,7 @@ class OperationalStatusTest < Minitest::Test
         "condition_task_generation" => source_task["condition_task_generation"],
         "commit_generation" => source_task["commit_generation"],
         "attempt_id" => source_task["attempt_id"],
+        "status_payload_mtime" => source_task["mtime"],
         "state_file_mtime" => source_task["mtime"],
         "action" => source_task["action"],
         "depends_on" => source_task["depends_on"],

@@ -2048,7 +2048,9 @@ module Hive
                payload["project"] == aggregate.dig("source", "registration") &&
                payload["project_root"] == project_root && payload["dry_run"] == false &&
                payload["analysis_sha"] == aggregate.fetch("analysis_sha") &&
-               payload["source_pr"] == aggregate.fetch("source") &&
+               payload["source_pr"] == aggregate.fetch("source").slice(
+                 *PrManifest::SOURCE_REFERENCE_KEYS
+               ) &&
                payload["attempts"] == [] && payload["actions"] == []
           raise InconsistentRecord, "refactor patrol completion payload does not match its claimed job"
         end
@@ -2152,18 +2154,7 @@ module Hive
         %w[url number repository registration base_branch base_sha merge_sha merged_at].each do |key|
           source.fetch(key)
         end
-        projected = source.merge(
-          "changed_paths" => manifest.fetch("changed_paths"),
-          "manifest_checksum" => manifest.fetch("manifest_checksum")
-        )
-        if manifest.fetch("schema_version") == PrManifest::SCHEMA_VERSION
-          projected = projected.merge(
-            "lane" => manifest.fetch("lane"),
-            "classification" => manifest.fetch("classification"),
-            "provenance" => manifest.fetch("provenance")
-          )
-        end
-        projected
+        PrManifest.source_context(manifest)
       rescue PrManifest::Invalid => error
         raise CorruptRecord, error.message
       end

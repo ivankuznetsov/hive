@@ -196,6 +196,11 @@ customizations; unrelated Claude launches do not receive it. Discovery still
 uses Claude's positional prompt, while Codex's normal and workspace-write
 launches send the prompt through stdin with `-` in argv.
 
+Native OpenCode launches use the operator-selected executable and environment
+without resolving or replacing tool-manager launchers. As with the other
+agents, launcher output still belongs to the CLI protocol: non-JSON stdout on
+the strict JSONL run boundary becomes a typed `malformed_output` failure.
+
 ## `spawn_and_wait` (the long part)
 
 1. Open an owner-private (`0600`), no-follow logfile (`<task.log_dir>/<label>-<UTC-ts>.log`). Append only bounded launch metadata (`cwd`, profile, executable basename, argv count); never serialize argv because positional profiles carry the complete prompt there. Event messages pass through the same shared secret redactor before persistence.
@@ -215,6 +220,17 @@ launches send the prompt through stdin with `-` in argv.
 12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
+
+Controller-managed report stages use `ManagedAgentCustody` with
+`:exit_code_only`, then validate the required report and protected anchors as
+one outer transaction. If Pi reports a failed provider turn, retries it
+internally, and later exits zero with a clean current report, that clean custody
+receipt is terminal completion evidence and the transient failure is recovered.
+This applies to typed `provider_error` failures and to a temporary 429 that
+`Hive::Agent` classifies as `limits_reached` with a rate-limit provider kind.
+Resource exhaustion, budget exhaustion, missing typed provider evidence,
+missing output, nonzero exit, timeout, or any protected-anchor change remains a
+failure.
 
 Claude/tmux launches record the managed pane PID in the same per-task lock.
 `Hive::ClaudeLauncher#record_claude_pid` waits for `pane_pid`, then writes both

@@ -19,6 +19,7 @@ module Hive
       MAX_LIVE_RESERVATIONS = 1_024
       MAX_ROUTING_PROJECTIONS = 4_096
       TERMINAL_REQUEST = "terminal-request".freeze
+      LATEST_TERMINAL = "latest-terminal".freeze
       SUCCESSFUL_OWNER = "successful-owner".freeze
       UNRESOLVED_LOSS = "unresolved-loss".freeze
       SUCCESSOR = "successor".freeze
@@ -45,6 +46,11 @@ module Hive
           request_key(record["request_id"]),
           ordered_value(record).merge("outcome" => record.outcome)
         )
+        update_ordered(
+          LATEST_TERMINAL,
+          semantic_key(record.task_generation, record.subject),
+          ordered_value(record)
+        )
         return record unless record.outcome == "succeeded"
 
         update_ordered(
@@ -57,6 +63,14 @@ module Hive
 
       def terminal_attempt_id(request_id:)
         value = read_value(TERMINAL_REQUEST, request_key(request_id))
+        value && value.fetch("attempt_id")
+      end
+
+      def latest_terminal_attempt_id(task_generation:, subject:)
+        value = read_value(
+          LATEST_TERMINAL,
+          semantic_key(task_generation, subject)
+        )
         value && value.fetch("attempt_id")
       end
 
@@ -448,7 +462,7 @@ module Hive
         when TERMINAL_REQUEST
           ordered_value_shape!(value, extra_keys: [ "outcome" ])
           raise StoreError unless Record::TERMINAL_OUTCOMES.include?(value["outcome"])
-        when SUCCESSFUL_OWNER, SUCCESSOR
+        when LATEST_TERMINAL, SUCCESSFUL_OWNER, SUCCESSOR
           ordered_value_shape!(value)
         when UNRESOLVED_LOSS
           ordered_value_shape!(value, extra_keys: [ "resolved_by" ])

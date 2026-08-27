@@ -1758,6 +1758,7 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
+          when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           when "invalid_predecessor" then :invalid_predecessor
@@ -1783,6 +1784,8 @@ module Hive
           [ "hive", "the matching durable attempt already reached a terminal receipt" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
+        when :attempt_transient_retry
+          [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
@@ -3494,7 +3497,8 @@ module Hive
           when :accepted then :attempt_accepted
           when :existing_live then :attempt_duplicate
           when :terminal_replay then :attempt_terminal_replay
-          when :deferred then :attempt_capacity_deferred
+          when :deferred
+            result.reason == "transient_retry" ? :attempt_transient_retry : :attempt_capacity_deferred
           when :no_route then :attempt_route_unavailable
           else return
           end

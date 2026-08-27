@@ -160,6 +160,8 @@ log as a substitute. The task journal must first identify the current attempt
 as terminal and failed or cancelled, so running and successful rows do not
 point-fetch diagnostic receipts on the status hot path. A provider-owned typed
 failure is provider-waiting, while other typed failures are repair-owned.
+An exit-75 receipt is scheduler contention rather than a Patrol-agent verdict,
+so status does not synthesize or project its `agent_exit_nonzero` diagnostic.
 Durable recovery disposition and pacing remain separate policy.
 
 For a daemon-enrolled project with global automatic retry enabled, a real

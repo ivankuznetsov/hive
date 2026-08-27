@@ -26,6 +26,7 @@ class CommandsStatusTest < Minitest::Test
       "size" => JSON.generate(diagnostic).bytesize, "sha256" => "b" * 64
     }
     receipt = {
+      "exit_status" => 7,
       "output_references" => [ reference ], "log_reference" => log_reference
     }
     binding = {
@@ -92,6 +93,12 @@ class CommandsStatusTest < Minitest::Test
     reader.fetches = 0
     assert_nil command.send(:attempt_diagnostic_for, running)
     assert_equal 0, reader.fetches
+
+    reader.binding = binding.merge(
+      "receipt" => receipt.merge("exit_status" => Hive::ExitCodes::TEMPFAIL)
+    )
+    assert_nil command.send(:attempt_diagnostic_for, row)
+    assert_equal 1, reader.fetches
   end
 
   def test_default_json_call_uses_compact_producer_without_building_full_graph

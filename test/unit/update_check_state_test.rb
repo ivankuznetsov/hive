@@ -273,6 +273,29 @@ class UpdateCheckStateTest < Minitest::Test
     assert(logger.events.any? { |name, _| name == :update_check_state_lock_error })
   end
 
+  def test_flock_failure_swallows_a_secondary_close_error
+    handle = Object.new
+    def handle.flock(_mode) = raise(Errno::ENOLCK)
+    def handle.close = raise(IOError, "synthetic close failure")
+
+    original_open = File.method(:open)
+    failing_open = lambda do |*args, **kwargs, &block|
+      if args.first.to_s.end_with?(".lock")
+        handle
+      else
+        original_open.call(*args, **kwargs, &block)
+      end
+    end
+    logger = RecordingLogger.new
+    s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
+
+    with_replaced_singleton_method(File, :open, failing_open) do
+      s.record_check!(@now)
+    end
+
+    assert(logger.events.any? { |name, _| name == :update_check_state_lock_error })
+  end
+
   def test_fsync_dir_swallows_errors
     state.send(:fsync_dir, File.join(@dir, "does-not-exist")) # Dir.open raises → nil
   end

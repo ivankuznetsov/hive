@@ -267,6 +267,17 @@ class WorkflowPackageTransactionTest < Minitest::Test
     end
   end
 
+  def test_journal_round_trips_binary_values_nested_in_arrays
+    with_tmp_dir do |dir|
+      journal = Hive::WorkflowPackage::TransactionJournal.new(dir)
+      data = { "entries" => [ "text", [ "\xFF\xFE".b ] ] }
+
+      journal.write(data)
+
+      assert_equal data, journal.read
+    end
+  end
+
   def test_mutation_lock_wraps_filesystem_failures
     with_tmp_dir do |dir|
       blocked = File.join(dir, "not-a-directory")

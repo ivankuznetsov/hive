@@ -48,6 +48,46 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  # Bootstrap commits must be pathspec-limited. A plain `git commit -m`
+  # in the project root commits the whole index, sweeping up unrelated
+  # files the user had already staged before running `hive init`.
+  def test_llm_wiki_bootstrap_does_not_commit_pre_staged_unrelated_files
+    with_tmp_git_repo do |dir|
+      File.write(File.join(dir, "CLAUDE.md"), "claude")
+      File.write(File.join(dir, "wip.txt"), "wip")
+      run!("git", "-C", dir, "add", "wip.txt")
+
+      result = Hive::GitOps.new(dir).commit_llm_wiki_bootstrap!
+
+      assert_equal :committed, result
+      out, = Open3.capture2("git", "-C", dir, "show", "--stat", "--format=", "HEAD")
+      assert_includes out, "CLAUDE.md"
+      refute_includes out, "wip.txt",
+                      "pre-staged unrelated files must not ride along in the bootstrap commit"
+      # The user's staging area is left untouched.
+      staged, = Open3.capture2("git", "-C", dir, "diff", "--cached", "--name-only")
+      assert_includes staged.split("\n"), "wip.txt"
+    end
+  end
+
+  def test_add_hive_state_to_master_gitignore_does_not_commit_pre_staged_unrelated_files
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      File.write(File.join(dir, "wip.txt"), "wip")
+      run!("git", "-C", dir, "add", "wip.txt")
+
+      assert_equal :added, ops.add_hive_state_to_master_gitignore!
+
+      out, = Open3.capture2("git", "-C", dir, "show", "--stat", "--format=", "HEAD")
+      assert_includes out, ".gitignore"
+      refute_includes out, "wip.txt",
+                      "pre-staged unrelated files must not ride along in the gitignore commit"
+      staged, = Open3.capture2("git", "-C", dir, "diff", "--cached", "--name-only")
+      assert_includes staged.split("\n"), "wip.txt"
+    end
+  end
+
   def test_default_branch_from_local_head
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

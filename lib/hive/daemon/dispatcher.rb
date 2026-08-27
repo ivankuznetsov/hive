@@ -1760,6 +1760,7 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
+          when "failure_cohort_cooldown" then :attempt_failure_cohort
           when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
@@ -1786,6 +1787,8 @@ module Hive
           [ "hive", "the matching durable attempt already reached a terminal receipt" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
+        when :attempt_failure_cohort
+          [ "scheduler", "this typed Patrol failure cohort is durably paced" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
@@ -3500,7 +3503,11 @@ module Hive
           when :existing_live then :attempt_duplicate
           when :terminal_replay then :attempt_terminal_replay
           when :deferred
-            result.reason == "transient_retry" ? :attempt_transient_retry : :attempt_capacity_deferred
+            case result.reason
+            when "transient_retry" then :attempt_transient_retry
+            when "failure_cohort_cooldown" then :attempt_failure_cohort_deferred
+            else :attempt_capacity_deferred
+            end
           when :no_route then :attempt_route_unavailable
           else return
           end

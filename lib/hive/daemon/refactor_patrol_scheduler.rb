@@ -403,7 +403,11 @@ module Hive
         result
       rescue Hive::RefactorPatrol::JobStore::StaleClaim
         completion_result(:stale, dispatch_token, envelope, aggregate: aggregate)
-      rescue Hive::RefactorPatrol::JobStore::Error, KeyError
+      # Hive::ConfigError belongs here alongside JobStore::Error because the
+      # shared entry_for_token/registry lookup can raise it; without it a
+      # corrupt or unreadable registry would escape complete instead of
+      # settling the claim as retryable work (matching reserve/candidates).
+      rescue Hive::RefactorPatrol::JobStore::Error, Hive::ConfigError, KeyError
         begin
           if entry && store
             release_discovery!(

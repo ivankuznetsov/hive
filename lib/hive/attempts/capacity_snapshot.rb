@@ -1,4 +1,5 @@
 require "date"
+require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/lost_outcome"
 require "hive/attempts/store"
 
@@ -150,6 +151,7 @@ module Hive
       def initialize(store:, hot_scan:)
         @store = store
         @hot_scan = hot_scan
+        @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
         @records = hot_scan.records.to_h { |record| [ record.attempt_id, record ] }
         @indexed_versions = {}
         synchronize_indexes!(@records.values)
@@ -167,9 +169,10 @@ module Hive
       # another Store instance after that scan.
       def refresh_for_admission
         reservations = mutable_live_reservations
-        merge_observed_reservations!(reservations, @records.values)
+        merge_observed_reservations!(reservations, @records.values, release_final: false)
         refresh_known_records!(unreadable: :forget)
         hydrate_reserved_records!(reservations)
+        reconcile_failure_cohorts!(reservations, @records.values)
         merge_observed_reservations!(reservations, @records.values)
         release_converged_reservations!(reservations)
         decision_index.replace_live_reservations(reservations)
@@ -190,18 +193,32 @@ module Hive
       end
 
       # These mutations share the admission lock held by Dispatcher#admit.
-      def reserve_live(attempt_id:, project:, task_slug:)
+      def reserve_live(attempt_id:, project:, task_slug:, admission: nil)
         decision_index.reserve_live(
-          attempt_id: attempt_id, project: project, task_slug: task_slug
+          attempt_id: attempt_id, project: project, task_slug: task_slug,
+          admission: admission
         )
       end
 
-      def confirm_live(record)
+      def confirm_live(record, admission: nil)
         decision_index.confirm_live(
           attempt_id: record.attempt_id,
           project: record["project"],
-          task_slug: record["task_slug"]
+          task_slug: record["task_slug"],
+          admission: admission
         )
+      end
+
+      def failure_cohort_admission(**attributes)
+        decision_index.failure_cohort_admission(**attributes)
+      end
+
+      def claim_failure_cohort_probe(**attributes)
+        decision_index.claim_failure_cohort_probe(**attributes)
+      end
+
+      def release_failure_cohort_probe(**attributes)
+        decision_index.release_failure_cohort_probe(**attributes)
       end
 
       def record(record)
@@ -302,17 +319,27 @@ module Hive
         decision_index.live_reservations.transform_values(&:dup)
       end
 
-      def merge_observed_reservations!(reservations, records)
+      def merge_observed_reservations!(reservations, records, release_final: true)
         records.each do |record|
           if CapacitySnapshot.reserves_capacity?(record, outcome_store: outcome_store)
-            reservations[record.attempt_id] = {
+            replacement = {
               "project" => record["project"],
               "task_slug" => record["task_slug"],
               "phase" => "active"
             }
-          else
+            admission = reservations.dig(record.attempt_id, "admission")
+            replacement["admission"] = admission if admission
+            reservations[record.attempt_id] = replacement
+          elsif release_final
             reservations.delete(record.attempt_id)
           end
+        end
+      end
+
+      def reconcile_failure_cohorts!(reservations, records)
+        records.each do |record|
+          admission = reservations.dig(record.attempt_id, "admission")
+          @failure_cohort_reconciler.reconcile(record: record, admission: admission)
         end
       end
 

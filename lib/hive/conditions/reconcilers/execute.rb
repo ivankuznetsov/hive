@@ -248,17 +248,24 @@ module Hive
           { "type" => "commit", "sha" => sha, "branch" => branch || "(detached)" }
         end
 
+        # Journal consumers apply last-event-wins semantics, so an observation is
+        # already recorded only when it field-matches the most recent record of
+        # the same event stream — not any earlier record. Comparing against the
+        # whole history would drop re-transitions back to a previously observed
+        # state and leave a stale current condition in the projection.
         def already_recorded?(records, observation)
           normalized = Hive::StringifyKeys.call(observation)
-          records.any? do |record|
-            record["event_type"] == normalized["event_type"] &&
-              record["attempt_id"] == normalized["attempt_id"] &&
-              record["task_generation"] == normalized["task_generation"] &&
-              record["commit_generation"] == normalized["commit_generation"] &&
-              record["reason"] == normalized["reason"] &&
-              record["evidence"] == normalized["evidence"] &&
-              record["payload"] == normalized["payload"]
+          stream = event_stream_key(normalized)
+          latest = records.reverse.find { |record| event_stream_key(record) == stream }
+          return false unless latest
+
+          %w[event_type attempt_id task_generation commit_generation reason evidence payload].all? do |field|
+            latest[field] == normalized[field]
           end
+        end
+
+        def event_stream_key(record)
+          [ record["event_type"], record["attempt_id"], record.dig("payload", "condition") ]
         end
 
         def task_id

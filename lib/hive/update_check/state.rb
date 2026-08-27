@@ -9,7 +9,10 @@ module Hive
     # GitHub (throttle), the last version it notified about (de-dupe), and the
     # active nudge payload the TUI footer renders. JSON on disk, atomic write,
     # fail-closed load (a corrupt file degrades to empty rather than raising).
-    # Mirrors Hive::Bot::AlertStore's persistence discipline.
+    # A *transient* read error (EIO etc.) is not corruption: the last-known
+    # in-memory state is kept and writes are suspended until a load succeeds,
+    # so a read-modify-write can never persist reset state over an intact
+    # file. Mirrors Hive::Bot::AlertStore's persistence discipline.
     #
     # This file is shared across processes: the daemon writes `nudge` +
     # `last_check_at`, the bot writes `last_notified_version`, and the TUI
@@ -178,7 +181,7 @@ module Hive
         raw = begin
           File.read(@path)
         rescue SystemCallError, IOError => e
-          handle_corrupt!(e)
+          handle_read_error!(e)
           return
         end
 
@@ -206,6 +209,19 @@ module Hive
         @logger&.event(:update_check_state_corrupt, path: @path,
                                                      error_class: error.class.name, message: error.message)
         @data = empty_data
+      end
+
+      # The file exists but couldn't be read (transient EIO, momentary FS
+      # hiccups). That says nothing about its contents — resetting @data here
+      # would let the caller's read-modify-write persist emptied state over a
+      # good file (losing last_notified_version/nudge). Instead: keep the
+      # last-known @data and suspend writes until the next successful load!,
+      # which clears the flag. This tick's mutation is dropped; the next one
+      # retries against freshly-read state.
+      def handle_read_error!(error)
+        @logger&.event(:update_check_state_read_error, path: @path,
+                                                       error_class: error.class.name, message: error.message)
+        @suspend_writes = true
       end
 
       # SIGKILL/power-loss between write(tmp) and rename leaves a hidden tmp

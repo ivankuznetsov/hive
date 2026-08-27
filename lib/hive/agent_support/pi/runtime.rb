@@ -57,7 +57,10 @@ module Hive::AgentSupport::Pi::Runtime
     )
 
     tool_names = %w[read ls grep find evidence_write evidence_terminal]
-    tool_names << "evidence_browser" if browser
+    if browser
+      tool_names << "evidence_browser"
+      tool_names << "evidence_server"
+    end
     flags = [
       "--no-builtin-tools", "--no-extensions", "--no-skills",
       "--no-prompt-templates", "--no-context-files",
@@ -253,13 +256,29 @@ module Hive::AgentSupport::Pi::Runtime
         pi.registerTool(defineTool({
           name: "evidence_browser",
           label: "Capture browser evidence",
-          description: "Run one controller-admitted browser capture action.",
+          description: "Run one controller-admitted browser capture action. Pass the complete action argv, beginning with open, snapshot, click, fill, wait, screenshot, or record.",
           parameters: Type.Object({
-            command: Type.String({ minLength: 1, maxLength: 64 }),
-            argv: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 64 })
+            argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+              minItems: 1, maxItems: 64
+            })
           }),
           async execute(_id, params, signal) {
-            return runHive(["evidence", "browser", params.command, ...params.argv], signal);
+            return runHive(["evidence", "browser", ...params.argv], signal);
+          }
+        }));
+
+        pi.registerTool(defineTool({
+          name: "evidence_server",
+          label: "Start project evidence server",
+          description: "Start one repository application command on the controller-issued evidence port and keep it under Hive custody for this attempt.",
+          parameters: Type.Object({
+            argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+              minItems: 1, maxItems: 64
+            })
+          }),
+          async execute(_id, params, signal) {
+            const [executable, ...argv] = params.argv;
+            return runHive(["evidence", "server", executable, "--json", "--", ...argv], signal);
           }
         }));
       TYPESCRIPT

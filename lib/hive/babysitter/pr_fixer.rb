@@ -17,17 +17,19 @@ module Hive
         new(...).run
       end
 
-      def initialize(pr, project, cfg, dry_run:, logger:, inflight:)
+      def initialize(pr, project, cfg, dry_run:, logger:, inflight:, admission_open: -> { true })
         @pr = pr
         @project = project
         @cfg = cfg
         @dry_run = dry_run
         @logger = logger
         @inflight = inflight
+        @admission_open = admission_open
       end
 
       def run
         key = nil
+        return :shutdown unless admission_open?
         return :noop if @inflight.include?(inflight_key)
 
         key = inflight_key
@@ -40,6 +42,7 @@ module Hive
         # config, and the result is threaded into ContextBuilder so the second
         # call reuses this rollup rather than re-fetching.
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
+        return :shutdown unless admission_open?
         return handle_green(status, started) if already_green?(status) && !behind?(status)
 
         if fork_pr?
@@ -48,6 +51,7 @@ module Hive
         end
 
         return handle_green(status, started) if already_green?(status)
+        return :shutdown unless admission_open?
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
         context = Hive::Babysitter::ContextBuilder.build(
@@ -56,7 +60,11 @@ module Hive
           cfg: @cfg,
           status_rollup: status
         )
+        return :shutdown unless admission_open?
+
         result = spawn_agent(worktree.path, context)
+        return :shutdown if result == :shutdown
+
         outcome = outcome_for(result, worktree.path)
         emit_agent_event(outcome, started)
         return outcome if %i[success dry_run].include?(outcome)
@@ -68,6 +76,12 @@ module Hive
       end
 
       private
+
+      def admission_open?
+        @admission_open.call == true
+      rescue StandardError
+        false
+      end
 
       def number
         @pr.fetch("number")
@@ -150,7 +164,11 @@ module Hive
           return :dry_run
         end
 
+        return :shutdown unless admission_open?
+
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
+        return :shutdown unless admission_open?
+
         rebase = Hive::Babysitter::GhOps.rebase_onto_base(
           worktree.path,
           @pr.fetch("baseRefName"),
@@ -167,6 +185,16 @@ module Hive
             duration_ms: duration_ms(started)
           )
           return rebase.conflict? ? :rebase_conflict : :failure
+        end
+        unless admission_open?
+          Hive::Babysitter::Events.emit(
+            project: @project,
+            pr: number,
+            action: "rebase",
+            outcome: "shutdown",
+            duration_ms: duration_ms(started)
+          )
+          return :shutdown
         end
 
         # Push to the PR's REAL head branch (worktree.branch is the
@@ -221,6 +249,8 @@ module Hive
         )
         prompt = render_prompt(worktree_path, context)
         spawn = lambda do
+          return :shutdown unless admission_open?
+
           Hive::Stages::Base.spawn_agent(
             task,
             prompt: prompt,
@@ -235,7 +265,8 @@ module Hive
               @cfg, "babysitter", profile,
               current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
             ),
-            status_mode: :exit_code_only
+            status_mode: :exit_code_only,
+            terminate_on_parent_signal: false
           )
         end
         @dry_run ? Hive::Babysitter::DryRunEnv.with_env(worktree_path, &spawn) : spawn.call

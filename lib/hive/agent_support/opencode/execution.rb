@@ -25,7 +25,7 @@ module Hive
             stdout_limit: RUN_CAPTURE_BYTES,
             stderr_limit: self.class::FINAL_MESSAGE_TAIL_BYTES,
             record_spawn: true,
-            forward_signals: true,
+            forward_signals: @terminate_on_parent_signal,
             drain_timeout: CAPTURE_DRAIN_SECONDS
           )
           provider_error = write_capture_log(log_file, run.stdout, run.stderr)

@@ -722,6 +722,43 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_parent_signal_can_drain_child_while_chaining_the_previous_handler
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ready = File.join(dir, "barrier", "ready")
+      release = File.join(dir, "barrier", "release")
+      ENV["HIVE_FAKE_CLAUDE_READY_FILE"] = ready
+      ENV["HIVE_FAKE_CLAUDE_RELEASE_FILE"] = release
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      previous_called = false
+      previous = Signal.trap("TERM") { previous_called = true }
+
+      sender = Thread.new do
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+        sleep 0.01 until File.exist?(ready) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        Process.kill("TERM", Process.pid)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+        sleep 0.01 until previous_called || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        FileUtils.mkdir_p(File.dirname(release))
+        File.write(release, "go\n")
+      end
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        terminate_on_parent_signal: false
+      ).run!
+
+      assert File.exist?(ready), "agent child must have started before TERM"
+      assert previous_called, "TERM must still reach the dispatcher's prior handler"
+      assert_equal :waiting, result[:status], "TERM must not cancel a draining child"
+    ensure
+      sender&.join(2)
+      Signal.trap("TERM", previous || "DEFAULT")
+    end
+  end
+
   def test_exception_before_handle_exit_emits_agent_end_with_exception_status
     with_tmp_dir do |dir|
       task = make_task(dir)

@@ -172,9 +172,13 @@ class InstallScriptTest < Minitest::Test
   def test_fresh_install_preserves_an_unowned_hv_when_hive_link_publishes
     Dir.mktmpdir("hive-installer-unowned-hv") do |dir|
       bin = File.join(dir, "bin")
+      fake_bin = File.join(dir, "fake-bin")
       FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(fake_bin)
       unowned = "#!/bin/sh\nprintf 'operator hv\\n'\n"
       write_file_with_mode(File.join(bin, "hv"), unowned, 0o755)
+      File.symlink(File.join(dir, "prefix", "hive", "gems", "bin", "hive"),
+                   File.join(fake_bin, "hive"))
 
       _out, err, status = run_installer(dir, "none")
 

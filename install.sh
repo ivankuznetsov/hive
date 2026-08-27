@@ -935,7 +935,7 @@ else
   # when it is ours (so stale symlinks from earlier installs don't dangle),
   # and back off only when another program owns the name — matching the qmd
   # managed-link behavior above.
-  publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"
+  publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv" || true
 fi
 
 runtime_preflight

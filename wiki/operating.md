@@ -156,8 +156,9 @@ publication leaves an
 already-correct managed symlink in place and never force-replaces a
 destination. A concurrent destination creator makes publication fail closed
 into the fallback path. An unrelated `hive` or `hv` file/symlink is preserved;
-Hive uses the unoccupied fallback name when possible and otherwise leaves both
-managed wrappers available under
+an expected ownership collision does not abort the installation. Hive uses the
+unoccupied fallback name when possible and otherwise leaves both managed
+wrappers available under
 `${data_home}/gems/bin`. The in-tree `bin/hv` fallback probes only
 `HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,

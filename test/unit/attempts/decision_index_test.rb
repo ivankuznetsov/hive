@@ -4,6 +4,8 @@ require "hive/attempts/decision_index"
 require "hive/provider_routing"
 
 class AttemptsDecisionIndexTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 8, 10, 12)
 
   def setup
@@ -79,6 +81,121 @@ class AttemptsDecisionIndexTest < Minitest::Test
     assert_equal admission, reservation.fetch("admission")
   end
 
+  def test_live_reservation_rejects_invalid_patrol_admission_metadata
+    invalid_digest = {
+      "workflow" => "patrol_fix", "stage" => "2-fix",
+      "runtime_digest" => "invalid", "utc_date" => NOW.to_date.iso8601
+    }
+
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.reserve_live(
+        attempt_id: "attempt-1", project: "demo", task_slug: "task",
+        admission: invalid_digest
+      )
+    end
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.reserve_live(
+        attempt_id: "attempt-2", project: "demo", task_slug: "task",
+        admission: invalid_digest.merge(
+          "runtime_digest" => "a" * 64, "stage" => nil
+        )
+      )
+    end
+  end
+
+  def test_failure_cohort_inputs_and_utc_shard_bounds_fail_closed
+    invalid_identities = [
+      failure_cohort_identity.merge("future" => true),
+      failure_cohort_identity.merge("runtime_digest" => "invalid"),
+      failure_cohort_identity.merge("project" => nil)
+    ]
+    invalid_identities.each do |identity|
+      assert_raises(Hive::Attempts::StoreError) do
+        @index.failure_cohort_admission(
+          identity: identity, date: NOW.to_date, now: NOW
+        )
+      end
+    end
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: failure_cohort_identity,
+        occurred_at: NOW + index
+      )
+    end
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.failure_cohort_admission(
+        identity: failure_cohort_identity, date: NOW.to_date, now: "invalid"
+      )
+    end
+    assert_raises(Hive::Attempts::StoreError) do
+      @index.send(:update_failure_cohorts, NOW.to_date) do |value|
+        value["processed_attempts"] = Array.new(
+          Hive::Attempts::DecisionIndex::MAX_DAILY_ATTEMPTS + 1
+        ) { |index| [ "attempt-#{index}", "succeeded" ] }.to_h
+        value
+      end
+    end
+  end
+
+  def test_failure_cohort_normalizers_translate_raw_type_errors
+    replacement = ->(*) { raise TypeError, "injected normalization failure" }
+
+    with_replaced_singleton_method(
+      Hive::Attempts::StorageKey, :normalize, replacement
+    ) do
+      assert_raises(Hive::Attempts::StoreError) do
+        @index.failure_cohort_admission(
+          identity: failure_cohort_identity, date: NOW.to_date, now: NOW
+        )
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        @index.send(
+          :live_admission,
+          {
+            "workflow" => "patrol_fix", "stage" => "2-fix",
+            "runtime_digest" => "a" * 64,
+            "utc_date" => NOW.to_date.iso8601
+          }
+        )
+      end
+    end
+  end
+
+  def test_failure_cohort_schema_rejects_each_corrupt_shape
+    identity = failure_cohort_identity
+    digest = @index.send(:failure_cohort_digest, identity)
+    entry = {
+      "identity" => identity,
+      "failure_count" => 1,
+      "retry_at" => nil,
+      "probe_attempt_id" => nil,
+      "probe_expires_at" => nil
+    }
+    base = {
+      "cohorts" => { digest => entry },
+      "processed_attempts" => { "attempt-1" => digest }
+    }
+    mutations = [
+      ->(value) { value["cohorts"] = [] },
+      ->(value) { value["processed_attempts"]["attempt-1"] = "invalid" },
+      ->(value) { value["cohorts"][digest]["future"] = true },
+      lambda do |value|
+        value["cohorts"][digest]["probe_attempt_id"] = "probe-1"
+      end
+    ]
+
+    mutations.each do |mutation|
+      value = Marshal.load(Marshal.dump(base))
+      mutation.call(value)
+      assert_raises(Hive::Attempts::StoreError) do
+        @index.send(
+          :validate_failure_cohorts_value!, value,
+          key: { "utc_date" => NOW.to_date.iso8601 }
+        )
+      end
+    end
+  end
+
   def test_failure_cohort_opens_durably_and_allows_only_one_probe
     identity = failure_cohort_identity
     3.times do |index|
@@ -133,6 +250,28 @@ class AttemptsDecisionIndexTest < Minitest::Test
       identity: identity, date: NOW.to_date, now: NOW + 11,
       explicit_release: true
     ).fetch("status")
+  end
+
+  def test_expired_probe_fence_allows_one_new_probe
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+    claimed_at = NOW + Hive::Attempts::DecisionIndex::FAILURE_COHORT_COOLDOWN_SEC + 10
+    assert @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: claimed_at
+    )
+
+    result = @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date,
+      now: claimed_at + Hive::Attempts::DecisionIndex::FAILURE_COHORT_PROBE_TTL_SEC + 1
+    )
+
+    assert_equal "probe", result.fetch("status")
   end
 
   def test_concurrent_probe_claims_admit_exactly_one_attempt

@@ -634,6 +634,65 @@ class AttemptsDispatcherTest < Minitest::Test
     refute_equal first, repaired
   end
 
+  def test_invalid_runtime_digest_is_rejected_before_dispatch
+    with_tmp_dir do |root|
+      assert_raises(ArgumentError) do
+        Hive::Attempts::Dispatcher.new(
+          store: Hive::Attempts::Store.new(root: File.join(root, "attempts")),
+          launcher: FakeLauncher.new,
+          runtime_digest: "invalid"
+        )
+      end
+    end
+  end
+
+  def test_already_lost_handoff_defers_and_releases_matching_probe
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      created = dispatch(dispatcher, task, request_id: "lost-handoff").attempt
+      lost = store.mark_lost(created, reason: "owner_gone", now: NOW + 1)
+      3.times do |index|
+        store.decision_index.record_failure_cohort(
+          attempt_id: "failure-#{index}", identity: failure_cohort_identity,
+          occurred_at: NOW + index
+        )
+      end
+      assert store.decision_index.claim_failure_cohort_probe(
+        identity: failure_cohort_identity, date: NOW.to_date,
+        attempt_id: lost.attempt_id, now: NOW + 4_000
+      )
+      view = Object.new
+      view.define_singleton_method(:record) { |_record| true }
+
+      result = dispatcher.send(
+        :resolve_failed_handoff, lost, interactive: false,
+        admission_view: view, cohort_identity: failure_cohort_identity,
+        cohort_date: NOW.to_date
+      )
+
+      assert_equal :deferred, result.status
+      assert_equal "launch_handoff_failed", result.reason
+      assert store.decision_index.claim_failure_cohort_probe(
+        identity: failure_cohort_identity, date: NOW.to_date,
+        attempt_id: "probe-2", now: NOW + 4_001, explicit_release: true
+      )
+    end
+  end
+
+  def test_unpersisted_probe_release_fails_closed_on_store_error
+    with_dispatcher do |dispatcher|
+      view = Object.new
+      view.define_singleton_method(:release_failure_cohort_probe) do |**|
+        raise Hive::Attempts::StoreError, "injected release failure"
+      end
+
+      refute dispatcher.send(
+        :release_unpersisted_failure_probe,
+        view: view, identity: failure_cohort_identity,
+        date: NOW.to_date, attempt_id: "missing-attempt"
+      )
+    end
+  end
+
   def test_distinct_generations_share_one_multiprocess_capacity_transaction
     skip "fork is unavailable" unless Process.respond_to?(:fork)
 
@@ -1440,6 +1499,16 @@ class AttemptsDispatcherTest < Minitest::Test
   end
 
   private
+
+  def failure_cohort_identity
+    {
+      "runtime_digest" => "a" * 64,
+      "project" => "demo",
+      "workflow" => "patrol_fix",
+      "stage" => "2-fix",
+      "code" => "agent_exit_nonzero"
+    }
+  end
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
                       context_provenance: Hive::ContextProvenance,

@@ -1384,6 +1384,117 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_completion_time_discovery_warns_when_no_credible_source_exists
+    command = migrate_command("/tmp/project")
+    task = Struct.new(:completed_at, :state_file, :slug).new(nil, "/tmp/task.md", "legacy")
+    command.define_singleton_method(:archived_task?) { |*, **| true }
+
+    with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { task }) do
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { nil }) do
+        with_replaced_singleton_method(Hive::CompletionTime, :discover, ->(*) { nil }) do
+          value = nil
+          _out, err = capture_io do
+            value = command.send(
+              :discover_completion_time, "/tmp/task",
+              workflow_generation: nil, config: {}, history: Object.new
+            )
+          end
+
+          assert_nil value
+          assert_includes err, "could not discover a completion time for legacy"
+        end
+      end
+    end
+  end
+
+  def test_completion_time_discovery_does_not_swallow_interrupts
+    command = migrate_command("/tmp/project")
+    task = Struct.new(:completed_at, :state_file, :slug).new(nil, "/tmp/task.md", "legacy")
+    command.define_singleton_method(:archived_task?) { |*, **| true }
+
+    with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { task }) do
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { nil }) do
+        with_replaced_singleton_method(
+          Hive::CompletionTime, :discover, ->(*) { raise Interrupt }
+        ) do
+          assert_raises(Interrupt) do
+            command.send(
+              :discover_completion_time, "/tmp/task",
+              workflow_generation: nil, config: {}, history: Object.new
+            )
+          end
+        end
+      end
+    end
+  end
+
+  def test_completion_time_transaction_restores_snapshots_after_an_interrupt
+    command = migrate_command("/tmp/project")
+    restored = nil
+    command.define_singleton_method(:persist_completion_time) do |folder, *, snapshots:, **|
+      snapshots[folder] = :before
+      true
+    end
+    command.define_singleton_method(:commit_metadata_backfill!) { |*, **| raise Interrupt }
+    command.define_singleton_method(:restore_completion_time_backfill) do |state, snapshots|
+      restored = [ state, snapshots.dup ]
+    end
+
+    assert_raises(Interrupt) do
+      command.send(
+        :persist_completion_times_and_commit,
+        "/state", { "/task" => Time.utc(2026, 7, 1) },
+        workflow_generation: nil, config: {}
+      )
+    end
+
+    assert_equal [ "/state", { "/task" => :before } ], restored
+  end
+
+  def test_completion_time_persistence_does_not_swallow_interrupts
+    with_tmp_dir do |folder|
+      command = migrate_command("/tmp/project")
+      task = Struct.new(:completed_at, :state_file).new(nil, File.join(folder, "task.md"))
+      command.define_singleton_method(:archived_task?) { |*, **| true }
+
+      with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { task }) do
+        with_replaced_singleton_method(Hive::Markers, :current, ->(*) { nil }) do
+          with_replaced_singleton_method(Hive::TaskMeta, :snapshot, ->(*) { :before }) do
+            with_replaced_singleton_method(
+              Hive::TaskMeta, :write_completed_at_once, ->(*) { raise Interrupt }
+            ) do
+              assert_raises(Interrupt) do
+                command.send(
+                  :persist_completion_time, folder, Time.utc(2026, 7, 1),
+                  workflow_generation: nil, config: {}, snapshots: {}
+                )
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_completion_time_restore_reports_and_reraises_restore_failures
+    command = migrate_command("/tmp/project")
+
+    with_replaced_singleton_method(
+      Hive::TaskMeta, :restore, ->(*) { raise IOError, "restore failed" }
+    ) do
+      _out, err = capture_io do
+        assert_raises(IOError) do
+          command.send(
+            :restore_completion_time_backfill, "/state", { "/task" => :before }
+          )
+        end
+      end
+
+      assert_includes err, "could not restore completion-time metadata"
+      assert_includes err, "restore failed"
+    end
+  end
+
   def test_migrate_seeds_counter_above_existing_ids
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -21,7 +21,7 @@ class ConditionsValueTest < Minitest::Test
   end
 
   def test_observation_rejects_non_hash_payload_without_crashing
-    [nil, [], "AgentHealthy", 42].each do |payload|
+    [ nil, [], "AgentHealthy", 42 ].each do |payload|
       error = assert_raises(Hive::Conditions::InvalidCondition) do
         Hive::Conditions::Value.validate_observation!(valid_record.merge("payload" => payload))
       end

@@ -132,6 +132,32 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  def test_explicitly_disabled_review_does_not_gate_plan_or_execute
+    with_task do |task, cfg|
+      cfg["plan_review"]["enabled"] = false
+
+      assert_nil Hive::PlanReview::TransitionGuard.prepare!(
+        task:, destination: "4-execute", config: cfg,
+        orchestrator: ->(**) { flunk "disabled review must not initialize" }
+      )
+      assert_nil Hive::PlanReview::TransitionGuard.prepare_existing!(
+        task:, destination: "4-execute", config: cfg
+      )
+      assert Hive::PlanReview::TransitionGuard.verify!(
+        task:, destination: "4-execute", observation: nil, config: cfg
+      )
+    end
+
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      cfg["plan_review"]["enabled"] = false
+
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+        task:, config: cfg
+      )
+      refute File.exist?(File.join(task.folder, "plan-review"))
+    end
+  end
+
   def test_execute_entry_validates_review_or_records_legacy_adoption
     with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
       assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/agent_skills"
 require "hive/agent_skills/inspector"
+require "hive/agent_support/opencode"
 
 class AgentSkillsInspectorTest < Minitest::Test
   include HiveTestHelper
@@ -50,6 +51,10 @@ class AgentSkillsInspectorTest < Minitest::Test
     cfg["review"]["browser_test"]["agent"] = agent
     cfg["agents"][agent]["bin"] = bin if bin
     cfg
+  end
+
+  def native_spec(provider)
+    Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for(provider)
   end
 
   def claude_responses(bin:, plugins:, marketplaces:, version: "2.1.179")
@@ -207,6 +212,20 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_equal "incompatible", row.health
       assert runner.calls.all? { |call| call.fetch(:argv).first == bin }
     end
+  end
+
+  def test_claude_failed_native_inventory_commands_are_incompatible
+    failed = result(stdout: "[]", stderr: "failed", status: 1)
+    issues = []
+    Hive::AgentSupport.for(:claude)::Skills.live_inventory(
+      bin: "claude", native_spec: native_spec("claude"), issues:,
+      run: ->(*) { failed }, failure: ->(response) { response.stderr }
+    )
+
+    assert_equal [
+      "claude plugin inventory failed: failed",
+      "claude marketplace inventory failed: failed"
+    ], issues.map(&:last)
   end
 
   def test_native_claim_without_runtime_resolution_remains_missing
@@ -473,7 +492,7 @@ class AgentSkillsInspectorTest < Minitest::Test
       assert_equal native.package, live.dig("package", "id")
       assert_equal install, live.dig("package", "install_path")
       assert_equal "1.18.16", live.fetch("cli_version")
-      assert_same Hive::SkillCheck::OpenCode,
+      assert_same Hive::AgentSupport::OpenCode::Skills,
                   inspector.send(:skill_module, "opencode")
       assert_equal config_path,
                    inspector.send(:skill_environment, "opencode")
@@ -494,11 +513,11 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
-  def test_opencode_prepared_pinned_plugin_is_an_expected_resolution
+  def test_opencode_configured_pinned_plugin_is_an_expected_resolution
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "opencode")
       executable(bin)
-      plugin = Hive::SkillCheck::OpenCode::PINNED_COMPOUND_ENGINEERING_PLUGIN
+      plugin = Hive::AgentSupport::OpenCode::Skills::PINNED_COMPOUND_ENGINEERING_PLUGIN
       config_root = File.join(dir, ".config", "opencode")
       write(File.join(config_root, "opencode.json"), JSON.generate("plugin" => [ plugin ]))
       cfg = config(agent: "opencode", bin: bin)
@@ -892,30 +911,20 @@ class AgentSkillsInspectorTest < Minitest::Test
       other = File.join(install, "skills", "other-review", "SKILL.md")
       write(expected)
       write(other)
-      target = Hive::AgentSkills::Target.new(
-        surfaces: [ "review" ], kind: "agent", agent: "grok",
-        configured_skill: "ce-code-review", invocation: "/ce-code-review",
-        capability_id: "ce-code-review", package_id: "compound-engineering", managed: true
-      )
-      inspector = Hive::AgentSkills::Inspector.new(
-        config: config(agent: "grok"),
-        project_root: dir,
-        runner: FakeRunner.new,
-        environment: { "HOME" => dir, "PATH" => "" }
-      )
       native = {
         "package" => { "install_path" => install },
         "runtime_skills" => []
       }
+      skills = Hive::AgentSupport.for(:grok)::Skills
 
-      missing = inspector.send(
-        :grok_runtime_skill_issues, "/ce-code-review", expected, target, native
+      missing = skills.resolution_issues(
+        invocation: "/ce-code-review", resolved_path: expected, native:
       )
       assert_match(/does not report skill/, missing.first.last)
 
       native["runtime_skills"] = [ { "name" => "ce-code-review", "source_path" => other } ]
-      mismatched = inspector.send(
-        :grok_runtime_skill_issues, "/ce-code-review", expected, target, native
+      mismatched = skills.resolution_issues(
+        invocation: "/ce-code-review", resolved_path: expected, native:
       )
       assert_match(/expected/, mismatched.first.last)
     end
@@ -993,6 +1002,23 @@ class AgentSkillsInspectorTest < Minitest::Test
         assert_match(/entries must be objects/, evidence.fetch("issues").first.last)
       end
     end
+  end
+
+  def test_grok_failed_native_inventory_commands_are_incompatible
+    failed = ->(argv, **) do
+      stdout = argv[1] == "inspect" ? JSON.generate("plugins" => [], "skills" => []) : "[]"
+      result(stdout:, stderr: "failed", status: 1)
+    end
+    issues = []
+    Hive::AgentSupport.for(:grok)::Skills.live_inventory(
+      bin: "grok", native_spec: native_spec("grok"), issues:, project_root: "/project",
+      run: failed, failure: ->(response) { response.stderr }
+    )
+
+    assert_equal [
+      "grok plugin inventory failed: failed",
+      "grok runtime inspection failed: failed"
+    ], issues.map(&:last)
   end
 
   def test_available_unmanaged_native_reviewer_is_non_blocking

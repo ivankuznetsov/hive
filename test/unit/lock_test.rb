@@ -4,6 +4,21 @@ require "hive/lock"
 class LockTest < Minitest::Test
   include HiveTestHelper
 
+  def test_ps_start_time_fallback_is_time_bounded
+    original_spawn = Process.method(:spawn)
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    value = with_replaced_singleton_method(Process, :spawn, lambda { |*args|
+      options = args.last
+      original_spawn.call(RbConfig.ruby, "-e", "sleep 1", options)
+    }) do
+      Hive::Lock.ps_lstart_start_time(Process.pid, timeout: 0.01)
+    end
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    assert_nil value
+    assert_operator elapsed, :<, 0.5
+  end
+
   def test_with_task_lock_creates_and_removes
     with_tmp_dir do |dir|
       Hive::Lock.with_task_lock(dir, slug: "x") do
@@ -123,6 +138,58 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_commit_lock_is_reentrant_for_the_same_thread_and_process
+    with_tmp_dir do |dir|
+      result = Hive::Lock.with_commit_lock(dir) do
+        Hive::Lock.with_commit_lock(dir, timeout: 0) { :nested }
+      end
+
+      assert_equal :nested, result
+    end
+  end
+
+  def test_commit_lock_is_not_reentrant_for_another_thread_in_the_same_process
+    with_tmp_dir do |dir|
+      result = Hive::Lock.with_commit_lock(dir) do
+        Thread.new do
+          Hive::Lock.with_commit_lock(dir, timeout: 0.05) { :unexpected }
+        rescue Hive::ConcurrentRunError => error
+          error.class
+        end.value
+      end
+
+      assert_equal Hive::ConcurrentRunError, result
+    end
+  end
+
+  def test_commit_lock_clears_reentrant_ownership_after_exception
+    with_tmp_dir do |dir|
+      assert_raises(RuntimeError) do
+        Hive::Lock.with_commit_lock(dir) { raise "boom" }
+      end
+
+      assert_equal :reacquired,
+                   Hive::Lock.with_commit_lock(dir, timeout: 0) { :reacquired }
+    end
+  end
+
+  def test_commit_lock_does_not_trust_inherited_reentrancy_after_fork
+    with_tmp_dir do |dir|
+      status = Hive::Lock.with_commit_lock(dir) do
+        child = fork do
+          begin
+            Hive::Lock.with_commit_lock(dir, timeout: 0.05) { exit! 2 }
+          rescue Hive::ConcurrentRunError
+            exit! 0
+          end
+        end
+        Process.wait2(child).last
+      end
+
+      assert status.success?, "forked child must contend instead of inheriting lock ownership"
+    end
+  end
+
   def test_commit_lock_blocks_other_process
     with_tmp_dir do |dir|
       reader, writer = IO.pipe
@@ -144,6 +211,33 @@ class LockTest < Minitest::Test
       reader.close
     ensure
       Process.wait(child) if child
+    end
+  end
+
+  def test_commit_lock_is_released_when_holder_is_killed
+    with_tmp_dir do |dir|
+      reader, writer = IO.pipe
+      child = fork do
+        reader.close
+        Hive::Lock.with_commit_lock(dir) do
+          writer.write("locked\n")
+          writer.close
+          sleep 10
+        end
+      end
+      writer.close
+      assert_equal "locked\n", reader.gets
+      Process.kill("KILL", child)
+      Process.wait(child)
+      child = nil
+
+      assert_equal :released,
+                   Hive::Lock.with_commit_lock(dir, timeout: 0.5) { :released }
+    ensure
+      Process.kill("KILL", child) if child
+      Process.wait(child) if child
+      reader&.close unless reader&.closed?
+      writer&.close unless writer&.closed?
     end
   end
 
@@ -360,16 +454,46 @@ class LockTest < Minitest::Test
   end
 
   def test_ps_lstart_start_time_handles_empty_output_value_and_errors
-    with_replaced_singleton_method(Hive::Lock, :`, ->(_cmd) { "\n" }) do
-      assert_nil Hive::Lock.ps_lstart_start_time(12_345)
+    success = Struct.new(:success?).new(true)
+    run_with_output = lambda do |output|
+      with_replaced_singleton_method(Process, :spawn, lambda { |*args|
+        args.last.fetch(:out).write(output)
+        12_345
+      }) do
+        with_replaced_singleton_method(
+          Process, :waitpid2, ->(*) { [ 12_345, success ] }
+        ) do
+          Hive::Lock.ps_lstart_start_time(12_345)
+        end
+      end
     end
 
-    with_replaced_singleton_method(Hive::Lock, :`, ->(_cmd) { "Mon Jan  1 00:00:00 2024\n" }) do
-      assert_equal "Mon Jan  1 00:00:00 2024", Hive::Lock.ps_lstart_start_time(12_345)
-    end
+    assert_nil run_with_output.call("\n")
+    assert_equal "Mon Jan  1 00:00:00 2024",
+                 run_with_output.call("Mon Jan  1 00:00:00 2024\n")
 
-    with_replaced_singleton_method(Hive::Lock, :`, ->(_cmd) { raise "ps failed" }) do
+    with_replaced_singleton_method(Process, :spawn, ->(*) { raise "ps failed" }) do
       assert_nil Hive::Lock.ps_lstart_start_time(12_345)
     end
+  end
+
+  def test_process_cleanup_tolerates_a_child_that_already_exited_and_was_reaped
+    calls = []
+    kill = lambda do |signal, pid|
+      calls << [ :kill, signal, pid ]
+      raise Errno::ESRCH
+    end
+    detach = lambda do |pid|
+      calls << [ :detach, pid ]
+      raise Errno::ECHILD
+    end
+
+    with_replaced_singleton_method(Process, :kill, kill) do
+      with_replaced_singleton_method(Process, :detach, detach) do
+        assert_nil Hive::Lock.send(:terminate_and_detach, 12_345)
+      end
+    end
+
+    assert_equal [ [ :kill, "KILL", 12_345 ], [ :detach, 12_345 ] ], calls
   end
 end

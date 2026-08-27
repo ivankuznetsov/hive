@@ -27,22 +27,22 @@ class E2EIncidentBudgetTest < Minitest::Test
     assert_equal 0, checked.total_seconds
   end
 
-  def test_enabled_incident_must_be_below_ten_seconds
+  def test_enabled_incident_must_be_below_eleven_seconds
     checked = Hive::E2E::IncidentBudget.check(
-      report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 10.0) ])
+      report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 11.0) ])
     )
 
     refute checked.ok?
     assert checked.ok?(:integrity)
     refute checked.ok?(:timing)
     assert_empty checked.integrity_violations
-    assert_equal [ "slow took 10.000s (must be below 10.000s)" ], checked.violations
+    assert_equal [ "slow took 11.000s (must be below 11.000s)" ], checked.violations
     assert_equal checked.violations, checked.timing_violations
   end
 
-  def test_hosted_runner_variance_above_five_seconds_stays_within_budget
+  def test_observed_hosted_runner_variance_below_eleven_seconds_stays_within_budget
     checked = Hive::E2E::IncidentBudget.check(
-      report(metadata: [ metadata("variable") ], scenarios: [ result("variable", 5.010) ])
+      report(metadata: [ metadata("variable") ], scenarios: [ result("variable", 10.585) ])
     )
 
     assert checked.ok?
@@ -109,7 +109,7 @@ class E2EIncidentBudgetTest < Minitest::Test
       missing_report = File.join(dir, "missing.json")
       File.write(
         slow_report,
-        JSON.generate(report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 10.0) ]))
+        JSON.generate(report(metadata: [ metadata("slow") ], scenarios: [ result("slow", 11.0) ]))
       )
       File.write(
         missing_report,
@@ -123,7 +123,7 @@ class E2EIncidentBudgetTest < Minitest::Test
 
       assert slow_integrity.success?, slow_integrity_error
       refute slow_timing.success?
-      assert_includes slow_timing_error, "slow took 10.000s"
+      assert_includes slow_timing_error, "slow took 11.000s"
       refute missing_integrity.success?
       assert_includes missing_integrity_error, "has no scenario result"
       assert missing_timing.success?, missing_timing_error

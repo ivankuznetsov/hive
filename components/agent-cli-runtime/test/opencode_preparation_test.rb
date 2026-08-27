@@ -223,6 +223,10 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
 
         assert prepared.probe_result.ready
         assert_equal [ "high" ], prepared.probe_result.available_variants
+        configured = prepared.probe_result.capability_evidence.find do |item|
+          item.capability == :configured_model_route
+        end
+        assert_equal [ "anthropic/claude-sonnet-4-5" ], configured.arguments
         calls = File.readlines(fixture.fetch(:log), chomp: true)
         refute calls.any? { |line| line.include?("models anthropic --verbose") }
         prepared.cleanup!
@@ -245,6 +249,39 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
             env: fixture.fetch(:env)
           )
         end
+      end
+    end
+  end
+
+  def test_explicit_model_definition_still_requires_the_requested_variant
+    with_fixture_cli(mode: :wrong_route) do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        root = File.join(dir, "invocation")
+        FileUtils.mkdir_p(work)
+        config = {
+          "provider" => {
+            "anthropic" => {
+              "models" => {
+                "claude-sonnet-4-5" => {
+                  "variants" => { "low" => {} }
+                }
+              }
+            }
+          }
+        }
+
+        error = assert_raises(AgentCliRuntime::RouteUnavailable) do
+          AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root:, source: nil, configuration: config
+            ),
+            env: fixture.fetch(:env)
+          )
+        end
+
+        assert_match(/variant is unavailable/, error.message)
+        refute File.exist?(root)
       end
     end
   end
@@ -437,6 +474,14 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
   end
 
   def test_nil_permission_mode_requires_a_typed_policy
+    invalid = assert_raises(ArgumentError) do
+      AgentCliRuntime::OpenCode::Permissions.compile(
+        permission_mode: nil, permission_policy: Object.new,
+        working_directory: Dir.pwd
+      )
+    end
+    assert_match(/must be an OpenCodePermissionPolicy/, invalid.message)
+
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|
         work = File.join(dir, "work")

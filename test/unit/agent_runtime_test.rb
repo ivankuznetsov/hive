@@ -3,6 +3,8 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 
 class AgentRuntimeTest < Minitest::Test
+  include HiveTestHelper
+
   FailingProbeProfile = Struct.new(:name, :launcher_identity, :error, keyword_init: true) do
     def check_version!
       raise error
@@ -371,6 +373,53 @@ class AgentRuntimeTest < Minitest::Test
     assert_predicate result.capability_evidence, :frozen?
     assert_equal %i[headless version preflight], result.capability_evidence.map(&:capability)
     assert result.capability_evidence.all?(&:supported)
+  end
+
+  def test_prepare_delegates_standalone_opencode_preparation_requests
+    preparation = Hive::AgentRuntime::OpenCodePreparationRequest.new(
+      request: AgentCliRuntime::Request.new(
+        profile: :opencode, prompt: "inspect only", permission_mode: "read-only",
+        model: "anthropic/claude-sonnet-4-5"
+      ),
+      working_directory: Dir.pwd,
+      invocation_root: File.join(Dir.tmpdir, "unused-opencode-preparation")
+    )
+    environment = { "HOME" => "/native/home" }
+    expected = Object.new
+    received = nil
+    replacement = lambda do |request, env:|
+      received = [ request, env ]
+      expected
+    end
+
+    result = with_replaced_singleton_method(
+      AgentCliRuntime, :prepare!, replacement
+    ) do
+      Hive::AgentRuntime.prepare!(preparation, env: environment)
+    end
+
+    assert_same expected, result
+    assert_equal [ preparation, environment ], received
+  end
+
+  def test_prepare_inspection_delegates_to_the_standalone_runtime
+    prepared = Object.new
+    parsed_run = Object.new
+    expected = Object.new
+    received = nil
+    replacement = lambda do |actual_prepared, actual_parsed_run|
+      received = [ actual_prepared, actual_parsed_run ]
+      expected
+    end
+
+    result = with_replaced_singleton_method(
+      AgentCliRuntime, :prepare_inspection, replacement
+    ) do
+      Hive::AgentRuntime.prepare_inspection(prepared, parsed_run)
+    end
+
+    assert_same expected, result
+    assert_equal [ prepared, parsed_run ], received
   end
 
   def test_prepare_uses_package_probe_for_adapter_without_hive_version_method

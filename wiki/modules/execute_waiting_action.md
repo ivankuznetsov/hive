@@ -7,7 +7,7 @@ updated: 2026-05-13
 tags: [module, execute, status, json, tui]
 ---
 
-**TLDR**: Shared builder for `EXECUTE_WAITING reason=...` recovery actions. It returns a `next_action` hash with `kind`, `target`, `instructions`, and optional `rerun_with` so `hive run --json`, `hive status --json`, and the TUI all point at the same repair target.
+**TLDR**: Shared builder for `EXECUTE_WAITING reason=...` recovery actions. It returns a `next_action` hash with `kind`, `target`, `instructions`, and optional `rerun_with` so `hive run --json`, the internal task projection, and the TUI all point at the same repair target.
 
 ## Reasons
 
@@ -26,5 +26,5 @@ tags: [module, execute, status, json, tui]
 | File | Use |
 |---|---|
 | `lib/hive/commands/run.rb` | Builds `hive run --json next_action` for `:execute_waiting`. |
-| `lib/hive/task_action.rb` | Adds row-local `next_action` to `hive status --json` through `TaskAction#next_action`. |
+| `lib/hive/task_action.rb` | Adds row-local `next_action` to internal task projections through `TaskAction#next_action`. |
 | `lib/hive/tui/key_map.rb` / `lib/hive/tui/bubble_model.rb` | Enter on execute waiting rows opens edit targets or dispatches run actions from the same structured payload. |

@@ -359,6 +359,39 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_v5_markerless_controller_recovery_round_trips_and_has_exact_lookup
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      recovery = recovery_payload.merge(
+        "variant" => "markerless_failure",
+        "observed_marker_generation" => nil,
+        "expected_marker_attrs" => {},
+        "failure_origin" => "agent_exited_without_terminal_marker"
+      )
+      Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 2-fix --project hive --json],
+        requestor: "healer", trigger: "recovery/markerless_failure",
+        request_id: "markerless-controller-v5", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "2-fix", recovery: recovery,
+        state_home: dir, now: Time.utc(2026, 8, 10, 12)
+      )
+
+      parsed = Q.fetch("markerless-controller-v5", state_home: dir)
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
+      )
+      assert_empty schema.validate(JSON.parse(File.read(parsed.path))).to_a
+      assert_equal parsed, Q.find_markerless_recovery(
+        project: "hive", slug: "retry-task", task_generation: "c" * 64,
+        failure_origin: "agent_exited_without_terminal_marker", state_home: dir
+      )
+      assert_nil Q.find_markerless_recovery(
+        project: "hive", slug: "retry-task", task_generation: "f" * 64,
+        failure_origin: "agent_exited_without_terminal_marker", state_home: dir
+      )
+    end
+  end
+
   def test_v5_recovery_rejects_cross_variant_identity_and_unsafe_observations
     admission = recovery_payload.merge(
       "variant" => "admission_failure",
@@ -367,10 +400,20 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "policy_digest" => "e" * 64,
       "admission_observation" => admission_observation
     )
+    markerless = recovery_payload.merge(
+      "variant" => "markerless_failure",
+      "observed_marker_generation" => nil,
+      "expected_marker_attrs" => {},
+      "failure_origin" => "agent_exited_without_terminal_marker"
+    )
     invalid = [
       admission.merge("observed_marker_generation" => "a" * 64),
       admission.merge("expected_marker_attrs" => { "marker_id" => "invented" }),
       admission.merge("policy_digest" => nil),
+      markerless.merge("observed_marker_generation" => "a" * 64),
+      markerless.merge("expected_marker_attrs" => { "marker_id" => "invented" }),
+      markerless.merge("policy_digest" => "e" * 64),
+      markerless.merge("admission_observation" => admission_observation),
       recovery_payload.merge("policy_digest" => "e" * 64),
       admission.merge(
         "admission_observation" => admission.fetch("admission_observation").merge(
@@ -1401,6 +1444,98 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_recover_claims_requeues_legacy_admitted_recovery_with_terminal_attempt
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 8, 27, 8)
+      recovery = recovery_payload(
+        phase: "terminal", terminal_at: at.iso8601(6)
+      ).merge(
+        "variant" => "markerless_failure",
+        "observed_marker_generation" => nil,
+        "expected_marker_attrs" => {},
+        "failure_origin" => "agent_exited_without_terminal_marker"
+      )
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 2-fix --project hive --json],
+        requestor: "healer", trigger: "recovery/markerless_failure",
+        request_id: "legacy-admitted-claim", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "2-fix", recovery: recovery,
+        state_home: dir, now: at
+      )
+      claimed = Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-terminal",
+        task_generation: "c" * 64, state_home: dir, now: at
+      )
+      Q.update_recovery!(
+        request_id, expected_phase: "terminal",
+        changes: {
+          "phase" => "admitted", "attempt_id" => nil,
+          "terminal_outcome" => nil, "terminal_at" => nil
+        },
+        state_home: dir
+      )
+      events = []
+
+      recovered = with_replaced_singleton_method(
+        Q, :request_files, ->(*) { flunk "known claim repair must not rescan the queue" }
+      ) do
+        Q.recover_claims(
+          state_home: dir, now: at + 1,
+          alive: ->(_pid, _start) { false },
+          attempt_alive: ->(_attempt_id, _generation) { false },
+          handler: ->(**event) { events << event }
+        )
+      end
+
+      assert_equal 1, recovered
+      refute File.exist?(claimed)
+      refute File.exist?("#{claimed}#{Q::CLAIM_META_SUFFIX}")
+      assert_empty Q.claimed(state_home: dir)
+      pending = Q.pending(state_home: dir)
+      assert_equal [ request_id ], pending.map(&:request_id)
+      assert_equal "admitted", pending.first.recovery.fetch("phase")
+      assert_equal "recovery_admitted_claim_requeued", events.dig(0, :reason)
+    end
+  end
+
+  def test_recover_claims_retains_legacy_admitted_claim_when_requeue_fails
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 8, 27, 8)
+      recovery = recovery_payload.merge(
+        "variant" => "markerless_failure",
+        "observed_marker_generation" => nil,
+        "expected_marker_attrs" => {},
+        "failure_origin" => "agent_exited_without_terminal_marker"
+      )
+      request_id = Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 2-fix --project hive --json],
+        requestor: "healer", trigger: "recovery/markerless_failure",
+        request_id: "failed-admitted-requeue", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "2-fix", recovery: recovery,
+        state_home: dir, now: at
+      )
+      claimed = Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-terminal",
+        task_generation: "c" * 64, state_home: dir, now: at
+      )
+      events = []
+
+      with_replaced_singleton_method(Q, :requeue_recovery!, ->(*, **_kwargs) { false }) do
+        recovered = Q.recover_claims(
+          state_home: dir, now: at + 1,
+          alive: ->(_pid, _start) { false },
+          handler: ->(**event) { events << event }
+        )
+
+        assert_equal 0, recovered
+      end
+      assert File.exist?(claimed)
+      assert_equal "recovery_admitted_claim_requeue_failed", events.dig(0, :reason)
+    end
+  end
+
   def test_recover_claims_discards_the_claim_when_a_pending_recovery_sibling_exists
     Dir.mktmpdir("hive-queue") do |dir|
       at = Time.utc(2026, 7, 25, 12)
@@ -1698,6 +1833,9 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     with_replaced_singleton_method(Q, :directory, ->(**_kwargs) { raise Errno::ENOENT, "gone" }) do
       assert_nil Q.update_claim("missing", pid: 123, state_home: "/tmp/missing")
       refute Q.release_claim("missing", state_home: "/tmp/missing")
+      refute Q.requeue_recovery!(
+        "missing", expected_phase: "terminal", changes: {}, state_home: "/tmp/missing"
+      )
       refute Q.discard_sequence("missing-seq", state_home: "/tmp/missing")
     end
   end

@@ -1,17 +1,16 @@
 require "test_helper"
-require "json"
 require "shellwords"
 require "hive/cli"
 require "hive/attempts/context"
 require "hive/commands/init"
 require "hive/commands/new"
-require "hive/daemon/child_supervisor"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatcher"
-require "hive/daemon/status_consumer"
+require_relative "../support/daemon_e2e_harness"
 
 class ContentWorkflowDaemonE2ETest < Minitest::Test
   include HiveTestHelper
+  include HiveDaemonE2EHarness
 
   def test_content_fixture_advances_from_init_new_to_terminal_stage
     descriptor = content_workflow
@@ -33,6 +32,7 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
               supervisor = InlineSupervisor.new(
                 run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }
               )
+              logger = CollectingLogger.new
               dispatcher = Hive::Daemon::Dispatcher.new(
                 config: { "daemon" => { "edit_debounce_sec" => 0, "poll_interval_sec" => 30 } },
                 controller: Hive::Daemon::ConcurrencyController.new(
@@ -41,30 +41,20 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
                   max_runs_per_day_per_project: 100
                 ),
                 supervisor: supervisor,
-                status_consumer: LiveStatusConsumer.new(
-                  fetch: lambda do
-                    out, = capture_io { Hive::CLI.start([ "status", "--json" ]) }
-                    doc = JSON.parse(out)
-                    mapper = Hive::Daemon::StatusConsumer.new
-                    Hive::Daemon::StatusConsumer::Result.new(
-                      ok: true,
-                      rows: mapper.send(:extract_rows, doc),
-                      projects: mapper.send(:extract_projects, doc),
-                      error: nil
-                    )
-                  end
-                ),
-                logger: CollectingLogger.new
+                status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
+                logger: logger
               )
+              name_generation_requests = install_inline_display_name_backfiller(dispatcher, logger: logger)
 
               24.times do
                 break if File.file?(File.join(task_folder(project_root, "4-done", slug), "done.md"))
 
-                now = Time.now
-                supervisor.now = now
-                dispatcher.tick(now: now)
+                advance_tick(dispatcher, supervisor)
               end
 
+              assert_equal %w[1-inbox 2-research 3-draft 4-done],
+                           name_generation_requests.map { |folder| File.basename(File.dirname(folder)) },
+                           "daemon E2E must exercise display-name backfill without external child processes"
               @spawned_commands = supervisor.spawned.map { |s| s[:command] }
             end
           end
@@ -93,76 +83,5 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
         end
       end
     end
-  end
-
-  private
-
-  class CollectingLogger
-    def event(_name, **_attrs); end
-    def close; end
-  end
-
-  class LiveStatusConsumer
-    def initialize(fetch:)
-      @fetch = fetch
-    end
-
-    def fetch
-      @fetch.call
-    end
-  end
-
-  class InlineSupervisor
-    ChildExit = Hive::Daemon::ChildSupervisor::ChildExit
-
-    attr_reader :spawned
-    attr_accessor :now
-
-    def initialize(run:)
-      @run = run
-      @spawned = []
-      @pending = []
-      @next_pid = 6000
-      @now = Time.now
-    end
-
-    def spawn(command_string:, project:, slug:, stage:,
-              log_state_path: nil, state_file_path: nil, dry_run: nil, request_id: nil)
-      pid = (@next_pid += 1)
-      @spawned << { command: command_string, project: project, slug: slug, stage: stage }
-      exit_code = @run.call(command_string)
-      @pending << ChildExit.new(
-        pid: pid,
-        exit_code: exit_code,
-        project: project,
-        slug: slug,
-        stage: stage,
-        command: command_string,
-        state_file_path: state_file_path,
-        started_at: @now,
-        finished_at: @now,
-        json_envelope: nil
-      )
-      pid
-    end
-
-    def reap_all(now: Time.now)
-      pending = @pending
-      @pending = []
-      pending
-    end
-
-    def reap_dry_run(now: Time.now)
-      []
-    end
-
-    def terminate_all(grace_sec: 600); end
-    def update_timeouts(**); end
-    def enforce_timeouts(now:) = []
-    def in_flight_count = @pending.size
-  end
-
-  def task_folder(project_root, stage, slug)
-    File.join(project_root, ".hive-state", "stages", stage, slug)
   end
 end

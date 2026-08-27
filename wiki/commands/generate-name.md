@@ -3,7 +3,7 @@ title: hive generate-name
 type: command
 source: lib/hive/commands/generate_name.rb, lib/hive/display_name/generator.rb, lib/hive/display_name/sanitizer.rb, templates/display_name_prompt.md.erb
 created: 2026-06-03
-updated: 2026-07-22
+updated: 2026-08-26
 tags: [command, display-name, task-id]
 ---
 
@@ -43,7 +43,7 @@ The subprocess command is built from the profile binary, headless flag, Claude p
 
 ## State effects
 
-Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, name)`. Display-name and daemon id updates share one metadata rewrite path that preserves every declared sidecar field, including workflow provenance, then this command commits through `Hive::GitOps#hive_commit(stage_name:, slug:, action: "named")`. Git commit failures are swallowed after the sidecar update, matching the command's best-effort display-name posture.
+Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, name)`. Display-name and daemon id updates share one metadata rewrite path that preserves every declared sidecar field, including workflow provenance, then this command commits through the centrally serialized `Hive::GitOps#hive_commit(stage_name:, slug:, action: "named")`. Git commit failures are still swallowed after the sidecar update, matching the command's best-effort display-name posture; ordinary concurrent hive-state writers no longer create an unlocked index race.
 
 `hive new` starts this command asynchronously after the captured-task commit:
 

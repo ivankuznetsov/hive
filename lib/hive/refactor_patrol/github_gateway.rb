@@ -15,8 +15,6 @@ module Hive
       MAX_MERGE_LABELS = 100
       MAX_MERGE_LABEL_BYTES = 256
       MAX_MERGE_FILES = 10_000
-      MAX_MERGE_PATCH_BYTES = 32 * 1024
-      MAX_MERGE_PATCH_TOTAL_BYTES = 512 * 1024
       PATROL_PUBLICATION_MARKER =
         /<!--\s*hive-publication:v1\s+id=pub-[0-9a-f]{32}\s+base=[0-9a-f]{40,64}\s*-->/
       PATROL_SUCCESSOR_MARKER =
@@ -102,25 +100,16 @@ module Hive
         unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
           raise Hive::GhError, "`gh api` returned incomplete file pages for PR #{number}"
         end
-        patch_bytes = 0
         files = pages.flat_map do |page|
           page.map do |file|
             unless file.is_a?(Hash)
               raise Hive::GhError, "`gh api` returned a non-object file for PR #{number}"
             end
 
-            patch = bounded_merge_text(
-              file["patch"], "file patch", MAX_MERGE_PATCH_BYTES, allow_empty: true
-            )
-            patch_bytes += patch.bytesize
-            if patch_bytes > MAX_MERGE_PATCH_TOTAL_BYTES
-              raise Hive::GhError, "merged PR file patches exceed their aggregate bound"
-            end
             {
               "path" => file["filename"].to_s,
               "status" => file["status"].to_s,
-              "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s,
-              "patch" => patch
+              "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s
             }.compact
           end
         end

@@ -210,16 +210,33 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     end
   end
 
-  def test_empty_final_text_and_mismatched_sessions_are_malformed
+  def test_tool_only_terminal_step_can_complete_with_empty_final_text
     empty = fixture("run-one-step.jsonl").sub('"text":"Done."', '"text":""')
+    parsed = AgentCliRuntime.parse_run(:opencode, stdout: empty)
+
+    assert_equal "", parsed.final_message
+
+    outcome = normalize(
+      stdout: empty,
+      export: export_for(
+        session_id: parsed.session_id,
+        message_id: parsed.terminal_message_id,
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        tokens: {}
+      )
+    )
+
+    assert outcome.completed?
+    assert_equal "", outcome.final_message
+  end
+
+  def test_mismatched_sessions_are_malformed
     mismatched = fixture("run-one-step.jsonl").sub(
       '"sessionID":"ses_contract_one","part":{"id":"prt_text_one"',
       '"sessionID":"ses_other","part":{"id":"prt_text_one"'
     )
 
-    assert_raises(AgentCliRuntime::MalformedOutput) do
-      AgentCliRuntime.parse_run(:opencode, stdout: empty)
-    end
     assert_raises(AgentCliRuntime::MalformedOutput) do
       AgentCliRuntime.parse_run(:opencode, stdout: mismatched)
     end

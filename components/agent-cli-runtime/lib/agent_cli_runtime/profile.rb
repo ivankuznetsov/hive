@@ -7,7 +7,7 @@ module AgentCliRuntime
     PROMPT_STYLES = %i[positional headless_flag_value stdin piped_stdin].freeze
     WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     READ_ONLY_PERMISSION_MODE = "read-only".freeze
-    CAPTURE_TIMEOUT_SECONDS = 10
+    CAPTURE_TIMEOUT_SECONDS = 120
     CAPTURE_POLL_SECONDS = 0.01
     CAPTURE_TERM_GRACE_SECONDS = 0.2
     CAPTURE_REAP_GRACE_SECONDS = 0.2

@@ -56,6 +56,48 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_closed_admission_skips_pr_status_query
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      queried = false
+      inflight = Set.new
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, lambda { |*_args, **_kwargs|
+        queried = true
+        {}
+      }) do
+        outcome = Hive::Babysitter::PrFixer.run(
+          pr, project, cfg, dry_run: false, logger: nil, inflight: inflight,
+          admission_open: -> { false }
+        )
+        assert_equal :shutdown, outcome
+      end
+
+      refute queried, "a stopped dispatcher must not start a PR status query"
+      assert_empty inflight
+    end
+  end
+
+  def test_raising_admission_predicate_fails_closed
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      queried = false
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, lambda { |*_args, **_kwargs|
+        queried = true
+        {}
+      }) do
+        outcome = Hive::Babysitter::PrFixer.run(
+          pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+          admission_open: -> { raise IOError, "shutdown state unavailable" }
+        )
+        assert_equal :shutdown, outcome
+      end
+
+      refute queried, "an unavailable shutdown state must not admit PR work"
+    end
+  end
+
   def test_already_green_fork_pr_noops_without_needs_human_label
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -99,6 +141,65 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_shutdown_during_context_build_prevents_agent_spawn
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      admission_open = true
+      spawned = false
+      inflight = Set.new
+
+      stub_non_green_context(project, worktree_path, before_return: -> { admission_open = false }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **_kwargs|
+          spawned = true
+          { status: :ok }
+        }) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr, project, cfg, dry_run: false, logger: nil, inflight: inflight,
+            admission_open: -> { admission_open }
+          )
+          assert_equal :shutdown, outcome
+        end
+      end
+
+      refute spawned, "shutdown must be rechecked immediately before the agent launch"
+      assert_empty inflight
+    end
+  end
+
+  def test_shutdown_while_preparing_agent_prevents_provider_launch
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      admission_open = true
+      spawned = false
+      original_lookup = Hive::AgentProfiles.method(:lookup)
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lambda { |*args, **kwargs|
+          profile = original_lookup.call(*args, **kwargs)
+          admission_open = false
+          profile
+        }) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **_kwargs|
+            spawned = true
+            { status: :ok }
+          }) do
+            outcome = Hive::Babysitter::PrFixer.run(
+              pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+              admission_open: -> { admission_open }
+            )
+            assert_equal :shutdown, outcome
+          end
+        end
+      end
+
+      refute spawned, "shutdown during launch preparation must suppress the provider process"
+    end
+  end
+
   def test_agent_spawn_receives_babysitter_route
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -129,6 +230,7 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_equal [
         "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
       ], captured.fetch(:routing_arguments).global_arguments
+      assert_equal false, captured.fetch(:terminate_on_parent_signal)
     end
   end
 
@@ -370,6 +472,80 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_shutdown_during_auto_rebase_materialization_prevents_rebase
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      admission_open = true
+      rebased = false
+      pushed = false
+      status = green_behind_status
+      rebase = Hive::Babysitter::GhOps::RebaseResult.new(status: :success, stdout: "", stderr: "")
+      push = Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { status }) do
+        with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, lambda { |*_args|
+          admission_open = false
+          WorktreeResult.new(path: File.join(dir, "wt"), branch: "feature")
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :rebase_onto_base, lambda { |*_args, **_kwargs|
+            rebased = true
+            rebase
+          }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :force_push_with_lease, lambda { |*_args, **_kwargs|
+              pushed = true
+              push
+            }) do
+              outcome = Hive::Babysitter::PrFixer.run(
+                pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+                admission_open: -> { admission_open }
+              )
+              assert_equal :shutdown, outcome
+            end
+          end
+        end
+      end
+
+      refute rebased
+      refute pushed
+    end
+  end
+
+  def test_shutdown_during_auto_rebase_prevents_force_push
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree = WorktreeResult.new(path: File.join(dir, "wt"), branch: "feature")
+      admission_open = true
+      pushed = false
+      status = green_behind_status
+      rebase = Hive::Babysitter::GhOps::RebaseResult.new(status: :success, stdout: "", stderr: "")
+      push = Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { status }) do
+        with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, ->(*_args) { worktree }) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :rebase_onto_base, lambda { |*_args, **_kwargs|
+            admission_open = false
+            rebase
+          }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :force_push_with_lease, lambda { |*_args, **_kwargs|
+              pushed = true
+              push
+            }) do
+              outcome = Hive::Babysitter::PrFixer.run(
+                pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+                admission_open: -> { admission_open }
+              )
+              assert_equal :shutdown, outcome
+            end
+          end
+        end
+      end
+
+      refute pushed
+      events = read_events(project)
+      assert events.any? { |event| event["action"] == "rebase" && event["outcome"] == "shutdown" }
+    end
+  end
+
   def test_green_but_behind_reports_failure_when_force_push_fails
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -484,7 +660,7 @@ class BabysitterPrFixerTest < Minitest::Test
     File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
   end
 
-  def stub_non_green_context(project, worktree_path)
+  def stub_non_green_context(project, worktree_path, before_return: nil)
     status = { "mergeable" => "CONFLICTING", "statusCheckRollup" => [ { "conclusion" => "FAILURE" } ] }
     context = Hive::Babysitter::ContextBuilder::Context.new(
       status_rollup: status,
@@ -497,7 +673,10 @@ class BabysitterPrFixerTest < Minitest::Test
 
     with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(_path, _number, **_kwargs) { status }) do
       with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, ->(_project, _pr) { WorktreeResult.new(path: worktree_path, branch: "feature") }) do
-        with_replaced_singleton_method(Hive::Babysitter::ContextBuilder, :build, ->(**_kwargs) { context }) do
+        with_replaced_singleton_method(Hive::Babysitter::ContextBuilder, :build, lambda { |**_kwargs|
+          before_return&.call
+          context
+        }) do
           yield
         end
       end

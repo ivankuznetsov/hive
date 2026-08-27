@@ -116,7 +116,7 @@ class MigrateAllCommandTest < Minitest::Test
     global_calls = 0
     child_global_migrations = []
 
-    replacement = lambda { |_path, global_migration:, daemon_restarter:|
+    replacement = lambda { |_path, global_migration:, daemon_restarter:, daemon_cutover:|
       child_global_migrations << global_migration
       Command.new(-> { global_migration.call })
     }
@@ -141,7 +141,7 @@ class MigrateAllCommandTest < Minitest::Test
     ]
     restart_calls = 0
 
-    replacement = lambda { |_path, global_migration:, daemon_restarter:|
+    replacement = lambda { |_path, global_migration:, daemon_restarter:, daemon_cutover:|
       Command.new(lambda {
         global_migration.call
         daemon_restarter.call
@@ -160,6 +160,38 @@ class MigrateAllCommandTest < Minitest::Test
     assert_equal 1, restart_calls
   end
 
+  def test_immediate_patrol_cutover_replaces_the_daemon_only_once
+    projects = [
+      { "name" => "alpha", "path" => "/tmp/alpha" },
+      { "name" => "beta", "path" => "/tmp/beta" }
+    ]
+    project_cutovers = 0
+    cutovers = 0
+    restart_calls = 0
+
+    replacement = lambda { |_path, global_migration:, daemon_restarter:, daemon_cutover:|
+      Command.new(lambda {
+        global_migration.call
+        project_cutovers += 1
+        raise "expected immediate daemon cutover" unless daemon_cutover.call
+      })
+    }
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
+      Hive::Commands::MigrateAll.new(
+        projects: projects,
+        output: StringIO.new,
+        binary: "hive",
+        global_migration: -> { },
+        daemon_cutover: -> { cutovers += 1; true },
+        daemon_restarter: -> { restart_calls += 1 }
+      ).call
+    end
+
+    assert_equal 2, project_cutovers
+    assert_equal 1, cutovers
+    assert_equal 0, restart_calls
+  end
+
   def test_partial_fleet_failure_does_not_restart_the_daemon
     projects = [
       { "name" => "alpha", "path" => "/tmp/alpha" },
@@ -168,7 +200,7 @@ class MigrateAllCommandTest < Minitest::Test
     restart_calls = 0
     error_output = StringIO.new
 
-    replacement = lambda { |path, global_migration:, daemon_restarter:|
+    replacement = lambda { |path, global_migration:, daemon_restarter:, daemon_cutover:|
       Command.new(lambda {
         global_migration.call
         daemon_restarter.call if path.end_with?("alpha")
@@ -197,7 +229,7 @@ class MigrateAllCommandTest < Minitest::Test
     restart_calls = 0
     phase = :first
 
-    replacement = lambda { |path, global_migration:, daemon_restarter:|
+    replacement = lambda { |path, global_migration:, daemon_restarter:, daemon_cutover:|
       Command.new(lambda {
         global_migration.call
         if phase == :first

@@ -1,9 +1,9 @@
 ---
 title: Hive::Rebase
 type: module
-source: lib/hive/rebase.rb
+source: lib/hive/rebase.rb, lib/hive/commands/run.rb
 created: 2026-05-14
-updated: 2026-07-22
+updated: 2026-08-27
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
@@ -32,13 +32,19 @@ tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 
 The guards short-circuit before any git fetch or rebase attempt. Each maps to a specific `Result.reason`:
 
-1. `cfg.rebase.enabled == false` → `:disabled`
-2. `@no_rebase` CLI override → `:cli_override` (handled in `Hive::Commands::Run`, not `Rebase.perform`)
-3. `task.worktree_path` missing or directory absent → `:no_worktree`
-4. `.git/rebase-merge/` or `.git/rebase-apply/` exists (pre-existing half-rebase) → `:pre_existing_rebase`
-5. Worktree dirty (any uncommitted changes) → `:dirty_worktree`
-6. Detached HEAD → `:detached_head`
-7. Default branch cannot be resolved from cfg or git → `:no_default_branch`
+1. Controller workflow → `:controller_workflow` (handled in
+   `Hive::Commands::Run`, independently of stage or worktree shape)
+2. Managed draft-PR handoff → `:managed_draft_pr_handoff` (handled in
+   `Hive::Commands::Run`)
+3. `@no_rebase` CLI override → `:cli_override` (handled in
+   `Hive::Commands::Run`)
+4. `cfg.rebase.enabled == false` → `:disabled`
+5. `task.worktree_path` missing or directory absent → `:no_worktree`
+6. `.git/rebase-merge/` or `.git/rebase-apply/` exists (pre-existing
+   half-rebase) → `:pre_existing_rebase`
+7. Worktree dirty (any uncommitted changes) → `:dirty_worktree`
+8. Detached HEAD → `:detached_head`
+9. Default branch cannot be resolved from cfg or git → `:no_default_branch`
 
 ### Fetch
 

@@ -153,7 +153,9 @@ module Hive
         rejection = direction == "backward"
         activity.begin_operation(
           kind: rejection ? "rejection_recorded" : "approval_recorded",
-          operation_id: "#{rejection ? 'reject' : 'approve'}:#{task.stage_index}-#{task.stage_name}:#{destination}:#{direction}",
+          operation_id: approval_operation_id(
+            activity, task, destination, direction, rejection: rejection
+          ),
           source: "command_service",
           reason: rejection ? "task stage rejection recorded" : "task stage approval recorded",
           precondition: {
@@ -162,6 +164,19 @@ module Hive
           },
           expected_postcondition: { "stage" => destination }
         )
+      end
+
+      def approval_operation_id(activity, task, destination, direction, rejection:)
+        binding = activity.binding
+        identity = Hive::TaskActivity.fingerprint(
+          "stage" => "#{task.stage_index}-#{task.stage_name}",
+          "destination" => destination,
+          "direction" => direction,
+          "task_generation" => binding.fetch("task_generation"),
+          "ownership_generation" => binding.fetch("ownership_generation")
+        )
+        verb = rejection ? "reject" : "approve"
+        "#{verb}:#{identity}"
       end
 
       def complete_approval_operation(operation, new_folder, destination, direction)

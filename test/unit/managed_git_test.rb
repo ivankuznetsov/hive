@@ -70,4 +70,75 @@ class ManagedGitTest < Minitest::Test
       Hive::ManagedGit.command("/tmp/repo", "config", "alias.escape", "!sh")
     end
   end
+
+  def test_absolute_gh_binary_is_embedded_in_credential_helper
+    command = Hive::ManagedGit.command(
+      "/tmp/repo", "status", env: { "HIVE_GH_BIN" => "/usr/bin/true" }
+    )
+
+    assert_includes command,
+                    "credential.https://github.com.helper=!/usr/bin/true auth git-credential"
+  end
+
+  def test_gh_binary_override_must_be_an_absolute_executable
+    error = assert_raises(ArgumentError) do
+      Hive::ManagedGit.command(
+        "/tmp/repo", "status", env: { "HIVE_GH_BIN" => "gh" }
+      )
+    end
+
+    assert_match(/absolute executable file/, error.message)
+  end
+
+  def test_capture_timeout_terminates_the_process_group
+    Dir.mktmpdir("managed-git-timeout") do |dir|
+      fake_git = File.join(dir, "git")
+      pid_file = File.join(dir, "pid")
+      File.write(fake_git, <<~SH)
+        #!/bin/sh
+        printf '%s' "$$" > #{Shellwords.escape(pid_file)}
+        trap '' TERM
+        /usr/bin/sleep 30
+      SH
+      File.chmod(0o755, fake_git)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      _out, err, status = with_env("PATH" => dir) do
+        Hive::ManagedGit.capture3(
+          dir, "status", timeout_sec: 0.1
+        )
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      refute status.success?
+      assert_match(/timed out after 0.1s/, err)
+      assert_operator elapsed, :<, 2
+      pid = Integer(File.read(pid_file))
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+      group_gone = loop do
+        Process.kill(0, -pid)
+        break false if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+        sleep 0.01
+      rescue Errno::ESRCH
+        break true
+      end
+      assert group_gone, "timed-out managed Git process group still exists"
+    end
+  end
+
+  def test_capture_timeout_must_be_positive
+    assert_raises(ArgumentError) do
+      Hive::ManagedGit.capture3("/tmp/repo", "status", timeout_sec: 0)
+    end
+  end
+
+  def test_timeout_cleanup_tolerates_completed_processes_and_failed_readers
+    reader = Thread.new { raise "reader failed" }
+    reader.report_on_exception = false
+    assert_raises(RuntimeError) { reader.join }
+
+    assert_equal "", Hive::ManagedGit.send(:thread_value, reader)
+    assert_nil Hive::ManagedGit.send(:terminate_process_group, 2_147_483_647)
+  end
 end

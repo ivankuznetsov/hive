@@ -9,11 +9,11 @@ module HiveReleaseCandidate
     COMMON_SECTIONS = %w[
       channel_sidecars configuration default_workflow dependencies
       dispatch_receipts durable_attempts global_registry install_identity
-      managed_web_data markers project_registry service_definitions status_json
+      managed_web_data markers project_registry service_definitions
       doctor_json tasks
     ].freeze
     HISTORICAL_SECTIONS = %w[builtin_runtime legacy_descriptor legacy_instructions].freeze
-    SEMANTIC_JSON_SECTIONS = %w[doctor_json status_json].freeze
+    SEMANTIC_JSON_SECTIONS = %w[doctor_json].freeze
     VOLATILE_JSON_KEYS = %w[
       age_seconds binary binary_path elapsed_ms executable finished_at generated_at
       hive_version observation_mtime observed_at pid process_start_time schema_version
@@ -167,24 +167,11 @@ module HiveReleaseCandidate
       def omit_semantic_json_key?(path:, key:, value:)
         return true if VOLATILE_JSON_KEYS.include?(key)
         return true if key == "expected" && doctor_managed_skill_path?(path)
-        return true if key == "hidden_archived_task_count" && value == 0 && status_project_path?(path)
-        return true if key == "closure" && value.nil? && status_task_path?(path)
-        return true if key == "outcomes" && value == [] && status_task_path?(path)
-
         false
       end
 
       def doctor_managed_skill_path?(path)
         path.length == 3 && path[0, 2] == %w[doctor_json managed_skills] && path[2].is_a?(Integer)
-      end
-
-      def status_project_path?(path)
-        path.length == 3 && path[0, 2] == %w[status_json projects] && path[2].is_a?(Integer)
-      end
-
-      def status_task_path?(path)
-        path.length == 5 && path[0, 2] == %w[status_json projects] &&
-          path[2].is_a?(Integer) && path[3] == "tasks" && path[4].is_a?(Integer)
       end
     end
   end

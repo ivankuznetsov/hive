@@ -4,6 +4,7 @@ require "tempfile"
 require "time"
 require "hive/agent_runtime"
 require "hive/agent/message_extractor"
+require "hive/agent_support"
 require "hive/config"
 require "hive/display_name/sanitizer"
 require "hive/git_ops"
@@ -65,7 +66,8 @@ module Hive
         pgid = process_group(pid)
         messages = Hive::Agent::MessageExtractor::Accumulator.new(
           max_bytes: TAIL_BYTES,
-          structured_output_protocol: profile.structured_output_protocol
+          structured_output_protocol: Hive::AgentSupport.for(profile) ||
+            Hive::AgentSupport.for_protocol(profile.structured_output_protocol)
         )
         reader = Thread.new do
           File.open(log_path, "a") do |log|
@@ -177,7 +179,7 @@ module Hive
           slug: @task.slug,
           action: "named"
         )
-      rescue Hive::GitError
+      rescue Hive::GitError, Hive::ConcurrentRunError
         nil
       end
     end

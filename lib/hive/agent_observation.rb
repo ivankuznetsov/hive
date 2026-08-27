@@ -226,7 +226,7 @@ module Hive
 
     def actual_model(result)
       value = result[:actual_model]
-      value ||= split_route(result[:actual_opencode_route]).last
+      value ||= split_route(result[:actual_route]).last
       value ||= result[:model] || result.dig(:usage, :model)
       _provider, model = split_route(value)
       optional_text(model || value)
@@ -234,7 +234,7 @@ module Hive
 
     def actual_provider(result)
       value = result[:actual_provider]
-      value ||= split_route(result[:actual_opencode_route]).first
+      value ||= split_route(result[:actual_route]).first
       optional_identifier(value, "actual_provider")
     end
 
@@ -242,7 +242,7 @@ module Hive
       provider = actual_provider(result)
       model = actual_model(result)
       source = result[:execution_identity_source]
-      source ||= "sanitized_export" if result[:actual_opencode_route]
+      source ||= "sanitized_export" if result[:actual_route]
       source ||= "provider_usage_event" if provider || model
       source ||= "unavailable"
       {

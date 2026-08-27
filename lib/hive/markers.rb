@@ -82,28 +82,25 @@ module Hive
     # write (ENOSPC, crash mid-write) leaves the original state file intact.
     # The lock file (a sidecar) serialises concurrent writers; the data file
     # itself is replaced atomically.
-    def set(state_file_path, name, attrs = {})
-      marker_name = name.to_s.upcase
-      raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
-
-      attrs = attrs_with_recovery_marker_id(marker_name, attrs)
-              .to_h
-              .merge(Hive::Attempts::Context.projection)
-      new_marker = build_marker(marker_name, attrs)
+    def set(state_file_path, name, attrs = nil, at_end: false, **keyword_attrs)
+      new_marker = marker_for(name, attrs, keyword_attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do
-        # The state path is agent-controlled. A FIFO, device, or symlink must
-        # never be opened while the controller owns the task lock. Treat such
-        # nodes as an empty artifact and replace the directory entry atomically.
-        body = read_regular_body(state_file_path) || "".b
-        replaced, count = replace_last_marker(body, new_marker)
-        body = if count.positive?
-                 replaced
-        else
-                 separator = body.empty? || body.end_with?("\n") ? "" : "\n"
-                 "#{body}#{separator}#{new_marker}\n"
-        end
-        write_atomic(state_file_path, body)
+        write_marker_locked(state_file_path, new_marker, at_end: at_end)
+      end
+      new_marker
+    end
+
+    # Compare-and-set marker transition. The current marker is re-read under
+    # the same sidecar lock used by every marker writer, so a concurrent agent
+    # or operator marker wins instead of being overwritten by a stale read.
+    def set_if_current(state_file_path, expected_name:, name:, attrs: nil, **keyword_attrs)
+      new_marker = marker_for(name, attrs, keyword_attrs)
+      ensure_dir(state_file_path)
+      with_markers_lock(state_file_path) do
+        return false unless current(state_file_path).name == expected_name.to_s.downcase.to_sym
+
+        write_marker_locked(state_file_path, new_marker, at_end: false)
       end
       new_marker
     end
@@ -185,6 +182,34 @@ module Hive
         yield
       end
     end
+
+    def marker_for(name, attrs, keyword_attrs)
+      marker_name = name.to_s.upcase
+      raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
+
+      attrs = (attrs || {}).to_h.merge(keyword_attrs)
+      attrs = attrs_with_recovery_marker_id(marker_name, attrs)
+              .to_h
+              .merge(Hive::Attempts::Context.projection)
+      build_marker(marker_name, attrs)
+    end
+    private_class_method :marker_for
+
+    def write_marker_locked(state_file_path, new_marker, at_end:)
+      # The state path is agent-controlled. A FIFO, device, or symlink must
+      # never be opened while the controller owns the task lock. Treat such
+      # nodes as an empty artifact and replace the directory entry atomically.
+      body = read_regular_body(state_file_path) || "".b
+      body = if at_end
+        without_last, = replace_last_marker(body, "")
+        append_marker(without_last, new_marker)
+      else
+        replaced, count = replace_last_marker(body, new_marker)
+        count.positive? ? replaced : append_marker(body, new_marker)
+      end
+      write_atomic(state_file_path, body)
+    end
+    private_class_method :write_marker_locked
 
     def acquire_markers_lock(lock, lock_path, timeout)
       return lock.flock(File::LOCK_EX) if timeout.nil?
@@ -326,6 +351,12 @@ module Hive
       last = matches.last
       [ binary_body[0...last.begin(0)] + new_marker.b + binary_body[last.end(0)..], 1 ]
     end
+
+    def append_marker(body, marker)
+      separator = body.empty? || body.end_with?("\n") ? "" : "\n"
+      "#{body}#{separator}#{marker}\n"
+    end
+    private_class_method :append_marker
 
     def remove_marker(state_file_path, raw_marker)
       return if raw_marker.to_s.empty?

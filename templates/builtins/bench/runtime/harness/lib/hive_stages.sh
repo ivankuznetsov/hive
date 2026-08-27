@@ -15,10 +15,12 @@ set -uo pipefail
 SLUG="$1"
 BASE="$2"
 export HOME=/home/asterio
-git config --global --add safe.directory '*' 2>/dev/null
-mkdir -p /work/.hb/bin
 if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
   HIVE_RUNTIME_BIN=/opt/hb/control-bundle/bin
+  CONTROLLER_BIN=/opt/hb/controller-bin
+  CONTROLLER_STATE=/opt/hb/controller-state
+  install -d -m 0755 "$CONTROLLER_BIN" "$CONTROLLER_STATE" || exit 4
+  install -m 0755 /opt/hb/controller-git "$CONTROLLER_BIN/git" || exit 4
   if [ -z "${HB_HIVE_BUILD_SHA:-}" ]; then
     echo "HB_ERROR hive_runtime_build_missing" >&2
     exit 4
@@ -32,6 +34,9 @@ if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
   echo "HB_NOTE hive_runtime_visibility sealed build=$HB_HIVE_BUILD_SHA"
 else
   HIVE_RUNTIME_BIN=/opt/hb/hive-current/bin
+  CONTROLLER_BIN=/work/.hb/bin
+  CONTROLLER_STATE=/work/.hb
+  mkdir -p "$CONTROLLER_BIN" "$CONTROLLER_STATE"
 fi
 if [ ! -x "$HIVE_RUNTIME_BIN/hive" ] || [ -z "${HB_HIVE_VERSION:-}" ]; then
   echo "HB_ERROR hive_runtime_missing" >&2
@@ -42,7 +47,12 @@ if [ "$ACTUAL_HIVE_VERSION" != "$HB_HIVE_VERSION" ]; then
   echo "HB_ERROR hive_runtime_version_mismatch expected=$HB_HIVE_VERSION actual=$ACTUAL_HIVE_VERSION" >&2
   exit 4
 fi
-export PATH="/work/.hb/bin:$HIVE_RUNTIME_BIN:$PATH"
+if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+  export PATH="$CONTROLLER_BIN:$HIVE_RUNTIME_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  export HB_CONTROLLER_ORIGIN="$CONTROLLER_STATE/origin.git"
+else
+  export PATH="$CONTROLLER_BIN:$HIVE_RUNTIME_BIN:$PATH"
+fi
 echo "HB_NOTE hive_runtime version=$ACTUAL_HIVE_VERSION"
 cd /work || exit 3
 
@@ -125,16 +135,9 @@ install_pi_openrouter_auth() {
   ' "$auth_dir"
 }
 
-# Pi's transport extension requests streamed tool arguments from OpenRouter.
-# Hive owns the stage model flags; this wrapper only activates the extension and
+# The HIVE_PI_BIN launcher owns Pi's transport extension. This stage only
 # installs the container-only credential/catalog in Pi's ephemeral home.
 if [ -f /opt/hb/pi-tool-stream.ts ]; then
-  PI_REAL="$(command -v pi)"
-  cat >/work/.hb/bin/pi <<PI
-#!/usr/bin/env bash
-exec "$PI_REAL" --extension /opt/hb/pi-tool-stream.ts "\$@"
-PI
-  chmod +x /work/.hb/bin/pi
   mkdir -p "$HOME/.pi/agent"
   if [ -f /opt/hb/pi-openrouter-models.json ]; then
     install_pi_openrouter_auth || exit 4
@@ -442,11 +445,13 @@ task_dir() { find /work/.hive-state/stages -maxdepth 2 -type d -name "$SLUG" 2>/
 
 REVIEW_RC=""
 if [ "${HB_REVIEW:-1}" = "1" ] && [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
-  git init -q --bare /work/.hb/origin.git 2>/dev/null
-  git -C /work remote add origin /work/.hb/origin.git 2>/dev/null
-  git -C /work push -q origin main 2>/dev/null
+  ORIGIN="$HB_CONTROLLER_ORIGIN"
+  rm -rf -- "$ORIGIN"
+  /usr/bin/git init -q --bare "$ORIGIN" 2>/dev/null || exit 4
+  chown -R 1000:1000 "$ORIGIN" || exit 4
+  git -C /work push -q "$ORIGIN" main 2>/dev/null || exit 4
 
-  cat >/work/.hb/bin/gh <<'GH'
+  cat >"$CONTROLLER_BIN/gh" <<'GH'
 #!/usr/bin/env bash
 # bench gh shim: enough of gh for hive's open-pr/review in an offline container.
 # Contract (lib/hive/gh.rb): `pr list --head <branch> --state all --json
@@ -469,7 +474,7 @@ case "$1 ${2:-}" in
 esac
 exit 0
 GH
-  chmod +x /work/.hb/bin/gh
+  chmod 0755 "$CONTROLLER_BIN/gh"
 
   if [ "$RESUME_REVIEW" = "1" ]; then
     stage open-pr 0

@@ -1290,3 +1290,11 @@ not stored in this repository, so this remains unproven as an end-to-end
 installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
+
+## Sealed benchmark controller hardening awaits a live canary (2026-08-27)
+
+Focused tests execute the Pi and Git wrappers, including a candidate pre-push
+hook and redirected `origin.pushurl`. They do not start a sealed runner with a
+candidate-created `hive`/`git` shim and then complete the offline review cycle.
+Keep this gap open until the packaged CI gate proves those attacks remain
+unprivileged and cannot redirect the controller while ordinary review succeeds.

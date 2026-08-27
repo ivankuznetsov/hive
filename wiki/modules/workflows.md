@@ -199,6 +199,14 @@ and reset its gem path. The driver omits all host Hive source/gem mounts and
 refuses model spend when the image label does not match the active immutable
 dogfood deployment. Runtime visibility joins base history and egress in the
 generation identity, so unsealed artifacts cannot satisfy a sealed campaign.
+The root controller uses root-owned binary/state directories. Its root-owned
+Git wrapper pins the offline origin, disables candidate hooks and executable
+helpers, and drops every repository Git command to uid 1000. Candidate files
+and Git config therefore cannot replace `hive`/`gh`, execute Git extension
+points as root, or redirect a review push. Pi's explicit `HIVE_PI_BIN` launcher
+is the single wrapper for non-version calls and always loads the GLM 5.2/5.3
+tool-stream extension before dropping privileges; the unreachable PATH wrapper
+is gone.
 When the control plane is invoked through the dogfood wrapper, the packaged
 driver resolves the exact immutable deployment named by
 `HIVE_RUNTIME_DEPLOYMENT_ID` and verifies its full commit against

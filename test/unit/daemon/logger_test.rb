@@ -89,7 +89,7 @@ class HiveDaemonLoggerTest < Minitest::Test
   def test_every_daemon_event_symbol_is_whitelisted
     daemon_dir = File.expand_path("../../../lib/hive/daemon", __dir__)
     emitted = Dir[File.join(daemon_dir, "**", "*.rb")].flat_map do |file|
-      File.read(file).scan(/\.event\(:([a-z_][a-z0-9_]*)/).flatten.map(&:to_sym)
+      File.read(file).scan(/\.event\(\s*:([a-z_][a-z0-9_]*)/).flatten.map(&:to_sym)
     end.uniq
 
     refute_empty emitted,

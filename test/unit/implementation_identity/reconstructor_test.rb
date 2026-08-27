@@ -159,6 +159,24 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
+  def test_logged_pi_argv_ignores_unsupported_effort_hook
+    with_attempt_history do |task, store, current|
+      running_attempt(store, "historical-execute", "4-execute", "pi")
+      log_dir = File.join(task.folder, "logs")
+      FileUtils.mkdir_p(log_dir)
+      File.write(
+        File.join(log_dir, "execute.log"),
+        '[hive] spawn cmd=["pi","--model","openai/gpt-5.6-sol"]' + "\n"
+      )
+
+      selection = with_context(current) { described_class(task, store).reconstruct! }
+
+      assert_equal "pi", selection.provider
+      assert_equal "openai/gpt-5.6-sol", selection.model
+      assert_nil selection.effective_effort
+    end
+  end
+
   def test_missing_current_attempt_fails_before_recovery
     with_tmp_dir do |root|
       task = TaskStub.new(
@@ -201,7 +219,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       assert_nil subject.send(:parse_logged_argv, "cmd=[not-json]")
       assert_nil subject.send(:parse_logged_argv, "cmd=#{"[" + ("x" * (33 * 1024)) + "]"}")
       assert_nil subject.send(:parse_logged_argv, "cmd=[1]")
-      assert_nil subject.send(:codex_effort, [ "codex", "--model", "gpt" ])
+      assert_nil Hive::AgentSupport.for(:codex).effort_from_argv([ "codex", "--model", "gpt" ])
       refute subject.send(:usable_components?, "provider" => "codex", "model" => "default")
     end
   end
@@ -311,8 +329,12 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         def read = value
       end.new({ "implementation_identity" => { "execute" => identity } })
       sentinel = Object.new
-      resolver = Minitest::Mock.new
-      resolver.expect(:materialize_persisted, sentinel, [ identity ])
+      resolver = Object.new
+      resolver.define_singleton_method(:materialize_persisted) do |received|
+        raise "unexpected persisted identity" unless received == identity
+
+        sentinel
+      end
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
         projection_store: projection, resolver: resolver
@@ -323,7 +345,6 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       ) { subject.reconstruct! }
 
       assert_same sentinel, selection
-      resolver.verify
     end
   end
 

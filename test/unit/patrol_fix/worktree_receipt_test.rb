@@ -15,7 +15,9 @@ class PatrolFixWorktreeReceiptTest < Minitest::Test
       )
 
       first = store.prepare!(generation: 1, evidence_digest: "a" * 64, base_revision: base)
-      second = store.prepare!(generation: 1, evidence_digest: "a" * 64, base_revision: base)
+      second = store.prepare!(generation: 1, evidence_digest: "a" * 64) do
+        flunk "must not resolve a new base for existing custody"
+      end
 
       assert_equal first, second
       assert_equal base, first.fetch("base_revision")

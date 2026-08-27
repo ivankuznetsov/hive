@@ -74,7 +74,7 @@ dying in seconds rather than as a test failure.
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
-| `agent-cli-runtime` | `~> 0.2.0` (locked 0.2.3) | Published compatibility layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive source resolves the component path, while installed Hive requires the independently published OpenCode-capable 0.2.x line. Provider-error extraction shipped as 0.2.1, Grok's sandbox flags as 0.2.2, and typed provider-failure classification as 0.2.3; all are compatible patches on the same line. |
+| `agent-cli-runtime` | `~> 0.2.0` (locked 0.2.4) | Published compatibility layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Hive source resolves the component path, while installed Hive requires the independently published OpenCode-capable 0.2.x line. Provider-error extraction shipped as 0.2.1, Grok's sandbox flags as 0.2.2, typed provider-failure classification as 0.2.3, and the independently callable OpenCode permission compiler as 0.2.4; all are compatible patches on the same line. Hive's native OpenCode launch calls the 0.2.4 compiler, so an installed Hive resolving an earlier 0.2.x has no `AgentCliRuntime::OpenCode::Permissions`. |
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `base64` | `>= 0.2` | Explicit runtime dependency for framed durable-attempt output and other binary-safe payloads; Ruby is unbundling it from the default gems. |
 | `bundler` | `= 2.7.2` | Exact installer for the authenticated managed web lock. Hive package managers vendor it into Hive's isolated `GEM_HOME`, and `AppBundle` invokes its absolute executable through the current Ruby without consulting `PATH`. |

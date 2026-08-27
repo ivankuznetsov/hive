@@ -15,7 +15,6 @@ module HiveReleaseCandidate
 
       def call(target:, row:, project:, environment:)
         env = environment
-        status = probe_json(target, [ "status", "--json" ], env, project)
         doctor = probe_json(target, [ "doctor", "--json" ], env, project)
         state = File.join(project, ".hive-state")
         config = safe_yaml(File.join(state, "config.yml"))
@@ -33,7 +32,6 @@ module HiveReleaseCandidate
           "channel_sidecars" => tree(File.join(env.fetch("HIVE_HOME"), "install-channel")),
           "managed_web_data" => tree(File.join(env.fetch("XDG_DATA_HOME"), "hive", "web")),
           "service_definitions" => tree(File.join(env.fetch("XDG_CONFIG_HOME"), "systemd", "user")),
-          "status_json" => status,
           "doctor_json" => doctor,
           "install_identity" => {
             "role" => target.role,

@@ -68,7 +68,7 @@ Codes are surfaced via `Hive::Error` subclasses; `bin/hive` rescues them and exi
 Both `hive status` and `hive run` accept `--json`. Each emits a single JSON document on stdout with a `schema` + `schema_version` header so future evolution is explicit.
 
 ```bash
-hive status --json | jq '.projects[].tasks[] | select(.marker == "execute_waiting")'
+hive status --operational --json | jq '.tasks[] | select(.position.marker == "execute_waiting")'
 hive run /path/to/task --json | jq '.next_action'
 ```
 

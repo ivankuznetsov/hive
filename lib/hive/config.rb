@@ -210,8 +210,7 @@ module Hive
           "env_override" => "HIVE_OPENCODE_BIN",
           "min_version" => "1.18.16",
           "credential_env" => [],
-          "plugins" => [],
-          "isolation" => "hermetic"
+          "plugins" => []
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -388,7 +387,7 @@ module Hive
         "max_wall_clock_sec" => 28_800
       },
       # Hive daemon settings (ADR-024). The daemon polls
-      # `hive status --json`, dispatches workflow verbs on tasks the
+      # Hive's internal task graph, dispatches workflow verbs on tasks the
       # classifier marks safe, and stops only at human-input gates.
       #
       # Per-project `daemon.enabled` is rendered into a project's
@@ -1164,7 +1163,7 @@ module Hive
       agent_name = (stage_cfg["agent"] || DEFAULTS.dig(stage, "agent") || "claude").to_s
       configured_skill = stage_cfg["skill"]
 
-      return configured_skill if configured_skill && !legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, configured_skill)
+      return configured_skill if configured_skill && !unsupported_legacy_wiki_plan_alias?(stage, agent_name, configured_skill)
 
       skills_by_agent = {}
       default_skills_by_agent = DEFAULTS.dig(stage, "skill_by_agent")
@@ -1179,16 +1178,17 @@ module Hive
       end
     end
 
-    def legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, skill)
+    def unsupported_legacy_wiki_plan_alias?(stage, agent_name, skill)
+      support = Hive::AgentSupport.for(agent_name)
       stage == "plan" &&
-        agent_name != "claude" &&
-        skill.to_s == LEGACY_WIKI_PLAN_ALIAS
+        skill.to_s == LEGACY_WIKI_PLAN_ALIAS &&
+        !(support&.respond_to?(:legacy_wiki_plan_alias?) && support.legacy_wiki_plan_alias?)
     end
 
     # Surface a misconfigured HIVE_HOME loudly on READ paths only.
     # When ENV["HIVE_HOME"] is explicitly set to a path that doesn't exist
     # (e.g., a user typo), `registered_projects` returning [] silently hid
-    # the typo and made `hive status --json | jq .ok` falsely report `true`
+    # the typo and made the internal task graph falsely report `ok: true`
     # under nonexistent-HIVE_HOME smoke runs. Fire only when explicitly set
     # AND missing — leave the default unset path lazy-creatable by
     # `register_project` (which does its own mkdir_p), and accept the
@@ -2069,6 +2069,7 @@ module Hive
       "routes" => %w[primary adversarial verification fallbacks]
     }.freeze
     PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
+    PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV = "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"
     PLAN_REVIEW_NAME = /\A[a-z][a-z0-9_]{0,63}\z/
     PLAN_REVIEW_POLICY_KEYS = %w[
       id version action risk paths valid_from valid_until revoked
@@ -2077,7 +2078,9 @@ module Hive
     def validate_plan_review!(cfg, source_path)
       review = cfg.fetch("plan_review")
       validate_closed_mapping!(review, PLAN_REVIEW_KEYS, "plan_review", source_path)
-      unless review["enabled"] == true
+      benchmark_opt_out = review["enabled"] == false &&
+        ENV[PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV] == "1"
+      unless review["enabled"] == true || benchmark_opt_out
         raise ConfigError,
               "plan_review.enabled in #{describe_source(source_path)} must be true; " \
               "built-in coding review cannot be disabled"
@@ -2874,7 +2877,7 @@ module Hive
         # built-in review and takes no CE skill, so it is exempt. The
         # codex_review adapter DOES require `agent` (it resolves the codex
         # binary via Hive::AgentProfiles.lookup(spec.fetch("agent")) — see
-        # lib/hive/reviewers/codex_review.rb), so require it here to fail at
+        # lib/hive/agent_support/codex/reviewer.rb), so require it here to fail at
         # load instead of crashing mid-dispatch with a KeyError. (The generic
         # validate_agent_name! below returns early on nil, so without this
         # entry a codex_review spec missing `agent` would pass load.)

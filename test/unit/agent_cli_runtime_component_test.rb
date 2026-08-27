@@ -38,7 +38,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     script = <<~'RUBY'
       require "agent_cli_runtime"
       abort "loaded Hive unexpectedly" if defined?(Hive)
-      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.3"
+      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.4"
       puts AgentCliRuntime::Profiles.names.join(",")
     RUBY
     out, err, status = Bundler.with_unbundled_env do

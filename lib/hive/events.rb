@@ -105,8 +105,9 @@ module Hive
 
     def clean_exit_paths(paths)
       Array(paths).first(MAX_EVENT_PATHS).map do |path|
-        bounded = path.to_s.byteslice(0, MAX_EVENT_PATH_BYTES).to_s.scrub("").gsub(/[\u0000-\u001f\u007f]/, "?")
-        Hive::SecretPatterns.redact(bounded)
+        sanitized = path.to_s.scrub("").gsub(/[\u0000-\u001f\u007f]/, "?")
+        redacted = Hive::SecretPatterns.redact(sanitized)
+        redacted.byteslice(0, MAX_EVENT_PATH_BYTES).to_s.scrub("")
       end
     end
 

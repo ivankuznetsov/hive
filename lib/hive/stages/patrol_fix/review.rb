@@ -56,7 +56,7 @@ module Hive
             )
           end
           validate_agent_run!(run)
-          report = Hive::PatrolFix::ReviewReceipt.read(output, allowed_routes: allowed)
+          report = read_report!(output, allowed_routes: allowed)
 
           # The independent agent's runtime is outside workflow authority. Re-read
           # the exact controller snapshot immediately before the receipt becomes
@@ -117,6 +117,15 @@ module Hive
           routes.delete("rework") if reworks >= max_reworks
           routes.freeze
         end
+
+
+        def read_report!(path, allowed_routes:)
+          Hive::Stages::ManagedAgentCustody.read_report(
+            stage: "review", parser: "review_report",
+            invalid_report: Hive::PatrolFix::ReviewReceipt::InvalidReport
+          ) { Hive::PatrolFix::ReviewReceipt.read(path, allowed_routes: allowed_routes) }
+        end
+        private_class_method :read_report!
 
         def review_evidence(store, manifest)
           receipts = store.read_all
@@ -211,12 +220,16 @@ module Hive
 
         def validate_agent_run!(run)
           unless run.is_a?(Hash) && run[:status] == :ok
-            raise Hive::StageError, "independent review agent failed without a semantic decision"
+            code = run.is_a?(Hash) && run.dig(:attempt_diagnostic, "code")
+            suffix = code ? "; diagnostic=#{code}" : ""
+            raise Hive::StageError,
+                  "independent review agent failed without a semantic decision#{suffix}"
           end
           return if run[:custody] == :clean
 
+          diagnostic = run.dig(:attempt_diagnostic, "code") || run[:diagnostic].to_s[0, 256]
           raise Hive::StageError,
-                "review agent modified controller authority: #{run[:diagnostic].to_s[0, 256]}"
+                "review agent modified controller authority: #{diagnostic}"
         end
         private_class_method :validate_agent_run!
       end

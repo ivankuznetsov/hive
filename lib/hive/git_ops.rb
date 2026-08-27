@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "hive/stages"
 require "hive/git_ref"
+require "hive/lock"
 
 module Hive
   class GitOps
@@ -249,24 +250,28 @@ module Hive
     # by `ls-files` so untracked siblings cannot leak in).
     def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false,
                     after_stage: nil)
-      message = "hive: #{stage_name}/#{slug} #{action}"
-      task_path = File.join("stages", stage_name, slug)
-      if pathspecs
-        Array(pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
-      else
-        run_git!("-C", hive_state_path, "add", task_path) if File.directory?(File.join(hive_state_path, task_path))
-        run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
-      end
-      after_stage&.call
-      _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
-      if status.success? && !allow_empty
-        :nothing_to_commit
-      else
-        args = [ "-C", hive_state_path, "commit", "-m", message ]
-        args += [ "-m", body ] if body && !body.to_s.empty?
-        args << "--allow-empty" if allow_empty
-        run_git!(*args)
-        :committed
+      Hive::Lock.with_commit_lock(hive_state_path) do
+        message = "hive: #{stage_name}/#{slug} #{action}"
+        task_path = File.join("stages", stage_name, slug)
+        if pathspecs
+          Array(pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
+        else
+          if File.directory?(File.join(hive_state_path, task_path))
+            run_git!("-C", hive_state_path, "add", task_path)
+          end
+          run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
+        end
+        after_stage&.call
+        _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
+        if status.success? && !allow_empty
+          :nothing_to_commit
+        else
+          args = [ "-C", hive_state_path, "commit", "-m", message ]
+          args += [ "-m", body ] if body && !body.to_s.empty?
+          args << "--allow-empty" if allow_empty
+          run_git!(*args)
+          :committed
+        end
       end
     end
 

@@ -10,12 +10,13 @@
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "mode", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
+      "required": ["schema", "schema_version", "ok", "mode", "runtime", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
       "properties": {
         "schema": { "const": "hive-web-status" },
         "schema_version": { "const": 1 },
         "ok": { "const": true },
         "mode": { "const": "managed_service" },
+        "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
         "platform": { "enum": ["linux", "macos", "unsupported"] },
         "unit_path": { "type": ["string", "null"] },
         "service_installed": { "type": "boolean" },
@@ -31,7 +32,7 @@
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message", "mode", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message", "mode", "runtime", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
       "properties": {
         "schema": { "const": "hive-web-status" },
         "schema_version": { "const": 1 },
@@ -41,6 +42,7 @@
         "exit_code": { "type": "integer" },
         "message": { "type": "string", "minLength": 1 },
         "mode": { "const": "managed_service" },
+        "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
         "platform": { "enum": ["linux", "macos", "unsupported"] },
         "unit_path": { "type": ["string", "null"] },
         "service_installed": { "type": "boolean" },
@@ -52,6 +54,38 @@
         "readiness": { "$ref": "#/$defs/Readiness" },
         "warnings": { "type": "array", "items": { "$ref": "#/$defs/Warning" } }
       }
+    },
+    "RuntimeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "release_version", "display_version", "build_sha", "deployment_id"],
+      "properties": {
+        "channel": { "enum": ["release", "dogfood", "unknown"] },
+        "release_version": { "type": "string", "minLength": 1 },
+        "display_version": { "type": "string", "minLength": 1 },
+        "build_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "deployment_id": { "type": ["string", "null"], "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "channel": { "const": "dogfood" } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "string" },
+              "deployment_id": { "type": "string" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "channel": { "enum": ["release", "unknown"] } } },
+          "then": {
+            "properties": {
+              "build_sha": { "type": "null" },
+              "deployment_id": { "type": "null" }
+            }
+          }
+        }
+      ]
     },
     "Readiness": {
       "enum": ["ready", "manager_unavailable", "not_installed", "disabled", "inactive", "active_not_ready", "invalid_url"]

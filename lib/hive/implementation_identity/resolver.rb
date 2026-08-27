@@ -198,11 +198,13 @@ module Hive
           return [ Hive::ImplementationIdentity.normalize_model(fields["model"], concrete: true), true ]
         end
 
-        if stage == "open_pr"
-          if profile.name == :opencode && !provider_changed
-            return [ identity_value(execute_identity, :model), true ]
-          end
+        support = Hive::AgentSupport.for(profile)
+        selected = support.downstream_model(
+          stage:, execute_identity:, provider_changed:
+        ) if support&.respond_to?(:downstream_model)
+        return selected if selected
 
+        if stage == "open_pr"
           policy = UtilityModels.resolve(profile.name)
           model = policy.fetch(:model) || profile.concrete_default_model(
             cfg: @cfg, project_root: @cfg["project_root"]
@@ -330,18 +332,20 @@ module Hive
       end
 
       def configured_model(profile)
-        return nil unless profile.name == :claude
+        support = Hive::AgentSupport.for(profile)
+        return nil unless support&.respond_to?(:legacy_control)
 
-        value = @cfg.dig("claude", "model").to_s.strip
+        value = support.legacy_control(@cfg, :model).to_s.strip
         return nil if value.empty? || %w[default inherit].include?(value)
 
         Hive::ImplementationIdentity.normalize_model(value, concrete: true)
       end
 
       def configured_effort(profile)
-        return nil unless profile.name == :claude
+        support = Hive::AgentSupport.for(profile)
+        return nil unless support&.respond_to?(:legacy_control)
 
-        value = @cfg.dig("claude", "effort").to_s.strip
+        value = support.legacy_control(@cfg, :effort).to_s.strip
         return nil if value.empty? || %w[default inherit].include?(value)
 
         Hive::ImplementationIdentity.normalize_effort(value)

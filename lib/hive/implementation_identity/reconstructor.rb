@@ -1,5 +1,6 @@
 require "json"
 require "hive/attempts/context"
+require "hive/agent_support"
 require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/task_journal"
@@ -85,7 +86,9 @@ module Hive
             model = flag_value(argv, "--model", "-m")
             next if provider.nil? || model.to_s.empty?
 
-            effort = flag_value(argv, "--effort", "--reasoning-effort") || codex_effort(argv)
+            support = Hive::AgentSupport.for(provider)
+            effort = flag_value(argv, "--effort", "--reasoning-effort") ||
+              (support.effort_from_argv(argv) if support&.respond_to?(:effort_from_argv))
             values = {
               "provider" => provider.to_s,
               "model" => model,
@@ -199,16 +202,6 @@ module Hive
         flags.each do |flag|
           index = argv.index(flag)
           return argv[index + 1] if index && argv[index + 1]
-        end
-        nil
-      end
-
-      def codex_effort(argv)
-        argv.each_cons(2) do |flag, value|
-          next unless flag == "-c"
-
-          match = value.match(/\Amodel_reasoning_effort=([a-z][a-z0-9_-]*)\z/)
-          return match[1] if match
         end
         nil
       end

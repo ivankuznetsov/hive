@@ -424,7 +424,7 @@ else
   fail ".hive-state/stages/1-inbox/ missing after init"
 fi
 
-step "new task + status --json"
+step "new task + operational status"
 PROJECT_NAME="$(basename "$PROJECT")"
 if "$XDG_BIN_HOME/hive" new "$PROJECT_NAME" "verify release smoke task" \
      >"$PREFIX/new.log" 2>&1; then
@@ -435,11 +435,11 @@ else
 fi
 
 STATUS_JSON="$PREFIX/status.json"
-if "$XDG_BIN_HOME/hive" status --json >"$STATUS_JSON" 2>"$PREFIX/status.err"; then
-  ok "hive status --json exited 0"
+if "$XDG_BIN_HOME/hive" status --operational --json >"$STATUS_JSON" 2>"$PREFIX/status.err"; then
+  ok "hive status --operational --json exited 0"
 else
   cat "$PREFIX/status.err" >&2 2>/dev/null || true
-  fail "hive status --json failed"
+  fail "hive status --operational --json failed"
 fi
 
 # Validate envelope shape: schema name, then probe the new task's
@@ -449,13 +449,13 @@ fi
 # envelope produces a clean fail line instead of aborting the script
 # mid-step under set -e.
 SCHEMA="$(jq -r '.schema // empty' "$STATUS_JSON" 2>/dev/null || true)"
-TASK_COUNT="$(jq -r '[.projects[].tasks[]] | length' "$STATUS_JSON" 2>/dev/null || echo 0)"
-NEW_TASK_STAGE="$(jq -r '[.projects[].tasks[]][0].stage // empty' "$STATUS_JSON" 2>/dev/null || true)"
-NEW_TASK_MARKER="$(jq -r '[.projects[].tasks[]][0].marker // empty' "$STATUS_JSON" 2>/dev/null || true)"
-NEW_TASK_ACTION="$(jq -r '[.projects[].tasks[]][0].action // empty' "$STATUS_JSON" 2>/dev/null || true)"
+TASK_COUNT="$(jq -r '.tasks | length' "$STATUS_JSON" 2>/dev/null || echo 0)"
+NEW_TASK_STAGE="$(jq -r '.tasks[0].position.stage // empty' "$STATUS_JSON" 2>/dev/null || true)"
+NEW_TASK_MARKER="$(jq -r '.tasks[0].position.marker // empty' "$STATUS_JSON" 2>/dev/null || true)"
+NEW_TASK_ACTION="$(jq -r '.tasks[0].evidence.task_action // empty' "$STATUS_JSON" 2>/dev/null || true)"
 
-if [[ "$SCHEMA" == "hive-status" ]]; then ok "status envelope schema=hive-status"
-else fail "status envelope schema is '$SCHEMA', want hive-status"; fi
+if [[ "$SCHEMA" == "hive-operational-status" ]]; then ok "status envelope schema=hive-operational-status"
+else fail "status envelope schema is '$SCHEMA', want hive-operational-status"; fi
 
 if [[ "${TASK_COUNT:-0}" -ge 1 ]]; then ok "status envelope reports >=1 task"
 else fail "status envelope reports 0 tasks after 'hive new'"; fi

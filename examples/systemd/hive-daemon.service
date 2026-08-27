@@ -52,7 +52,7 @@ StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-# `hive daemon` shells out to `hive status --json` once per tick.
+# `hive daemon` shells out to Hive's private scheduler projection once per tick.
 # systemd user services do NOT inherit your interactive shell's
 # PATH, so:
 #   1. HIVE_BIN — absolute path to the binary; the daemon reads

@@ -3,11 +3,11 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-08-26
 tags: [git, init, commit]
 ---
 
-**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, commit managed llm-wiki bootstrap files during `hive init`, and stage scoped changes before committing inside the hive-state worktree.
+**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, commit managed llm-wiki bootstrap files during `hive init`, and serialize scoped commits inside the hive-state worktree.
 
 ## Constants
 
@@ -87,16 +87,29 @@ If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise retu
 
 ## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false, after_stage: nil)`
 
-Records a hive-state audit commit. `GitOps` does not acquire the project commit lock itself; durable command callers wrap this method in `Hive::Lock.with_commit_lock(<hive_state_path>)` when concurrent writers can touch the same `.hive-state` worktree. Current locked callers include `Commands::Run`, `Commands::New`, `Commands::Approve`, `Commands::Markers`, `Commands::Drop`, and `Commands::Migrate`. `Hive::DisplayName::Generator` is a best-effort exception: it writes `meta.yml`, calls `hive_commit`, and swallows `Hive::GitError` if that commit loses a race.
+Records a hive-state audit commit. `GitOps` acquires the project commit lock at
+this shared mutation seam, so every caller is serialized, including
+`Hive::DisplayName::Generator` and Patrol Fix transition commits. Existing
+transactional callers may still hold `Hive::Lock.with_commit_lock` around a
+larger filesystem-plus-index operation; same-thread, same-process reentrancy
+lets the nested `hive_commit` reuse that ownership without deadlocking.
 
-1. Build the message `hive: <stage_name>/<slug> <action>`, plus an optional second body paragraph when `body:` is present.
-2. With no `pathspecs:`, stage only `stages/<stage_name>/<slug>` when that directory exists, plus `logs/` when present. This avoids sweeping unrelated sibling-task changes into the commit.
-3. With `pathspecs:`, stage each explicit hive-state-relative pathspec via `git add -A -- <pathspec>` only when the path exists or is already tracked, so deletion commits work without untracked sibling leakage.
-4. Invoke optional `after_stage` after all scoped adds and before inspecting or committing the index. Safety-sensitive migrations use this boundary to verify that a raced path did not reappear in either the worktree or staged index; raising aborts before `git commit`.
-5. `git diff --cached --quiet`. If exit 0 (nothing staged), return `:nothing_to_commit`.
-6. Otherwise commit and return `:committed`; `allow_empty: true` adds `--allow-empty`.
+Inside one commit-lock critical section it:
+
+1. Builds the message `hive: <stage_name>/<slug> <action>`, plus an optional second body paragraph when `body:` is present.
+2. With no `pathspecs:`, stages only `stages/<stage_name>/<slug>` when that directory exists, plus `logs/` when present. This avoids sweeping unrelated sibling-task changes into the commit.
+3. With `pathspecs:`, stages each explicit hive-state-relative pathspec via `git add -A -- <pathspec>` only when the path exists or is already tracked, so deletion commits work without untracked sibling leakage.
+4. Invokes optional `after_stage` after all scoped adds and before inspecting or committing the index. Safety-sensitive migrations use this boundary to verify that a raced path did not reappear in either the worktree or staged index; raising aborts before `git commit`.
+5. Runs `git diff --cached --quiet`. If exit 0 (nothing staged), returns `:nothing_to_commit`.
+6. Otherwise commits and returns `:committed`; `allow_empty: true` adds `--allow-empty`.
 
 Empty diffs are silently skipped (e.g. an `inbox.run!` that deliberately does nothing).
+
+The central lock covers runtime commits after the hive-state worktree exists.
+`hive_state_init` remains a separate lifecycle boundary: it must create the
+orphan worktree before a worktree-local `.commit-lock` can be opened, so
+simultaneous first initialization is not solved by `hive_commit` serialization.
+See [[gaps]].
 
 ## Worktree Inspection Helpers
 
@@ -113,7 +126,7 @@ Empty diffs are silently skipped (e.g. an `inbox.run!` that deliberately does no
 
 ## Tests
 
-- `test/unit/git_ops_test.rb` — default-branch detection across remote/no-remote/no-commits scenarios; orphan worktree bootstrap; idempotent gitignore; commit skipping on empty diff.
+- `test/unit/git_ops_test.rb` — default-branch detection across remote/no-remote/no-commits scenarios; orphan worktree bootstrap; idempotent gitignore; commit skipping on empty diff; central lock coverage; and concurrent direct commits against one shared index.
 
 ## Backlinks
 

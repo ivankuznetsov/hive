@@ -119,13 +119,21 @@ module Hive
 
       def show_envelope(project:, project_root:, job_id:, limit: nil, full: false)
         id = self.class.validate_job_id!(job_id)
-        history_limit = full ? nil : self.class.normalize_limit(limit)
         aggregate = @store.read_job(id)
-        success_envelope(project, project_root, "show").merge(
-          "job" => detail(aggregate, history_limit: history_limit, full: full == true)
+        show_job_envelope(
+          project: project, project_root: project_root, job: aggregate,
+          limit: limit, full: full
         )
       rescue Hive::RefactorPatrol::JobStore::RecordNotFound
         raise NotFound, "refactor patrol job #{job_id.inspect} was not found"
+      end
+
+      def show_job_envelope(project:, project_root:, job:, limit: nil,
+                            full: false)
+        history_limit = full ? nil : self.class.normalize_limit(limit)
+        success_envelope(project, project_root, "show").merge(
+          "job" => detail(job, history_limit: history_limit, full: full == true)
+        )
       end
 
       def self.error_envelope(error, action:)

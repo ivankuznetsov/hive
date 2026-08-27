@@ -14,15 +14,17 @@ module Hive
     module ProjectTick
       module_function
 
-      def run(project_entry, dry_run:, logger:, inflight:)
+      def run(project_entry, dry_run:, logger:, inflight:, admission_open: -> { true })
         started = Time.now
+        return empty_summary unless admission_open?(admission_open)
+
         # Re-read config here (rather than accepting the dispatcher's cached
         # cfg) so a per-tick edit to babysitter.* takes effect on the next
         # tick without restarting the daemon.
         cfg = Hive::Config.load(project_entry.fetch("path"))
         unless cfg.dig("babysitter", "enabled") == true
           logger.event(:project_skipped, project: project_entry["name"], reason: "babysitter_disabled")
-          return { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+          return empty_summary
         end
 
         prs = Hive::Gh.list_open_prs(project_entry.fetch("path"), cfg: cfg)
@@ -33,11 +35,18 @@ module Hive
           duration_ms: duration_ms(started),
           count: prs.size
         )
+        return empty_summary unless admission_open?(admission_open)
 
         owned_branches = pipeline_owned_branches(project_entry)
         selected = select_prs(prs, project_entry, cfg, inflight, owned_branches)
-        summary = { total: selected.size, fixed: 0, untouched: 0, needs_human: 0 }
+        summary = empty_summary
+        interrupted = false
         selected.each do |pr|
+          unless admission_open?(admission_open)
+            interrupted = true
+            break
+          end
+
           outcome =
             begin
               Hive::Babysitter::PrFixer.run(
@@ -46,7 +55,8 @@ module Hive
                 cfg,
                 dry_run: dry_run,
                 logger: logger,
-                inflight: inflight
+                inflight: inflight,
+                admission_open: admission_open
               )
             rescue StandardError => e
               Hive::Babysitter::Events.emit(
@@ -63,6 +73,12 @@ module Hive
               :failure
             end
 
+          if outcome == :shutdown
+            interrupted = true
+            break
+          end
+
+          summary[:total] += 1
           case outcome
           when :success, :rebased then summary[:fixed] += 1
           when :already_green, :noop, :dry_run then summary[:untouched] += 1
@@ -70,13 +86,15 @@ module Hive
           end
         end
 
-        Hive::Babysitter::StatusWriter.append(
-          project: project_entry,
-          pr_count: summary[:total],
-          fixed: summary[:fixed],
-          untouched: summary[:untouched],
-          needs_human: summary[:needs_human]
-        )
+        unless interrupted
+          Hive::Babysitter::StatusWriter.append(
+            project: project_entry,
+            pr_count: summary[:total],
+            fixed: summary[:fixed],
+            untouched: summary[:untouched],
+            needs_human: summary[:needs_human]
+          )
+        end
         summary
       rescue Hive::GhError => e
         Hive::Babysitter::Events.emit(
@@ -87,7 +105,15 @@ module Hive
           message: e.message
         )
         logger.event(:fatal, project: project_entry["name"], message: "gh pr list failed: #{e.message}")
-        { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+        empty_summary
+      end
+
+      def empty_summary = { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+
+      def admission_open?(predicate)
+        predicate.call == true
+      rescue StandardError
+        false
       end
 
       def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new)

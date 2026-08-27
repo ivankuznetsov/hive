@@ -13,13 +13,15 @@ class AttemptsGenerationTest < Minitest::Test
 
   FolderTask = Struct.new(:folder, :state_file, keyword_init: true)
 
-  def test_default_attempt_store_runs_layout_migration_when_no_override_is_set
+  def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |state_home|
       with_env("HIVE_HOME" => state_home, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::Attempts::Generation.send(:default_attempt_store)
-        assert_equal File.join(state_home, "attempts", "v4"), store.root
+        assert_equal File.join(state_home, "attempts", "v4"),
+                     store.instance_variable_get(:@root)
       end
-      assert File.file?(File.join(state_home, "attempts", "v2"))
+      refute File.exist?(File.join(state_home, "attempts", "v2"))
+      refute File.exist?(File.join(state_home, "recovery-migration-v6.json"))
     end
   end
 

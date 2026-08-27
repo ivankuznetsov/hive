@@ -75,6 +75,26 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_set_can_relocate_the_current_marker_to_the_bounded_tail
+    with_tmp_dir do |dir|
+      file = File.join(dir, "large.md")
+      File.write(
+        file,
+        "<!-- AGENT_WORKING pid=123 started=2026-08-22T10:00:00Z -->\n" +
+          ("x" * (Hive::Markers::MAX_MARKER_SCAN_BYTES + 1))
+      )
+
+      Hive::Markers.set(file, :error, { reason: "limits_reached" }, at_end: true)
+
+      state = Hive::Markers.current(file)
+      assert_equal :error, state.name
+      assert_equal "limits_reached", state.attrs.fetch("reason")
+      content = File.read(file)
+      refute_includes content, "<!-- AGENT_WORKING"
+      assert content.end_with?("#{state.raw}\n"), "relocated marker must be visible at EOF"
+    end
+  end
+
   # `summary` returns null (not the string "NONE") for the :none marker and a
   # nil marker, so a markerless task's diagnose envelope reads marker_summary:
   # null and the evidence resolver omits the prefix. Produce it end-to-end from
@@ -245,6 +265,24 @@ class MarkersTest < Minitest::Test
       refute Hive::Markers.upgrade_recovery_marker_id(file, observed: observed)
       assert_equal "newer-id", Hive::Markers.current(file).attrs.fetch("marker_id"),
                    "a migration read must never overwrite a newer marker generation"
+    end
+  end
+
+  def test_set_if_current_preserves_a_newer_marker
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, "# task\n")
+      Hive::Markers.set(file, :waiting, reason: "operator_input")
+
+      refute Hive::Markers.set_if_current(
+        file,
+        expected_name: :none,
+        name: :error,
+        reason: "agent_exited_without_terminal_marker"
+      )
+      marker = Hive::Markers.current(file)
+      assert_equal :waiting, marker.name
+      assert_equal "operator_input", marker.attrs["reason"]
     end
   end
 

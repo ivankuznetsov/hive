@@ -1134,7 +1134,8 @@ normal merge gate.
 
 Deterministic policy, adapter, lineage, decision, transition-bypass, status/TUI,
 and Rails Web tests pin the conditional plan-review contract, including
-requested native Grok Build / `grok-4.6` and different-family independence.
+requested native Grok Build / `grok-4.6`, its `grok-4.6-build` served identity,
+and different-family independence.
 `test/smoke/plan_review_smoke_test.rb` now provides the credential-preserving
 real route proof, but it deliberately requires `HIVE_LIVE_PLAN_REVIEW=1` and is
 excluded from normal CI. Until an operator runs that opt-in smoke on the exact

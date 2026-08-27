@@ -335,8 +335,8 @@ applies, the generic force-approve control is hidden.
   cross-surface proof snapshot for `skipped`, `cleared`, standard
   `degraded_cleared`, and mandatory `blocked`.
 - `test/smoke/plan_review_smoke_test.rb` is the explicitly opt-in authenticated
-  native Grok `grok-4.6` route/independence proof. It skips with a diagnostic
-  when opt-in, binary, or authentication is unavailable.
+  native Grok `grok-4.6` request / `grok-4.6-build` served-identity proof. It
+  skips with a diagnostic when opt-in, binary, or authentication is unavailable.
 
 ## Backlinks
 

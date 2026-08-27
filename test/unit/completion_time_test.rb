@@ -112,6 +112,60 @@ class CompletionTimeTest < Minitest::Test
     assert_operator clock.call - started, :<, 0.5
   end
 
+  def test_history_command_runner_returns_successful_output
+    result = Hive::CompletionTime::CommandRunner.new.capture(
+      [ RbConfig.ruby, "-e", '$stdout.write("out"); $stderr.write("err")' ],
+      deadline: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1,
+      monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    )
+
+    assert_equal "out", result.out
+    assert_equal "err", result.err
+    assert result.status.success?
+  end
+
+  def test_history_commits_uses_deadline_runner_and_filters_malformed_rows
+    success = Struct.new(:success?).new(true)
+    calls = []
+    runner = Object.new
+    runner.define_singleton_method(:capture) do |argv, **kwargs|
+      calls << [ argv, kwargs ]
+      Hive::CompletionTime::CommandResult.new(
+        out: "good\0#{Time.utc(2026, 7, 20).iso8601}\0hive: 9-done/demo complete\n" \
+             "missing-subject\0#{Time.utc(2026, 7, 20).iso8601}\0\n" \
+             "wrong\0#{Time.utc(2026, 7, 20).iso8601}\0hive: 9-done/other complete\n",
+        err: "", status: success
+      )
+    end
+    history = Hive::CompletionTime::History.new(
+      command_runner: runner, monotonic_clock: -> { 2.0 }
+    )
+
+    assert_equal(
+      [ { sha: "good", committed_at: "2026-07-20T00:00:00Z",
+          subject: "hive: 9-done/demo complete" } ],
+      history.commits(hive_state_path: "/state", slug: "demo", deadline: 3.0)
+    )
+    assert_equal 3.0, calls.dig(0, 1, :deadline)
+  end
+
+  def test_history_commits_reports_stdout_when_git_stderr_is_empty
+    failure = Struct.new(:success?).new(false)
+    runner = Object.new
+    runner.define_singleton_method(:capture) do |*, **|
+      Hive::CompletionTime::CommandResult.new(
+        out: "branch missing", err: "", status: failure
+      )
+    end
+    history = Hive::CompletionTime::History.new(command_runner: runner)
+
+    error = assert_raises(Hive::GitError) do
+      history.commits(hive_state_path: "/state", slug: "demo", deadline: 3.0)
+    end
+
+    assert_includes error.message, "branch missing"
+  end
+
   def test_history_command_runner_times_out_blocked_readers_and_closes_streams
     runner = Hive::CompletionTime::CommandRunner.new
     runner.define_singleton_method(:terminate) { |_waiter| nil }
@@ -182,6 +236,36 @@ class CompletionTimeTest < Minitest::Test
       Hive::CompletionTime.discover(
         Object.new, deadline: 1.0, monotonic_clock: -> { 1.0 }
       )
+    end
+  end
+
+  def test_discovery_warns_and_falls_back_to_mtime_when_history_fails
+    with_tmp_dir do |folder|
+      state_file = File.join(folder, "done.md")
+      File.write(state_file, "done")
+      completed_at = Time.utc(2026, 7, 20, 8)
+      File.utime(completed_at, completed_at, state_file)
+      terminal = Hive::Workflow::Stage.new(
+        name: "done", index: 1, state_file: "done.md", kind: :inert
+      )
+      task = TaskDouble.new(
+        state_file: state_file, folder: folder,
+        workflow: Hive::Workflow.new(id: :publish, stages: [ terminal ]),
+        hive_state_path: folder, slug: "history-fallback"
+      )
+      history = Object.new
+      history.define_singleton_method(:commits) do |**|
+        raise Hive::GitError, "history unavailable"
+      end
+
+      value = nil
+      _out, err = capture_io do
+        value = Hive::CompletionTime.discover(task, history: history)
+      end
+
+      assert_equal completed_at, value
+      assert_includes err, "history unavailable"
+      assert_includes err, "falling back to filesystem mtimes"
     end
   end
 end

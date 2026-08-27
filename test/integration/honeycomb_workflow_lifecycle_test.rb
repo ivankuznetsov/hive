@@ -81,6 +81,36 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     end
   end
 
+  def test_profile_drift_blocks_runtime_without_hiding_the_managed_task
+    with_tmp_git_repo do |registry|
+      versions = {}
+      version = publish_version(registry, versions, "1.0.0", "Inspect the task.\n")
+      with_project do |project|
+        client = Hive::WorkflowPackage::RegistryClient.new(repository: registry)
+        install = Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo@1.0.0", project_root: project, json: true, yes: true,
+          stdout: StringIO.new, registry_client: client, committer: ->(*) { }
+        ).call!
+        task_path = write_pinned_task(
+          project, version, configuration_digest: install.fetch("configuration_digest")
+        )
+        agent = install.fetch("mappings").fetch(0).fetch("agent")
+        bin_override = Hive::AgentProfiles.lookup(agent).env_bin_override_key
+        refute_nil bin_override
+
+        with_env(bin_override => "/tmp/drifted-#{agent}") do
+          task = Hive::Task.new(task_path)
+
+          assert_equal :demo, task.workflow.id
+          error = assert_raises(Hive::ConfigError) do
+            task.managed_runtime_context("stages.work")
+          end
+          assert_match(/agent profile drifted for stages\.work/, error.message)
+        end
+      end
+    end
+  end
+
   def test_web_adapter_drives_real_install_update_and_remove_commands
     with_tmp_git_repo do |registry|
       versions = {}

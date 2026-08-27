@@ -110,7 +110,7 @@ configuration is loaded lazily only for a legacy v1 selection that must derive
 its compatibility snapshot; current v2 locks and unmanaged workflows do not
 pay that validation cost.
 8. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: entry_stage.dir, slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
-9. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; if the task still has a blank sidecar name later, a running daemon retries the same command from `Hive::Daemon::DisplayNameBackfiller`.
+9. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; repair a remaining blank name with `hive generate-name <task_dir>` or the explicit [[commands/migrate]] command.
 10. Print `hive: captured <path>` and the descriptor-derived `mv ... && hive run ...` next-step hint.
 
 ## Task metadata

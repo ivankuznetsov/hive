@@ -3,8 +3,8 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-22
-tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
+updated: 2026-08-26
+tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and
@@ -21,11 +21,11 @@ task agents.
 | `API` | Provide Hive commands, bot delivery, daemon recovery, and module-hook delivery with the stable admission operations `dispatch`, `dispatch_request`, `dispatch_successor`, and `dispatch_module_hook`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
 | `Record`, `Store` | Read and write schema-v4 records in the physical v4 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. `Store::ProjectionReader` is a read-only scan-scoped view that caches each immutable projection binding once without making the long-lived runtime store stale. The default store opens only v4 and contains no migration trigger or legacy-layout monitor. |
-| `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose the immutable admitted route plus process-local compatibility projections after transport variables are scrubbed. |
+| `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, expose the immutable admitted route, and provide one inherited bounded diagnostic writer after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
-| `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, and terminalize. |
+| `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, validate one child diagnostic frame, bind its exact private log reference, and terminalize only after appending the diagnostic output reference. |
 | `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, normalize loss, and publish current hot counts beside cached storage-maintenance health without scanning historical proof or cold logs. |
@@ -183,6 +183,24 @@ deadlines, checkpoint, integrity references, diagnostics, and loss or receipt
 fields. The capability itself is never persisted. Large payloads remain
 owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
+
+Failed Patrol Fix attempts add exactly one
+`outputs/<attempt-id>/patrol-fix-attempt-diagnostic.v1.json`. The child may
+send one bounded schema-valid frame; EOF, duplicate, malformed, and oversized
+frames are closed transport states rather than trusted evidence. The
+supervisor revalidates identity and scans the complete document for secret
+patterns, injects the exact
+per-spawn log reference, and synthesizes a minimal typed terminal diagnostic
+from authoritative exit, timeout, cancellation, and signal state whenever a
+failed Patrol attempt has no usable frame. Secret-bearing metadata invalidates
+the child frame rather than being persisted. A trusted provider-evidence signal
+overrides child attribution and supplies the provider-owned failure class on
+both finalized and synthesized diagnostics. The supervisor resolves the task's
+current workflow controller before writing the artifact; overlapping Bench and
+Patrol stage directory names are not workflow identity. Output reads used by projections
+share the `OutputReference` custody primitive: they open the validated lexical
+path with `O_NOFOLLOW`, bound bytes, and verify the receipt size and SHA-256
+from the same descriptor. Raw log bytes are never a status fallback.
 
 For an explicit pool, admission freezes the task-generation policy before the
 first decision, including no-route and provider-capacity results. Under the

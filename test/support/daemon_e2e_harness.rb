@@ -1,7 +1,6 @@
 require "json"
 require "hive/cli"
 require "hive/daemon/child_supervisor"
-require "hive/daemon/display_name_backfiller"
 require "hive/daemon/status_consumer"
 
 # In-process daemon scaffolding shared by the content-workflow end-to-end
@@ -100,25 +99,6 @@ module HiveDaemonE2EHarness
     now = Time.now
     supervisor.now = now
     dispatcher.tick(now: now)
-  end
-
-  # Keep daemon E2E tests process-local while still exercising the real
-  # display-name backfill projection. The production collaborator starts a
-  # detached `hive generate-name` child; those children can outlive Minitest
-  # and race process-level coverage collection. Returning the current process
-  # pid models an inflight child without forking and records each folder the
-  # dispatcher would have backfilled.
-  def install_inline_display_name_backfiller(dispatcher, logger:)
-    requested_folders = []
-    backfiller = Hive::Daemon::DisplayNameBackfiller.new(
-      logger: logger,
-      spawn: lambda do |folder|
-        requested_folders << folder
-        Process.pid
-      end
-    )
-    dispatcher.instance_variable_set(:@display_name_backfiller, backfiller)
-    requested_folders
   end
 
   # Build a StatusConsumer::Result from a live internal task-graph snapshot —

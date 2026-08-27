@@ -35,6 +35,9 @@ class PatrolFixFixStageTest < Minitest::Test
       assert_equal [ captured.fetch(:cwd), task.folder ], captured.fetch(:add_dirs)
       assert_equal "fix", captured.fetch(:stage)
       assert_equal "patrol-fix-fix", captured.fetch(:log_label)
+      assert_includes captured.fetch(:prompt), "pristine detached checkout of this commit"
+      assert_includes captured.fetch(:prompt), "include any dependency or"
+      assert_includes captured.fetch(:prompt), "do not depend on ignored state"
       receipt = result.fetch(:receipt)
       assert_equal "fix", receipt.fetch("kind")
       assert_equal "agent", receipt.dig("payload", "validation_commands", 0, "provenance")
@@ -163,6 +166,30 @@ class PatrolFixFixStageTest < Minitest::Test
         assert_match(/does not bind the current generation/, error.message)
       end
     end
+  end
+
+  def test_agent_run_validation_surfaces_typed_failure_and_custody_codes
+    failure = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Fix.send(
+        :validate_agent_run!,
+        { status: :error, attempt_diagnostic: { "code" => "agent_exit_nonzero" } }
+      )
+    end
+    assert_equal "fix agent failed: agent_exit_nonzero", failure.message
+
+    custody = assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Fix.send(
+        :validate_agent_run!,
+        {
+          status: :ok, custody: :tampered,
+          attempt_diagnostic: { "code" => "protected_git_config_tamper" }
+        }
+      )
+    end
+    assert_equal(
+      "fix agent modified controller authority: protected_git_config_tamper",
+      custody.message
+    )
   end
 
   private

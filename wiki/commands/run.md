@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-08-27
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -70,20 +70,29 @@ workflow-verb composition cannot bypass this check.
 
 `hive run` checks whether the task's worktree branch is behind `origin/<default_branch>` and, if so, attempts a rebase before dispatching the stage runner. This prevents the failure mode where a long-running task's branch drifts behind main and reviewers in 5-review see "phantom deletions" of code that landed on main after the branch was created (originating incident: `i-want-to-be-able-260507-7682` at REVIEW_STALE pass=4).
 
-Workflows declaring `handoff: draft_pr` are the exception: Run returns
-`Result.skipped(:managed_draft_pr_handoff)` before calling `Hive::Rebase`.
-Their controller receipt pins an exact base/head pair, so rewriting the branch
-would invalidate already-validated handoff identity and could introduce a
+Controller workflows are excluded before the generic rebase machinery: Run
+returns `Result.skipped(:controller_workflow)` without consulting stage index,
+worktree path, or rebase configuration. Their stage receipts and custody rules
+own exact checkout movement. This explicit workflow invariant prevents a new
+controller stage descriptor from silently acquiring generic rebase behavior.
+
+Non-controller workflows declaring `handoff: draft_pr` are also excluded: Run
+returns `Result.skipped(:managed_draft_pr_handoff)` before calling
+`Hive::Rebase`. Their handoff receipt pins an exact base/head pair, so rewriting
+the branch would invalidate already-validated identity and could introduce a
 second conflict-resolution agent into a one-agent workflow.
 
 **Trigger:** stages 4-execute, 5-open-pr, 6-review, 7-artifacts, and 8-finalize. Stages 2-brainstorm and 3-plan have no worktree (`task.worktree_path` is nil), so the trigger silently no-ops; 1-inbox doesn't enter `hive run`; 9-done is terminal.
 
 **Pre-rebase guards (in order, before any fetch):**
-1. `cfg.rebase.enabled == false` → `Result.disabled`.
-2. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
-3. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
-4. Worktree dirty → `Result.skipped(:dirty_worktree)`.
-5. Detached HEAD → `Result.skipped(:detached_head)`.
+1. `task.workflow.controller?` → `Result.skipped(:controller_workflow)`.
+2. `task.workflow.draft_pr_handoff?` → `Result.skipped(:managed_draft_pr_handoff)`.
+3. `--no-rebase` → `Result.skipped(:cli_override)`.
+4. `cfg.rebase.enabled == false` → `Result.disabled`.
+5. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
+6. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
+7. Worktree dirty → `Result.skipped(:dirty_worktree)`.
+8. Detached HEAD → `Result.skipped(:detached_head)`.
 
 **Fetch:** `git fetch origin <default_branch>` runs with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` set in the spawn environment, plus a Ruby-side wall-clock budget (`FETCH_TIMEOUT_SEC = 60`) enforced via `Process.spawn` + `Process.waitpid2` polling with SIGTERM→SIGKILL escalation. So both credential/host-key prompts and HTTPS network hangs fail immediately rather than blocking the run. Failure → `Result.skipped(:fetch_failed)`.
 
@@ -133,6 +142,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 |--------|---------|
 | `disabled` | `cfg.rebase.enabled = false` in this project |
 | `cli_override` | `--no-rebase` was passed for this run |
+| `controller_workflow` | The workflow owns checkout movement through its controller state machine; generic auto-rebase is prohibited |
 | `managed_draft_pr_handoff` | The task workflow owns an exact receipt-backed draft-PR handoff; auto-rebase is prohibited |
 | `no_worktree` | Stage has no worktree (brainstorm/plan) or worktree directory missing |
 | `pre_existing_rebase` | `.git/rebase-merge/` or `.git/rebase-apply/` already exists; operator cleanup required |
@@ -151,6 +161,13 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `unexpected_io_error` | A `Hive::GitError` / `SystemCallError` / `IOError` escaped the narrow rescue (programmer-error class) |
 
 `post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
+
+When this run first enters archived state, the final commit writes the current
+UTC `completed_at` clock in the same transaction. A legacy task that was
+already archived before the run keeps a missing clock unchanged; only the
+explicit [[commands/migrate]] command may discover and persist its historical
+completion time.
+
 ## next: hints (by marker)
 
 | Marker | `report` output |

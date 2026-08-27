@@ -1,4 +1,5 @@
 require "json"
+require "digest"
 require "time"
 require "hive/agent_limit"
 require "hive/config"
@@ -17,6 +18,7 @@ require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/attempts/store"
+require "hive/patrol_fix/attempt_diagnostic"
 require "hive/task_projection/store"
 require "hive/task_closure"
 require "hive/implementation_identity/resolver"
@@ -199,14 +201,12 @@ module Hive
         admission_context = build_admission_context(
           projects, workflow_generations: workflow_generations
         )
-        archive_backfiller = shared_archive_backfiller
         owns_attempt_store = acquire_status_attempt_store
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
             admission_context: admission_context, now: now,
-            workflow_generation: workflow_generation_for(project, workflow_generations),
-            archive_backfiller: archive_backfiller
+            workflow_generation: workflow_generation_for(project, workflow_generations)
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -539,7 +539,6 @@ module Hive
         admission_context ||= build_admission_context(
           projects, workflow_generations: workflow_generations
         )
-        archive_backfiller = shared_archive_backfiller
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -554,7 +553,6 @@ module Hive
               admission_context: admission_context,
               now: now,
               workflow_generation: workflow_generation_for(p, workflow_generations),
-              archive_backfiller: archive_backfiller,
               include_archive_index: include_archive_index
             )
           end
@@ -571,7 +569,6 @@ module Hive
         targets = daemon_task_targets(projects)
         selected = projects.select { |project| targets.key?(project.fetch("name")) }
         workflow_generations = capture_workflow_generations(selected)
-        archive_backfiller = shared_archive_backfiller
         owns_attempt_store = acquire_status_attempt_store
         {
           "schema" => "hive-status",
@@ -586,7 +583,6 @@ module Hive
               admission_context: nil,
               now: now.utc,
               workflow_generation: workflow_generation_for(project, workflow_generations),
-              archive_backfiller: archive_backfiller,
               task_slugs: targets.fetch(project.fetch("name"))
             )
           end
@@ -605,7 +601,7 @@ module Hive
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
                                       admission_context: nil, now: Time.now.utc,
-                                      workflow_generation: nil, archive_backfiller: nil,
+                                      workflow_generation: nil,
                                       include_archive_index: false, task_slugs: nil)
         project_payload(
           project,
@@ -615,7 +611,6 @@ module Hive
           admission_context: admission_context,
           now: now,
           workflow_generation: workflow_generation,
-          archive_backfiller: archive_backfiller,
           include_archive_index: include_archive_index,
           task_slugs: task_slugs
         )
@@ -640,7 +635,7 @@ module Hive
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
                           admission_context: nil, now: Time.now.utc,
-                          workflow_generation: nil, archive_backfiller: nil,
+                          workflow_generation: nil,
                           include_archive_index: false, task_slugs: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
@@ -694,7 +689,6 @@ module Hive
             end
             projection = Hive::ArchiveFilter.project(
               rows, now: now,
-              backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
               apply_retention: !@archive
             )
             note_retention_boundary(projection.next_retention_boundary) unless @archive
@@ -1072,7 +1066,7 @@ module Hive
       end
 
       def render_project(project, project_count:, admission_context: nil, now: Time.now.utc,
-                         workflow_generation: nil, archive_backfiller: nil)
+                         workflow_generation: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -1108,7 +1102,6 @@ module Hive
           rows = annotate_dependencies(rows, project, admission_context: admission_context)
           projection = Hive::ArchiveFilter.project(
             rows, now: now,
-            backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
             apply_retention: !@archive
           )
         end
@@ -1744,10 +1737,6 @@ module Hive
         generation ? generation.workflows.keys : Hive::Workflows::Registry.ids
       end
 
-      def shared_archive_backfiller
-        Hive::CompletedAtBackfiller.new(shared_refresh_deadline: true)
-      end
-
       def note_retention_boundary(boundary)
         return unless boundary
 
@@ -2012,7 +2001,7 @@ module Hive
             suggested_command: action.command,
             outcomes: action.allowed_outcomes,
             next_action: action.next_action,
-            diagnostic: with_diagnostic ? action.diagnostic : nil,
+            diagnostic: with_diagnostic ? (attempt_diagnostic_for(row) || action.diagnostic) : nil,
             condition_gate: action.condition_gate&.to_h,
             condition_migration: action.migration_selection.to_h,
             condition_warning: action.condition_warning,
@@ -2021,6 +2010,89 @@ module Hive
             state_label: condition_state_label(row, action)
           )
         end
+      end
+
+      def attempt_diagnostic_for(row)
+        return nil unless row[:workflow].to_s == Hive::PatrolFix::WORKFLOW_ID.to_s
+
+        identity = row[:projection_data].is_a?(Hash) ? row[:projection_data]["identity"] : nil
+        attempt_id = identity.is_a?(Hash) ? identity["attempt_id"].to_s : ""
+        return nil if attempt_id.empty? || attempt_id == Hive::TaskJournal::LEGACY_ATTEMPT_ID
+
+        attempt = Array(row.dig(:projection_data, "journal", "attempts")).find do |candidate|
+          candidate.is_a?(Hash) && candidate["attempt_id"] == attempt_id
+        end
+        return nil unless attempt && attempt["state"] == "terminal" &&
+                          %w[failed cancelled].include?(attempt["outcome"])
+
+        binding = status_attempt_store.fetch_terminal_diagnostic_binding(attempt_id)
+        return nil unless binding.is_a?(Hash) && binding["attempt_id"] == attempt_id
+
+        receipt = binding["receipt"]
+        return nil unless receipt.is_a?(Hash)
+
+        diagnostic_path = File.join(
+          "outputs", attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME
+        )
+        reference = Array(receipt["output_references"]).find do |candidate|
+          candidate.is_a?(Hash) && candidate["path"] == diagnostic_path
+        end
+        return nil unless reference
+
+        document = JSON.parse(status_attempt_store.read_output(
+          reference, max_bytes: Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
+        ))
+        Hive::PatrolFix::AttemptDiagnostic.validate!(document)
+        return nil unless document["attempt_id"] == attempt_id &&
+                          document["correlation_id"] == attempt_id &&
+                          document["stage"] == binding["stage"].to_s &&
+                          document["task_generation"] == binding["task_generation"].to_s &&
+                          document["log_reference"] == receipt["log_reference"]
+
+        diagnostic_projection(document, reference)
+      rescue JSON::ParserError, Hive::Error, SystemCallError, IOError
+        nil
+      end
+
+      def diagnostic_projection(document, reference)
+        paths = [ reference["path"], document.dig("log_reference", "path") ].compact.uniq
+        {
+          "summary" => "#{document.fetch('code')} (#{document.fetch('owner')})".byteslice(0, 120),
+          "detail" => document["detail"] || "No provider-safe detail was emitted.",
+          "source" => "artifact",
+          "source_path" => reference.fetch("path"),
+          "artifact_paths" => paths,
+          "generated_by" => "local",
+          "marker_signature" => Digest::SHA256.hexdigest(JSON.generate(reference)),
+          "suggested_next_action" => nil,
+          "updated_at" => document.fetch("recorded_at"),
+          "code" => document.fetch("code"),
+          "owner" => document.fetch("owner"),
+          "workflow" => document.fetch("workflow"),
+          "stage" => document.fetch("stage"),
+          "phase" => document.fetch("phase"),
+          "status" => document.fetch("status"),
+          "agent_reason" => document.fetch("agent_reason"),
+          "exit_code" => document.fetch("exit_code"),
+          "timed_out" => document.fetch("timed_out"),
+          "cancelled" => document.fetch("cancelled"),
+          "signal" => document.fetch("signal"),
+          "provider" => document.fetch("provider"),
+          "attempt_id" => document.fetch("attempt_id"),
+          "correlation_id" => document.fetch("correlation_id"),
+          "task_generation" => document.fetch("task_generation"),
+          "diagnostic_digest" => reference.fetch("sha256"),
+          "diagnostic_reference" => reference,
+          "log_reference" => document.fetch("log_reference"),
+          "report_status" => document.fetch("report_status"),
+          "report_parser" => document.fetch("report_parser"),
+          "firewall_status" => document.fetch("firewall_status"),
+          "firewall_restoration" => document.fetch("firewall_restoration"),
+          "custody_status" => document.fetch("custody_status"),
+          "transport_status" => document.fetch("transport_status"),
+          "redaction_status" => document.fetch("redaction_status"),
+          "secret_policy_version" => document.fetch("secret_policy_version")
+        }
       end
 
       # Dependency admission reports invalid project configuration on each

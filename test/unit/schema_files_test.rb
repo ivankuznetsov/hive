@@ -1130,6 +1130,16 @@ class SchemaFilesTest < Minitest::Test
                  "schema/producer required-key drift in current hive-run schema"
   end
 
+  def test_hive_run_schema_accepts_controller_owned_rebase_skip_reasons
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
+    reasons = doc.dig(
+      "$defs", "SuccessPayload", "properties", "rebase", "properties", "reason", "enum"
+    )
+
+    assert_includes reasons, "controller_workflow"
+    assert_includes reasons, "managed_draft_pr_handoff"
+  end
+
   # OPTIONAL_PAYLOAD_KEYS documents fields that are valid in SuccessPayload
   # but only emitted conditionally (currently `cleanup_instructions`).
   # Without this disjointness check, a contributor could move a key from

@@ -3,7 +3,7 @@ title: hive rebase-status
 type: command
 source: lib/hive/commands/rebase_status.rb
 created: 2026-05-14
-updated: 2026-05-14T12:00:00Z
+updated: 2026-08-27
 tags: [command, rebase, read-only, inspector]
 ---
 
@@ -22,6 +22,8 @@ hive rebase-status <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 
 | State | Text output | Meaning |
 |-------|-------------|---------|
+| `controller_workflow` | `<slug>: controller workflow owns checkout movement; generic auto-rebase does not apply` | The workflow's receipts and controller own the checkout |
+| `managed_draft_pr_handoff` | `<slug>: draft-PR handoff owns exact checkout identity; generic auto-rebase does not apply` | The managed handoff receipt owns the checkout pair |
 | `disabled` | `<slug>: auto-rebase DISABLED via cfg.rebase.enabled = false` | Project opted out |
 | `no_worktree` | `<slug>: no worktree at this stage (<stage>); rebase not applicable` | Brainstorm/plan/inbox/done, or worktree path missing |
 | `pre_existing_rebase` | `<slug>: pre-existing rebase state on disk; rebase would skip. Run `git -C <wt> rebase --abort` to clean up.` | A prior aborted run left `.git/rebase-merge/` or `rebase-apply/` |
@@ -47,7 +49,7 @@ hive rebase-status <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 }
 ```
 
-- `state` is one of the eight values in the table above (snake_case).
+- `state` is one of the ten values in the table above (snake_case).
 - `would_rebase` is `true` only when `state == "would_rebase"`.
 - `commits_behind` and `default_branch` are present for `no_drift` and `would_rebase`; otherwise omitted.
 
@@ -62,7 +64,7 @@ Two reasons:
 
 ## Relationship to `hive run`
 
-`rebase-status` is a strict subset of `Hive::Rebase.perform`'s guard logic, with the fetch + actual rebase removed. If `rebase-status` reports `would_rebase` with `commits_behind: N`, then `hive run` will start a rebase attempt of N commits (assuming nothing changes between the two invocations). If `rebase-status` reports a skip-state, `hive run` will surface the same state via `Hive::Rebase::Result.reason` in its JSON envelope.
+`rebase-status` mirrors `hive run`'s complete auto-rebase guard order, with the fetch + actual rebase removed. Controller workflows and managed draft-PR handoffs are excluded before the generic `Hive::Rebase.perform` ladder. If `rebase-status` reports `would_rebase` with `commits_behind: N`, then `hive run` will start a rebase attempt of N commits (assuming nothing changes between the two invocations). If `rebase-status` reports a skip-state, `hive run` will surface the same state via `Hive::Rebase::Result.reason` in its JSON envelope.
 
 ## Backlinks
 

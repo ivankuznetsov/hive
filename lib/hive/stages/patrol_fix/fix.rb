@@ -61,7 +61,7 @@ module Hive
             )
           end
           validate_agent_run!(run)
-          report = Hive::PatrolFix::FixReport.read(output)
+          report = read_report!(output)
           raise Hive::StageError, "fix agent parked with partial work; preserving the owned worktree" unless report.status == "fixed"
           payload = custody.capture!(
             generation: manifest.dig("task", "generation"),
@@ -86,7 +86,9 @@ module Hive
             Do not write Hive receipts, task metadata, publication state, push, or open a PR/issue.
             Write only strict JSON to #{output}: schema hive-patrol-fix-fix-report, schema_version 1,
             status fixed|blocked, summary, and validation_commands as structured identity/command pairs
-            that you deliberately selected. Hive will independently execute those commands later.
+            that you deliberately selected. Hive will independently execute those commands later in a
+            pristine detached checkout of this commit. Each command must include any dependency or
+            bootstrap setup it needs; do not depend on ignored state from the owned fix worktree.
           PROMPT
         end
 
@@ -98,6 +100,13 @@ module Hive
             "recorded_at" => Time.now.utc.iso8601, "payload" => payload }
         end
         private_class_method :build_receipt
+        def read_report!(path)
+          Hive::Stages::ManagedAgentCustody.read_report(
+            stage: "fix", parser: "fix_report",
+            invalid_report: Hive::PatrolFix::FixReport::InvalidReport
+          ) { Hive::PatrolFix::FixReport.read(path) }
+        end
+        private_class_method :read_report!
 
         def current(store, manifest, kind, stage)
           store.read_all.find { |r| r["kind"] == kind && r["stage"] == stage && r["task"] == manifest["task"] && r["evidence_revision"] == manifest["evidence_revision"] }
@@ -129,8 +138,14 @@ module Hive
         def complete(receipt) = { status: :complete, commit: "patrol-fix fix complete", receipt: receipt }
         private_class_method :complete
         def validate_agent_run!(run)
-          raise Hive::StageError, "fix agent failed" unless run.is_a?(Hash) && run[:status] == :ok
-          raise Hive::StageError, "fix agent modified controller authority: #{run[:diagnostic]}" unless run[:custody] == :clean
+          unless run.is_a?(Hash) && run[:status] == :ok
+            code = run.is_a?(Hash) && run.dig(:attempt_diagnostic, "code")
+            raise Hive::StageError, [ "fix agent failed", code ].compact.join(": ")
+          end
+          unless run[:custody] == :clean
+            diagnostic = run.dig(:attempt_diagnostic, "code") || run[:diagnostic]
+            raise Hive::StageError, "fix agent modified controller authority: #{diagnostic}"
+          end
         end
         private_class_method :validate_agent_run!
       end

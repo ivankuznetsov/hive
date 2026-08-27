@@ -1186,6 +1186,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "blocked", receipt.status
       assert_equal "missing_task_id", receipt.reason
       assert_equal "hive", receipt.owner
+      assert_includes receipt.remediation, "hive migrate"
       assert_empty Q.pending(state_home: state_home)
       assert_equal :error, Hive::Markers.current(row.state_file).name
     end
@@ -1282,6 +1283,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         request: request, row: row, now: Time.iso8601(admitted.next_eligible_at)
       )
       request = Q.fetch(admitted.request_id, state_home: dir)
+      claimed_path = Q.claim(
+        admitted.request_id, pid: nil, attempt_id: "attempt-2",
+        task_generation: request.task_generation, state_home: dir, now: NOW + 6
+      )
       coordinator.mark_dispatched(request, attempt_id: "attempt-2", now: NOW + 6)
       request = Q.fetch(admitted.request_id, state_home: dir)
       coordinator.mark_dispatched(
@@ -1301,6 +1306,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "cooldown", rearmed.status
       assert_equal "admitted", rearmed.phase
       assert_equal 2, rearmed.retry_count
+      assert_empty Q.claimed(state_home: dir)
+      assert_equal [ admitted.request_id ], Q.pending(state_home: dir).map(&:request_id)
+      refute File.exist?("#{claimed_path}#{Q::CLAIM_META_SUFFIX}")
       persisted = Q.fetch(admitted.request_id, state_home: dir)
       assert_nil persisted.recovery.fetch("attempt_id")
       assert_nil persisted.recovery.fetch("terminal_outcome")
@@ -1357,6 +1365,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         reason: "agent_exited_without_terminal_marker", now: NOW
       )
       assert_equal "missing_task_id", receipt.reason
+      assert_includes receipt.remediation, "hive migrate"
       assert_empty Q.pending(state_home: dir)
     end
   end
@@ -1732,6 +1741,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         request: request, decision: routing_decision(row, status: :no_route), now: NOW
       )
       assert_equal "missing_task_id", result.reason
+      assert_includes result.remediation, "hive migrate"
     end
 
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, _state_home|

@@ -17,15 +17,117 @@ BASE="$2"
 export HOME=/home/asterio
 git config --global --add safe.directory '*' 2>/dev/null
 mkdir -p /work/.hb/bin
-export PATH="/work/.hb/bin:$PATH"
+if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+  HIVE_RUNTIME_BIN=/opt/hb/control-bundle/bin
+  if [ -z "${HB_HIVE_BUILD_SHA:-}" ]; then
+    echo "HB_ERROR hive_runtime_build_missing" >&2
+    exit 4
+  fi
+  if setpriv --reuid=1000 --regid=1000 --init-groups \
+       --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+       test -r "$HIVE_RUNTIME_BIN/hive" 2>/dev/null; then
+    echo "HB_ERROR hive_runtime_visible_to_candidate" >&2
+    exit 4
+  fi
+  echo "HB_NOTE hive_runtime_visibility sealed build=$HB_HIVE_BUILD_SHA"
+else
+  HIVE_RUNTIME_BIN=/opt/hb/hive-current/bin
+fi
+if [ ! -x "$HIVE_RUNTIME_BIN/hive" ] || [ -z "${HB_HIVE_VERSION:-}" ]; then
+  echo "HB_ERROR hive_runtime_missing" >&2
+  exit 4
+fi
+ACTUAL_HIVE_VERSION="$("$HIVE_RUNTIME_BIN/hive" --version 2>/dev/null)"
+if [ "$ACTUAL_HIVE_VERSION" != "$HB_HIVE_VERSION" ]; then
+  echo "HB_ERROR hive_runtime_version_mismatch expected=$HB_HIVE_VERSION actual=$ACTUAL_HIVE_VERSION" >&2
+  exit 4
+fi
+export PATH="/work/.hb/bin:$HIVE_RUNTIME_BIN:$PATH"
+echo "HB_NOTE hive_runtime version=$ACTUAL_HIVE_VERSION"
 cd /work || exit 3
 
 stage() { echo "HB_STAGE $1 rc=$2"; }
 
-# Pi's mounted transport extension requests tool streaming from OpenRouter.
-# Model identity remains in Hive's native routing and reaches Pi through the
-# shared Agent CLI runtime. Hive's preflight also insists on a non-empty
-# ~/.pi/agent/auth.json; Pi itself authenticates via OPENROUTER_API_KEY.
+preflight_opencode_ce_skills() {
+  local package=/opt/compound-engineering
+  local config_out=/work/.hb/opencode-ce-config.json
+  local skills_out=/work/.hb/opencode-ce-skills.json
+  local required
+
+  for required in ce-plan ce-work ce-code-review; do
+    if [ ! -f "$package/skills/$required/SKILL.md" ]; then
+      echo "HB_ERROR opencode_ce_skills missing=$required" >&2
+      return 1
+    fi
+  done
+
+  mkdir -p "$HOME/.agents" || return 1
+  ln -sfn "$package/skills" "$HOME/.agents/skills" || return 1
+
+  if ! timeout 90 env \
+    OPENCODE_CONFIG_CONTENT='{"plugin":["/opt/compound-engineering"]}' \
+    "${HIVE_OPENCODE_BIN:-opencode}" debug config >"$config_out"; then
+    echo "HB_ERROR opencode_ce_skills config_probe_failed" >&2
+    return 1
+  fi
+  if ! timeout 90 env \
+    OPENCODE_CONFIG_CONTENT='{"plugin":["/opt/compound-engineering"]}' \
+    "${HIVE_OPENCODE_BIN:-opencode}" debug skill >"$skills_out"; then
+    echo "HB_ERROR opencode_ce_skills discovery_probe_failed" >&2
+    return 1
+  fi
+
+  ruby -rjson -e '
+    config = JSON.parse(File.read(ARGV.fetch(0)))
+    skills = JSON.parse(File.read(ARGV.fetch(1)))
+    paths = Array(config.dig("skills", "paths"))
+    commands = config.fetch("command", {}).keys
+    names = skills.filter_map { |skill| skill["name"] }
+    required = %w[ce-plan ce-work ce-code-review]
+    abort "missing CE skill path" unless paths.include?("/opt/compound-engineering/skills")
+    abort "missing CE commands" unless (required - commands).empty?
+    abort "missing CE skills" unless (required - names).empty?
+    count = names.count { |name| name.start_with?("ce-") || name == "lfg" }
+    abort "incomplete CE skill corpus" unless count == 33
+  ' "$config_out" "$skills_out" || {
+    echo "HB_ERROR opencode_ce_skills validation_failed" >&2
+    return 1
+  }
+
+  echo "HB_NOTE opencode_ce_skills enabled count=33"
+}
+
+if [ "${HB_OPENCODE_CE_PREFLIGHT:-0}" = "1" ]; then
+  preflight_opencode_ce_skills || exit 4
+fi
+
+install_pi_openrouter_auth() {
+  local auth_dir="$HOME/.pi/agent"
+  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    echo "HB_ERROR pi_openrouter_auth missing OPENROUTER_API_KEY" >&2
+    return 1
+  fi
+  mkdir -p "$auth_dir" || return 1
+  ruby -rjson -rfileutils -e '
+    dir = ARGV.fetch(0)
+    path = File.join(dir, "auth.json")
+    tmp = File.join(dir, ".auth.json.tmp-#{Process.pid}")
+    begin
+      payload = { "openrouter" => { "type" => "api_key", "key" => ENV.fetch("OPENROUTER_API_KEY") } }
+      File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+        file.write(JSON.generate(payload))
+      end
+      File.rename(tmp, path)
+      File.chmod(0o600, path)
+    ensure
+      FileUtils.rm_f(tmp)
+    end
+  ' "$auth_dir"
+}
+
+# Pi's transport extension requests streamed tool arguments from OpenRouter.
+# Hive owns the stage model flags; this wrapper only activates the extension and
+# installs the container-only credential/catalog in Pi's ephemeral home.
 if [ -f /opt/hb/pi-tool-stream.ts ]; then
   PI_REAL="$(command -v pi)"
   cat >/work/.hb/bin/pi <<PI
@@ -34,8 +136,16 @@ exec "$PI_REAL" --extension /opt/hb/pi-tool-stream.ts "\$@"
 PI
   chmod +x /work/.hb/bin/pi
   mkdir -p "$HOME/.pi/agent"
-  [ -s "$HOME/.pi/agent/auth.json" ] || \
-    echo '{"openrouter":{"type":"api-key","via":"OPENROUTER_API_KEY env"}}' >"$HOME/.pi/agent/auth.json"
+  if [ -f /opt/hb/pi-openrouter-models.json ]; then
+    install_pi_openrouter_auth || exit 4
+    ln -sfn /opt/hb/pi-openrouter-models.json "$HOME/.pi/agent/models.json"
+    echo "HB_NOTE pi_openrouter_models enabled"
+  else
+    [ -s "$HOME/.pi/agent/auth.json" ] || \
+      echo '{"bench-preflight":{"type":"api_key","key":"container-only-placeholder"}}' \
+        >"$HOME/.pi/agent/auth.json"
+    chmod 600 "$HOME/.pi/agent/auth.json"
+  fi
   echo "HB_NOTE pi_tool_stream enabled"
 fi
 
@@ -163,6 +273,32 @@ finalize_candidate_patch() {
   fi
 }
 
+# A durable stage action can successfully promote a task yet leave the target
+# markerless, with `next_action=ready_to_run`. Follow that native continuation
+# once so a successful wrapper receipt cannot be mistaken for a produced plan.
+# PLAN_MD is intentionally global for the caller.
+ensure_plan_artifact() {
+  local plan_task="$1" state_root="${2:-/work/.hive-state}" hb_root="${3:-/work/.hb}" rc
+  PLAN_MD="$(find "$state_root/stages/3-plan" -name plan.md 2>/dev/null | head -1)"
+  [ -n "$PLAN_MD" ] && [ -f "$PLAN_MD" ] && return 0
+  if [ -z "$plan_task" ] || [ ! -d "$plan_task" ]; then
+    echo "HB_ERROR plan_artifact_missing phase=task" >&2
+    return 1
+  fi
+
+  hive run "$plan_task" --json >"$hb_root/plan-run.json" 2>>"$hb_root/stage.err"
+  rc=$?
+  stage plan-run "$rc"
+  [ "$rc" -eq 0 ] || return "$rc"
+
+  PLAN_MD="$(find "$state_root/stages/3-plan" -name plan.md 2>/dev/null | head -1)"
+  if [ -z "$PLAN_MD" ] || [ ! -f "$PLAN_MD" ]; then
+    echo "HB_ERROR plan_artifact_missing phase=run" >&2
+    return 1
+  fi
+  echo "HB_NOTE plan_stage_resumed"
+}
+
 # Accept a planner's unanswered-question pause without letting Hive's runtime
 # lock files leak into the state-branch bookkeeping commit. The plan document
 # is the benchmark deliverable; only that document belongs in this commit.
@@ -189,11 +325,56 @@ force_plan_complete() {
   echo "HB_NOTE plan_forced_complete"
 }
 
+# A dependency-free plan must omit `depends_on`; YAML null is not a dependency
+# identifier and current Hive correctly rejects it. Some model/CE combinations
+# emit the explicit null despite meaning "none". Remove only that exact
+# semantics-preserving form and commit only the plan artifact, just like the
+# unattended WAITING-to-COMPLETE normalization above.
+normalize_null_plan_dependency() {
+  local plan_md="$1" state_root="${2:-/work/.hive-state}" plan_rel
+  [ -f "$plan_md" ] || return 0
+  grep -Eq '^depends_on:[[:space:]]*(null|~)[[:space:]]*$' "$plan_md" || return 0
+  plan_rel="${plan_md#"$state_root"/}"
+  if [ "$plan_rel" = "$plan_md" ]; then
+    echo "HB_ERROR plan_dependency_normalize_failed phase=path" >&2
+    return 1
+  fi
+  if ! ruby -e '
+    path = ARGV.fetch(0)
+    source = File.read(path)
+    rewritten = source.sub(/^depends_on:[ \t]*(?:null|~)[ \t]*$\n/, "")
+    abort "null dependency not found" if rewritten == source
+    File.write(path, rewritten)
+  ' "$plan_md"; then
+    echo "HB_ERROR plan_dependency_normalize_failed phase=rewrite" >&2
+    return 1
+  fi
+  if ! git -C "$state_root" add -- "$plan_rel" ||
+     ! git -C "$state_root" -c user.email=bench@hive-bench -c user.name=hive-bench \
+       commit -qm 'bench: omit null plan dependency' -- "$plan_rel"; then
+    echo "HB_ERROR plan_dependency_normalize_failed phase=commit" >&2
+    return 1
+  fi
+  echo "HB_NOTE plan_dependency_null_removed"
+}
+
 # 1. PLAN — real /ce-plan, or reuse the identity-verified plan when the host
-# driver resumes an execute turn interrupted only by model transport. Clear
-# exactly the persisted implementer_failed marker before asking Hive to continue.
+# driver resumes an execute turn interrupted by exact model transport evidence
+# or a post-cleanup dirty-worktree marker. Clear exactly the verified ordinary
+# marker, or complete Hive-validated committed residue, before continuing.
 PLAN_TASK=""
-if [ "${HB_RESUME_EXECUTE:-0}" = "1" ]; then
+EXECUTE_RESIDUE_RECOVERED=0
+RESUME_REVIEW="${HB_RESUME_REVIEW:-0}"
+if [ "$RESUME_REVIEW" = "1" ]; then
+  PLAN_TASK="/work/.hive-state/stages/6-review/$SLUG"
+  if [ ! -d "$PLAN_TASK" ] || [ ! -s /work/candidate-execute.patch ]; then
+    echo "HB_ERROR review_resume_preflight_failed" >&2
+    exit 5
+  fi
+  stage plan 0
+  echo "HB_NOTE plan_reused"
+  echo "HB_NOTE review_resumed"
+elif [ "${HB_RESUME_EXECUTE:-0}" = "1" ]; then
   PLAN_TASK="/work/.hive-state/stages/4-execute/$SLUG"
   bash /hive_resume_execute.sh "$PLAN_TASK" "${HB_RESUME_MARKER_ID:-}" \
     /work/.hb/resume-clear.json /work/.hb/stage.err
@@ -203,30 +384,52 @@ if [ "${HB_RESUME_EXECUTE:-0}" = "1" ]; then
   stage plan 0
   echo "HB_NOTE plan_reused"
   echo "HB_NOTE execute_resumed"
+  if [ -f /work/.hb/execute-residue-recovered ]; then
+    EXECUTE_RESIDUE_RECOVERED=1
+    echo "HB_NOTE execute_residue_recovered"
+  fi
 else
   hive plan "/work/.hive-state/stages/2-brainstorm/$SLUG" --json >/work/.hb/plan.json 2>>/work/.hb/stage.err
-  stage plan $?
+  PLAN_RC=$?
+  stage plan "$PLAN_RC"
+  if [ "$PLAN_RC" -ne 0 ]; then
+    # A failed Hive stage can leave a partial plan.md alongside its durable
+    # error marker. That file is not a completed planning result and must not
+    # be fed to develop; the outer campaign may retry this cell from a clean
+    # seed when the provider failure is transient.
+    echo "HB_NOTE plan_failed"
+    exit 4
+  fi
+
+  PLAN_TASK="$(find /work/.hive-state/stages/3-plan -mindepth 1 -maxdepth 1 -type d -name "$SLUG" 2>/dev/null | head -1)"
+  ensure_plan_artifact "$PLAN_TASK" || exit 4
 
   # /ce-plan ends WAITING when it raised open questions. With no human in the loop,
   # accept the plan as-is: the plan document is the deliverable; the Q&A refinement
   # loop is out of scope for the benchmark. Flip the marker so execute can proceed.
-  PLAN_MD="$(find /work/.hive-state/stages/3-plan -name plan.md 2>/dev/null | head -1)"
   if [ -n "$PLAN_MD" ] && grep -q '<!-- WAITING -->' "$PLAN_MD"; then
     force_plan_complete "$PLAN_MD"
   fi
+  normalize_null_plan_dependency "$PLAN_MD" || exit 4
   PLAN_TASK="$(dirname "$PLAN_MD" 2>/dev/null)"
 fi
 
 # 2. EXECUTE — real develop -> worktree off base_commit.
-if [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
+if [ "$RESUME_REVIEW" = "1" ] || [ "$EXECUTE_RESIDUE_RECOVERED" -eq 1 ]; then
+  stage develop 0
+elif [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
   hive develop "$PLAN_TASK" --json >/work/.hb/develop.json 2>>/work/.hb/stage.err
   stage develop $?
 fi
 
 # Post-execute capture: the raw first-pass diff, kept for review-lift analysis.
-if ! capture /work/candidate-execute.patch execute; then
-  echo "HB_NOTE execute_patch_failed"
-  exit 4
+if [ "$RESUME_REVIEW" = "1" ]; then
+  echo "HB_DIFF execute lines=$(wc -l </work/candidate-execute.patch) files=$(grep -c '^diff --git' /work/candidate-execute.patch)"
+else
+  if ! capture /work/candidate-execute.patch execute; then
+    echo "HB_NOTE execute_patch_failed"
+    exit 4
+  fi
 fi
 
 # 3-4. OPEN-PR + REVIEW — the rest of the real hive cycle (HB_REVIEW=0 skips).
@@ -268,8 +471,12 @@ exit 0
 GH
   chmod +x /work/.hb/bin/gh
 
-  hive open-pr "$(task_dir)" --json >/work/.hb/open_pr.json 2>>/work/.hb/stage.err
-  stage open-pr $?
+  if [ "$RESUME_REVIEW" = "1" ]; then
+    stage open-pr 0
+  else
+    hive open-pr "$(task_dir)" --json >/work/.hb/open_pr.json 2>>/work/.hb/stage.err
+    stage open-pr $?
+  fi
   hive review "$(task_dir)" --json >/work/.hb/review.json 2>>/work/.hb/stage.err
   REVIEW_RC=$?
   stage review "$REVIEW_RC"

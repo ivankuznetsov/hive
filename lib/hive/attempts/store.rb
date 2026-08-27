@@ -4,6 +4,7 @@ require "fileutils"
 require "hive/atomic_file"
 require "hive/attempts/capability"
 require "hive/attempts/record"
+require "hive/output_reference"
 require "hive/point_storage"
 require "hive/stringify_keys"
 require "hive/paths"
@@ -31,6 +32,7 @@ module Hive
         def initialize(store)
           @store = store
           @bindings = {}
+          @terminal_diagnostic_bindings = {}
         end
 
         def fetch_projection_binding(attempt_id)
@@ -38,6 +40,23 @@ module Hive
           return @bindings[key] if @bindings.key?(key)
 
           @bindings[key] = @store.fetch_projection_binding(attempt_id)
+        end
+
+        def fetch_terminal_diagnostic_binding(attempt_id)
+          key = attempt_id.to_s
+          return @terminal_diagnostic_bindings[key] if @terminal_diagnostic_bindings.key?(key)
+
+          record = @store.fetch(key)
+          @terminal_diagnostic_bindings[key] = record&.final? ? {
+            "attempt_id" => record.attempt_id,
+            "stage" => record["intended_stage"],
+            "task_generation" => record.task_generation,
+            "receipt" => record.receipt
+          } : nil
+        end
+
+        def read_output(reference, max_bytes:)
+          @store.read_output(reference, max_bytes: max_bytes)
         end
       end
 
@@ -220,6 +239,12 @@ module Hive
         end
 
         path
+      end
+
+      def read_output(reference, max_bytes:)
+        Hive::OutputReference.read(reference, root: root, max_bytes: max_bytes)
+      rescue Hive::InvalidOutputReference => e
+        raise StoreError, e.message
       end
 
       def create_launching(**attributes)

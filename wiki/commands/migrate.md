@@ -3,11 +3,11 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/patrol_fix/admission_store.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-23
+updated: 2026-08-27
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage, patrol]
 ---
 
-**TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
+**TLDR**: `hive migrate [PROJECT_PATH]` is the sole explicit, idempotent upgrade
 path for one project. `hive migrate --all` checks global state and every
 registered project; `hive update` runs that fleet form automatically after a
 successful package update.
@@ -117,6 +117,19 @@ post-feature task from deleting its task-local review root and using a raw
 folder move as a legacy bypass. Non-coding workflows are untouched.
 
 After the locked id/config/stage migration finishes, `hive migrate` also backfills missing/null `display_name` values for every canonical task folder using `Hive::DisplayName::Generator`, the same agent-backed pipeline as `hive generate-name <target>`. Generation runs outside the commit lock because agent naming can take seconds per task; successful names are committed in a separate `.hive-state` commit. Existing display names are skipped, including patrol handoff names such as `Patrol: <finding title>`. A generation failure is fail-soft: that task keeps its null display name and can be retried by rerunning `hive migrate` or `hive generate-name`.
+
+The same explicit command backfills missing `completed_at` values for tasks
+already classified as archived. It prefers the earliest credible Git completion
+event, then the terminal state-file mtime, then the task-folder mtime, and
+commits successful discoveries as `hive: migrate completion times (N tasks)`.
+History discovery runs before the project commit lock. The locked write phase
+re-resolves every candidate and persists only tasks that are still archived and
+unstamped, then stages and commits only their exact `meta.yml` paths. A failed
+commit restores the original metadata and exits non-zero, so rerunning
+`hive migrate` can complete the same repair. One malformed task warns and stays
+visible while valid candidates still commit. Missing sources likewise warn and
+leave the task visible. The daemon, status command, `approve`, and `run` do not
+perform legacy metadata discovery or migration.
 
 ## Patrol Fix admission index cutover
 
@@ -253,6 +266,7 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate managed workflow tasks (N tasks)` for a managed-generation-only cutover.
 - `hive: migrate plan review requirements (N tasks)` for a plan-review-requirement-only cutover.
 - `hive: migrate project state (N ids, M recovery markers, P managed workflow tasks, Q plan review requirements)` when multiple non-stage upgrades land together; zero-value categories are omitted.
+- `hive: migrate completion times (N tasks)` for archived completion-clock backfills.
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.

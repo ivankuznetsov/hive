@@ -17,8 +17,6 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recovery_coordinator"
-require "hive/daemon/display_name_backfiller"
-require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
@@ -159,23 +157,6 @@ module Hive
           recovery_coordinator: @recovery_coordinator,
           admission_open: -> { admission_open? }
         )
-        # Additive self-heal for tasks whose one-shot name generation at
-        # `hive new` never landed (agent/codex outage). Re-spawns
-        # `hive generate-name <folder>` on later ticks; never touches
-        # markers or dispatch.
-        @display_name_backfiller = DisplayNameBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run,
-          admission_open: -> { admission_open? }
-        )
-        # Additive self-heal for tasks created outside `hive new` (hand-made
-        # folder, `mv`-ed in) whose meta.yml has no id. Assigns the next
-        # counter id and commits it; never touches markers or dispatch.
-        @task_id_backfiller = TaskIdBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run
-        )
-
         @shutdown = false
         @reload = false
         @reexec_requested = false
@@ -363,18 +344,6 @@ module Hive
 
         apply_external_running_counts
 
-        # Recovery requests require the immutable task id. Assign ids before
-        # the healer observes failures so an externally-created legacy task can
-        # become recoverable in this tick instead of producing an unusable
-        # request that no later backfill can repair.
-        begin
-          @task_id_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
         # Reconcile task-bound merged PRs before automatic error recovery.
         # This prevents an already-delivered task from launching another
         # provider attempt merely because its final local marker is an error.
@@ -426,19 +395,6 @@ module Hive
                         keeping_previous: true)
         end
         return unless admission_open?
-
-        # Self-heal tasks left showing their raw slug because name
-        # generation never landed at `hive new`. Purely additive and
-        # marker-free, so order relative to dispatch is irrelevant — but
-        # it shares the healer's defensive rescue so a backfiller bug
-        # can't crash the tick (and trip the unit's restart-loop cap).
-        begin
-          @display_name_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "display_name_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
 
         # 3b. Preserve the row priority order across auxiliary dispatch
         # lanes. Dispatch the prefix ending at the last advance-ready row
@@ -598,13 +554,6 @@ module Hive
         apply_external_running_counts
 
         begin
-          @task_id_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-        begin
           @stale_agent_healer.heal(
             rows_eligible_for_error_recovery(result.rows),
             now: now,
@@ -616,14 +565,6 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
-        begin
-          @display_name_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "display_name_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
         dispatch_rows = if dispatchable_change
           incremental_dispatch_rows(result.rows)
         else
@@ -3212,13 +3153,26 @@ module Hive
 
           receipt = attempt.receipt
           if request.recovery.is_a?(Hash)
-            @recovery_coordinator.mark_dispatched(
+            terminal_transition = @recovery_coordinator.mark_dispatched(
               request,
               attempt_id: attempt.attempt_id,
               terminal: true,
               outcome: receipt["outcome"],
               now: now
             )
+            unless terminal_transition&.status == "terminal" &&
+                   terminal_transition&.phase == "terminal"
+              @logger.event(
+                :dispatch_request_reconciliation_failed,
+                request_id: request.request_id,
+                attempt_id: attempt.attempt_id,
+                project: request.project,
+                slug: request.slug,
+                phase: terminal_transition&.phase || request.recovery["phase"],
+                reason: terminal_transition&.reason || "terminal_transition_unavailable"
+              )
+              next
+            end
           end
           continuation = if receipt["exit_status"].zero?
             Hive::Daemon::DispatchRequestQueue.promote_sequence(
@@ -3868,18 +3822,6 @@ module Hive
         # captured at boot and only a full daemon restart applies new
         # values.
         @stale_agent_healer = stale_agent_healer
-        # Rebuild alongside the healer on SIGHUP reload so a future
-        # operator-tunable knob (e.g. max_per_tick) would take effect
-        # within one tick; today it carries only the dry_run flag.
-        @display_name_backfiller = DisplayNameBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run,
-          admission_open: -> { admission_open? }
-        )
-        @task_id_backfiller = TaskIdBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run
-        )
         @enabled_cache.clear
         @logger.event(
           :config_reloaded,

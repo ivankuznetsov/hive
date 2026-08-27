@@ -31,7 +31,7 @@ tasks. The watch pins the selected task id when one is available, so a later
 task that reuses the same `PROJECT:SLUG` cannot replace it in the stream; the
 original task must either remain present, appear in the verified archive, or
 be reported missing. An initially id-less task is provisionally pinned by its
-directory device/inode identity. If the daemon backfills an id onto that same
+directory device/inode identity. If an explicit migration backfills an id onto that same
 directory, the watch adopts and then pins the new id; it does not confuse the
 repair with task replacement. If active/archive materialization exposes
 multiple physical rows for the selected identity, including an id-less

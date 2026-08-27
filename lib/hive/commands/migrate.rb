@@ -4,6 +4,7 @@ require "time"
 require "yaml"
 require "hive/atomic_file"
 require "hive/config"
+require "hive/completion_time"
 require "hive/display_name/generator"
 require "hive/git_ops"
 require "hive/lock"
@@ -16,6 +17,7 @@ require "hive/recovery/migration"
 require "hive/repository_identity"
 require "hive/stages"
 require "hive/task"
+require "hive/task_action"
 require "hive/task_counter"
 require "hive/task_meta"
 require "hive/workflow_package/managed_store"
@@ -219,10 +221,24 @@ module Hive
             restart_requested = true
           end
         end
-        display_name_count = backfill_display_names(stages)
+        metadata_folders = task_folders(stages)
+        completion_time_candidates = discover_completion_times(
+          metadata_folders,
+          workflow_generation: workflow_generation, config: project_config
+        )
+        completion_time_count = 0
+        Hive::Lock.with_commit_lock(hive_state) do
+          completion_time_count = persist_completion_times_and_commit(
+            hive_state, completion_time_candidates,
+            workflow_generation: workflow_generation, config: project_config
+          )
+        end
+        display_name_count = backfill_display_names(metadata_folders)
         if display_name_count.positive?
           Hive::Lock.with_commit_lock(hive_state) do
-            commit_display_name_backfill(hive_state, display_name_count)
+            commit_metadata_backfill(
+              hive_state, label: "display names", count: display_name_count
+            )
           end
         end
         repository_identity = backfill_registered_repository_identity
@@ -241,6 +257,10 @@ module Hive
         end
         if display_name_count.positive?
           puts "hive: migrate backfilled #{display_name_count} display name#{display_name_count == 1 ? '' : 's'}"
+        end
+        if completion_time_count.positive?
+          puts "hive: migrate backfilled #{completion_time_count} completion time" \
+               "#{completion_time_count == 1 ? '' : 's'}"
         end
         if repository_identity
           puts "hive: migrate backfilled registered repository identity #{repository_identity}"
@@ -495,13 +515,112 @@ module Hive
         Hive::WorkflowPackage::MutationLock.with_lock(store.workflows_dir, &block)
       end
 
-      def backfill_display_names(stages)
+      def backfill_display_names(folders)
         cfg = Hive::Config.load(@project_path)
-        targets = task_folders(stages).select { |folder| Hive::TaskMeta.read(folder)[:display_name].nil? }
+        targets = folders.select { |folder| Hive::TaskMeta.read(folder)[:display_name].nil? }
 
         targets.count do |folder|
           name = @display_name_generator.new(Hive::Task.new(folder), cfg: cfg, commit: false).call
           !name.to_s.strip.empty?
+        end
+      end
+
+      def discover_completion_times(folders, workflow_generation:, config:)
+        history = Hive::CompletionTime::History.new
+        folders.each_with_object({}) do |folder, candidates|
+          completed_at = discover_completion_time(
+            folder, workflow_generation: workflow_generation,
+            config: config, history: history
+          )
+          candidates[folder] = completed_at if completed_at
+        end
+      end
+
+      def discover_completion_time(folder, workflow_generation:, config:, history:)
+        task = Hive::Task.new(folder, workflow_generation: workflow_generation)
+        return if task.completed_at
+
+        marker = Hive::Markers.current(task.state_file)
+        return unless archived_task?(task, marker, config: config)
+
+        Hive::CompletionTime.discover(task, history: history).tap do |completed_at|
+          next if completed_at
+
+          warn "hive: migrate could not discover a completion time for #{task.slug}; " \
+               "keeping it visible"
+        end
+      rescue Interrupt
+        raise
+      rescue StandardError => e
+        warn "hive: migrate could not discover a completion time for #{folder}: " \
+             "#{e.message}; keeping it visible"
+        nil
+      end
+
+      def persist_completion_times_and_commit(hive_state, candidates, workflow_generation:, config:)
+        snapshots = {}
+        count = candidates.count do |folder, completed_at|
+          persist_completion_time(
+            folder, completed_at, workflow_generation: workflow_generation,
+            config: config, snapshots: snapshots
+          )
+        end
+        return 0 if count.zero?
+
+        commit_metadata_backfill!(
+          hive_state, label: "completion times", count: count,
+          paths: completion_time_metadata_paths(snapshots.keys)
+        )
+        count
+      rescue Interrupt
+        restore_completion_time_backfill(hive_state, snapshots)
+        raise
+      rescue StandardError
+        restore_completion_time_backfill(hive_state, snapshots)
+        raise
+      end
+
+      def persist_completion_time(folder, completed_at, workflow_generation:, config:, snapshots:)
+        return false unless File.directory?(folder)
+
+        task = Hive::Task.new(folder, workflow_generation: workflow_generation)
+        return false if task.completed_at
+
+        marker = Hive::Markers.current(task.state_file)
+        return false unless archived_task?(task, marker, config: config)
+
+        snapshot = Hive::TaskMeta.snapshot(folder)
+        snapshots[folder] = snapshot
+        Hive::TaskMeta.write_completed_at_once(folder, completed_at)
+        true
+      rescue Interrupt
+        raise
+      rescue StandardError => e
+        warn "hive: migrate could not migrate a completion time for #{folder}: " \
+             "#{e.message}; keeping it visible"
+        false
+      end
+
+      def archived_task?(task, marker, config:)
+        Hive::TaskAction.for(task, marker, config: config).key ==
+          Hive::Schemas::TaskActionKind::ARCHIVED
+      end
+
+      def restore_completion_time_backfill(hive_state, snapshots)
+        snapshots.each { |folder, snapshot| Hive::TaskMeta.restore(folder, snapshot) }
+        paths = completion_time_metadata_paths(snapshots.keys)
+        return if paths.empty?
+
+        Hive::GitOps.new(@project_path).run_git!("-C", hive_state, "add", "-A", "--", *paths)
+      rescue StandardError => e
+        warn "hive: migrate could not restore completion-time metadata after a migration failure: " \
+             "#{e.class}: #{e.message}"
+        raise
+      end
+
+      def completion_time_metadata_paths(folders)
+        folders.map do |folder|
+          File.join("stages", File.basename(File.dirname(folder)), File.basename(folder), "meta.yml")
         end
       end
 
@@ -587,20 +706,32 @@ module Hive
              "git -C #{hive_state} commit -m '#{message}'"
       end
 
-      def commit_display_name_backfill(hive_state, display_name_count)
-        ops = Hive::GitOps.new(@project_path)
-        ops.run_git!("-C", hive_state, "add", "-A")
-        _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
-        return if status.success?
-
-        ops.run_git!("-C", hive_state, "commit", "-m",
-                     "hive: migrate display names (#{display_name_count} task#{display_name_count == 1 ? '' : 's'})")
+      def commit_metadata_backfill(hive_state, label:, count:)
+        commit_metadata_backfill!(hive_state, label: label, count: count)
       rescue Hive::GitError => e
-        warn "hive: migrate generated display names but could not commit them " \
+        warn "hive: migrate generated #{label} but could not commit them " \
              "to the hive-state git history: #{e.class}: #{e.message}"
         warn "hive: recover with:  git -C #{hive_state} add -A && " \
-             "git -C #{hive_state} commit -m 'hive: migrate display names " \
-             "(#{display_name_count} task#{display_name_count == 1 ? '' : 's'})'"
+             "git -C #{hive_state} commit -m 'hive: migrate #{label} " \
+             "(#{count} task#{count == 1 ? '' : 's'})'"
+      end
+
+      def commit_metadata_backfill!(hive_state, label:, count:, paths: nil)
+        ops = Hive::GitOps.new(@project_path)
+        add_args = [ "-C", hive_state, "add", "-A" ]
+        add_args.concat([ "--", *paths ]) if paths
+        ops.run_git!(*add_args)
+        diff_args = [ "git", "-C", hive_state, "diff", "--cached", "--quiet" ]
+        diff_args.concat([ "--", *paths ]) if paths
+        _out, _err, status = Open3.capture3(*diff_args)
+        return if status.success?
+
+        commit_args = [
+          "-C", hive_state, "commit", "-m",
+          "hive: migrate #{label} (#{count} task#{count == 1 ? '' : 's'})"
+        ]
+        commit_args.concat([ "--only", "--", *paths ]) if paths
+        ops.run_git!(*commit_args)
       end
 
       def commit_managed_workflow_cleanup(hive_state, operations)

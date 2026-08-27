@@ -48,6 +48,7 @@ module Hive
 
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
                      job_manifest: nil, result_file: nil, list: false, show: nil,
+                     archive: nil,
                      limit: nil, cursor: nil, full: false,
                      mapper_factory: nil, reviewer_factory: nil,
                      caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil,
@@ -73,6 +74,7 @@ module Hive
         @result_file = result_file
         @list_jobs = list == true
         @show_job = show
+        @archive_job = archive
         @query_limit = limit
         @query_cursor = cursor
         @query_full = full == true
@@ -117,6 +119,7 @@ module Hive
 
       def call
         validate_mode!
+        return run_job_archive if archive_mode?
         return run_job_query if query_mode?
         payload, theses = run_cycle
         emit(payload, theses)
@@ -253,12 +256,12 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = @config_loader.call(project_root)
-        unless query_mode? || Hive::Workflows.coding_id?(cfg["default_workflow"])
+        unless query_mode? || archive_mode? || Hive::Workflows.coding_id?(cfg["default_workflow"])
           raise Hive::ConfigError,
                 "hive refactor-patrol: project #{entry.fetch('name').inspect} uses non-coding " \
                 "default_workflow #{cfg['default_workflow'].inspect}"
         end
-        unless query_mode? || (cfg["refactor_patrol"] || {})["enabled"]
+        unless query_mode? || archive_mode? || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end
 
@@ -461,6 +464,19 @@ module Hive
       end
 
       def validate_mode!
+        if archive_mode?
+          incompatible = [
+            @list_jobs, @show_job, @pr, @job_manifest, @result_file,
+            @feature_hint, @entrypoint_hint, @path_hint, @changed_since,
+            @query_limit, @query_cursor
+          ].compact.any? || @dry_run || @query_full
+          if incompatible
+            raise Hive::RefactorPatrol::JobQuery::UsageError,
+                  "hive refactor-patrol --archive cannot be combined with other modes or modifiers"
+          end
+          Hive::RefactorPatrol::JobQuery.validate_job_id!(@archive_job)
+          return
+        end
         if query_requested? && !query_mode?
           raise Hive::RefactorPatrol::JobQuery::UsageError,
                 "hive refactor-patrol --limit/--cursor/--full require --list or --show"
@@ -1020,6 +1036,10 @@ module Hive
         @list_jobs || !@show_job.nil?
       end
 
+      def archive_mode?
+        !@archive_job.nil?
+      end
+
       def query_requested?
         query_mode? || !@query_limit.nil? || !@query_cursor.nil? || @query_full
       end
@@ -1046,6 +1066,38 @@ module Hive
           puts query.text(payload)
         end
         payload
+      end
+
+      def run_job_archive
+        entry, project_root, = resolve_project!
+        if @capability_context
+          @capability_context.require_filesystem_read!(
+            ".hive-state/refactor_patrol/**"
+          )
+          @capability_context.require_filesystem_write!(
+            ".hive-state/refactor_patrol/**"
+          )
+        end
+        store = job_store_for(entry, project_root)
+        result = store.archive_legacy_actions!(@archive_job)
+        query = Hive::RefactorPatrol::JobQuery.new(store)
+        payload = query.show_job_envelope(
+          project: entry.fetch("name"), project_root: project_root,
+          job: result.fetch(:job)
+        )
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts "hive refactor-patrol archive: #{result.fetch(:status)} " \
+               "archived_actions=#{result.fetch(:archived_actions)}"
+          puts query.text(payload)
+        end
+        payload
+      rescue Hive::RefactorPatrol::JobStore::RecordNotFound
+        raise Hive::RefactorPatrol::JobQuery::NotFound,
+              "refactor patrol job #{@archive_job.inspect} was not found"
+      rescue Hive::RefactorPatrol::JobStore::InconsistentRecord => error
+        raise Hive::ConfigError, error.message
       end
 
       def source_pr_context
@@ -1180,7 +1232,11 @@ module Hive
       def emit_error(error)
         return unless @json
 
-        payload = if query_requested?
+        payload = if archive_mode?
+          Hive::RefactorPatrol::JobQuery.error_envelope(
+            error, action: "show"
+          )
+        elsif query_requested?
           Hive::RefactorPatrol::JobQuery.error_envelope(
             error,
             action: @list_jobs ? "list" : (@show_job.nil? ? nil : "show")

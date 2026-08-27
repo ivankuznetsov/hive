@@ -47,9 +47,6 @@ module Hive
         marker_heal_failed
         recovery_requested
         recovery_blocked
-        display_name_backfill
-        task_id_backfill
-        task_id_backfill_commit_skipped
         update_available
         update_check_no_result
         update_check_error
@@ -67,6 +64,7 @@ module Hive
         dispatch_request_attached
         dispatch_request_terminal_replay
         dispatch_request_completed
+        dispatch_request_reconciliation_failed
         dispatch_request_rejected
         dispatch_request_blocked
         dispatch_request_expired

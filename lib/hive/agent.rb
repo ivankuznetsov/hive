@@ -68,7 +68,7 @@ module Hive
                    permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
-                   isolate_environment: false)
+                   isolate_environment: false, terminate_on_parent_signal: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -95,6 +95,7 @@ module Hive
         argument.to_s.dup.freeze
       end.freeze
       @isolate_environment = isolate_environment == true
+      @terminate_on_parent_signal = terminate_on_parent_signal == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
@@ -280,8 +281,8 @@ module Hive
         "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
       )
 
-      old_int = install_chained_signal_trap("INT") { kill_group(pgid) }
-      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) }
+      old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
+      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
 
       reader = Thread.new do
         open_private_log(log_file) do |log|

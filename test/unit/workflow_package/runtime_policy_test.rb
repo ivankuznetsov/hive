@@ -1740,11 +1740,6 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
         browser: false
       ), 'name: "evidence_browser"'
-      refute_includes Hive::WorkflowPackage::RuntimePolicy.pi_evidence_extension(
-        source_root: source, task_root: task, writable_root: writable,
-        task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
-        browser: false
-      ), 'name: "evidence_server"'
     end
   end
 

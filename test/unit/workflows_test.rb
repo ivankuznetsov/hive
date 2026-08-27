@@ -285,4 +285,12 @@ class WorkflowsTest < Minitest::Test
 
     assert_includes error.message, "ambiguous stage 'done'"
   end
+
+  def test_assert_known_stage_filter_propagates_typed_ambiguity
+    error = assert_raises(Hive::Workflows::AmbiguousStageRef) do
+      Hive::Workflows.assert_known_stage_filter!("done", [ { "path" => Dir.pwd } ])
+    end
+
+    assert_includes error.message, "ambiguous stage 'done'"
+  end
 end

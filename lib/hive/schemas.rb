@@ -519,5 +519,4 @@ module Hive
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
   end
-
 end

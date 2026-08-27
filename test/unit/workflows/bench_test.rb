@@ -256,7 +256,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes stages, "HB_ERROR hive_runtime_visible_to_candidate"
     assert_includes stages, "CONTROLLER_BIN=/opt/hb/controller-bin"
     assert_includes controller_git, "--reuid=1000"
-    assert_includes controller_git, 'args[$position]="$HB_CONTROLLER_ORIGIN"'
+    assert_includes controller_git, 'args[position]="$HB_CONTROLLER_ORIGIN"'
     assert_includes stages, 'cat >"$CONTROLLER_BIN/gh"'
     [ pi_launcher, opencode_launcher ].each do |launcher|
       assert_includes launcher, "--bounding-set=-all --inh-caps=-all --ambient-caps=-all"

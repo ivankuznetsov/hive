@@ -30,7 +30,7 @@ fi
 if [ "${args[$index]:-}" = "push" ]; then
   for ((position = index + 1; position < ${#args[@]}; position++)); do
     if [ "${args[$position]}" = "origin" ]; then
-      args[$position]="$HB_CONTROLLER_ORIGIN"
+      args[position]="$HB_CONTROLLER_ORIGIN"
       break
     fi
   done

@@ -1147,18 +1147,17 @@ class WorkflowsBenchTest < Minitest::Test
     Dir.mktmpdir("hive-bench-quota-marker") do |dir|
       state_file = File.join(dir, "generate.md")
       File.write(state_file, "# Generate\n<!-- AGENT_WORKING -->\n")
-      ruby_lib = [ File.expand_path("../../../lib", __dir__), ENV["RUBYLIB"] ].compact
-        .join(File::PATH_SEPARATOR)
       shell = <<~BASH
         set -euo pipefail
         STATE_FILE="$1"
+        SOURCE="$2"
         #{function}
         write_limits_reached "provider limit"
       BASH
 
       _out, err, status = Open3.capture3(
-        { "RUBYLIB" => ruby_lib, "HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "60" },
-        "bash", "-c", shell, "--", state_file
+        { "RUBYLIB" => nil, "HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "60" },
+        "bash", "-c", shell, "--", state_file, File.expand_path("../../..", __dir__)
       )
 
       assert status.success?, err
@@ -1367,18 +1366,17 @@ class WorkflowsBenchTest < Minitest::Test
         "# Judge\n<!-- AGENT_WORKING -->\n" +
           ("x" * (Hive::Markers::MAX_MARKER_SCAN_BYTES + 1))
       )
-      ruby_lib = [ File.expand_path("../../../lib", __dir__), ENV["RUBYLIB"] ].compact
-        .join(File::PATH_SEPARATOR)
       shell = <<~BASH
         set -euo pipefail
         STATE_FILE="$1"
+        SOURCE="$2"
         #{function}
         write_limits_reached "provider limit"
       BASH
 
       _out, err, status = Open3.capture3(
-        { "RUBYLIB" => ruby_lib, "HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "60" },
-        "bash", "-c", shell, "--", state_file
+        { "RUBYLIB" => nil, "HIVE_LIMITS_RETRY_COOLDOWN_SEC" => "60" },
+        "bash", "-c", shell, "--", state_file, File.expand_path("../../..", __dir__)
       )
 
       assert status.success?, err

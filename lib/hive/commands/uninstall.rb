@@ -118,7 +118,7 @@ module Hive
         return unless File.exist?(pid_file)
 
         # The bot's pid file is a YAML Hash payload ({pid:, started_at:}),
-        # unlike the daemon's bare-integer .daemon.pid. Guard is_a?(Hash)
+        # like the daemon's .daemon.pid payload. Guard is_a?(Hash)
         # before indexing: a corrupt/legacy bare scalar is still valid YAML
         # (e.g. "12345" parses to an Integer), and Integer#[] would raise an
         # unrescued TypeError that aborts the entire uninstall after only the
@@ -301,17 +301,24 @@ module Hive
 
       # Best-effort: find a running foreground daemon writing under
       # state_home and TERM it before purge would yank the floor.
-      # No-ops if the daemon isn't running.
+      # No-ops if the daemon isn't running. Shutdown is delegated to the
+      # daemon lifecycle boundary (Hive::PidFile.stop) and never signalled
+      # from a locally parsed number: the owner writes a YAML
+      # process-identity payload, a bare-integer parse of that doc reads
+      # PID 0 (a silent no-op shutdown), and a live PID whose start time
+      # no longer matches may belong to an unrelated process — reused and
+      # unverified identities are refused, mirroring `hive daemon stop`.
       def stop_foreground_daemon
-        pid_file = File.join(Hive::Paths.state_home, ".daemon.pid")
-        return unless File.exist?(pid_file)
-
-        pid = File.read(pid_file).strip.to_i
-        return if pid.zero?
-
-        Process.kill("TERM", pid)
-      rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT
-        nil
+        outcome = Hive::PidFile.stop(
+          File.join(Hive::Paths.state_home, ".daemon.pid")
+        )
+        case outcome[:status]
+        when :reused
+          @output.puts "hive: foreground daemon PID #{outcome[:pid]} appears reused " \
+                       "(start_time mismatch); refusing to signal"
+        when :unverified
+          @output.puts "hive: cannot verify PID #{outcome[:pid]} is the hive daemon; refusing to signal"
+        end
       end
 
       def prompt_yes?(message)

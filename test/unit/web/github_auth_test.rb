@@ -118,8 +118,16 @@ class GithubAuthTest < Minitest::Test
       assert_equal expected, auth.poll_device_flow("dev-1"), "GitHub error #{error} must map to #{expected[:state]}"
     end
 
+    # RFC 8628 §3.5: slow_down is additive, so the payload's own `interval`
+    # (when GitHub sends one) must be ignored in favor of the fixed penalty.
     auth, = build_auth(token: JSON.generate("error" => "slow_down", "interval" => 11))
-    assert_equal({ state: :slow_down, interval: 11 }, auth.poll_device_flow("dev-1"))
+    assert_equal({ state: :slow_down, increase_by: Hive::Web::GithubAuth::SLOW_DOWN_PENALTY },
+                 auth.poll_device_flow("dev-1"),
+                 "slow_down must report the additive penalty, not an absolute interval")
+
+    auth, = build_auth(token: JSON.generate("error" => "slow_down"))
+    assert_equal({ state: :slow_down, increase_by: 5 }, auth.poll_device_flow("dev-1"),
+                 "slow_down without an interval member still reports the +5 penalty")
   end
 
   def test_poll_raises_on_unknown_error_payload

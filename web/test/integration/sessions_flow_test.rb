@@ -4,6 +4,8 @@ require "test_helper"
 # only Net::HTTP is replaced via the `http:` DI seam (the same seam the
 # gem's unit suite uses): start → wait-page poll → grant/denial.
 class SessionsFlowTest < ActionDispatch::IntegrationTest
+  include ActiveSupport::Testing::TimeHelpers
+
   class FakeHttp
     def initialize(device:, token:, user:)
       @device = device
@@ -74,10 +76,10 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     res
   end
 
-  def install_auth(login: "alice", token_body: nil)
+  def install_auth(login: "alice", token_body: nil, device_body: nil)
     token_body ||= JSON.generate("access_token" => "gho_test")
     SessionsController.http_client = FakeHttp.new(
-      device: http_ok(DEVICE_BODY),
+      device: http_ok(device_body || DEVICE_BODY),
       token: http_ok(token_body),
       user: http_ok(JSON.generate("login" => login))
     )
@@ -129,6 +131,33 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
 
     assert_response :forbidden
     assert_match(/expired/i, response.body)
+  end
+
+  test "a slow_down grant raises our polling interval by five over its current value" do
+    # GitHub's slow_down payload carries no usable `interval`; the flow must
+    # grow its OWN interval (started at 5) by the additive penalty to 10.
+    install_auth(
+      device_body: JSON.generate(
+        "device_code" => "dev-1", "user_code" => "ABCD-1234",
+        "verification_uri" => "https://github.com/login/device",
+        "expires_in" => 900, "interval" => 5
+      ),
+      token_body: JSON.generate("error" => "slow_down")
+    )
+    begin_device_flow
+    assert_equal 5, session[:github_device]["interval"]
+
+    # Advance exactly to the server-issued poll boundary instead of making the
+    # suite wait on wall-clock scheduling.
+    travel_to(Time.at(session[:github_device]["next_poll_at"])) do
+      get "/auth/github/wait"
+
+      assert_response :success, "a slow_down grant must keep showing the waiting page"
+      assert_equal 10, session[:github_device]["interval"],
+                   "RFC 8628 slow_down is additive: interval must grow from 5 to 5+5, not reset to a payload value"
+      assert session[:github_device]["next_poll_at"] >= Time.now.to_i + 9,
+                   "the next poll must be pushed back by the raised interval"
+    end
   end
 
   test "an owner change evicts existing sessions" do

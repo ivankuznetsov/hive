@@ -134,10 +134,20 @@ provisioning helper runs through the shared `phase(name)` wrapper: the block
 returns `[ok, data]`, and any `StandardError` is recorded as an `ok:false`
 phase with a `"Class: message"` `message` instead of aborting before the JSON
 envelope can be emitted. This covers agent skills, QMD bootstrap, web-bundle
-refresh, daemon and babysitter service install, enrollment, and optional web-service install
-through the same failure shape. An unavailable agent is a non-blocking skip;
+refresh, daemon and babysitter service install, enrollment, and optional
+web-service install through the same failure shape. An unavailable agent is a non-blocking skip;
 an actionable conflict, failed operation, or residual unhealthy available
 target fails the phase.
+
+The web URL is resolved from `Config.load_global_web` both inside `call` (the
+`web` phase) and again inside `emit`, so a malformed global `web` block (a
+non-hash scalar) cannot be handled by the `phase` wrapper — it would raise
+`Hive::ConfigError` before any envelope exists. Setup therefore resolves the
+config once with a documented-defaults fallback: a `ConfigError` is remembered,
+URLs stay resolvable from defaults, managed service install is blocked (not
+performed against fabricated defaults), and the remembered error fails the
+`web` phase (`ok:false`, message on the phase) so the run exits non-zero while
+still emitting the envelope.
 
 If Thor rejects argv before `Hive::Commands::Setup` runs (for example
 `hive setup extra --json`), `bin/hive` still emits the versioned

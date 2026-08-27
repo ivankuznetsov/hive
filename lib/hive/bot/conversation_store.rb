@@ -28,6 +28,12 @@ module Hive
       def start(chat_id:, slug:, question_n:, binding: nil, mode: :path_b, project: nil)
         validate_mode!(mode)
         synchronize do
+          # A chat has exactly one active answer conversation. Starting a new
+          # one (e.g. `/answer other-slug` while task A is still open)
+          # supersedes any previous entry for the same chat; otherwise the
+          # stale entry would linger and the slug-less lookups used by the
+          # free-text path (`get(chat_id:)`) could return the old task.
+          @states.delete_if { |existing_key, _state| existing_key.first == chat_id }
           @states[key(chat_id, slug)] = State.new(
             chat_id: chat_id,
             project: project,

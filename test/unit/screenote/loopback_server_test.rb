@@ -109,7 +109,9 @@ class ScreenoteLoopbackServerTest < Minitest::Test
     assert_includes response, "Screenote connected"
   end
 
-  def test_wait_for_callback_rejects_oversized_request_headers
+  def test_wait_for_callback_drops_oversized_request_headers_and_keeps_waiting
+    # Oversized headers are CONNECTION-fatal: that socket is dropped (with a
+    # warning) and the wait keeps going for the real redirect.
     server = Hive::Screenote::LoopbackServer.new
     waiter = wait_for(server)
     socket = TCPSocket.new(server.host, server.port)
@@ -122,8 +124,11 @@ class ScreenoteLoopbackServerTest < Minitest::Test
       # The server hit the cap and closed mid-write — expected.
     end
 
-    err = assert_raises(Hive::Error) { waiter.value }
-    assert_match(/exceeded .* bytes/, err.message)
+    response = raw_get(server, "/callback?code=code-123&state=state-123")
+    result = waiter.value
+
+    assert_equal({ "code" => "code-123", "state" => "state-123" }, result)
+    assert_includes response, "Screenote connected"
   ensure
     socket&.close
   end
@@ -145,18 +150,45 @@ class ScreenoteLoopbackServerTest < Minitest::Test
     server&.close
   end
 
-  def test_read_callback_times_out_on_a_stalled_partial_request
-    server = Hive::Screenote::LoopbackServer.new(read_timeout_sec: 0.05)
+  def test_wait_for_callback_drops_a_silent_connection_and_still_serves_the_real_callback
+    # Regression: a connect-with-no-data probe (browser/OS prefetch) used to
+    # trip the per-read deadline and raise straight through wait_for_callback,
+    # closing the listener BEFORE the real redirect ever arrived. A read
+    # failure on one connection must be CONNECTION-fatal, not flow-fatal.
+    server = Hive::Screenote::LoopbackServer.new(read_timeout_sec: 0.1)
     waiter = wait_for(server)
-    socket = TCPSocket.new(server.host, server.port)
-    # Send a request line + one header but NEVER the terminating blank line,
-    # and keep the socket open so the header read loop blocks.
-    socket.write("GET /callback?code=c&state=state-123 HTTP/1.1\r\nHost: #{server.host}\r\n")
 
-    err = assert_raises(Hive::Error) { waiter.value }
-    assert_match(/timed out reading/, err.message)
+    silent = TCPSocket.new(server.host, server.port) # sends nothing, stays open
+    sleep 0.3 # let the per-connection read deadline fire while silent holds its slot
+
+    response = raw_get(server, "/callback?code=code-123&state=state-123")
+    result = waiter.value
+
+    # The silent connection tripped its read deadline, was dropped, and the
+    # real callback arriving afterwards still succeeded.
+    assert_equal({ "code" => "code-123", "state" => "state-123" }, result)
+    assert_includes response, "Screenote connected"
   ensure
-    socket&.close
+    silent&.close
+  end
+
+  def test_wait_for_callback_drops_a_stalled_partial_request_and_keeps_waiting
+    # A partial request (headers sent but never the terminating blank line,
+    # socket held open) hits the per-connection read deadline, is dropped,
+    # and the real callback arriving later still succeeds.
+    server = Hive::Screenote::LoopbackServer.new(read_timeout_sec: 0.1)
+    waiter = wait_for(server)
+    stalled = TCPSocket.new(server.host, server.port)
+    stalled.write("GET /callback?code=c&state=state-123 HTTP/1.1\r\nHost: #{server.host}\r\n")
+    sleep 0.3
+
+    response = raw_get(server, "/callback?code=code-123&state=state-123")
+    result = waiter.value
+
+    assert_equal({ "code" => "code-123", "state" => "state-123" }, result)
+    assert_includes response, "Screenote connected"
+  ensure
+    stalled&.close
   end
 
   private

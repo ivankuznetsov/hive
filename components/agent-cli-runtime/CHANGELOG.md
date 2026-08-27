@@ -8,6 +8,16 @@
   overlay so callers can supply the same deny-first rules through native
   per-process configuration without duplicating policy generation.
 
+- Carry the already-resolved OpenCode executable on `ProbeRequest` (`executable:`)
+  instead of re-encoding it as the `AGENT_CLI_RUNTIME_OPENCODE_BIN` environment
+  override. The route-aware probe now resolves the executable once — honoring a
+  caller-supplied value first — and threads that single value through the
+  installation check, version check, every local inspection command, and the
+  reported result executable. `Profile#binary_installed?`,
+  `Profile#check_version!`, and `Profile#capture_local` accept an optional
+  `executable:` override; existing environment-based resolution is unchanged
+  when no explicit value is carried.
+
 ## 0.2.3 - 2026-08-21
 
 - Classify extracted provider failures once at the runtime boundary as

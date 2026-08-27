@@ -28,6 +28,32 @@ class HiveBotConversationStoreTest < Minitest::Test
     assert_equal "slug", store.get(chat_id: 123).slug
   end
 
+  # Regression: starting a second answer conversation for the same chat must
+  # supersede the first. Previously both entries coexisted under different
+  # keys and `get(chat_id:)` returned whichever slug was started first, so a
+  # free-text reply after opening task B was written to task A.
+  def test_start_supersedes_previous_conversation_for_same_chat
+    store.start(chat_id: 1, slug: "task-a", question_n: 1)
+    store.start(chat_id: 1, slug: "task-b", question_n: 1)
+
+    state = store.get(chat_id: 1)
+
+    refute_nil state, "the newest conversation for the chat must remain active"
+    assert_equal "task-b", state.slug,
+                 "slug-less lookup must return the most recently started conversation"
+    assert_equal 1, store.get(chat_id: 1, slug: "task-b").question_n
+    assert_nil store.get(chat_id: 1, slug: "task-a"),
+               "the superseded conversation must be removed, not left behind"
+  end
+
+  def test_start_in_one_chat_does_not_disturb_other_chats
+    store.start(chat_id: 1, slug: "task-a", question_n: 1)
+    store.start(chat_id: 2, slug: "task-b", question_n: 1)
+
+    assert_equal "task-a", store.get(chat_id: 1).slug
+    assert_equal "task-b", store.get(chat_id: 2).slug
+  end
+
   def test_update_mutates_known_attrs_and_refreshes_timestamp
     store.start(chat_id: 123, slug: "slug", question_n: 1)
     @now += 10

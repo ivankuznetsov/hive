@@ -229,6 +229,33 @@ and both derived projection files, plus the Patrol-specific manifests and
 receipts. An agent cannot establish a trusted projection or journal state by
 rewriting those task-folder files during its run.
 
+Before any provider process starts, `ManagedAgentCustody` requires
+Linux bubblewrap and creates one task-private Git directory, index, object
+alternates mount, and `TMPDIR`. The namespace starts from a read-only host root
+and rebinds only the selected Fix worktree, exact task directory, private
+runtime directory, and admitted provider state directories as writable. Each
+provider directory is canonicalized and must be strictly below the canonical
+HOME without overlapping the selected task or worktree; outside-HOME paths,
+symlink escapes, and worktree-contained provider paths fail before launch.
+The controller resolves the admitted provider binding before building that
+mount plan and passes the same binding to the launch. Real common/worktree Git
+metadata, HOME, existing Git config targets, and checked-out submodule `.git`
+pointers remain read-only; an absent protected target below a writable mount
+fails the launch instead of widening an ancestor mount. Private metadata is
+mounted at the selected worktree's discovered Git directory, so ordinary Git
+discovery supports `git add` and `git commit` without process-wide repository
+location `GIT_*` variables or changing nested repository discovery.
+
+Fix receives a writable code worktree and its exact task-report directory.
+After a clean agent result and valid Artifact Firewall report, Hive imports
+only the exact clean private HEAD, rechecks the source branch/base, and moves
+the real branch with an expected-old-OID compare-and-swap. Inbox and Review
+mount the code worktree read-only and never adopt private commits. Missing or
+unusable bubblewrap fails before `Base.spawn_agent`, and cleanup failure retains
+the private directory with a warning instead of masking the attempt outcome.
+This is targeted Git and report containment, not a general same-user filesystem
+or network sandbox; Artifact Firewall remains an independent postcondition.
+
 Every managed Patrol Fix agent is also told to return its report as the exact
 final JSON object. If the agent exits successfully without creating the report,
 the controller may materialize only that exact, untruncated JSON object before

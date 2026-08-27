@@ -15,6 +15,12 @@ module HiveChangedCoverage
   # Deliberate source-to-test exceptions where naming conventions do not hold.
   # Values are repo-relative test files or empty arrays (no focused test).
   SOURCE_TEST_OVERRIDES = {
+    "lib/hive/agent_support/opencode/execution.rb" =>
+      [ "test/unit/opencode_agent_lifecycle_test.rb" ],
+    "lib/hive/patrol_fix.rb" =>
+      [ "test/unit/patrol_fix/agent_git_isolation_test.rb" ],
+    "lib/hive/agent_git_gate/isolation.rb" => [ "test/unit/agent_git_gate_test.rb" ],
+    "lib/hive/stages/base.rb" => [ "test/unit/spawn_agent_test.rb" ],
     "lib/hive/version.rb" => [],
     "lib/hive/errors.rb" => [],
     "lib/hive/stages/review.rb" => [

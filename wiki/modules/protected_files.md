@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-08-21
+updated: 2026-08-27
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -190,6 +190,14 @@ Hive keeps stage semantics above the facade:
   control anchors in one capture, requires a regular in-root
   `fix-report.md`, and leaves repository/report semantics to
   `AgentReport` and `DraftPrHandoff`.
+- `Stages::ManagedAgentCustody` retains the same before/after Patrol task and
+  Git-config anchors, but now composes them with
+  `PatrolFix::AgentGitIsolation`. The mount namespace makes the real common Git
+  directory, worktree Git directory or pointer, HOME, and declared Git config
+  paths read-only before the provider starts. Fix receives a writable code
+  worktree and private Git metadata; Inbox and Review receive a read-only code
+  worktree. Artifact Firewall remains the independent postcondition and
+  recovery layer rather than claiming that its snapshots performed prevention.
 - `Hive::Agent` and `Hive::ClaudeLauncher` use required-output admission for
   `:output_file_exists` status polling.
 

@@ -18,6 +18,7 @@ module Hive
     REMOTE_NAME = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
     SAFE_REMOTE_SCHEMES = %w[git https ssh].freeze
     NETWORK_TIMEOUT_SEC = Hive::ManagedGit::NETWORK_TIMEOUT_SEC
+    DEFAULT_GITLINK_OUTPUT_BYTES = 64 * 1024
 
     class Error < Hive::Error; end
     class InvalidRequest < Error; end
@@ -26,6 +27,7 @@ module Hive
     class RemoteConflict < Error; end
     class MaterializationFailed < Error; end
     class PublicationFailed < Error; end
+    class IsolationFailed < Error; end
 
     ReadResult = Data.define(
       :operation, :stdout, :stderr, :exitstatus, :overflow
@@ -204,6 +206,30 @@ module Hive
         stderr: immutable(err),
         exitstatus: status.exitstatus,
         overflow: overflow
+      )
+    rescue ArgumentError, TypeError => e
+      raise InvalidRequest, e.message
+    end
+
+    def prepare_isolated_metadata(repository_path:, worktree_path:, destination:,
+                                  destination_root:)
+      Isolation.prepare(
+        repository_path:, worktree_path:, destination:, destination_root:
+      )
+    end
+
+    def adopt_isolated_metadata(metadata)
+      Isolation.adopt(metadata)
+    end
+
+    # Return registered submodule paths through the hardened Git boundary.
+    # The bounded default belongs to this closed facade; callers cannot reach
+    # ManagedGit's broader process surface from production components.
+    def tracked_gitlinks(repository_path,
+                         max_stdout_bytes: DEFAULT_GITLINK_OUTPUT_BYTES)
+      repository = repository_path(repository_path)
+      Hive::ManagedGit.tracked_gitlinks(
+        repository, max_stdout_bytes: max_stdout_bytes
       )
     rescue ArgumentError, TypeError => e
       raise InvalidRequest, e.message
@@ -843,5 +869,14 @@ module Hive
       value && immutable(value)
     end
     private_class_method :immutable_or_nil
+  end
+end
+
+require "hive/agent_git_gate/isolation"
+
+module Hive
+  module AgentGitGate
+    IsolatedMetadata = Isolation::IsolatedMetadata
+    AdoptionReceipt = Isolation::AdoptionReceipt
   end
 end

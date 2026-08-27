@@ -1631,9 +1631,7 @@ class StagesAgentTest < Minitest::Test
     failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
     with_replaced_singleton_method(Open3, :capture3, ->(*) { [ "stdout detail", "", failed ] }) do
       error = assert_raises(Hive::StageError) do
-        Hive::Stages::ManagedAgentCustody.send(
-          :git_path!, "/tmp/repo", "--absolute-git-dir"
-        )
+        Hive::Stages::ManagedAgentCustody.git_control_paths!("/tmp/repo")
       end
       assert_includes error.message, "stdout detail"
     end

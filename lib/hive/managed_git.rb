@@ -10,10 +10,12 @@ module Hive
   module ManagedGit
     NETWORK_TIMEOUT_SEC = 60
     TERMINATION_GRACE_SEC = 0.1
+    MAX_TRACKED_GITLINKS = 128
+    DEFAULT_GITLINK_OUTPUT_BYTES = 64 * 1024
     GH_BIN_ENV = "HIVE_GH_BIN"
     COMMANDS = %w[
-      cat-file diff fetch ls-remote merge-base push remote rev-list rev-parse
-      show status symbolic-ref worktree
+      cat-file diff fetch init ls-remote merge-base push read-tree remote
+      rev-list rev-parse show status symbolic-ref update-ref worktree
     ].freeze
     CONFIG = [
       "core.hooksPath=/dev/null",
@@ -21,6 +23,7 @@ module Hive
       "core.sshCommand=",
       "core.askPass=",
       "core.attributesFile=/dev/null",
+      "core.useReplaceRefs=false",
       "core.excludesFile=/dev/null",
       "diff.external=",
       "interactive.diffFilter=",
@@ -42,12 +45,58 @@ module Hive
       /\Aurl\..*\.(?:insteadof|pushinsteadof)\z/,
       /\Acredential(?:\..*)?\.helper\z/,
       /\Aremote\..*\.(?:uploadpack|receivepack)\z/,
-      /\Acore\.(?:alternaterefscommand|gitproxy|pager|worktree)\z/,
+      /\Auploadpack\.packobjectshook\z/,
+      /\Acore\.(?:alternaterefscommand|gitproxy|pager)\z/,
       /\Ahttp(?:\..*)?\..+\z/,
       /\Apager\..*\z/
     ].freeze
 
     module_function
+
+    # Return the checked-out submodule paths from a bounded, fixed Git read.
+    # This deliberately does not expose a general ls-files/config surface.
+    def tracked_gitlinks(path, max_stdout_bytes: DEFAULT_GITLINK_OUTPUT_BYTES)
+      limit = Integer(max_stdout_bytes)
+      raise ArgumentError, "managed Git gitlink output limit must be positive" unless limit.positive?
+
+      out, _err, status, overflow = capture3_bounded_fixed(
+        fixed_command(path, "ls-files", "--stage", "-z"), limit
+      )
+      unless status.success? && !overflow
+        raise ArgumentError, "managed Git gitlink discovery failed"
+      end
+
+      paths = out.split("\0").filter_map do |record|
+        next unless record.start_with?("160000 ")
+
+        match = /\A160000 [0-9a-f]{40}(?:[0-9a-f]{24})? [0-3]\t(.+)\z/.match(record)
+        raise ArgumentError, "managed Git gitlink discovery returned malformed index data" unless match
+
+        gitlink_path!(match[1])
+      end
+      raise ArgumentError, "managed Git gitlink discovery exceeded the path limit" if
+        paths.length > MAX_TRACKED_GITLINKS
+
+      paths.uniq.sort.freeze
+    rescue TypeError
+      raise ArgumentError, "managed Git gitlink output limit must be positive"
+    end
+
+    # Set only the two private-repository values needed for ordinary Git
+    # discovery through a .git directory or gitdir pointer. This is not a
+    # generic config API: callers cannot choose the key, command, or value.
+    def configure_isolated_worktree(git_dir:, worktree:)
+      private_dir = existing_directory!(git_dir, "private Git directory")
+      tree = existing_directory!(worktree, "private Git worktree")
+      [ [ "core.bare", "false" ], [ "core.worktree", tree ] ].each do |key, value|
+        out, err, status = capture3_isolated_config(private_dir, tree, key, value)
+        next if status.success?
+
+        detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+        raise ArgumentError, "managed Git private worktree configuration failed: #{detail[0, 200]}"
+      end
+      true
+    end
 
     def capture3(path, *args, allow_local_transport: false, timeout_sec: nil,
                  env: ENV, **options)
@@ -61,6 +110,23 @@ module Hive
 
       capture3_with_deadline(
         child_env, argv, timeout_sec: timeout_sec, **options
+      )
+    end
+
+    def capture3_isolated(git_dir, worktree, *args, env: ENV, **options)
+      command_name = args.first.to_s
+      unless COMMANDS.include?(command_name)
+        raise ArgumentError, "managed Git command is not allowed: #{command_name}"
+      end
+
+      argv = [
+        "git", "--git-dir=#{File.expand_path(git_dir)}",
+        "--work-tree=#{File.expand_path(worktree)}",
+        *git_config(env).flat_map { |entry| [ "-c", entry ] },
+        *harden_diff_args(args)
+      ]
+      Open3.capture3(
+        environment(env: env), *argv, **options, unsetenv_others: true
       )
     end
 
@@ -88,14 +154,18 @@ module Hive
 
     def capture3_bounded(path, *args, max_stdout_bytes:,
                          allow_local_transport: false)
+      capture3_bounded_fixed(
+        command(path, *args, allow_local_transport: allow_local_transport),
+        max_stdout_bytes
+      )
+    end
+
+    def capture3_bounded_fixed(argv, max_stdout_bytes)
       out = String.new(capacity: [ max_stdout_bytes, 16 * 1024 ].min, encoding: Encoding::BINARY)
       err = String.new(capacity: 16 * 1024, encoding: Encoding::BINARY)
       overflow = false
       status = nil
-      popen3(
-        path, *args, allow_local_transport: allow_local_transport,
-        pgroup: true
-      ) do |stdin, stdout, stderr, wait|
+      Open3.popen3(environment, *argv, pgroup: true, unsetenv_others: true) do |stdin, stdout, stderr, wait|
         stdin.close
         stdout.binmode
         stderr.binmode
@@ -131,6 +201,7 @@ module Hive
       end
       [ out, err, status, overflow ]
     end
+    private_class_method :capture3_bounded_fixed
 
     # Read only repository-local config key names through a fixed command.
     # The public facade uses this before every operation to refuse executable
@@ -161,6 +232,7 @@ module Hive
         "GIT_CONFIG_NOSYSTEM" => "1",
         "GIT_CONFIG_SYSTEM" => File::NULL,
         "GIT_OPTIONAL_LOCKS" => "0",
+        "GIT_NO_REPLACE_OBJECTS" => "1",
         "GIT_PROTOCOL_FROM_USER" => "0",
         "GIT_TERMINAL_PROMPT" => "0"
       )
@@ -173,6 +245,47 @@ module Hive
       [ command_name, "--no-ext-diff", "--no-textconv", *rest ]
     end
     private_class_method :harden_diff_args
+
+    def capture3_isolated_config(git_dir, worktree, key, value)
+      argv = [
+        "git", "--git-dir=#{git_dir}", "--work-tree=#{worktree}",
+        *git_config(ENV).flat_map { |entry| [ "-c", entry ] },
+        "config", "--local", key, value
+      ]
+      Open3.capture3(environment, *argv, unsetenv_others: true)
+    end
+    private_class_method :capture3_isolated_config
+
+    def fixed_command(path, *args)
+      [
+        "git", "-C", File.expand_path(path),
+        *git_config(ENV).flat_map { |entry| [ "-c", entry ] }, *args
+      ]
+    end
+    private_class_method :fixed_command
+
+    def existing_directory!(path, label)
+      expanded = File.expand_path(path.to_s)
+      unless File.directory?(expanded)
+        raise ArgumentError, "managed Git #{label} is unavailable"
+      end
+
+      File.realpath(expanded)
+    rescue SystemCallError
+      raise ArgumentError, "managed Git #{label} is unavailable"
+    end
+    private_class_method :existing_directory!
+
+    def gitlink_path!(path)
+      value = path.to_s
+      unless !value.empty? && !value.start_with?("/") &&
+             value.split(File::SEPARATOR).none? { |part| part.empty? || part == "." || part == ".." }
+        raise ArgumentError, "managed Git gitlink path is invalid"
+      end
+
+      value
+    end
+    private_class_method :gitlink_path!
 
     def credential_helper_config(env)
       configured = env[GH_BIN_ENV].to_s.strip

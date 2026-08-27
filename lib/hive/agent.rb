@@ -68,7 +68,8 @@ module Hive
                    permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
-                   isolate_environment: false, terminate_on_parent_signal: true)
+                   isolate_environment: false, command_prefix: [],
+                   terminate_on_parent_signal: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -95,6 +96,13 @@ module Hive
         argument.to_s.dup.freeze
       end.freeze
       @isolate_environment = isolate_environment == true
+      @command_prefix = Array(command_prefix).map do |argument|
+        value = argument.to_s
+        raise ArgumentError, "agent command prefix contains an invalid argument" if
+          value.empty? || value.match?(/[\0\r\n]/)
+
+        value.dup.freeze
+      end.freeze
       @terminate_on_parent_signal = terminate_on_parent_signal == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
@@ -813,9 +821,13 @@ module Hive
           raw_cli_arguments: @cli_flags,
           trusted_cli_arguments: @runtime_cli_flags,
           executable: @runtime_policy&.executable,
-          command_prefix: @runtime_policy&.command_prefix
+          command_prefix: effective_command_prefix
         )
       )
+    end
+
+    def effective_command_prefix
+      @effective_command_prefix ||= [ *@command_prefix, *@runtime_policy&.command_prefix ].freeze
     end
 
     def kill_group(pgid)

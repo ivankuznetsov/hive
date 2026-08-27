@@ -1756,7 +1756,16 @@ class SpawnAgentTest < Minitest::Test
   def test_controller_launch_environment_rejects_unknown_or_non_string_values
     with_tmp_dir do |dir|
       task = make_task(dir)
-      [ { "HOME" => "/tmp" }, { "HIVE_EVIDENCE_TASK_ROOT" => 123 } ].each do |environment|
+      invalid_environments = [
+        { "HOME" => "/tmp" },
+        { "HIVE_EVIDENCE_TASK_ROOT" => 123 },
+        { "GIT_COMMON_DIR" => File.join(dir, "repository.git") },
+        { "GIT_DIR" => File.join(dir, "repository.git") },
+        { "GIT_INDEX_FILE" => File.join(dir, "repository.git", "index") },
+        { "GIT_OBJECT_DIRECTORY" => File.join(dir, "repository.git", "objects") },
+        { "GIT_WORK_TREE" => dir }
+      ]
+      invalid_environments.each do |environment|
         assert_raises(ArgumentError) do
           Hive::Stages::Base.spawn_agent(
             task, prompt: "prompt", max_budget_usd: nil, timeout_sec: 5,
@@ -1764,6 +1773,30 @@ class SpawnAgentTest < Minitest::Test
           )
         end
         end
+    end
+  end
+
+  def test_controller_launch_environment_accepts_private_git_identity_without_repository_location
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      environment = {
+        "GIT_AUTHOR_EMAIL" => "patrol-agent@hive.local",
+        "GIT_AUTHOR_NAME" => "Hive Patrol Agent",
+        "GIT_COMMITTER_EMAIL" => "patrol-agent@hive.local",
+        "GIT_COMMITTER_NAME" => "Hive Patrol Agent",
+        "GIT_CONFIG_COUNT" => "0",
+        "GIT_CONFIG_GLOBAL" => File::NULL,
+        "GIT_CONFIG_NOSYSTEM" => "1",
+        "GIT_CONFIG_SYSTEM" => File::NULL,
+        "GIT_TERMINAL_PROMPT" => "0"
+      }
+
+      result = Hive::Stages::Base.spawn_agent(
+        task, prompt: "prompt", max_budget_usd: nil, timeout_sec: 5,
+        status_mode: :exit_code_only, launch_environment: environment
+      )
+
+      assert_equal :ok, result.fetch(:status)
     end
   end
 

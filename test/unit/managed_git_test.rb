@@ -71,6 +71,48 @@ class ManagedGitTest < Minitest::Test
     end
   end
 
+  def test_isolated_command_allowlist_blocks_unneeded_git_surfaces
+    assert_raises(ArgumentError) do
+      Hive::ManagedGit.capture3_isolated(
+        "/tmp/repository.git", "/tmp/worktree",
+        "config", "alias.escape", "!sh"
+      )
+    end
+  end
+
+  def test_tracked_gitlinks_returns_only_bounded_registered_gitlinks
+    with_tmp_git_repo do |repo|
+      gitlink = "vendor/fixture"
+      run!("git", "-C", repo, "update-index", "--add", "--cacheinfo",
+           "160000,#{"a" * 40},#{gitlink}")
+
+      assert_equal [ gitlink ], Hive::ManagedGit.tracked_gitlinks(repo)
+      assert_raises(ArgumentError) { Hive::ManagedGit.tracked_gitlinks(repo, max_stdout_bytes: 1) }
+    end
+  end
+
+  def test_private_worktree_configuration_is_fixed_and_discoverable
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("managed-git-private") do |root|
+        private_dir = File.join(root, "private.git")
+        run!("git", "init", "--bare", "--quiet", private_dir)
+
+        assert Hive::ManagedGit.configure_isolated_worktree(
+          git_dir: private_dir, worktree: repo
+        )
+        assert_equal "false", run!("git", "--git-dir=#{private_dir}", "config", "--local", "--get", "core.bare").strip
+        assert_equal repo, run!("git", "--git-dir=#{private_dir}", "config", "--local", "--get", "core.worktree").strip
+      end
+    end
+  end
+
+  def test_hardened_environment_disables_replace_objects
+    env = Hive::ManagedGit.environment
+
+    assert_equal "1", env.fetch("GIT_NO_REPLACE_OBJECTS")
+    assert_includes Hive::ManagedGit::CONFIG, "core.useReplaceRefs=false"
+  end
+
   def test_absolute_gh_binary_is_embedded_in_credential_helper
     command = Hive::ManagedGit.command(
       "/tmp/repo", "status", env: { "HIVE_GH_BIN" => "/usr/bin/true" }

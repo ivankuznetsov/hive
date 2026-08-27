@@ -1,7 +1,7 @@
 ---
 title: Hive::AgentGitGate
 type: module
-source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
+source: lib/hive/agent_git_gate.rb, lib/hive/agent_git_gate/isolation.rb, lib/hive/managed_git.rb
 created: 2026-07-26
 updated: 2026-08-27
 tags: [git, security, publication, worktree, boundary]
@@ -9,10 +9,10 @@ tags: [git, security, publication, worktree, boundary]
 
 **TLDR**: `Hive::AgentGitGate` is the boundary-ready, clean-loadable Git
 mechanism used after an agent has edited a repository. It exposes a closed set
-of hardened reads, exact detached materialization, remote-ref observation, and
-expected-OID publication with immutable receipts. Hive owns credentials,
-transport permission, branch and PR policy, durable mutation intent, and
-operator approval.
+of hardened reads, private agent Git metadata with guarded adoption, exact
+detached materialization, remote-ref observation, and expected-OID publication
+with immutable receipts. Hive owns credentials, transport permission, branch
+and PR policy, durable mutation intent, and operator approval.
 
 ## Supported entry point
 
@@ -32,9 +32,12 @@ argv directly.
 | `RemoteObservation` | Exact branch/ref/OID observation plus a SHA-256 fingerprint of the resolved transport target. It never stores the remote URL or credentials. |
 | `MaterializationReceipt` | Exact commit, root-confined destination, and `created`/`existing` disposition for a verified detached clean worktree. |
 | `PublicationReceipt` | Expected, before, published, and independently observed after OIDs plus the non-secret remote fingerprint. |
+| `IsolatedMetadata` | Exact source repository, worktree, private Git directory, attached branch, and base OID prepared for one managed agent launch. |
+| `AdoptionReceipt` | Exact base and imported descendant OIDs after a guarded local branch adoption. |
 
 Typed failures are `InvalidRequest`, `UnsupportedOperation`, `CommandFailed`,
-`RemoteConflict`, `MaterializationFailed`, and `PublicationFailed`.
+`RemoteConflict`, `MaterializationFailed`, `PublicationFailed`, and
+`IsolationFailed`.
 
 ## Closed operations
 
@@ -53,6 +56,11 @@ reads kill the Git process group when stdout exceeds the declared cap.
 accepts an explicit allowed transport, and validates one exact
 `refs/heads/<branch>` response.
 
+`tracked_gitlinks(repository_path, max_stdout_bytes: 64 * 1024)` is the only
+submodule-discovery operation exposed to production callers. It delegates to a
+fixed bounded `ls-files --stage -z` read and returns validated relative gitlink
+paths; it is not a general Git command or configuration interface.
+
 `materialize` verifies an already-present commit OID, constrains the destination
 below an explicit root, creates a detached worktree, and verifies exact HEAD,
 detachment, and cleanliness. It reuses only an exact clean match and prunes
@@ -67,6 +75,10 @@ Hive-owned disposable callers may request force removal so formatter or test
 output can be discarded without leaving a registered worktree behind. The
 force flag is a strict boolean and does not relax destination confinement or
 registration ownership.
+
+`prepare_isolated_metadata` proves that the supplied worktree belongs to the
+source repository, captures its attached branch and exact HEAD, initializes a
+private Git directory below a declared temporary root, configures only its fixed non-bare worktree identity, reads source objects through an alternates file, and builds a private index without moving the controller branch. `adopt_isolated_metadata` accepts only a clean committed descendant. It imports the exact private HEAD without writing `FETCH_HEAD`, resolves that exact object and re-proves ancestry in the authoritative repository with replace objects disabled, revalidates the controller branch and base, updates the worktree index, and moves the source ref with an expected-old-OID compare-and-swap. Any failure through final authoritative status proof rolls back the ref with an expected-head lease and restores the base index; typed diagnostics preserve the original and rollback failures. A receipt is returned only after the authoritative worktree is clean at the adopted commit.
 
 `publish` requires either an exact expected remote OID or exact expected
 absence. It resolves the local commit, captures one exact push target, observes
@@ -83,12 +95,14 @@ selectors, reduces the environment to an allowlist, disables terminal prompts,
 and supplies fixed config that neutralizes:
 
 - repository hooks and fsmonitor;
+- replace-object interpretation;
 - external diff, textconv, pager, and interactive diff filters;
 - repository-selected clean/smudge/process filters, URL rewrites, credential
   helpers, and custom remote upload/receive programs (the operation refuses
   repository-local executable config before spawn, including config reached
   through local `include` directives; an unreadable or otherwise uninspectable
-  config fails closed);
+  config fails closed; private-metadata import also refuses
+  `uploadpack.packObjectsHook`);
 - repository-selected HTTP transport policy, alternate-ref commands, and
   working-tree redirection;
 - inherited credential, SSH-command, askpass, and config-count helpers; and
@@ -130,6 +144,10 @@ details rather than potentially credential-bearing transport output.
   original outcome and warns with the retained checkout path for operator
   recovery. Its authoritative patch checkout is never the validation command
   working directory.
+- Managed Patrol Fix agents compose the gate with
+  `PatrolFix::AgentGitIsolation`: every launch writes Git config, refs, objects,
+  and index state only in private metadata. A successful Fix report may adopt
+  an exact clean descendant through this gate; Inbox and Review never adopt.
 - Refactor patrol captures one managed push URL, uses managed remote
   observations, and publishes through the exact expected-OID/absence gate.
   Its append-only action ledger remains the authority deciding which old OID is
@@ -143,11 +161,12 @@ details rather than potentially credential-bearing transport output.
 ## Guarantee limits
 
 This boundary hardens controller Git process execution and ref authority. It
-does not confine arbitrary same-user code, monitor writes, sandbox the agent,
-validate patch meaning, authorize a mutation, own PR state, or make repository
-data trustworthy. Agent invocation guarantees belong to
-`Hive::AgentRuntime`; protected-output custody belongs to
-`Hive::ArtifactFirewall`.
+does not by itself confine arbitrary same-user code, monitor writes, sandbox
+the agent, validate patch meaning, authorize a mutation, own PR state, or make
+repository data trustworthy. Patrol's separate mount adapter supplies targeted
+pre-spend filesystem prevention for real Git metadata and user Git config.
+Agent invocation guarantees otherwise belong to `Hive::AgentRuntime`;
+protected-output custody belongs to `Hive::ArtifactFirewall`.
 
 ## Tests
 
@@ -155,9 +174,14 @@ data trustworthy. Agent invocation guarantees belong to
   exact absence/OID leases, before/after receipts, ref-movement refusal,
   detached materialization, destination confinement, dirty disposable
   force-removal, forbidden transports, unknown-operation rejection, immutable
-  values, and helper suppression.
+  values, helper suppression, private-metadata preparation, stale-source and
+  dirty/private-history refusal, exact no-`FETCH_HEAD` import, authoritative
+  replace-free ancestry proof, exact adoption, compare-and-swap loss, index
+  restoration, final clean-postcondition rollback proof, and the narrow
+  tracked-gitlink facade.
 - `test/unit/managed_git_test.rb` pins environment/config/command hardening,
-  absolute credential-helper selection, and deadline process-group cleanup.
+  absolute credential-helper selection, bounded fixed gitlink discovery,
+  fixed private-worktree configuration, and deadline process-group cleanup.
 - `test/unit/gh_test.rb`, `test/unit/worktree_test.rb`,
   `test/unit/stages/agent_report_test.rb`,
   `test/unit/stages/draft_pr_handoff_test.rb`,
@@ -165,6 +189,8 @@ data trustworthy. Agent invocation guarantees belong to
   `test/unit/stages/open_pr_test.rb` pin the Hive adapters.
 - `test/unit/component_boundaries_test.rb` proves clean loading and rejects
   production `Hive::ManagedGit` bypasses.
+- `test/unit/patrol_fix/agent_git_isolation_test.rb` proves the composing mount
+  boundary with regular and linked worktrees and malicious Git writes.
 
 ## Backlinks
 

@@ -105,6 +105,28 @@ task-capacity partition is inferred from that missing history: Patrol discovery
 already has separate scan concurrency and per-engine daily allowances, while
 Attempts capacity remains a shared safety boundary.
 
+## Patrol managed-agent containment portability (2026-08-27)
+
+Managed Patrol Inbox, Fix, and Review now require `/usr/bin/bwrap` before a
+provider starts. Focused Linux tests prove that regular and linked worktrees
+cannot mutate the real common/worktree Git metadata, refs, hooks, index,
+worktree pointer, HOME Git config, XDG Git config, or a declared absent config,
+while private `git config`, `git add`, and `git commit` remain usable and an
+exact clean Fix descendant can be adopted. There is no non-Linux fallback; a
+host without usable bubblewrap fails the stage preflight. Portability to macOS
+or another sandbox implementation remains intentionally unsupported rather
+than silently degrading to post-spend restoration.
+
+The namespace starts with a read-only host root and rebinds only the selected
+Fix worktree, task report/private runtime area, and canonical admitted provider
+state directories as writable. It is still targeted Git/report containment,
+not a credential, process, syscall, or network sandbox: readable host files and
+reachable sockets are outside this change's guarantee. The remaining proof gap
+is one real configured-provider Patrol task through this boundary; current
+evidence uses the real kernel mount namespace with deterministic local child
+commands. Provider sibling-state needs and timeout/signal forwarding through
+the nested namespace also remain live-proof gaps.
+
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## OpenCode live validation (updated 2026-08-21)

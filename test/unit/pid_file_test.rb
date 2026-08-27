@@ -254,6 +254,19 @@ class HivePidFileModuleTest < Minitest::Test
     end
   end
 
+  def test_stop_treats_a_file_that_becomes_unreadable_as_malformed
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, "4242\n")
+
+      outcome = with_replaced_singleton_method(File, :read, ->(_path) { raise Errno::EACCES }) do
+        PF.stop(path)
+      end
+
+      assert_equal({ status: :malformed, pid: nil }, outcome)
+    end
+  end
+
   def test_stop_treats_a_mid_stop_death_as_stale
     Dir.mktmpdir("hive-pid-file") do |dir|
       path = File.join(dir, "daemon.pid")
@@ -263,6 +276,20 @@ class HivePidFileModuleTest < Minitest::Test
       outcome = PF.stop(path, process: AliveProcess.new(:dies_on_signal, signals))
 
       assert_equal({ status: :stale, pid: 4242 }, outcome)
+    end
+  end
+
+  def test_stop_warns_and_refuses_when_signalling_a_verified_process_is_forbidden
+    Dir.mktmpdir("hive-pid-file") do |dir|
+      path = File.join(dir, "daemon.pid")
+      File.write(path, "4242\n")
+
+      _out, err = capture_io do
+        outcome = PF.stop(path, process: AliveProcess.new(:eperm))
+        assert_equal({ status: :unverified, pid: 4242 }, outcome)
+      end
+
+      assert_equal "hive: insufficient permissions to signal pid 4242\n", err
     end
   end
 

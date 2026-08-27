@@ -814,6 +814,83 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Regression for the tag-shadowed local-default fallback in `freshest_base`:
+  # with no origin remote the base resolves to the bare short `<default>`, and
+  # under gitrevisions precedence a same-named `refs/tags/<default>` shadows
+  # `refs/heads/<default>`, so `git worktree add -b <branch> <default>` either
+  # failed on the ambiguous refname or silently based the worktree on the
+  # tagged commit instead of the branch tip. A reversion to the bare name
+  # would make this test fail (worktree HEAD != default tip).
+  def test_create_from_local_default_resolves_branch_not_same_named_tag
+    with_initialized_project do |dir, root|
+      default_sha = run!("git", "-C", dir, "rev-parse", "master").strip
+      # Decoy commit + tag named `master` shadowing the branch.
+      File.write(File.join(dir, "tagged-decoy.txt"), "tagged decoy\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "tagged decoy commit", "--quiet")
+      tag_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      run!("git", "-C", dir, "tag", "master", tag_sha)
+      run!("git", "-C", dir, "reset", "--hard", "HEAD~1", "--quiet")
+
+      refute_equal tag_sha, default_sha,
+                   "decoy tag and master branch must point at distinct commits for the test to bite"
+
+      wt = Hive::Worktree.new(dir, "feat-tag-shadow", worktree_root: root)
+      _, err = capture_io do
+        wt.create!("feat-tag-shadow", default_branch: "master")
+      end
+
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal default_sha, worktree_sha,
+                   "the local fallback must resolve refs/heads/master, not a same-named tag"
+      refute_equal tag_sha, worktree_sha,
+                   "a same-named tag must not become the new worktree's start point"
+      refute_match(/is ambiguous/, err,
+                   "the fully-qualified start point must not trigger git's refname ambiguity warning")
+    end
+  end
+
+  # Regression for the tag-shadowed placeholder deletion: `default_base_refs`
+  # used to push the bare short `<default>` as a measurement ref, so when a
+  # tag named `<default>` sat at (or beyond) the placeholder's tip,
+  # `rev-list --count <default>..refs/heads/<branch>` resolved against the TAG
+  # and returned 0 — positively 'proving' emptiness for a branch that carries
+  # unique commits beyond refs/heads/<default>, which was then deleted. The
+  # fix qualifies the measurement ref as refs/heads/<default>, so this test
+  # preserves the branch and attaches it as-is.
+  def test_placeholder_survives_when_same_named_tag_shadows_default
+    with_initialized_project do |dir, root|
+      # Placeholder carrying real work beyond local master.
+      run!("git", "-C", dir, "checkout", "-b", "stacked-shadowed", "--quiet")
+      File.write(File.join(dir, "precious.txt"), "precious\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "precious work", "--quiet")
+      precious_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      run!("git", "-C", dir, "checkout", "master", "--quiet")
+      # Tag named `master` at the placeholder tip: a bare-name emptiness count
+      # measures zero against the tag and would delete the branch.
+      run!("git", "-C", dir, "tag", "-f", "master", precious_sha)
+
+      refute_equal precious_sha, run!("git", "-C", dir, "rev-parse", "refs/heads/master").strip,
+                   "placeholder must carry unique commits beyond refs/heads/master for the test to bite"
+      bare_count = run!("git", "-C", dir, "rev-list", "--count",
+                        "master..refs/heads/stacked-shadowed").lines.last.strip
+      assert_equal "0", bare_count,
+                   "the bare-name count must resolve to the shadowing tag (0) to prove the pre-fix hazard"
+
+      wt = Hive::Worktree.new(dir, "stacked-shadowed", worktree_root: root)
+      wt.create!("stacked-shadowed", default_branch: "master", base_override: "prereq-x")
+
+      assert system("git", "-C", dir, "show-ref", "--verify", "--quiet", "refs/heads/stacked-shadowed"),
+             "a branch with unique commits beyond refs/heads/master must never be deleted because a same-named tag measures empty"
+      assert File.exist?(File.join(wt.path, "precious.txt")),
+             "the preserved placeholder's committed work must survive intact"
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal precious_sha, worktree_sha,
+                   "a non-empty placeholder is attached as-is, not re-pointed or deleted"
+    end
+  end
+
   def test_materialize_pr_fetches_pull_head_and_adds_branch_worktree
     with_synthetic_pull_origin(42) do |dir, root, _origin_dir, sha|
       path = File.join(root, "adhoc-review-pr-42")
@@ -1515,6 +1592,35 @@ class WorktreeTest < Minitest::Test
         Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
       end
       assert_includes error.message, "exceeds"
+    end
+  end
+
+  def test_strict_pointer_rejects_zero_byte_file_as_worktree_error
+    Dir.mktmpdir do |folder|
+      File.open(File.join(folder, "worktree.yml"), "w") { }
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
+      end
+      assert_includes error.message, "must be a hash"
+    end
+  end
+
+  def test_owned_pointer_rejects_zero_byte_file_as_worktree_error
+    with_tmp_dir do |root|
+      folder = File.join(root, "task")
+      FileUtils.mkdir_p(folder)
+      File.open(File.join(folder, "worktree.yml"), "w") { }
+
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          folder,
+          project_root: root,
+          slug: "owned-task",
+          expected_root: root
+        )
+      end
+      assert_includes error.message, "must be a hash"
     end
   end
 

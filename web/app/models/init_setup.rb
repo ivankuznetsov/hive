@@ -44,6 +44,18 @@ class InitSetup
       end
     end
 
+    # Form-facing enumeration for the /repos/new workflow select: every
+    # currently valid name PLUS any persisted default that valid_names dropped
+    # (its descriptor was deleted/renamed). Unioning here — not in the view —
+    # keeps "a bare Apply must not silently rebind the project to coding" in
+    # the same class that owns workflow choice enumeration; callers only say
+    # which value should stay selected.
+    def workflow_options(project_root: nil, persisted: nil)
+      options = workflows(project_root)
+      persisted = persisted.to_s
+      persisted.present? ? options | [ persisted ] : options
+    end
+
     def workflow(value)
       value = value.to_s.strip.presence
       return if value.nil?

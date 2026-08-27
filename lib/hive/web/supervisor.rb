@@ -8,7 +8,12 @@ require "hive/config"
 module Hive
   module Web
     class Supervisor
-      Child = Struct.new(:name, :argv, :pid, :started_at, keyword_init: true)
+      # `desired` records whether the supervisor wants this child running.
+      # A supervisor-initiated stop (reload disabling the bot) flips it to
+      # false BEFORE the TERM so the subsequent signal-death reap cannot be
+      # mistaken for a crash and respawn the child the operator just stopped.
+      # nil means "desired" so plain construction keeps the old behavior.
+      Child = Struct.new(:name, :argv, :pid, :started_at, :desired, keyword_init: true)
 
       # Minimum delay before restarting a child that just exited. Without it,
       # a fast-failing `web` (e.g. a startup crash) spins in a tight restart
@@ -97,17 +102,20 @@ module Hive
         if existing
           existing.pid = pid
           existing.started_at = Time.now
+          existing.desired = true
         else
-          @children << Child.new(name: name, argv: argv, pid: pid, started_at: Time.now)
+          @children << Child.new(name: name, argv: argv, pid: pid,
+                                 started_at: Time.now, desired: true)
         end
       end
 
       # SIGHUP = config changed. Three bot cases:
-      #   enabled + not running → start it (first-time enable);
+      #   enabled + not running → start it (first-time enable, or bring back
+      #     a previously disabled bot — start_child re-arms desired);
       #   enabled + running     → RESTART it — the running process long-polls
       #     with the credentials it booted with, so a token/allowlist
       #     rotation saved via the web wizard never reaches it otherwise;
-      #   disabled + running    → stop it.
+      #   disabled + present    → stop it, whatever state it is in.
       # The restart works by TERMing the group and scheduling an immediate
       # respawn: reap_once collects the signal death and start_due_restarts
       # brings it back up (the pre-seeded @restart_at entry skips backoff).
@@ -117,15 +125,28 @@ module Hive
         running = bot && bot.pid
 
         if bot_enabled?
-          if running
-            signal_group(bot.pid, "TERM")
-            @restart_at["bot"] = Time.now
-          else
+          unless running
+            # A pending crash-respawn entry is superseded: the bot starts NOW.
+            @restart_at.delete("bot")
             start_child("bot", %w[hive bot start --foreground])
+            return
           end
-        elsif running
-          @restart_at.delete("bot")
           signal_group(bot.pid, "TERM")
+          @restart_at["bot"] = Time.now
+        elsif bot
+          # Disable intent is authoritative regardless of HOW the bot is
+          # currently down:
+          #   running           → TERM it (a signal-death reap must classify
+          #     as an intentional stop, not a crash that schedules a respawn —
+          #     @restart_at.delete alone cannot do that, reap_once re-adds the
+          #     entry when it collects the death);
+          #   crashed, still awaiting its scheduled respawn (pid nil, entry
+          #     queued) → the operator's disable must also cancel that queued
+          #     restart, or start_due_restarts would fire it and bring back a
+          #     bot the config no longer enables.
+          bot.desired = false
+          @restart_at.delete("bot")
+          signal_group(bot.pid, "TERM") if bot.pid
         end
       end
 
@@ -145,7 +166,7 @@ module Hive
           next unless pid
 
           child.pid = nil
-          schedule_restart(child) if should_restart?(status)
+          schedule_restart(child) if should_restart?(child, status)
         rescue Errno::ECHILD
           # Reaped elsewhere — without a log line this child would silently
           # cease to exist as far as the supervisor is concerned.
@@ -155,17 +176,21 @@ module Hive
       end
 
       # Restart any crashed child (web, daemon, or bot) — a daemon or bot
-      # that died must come back, not silently disappear. Only two deaths
-      # are NOT respawned: anything reaped while we are stopping, and a
-      # clean (success) exit. Signal deaths ARE respawned: the shutdown
+      # that died must come back, not silently disappear. Three deaths are
+      # NOT respawned: anything reaped while we are stopping, a child whose
+      # desired state the supervisor itself flipped to "stopped" (a reload
+      # disabling the bot TERMs it; without this check the signal death
+      # looks like a crash and undoes the operator's disable), and a clean
+      # (success) exit. Signal deaths ARE otherwise respawned: the shutdown
       # race the old signal exemption feared is already excluded by the
       # @stopping check (the trap sets it before terminate_all sends any
       # signal), while the exemption's real-world cost was an OOM-killed
-      # daemon silently never coming back. Reload-driven bot TERMs are
-      # likewise safe: handle_reload pre-seeds @restart_at, and a second
-      # schedule here is harmless.
-      def should_restart?(status)
+      # daemon silently never coming back. Reload-driven bot RESTARTS are
+      # likewise safe: the child stays desired, handle_reload pre-seeds
+      # @restart_at, and a second schedule here is harmless.
+      def should_restart?(child, status)
         return false if @stopping
+        return false if child.desired == false
         return false if status.success?
 
         true

@@ -329,8 +329,12 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         def read = value
       end.new({ "implementation_identity" => { "execute" => identity } })
       sentinel = Object.new
-      resolver = Minitest::Mock.new
-      resolver.expect(:materialize_persisted, sentinel, [ identity ])
+      calls = []
+      resolver = Object.new
+      resolver.define_singleton_method(:materialize_persisted) do |value|
+        calls << value
+        sentinel
+      end
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
         projection_store: projection, resolver: resolver
@@ -341,7 +345,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       ) { subject.reconstruct! }
 
       assert_same sentinel, selection
-      resolver.verify
+      assert_equal [ identity ], calls
     end
   end
 

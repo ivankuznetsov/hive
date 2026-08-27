@@ -8,6 +8,7 @@ require "hive/commands/status"
 require "hive/tui/snapshot"
 require "hive/bot/status_watcher"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/task_manifest"
 require "hive/task"
 require "hive/task_action"
@@ -66,6 +67,52 @@ class PatrolFixTaskActionTest < Minitest::Test
       assert_equal Hive::Schemas::TaskActionKind::ARCHIVED, done.key
       assert done.patrol_fix.fetch("archived")
       assert_equal "github:acme/demo#42", done.patrol_fix.dig("publication", "id")
+    end
+  end
+
+  def test_publication_secret_block_exposes_only_the_receipt_bound_operator_rework
+    with_task("publish") do |task, receipts, root|
+      block = publication_block_receipt
+      receipts.append!(block)
+      action = Hive::TaskAction.for(task, marker)
+
+      assert_equal Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED,
+                   action.key
+      assert_equal "Publication blocked by secret policy", action.label
+      assert_nil action.command
+      assert_equal :skip, policy_decision(action)
+
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
+      assert_equal "patrol_fix.rework_publication", descriptor.fetch("action_id")
+      assert_raises(Hive::StaleOperationalObservation) do
+        Hive::OperationalAction.assert_current!(
+          task, project: "demo", action_id: "workflow.retry",
+          target: descriptor.fetch("target"),
+          observation_token: descriptor.fetch("observation_token")
+        )
+      end
+
+      project = {
+        "name" => "demo", "path" => root,
+        "hive_state_path" => File.join(root, ".hive-state")
+      }
+      status = Hive::Commands::Status.new(json: true)
+      payload = status.json_payload([ project ], now: Time.utc(2026, 8, 20, 12, 5))
+      row = payload.dig("projects", 0, "tasks", 0)
+      assert_equal "patrol_fix_publication_blocked", row.fetch("action")
+      assert_equal block.fetch("receipt_id"), row.fetch("action_receipt_id")
+
+      operational = status.operational_payload(
+        [ project ], status_payload: payload, scheduler_snapshot: nil,
+        now: Time.utc(2026, 8, 20, 12, 5)
+      ).fetch("tasks").first
+      assert_equal "waiting_on_you", operational.fetch("state")
+      assert_equal "operator", operational.fetch("blocker_owner")
+      assert_equal "secret_detected", operational.dig("reasons", 0, "code")
+      assert_equal "patrol_fix.rework_publication",
+                   operational.dig("action", "action_id")
+      assert_equal descriptor.fetch("observation_token"),
+                   operational.dig("action", "observation_token")
     end
   end
 
@@ -171,6 +218,17 @@ class PatrolFixTaskActionTest < Minitest::Test
         "state" => "open", "observed_at" => "2026-08-20T12:02:00Z"
       }
     }
+  end
+
+  def publication_block_receipt
+    Hive::PatrolFix::PublicationBlockReceipt.build(
+      task: { "slug" => SLUG, "generation" => 1 },
+      evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
+      blocked_fields: [ "body" ], rework_stage: "review",
+      review_receipt_id: "review-1", fix_receipt_id: "fix-1",
+      validation_receipt_id: "validation-1", head_revision: "2" * 40,
+      diff_digest: "3" * 64, recorded_at: Time.utc(2026, 8, 20, 12, 2)
+    )
   end
 
   def policy_decision(action)

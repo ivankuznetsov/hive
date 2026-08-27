@@ -275,7 +275,7 @@ class PatrolFixReviewStageTest < Minitest::Test
       "receipt_id" => "validation-old", "kind" => "validation"
     )
     reopen = {
-      "kind" => "reopen", "stage" => "review", "task" => manifest.fetch("task"),
+      "kind" => "reopen", "stage" => "publish", "task" => manifest.fetch("task"),
       "evidence_revision" => manifest.fetch("evidence_revision"),
       "payload" => { "carried_receipts" => [ "fix-old", "validation-old" ] }
     }

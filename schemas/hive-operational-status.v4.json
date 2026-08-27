@@ -904,7 +904,7 @@
         "confirmation_required", "provenance"
       ],
       "properties": {
-        "action_id": { "type": "string", "enum": ["workflow.advance", "workflow.retry"] },
+        "action_id": { "type": "string", "enum": ["workflow.advance", "workflow.retry", "patrol_fix.rework_publication"] },
         "target": { "type": "string", "pattern": "^.+:.+$" },
         "observation_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "risk_class": { "const": "routine_idempotent" },

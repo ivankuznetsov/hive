@@ -5,6 +5,7 @@ require "hive/atomic_file"
 require "hive/github_publication"
 require "hive/git_ops"
 require "hive/patrol_fix/publication_receipt"
+require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_snapshot"
@@ -34,10 +35,14 @@ module Hive
             )
             return complete(existing)
           end
+          if (blocked = current_publication_block(store, task.folder))
+            Hive::PatrolFix::PublicationBlockReceipt.validate_payload!(blocked.fetch("payload"))
+            return parked(blocked)
+          end
 
           git_gateway ||= default_git_gateway(cfg)
           github_gateway ||= Hive::GithubPublication::GithubGateway.new(cfg: cfg)
-          request, authority = publication_context(
+          request, authority, snapshot = publication_context(
             task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
           )
           controller ||= Hive::GithubPublication::Controller.new(
@@ -45,17 +50,25 @@ module Hive
             git_gateway: git_gateway, github_gateway: github_gateway
           )
           revalidate = lambda do |_phase|
-            current, current_authority = publication_context(
+            current, current_authority, = publication_context(
               task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
             )
             current.to_h == request.to_h && current_authority == authority
           end
-          publication = controller.publish!(request, revalidate: revalidate)
+          begin
+            publication = controller.publish!(request, revalidate: revalidate)
+          rescue Hive::GithubPublication::Blocked => e
+            raise unless e.code == Hive::PatrolFix::PublicationBlockReceipt::CODE
+
+            block = build_publication_block(task, request, authority, snapshot)
+            block = store.append!(block)
+            return parked(block)
+          end
 
           # The lower-level controller revalidates at its final observation,
           # and the stage repeats that exact check immediately before local
           # completion authority becomes durable.
-          final, final_authority = publication_context(
+          final, final_authority, = publication_context(
             task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
           )
           unless final.to_h == request.to_h && final_authority == authority
@@ -103,9 +116,55 @@ module Hive
             "evidence_digest" => snapshot.fetch("manifest").dig("evidence_revision", "digest"),
             "review_receipt_id" => snapshot.fetch("review").fetch("receipt_id")
           }.freeze
-          [ request_from_snapshot(task, cfg, snapshot), authority ]
+          [ request_from_snapshot(task, cfg, snapshot), authority, snapshot ]
         end
         private_class_method :publication_context
+
+        def build_publication_block(task, request, authority, snapshot)
+          fields = {
+            "title" => request.title,
+            "body" => request.published_body,
+            "diff" => request.diff
+          }
+          blocked_fields = fields.filter_map do |field, bytes|
+            field if Hive::SecretPatterns.match?(bytes)
+          end
+          Hive::PatrolFix::PublicationBlockReceipt.build(
+            task: { "slug" => task.slug, "generation" => authority.fetch("generation") },
+            evidence_revision: snapshot.fetch("manifest").fetch("evidence_revision"),
+            blocked_fields: blocked_fields,
+            rework_stage: publication_rework_stage(snapshot, blocked_fields),
+            review_receipt_id: snapshot.fetch("review").fetch("receipt_id"),
+            fix_receipt_id: snapshot.fetch("fix").fetch("receipt_id"),
+            validation_receipt_id: snapshot.fetch("validation").fetch("receipt_id"),
+            head_revision: snapshot.fetch("head_revision"),
+            diff_digest: snapshot.fetch("diff_digest")
+          )
+        end
+        private_class_method :build_publication_block
+
+        def publication_rework_stage(snapshot, blocked_fields)
+          manifest = snapshot.fetch("manifest")
+          source_bytes = manifest.fetch("sources").flat_map do |source|
+            [ source["engine"], source["identity"], *Array(source["evidence"]) ]
+          end
+          return "inbox" if blocked_fields.include?("title") || secret_in?(source_bytes)
+
+          validation = snapshot.fetch("validation").fetch("payload")
+          validation_bytes = Array(validation["commands"]).map { |command| command["identity"] }
+          return "fix" if blocked_fields.include?("diff") || secret_in?(validation_bytes)
+
+          review = snapshot.fetch("review").fetch("payload")
+          return "review" if secret_in?([ review["rationale"], *Array(review["evidence"]) ])
+
+          "review"
+        end
+        private_class_method :publication_rework_stage
+
+        def secret_in?(values)
+          values.compact.any? { |value| Hive::SecretPatterns.match?(value.to_s) }
+        end
+        private_class_method :secret_in?
 
         def request_from_snapshot(task, cfg, snapshot)
           Hive::GithubPublication::Request.new(
@@ -245,6 +304,24 @@ module Hive
           end
         end
         private_class_method :current_publication
+
+        def current_publication_block(store, folder)
+          manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read
+          store.read_all.find do |row|
+            current?(row, manifest) && row["kind"] == "publication_block" &&
+              row["stage"] == "publish"
+          end
+        end
+        private_class_method :current_publication_block
+
+        def parked(receipt)
+          {
+            status: :parked,
+            commit: "park Patrol-fix publication blocked by secret policy",
+            receipt: receipt
+          }
+        end
+        private_class_method :parked
 
         def current?(receipt, manifest)
           receipt.fetch("task") == manifest.fetch("task") &&

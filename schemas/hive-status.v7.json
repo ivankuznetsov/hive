@@ -133,7 +133,7 @@
         "attempt_id", "task_generation",
         "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
         "condition_task_generation",
-         "commit_generation", "current_attempt", "conditions", "condition_history",
+         "commit_generation", "current_attempt", "action_receipt_id", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
          "shadow_audit", "condition_warning", "plan_review", "auto_residue", "unanswered_questions", "action",
          "action_label", "suggested_command", "outcomes",
@@ -214,6 +214,11 @@
           "description": "Current durable attempt selected by the condition projection, or null before handoff.",
           "type": ["string", "null"]
         },
+        "action_receipt_id": {
+          "description": "Exact current semantic receipt bound into an operator action, or null.",
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
         "conditions": {
           "description": "Current condition facts selected by generation, attempt family, and commit scope.",
           "type": "array",
@@ -293,7 +298,7 @@
             "recover_review", "agent_running", "archived", "manual_steering",
             "plan_reviewing", "plan_review_retry", "plan_review_decision",
             "plan_review_degraded", "plan_review_unsupported", "plan_review_blocked",
-            "error", "admission_error"
+            "patrol_fix_publication_blocked", "error", "admission_error"
           ]
         },
         "action_label": { "type": "string" },

@@ -135,7 +135,9 @@ module Hive
             row["kind"] == "validation" && row["stage"] == "validate"
           end
           unless fix && validation
-            reopen = current.find { |row| row["kind"] == "reopen" && row["stage"] == "review" }
+            reopen = current.find do |row|
+              row["kind"] == "reopen" && %w[review publish].include?(row["stage"])
+            end
             carried = Array(reopen&.dig("payload", "carried_receipts"))
             fix = receipts.find { |row| row["receipt_id"] == carried[0] }
             validation = receipts.find { |row| row["receipt_id"] == carried[1] }

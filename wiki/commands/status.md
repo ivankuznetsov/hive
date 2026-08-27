@@ -230,6 +230,14 @@ terminal recovery receipt. The one-off recovery-contract migration moved every
 in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.
 
+A Patrol Fix publication secret park recommends
+`patrol_fix.rework_publication` instead. Its observation token includes the
+exact sanitized `publication_block` receipt ID, and execution rechecks that
+receipt under the controller transition and task locks before advancing a new
+generation to Inbox, Fix, or Review. Daemon enrollment does not suppress this
+operator action, but daemon policy never dispatches it. `workflow.retry` cannot
+act on the same park.
+
 Recovery recommendations bind to the exact current `marker_id`. A task carrying
 an old id-less recoverable marker reports `recovery_migration_required` and
 remains operator-owned until `hive migrate <project>` performs the one-off

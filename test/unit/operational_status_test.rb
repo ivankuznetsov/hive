@@ -66,6 +66,28 @@ class OperationalStatusTest < Minitest::Test
     assert_equal diagnostic, projected.dig("evidence", "diagnostic")
   end
 
+  def test_publication_secret_park_remains_operator_owned_and_actionable_when_daemon_enabled
+    row = task(
+      action: "patrol_fix_publication_blocked", slug: "publication-block",
+      stage: "5-publish", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "action_label" => "Publication blocked by secret policy",
+      "suggested_command" => nil,
+      "action_receipt_id" => "publication-block-one"
+    )
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "secret_detected", projected.dig("reasons", 0, "code")
+    assert_equal "patrol_fix.rework_publication",
+                 projected.dig("action", "action_id")
+  end
+
   def test_operational_snapshot_identifies_the_active_dogfood_build
     sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
     result = Hive::OperationalStatus.new(

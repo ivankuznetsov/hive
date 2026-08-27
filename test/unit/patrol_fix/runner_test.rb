@@ -71,6 +71,29 @@ class PatrolFixRunnerTest < Minitest::Test
     assert_includes error.message, "controller for stage done is not available"
   end
 
+  def test_reconciled_route_move_returns_the_new_folder_without_dispatching_the_old_stage
+    task = Struct.new(:stage_name, :folder).new("publish", "/old/publish/task")
+    transition = Object.new
+    transition.define_singleton_method(:reconcile!) do
+      { task_folder: "/new/review/task", generation: 2 }
+    end
+
+    result = with_replaced_singleton_method(
+      Hive::PatrolFix::Transition, :new, ->(*) { transition }
+    ) do
+      with_replaced_singleton_method(
+        Hive::PatrolFix::Runner, :load_handler,
+        ->(*) { flunk "the old stage must not run after reconciliation moved the task" }
+      ) do
+        Hive::PatrolFix::Runner.run!(task)
+      end
+    end
+
+    assert_equal :complete, result.fetch(:status)
+    assert_nil result.fetch(:commit)
+    assert_equal "/new/review/task", result.fetch(:moved_task_folder)
+  end
+
   def test_controller_failures_publish_semantic_attempt_diagnostics_before_reraising
     cases = [
       [ "validate", Hive::StageError.new("validation changed the worktree bytes"),

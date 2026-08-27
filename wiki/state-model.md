@@ -633,6 +633,23 @@ evidence generation. Worktree cleanup follows receipt durability; failure is a
 bounded diagnostic and cannot revoke completion. Publication performs no LLM,
 issue, edit, close, ready, or merge operation.
 
+If the pre-effect secret scan returns `secret_detected`, Publish writes no
+publication state or PR receipt. It appends one generation-scoped
+`publication_block` receipt containing the safe blocked-field names, exact
+review/fix/validation receipt IDs, HEAD and diff digests, policy version, fixed
+operator owner, and fixed summary. The projection treats that receipt as a
+parked `publication_blocked` outcome and exposes
+`patrol_fix.rework_publication`; the receipt ID participates in the action's
+observation token. The action rechecks that token while holding the controller
+transition and task locks, writes a replayable `publication_rework` intent,
+advances the manifest/evidence generation, rotates worktree custody, appends a
+new-generation Publish reopen receipt, and moves to `1-inbox`, `2-fix`, or
+`4-review`. Review rework carries the exact prior Fix and Validation receipts;
+Fix and Inbox rework carry none. The old block is no longer current after the
+generation change. Daemon policy never dispatches this action, while daemon
+status retains it for the operator. `workflow.retry` is neither advertised nor
+accepted for the park.
+
 Admission may bypass remote reconciliation only by supplying this
 same full canonical publication payload, including host/repository/base,
 immutable creation base, exact head and digests, hosted state, and observation

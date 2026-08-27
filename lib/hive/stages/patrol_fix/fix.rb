@@ -132,6 +132,16 @@ module Hive
              prior&.dig("payload", "route") == "rework"
             return true
           end
+
+          reopen = current(store, manifest, "reopen", "publish")
+          prior = store.read_all.find do |row|
+            row["receipt_id"] == reopen&.dig("payload", "outcome_receipt_id")
+          end
+          if reopen&.dig("payload", "operator") == "operator:publication_policy" &&
+             prior&.fetch("kind", nil) == "publication_block" &&
+             prior.dig("payload", "rework_stage") == "fix"
+            return true
+          end
           raise Hive::StageError, "fix requires a current inbox fix or controller rework authorization"
         end
         private_class_method :fix_authorization

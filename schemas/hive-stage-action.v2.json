@@ -313,6 +313,7 @@
             "patrol_fix_rejected",
             "patrol_fix_blocked",
             "patrol_fix_escalated",
+            "patrol_fix_publication_blocked",
             "error",
             "admission_error"
           ]

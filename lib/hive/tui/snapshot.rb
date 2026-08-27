@@ -90,6 +90,7 @@ module Hive
         :claude_pid_alive,
         :action_key,
         :action_label,
+        :action_receipt_id,
         :suggested_command,
         :next_action,
         :outcomes,
@@ -129,6 +130,7 @@ module Hive
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        implementation_identity: nil,
                        plan_review: nil, auto_residue: nil,
+                       action_receipt_id: nil,
                        unanswered_questions: 0, outcomes: [], depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, admission_error: nil, held: nil, **rest)
@@ -166,6 +168,7 @@ module Hive
                 implementation_identity: implementation_identity,
                 plan_review: plan_review,
                 auto_residue: auto_residue,
+                action_receipt_id: action_receipt_id,
                 unanswered_questions: unanswered_questions,
                 outcomes: outcomes, **rest)
         end
@@ -278,6 +281,7 @@ module Hive
           claude_pid_alive: payload["claude_pid_alive"],
           action_key: payload["action"],
           action_label: payload["action_label"],
+          action_receipt_id: payload["action_receipt_id"],
           suggested_command: payload["suggested_command"],
           next_action: payload["next_action"],
           outcomes: Array(payload["outcomes"]).freeze,

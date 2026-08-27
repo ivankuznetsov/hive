@@ -39,21 +39,27 @@ module Hive
         validation = current.reverse.find { |receipt| receipt["kind"] == "validation" }
         if validation.nil?
           carried = current.reverse.find do |receipt|
-            receipt["kind"] == "reopen" && receipt["stage"] == "review"
+            receipt["kind"] == "reopen" && %w[review publish].include?(receipt["stage"])
           end
           validation_id = Array(carried&.dig("payload", "carried_receipts"))[1]
           validation = receipts.find { |receipt| receipt["receipt_id"] == validation_id }
         end
         fix = current.reverse.find { |receipt| receipt["kind"] == "fix" }
         publication = current.reverse.find { |receipt| receipt["kind"] == "publication" }
-        outcome = parked_outcome(decision)
+        publication_block = current.reverse.find do |receipt|
+          receipt["kind"] == "publication_block" && receipt["stage"] == "publish"
+        end
+        outcome = parked_outcome(decision) || publication_block_outcome(publication_block)
         done = stage == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
         missing_publication = done && publication.nil?
         state = missing_publication ? "invalid" : "current"
         diagnostic = if missing_publication
           { "summary" => "Patrol-fix done requires an exact current pull-request receipt." }
         else
-          publication_diagnostic
+          publication_block ? {
+            "code" => publication_block.dig("payload", "code"),
+            "summary" => publication_block.dig("payload", "summary")
+          } : publication_diagnostic
         end
 
         data = {
@@ -73,12 +79,12 @@ module Hive
           "validation" => validation&.fetch("payload", nil),
           "review" => last_decision && last_decision["stage"] == "review" ? last_decision.fetch("payload") : nil,
           "publication" => publication&.fetch("payload", nil),
-          "timing" => timing_projection(receipts, current, decision),
+          "timing" => timing_projection(receipts, current, outcome),
           "archived" => done && publication && state == "current" ? true : false,
           "diagnostic" => diagnostic,
           "action" => action_for(
             state: state, done: done, outcome: outcome,
-            decision: last_decision, fix: fix, validation: validation,
+            decision: decision, fix: fix, validation: validation,
             publication: publication
           )
         }
@@ -120,6 +126,17 @@ module Hive
         }
       end
 
+      def publication_block_outcome(receipt)
+        return unless receipt
+
+        {
+          "kind" => "publication_blocked",
+          "receipt_id" => receipt.fetch("receipt_id"),
+          "rationale" => receipt.dig("payload", "summary"),
+          "blocker_owner" => receipt.dig("payload", "owner")
+        }
+      end
+
       def decision_projection(receipt)
         return nil unless receipt
 
@@ -130,21 +147,24 @@ module Hive
         }
       end
 
-      def timing_projection(receipts, current, current_decision)
+      def timing_projection(receipts, current, outcome)
         starts = receipts.map { |receipt| receipt.fetch("recorded_at") }
         parked_seconds = 0
         parked_since = nil
         parked = {}
         receipts.each do |receipt|
-          if receipt["kind"] == "decision" && PARKED_ROUTES.include?(receipt.dig("payload", "route"))
+          if (receipt["kind"] == "decision" &&
+              PARKED_ROUTES.include?(receipt.dig("payload", "route"))) ||
+             receipt["kind"] == "publication_block"
             parked[receipt.fetch("receipt_id")] = receipt.fetch("recorded_at")
           elsif receipt["kind"] == "reopen"
             opened = parked.delete(receipt.dig("payload", "outcome_receipt_id"))
             parked_seconds += elapsed_seconds(opened, receipt.fetch("recorded_at")) if opened
           end
         end
-        if current_decision && PARKED_ROUTES.include?(current_decision.dig("payload", "route"))
-          parked_since = current_decision.fetch("recorded_at")
+        if outcome
+          active = current.find { |receipt| receipt["receipt_id"] == outcome["receipt_id"] }
+          parked_since = active&.fetch("recorded_at", nil)
         end
         {
           "started_at" => starts.min,
@@ -152,7 +172,10 @@ module Hive
           "parked_seconds" => parked_seconds,
           "parked_since" => parked_since,
           "rework_count" => receipts.count do |receipt|
-            receipt["kind"] == "decision" && receipt.dig("payload", "route") == "rework"
+            (receipt["kind"] == "decision" &&
+              receipt.dig("payload", "route") == "rework") ||
+              (receipt["kind"] == "reopen" &&
+                receipt.dig("payload", "operator") == "operator:publication_policy")
           end
         }
       end

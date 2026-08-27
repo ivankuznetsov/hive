@@ -375,6 +375,11 @@ module HiveBench
                       resume_review: false,
                       hive_runtime: resolved_hive_runtime)
       verify_sealed_runtime!(candidate, hive_runtime) if sealed_agent_runtime?
+      ownership_cleanup = if sealed_agent_runtime?
+                            "trap 'chown -R #{Process.uid}:#{Process.gid} /work 2>/dev/null || true' EXIT; "
+                          else
+                            ""
+                          end
       cmd = ["docker", "run", "--rm",
              "-e", "HOME=#{HOME}",
              "-e", "HIVE_HOME=#{HIVE_HOME}",
@@ -406,8 +411,11 @@ module HiveBench
              runner_image(candidate),
              # HB_EXIT lets classify() tell a timeout (rc=124) from a stage
              # failure; tee persists the markers so a driver crash after the
-             # (expensive) container run can never lose the classification.
-             "mkdir -p /work/.hb; { timeout #{PLAN_TIMEOUT} bash /hive_stages.sh #{slug} #{base}; " \
+             # (expensive) container run can never lose the classification. A
+             # sealed root controller restores host ownership after every exit
+             # so a later host-side retry can replace and seed the target.
+             "#{ownership_cleanup}mkdir -p /work/.hb; " \
+             "{ timeout #{PLAN_TIMEOUT} bash /hive_stages.sh #{slug} #{base}; " \
              "echo HB_EXIT rc=$?; } | tee /work/.hb/stages.out"]
       (@runner || method(:capture)).call(cmd)
     end

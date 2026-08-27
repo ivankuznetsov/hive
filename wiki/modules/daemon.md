@@ -824,10 +824,13 @@ sidecar, and only then changes `terminal` to `admitted`. The ordering is
 crash-safe because interruption before the phase rewrite leaves a terminal
 pending receipt, which remains invisible to dispatch. Startup claim recovery
 also recognizes the older invalid `admitted` + claimed combination and
-requeues it without following or deleting the stale terminal attempt. During
-terminal delivery reconciliation, a rejected durable phase transition emits
-`dispatch_request_reconciliation_failed`; it is not acknowledged, written as
-a result, or reported as `dispatch_request_completed`.
+requeues it without following or deleting the stale terminal attempt. Its
+targeted queue lookup accepts only the claimed receipt path; pending or
+out-of-directory hints fail closed instead of synthesizing a sibling claim
+path. During terminal delivery reconciliation, a rejected durable phase
+transition emits `dispatch_request_reconciliation_failed`; it is not
+acknowledged, written as a result, or reported as
+`dispatch_request_completed`.
 
 Recovery generation checks also share one immutable dependency-admission
 context per queue scan. The dispatcher creates it lazily only when a recovery

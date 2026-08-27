@@ -13,6 +13,8 @@ completion on every daemon tick and kept the retry invisible to pending work.
 
 Startup claim recovery repairs already-persisted `admitted` + claimed records
 by returning them to pending instead of deleting them or following their stale
-attempt correlation. Terminal delivery reconciliation also requires a durable
-terminal transition before writing a result, acknowledging finalization, or
-logging `dispatch_request_completed`; conflicts receive their own typed event.
+attempt correlation. Its targeted lookup accepts only a claimed receipt path,
+so invalid pending or out-of-directory hints fail closed. Terminal delivery
+reconciliation also requires a durable terminal transition before writing a
+result, acknowledging finalization, or logging `dispatch_request_completed`;
+conflicts receive their own typed event.

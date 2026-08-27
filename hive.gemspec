@@ -65,6 +65,11 @@ Gem::Specification.new do |spec|
   spec.add_dependency "agent-cli-runtime", "~> 0.2.0"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
+  # Usage accounting and pricing math parse token counts with BigDecimal.
+  # bigdecimal became a bundled gem in Ruby 3.4, so it is no longer guaranteed
+  # present; declaring it directly keeps installed gems from crashing with a
+  # LoadError if an upstream bump drops the transitive carrier.
+  spec.add_dependency "bigdecimal", ">= 1.4"
   # Managed installs isolate GEM_HOME/GEM_PATH from the operator's gems. Keep
   # the exact web-lock Bundler inside that managed gem home so web bootstrap
   # can resolve it without relying on a PATH wrapper or a system default gem.

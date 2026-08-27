@@ -169,7 +169,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
 | `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
-| `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
+| `transient_retry_backoff_sec` | 60 | First retry hold for a durable task attempt that exits `75 (TEMPFAIL)`; also the base of the ancillary-child `60 → 120 → 300 s` transient backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02), shared by ancillary children and detached durable task attempts. `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{answer-digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value is an integer ≥ 0 (0 disables that verb's cap). Fresh durable attempts resolve this map from current global daemon config. |
@@ -187,7 +187,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | 4 | `WRONG_STAGE` | 60s protective backoff (race or classifier bug) |
 | 64 | `USAGE` | Quarantine `(project, slug)` for daemon lifetime |
 | 70 / 1 | `SOFTWARE` / `GENERIC` | Transient: 60→120→300 s backoff, then quarantine |
-| 75 | `TEMPFAIL` | Refund daily slot, allow immediate retry next tick |
+| 75 | `TEMPFAIL` | Refund the daily slot. Ancillary children may retry next tick; durable task attempts retain a scheduler-owned point-indexed hold for `transient_retry_backoff_sec` before a fresh request is admitted. |
 | 78 | `CONFIG` | Drop the entire project from active dispatch until daemon restart |
 
 ## Structured log

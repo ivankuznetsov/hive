@@ -1457,6 +1457,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
       [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
+      [ :deferred, "transient_retry", :attempt_transient_retry, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
       [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
       [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
@@ -1796,6 +1797,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, = make_dispatcher(operational_snapshot: snapshot)
     observed = row
     expected = {
+      attempt_transient_retry: [ "scheduler", "transient contention is waiting for its retry backoff" ],
       attempt_deferred: [ "hive", "durable attempt admission was deferred" ],
       daily_cap: [ "scheduler", "project daily dispatch budget is exhausted" ],
       cooldown: [ "scheduler", "task is inside its scheduler cooldown" ],

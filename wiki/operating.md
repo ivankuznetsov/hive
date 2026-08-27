@@ -691,7 +691,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | `poll_interval_sec`             | 30      | Tick cadence. ≥ 5 enforced.                                 |
 | `edit_debounce_sec`             | 30      | Mid-save grace for `needs_input` rows. 0 disables.          |
 | `pr_merge_poll_interval_sec`    | 300     | `gh pr view` cadence per task. ≥ 60 enforced (rate limits). |
-| `transient_retry_backoff_sec`   | 60      | Reserved (current backoff schedule is hardcoded).           |
+| `transient_retry_backoff_sec`   | 60      | First retry hold for durable task-attempt `TEMPFAIL`; ancillary transient retries also use it as their backoff base. |
 | `shutdown_grace_sec`            | 600     | TERM→KILL window for `hive daemon stop`.                    |
 | `log_max_bytes`                 | 10 MB   | Rotation threshold.                                         |
 | `log_max_files`                 | 5       | 5 × 10 MB = 50 MB log budget.                               |

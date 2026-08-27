@@ -2030,6 +2030,10 @@ module Hive
 
         receipt = binding["receipt"]
         return nil unless receipt.is_a?(Hash)
+        # Exit 75 is durable scheduler contention. Its receipt remains
+        # auditable, but presenting the synthesized non-zero-exit artifact as
+        # a Patrol agent failure assigns the incident to the wrong owner.
+        return nil if receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
 
         diagnostic_path = File.join(
           "outputs", attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME

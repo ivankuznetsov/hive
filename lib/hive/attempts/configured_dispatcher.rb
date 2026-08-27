@@ -70,6 +70,7 @@ module Hive
           store: @store,
           launcher: launcher,
           limits: LaunchPolicy.limits(daemon: daemon),
+          transient_retry_backoff_sec: daemon.fetch("transient_retry_backoff_sec"),
           launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
           task_resolver: task_resolver,
           routing_policy_resolver: lambda do |_task, intended_stage|

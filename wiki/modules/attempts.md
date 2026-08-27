@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-26
+updated: 2026-08-27
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics]
 ---
 
@@ -23,7 +23,7 @@ task agents.
 | `Record`, `Store` | Read and write schema-v4 records in the physical v4 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. `Store::ProjectionReader` is a read-only scan-scoped view that caches each immutable projection binding once without making the long-lived runtime store stale. The default store opens only v4 and contains no migration trigger or legacy-layout monitor. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, expose the immutable admitted route, and provide one inherited bounded diagnostic writer after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
-| `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
+| `Dispatcher` | Resolve receipt replay, live duplicate attachment, durable transient-contention pacing, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, validate one child diagnostic frame, bind its exact private log reference, and terminalize only after appending the diagnostic output reference. |
 | `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
@@ -138,7 +138,7 @@ attempt subject.
 $HIVE_HOME/attempts/v4/
 ├── records/<attempt-id>.json              # live and finalization-pending hot set
 ├── proof/...                              # permanent point-addressed receipts
-├── decision-indexes/...                   # semantic/request/successor and routed-decision indexes
+├── decision-indexes/...                   # semantic/request/latest-terminal/successor and routed-decision indexes
 ├── pending-finalization/...               # consumer acknowledgements
 ├── logs/<attempt-id>.frames               # active raw stream
 ├── cold-logs/<digest-shard>/...           # finalized raw stream awaiting expiry
@@ -257,7 +257,16 @@ deterministic dependency-admission verdict. Replaying the same request returns
 that request's original terminal receipt, including a failure. A different
 request against an unchanged generation may start a fresh attempt after a
 failed/cancelled receipt; only a successful terminal receipt remains the
-semantic owner for later requests. A live owner is attachable only when its
+semantic owner for later requests. Exit `75 (TEMPFAIL)` is the exception: it
+means Hive lost a transient scheduler or lock race, not that the agent failed.
+The latest terminal decision index retains that generation's exact attempt ID
+after finalization moves its record to permanent proof. A different request is
+therefore scheduler-deferred until `transient_retry_backoff_sec` has elapsed
+from the receipt, without scanning history or running a retry watcher. The
+daily attempt charge remains refunded. A later terminal outcome replaces the
+point index, so an old TEMPFAIL cannot pace the generation forever.
+
+A live owner is attachable only when its
 task generation matches the new request. When the same task and stage are live
 under a different generation, admission returns `deferred(in_flight)` instead:
 the request stays queued until the old owner exits, then runs its distinct

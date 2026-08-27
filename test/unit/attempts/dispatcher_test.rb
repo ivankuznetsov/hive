@@ -1181,6 +1181,46 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_tempfail_receipt_defers_a_fresh_request_until_scheduler_backoff_expires
+    with_dispatcher(transient_retry_backoff_sec: 60) do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      terminal = terminalize_attempt(
+        store, launcher, first, outcome: "failed",
+        exit_status: Hive::ExitCodes::TEMPFAIL, now: NOW + 3
+      )
+      Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4)
+      store.permanent_proofs.publish(terminal)
+      File.unlink(store.record_path(terminal.attempt_id))
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW + 5)
+                                                  .admission_view
+
+      deferred = dispatch(
+        dispatcher, task, request_id: "request-two",
+        admission_view: admission_view, now: NOW + 62
+      )
+      accepted = dispatch(
+        dispatcher, task, request_id: "request-three",
+        admission_view: admission_view, now: NOW + 63
+      )
+      terminalize_attempt(
+        store, launcher, accepted, outcome: "failed", exit_status: 1,
+        now: NOW + 66
+      )
+      retry_after_regular_failure = dispatch(
+        dispatcher, task, request_id: "request-four",
+        admission_view: admission_view, now: NOW + 67
+      )
+
+      assert_equal :deferred, deferred.status
+      assert_equal "transient_retry", deferred.reason
+      assert_equal first.attempt.attempt_id, deferred.attempt.attempt_id
+      assert_equal :accepted, accepted.status
+      assert_equal :accepted, retry_after_regular_failure.status
+      assert_equal 3, launcher.launched.size
+    end
+  end
+
   def test_routing_collaborator_defaults_and_health_attempt_projection_fail_closed
     with_dispatcher do |dispatcher, _launcher, task, store|
       assert_match(
@@ -1228,7 +1268,8 @@ class AttemptsDispatcherTest < Minitest::Test
   private
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
-                      context_provenance: Hive::ContextProvenance)
+                      context_provenance: Hive::ContextProvenance,
+                      transient_retry_backoff_sec: 60)
     with_tmp_dir do |root|
       state_file = File.join(root, "task.md")
       File.write(state_file, "task\n<!-- WAITING -->\n")
@@ -1240,7 +1281,8 @@ class AttemptsDispatcherTest < Minitest::Test
       dispatcher = Hive::Attempts::Dispatcher.new(
         store: store, launcher: launcher, limits: limits, clock: -> { NOW },
         id_generator: -> { ids.next }, capability_generator: -> { CLAIM_CAPABILITY },
-        context_provenance: context_provenance
+        context_provenance: context_provenance,
+        transient_retry_backoff_sec: transient_retry_backoff_sec
       )
       yield dispatcher, launcher, task, store
     end

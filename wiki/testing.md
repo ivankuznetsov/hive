@@ -909,9 +909,9 @@ HIVE_LIVE_PLAN_REVIEW=1 rake smoke
 ```
 
 It resolves the production adversarial route, invokes native Grok Build with
-`grok-4.6` against a disposable plan, requires schema-valid completed
-adversarial coverage and a different-family independence receipt, and verifies
-that ambient credential values are absent from retained results. Missing
+`grok-4.6`, accepts the served `grok-4.6-build` identity, requires schema-valid
+completed adversarial coverage and a different-family independence receipt, and
+verifies that ambient credential values are absent from retained results. Missing
 opt-in, binary, authentication, or capability skips with a diagnostic and is
 not evidence.
 

@@ -4,6 +4,7 @@ require "hive/agent_support"
 module Hive::AgentSupport::Grok
   END_TYPE_FIELD = /"type"\s*:\s*"end"/.freeze
   STRUCTURED_OUTPUT_FIELD = /"structuredOutput"\s*:/.freeze
+  SERVED_MODEL_NAMES = { "grok-4.6-build" => "grok-4.6" }.freeze
 
   autoload :Runtime, "hive/agent_support/grok/runtime"
   autoload :Skills, "hive/agent_support/grok/skills"
@@ -13,6 +14,11 @@ module Hive::AgentSupport::Grok
 
   def credential_path(home: nil) = AgentCliRuntime::Profiles.grok_auth_path(home:, env: ENV)
   def execution_identity(model) = [ "xai", model.to_s.empty? ? nil : model.to_s ]
+  def model_identity_equivalent?(requested_model:, served_model:, family:)
+    canonical_requested_model = SERVED_MODEL_NAMES[served_model]
+    family.to_s.strip.downcase == "grok" &&
+      !canonical_requested_model.nil? && canonical_requested_model == requested_model
+  end
   def auth_environment(environment) = environment.except("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
   def default_model(**options)
     Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **options) do |project_root:, home:|

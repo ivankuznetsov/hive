@@ -118,7 +118,7 @@ module Hive
             }
             unless served_model.empty?
               actual["model"] = served_model
-              actual.delete("family") unless served_model == request.reviewer["model"]
+              actual.delete("family") unless same_model_identity?(request.reviewer, served_model)
             end
             {
               "status" => status,
@@ -126,6 +126,17 @@ module Hive
               "retry_at" => retry_at,
               "actual_route" => actual
             }
+          end
+
+          def same_model_identity?(reviewer, served_model)
+            requested_model = reviewer["model"]
+            return true if served_model == requested_model
+
+            support = Hive::AgentSupport.for(reviewer["provider"])
+            support&.respond_to?(:model_identity_equivalent?) &&
+              support.model_identity_equivalent?(
+                requested_model:, served_model:, family: reviewer["family"]
+              )
           end
 
           # Hive journals the review attempt itself — stage entry, agent

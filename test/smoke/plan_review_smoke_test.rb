@@ -4,6 +4,7 @@ require "json"
 require "hive/agent_runtime"
 require "hive/plan_review/adapters/ce_doc_review"
 require "hive/plan_review/route_resolver"
+require "hive/task"
 require "hive/task_meta"
 
 # Opt-in authenticated proof for the preferred independent adversarial route.
@@ -52,7 +53,7 @@ class PlanReviewSmokeTest < Minitest::Test
       assert_equal "grok", result.route_receipt.dig("requested", "provider")
       assert_equal "grok-4.6", result.route_receipt.dig("requested", "model")
       assert_equal "grok", result.route_receipt.dig("actual", "provider")
-      assert_equal "grok-4.6", result.route_receipt.dig("actual", "model")
+      assert_includes %w[grok-4.6 grok-4.6-build], result.route_receipt.dig("actual", "model")
       assert_equal "high", result.route_receipt.dig("actual", "effort")
       assert result.route_receipt.fetch("independence_verified")
       assert(result.coverage.any? do |entry|

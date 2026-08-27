@@ -446,6 +446,48 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_production_runner_attests_only_the_exact_grok_46_build_served_name
+    with_runner do |runner, request, output_path|
+      cases = [
+        [ "grok", "grok-4.6", "grok-4.6-build", "grok", true ],
+        [ "grok", "grok-4.6", "grok-4.6-build", " GROK ", true ],
+        [ "grok", "grok-4.5", "grok-4.6-build", "grok", false ],
+        [ "grok", "grok-4.6", "grok-4.7-build", "grok", false ],
+        [ "grok", "grok-4.6", "grok-4.6-build", "openai", false ],
+        [ "codex", "grok-4.6", "grok-4.6-build", "grok", false ],
+        [ "grok", nil, "unknown-model", "grok", false ]
+      ]
+
+      cases.each do |provider, requested_model, served_model, family, attested|
+        grok_request = request.with(
+          reviewer: {
+            "provider" => provider, "model" => requested_model, "family" => family,
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          kind: "adversarial"
+        )
+        payload = valid_result(grok_request)
+        replacement = lambda do |_task, expected_output:, **|
+          File.write(expected_output, JSON.generate(payload))
+          { status: :ok, usage: { model: served_model } }
+        end
+
+        observed = nil
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+          observed = runner.call(
+            prompt: "review", cwd: grok_request.output_directory,
+            output_path:, request: grok_request
+          )
+        end
+
+        assert_equal served_model, observed.dig("actual_route", "model")
+        assert_equal attested, observed.fetch("actual_route").key?("family"),
+                     "provider=#{provider.inspect} requested=#{requested_model.inspect} " \
+                     "served=#{served_model.inspect} family=#{family.inspect}"
+      end
+    end
+  end
+
   def test_production_runner_reports_custody_and_agent_failures_without_raising
     with_runner do |runner, request, output_path|
       raiser = lambda do |_manifest|

@@ -508,6 +508,41 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_force_removal_discards_a_dirty_materialization
+    with_tmp_git_repo do |repo|
+      oid = commit_file(repo, "one.txt", "one\n", "one")
+      Dir.mktmpdir("agent-git-materialization-discard") do |root|
+        destination = File.join(root, "exact")
+        Hive::AgentGitGate.materialize(
+          repository_path: repo, oid: oid,
+          destination: destination, destination_root: root
+        )
+        File.write(File.join(destination, "formatter-output.txt"), "disposable\n")
+
+        assert_raises(Hive::AgentGitGate::MaterializationFailed) do
+          Hive::AgentGitGate.remove_materialization(
+            repository_path: repo, destination: destination,
+            destination_root: root
+          )
+        end
+        assert File.exist?(destination), "normal removal must preserve a dirty materialization"
+
+        assert_equal :removed, Hive::AgentGitGate.remove_materialization(
+          repository_path: repo, destination: destination,
+          destination_root: root, force: true
+        )
+        refute File.exist?(destination)
+
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.remove_materialization(
+            repository_path: repo, destination: destination,
+            destination_root: root, force: "yes"
+          )
+        end
+      end
+    end
+  end
+
   def test_remote_observation_rejects_ambiguous_invalid_and_changed_targets
     absent = Hive::AgentGitGate::RemoteObservation.new(
       remote_fingerprint: "f" * 64, branch: "main",

@@ -205,7 +205,7 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
-  def test_typed_opencode_permission_policy_reaches_agent
+  def test_typed_permission_policy_reaches_agent
     with_tmp_dir do |dir|
       task = make_task(dir)
       policy = Hive::AgentRuntime::OpenCodePermissionPolicy.new(
@@ -223,12 +223,12 @@ class SpawnAgentTest < Minitest::Test
         with_replaced_singleton_method(Hive::Agent, :new, constructor) do
           Hive::Stages::Base.spawn_agent(
             task, prompt: "review", max_budget_usd: nil, timeout_sec: 5,
-            opencode_permission_policy: policy
+            permission_policy: policy
           )
         end
       end
 
-      assert_same policy, captured.fetch(:opencode_permission_policy)
+      assert_same policy, captured.fetch(:permission_policy)
     end
   end
 
@@ -958,8 +958,8 @@ class SpawnAgentTest < Minitest::Test
       assert_equal scope.fetch(:runtime_policy).directories,
                    scope.fetch(:additional_read_roots)
       assert_equal [ File.join(task_folder, "reviews", "**") ],
-                   scope.fetch(:opencode_edit_patterns)
-      assert_empty scope.fetch(:opencode_bash_patterns)
+                   scope.fetch(:edit_patterns)
+      assert_empty scope.fetch(:bash_patterns)
       assert_includes scope.fetch(:additional_write_roots), task_folder
     ensure
       scope&.fetch(:runtime_policy)&.cleanup!
@@ -1072,8 +1072,8 @@ class SpawnAgentTest < Minitest::Test
       kwargs = Hive::Stages::Base.tool_scope_kwargs(scope)
       assert_equal scope.fetch(:additional_write_roots),
                    kwargs.fetch(:additional_write_roots)
-      assert_empty kwargs.fetch(:opencode_edit_patterns)
-      assert_empty kwargs.fetch(:opencode_bash_patterns)
+      assert_empty kwargs.fetch(:edit_patterns)
+      assert_empty kwargs.fetch(:bash_patterns)
     end
   end
 
@@ -1097,7 +1097,7 @@ class SpawnAgentTest < Minitest::Test
       )
 
       assert_equal "workspace-write", scope.fetch(:permission_mode)
-      assert_equal [ "#{docs}/**" ], scope.fetch(:opencode_edit_patterns)
+      assert_equal [ "#{docs}/**" ], scope.fetch(:edit_patterns)
       assert_equal [ task.folder ], scope.fetch(:additional_write_roots).uniq
     end
   end
@@ -1127,7 +1127,7 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
-  def test_stage_permission_scope_preserves_qualified_opencode_bash_patterns
+  def test_stage_permission_scope_preserves_qualified_bash_patterns
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
       cfg = {
@@ -1144,9 +1144,9 @@ class SpawnAgentTest < Minitest::Test
       )
 
       assert_equal [ "bundle*", "git*" ],
-                   scope.fetch(:opencode_bash_patterns)
-      assert_equal scope.fetch(:opencode_bash_patterns),
-                   Hive::Stages::Base.tool_scope_kwargs(scope).fetch(:opencode_bash_patterns)
+                   scope.fetch(:bash_patterns)
+      assert_equal scope.fetch(:bash_patterns),
+                   Hive::Stages::Base.tool_scope_kwargs(scope).fetch(:bash_patterns)
     end
   end
 
@@ -1701,8 +1701,8 @@ class SpawnAgentTest < Minitest::Test
       )
       outcome = {
         status: :error,
-        requested_opencode_route: "anthropic/claude-sonnet-4-5",
-        actual_opencode_route: nil,
+        requested_route: "anthropic/claude-sonnet-4-5",
+        actual_route: nil,
         route_resolution_status: :unobserved,
         normalized_outcome_kind: :configuration_failure,
         normalized_outcome: Struct.new(:usage).new(typed_usage),
@@ -1712,7 +1712,7 @@ class SpawnAgentTest < Minitest::Test
       agent.define_singleton_method(:run!) { outcome }
       observation = nil
       store = Object.new
-      store.define_singleton_method(:observe_opencode!) do |**values|
+      store.define_singleton_method(:observe_route!) do |**values|
         observation = values
       end
       with_attempt_context(
@@ -1743,7 +1743,7 @@ class SpawnAgentTest < Minitest::Test
       end
 
       assert_equal "review.fix", observation.fetch(:stage)
-      assert_equal outcome.fetch(:requested_opencode_route),
+      assert_equal outcome.fetch(:requested_route),
                    observation.fetch(:requested_route)
       assert_nil observation.fetch(:actual_route)
       assert_equal :unobserved, observation.fetch(:resolution_status)

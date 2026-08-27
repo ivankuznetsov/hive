@@ -1,5 +1,6 @@
 Rails.application.routes.draw do
-  # Container healthcheck — unauthenticated by design; exposes no state.
+  # Container healthcheck — unauthenticated by design; exposes only bounded
+  # runtime build identity, never operator or task state.
   get "health" => "health#show"
   get "up" => "rails/health#show", as: :rails_health_check
 

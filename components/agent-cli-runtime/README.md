@@ -84,6 +84,8 @@ represent.
 - `observe(profile, result)` normalizes bounded, redacted result metadata.
 - `prepare!(open_code_preparation)` returns a `PreparedInvocation` containing
   an isolated OpenCode overlay, argv, and child environment.
+- `OpenCode::Permissions.compile(...)` returns the same deny-first permission
+  document independently for callers that retain native OpenCode state.
 - `parse_run(profile, stdout:)` parses a successful OpenCode JSONL capture
   into the session and terminal-message identity required for inspection.
 - `prepare_inspection(prepared, parsed_run)` returns the non-model sanitized
@@ -148,6 +150,11 @@ OpenCode `1.18.16+` requires an exact `provider/model` route and an explicit,
 read-only configuration source. Configuration may define providers and an
 exact default model, but it must not contain credential values. Name the
 credential environment variables the caller is allowed to forward instead.
+
+Callers that deliberately retain native OpenCode config and login can use
+`OpenCode::Permissions.compile` directly and pass the JSON document through
+OpenCode's per-process permission input. The prepared-overlay API below
+remains the closed, isolated option.
 
 ```ruby
 require "agent_cli_runtime"

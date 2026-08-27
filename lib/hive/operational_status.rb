@@ -27,11 +27,17 @@ module Hive
     PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
+    PATROL_FIX_WORKFLOW = Hive::PatrolFix::WORKFLOW_ID.to_s.freeze
 
-    def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil, now: Time.now.utc)
+    def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
+                   status_payload_tick_sequence: nil,
+                   runtime_identity: Hive::RuntimeIdentity.new.to_h,
+                   now: Time.now.utc)
       @status_payload = status_payload
       @project_context = project_context
       @scheduler_snapshot = scheduler_snapshot
+      @status_payload_tick_sequence = status_payload_tick_sequence
+      @runtime_identity = runtime_identity
       @now = now.utc
     end
 
@@ -64,6 +70,7 @@ module Hive
         "schema" => "hive-operational-status",
         "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status"),
         "ok" => true,
+        "runtime" => @runtime_identity,
         "generated_at" => @now.iso8601,
         "completeness" => completeness,
         "source" => {
@@ -71,6 +78,8 @@ module Hive
             "schema" => @status_payload.fetch("schema"),
             "schema_version" => @status_payload.fetch("schema_version"),
             "generated_at" => @status_payload.fetch("generated_at"),
+            "provenance" => @status_payload_tick_sequence ? "daemon_cache" : "fresh_scan",
+            "age_seconds" => task_graph_age_seconds,
             "status" => task_source_status,
             "projects_total" => projects.size,
             "projects_healthy" => projects.count { |project| project["error"].nil? }
@@ -127,6 +136,10 @@ module Hive
     end
 
     private
+
+    def task_graph_age_seconds
+      [ @now - Time.iso8601(@status_payload.fetch("generated_at")), 0 ].max.round(3)
+    end
 
     def validate_source!
       current_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
@@ -262,6 +275,11 @@ module Hive
     def scheduler_from_snapshot(snapshot)
       @daemon_snapshot = snapshot
       status = snapshot.fetch("status", "unavailable")
+      reason = snapshot["reason"]
+      if status == "current" && task_graph_predates_snapshot?(snapshot)
+        status = "unavailable"
+        reason = "task_graph_predates_scheduler_snapshot"
+      end
       @scheduler_task_index = if status == "current"
         Array(snapshot["tasks"]).to_h do |task|
           [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
@@ -273,13 +291,13 @@ module Hive
       unless status == "current"
         issues << issue(
           code: "scheduler_#{status}", source: "scheduler",
-          message: "daemon scheduler observation is #{status}: #{snapshot['reason'] || 'unknown reason'}",
+          message: "daemon scheduler observation is #{status}: #{reason || 'unknown reason'}",
           remediation: "check hive daemon status --json and wait for one complete reconciliation tick"
         )
       end
       {
         "status" => status,
-        "reason" => snapshot["reason"],
+        "reason" => reason,
         "observed_at" => snapshot["observed_at"],
         "valid_until" => snapshot["valid_until"],
         "tick_sequence" => snapshot["tick_sequence"],
@@ -288,6 +306,23 @@ module Hive
         "provider_holds" => Array(snapshot["provider_holds"]),
         "issues" => issues + Array(snapshot["issues"])
       }
+    end
+
+    def task_graph_predates_snapshot?(snapshot)
+      return false if task_graph_bound_to_snapshot?(snapshot)
+
+      completed_at = snapshot.dig("source_window", "completed_at")
+      return true if completed_at.to_s.empty?
+
+      Time.iso8601(@status_payload.fetch("generated_at")) < Time.iso8601(completed_at)
+    rescue ArgumentError, TypeError, KeyError
+      true
+    end
+
+    def task_graph_bound_to_snapshot?(snapshot)
+      sequence = @status_payload_tick_sequence
+      sequence.is_a?(Integer) &&
+        sequence == snapshot["tick_sequence"]
     end
 
     def daemon_payload(projects, scheduler, attempt_storage:)
@@ -468,7 +503,7 @@ module Hive
         "condition_task_generation" => row["condition_task_generation"],
         "commit_generation" => row["commit_generation"],
         "attempt_id" => row["attempt_id"],
-        "state_file_mtime" => row["mtime"],
+        "status_payload_mtime" => row["mtime"],
         "action" => row["action"],
         "depends_on" => row["depends_on"],
         "blocked_by" => row["blocked_by"],
@@ -486,7 +521,8 @@ module Hive
         "condition_task_generation" => observed["condition_task_generation"],
         "commit_generation" => observed["commit_generation"],
         "attempt_id" => observed["attempt_id"],
-        "state_file_mtime" => observed["state_file_mtime"],
+        # Older private snapshots used state_file_mtime for this join.
+        "status_payload_mtime" => scheduler_status_payload_mtime(observed),
         "action" => observed["action"],
         "depends_on" => observed["depends_on"],
         "blocked_by" => observed["blocked_by"],
@@ -494,10 +530,26 @@ module Hive
         "blocked" => observed["blocked"],
         "admission_error" => observed["admission_error"]
       }
+      if legacy_controller_payload_mtime_unknown?(observed, row)
+        expected.delete("status_payload_mtime")
+        actual.delete("status_payload_mtime")
+      end
       expected.all? do |key, value|
         other = actual[key]
         scheduler_value_matches?(value, other)
       end
+    end
+
+    def legacy_controller_payload_mtime_unknown?(observed, row)
+      !observed.key?("status_payload_mtime") &&
+        row["workflow"] == PATROL_FIX_WORKFLOW &&
+        task_graph_bound_to_snapshot?(@daemon_snapshot)
+    end
+
+    def scheduler_status_payload_mtime(observed)
+      return observed["status_payload_mtime"] if observed.key?("status_payload_mtime")
+
+      observed["state_file_mtime"]
     end
 
     def scheduler_value_matches?(expected, actual)
@@ -574,9 +626,15 @@ module Hive
       if PLAN_REVIEW_REPAIR_ACTIONS.include?(row["action"])
         return [ "needs_repair", operational_review_owner(row) ]
       end
+      if (diagnostic = typed_attempt_diagnostic(row))
+        owner = diagnostic.fetch("owner")
+        state = owner == "provider" ? "waiting_on_provider_or_scheduler" : "needs_repair"
+        return [ state, owner ]
+      end
       return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
+      return [ "completion_ready", "none" ] if terminal_parked?(row)
       if human_input?(row)
         return [ "waiting_on_provider_or_scheduler", "scheduler" ] if daemon_plan_approval?(project, row)
 
@@ -842,6 +900,12 @@ module Hive
       HUMAN_ACTIONS.include?(row["action"])
     end
 
+    def terminal_parked?(row)
+      row["workflow"] == PATROL_FIX_WORKFLOW && row["action"] == "needs_input" &&
+        row["marker"] == "none" &&
+        row["suggested_command"].to_s.empty?
+    end
+
     def daemon_plan_approval?(project, row)
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
@@ -878,6 +942,12 @@ module Hive
       elsif row["admission_error"]
         error = row.fetch("admission_error")
         reasons << reason(error.fetch("reason_code"), error.fetch("safe_correction"), "dependency")
+      elsif (diagnostic = typed_attempt_diagnostic(row))
+        reasons << reason(
+          diagnostic.fetch("code"),
+          diagnostic["detail"] || diagnostic.fetch("summary"),
+          "attempt_diagnostic"
+        )
       elsif automatic_error_retry?(project, row)
         marker = row["marker"].to_s.upcase
         reasons << reason(
@@ -896,6 +966,8 @@ module Hive
         reasons << reason("provider_quota", "#{provider} quota hold#{retry_text}", "provider")
       elsif daemon_plan_approval?(project, row)
         reasons << reason("daemon_plan_approval", "daemon owns plan approval for this enrolled project", "scheduler")
+      elsif terminal_parked?(row)
+        reasons << reason("terminal_parked", row["action_label"] || "task reached a parked outcome", "task")
       elsif human_input?(row)
         unanswered = row["unanswered_questions"].to_i
         message = unanswered.positive? ? "#{unanswered} unanswered questions" : row["action_label"]
@@ -920,6 +992,16 @@ module Hive
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
       end
       reasons
+    end
+
+    def typed_attempt_diagnostic(row)
+      diagnostic = row["diagnostic"]
+      return nil unless diagnostic.is_a?(Hash)
+      return nil unless diagnostic["source"] == "artifact" &&
+                        diagnostic["code"].to_s.match?(Hive::PatrolFix::AttemptDiagnostic::CODE_PATTERN) &&
+                        Hive::PatrolFix::AttemptDiagnostic::OWNER_VALUES.include?(diagnostic["owner"])
+
+      diagnostic
     end
 
     def operational_review_owner(row)

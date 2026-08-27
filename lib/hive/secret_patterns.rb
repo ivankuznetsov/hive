@@ -8,6 +8,8 @@ module Hive
   # New patterns must come with at least one test in
   # test/unit/secret_patterns_test.rb (or the consumer's tests).
   module SecretPatterns
+    POLICY_VERSION = 1
+
     PATTERNS = {
       # AWS access key id (AKIA = long-term, ASIA = temporary session token)
       # and secret access key.

@@ -228,7 +228,12 @@ module Hive
         # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
         # Use the same shape as the cfg-disabled path so JSON consumers
         # see the disabled result; distinguish by reason for ops debugging.
-        if task.workflow.draft_pr_handoff?
+        if task.workflow.controller?
+          # A controller workflow owns its checkout and stage receipts as one
+          # exact state machine. Generic task-stage rebasing must never rewrite
+          # that checkout before the controller validates its own custody.
+          result = Hive::Rebase::Result.skipped(:controller_workflow)
+        elsif task.workflow.draft_pr_handoff?
           # Managed handoff receipts pin an exact base/head pair. Rewriting the
           # task worktree before receipt reconciliation would invalidate the
           # controller's already-scanned identity and could invoke a second

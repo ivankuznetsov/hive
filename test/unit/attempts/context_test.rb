@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/attempts/context"
 require "hive/attempts/generation"
 require "hive/lock"
+require "hive/patrol_fix/attempt_diagnostic"
 require "hive/task_resolver"
 
 class AttemptsContextTest < Minitest::Test
@@ -91,6 +92,44 @@ class AttemptsContextTest < Minitest::Test
           assert_equal "4-execute", context.intended_stage
           assert_empty ENV.keys.grep(/\AHIVE_ATTEMPT_/)
         end
+      end
+    end
+  end
+
+  def test_environment_context_publishes_opaque_ownership_generation
+    with_running_attempt do |store, _record|
+      resolver = Struct.new(:task) { def resolve = task }.new(
+        FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+      )
+      diagnostic_reader, diagnostic_writer = IO.pipe
+      with_replaced_singleton_method(
+        Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }
+      ) do
+        with_env("HIVE_ATTEMPT_DIAGNOSTIC_FD" => diagnostic_writer.fileno.to_s) do
+          with_context_environment(store, capability: CLAIM_CAPABILITY) do
+            context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
+            installed_writer = context.instance_variable_get(:@diagnostic_writer)
+            assert installed_writer.instance_variable_get(:@io).close_on_exec?
+            draft = Hive::PatrolFix::AttemptDiagnostic.normalize(
+              { "status" => "error", "exit_code" => 7 },
+              stage: context.intended_stage,
+              task_generation: context.ownership_generation,
+              attempt_id: context.attempt_id,
+              recorded_at: Time.now.utc
+            )
+            assert context.publish_attempt_diagnostic(draft)
+            frame = Hive::Attempts::DiagnosticChannel.read(diagnostic_reader)
+            assert_equal "valid", frame.status
+            assert_equal "generation-env", frame.document.fetch("task_generation")
+            refute_equal context.task_generation.to_s, frame.document.fetch("task_generation")
+          end
+        end
+      end
+    ensure
+      [ diagnostic_reader, diagnostic_writer ].compact.each do |io|
+        io.close unless io.closed?
+      rescue Errno::EBADF
+        nil
       end
     end
   end

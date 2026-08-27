@@ -174,6 +174,17 @@ module Hive
         end
       end
 
+      def verify_profile!(workflow, slot_id, cfg: {})
+        slot = self.class.slots_for(workflow).find { |candidate| candidate.id == slot_id }
+        unless slot
+          raise Hive::ConfigError,
+                "managed workflow configuration has no executable slot #{slot_id.inspect}"
+        end
+
+        mapping_for(slot, cfg, true)
+        true
+      end
+
       def self.slots_for(workflow, runtime_metadata: {})
         authorized = Hash.new { |hash, key| hash[key] = [] }
         Array(runtime_metadata["optional_inputs"]).each do |entry|
@@ -250,7 +261,10 @@ module Hive
         def policy_compatible_suggestion(slot, suggested, cfg)
           preset = Hive::PermissionScope.parse_spec(slot.permissions, stage: slot.id).fetch("preset")
           profile = Hive::AgentProfiles.lookup(suggested, cfg: cfg)
-          return suggested if preset == Hive::PermissionScope::YOLO || profile.name == :claude
+          support = Hive::AgentSupport.for(profile)
+          runtime = support::Runtime if support&.const_defined?(:Runtime, false)
+          legacy = runtime&.respond_to?(:legacy_policy?) && runtime.legacy_policy?
+          return suggested if preset == Hive::PermissionScope::YOLO || legacy
 
           "claude"
         end
@@ -267,7 +281,8 @@ module Hive
           return nil unless profile.model_argument_builder
 
           value = cfg.dig(role == "planning" ? "plan" : "execute", "model")
-          value ||= cfg.dig("claude", "model") if profile.name == :claude
+          support = Hive::AgentSupport.for(profile)
+          value ||= support.legacy_control(cfg, :model) if support&.respond_to?(:legacy_control)
           normalize_optional(value)
         end
 
@@ -275,7 +290,8 @@ module Hive
           return nil unless profile.effort_argument_builder
 
           value = cfg.dig(role == "planning" ? "plan" : "execute", "effort")
-          value ||= cfg.dig("claude", "effort") if profile.name == :claude
+          support = Hive::AgentSupport.for(profile)
+          value ||= support.legacy_control(cfg, :effort) if support&.respond_to?(:legacy_control)
           normalize_optional(value)
         end
 
@@ -339,15 +355,15 @@ module Hive
                mapping.fetch("mapping_contract") == slot.contract
           raise Hive::ConfigError, "managed workflow configuration contract drifted for #{slot.id}"
         end
+        return mapping unless verify_profiles
+
         profile = Hive::AgentProfiles.lookup(mapping.fetch("agent"), cfg: cfg)
         self.class.validate_pin_support!(
           profile, slot.id, model: mapping["model"], effort: mapping["effort"]
         )
-        if verify_profiles
-          unless mapping.fetch("profile_fingerprint") == self.class.profile_fingerprint(profile)
-            raise Hive::ConfigError,
-                  "managed workflow agent profile drifted for #{slot.id}; reinstall or update the workflow mapping"
-          end
+        unless mapping.fetch("profile_fingerprint") == self.class.profile_fingerprint(profile)
+          raise Hive::ConfigError,
+                "managed workflow agent profile drifted for #{slot.id}; reinstall or update the workflow mapping"
         end
         mapping
       end

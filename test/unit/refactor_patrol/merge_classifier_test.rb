@@ -67,6 +67,53 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
     end
   end
 
+  def test_legacy_patch_snapshot_replays_without_rewrite_but_provider_receives_path_only_input
+    with_tmp_dir do |dir|
+      prompts = []
+      classifier = build_classifier(dir) do |prompt|
+        prompts << prompt
+        decision("feature")
+      end
+      legacy = snapshot
+      legacy.fetch("files").first["patch"] = "x" * (1024 * 1024)
+      normalized = classifier.send(:normalize_snapshot, legacy)
+      digest = classifier.send(:snapshot_digest, normalized)
+      occurrence = classifier.send(:occurrence_id, normalized)
+      classifier.send(
+        :prepare_attempt, occurrence, normalized, digest,
+        now: T0, launch: false, reservation_id: nil
+      )
+
+      adopted = classifier.hydrate(snapshot, now: T0 + 1)
+      assert_equal digest, adopted.fetch("snapshot_digest")
+      assert_equal legacy.dig("files", 0, "patch"), adopted.dig("snapshot", "files", 0, "patch")
+
+      classified = classifier.call(snapshot, now: T0 + 2)
+      assert_equal "feature", classified.fetch("status")
+      assert_equal digest, classified.fetch("snapshot_digest")
+      refute_includes prompts.one? ? prompts.first : "", '"patch"'
+    end
+  end
+
+  def test_path_only_record_larger_than_one_megabyte_round_trips
+    with_tmp_dir do |dir|
+      classifier = build_classifier(dir) { |_prompt| decision("feature") }
+      paths = 6_000.times.map do |index|
+        "lib/#{index.to_s.rjust(4, '0')}-#{'x' * 120}.rb"
+      end
+      input = snapshot(paths: paths)
+
+      record = classifier.hydrate(input, now: T0)
+      path = File.join(
+        dir, "classifications", "records", "#{record.fetch('occurrence_id')}.json"
+      )
+
+      assert_operator File.size(path), :>, 1024 * 1024
+      assert_equal record.fetch("occurrence_id"),
+                   classifier.fetch(input).fetch("occurrence_id")
+    end
+  end
+
   def test_malformed_provider_output_retries_then_parks_visibly_without_becoming_skip
     with_tmp_dir do |dir|
       classifier = build_classifier(dir, max_attempts: 2) { |_prompt| { "decision" => "skip" } }
@@ -427,10 +474,19 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
         snapshot.merge("merge_sha" => "bad"),
         snapshot.merge("labels" => [ "duplicate", "duplicate" ]),
         snapshot.merge("changed_paths" => []),
-        snapshot.merge("files" => [ { "path" => "lib/hive/workflow.rb", "status" => "bad", "patch" => "" } ]),
+        snapshot.merge("files" => [ { "path" => "lib/hive/workflow.rb", "status" => "bad" } ]),
         snapshot.merge("files" => [ {
-          "path" => "lib/hive/workflow.rb", "status" => "renamed", "patch" => "",
+          "path" => "lib/hive/workflow.rb", "status" => "renamed",
           "previous_path" => "../outside.rb"
+        } ]),
+        snapshot.merge("files" => [ {
+          "path" => "lib/hive/workflow.rb", "status" => "modified", "patch" => nil
+        } ]),
+        snapshot.merge("files" => [ {
+          "path" => "lib/hive/workflow.rb", "status" => "modified", "patch" => "bad\0patch"
+        } ]),
+        snapshot.merge("files" => [ {
+          "path" => "lib/hive/workflow.rb", "status" => "modified", "patch" => "\xFF".b
         } ]),
         snapshot.merge("publication_provenance" => { "kind" => "unknown", "marker" => nil }),
         snapshot.merge("merged_at" => "not-a-time"),
@@ -516,7 +572,7 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
       "target_head" => "c" * 40, "title" => title, "body" => body,
       "labels" => [], "author" => author,
       "changed_paths" => paths,
-      "files" => paths.map { |path| { "path" => path, "status" => "modified", "patch" => "@@ -1 +1 @@" } },
+      "files" => paths.map { |path| { "path" => path, "status" => "modified" } },
       "publication_provenance" => { "kind" => "none", "marker" => nil }
     }
   end

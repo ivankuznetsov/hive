@@ -65,6 +65,12 @@ weakening owner-authored descriptor compatibility:
   reads participate in that lock. Invalid selected configurations are skipped
   independently with one named warning, so one missing, malformed, or
   digest-tampered snapshot cannot hide itself or suppress healthy siblings.
+  Immutable task reads apply their saved mapping without resolving the process's
+  current agent profile, so status and retained history survive later profile
+  renames, capability changes, and compatible upgrades. Runtime-context
+  preparation verifies current pin support and the fingerprint for the exact
+  executable slot about to launch; drift therefore remains fail-closed at the
+  side-effect boundary without invalidating unrelated or completed task records.
   Configuration-only activation against an
   unchanged package generation compares the selected source, manifest, and
   configuration digests before swapping the pointer. Cleanup is serialized

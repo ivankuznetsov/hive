@@ -165,6 +165,31 @@
         }
       }
     },
+    "OutputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "AttemptDiagnosticProvider": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "failure_class", "retry_hint", "provenance"],
+          "properties": {
+            "name": { "type": ["string", "null"], "maxLength": 128 },
+            "failure_class": { "type": ["string", "null"], "maxLength": 128 },
+            "retry_hint": { "type": ["string", "null"], "maxLength": 128 },
+            "provenance": { "type": ["string", "null"], "maxLength": 128 }
+          }
+        }
+      ]
+    },
     "Diagnostic": {
       "type": "object",
       "additionalProperties": false,
@@ -259,7 +284,33 @@
         "updated_at": {
           "type": "string",
           "format": "date-time"
-        }
+        },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 128 },
+        "owner": { "enum": ["agent", "provider", "hive", "operator", "unknown"] },
+        "workflow": { "const": "patrol_fix" },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "agent_reason": { "type": ["string", "null"], "maxLength": 128 },
+        "exit_code": { "type": ["integer", "null"] },
+        "timed_out": { "type": "boolean" },
+        "cancelled": { "type": "boolean" },
+        "signal": { "type": ["string", "null"], "maxLength": 128 },
+        "provider": { "$ref": "#/$defs/AttemptDiagnosticProvider" },
+        "attempt_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "correlation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "task_generation": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "diagnostic_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "diagnostic_reference": { "$ref": "#/$defs/OutputReference" },
+        "log_reference": { "$ref": "#/$defs/OutputReference" },
+        "report_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "report_parser": { "type": ["string", "null"], "maxLength": 128 },
+        "firewall_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "firewall_restoration": { "type": ["string", "null"], "maxLength": 128 },
+        "custody_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "transport_status": { "enum": ["valid", "missing", "oversized", "malformed", "duplicate", "unavailable"] },
+        "redaction_status": { "enum": ["applied", "omitted", "failed"] },
+        "secret_policy_version": { "type": "integer", "minimum": 1 }
       }
     }
   }

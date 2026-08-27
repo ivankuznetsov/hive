@@ -93,6 +93,55 @@ class BabysitterDispatcherTest < Minitest::Test
     end
   end
 
+  def test_tick_does_not_start_a_later_project_after_shutdown
+    with_tmp_dir do |dir|
+      logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
+      entries = %w[one two].map do |name|
+        { project: { "name" => name }, cfg: { "babysitter" => { "interval" => "10m" } } }
+      end
+      dispatcher.define_singleton_method(:enabled_projects) { entries }
+      calls = []
+      predicate_states = []
+
+      with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, admission_open:, **_kwargs|
+        calls << project["name"]
+        predicate_states << admission_open.call
+        dispatcher.request_shutdown!
+        predicate_states << admission_open.call
+      }) do
+        assert_equal 1, dispatcher.tick
+      end
+
+      assert_equal [ "one" ], calls,
+                   "shutdown during one project must suppress later projects in the same tick"
+      assert_equal [ true, false ], predicate_states,
+                   "dispatcher must pass ProjectTick its live admission predicate"
+      events = File.readlines(File.join(dir, "babysitter.log")).map { |line| JSON.parse(line) }
+      assert_equal 1, events.last.fetch("projects"), "tick-end must count only projects that ran"
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_tick_does_not_enumerate_projects_after_shutdown
+    with_tmp_dir do |dir|
+      logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
+      enumerated = false
+      dispatcher.define_singleton_method(:enabled_projects) do
+        enumerated = true
+        []
+      end
+      dispatcher.request_shutdown!
+
+      assert_equal 0, dispatcher.tick
+      refute enumerated, "a stopped dispatcher must not start project enumeration"
+    ensure
+      logger&.close
+    end
+  end
+
   def test_tick_skips_local_and_unresolved_repositories_before_github_calls
     with_tmp_dir do |root|
       local = File.join(root, "local")

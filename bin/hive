@@ -1,5 +1,12 @@
 #!/usr/bin/env ruby
 
+source_agent_runtime_lib = File.expand_path(
+  "../components/agent-cli-runtime/lib",
+  __dir__
+)
+if File.file?(File.join(source_agent_runtime_lib, "agent_cli_runtime.rb"))
+  $LOAD_PATH.unshift(source_agent_runtime_lib)
+end
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
@@ -111,7 +118,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
     extras: { "operation" => "reject" }
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
-  "status" => { schema: "hive-status", error_kind: "error" },
+  "status" => { schema: "hive-running-status", error_kind: "error" },
   "circuits" => { schema: "hive-circuits", error_kind: "usage" },
   "act" => { schema: "hive-act", error_kind: "usage" },
   "prune" => { schema: "hive-prune", error_kind: "usage" },
@@ -224,6 +231,14 @@ def json_usage_error_contract(argv)
       arg.valid_encoding? && (arg == "--operational" || arg.start_with?("--operational="))
     end
     return { schema: "hive-operational-status", error_kind: "error" } if operational
+    internal_task_graph = option_argv.any? do |arg|
+      arg.valid_encoding? &&
+        (arg == "--internal-task-graph" || arg.start_with?("--internal-task-graph="))
+    end
+    daemon_task = option_argv.any? do |arg|
+      arg.valid_encoding? && (arg == "--daemon-task" || arg.start_with?("--daemon-task="))
+    end
+    return { schema: "hive-status", error_kind: "error" } if internal_task_graph || daemon_task
   when "web"
     subcommand = json_usage_subcommand(argv, command_index, value_options: %w[--bind --port])
     return unless %w[install status].include?(subcommand)
@@ -291,6 +306,7 @@ def json_usage_error_contract(argv)
 end
 
 def refactor_patrol_jobs_argv(argv)
+  archive = false
   list = nil
   full = nil
   show = false
@@ -299,7 +315,9 @@ def refactor_patrol_jobs_argv(argv)
       arg == "--cursor" || arg.start_with?("--cursor=")
   end
   argv.each do |arg|
-    if arg == "--show" || arg.start_with?("--show=")
+    if arg == "--archive" || arg.start_with?("--archive=")
+      archive = true
+    elsif arg == "--show" || arg.start_with?("--show=")
       show = true
     elsif %w[--no-list --skip-list].include?(arg)
       list = false
@@ -317,7 +335,9 @@ def refactor_patrol_jobs_argv(argv)
       full = !%w[false f no n 0].include?(value)
     end
   end
-  action = if list == true
+  action = if archive
+    "show"
+  elsif list == true
     "list"
   elsif show
     "show"
@@ -329,6 +349,9 @@ end
 
 def native_web_error_context(schema, argv)
   require "hive/commands/web"
+  if schema == "hive-web-status"
+    return Hive::Commands::Web.status_error_context(environment: ENV)
+  end
   context = Hive::Commands::Web.error_context(environment: ENV)
   return context unless schema == "hive-setup"
 

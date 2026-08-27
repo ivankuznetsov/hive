@@ -153,6 +153,12 @@ metadata reads. File-backed dispatch requests for run/advance/archive verbs
 are checked against the same tick's status row before spawn and remain queued
 on a dependency wait or admission error. `hive markers ...` repair requests
 are deliberately exempt so an operator can repair stale/corrupt marker state.
+A full dispatch-request scan constructs one immutable admission context for
+recovery generation validation. Its indexed verdicts are reused across queued
+requests; per-task state files and task identity are still revalidated under
+each task lock. Fingerprints resolve the task's project from the context's path
+index, preserving the same zero/duplicate-enrollment payload as the uncached
+path without rescanning the fleet.
 A task-local admission error exits 78 without dropping the entire enrolled
 project from daemon scheduling.
 
@@ -200,7 +206,7 @@ bounded relationship set. See [[modules/task_workspace]].
 
 ## Recovery
 
-Inspect `hive status --json` or the TUI's admission text, then repair the named
+Inspect `hive status --operational --json` or the TUI's admission text, then repair the named
 `meta.yml`, `plan.md`, project enrollment, remote, workflow, or gate. Do not
 delete dependency metadata merely to clear the row unless removing the edge is
 the intended model change. For corrupt state that must move out of a forward

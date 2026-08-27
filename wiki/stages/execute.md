@@ -67,8 +67,16 @@ Re-running with `worktree.yml` already present and a `:execute_complete` marker 
 An automatic retry after `ERROR` resumes the exact owned worktree even when it
 contains uncommitted edits from the failed agent. Those edits are durable
 implementation progress; ownership, branch, ancestry, and tamper checks still
-run. If a successful agent exit still leaves dirt, Execute writes a fresh
-`ERROR reason=dirty_worktree`, so retry backoff and lineage remain scheduler-owned.
+run. If a successful ordinary implementation exit leaves in-scope residue, the
+generic stage-exit CleanExit hook auto-commits it and immediately reuses
+Execute's owned-worktree, expected-branch, descendant-commit boundary to publish
+`EXECUTE_COMPLETE` in the same run. Research-mode execution keeps its separate
+final-message evidence contract. Residue that CleanExit cannot safely commit remains
+`ERROR reason=dirty_worktree`, so retry backoff and lineage stay scheduler-owned.
+The explicit `hive worktree commit-residue --complete-execute` recovery path can
+snapshot that whole implementation even when planned files fall outside the
+review-fix filename allowlist, while retaining staged-symlink, secret-content,
+signing, ownership, branch, ancestry, and cleanliness gates.
 
 ## Implementation sub-agent (`spawn_implementation`)
 

@@ -3,7 +3,7 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-08-16
+updated: 2026-08-25
 tags: [index, wiki]
 ---
 
@@ -13,19 +13,18 @@ local-first workflow engine for AI agents; software delivery is its flagship
 proof, while built-in content/bench, installable Honeycomb, and owner-authored
 workflows use the same folder-backed execution model.
 
-Page count: 104
-Updated: 2026-08-16
+Page count: 105
+Updated: 2026-08-25
 
-Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, and stable-ID semantic E2E profiles; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
+Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on bounded default liveness status, the operational workflow contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, and stable-ID semantic E2E profiles; the former public full-fleet status graph is now internal-only pending consumer-specific projection extraction. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
 
 Reusable mechanisms remain in this monorepo behind the canonical
-[[component-boundaries]] catalog. The sixteen-row internal graph has eleven
-`boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
+[[component-boundaries]] catalog. The sixteen-row internal graph has twelve
+`boundary-ready` facades—UserService, Agent Support, Agent ABI, Agent Artifact Firewall,
 Skillpack, Safe Agent Git Gate, WorkLedger, Patrol Fix Workflow Core, and Workflow Creator Values/Text
 Safety plus the composed Workflow Creator and deterministic Workflow Creator
-Execution custody—and five guarded candidates: Provider Health, Provider
-Routing Policy, Provider Routing Operations, Attempts admission, and Patrol
-Effect Evidence. The graph has eleven declared component edges, including the
+Execution custody—and four guarded candidates: Provider Health, Provider
+Routing Policy, Provider Routing Operations, and Attempts admission. The graph has twelve declared component edges, including the
 read-only routing projection's dependencies on Attempts, Provider Health, and
 routing policy plus Patrol Fix's downward dependency on the Safe Agent Git
 Gate for exact local worktree reads. Patrol's U3
@@ -98,6 +97,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/agent_cli_runtime]] — `wiki/modules/agent_cli_runtime.md`
 - [[modules/agent_git_gate]] — `wiki/modules/agent_git_gate.md`
 - [[modules/agent_profile]] — `wiki/modules/agent_profile.md`
+- [[modules/agent_support]] — `wiki/modules/agent_support.md`
 - [[modules/attempts]] — `wiki/modules/attempts.md`
 - [[modules/atomic_file]] — `wiki/modules/atomic_file.md`
 - [[modules/babysitter]] — `wiki/modules/babysitter.md`

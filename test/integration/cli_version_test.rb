@@ -14,6 +14,45 @@ class CliVersionTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_bin_hive_version_json_reports_dogfood_identity_without_changing_semver_probe
+    sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
+    environment = {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => sha,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-0864de726"
+    }
+
+    json_out, json_err, json_status = Open3.capture3(
+      environment, RbConfig.ruby, "-Ilib", "bin/hive", "version", "--json"
+    )
+    semver_out, semver_err, semver_status = Open3.capture3(
+      environment, RbConfig.ruby, "-Ilib", "bin/hive", "--version"
+    )
+
+    assert json_status.success?, json_err
+    payload = JSON.parse(json_out)
+    assert_equal "dogfood", payload.dig("runtime", "channel")
+    assert_equal sha, payload.dig("runtime", "build_sha")
+    assert semver_status.success?, semver_err
+    assert_equal "#{Hive::VERSION}\n", semver_out
+  end
+
+  def test_source_bin_prefers_the_checkout_agent_cli_runtime_component
+    script = <<~'RUBY'
+      at_exit do
+        parameters = AgentCliRuntime::OpenCodePreparationRequest
+          .instance_method(:initialize).parameters
+        puts "source-agent-cli-runtime=#{parameters.include?([:key, :bash_patterns])}"
+      end
+      ARGV.replace(["--version"])
+      load File.expand_path("bin/hive", Dir.pwd)
+    RUBY
+
+    out = run!(RbConfig.ruby, "-e", script)
+
+    assert_includes out, "source-agent-cli-runtime=true\n"
+  end
+
   def test_strict_no_write_routes_skip_scheduler_reconciliation
     with_tmp_global_config do |home|
       with_tmp_git_repo do |project_root|

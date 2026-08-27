@@ -1,15 +1,14 @@
 require "fileutils"
 require "json"
 require "open3"
-require "securerandom"
 require "tempfile"
 require "time"
-require "tmpdir"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_limit"
 require "hive/agent/message_extractor"
+require "hive/agent_support"
 require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
@@ -21,114 +20,22 @@ module Hive
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
     TERMINATION_GRACE_SECONDS = 3
     COMPLETION_EVENT_GRACE_SECONDS = 3
-    OPENCODE_INSPECTION_TIMEOUT_SECONDS = 10
-    OPENCODE_CAPTURE_BYTES =
-      AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
     TOKEN_LIMIT_REASON = "token_limit".freeze
     TURN_LIMIT_REASON = "turn_limit".freeze
     MODEL_OUTPUT_LIMIT_REASON = "model_output_limit".freeze
 
-    # Converts provider JSONL usage events into one monotonic in-flight count.
-    # Claude reports input/cache at message_start and cumulative output for the
-    # current turn at message_delta; treating each event as an independent row
-    # would double count output. Other profiles are conservatively accumulated
-    # until they emit a terminal run-total event.
-    class StreamTokenMeter
-      TERMINAL_TYPES = %w[result turn.completed response.completed run.completed task.completed].freeze
+    CapturedProcess = Data.define(
+      :pid, :pgid, :stdout, :stderr, :stdout_truncated, :stderr_truncated,
+      :termination
+    )
 
-      attr_reader :total
-
-      def initialize(profile_name)
-        @profile_name = profile_name.to_sym
-        @total = 0
-        @usage = { input: 0, output: 0, cached: 0, model: nil }
-        @completed_claude = { input: 0, output: 0, cached: 0 }
-        @claude_turn = nil
-      end
-
-      def observe(event, usage)
-        return @total unless usage.is_a?(Hash)
-
-        @usage[:model] = usage[:model] unless usage[:model].to_s.empty?
-        if terminal?(event)
-          replace_with_run_total(usage)
-        elsif claude_stream?(event)
-          observe_claude_stream(event, usage)
-        else
-          add_usage(usage)
-        end
-        @total
-      end
-
-      def terminal?(event)
-        event.is_a?(Hash) && TERMINAL_TYPES.include?(event["type"].to_s)
-      end
-
-      def usage
-        @usage.dup
-      end
-
-      private
-
-      def claude_stream?(event)
-        @profile_name == :claude && event["type"] == "stream_event"
-      end
-
-      def observe_claude_stream(event, usage)
-        kind = event.dig("event", "type").to_s
-        if kind == "message_start"
-          finish_claude_turn
-          @claude_turn = usage_counts(usage)
-        else
-          @claude_turn ||= { input: 0, output: 0, cached: 0 }
-          counts = usage_counts(usage)
-          @claude_turn[:input] = [ @claude_turn[:input], counts[:input] ].max
-          @claude_turn[:output] = [ @claude_turn[:output], counts[:output] ].max
-          @claude_turn[:cached] = [ @claude_turn[:cached], counts[:cached] ].max
-        end
-        refresh_claude_total
-      end
-
-      def finish_claude_turn
-        return unless @claude_turn
-
-        %i[input output cached].each do |key|
-          @completed_claude[key] += @claude_turn[key]
-        end
-      end
-
-      def refresh_claude_total
-        counts = @completed_claude.dup
-        if @claude_turn
-          %i[input output cached].each { |key| counts[key] += @claude_turn[key] }
-        end
-        @usage.merge!(counts)
-        @total = counts.values_at(:input, :output).sum
-      end
-
-      def add_usage(usage)
-        counts = usage_counts(usage)
-        %i[input output cached].each { |key| @usage[key] += counts[key] }
-        @total = @usage.values_at(:input, :output).sum
-      end
-
-      def replace_with_run_total(usage)
-        counts = usage_counts(usage)
-        terminal_total = counts.values_at(:input, :output).sum
-        return if terminal_total < @total
-
-        @usage.merge!(counts)
-        @total = terminal_total
-      end
-
-      def usage_counts(usage)
-        {
-          input: [ usage[:input].to_i, 0 ].max,
-          output: [ usage[:output].to_i, 0 ].max,
-          cached: [ usage[:cached].to_i, 0 ].max
-        }
-      end
-    end
+    # Hive runs under its own bundle, while native agent launches inherit the
+    # operator's environment. Unset Hive's Ruby toolchain so a child `ruby`,
+    # `gem`, or `bundle` resolves against the task repository instead.
+    SCRUBBED_TOOLCHAIN_ENV_KEYS = %w[
+      RUBYOPT RUBYLIB GEM_HOME GEM_PATH
+      BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_VERSION BUNDLER_SETUP
+    ].freeze
 
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so
@@ -137,7 +44,8 @@ module Hive
     # base_url. Mirrors the tmux path's blanking in
     # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
     SCRUBBED_CHILD_ENV = {
-      "HIVE_SCREENOTE_BASE_URL" => nil
+      "HIVE_SCREENOTE_BASE_URL" => nil,
+      **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }
     }.freeze
     ISOLATED_CHILD_ENV_KEYS = %w[
       HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR
@@ -157,11 +65,10 @@ module Hive
                    max_turns: nil, identity_arguments: [], runtime_policy: nil,
                    launch_arguments: nil, routing_arguments: nil,
                    launch_environment: {}, provider_route: nil, log_stream: true,
-                   opencode_invocation_root: nil,
-                   opencode_permission_policy: nil,
+                   permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
-                   opencode_edit_patterns: [], opencode_bash_patterns: [],
-                   isolate_environment: false)
+                   edit_patterns: [], bash_patterns: [],
+                   isolate_environment: false, terminate_on_parent_signal: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -175,12 +82,11 @@ module Hive
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @provider_route = provider_route
       @launch_environment = (launch_environment || {}).dup.freeze
-      @opencode_invocation_root = opencode_invocation_root&.to_s
-      @opencode_permission_policy = opencode_permission_policy
+      @permission_policy = permission_policy
       @additional_read_roots = Array(additional_read_roots).map(&:to_s).freeze
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
-      @opencode_edit_patterns = Array(opencode_edit_patterns).map(&:to_s).freeze
-      @opencode_bash_patterns = Array(opencode_bash_patterns).map(&:to_s).freeze
+      @edit_patterns = Array(edit_patterns).map(&:to_s).freeze
+      @bash_patterns = Array(bash_patterns).map(&:to_s).freeze
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -189,6 +95,7 @@ module Hive
         argument.to_s.dup.freeze
       end.freeze
       @isolate_environment = isolate_environment == true
+      @terminate_on_parent_signal = terminate_on_parent_signal == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
@@ -315,11 +222,15 @@ module Hive
     end
 
     def spawn_and_wait
-      return spawn_opencode_and_wait if opencode?
+      support = Hive::AgentSupport.for(@profile)
+      if support&.const_defined?(:Execution, false)
+        return extend(support.const_get(:Execution, false)).run_supported
+      end
 
       cmd = build_cmd
       log_file = log_path
-      structured_output_protocol = @profile.structured_output_protocol
+      structured_output_protocol = support ||
+        Hive::AgentSupport.for_protocol(@profile.structured_output_protocol)
       messages = Hive::Agent::MessageExtractor::Accumulator.new(
         max_bytes: FINAL_MESSAGE_TAIL_BYTES,
         structured_output_protocol: structured_output_protocol,
@@ -328,7 +239,10 @@ module Hive
       limit_text = nil
       structured_failure = nil
       last_usage = nil
-      token_meter = StreamTokenMeter.new(@profile.name)
+      stream = support::Stream if support&.const_defined?(:Stream, false)
+      meter_class = stream&.const_defined?(:TokenMeter, false) ?
+        stream::TokenMeter : Hive::AgentSupport::StreamMeter
+      token_meter = meter_class.new
       resource_exhaustion = nil
       provider_signal = nil
       provider_error = nil
@@ -367,8 +281,8 @@ module Hive
         "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
       )
 
-      old_int = install_chained_signal_trap("INT") { kill_group(pgid) }
-      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) }
+      old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
+      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
 
       reader = Thread.new do
         open_private_log(log_file) do |log|
@@ -391,9 +305,7 @@ module Hive
               structured_output_protocol: structured_output_protocol
             )
             message = messages.observe(json, raw_line: line)
-            if structured_failure.nil? && @profile.name == :claude
-              structured_failure = Hive::Agent::MessageExtractor.extract_failure(json)
-            end
+            structured_failure ||= stream.failure(json) if stream&.respond_to?(:failure)
             if @log_stream
               safe_line = if message || sensitive_payload
                 event_type = json.is_a?(Hash) ? json.fetch("type", "unknown") : "end"
@@ -428,7 +340,7 @@ module Hive
                 limit_text = (detail || line).to_s.strip
               end
             end
-            turn_started = claude_turn_started?(json)
+            turn_started = stream&.turn_started?(json)
             if turn_started
               if completion_event_deadline && termination_deadline.nil?
                 termination_deadline = begin_termination(pgid)
@@ -437,7 +349,7 @@ module Hive
               write_tool_in_current_turn = false
               write_turn_completed = false
             end
-            write_tool_in_current_turn = true if claude_write_tool_event?(json)
+            write_tool_in_current_turn = true if stream&.write_tool_event?(json)
 
             usage = json && Hive::AgentRuntime.extract_usage(@profile, json)
             if usage
@@ -457,7 +369,7 @@ module Hive
                 observed: usage&.dig(:output)
               }.compact
             end
-            turn_completed = claude_turn_completed?(json)
+            turn_completed = stream&.turn_completed?(json)
             if turn_completed
               completed_turns += 1
               write_turn_completed = true if write_tool_in_current_turn
@@ -470,7 +382,8 @@ module Hive
               end
             end
 
-            output_completed ||= output_completed_event?(json)
+            output_completed ||= (@max_turns || @max_tokens) &&
+              stream&.output_completed_event?(json) && completed_output_file?
             terminal_usage = json && token_meter.terminal?(json)
             if output_completed && (write_turn_completed || terminal_usage)
               unless terminal_usage
@@ -602,462 +515,6 @@ module Hive
       end
     end
 
-    def spawn_opencode_and_wait
-      prepared = nil
-      stdin_file = nil
-      result = nil
-      prepared = prepare_opencode_invocation
-      validate_prepared_opencode_skills!(prepared)
-      cmd = prepared.invocation.argv
-      stdin_file = stdin_file_for(prepared.invocation.stdin_data)
-      log_file = log_path
-      write_opencode_spawn_log(log_file, prepared, cmd)
-
-      stdout_reader, stdout_writer = IO.pipe
-      stderr_reader, stderr_writer = IO.pipe
-      stdout_capture = { data: +"", truncated: false }
-      stderr_capture = { data: +"", truncated: false }
-      stdout_thread = capture_bounded_stream(
-        stdout_reader, stdout_capture, OPENCODE_CAPTURE_BYTES
-      )
-      stderr_thread = capture_bounded_stream(
-        stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
-      )
-      child_env = opencode_child_environment(prepared)
-      spawn_opts = {
-        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
-        unsetenv_others: true
-      }
-      spawn_opts[:in] = stdin_file if stdin_file
-      pid = Process.spawn(child_env, *cmd, **spawn_opts)
-      stdout_writer.close
-      stderr_writer.close
-      pgid = begin
-        Process.getpgid(pid)
-      rescue Errno::ESRCH
-        pid
-      end
-      Hive::Lock.update_task_lock(
-        @task.folder,
-        "claude_pid" => pid,
-        "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
-      )
-
-      cancellation = { cancelled: false }
-      cancellation_handler = ->(*) { cancel_opencode!(cancellation, pgid) }
-      old_int = install_chained_signal_trap("INT", &cancellation_handler)
-      old_term = install_chained_signal_trap("TERM", &cancellation_handler)
-      begin
-        timed_out, status = wait_for_opencode_process(pid, pgid)
-      ensure
-        trap("INT", old_int || "DEFAULT")
-        trap("TERM", old_term || "DEFAULT")
-      end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
-      write_opencode_capture_log(
-        log_file, stdout_capture.fetch(:data), stderr_capture.fetch(:data)
-      )
-
-      termination = AgentRuntime::TerminationEvidence.new(
-        exit_code: process_exit_code(status),
-        timed_out: timed_out,
-        cancelled: cancellation.fetch(:cancelled),
-        signal: process_signal(status)
-      )
-      inspection_output = nil
-      inspection_diagnostic = nil
-      if termination.success?
-        begin
-          parsed = AgentRuntime.parse_run(
-            @profile, stdout: stdout_capture.fetch(:data)
-          )
-          inspection = AgentRuntime.prepare_inspection(prepared, parsed)
-          inspection_result = capture_opencode_inspection(inspection)
-          if inspection_result.fetch(:success)
-            inspection_output = inspection_result.fetch(:stdout)
-          else
-            inspection_diagnostic = inspection_result.fetch(:diagnostic)
-          end
-        rescue AgentCliRuntime::MalformedOutput => e
-          inspection_diagnostic = AgentCliRuntime::Redactor.diagnostic(e)
-        end
-      end
-      captured = AgentRuntime::CapturedResult.new(
-        stdout: stdout_capture.fetch(:data),
-        stderr: stderr_capture.fetch(:data),
-        termination: termination,
-        inspection_output: inspection_output
-      )
-      outcome = AgentRuntime.normalize(
-        @profile, captured, requested_route: prepared.requested_route
-      )
-      usage = opencode_usage(outcome)
-      result = {
-        pid: pid,
-        pgid: pgid,
-        exit_code: termination.exit_code,
-        timed_out: termination.timed_out,
-        cancelled: termination.cancelled,
-        log_file: log_file,
-        final_message: outcome.final_message,
-        final_message_source: :opencode_terminal_message,
-        final_message_truncated: outcome.final_message_truncated,
-        limit_text: nil,
-        usage: usage,
-        model: outcome.identity.actual&.to_s,
-        requested_opencode_route: outcome.identity.requested.to_s,
-        actual_opencode_route: outcome.identity.actual&.to_s,
-        route_resolution_status: outcome.identity.resolution_status,
-        normalized_outcome_kind: outcome.kind,
-        normalized_outcome: outcome,
-        inspection_diagnostic: inspection_diagnostic,
-        unknown_event_summaries: outcome.unknown_events,
-        resource_exhaustion: nil,
-        output_completed: outcome.completed?,
-        provider_signal: nil,
-        status: nil,
-        invocation_root: prepared.invocation_root
-      }
-      result
-    ensure
-      close_opencode_ios(
-        stdout_writer, stderr_writer, stdout_reader, stderr_reader
-      )
-      [ stdout_thread, stderr_thread ].each do |thread|
-        thread.kill if thread&.alive?
-      end
-      close_prompt_stdin_file(stdin_file)
-      if prepared
-        begin
-          prepared.cleanup!
-          result[:cleanup_completed] = true if result
-        rescue StandardError => e
-          diagnostic = AgentCliRuntime::Redactor.diagnostic(e)
-          if result
-            result[:cleanup_completed] = false
-            result[:cleanup_error] = diagnostic
-          end
-          warn "[hive] OpenCode cleanup failed: #{diagnostic}"
-        end
-      end
-    end
-
-    def prepare_opencode_invocation
-      validate_opencode_launch_channels!
-      model, effort = opencode_route_and_effort
-      request = AgentCliRuntime::Request.new(
-        profile: @profile.runtime_profile,
-        prompt: @prompt,
-        permission_mode: @permission_mode,
-        model: model,
-        effort: effort,
-        executable: @runtime_policy&.executable || @profile.bin,
-        command_prefix: @runtime_policy&.command_prefix || []
-      )
-      root = @opencode_invocation_root || File.join(
-        Dir.tmpdir,
-        "hive-opencode-#{Process.pid}-#{SecureRandom.hex(12)}"
-      )
-      preparation = AgentRuntime::OpenCodePreparationRequest.new(
-        request: request,
-        working_directory: @cwd,
-        invocation_root: root,
-        configuration_path: @profile.opencode_configuration_path,
-        configuration: @profile.opencode_configuration,
-        credential_environment_keys:
-          @profile.opencode_credential_environment_keys,
-        credential_file: @profile.opencode_credential_file,
-        permission_policy: @opencode_permission_policy,
-        additional_read_roots: @additional_read_roots,
-        additional_write_roots: @additional_write_roots,
-        edit_patterns: @opencode_edit_patterns,
-        bash_patterns: @opencode_bash_patterns,
-        plugins: @profile.opencode_plugins,
-        pure: @profile.opencode_pure
-      )
-      AgentRuntime.prepare!(preparation, env: opencode_preparation_environment)
-    end
-
-    def validate_prepared_opencode_skills!(prepared)
-      invocations = @prompt.scan(%r{/(?:[A-Za-z0-9_.-]+:)?ce-[a-z0-9-]+}).uniq
-      invocations.each do |invocation|
-        resolution = Hive::SkillCheck::OpenCode.resolve(
-          invocation,
-          project_root: @cwd,
-          environment: prepared.environment_for(env: opencode_preparation_environment),
-          configuration_path: prepared.configuration_path
-        )
-        next if resolution.status == :present
-
-        raise Hive::AgentError,
-              "OpenCode prepared skill readiness failed for #{invocation}: #{resolution.message}"
-      end
-    end
-
-    def validate_opencode_launch_channels!
-      unless @cli_flags.empty? && @runtime_cli_flags.empty?
-        raise Hive::ConfigError,
-              "OpenCode does not accept opaque CLI arguments through Hive"
-      end
-      if @allowed_tools || @disallowed_tools
-        raise Hive::ConfigError,
-              "OpenCode tool access must come from its typed permission overlay"
-      end
-      declared = (@additional_read_roots + @additional_write_roots + [ @cwd ])
-        .map { |path| File.expand_path(path) }
-      omitted = @add_dirs.reject do |path|
-        declared.include?(File.expand_path(path))
-      end
-      return if omitted.empty?
-
-      raise Hive::ConfigError,
-            "OpenCode additional directories require explicit read/write roots"
-    end
-
-    def opencode_route_and_effort
-      model = @routing_arguments&.model || @launch_arguments&.model ||
-        opencode_identity_argument("--model")
-      effort = @routing_arguments&.effort || @launch_arguments&.effective_effort ||
-        opencode_identity_argument("--variant")
-      [ model, effort ]
-    end
-
-    def opencode_identity_argument(flag)
-      index = @identity_arguments.rindex(flag)
-      return nil unless index && index < @identity_arguments.length - 1
-
-      @identity_arguments[index + 1]
-    end
-
-    def opencode_preparation_environment
-      base = selected_base_environment
-      @profile.opencode_credential_environment_keys.each do |key|
-        value = selected_credential_value(key)
-        base[key] = value unless value.to_s.empty?
-      end
-      base
-    end
-
-    def opencode_child_environment(prepared)
-      prepared.environment_for(env: opencode_preparation_environment)
-        .merge(selected_base_environment)
-        .freeze
-    end
-
-    def selected_base_environment
-      %w[
-        HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR SSL_CERT_FILE
-        USER
-      ].each_with_object({}) do |key, selected|
-        value = @launch_environment.key?(key) ?
-          @launch_environment[key] : ENV[key]
-        selected[key] = value.to_s unless value.to_s.empty?
-      end
-    end
-
-    def selected_credential_value(key)
-      return @launch_environment[key] if @launch_environment.key?(key)
-
-      ENV[key]
-    end
-
-    def capture_bounded_stream(io, capture, max_bytes)
-      Thread.new do
-        Thread.current.report_on_exception = false
-        loop do
-          chunk = io.readpartial(16 * 1024)
-          remaining = max_bytes - capture.fetch(:data).bytesize
-          if remaining.positive?
-            capture.fetch(:data) << chunk.byteslice(0, remaining)
-          end
-          capture[:truncated] = true if chunk.bytesize > remaining
-        end
-      rescue EOFError, IOError
-        nil
-      ensure
-        io.close unless io.closed?
-      end
-    end
-
-    def finish_capture_thread(thread, io)
-      return unless thread
-
-      thread.join(2)
-      return unless thread.alive?
-
-      io.close unless io.closed?
-      thread.join(0.2)
-      thread.kill if thread.alive?
-    rescue IOError
-      thread.kill if thread&.alive?
-    end
-
-    def cancel_opencode!(state, pgid)
-      state[:cancelled] = true
-      kill_group(pgid)
-    end
-
-    def close_opencode_ios(*ios)
-      ios.each do |io|
-        io.close if io && !io.closed?
-      rescue IOError
-        nil
-      end
-    end
-
-    def wait_for_opencode_process(pid, pgid)
-      deadline = Time.now + @timeout_sec
-      loop do
-        remaining = deadline - Time.now
-        if remaining <= 0
-          kill_group(pgid)
-          sleep_grace_then_kill(pgid, pid)
-          status = begin
-            Process.wait2(pid).last
-          rescue StandardError
-            nil
-          end
-          return [ true, status ]
-        end
-        captured = Process.wait2(pid, Process::WNOHANG)
-        return [ false, captured.last ] if captured
-
-        sleep [ remaining, 0.1 ].min
-      end
-    end
-
-    def capture_opencode_inspection(inspection)
-      stdout_reader, stdout_writer = IO.pipe
-      stderr_reader, stderr_writer = IO.pipe
-      stdout_capture = { data: +"", truncated: false }
-      stderr_capture = { data: +"", truncated: false }
-      stdout_thread = capture_bounded_stream(
-        stdout_reader, stdout_capture,
-        AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
-      )
-      stderr_thread = capture_bounded_stream(
-        stderr_reader, stderr_capture, FINAL_MESSAGE_TAIL_BYTES
-      )
-      pid = Process.spawn(
-        inspection.environment_for(env: opencode_preparation_environment)
-          .merge(selected_base_environment),
-        *inspection.argv,
-        chdir: @cwd, pgroup: true, out: stdout_writer, err: stderr_writer,
-        unsetenv_others: true
-      )
-      stdout_writer.close
-      stderr_writer.close
-      pgid = begin
-        Process.getpgid(pid)
-      rescue Errno::ESRCH
-        pid
-      end
-      deadline = Time.now + OPENCODE_INSPECTION_TIMEOUT_SECONDS
-      status = nil
-      until status
-        captured = Process.wait2(pid, Process::WNOHANG)
-        status = captured.last if captured
-        break if status
-        if Time.now >= deadline
-          kill_group(pgid)
-          sleep_grace_then_kill(pgid, pid)
-          status = begin
-            Process.wait2(pid).last
-          rescue Errno::ECHILD
-            nil
-          end
-          break
-        end
-        sleep 0.05
-      end
-      finish_capture_thread(stdout_thread, stdout_reader)
-      finish_capture_thread(stderr_thread, stderr_reader)
-      success = status&.success? == true && !stdout_capture.fetch(:truncated)
-      diagnostic = unless success
-        AgentCliRuntime::Redactor.diagnostic(
-          stderr_capture.fetch(:data).empty? ?
-            "OpenCode sanitized export inspection failed" :
-            stderr_capture.fetch(:data)
-        )
-      end
-      {
-        success: success,
-        stdout: stdout_capture.fetch(:data),
-        diagnostic: diagnostic
-      }
-    ensure
-      close_opencode_ios(
-        stdout_writer, stderr_writer, stdout_reader, stderr_reader
-      )
-      [ stdout_thread, stderr_thread ].each do |thread|
-        thread.kill if thread&.alive?
-      end
-    end
-
-    def process_exit_code(status)
-      return nil unless status
-      return status.exitstatus if status.exited?
-      return -status.termsig if status.signaled?
-
-      nil
-    end
-
-    def process_signal(status)
-      return nil unless status&.signaled?
-
-      Signal.signame(status.termsig) || status.termsig.to_s
-    rescue ArgumentError
-      status.termsig.to_s
-    end
-
-    def opencode_usage(outcome)
-      usage = outcome.usage
-      return nil unless usage
-
-      {
-        input: usage.input,
-        output: usage.output,
-        cached: usage.cached,
-        cache_read: usage.cache_read,
-        cache_write: usage.cache_write,
-        reasoning: usage.reasoning,
-        input_includes_cache_read: usage.input_includes_cache_read,
-        input_includes_cache_write: usage.input_includes_cache_write,
-        output_includes_reasoning: usage.output_includes_reasoning,
-        provider_reported_cost: usage.provider_reported_cost,
-        cost: usage.provider_reported_cost,
-        model: outcome.identity.actual&.to_s
-      }.freeze
-    end
-
-    def write_opencode_spawn_log(log_file, prepared, cmd)
-      open_private_log(log_file) do |log|
-        log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
-                 "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                 "profile=opencode executable=#{File.basename(prepared.executable)} " \
-                 "argc=#{cmd.length}#{launch_identity_log_fields}"
-      end
-    end
-
-    def write_opencode_capture_log(log_file, stdout, stderr)
-      open_private_log(log_file) do |log|
-        stdout.each_line do |line|
-          event = parse_json_line(line)
-          type = event.is_a?(Hash) ? event.fetch("type", "unknown") : "malformed"
-          log.puts "[opencode event omitted type=#{type}]"
-        end
-        stderr.each_line do |line|
-          log.write("[stderr] #{Time.now.utc.iso8601} #{Hive::SecretPatterns.redact(line)}")
-          log.write("\n") unless line.end_with?("\n")
-        end
-      end
-    end
-
-    def opencode?
-      @profile.name == :opencode
-    end
-
     # Compile the provider-neutral request through AgentRuntime.
     #
     # Order is fixed:
@@ -1140,6 +597,178 @@ module Hive
 
       file.close
       file.unlink
+    end
+
+    # Provider transactions decide which commands to run; Hive retains child
+    # process custody, bounded capture, cancellation, and timeout cleanup.
+    def capture_process(argv:, environment:, stdout_limit:, stderr_limit:,
+                        stdin_data: nil, timeout_sec: @timeout_sec,
+                        record_spawn: false, forward_signals: false,
+                        drain_timeout: 2)
+      stdin_file = stdin_file_for(stdin_data)
+      stdout_reader, stdout_writer = IO.pipe
+      stderr_reader, stderr_writer = IO.pipe
+      stdout = { data: +"", truncated: false }
+      stderr = { data: +"", truncated: false }
+      stdout_thread = capture_bounded_stream(stdout_reader, stdout, stdout_limit)
+      stderr_thread = capture_bounded_stream(stderr_reader, stderr, stderr_limit)
+      pid = Process.spawn(
+        environment, *argv, chdir: @cwd, pgroup: true,
+        in: stdin_file || :close, out: stdout_writer, err: stderr_writer,
+        unsetenv_others: true
+      )
+      stdout_writer.close
+      stderr_writer.close
+      pgid = begin
+        Process.getpgid(pid)
+      rescue Errno::ESRCH
+        pid
+      end
+      if record_spawn
+        Hive::Lock.update_task_lock(
+          @task.folder,
+          "claude_pid" => pid,
+          "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
+        )
+      end
+      cancellation = { cancelled: false }
+      signals_installed = false
+      if forward_signals
+        handler = ->(*) { cancellation[:cancelled] = true; kill_group(pgid) }
+        old_int = install_chained_signal_trap("INT", &handler)
+        old_term = install_chained_signal_trap("TERM", &handler)
+        signals_installed = true
+      end
+      timed_out, status = wait_for_process(pid, pgid, timeout_sec)
+      finish_capture_thread(
+        stdout_thread, stdout_reader, timeout: drain_timeout, capture: stdout
+      )
+      finish_capture_thread(
+        stderr_thread, stderr_reader, timeout: drain_timeout, capture: stderr
+      )
+      CapturedProcess.new(
+        pid:, pgid:, stdout: stdout.fetch(:data), stderr: stderr.fetch(:data),
+        stdout_truncated: stdout.fetch(:truncated),
+        stderr_truncated: stderr.fetch(:truncated),
+        termination: Hive::AgentRuntime::TerminationEvidence.new(
+          exit_code: process_exit_code(status), timed_out:,
+          cancelled: cancellation.fetch(:cancelled), signal: process_signal(status)
+        )
+      )
+    ensure
+      trap("INT", old_int || "DEFAULT") if signals_installed
+      trap("TERM", old_term || "DEFAULT") if signals_installed
+      close_ios(stdout_writer, stderr_writer, stdout_reader, stderr_reader)
+      [ stdout_thread, stderr_thread ].each do |thread|
+        thread.kill if thread&.alive?
+      end
+      close_prompt_stdin_file(stdin_file)
+    end
+
+    def capture_process_files(argv:, environment:, file_limit:, stderr_limit:,
+                              timeout_sec:)
+      Tempfile.create([ "hive-agent-capture-", ".stdout" ]) do |stdout_file|
+        Tempfile.create([ "hive-agent-capture-", ".stderr" ]) do |stderr_file|
+          pid = Process.spawn(
+            environment, *argv, chdir: @cwd, pgroup: true, in: :close,
+            out: stdout_file, err: stderr_file, unsetenv_others: true,
+            rlimit_fsize: [ file_limit, file_limit ]
+          )
+          pgid = begin
+            Process.getpgid(pid)
+          rescue Errno::ESRCH
+            pid
+          end
+          timed_out, status = wait_for_process(pid, pgid, timeout_sec)
+          stdout_file.rewind
+          stdout = stdout_file.read(file_limit).to_s
+          stdout_truncated = stdout.bytesize >= file_limit || !stdout_file.eof?
+          stderr_truncated = stderr_file.size >= [ file_limit, stderr_limit ].min
+          stderr_file.rewind
+          stderr = stderr_file.read(stderr_limit).to_s
+          return CapturedProcess.new(
+            pid:, pgid:, stdout:, stderr:, stdout_truncated:, stderr_truncated:,
+            termination: Hive::AgentRuntime::TerminationEvidence.new(
+              exit_code: process_exit_code(status), timed_out:, cancelled: false,
+              signal: process_signal(status)
+            )
+          )
+        end
+      end
+    end
+
+    def capture_bounded_stream(io, capture, max_bytes)
+      Thread.new do
+        Thread.current.report_on_exception = false
+        loop do
+          chunk = io.readpartial(16 * 1024)
+          remaining = max_bytes - capture.fetch(:data).bytesize
+          capture.fetch(:data) << chunk.byteslice(0, remaining) if remaining.positive?
+          capture[:truncated] = true if chunk.bytesize > remaining
+        end
+      rescue EOFError, IOError
+        nil
+      ensure
+        io.close unless io.closed?
+      end
+    end
+
+    def finish_capture_thread(thread, io, timeout: 2, capture: nil)
+      return unless thread
+
+      thread.join(timeout)
+      return unless thread.alive?
+
+      capture[:truncated] = true if capture
+      io.close unless io.closed?
+      thread.join(0.2)
+      thread.kill if thread.alive?
+    rescue IOError
+      thread.kill if thread&.alive?
+    end
+
+    def wait_for_process(pid, pgid, timeout_sec)
+      deadline = Time.now + timeout_sec
+      loop do
+        remaining = deadline - Time.now
+        if remaining <= 0
+          kill_group(pgid)
+          sleep_grace_then_kill(pgid, pid)
+          status = begin
+            Process.wait2(pid).last
+          rescue Errno::ECHILD
+            nil
+          end
+          return [ true, status ]
+        end
+        captured = Process.wait2(pid, Process::WNOHANG)
+        return [ false, captured.last ] if captured
+
+        sleep [ remaining, 0.1 ].min
+      end
+    rescue Errno::ECHILD
+      [ false, nil ]
+    end
+
+    def process_exit_code(status)
+      return unless status
+      return status.exitstatus if status.exited?
+
+      -status.termsig if status.signaled?
+    end
+
+    def process_signal(status)
+      return unless status&.signaled?
+
+      Signal.signame(status.termsig) || status.termsig.to_s
+    rescue ArgumentError
+      status.termsig.to_s
+    end
+
+    def close_ios(*ios)
+      ios.compact.each { |io| io.close unless io.closed? }
+    rescue IOError
+      nil
     end
 
     def compiled_invocation
@@ -1230,7 +859,7 @@ module Hive
         return
       end
 
-      # OpenCode can exit zero after completing its file tool call while its
+      # A provider can exit zero after completing its file tool call while its
       # terminal assistant message is empty. The strict transcript normalizer
       # correctly labels that chat evidence malformed, but a current terminal
       # stage artifact is stronger completion evidence: the previous marker
@@ -1324,17 +953,18 @@ module Hive
           return
         end
 
+        diagnostic = result[:inspection_diagnostic] || normalized.diagnostic
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(
             @task.state_file,
             :error,
             reason: normalized.kind.to_s,
-            message: normalized.diagnostic.to_s.byteslice(0, 200)
+            message: diagnostic.to_s.byteslice(0, 200)
           )
         end
         result[:status] = :error
         result[:error_reason] = normalized.kind.to_s
-        result[:error_message] = normalized.diagnostic
+        result[:error_message] = diagnostic
         return
       end
 
@@ -1370,38 +1000,6 @@ module Hive
       amount
     rescue ArgumentError, TypeError
       raise ArgumentError, "max_turns must be a positive integer"
-    end
-
-    def claude_turn_completed?(event)
-      @profile.name == :claude &&
-        event.is_a?(Hash) &&
-        event["type"] == "stream_event" &&
-        event.dig("event", "type") == "message_delta"
-    end
-
-    def claude_turn_started?(event)
-      @profile.name == :claude &&
-        event.is_a?(Hash) &&
-        event["type"] == "stream_event" &&
-        event.dig("event", "type") == "message_start"
-    end
-
-    def claude_write_tool_event?(event)
-      return false unless @profile.name == :claude && event.is_a?(Hash)
-
-      block = event.dig("event", "content_block")
-      return true if block.is_a?(Hash) && block["type"] == "tool_use" && block["name"] == "Write"
-
-      message = event["message"]
-      content = message.is_a?(Hash) ? message["content"] : nil
-      Array(content).any? do |item|
-        item.is_a?(Hash) && item["type"] == "tool_use" && item["name"] == "Write"
-      end
-    end
-
-    def output_completed_event?(event)
-      (@max_turns || @max_tokens) &&
-        @profile.name == :claude && event.is_a?(Hash) && completed_output_file?
     end
 
     def handle_resource_exhaustion(result)

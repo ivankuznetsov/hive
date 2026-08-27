@@ -17,6 +17,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
+      agent-support
       attempts
       patrol-fix
       provider-health
@@ -121,6 +122,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/commands/circuits.rb",
           "lib/hive/commands/daemon.rb",
           "lib/hive/commands/module/dry_run.rb",
+          "lib/hive/commands/status.rb",
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/artifacts/outcome_evidence/store.rb",
           "lib/hive/implementation_identity/store.rb",
@@ -161,6 +163,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::PatrolFix", patrol_fix.dig("entrypoint", "constant")
     assert_equal %w[
       Hive::PatrolFix::AdmissionStore
+      Hive::PatrolFix::AttemptDiagnostic
       Hive::PatrolFix::FixReport
       Hive::PatrolFix::InboxReport
       Hive::PatrolFix::Projection
@@ -191,6 +194,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
     assert_empty clean_load.fetch("forbidden_loaded_features")
     assert_empty clean_load.fetch("forbidden_constants")
+
+    agent_support = contract.component("agent-support")
+    assert_equal "boundary-ready", agent_support.fetch("state")
+    assert_equal "hive/agent_support", agent_support.dig("entrypoint", "require")
+    assert_empty agent_support.fetch("migration_exceptions")
 
     agent_abi = contract.component("agent-abi")
     assert_equal "boundary-ready", agent_abi.fetch("state")
@@ -228,6 +236,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::AgentSkills", skillpack.dig("entrypoint", "constant")
     assert_equal(
       %w[
+        Hive::AgentSkills::Adapter
         Hive::AgentSkills::Plan
         Hive::AgentSkills::Projection
         Hive::AgentSkills::ProjectionReport
@@ -448,7 +457,7 @@ class ComponentBoundariesTest < Minitest::Test
                  workflow_live.fetch("hive_consumers")
     assert_empty workflow_live.fetch("migration_exceptions")
 
-    ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
+    ready_components.push(agent_support, agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
                           workflow_values, workflow_core, workflow_execution, workflow_live)
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
@@ -463,6 +472,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
+      agent-support
       patrol-fix
       safe-agent-git-gate
       skillpack
@@ -695,12 +705,13 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_equal(
       {
+        "agent-abi" => [ "agent-support" ],
         "attempts" => [ "provider-health", "provider-routing-policy" ],
         "patrol-fix" => [ "safe-agent-git-gate" ],
         "provider-routing-operations" => [
           "attempts", "provider-health", "provider-routing-policy"
         ],
-        "skillpack" => [ "agent-abi" ],
+        "skillpack" => [ "agent-abi", "agent-support" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
         "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],
         "workflow-creator-execution" => [ "workflow-creator-core" ]

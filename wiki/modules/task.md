@@ -28,9 +28,14 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    configuration digests. Historical pins are not executable: Hive raises an
    `InvalidTaskPath` instruction to run `hive migrate`, whose dedicated
    migration boundary reads the old descriptor and moves/repins the task to
-   the selected semantic stage. Launch-time context repeats the selection
-   check so a task object created immediately before an update cannot dispatch
-   the superseded package.
+   the selected semantic stage. Loading the selected immutable snapshot for
+   status, history, or task inspection does not resolve or compare its saved
+   agent profile against the current process: a later agent rename, capability
+   change, or compatible upgrade must not make a retained task unreadable.
+   Launch-time context repeats the selection check and verifies the current
+   capabilities and fingerprint only for the executable actor slot about to
+   run, so a task object created immediately before an update cannot dispatch
+   the superseded package and a genuinely drifted launch still fails closed.
 5. Validate the parsed stage name and numeric prefix against the selected
    descriptor. A policy-only repin may retain an existing directory when that
    directory is the exact terminal stage of another registered descriptor.
@@ -103,7 +108,7 @@ For stages 4 and later:
 
 ## Tests
 
-- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
+- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers. `test/integration/honeycomb_workflow_lifecycle_test.rb` proves a saved managed task remains readable after agent-profile drift while runtime preparation still rejects that actor.
 - `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency validation, workflow selector preservation, corrupt-input mutation refusal, display-name updates, and id backfill.
 - `test/unit/task_counter_test.rb` — first id, sequential ids, fail-soft allocation, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 

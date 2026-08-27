@@ -3,11 +3,11 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-25
 tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
-**TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` safely returns the *last* marker in a bounded binary tail of a regular file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)` and a securely-created sibling temporary file, replacing the last marker (or appending if none).
+**TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` safely returns the *last* marker in a bounded binary tail of a regular file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)` and a securely-created sibling temporary file, replacing the last marker (or appending if none). Callers that append diagnostics before writing a terminal marker can use `at_end: true` to relocate the current marker to EOF atomically.
 
 ## Marker grammar
 
@@ -111,7 +111,7 @@ State = Struct.new(:name, :attrs, :raw, keyword_init: true)
   status or terminal-outcome normalization.
 - Returns `:none` if no markers are present (e.g. an in-flight agent that hasn't written one yet).
 
-## `set(path, name, attrs = {})`
+## `set(path, name, attrs = nil, at_end: false, **keyword_attrs)`
 
 - `name` is upcased; raises `ArgumentError` if not in `KNOWN_NAMES`.
 - Builds the marker text via `build_marker`. Attribute values containing whitespace get double-quoted. Double quotes are normalized to single quotes, `<!--` is rewritten to `< !--`, and `-->` is rewritten to `-- >` so generated attrs cannot confuse HTML-comment marker boundaries.
@@ -119,6 +119,10 @@ State = Struct.new(:name, :attrs, :raw, keyword_init: true)
   replaces the *last* marker via `replace_last_marker`, or appends if none. A
   symlink, FIFO, device, or raced replacement is never opened and is replaced
   as an empty artifact instead.
+- With `at_end: true`, removes the last marker and appends the new marker at
+  EOF under the same lock and atomic rename. This keeps a freshly written
+  terminal marker inside `current`'s bounded tail even after a stage appends
+  more than 1 MiB of retry diagnostics. Earlier markers remain historical.
 - Persists through a random `O_EXCL` sibling created by `Tempfile`, checks its
   open inode against the directory entry before rename, and verifies the
   installed inode after rename. This prevents a predictable temporary-path
@@ -132,6 +136,12 @@ that form polls `LOCK_NB` against a monotonic deadline and raises the retryable
 brainstorm writer uses both options, preventing a stalled marker holder from
 keeping the task lock and hanging CLI, web, or Telegram writes indefinitely.
 
+`set_if_current(path, expected_name:, name:, ...)` performs a marker
+compare-and-set under that same sidecar lock. It returns `false` when another
+writer changed the current marker first. The daemon's markerless-stall repair
+uses this operation so a concurrent agent or operator `WAITING`, `COMPLETE`, or
+`ERROR` marker wins instead of being overwritten by stale recovery input.
+
 ## `parse_attrs`
 
 Parses the attribute string into a Hash. Format: `key=value` pairs, optional double-quoted values for whitespace-containing payloads. Quoted values may span newlines and may contain `>` characters; parsing stops at the closing quote, not at branch-arrow text. Regex: `/(\w[\w-]*)=("[^"]*"|\S+)/`.
@@ -140,9 +150,10 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 
 - `test/unit/markers_test.rb` — round-trip set/get, binary preservation,
   attribute quoting/sanitization, last-marker semantics, bounded sparse-file
-  tails, nonblocking FIFO and no-follow symlink refusal, predictable-temp
+  tails, atomic EOF relocation, nonblocking FIFO and no-follow symlink refusal, predictable-temp
   symlink resistance, Git stderr attrs containing `branch -> branch`, and
-  migration compare-and-swap refusal after a newer generation lands.
+  migration compare-and-swap refusal after a newer generation lands, and
+  marker compare-and-set refusal after a concurrent marker transition.
 
 ## Used by
 

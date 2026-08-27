@@ -97,7 +97,6 @@ class CommandsRunTest < Minitest::Test
     run.define_singleton_method(:resolve_task) { task }
     run.define_singleton_method(:perform_rebase) { |*| completed_rebase }
     run.define_singleton_method(:pick_runner) { |_task| runner }
-    run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
     run.define_singleton_method(:report) { |_task, result| reported << result }
 
     with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) { }) do
@@ -368,7 +367,6 @@ class CommandsRunTest < Minitest::Test
       run.define_singleton_method(:resolve_task) { current }
       run.define_singleton_method(:perform_rebase) { |*| completed_rebase }
       run.define_singleton_method(:pick_runner) { |_task| runner }
-      run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
 
       error = with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) { }) do
         with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
@@ -586,7 +584,7 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
-  def test_legacy_terminal_completion_uses_discovered_time_before_current_clock
+  def test_terminal_completion_uses_current_clock
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
       FileUtils.mkdir_p(folder)
@@ -600,16 +598,40 @@ class CommandsRunTest < Minitest::Test
       )
       fake_ops = Object.new
       fake_ops.define_singleton_method(:hive_commit) { |**| nil }
-      discovered = Time.utc(2026, 7, 1, 8, 0, 0)
+      completed_at = Time.utc(2026, 7, 24)
 
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
-        command(clock: -> { Time.utc(2026, 7, 24) }).send(
-          :commit_after, t, { commit: "complete" }, config: {},
-          completion_time: discovered
+        command(clock: -> { completed_at }).send(
+          :commit_after, t, { commit: "complete" }, config: {}
         )
       end
 
-      assert_equal discovered.iso8601, Hive::TaskMeta.read(folder)[:completed_at]
+      assert_equal completed_at.iso8601, Hive::TaskMeta.read(folder)[:completed_at]
+    end
+  end
+
+  def test_already_archived_legacy_task_is_not_stamped_by_an_ordinary_run
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        command(clock: -> { Time.utc(2026, 7, 24) }).send(
+          :commit_after, t, { commit: "complete" }, config: {}, stamp_completion: false
+        )
+      end
+
+      assert_nil Hive::TaskMeta.read(folder)[:completed_at]
     end
   end
 

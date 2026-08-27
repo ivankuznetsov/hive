@@ -242,30 +242,26 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
-  def test_inert_terminal_entry_preserves_legacy_first_completion_time
+  def test_inert_terminal_entry_preserves_existing_first_completion_time
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
       source = File.join(state, "stages", "1-work", "slug-260522-abcd")
       FileUtils.mkdir_p(source)
-      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      first_completion = Time.utc(2026, 7, 20, 9, 0, 0)
+      Hive::TaskMeta.write(
+        source, id: 1, slug: "slug-260522-abcd", display_name: nil,
+        completed_at: first_completion
+      )
       current = task(
         folder: source, hive_state_path: state, project_root: root,
         stage_index: 1, stage_name: "work", workflow: terminal_workflow
       )
-      first_completion = Time.utc(2026, 7, 20, 9, 0, 0)
       cmd = command(clock: -> { Time.utc(2026, 7, 24, 10, 0, 0) })
       cmd.define_singleton_method(:record_hive_commit) { |*| nil }
-      observed_task = nil
 
-      with_replaced_singleton_method(Hive::CompletionTime, :discover, ->(task) {
-        observed_task = task
-        first_completion
-      }) do
-        folder, = cmd.send(:perform_move_and_commit, current, "2-done")
+      folder, = cmd.send(:perform_move_and_commit, current, "2-done")
 
-        assert_same current, observed_task
-        assert_equal "2026-07-20T09:00:00Z", Hive::TaskMeta.read(folder)[:completed_at]
-      end
+      assert_equal "2026-07-20T09:00:00Z", Hive::TaskMeta.read(folder)[:completed_at]
     end
   end
 
@@ -335,33 +331,6 @@ class HiveCommandsApproveTest < Minitest::Test
       refute Hive::TaskMeta.read(source).key?(:completed_at)
       cached, = Open3.capture3("git", "-C", state, "diff", "--cached")
       assert_empty cached, cached
-    end
-  end
-
-  def test_legacy_completion_time_uses_state_file_then_folder_mtime_fallbacks
-    with_tmp_dir do |root|
-      state = File.join(root, ".hive-state")
-      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
-      FileUtils.mkdir_p(source)
-      state_file = File.join(source, "work.md")
-      File.write(state_file, "legacy\n")
-      state_time = Time.utc(2026, 7, 20, 9, 0, 0)
-      folder_time = Time.utc(2026, 7, 19, 9, 0, 0)
-      File.utime(state_time, state_time, state_file)
-      File.utime(folder_time, folder_time, source)
-      current = task(
-        folder: source, hive_state_path: state, project_root: root,
-        stage_index: 1, stage_name: "work", workflow: terminal_workflow
-      )
-      current.define_singleton_method(:completed_at) { nil }
-      current.define_singleton_method(:state_file) { state_file }
-
-      with_replaced_singleton_method(Hive::CompletionTime, :from_history, ->(*) { nil }) do
-        assert_equal state_time, command.send(:legacy_completion_time, current)
-        File.delete(state_file)
-        File.utime(folder_time, folder_time, source)
-        assert_equal folder_time, command.send(:legacy_completion_time, current)
-      end
     end
   end
 

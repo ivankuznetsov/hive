@@ -201,14 +201,12 @@ module Hive
         admission_context = build_admission_context(
           projects, workflow_generations: workflow_generations
         )
-        archive_backfiller = shared_archive_backfiller
         owns_attempt_store = acquire_status_attempt_store
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
             admission_context: admission_context, now: now,
-            workflow_generation: workflow_generation_for(project, workflow_generations),
-            archive_backfiller: archive_backfiller
+            workflow_generation: workflow_generation_for(project, workflow_generations)
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -541,7 +539,6 @@ module Hive
         admission_context ||= build_admission_context(
           projects, workflow_generations: workflow_generations
         )
-        archive_backfiller = shared_archive_backfiller
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -556,7 +553,6 @@ module Hive
               admission_context: admission_context,
               now: now,
               workflow_generation: workflow_generation_for(p, workflow_generations),
-              archive_backfiller: archive_backfiller,
               include_archive_index: include_archive_index
             )
           end
@@ -573,7 +569,6 @@ module Hive
         targets = daemon_task_targets(projects)
         selected = projects.select { |project| targets.key?(project.fetch("name")) }
         workflow_generations = capture_workflow_generations(selected)
-        archive_backfiller = shared_archive_backfiller
         owns_attempt_store = acquire_status_attempt_store
         {
           "schema" => "hive-status",
@@ -588,7 +583,6 @@ module Hive
               admission_context: nil,
               now: now.utc,
               workflow_generation: workflow_generation_for(project, workflow_generations),
-              archive_backfiller: archive_backfiller,
               task_slugs: targets.fetch(project.fetch("name"))
             )
           end
@@ -607,7 +601,7 @@ module Hive
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
                                       admission_context: nil, now: Time.now.utc,
-                                      workflow_generation: nil, archive_backfiller: nil,
+                                      workflow_generation: nil,
                                       include_archive_index: false, task_slugs: nil)
         project_payload(
           project,
@@ -617,7 +611,6 @@ module Hive
           admission_context: admission_context,
           now: now,
           workflow_generation: workflow_generation,
-          archive_backfiller: archive_backfiller,
           include_archive_index: include_archive_index,
           task_slugs: task_slugs
         )
@@ -642,7 +635,7 @@ module Hive
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
                           admission_context: nil, now: Time.now.utc,
-                          workflow_generation: nil, archive_backfiller: nil,
+                          workflow_generation: nil,
                           include_archive_index: false, task_slugs: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
@@ -696,7 +689,6 @@ module Hive
             end
             projection = Hive::ArchiveFilter.project(
               rows, now: now,
-              backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
               apply_retention: !@archive
             )
             note_retention_boundary(projection.next_retention_boundary) unless @archive
@@ -1074,7 +1066,7 @@ module Hive
       end
 
       def render_project(project, project_count:, admission_context: nil, now: Time.now.utc,
-                         workflow_generation: nil, archive_backfiller: nil)
+                         workflow_generation: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -1110,7 +1102,6 @@ module Hive
           rows = annotate_dependencies(rows, project, admission_context: admission_context)
           projection = Hive::ArchiveFilter.project(
             rows, now: now,
-            backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
             apply_retention: !@archive
           )
         end
@@ -1744,10 +1735,6 @@ module Hive
 
       def workflow_ids(generation)
         generation ? generation.workflows.keys : Hive::Workflows::Registry.ids
-      end
-
-      def shared_archive_backfiller
-        Hive::CompletedAtBackfiller.new(shared_refresh_deadline: true)
       end
 
       def note_retention_boundary(boundary)

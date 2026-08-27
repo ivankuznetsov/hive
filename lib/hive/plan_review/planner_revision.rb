@@ -88,7 +88,7 @@ module Hive
           # the provider's terminal status is lost. `read_candidate!` repeats
           # the marker validation before accepting the candidate.
           artifact_override = result[:status] != :ok && complete_candidate
-          unless (result[:status] == :ok && output_valid) || artifact_override
+          unless (result[:status] == :ok && complete_candidate) || artifact_override
             return { "status" => "retryable_failure", "diagnostic" => result[:error_message] }
           end
 

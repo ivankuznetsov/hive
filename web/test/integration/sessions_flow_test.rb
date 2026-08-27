@@ -4,6 +4,8 @@ require "test_helper"
 # only Net::HTTP is replaced via the `http:` DI seam (the same seam the
 # gem's unit suite uses): start → wait-page poll → grant/denial.
 class SessionsFlowTest < ActionDispatch::IntegrationTest
+  include ActiveSupport::Testing::TimeHelpers
+
   class FakeHttp
     def initialize(device:, token:, user:)
       @device = device
@@ -145,15 +147,17 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     begin_device_flow
     assert_equal 5, session[:github_device]["interval"]
 
-    # The first poll is gated until next_poll_at (start interval = 5s).
-    sleep 5.2
-    get "/auth/github/wait"
+    # Advance exactly to the server-issued poll boundary instead of making the
+    # suite wait on wall-clock scheduling.
+    travel_to(Time.at(session[:github_device]["next_poll_at"])) do
+      get "/auth/github/wait"
 
-    assert_response :success, "a slow_down grant must keep showing the waiting page"
-    assert_equal 10, session[:github_device]["interval"],
-                 "RFC 8628 slow_down is additive: interval must grow from 5 to 5+5, not reset to a payload value"
-    assert session[:github_device]["next_poll_at"] >= Time.now.to_i + 9,
-                 "the next poll must be pushed back by the raised interval"
+      assert_response :success, "a slow_down grant must keep showing the waiting page"
+      assert_equal 10, session[:github_device]["interval"],
+                   "RFC 8628 slow_down is additive: interval must grow from 5 to 5+5, not reset to a payload value"
+      assert session[:github_device]["next_poll_at"] >= Time.now.to_i + 9,
+                   "the next poll must be pushed back by the raised interval"
+    end
   end
 
   test "an owner change evicts existing sessions" do

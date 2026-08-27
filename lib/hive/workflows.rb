@@ -19,6 +19,17 @@ module Hive
     # ⟹ coding" defaulting rule gates every coding-only daemon/bot branch,
     # so it lives here once instead of being re-spelled at each consumer.
     CODING_ID = :coding
+
+    # Internal typed specializations of Hive::InvalidTaskPath raised by
+    # `resolve_stage_ref_across_workflows`. They let internal callers classify
+    # a failed stage-ref resolution by CLASS (`rescue AmbiguousStageRef`)
+    # instead of parsing user-facing exception text
+    # (`e.message.start_with?("ambiguous stage")`) — the message stays a
+    # diagnostic, never an API. Both remain `Hive::InvalidTaskPath` instances,
+    # so public rescue clauses and exit-code mapping (USAGE) are unchanged.
+    class AmbiguousStageRef < Hive::InvalidTaskPath; end
+    class UnknownStageRef < Hive::InvalidTaskPath; end
+
     # Optional `interactive: true` flag marks verbs that need the user's
     # tty during execution (stdin prompts, interactive `gh pr create`,
     # claude tool-permission asks). The TUI's `BubbleModel#dispatch_command`
@@ -200,10 +211,10 @@ module Hive
       return matches.first if matches.one?
 
       if matches.size > 1
-        raise Hive::InvalidTaskPath, "ambiguous stage '#{stage_ref}'; matches: #{matches.join(', ')}"
+        raise AmbiguousStageRef, "ambiguous stage '#{stage_ref}'; matches: #{matches.join(', ')}"
       end
 
-      raise Hive::InvalidTaskPath,
+      raise UnknownStageRef,
             "unknown stage '#{stage_ref}'; valid: #{stage_ref_hint}"
     end
 
@@ -237,9 +248,9 @@ module Hive
         resolved = resolve_stage_ref_across_workflows(stage_filter)
         resolved ? [ resolved ] : []
       end
-    rescue Hive::InvalidTaskPath => e
-      raise if e.message.start_with?("ambiguous stage")
-
+    rescue Hive::Workflows::AmbiguousStageRef
+      raise
+    rescue Hive::InvalidTaskPath
       []
     end
 
@@ -260,9 +271,9 @@ module Hive
         Hive::Workflows::Project.synchronize do
           Hive::Workflows::Project.load!(project["path"])
           !resolve_stage_ref_across_workflows(stage_filter).nil?
-        rescue Hive::InvalidTaskPath => e
-          raise if e.message.start_with?("ambiguous stage")
-
+        rescue Hive::Workflows::AmbiguousStageRef
+          raise
+        rescue Hive::InvalidTaskPath
           false
         end
       end

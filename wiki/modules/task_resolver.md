@@ -49,6 +49,7 @@ When the caller passes both an absolute folder path AND `--project NAME`, the pa
 | `lib/hive/commands/drop.rb` | Resolves path-shaped and numeric-id targets before Drop snapshots active/archive stage dirs for deletion/refusal. |
 | `lib/hive/commands/approve.rb` | Resolves approve targets; `--from` can disambiguate same-slug stages while preserving idempotency checks. |
 | `lib/hive/commands/generate_name.rb` | Resolves task targets before display-name generation. |
+| `lib/hive/commands/markers.rb` | Resolves `markers clear` targets; slug scans include runtime-registered workflow stage dirs. |
 | `lib/hive/commands/findings.rb` | Resolves findings targets, with optional `--stage`. |
 | `lib/hive/commands/finding_toggle.rb` | Same pattern, used by both `accept-finding` and `reject-finding`. |
 

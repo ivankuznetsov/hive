@@ -233,7 +233,7 @@ rg -n 'Process.spawn|spawn!|system\(' lib/hive/bot/
 ```
 
 See [[modules/daemon]] §"Single-dispatcher" and [[architecture]]
-§"Dispatch flow" for the daemon side of the contract.
+§"Process model" for the daemon side of the contract.
 
 ## Dispatch result notices
 

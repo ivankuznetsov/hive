@@ -11,6 +11,19 @@ module Hive
 
       ATTEMPTS_KEY = "publication_attempts".freeze
       PHASES = %w[push_intent push_complete pr_create_intent].freeze
+      PHASE_OPERATIONS = {
+        "push_intent" => "push_branch",
+        "push_complete" => "push_branch_complete",
+        "pr_create_intent" => "create_pr"
+      }.freeze
+      PHASE_PAYLOAD_KEYS = {
+        "push_intent" =>
+          %w[operation canonical_action_id repository branch commit_sha expected_remote_oid],
+        "push_complete" =>
+          %w[operation canonical_action_id repository branch commit_sha remote_oid],
+        "pr_create_intent" =>
+          %w[operation canonical_action_id repository branch commit_sha]
+      }.freeze
       DESCRIPTOR_KEYS = %w[
         attempt_id patch_receipt_key publication_base_sha commit_sha recorded_at
       ].freeze
@@ -110,14 +123,8 @@ module Hive
         if continuation_only && !(phase_name == "push_complete" && attempt["push_intent"].is_a?(Hash))
           raise Error, "revoked action claim cannot begin a publication phase"
         end
-        if phase_name == "push_intent" && (attempt.key?("push_complete") || attempt.key?("pr_create_intent"))
-          raise Error, "publication push intent cannot be appended after completion"
-        end
-        if phase_name == "push_complete" && attempt.key?("pr_create_intent")
-          raise Error, "publication push completion cannot follow PR-create intent"
-        end
-        if phase_name == "pr_create_intent" && !attempt["push_complete"].is_a?(Hash)
-          raise Error, "publication PR-create intent requires durable push completion"
+        if (violation = phase_order_violation(attempt, phase_name))
+          raise Error, violation
         end
 
         attempt[phase_name] = value
@@ -252,6 +259,51 @@ module Hive
         attempt.is_a?(Hash) && !attempt.key?("superseded")
       end
 
+      # Pure statement of the phase-append ordering policy: which phases may
+      # legally follow an attempt's recorded phases. This is the single owner
+      # of the publication lifecycle grammar; both the mutation boundary
+      # (append_phase) and the record-validation boundary consume it instead
+      # of re-deriving the rules. Returns the violated rule as a message, or
+      # nil when appending the phase is legal.
+      def phase_order_violation(attempt, phase)
+        attempt = {} unless attempt.is_a?(Hash)
+        case phase.to_s
+        when "push_intent"
+          if attempt.key?("push_complete") || attempt.key?("pr_create_intent")
+            "publication push intent cannot be appended after completion"
+          end
+        when "push_complete"
+          if attempt.key?("pr_create_intent")
+            "publication push completion cannot follow PR-create intent"
+          end
+        when "pr_create_intent"
+          unless attempt["push_complete"].is_a?(Hash)
+            "publication PR-create intent requires durable push completion"
+          end
+        end
+      end
+
+      # A stored attempt is well-ordered exactly when every recorded phase
+      # could have been produced by a legal append sequence over PHASES.
+      def well_ordered?(attempt)
+        return false unless attempt.is_a?(Hash)
+
+        PHASES.each_with_object({}) do |phase, prefix|
+          return false if attempt.key?(phase) && phase_order_violation(prefix, phase)
+
+          prefix[phase] = attempt[phase] if attempt.key?(phase)
+        end
+        true
+      end
+
+      def phase_operation(phase)
+        PHASE_OPERATIONS.fetch(phase.to_s)
+      end
+
+      def phase_payload_keys(phase)
+        PHASE_PAYLOAD_KEYS.fetch(phase.to_s)
+      end
+
       def remote_push_evidence?(attempt)
         attempt.is_a?(Hash) && attempt["push_complete"].is_a?(Hash)
       end
@@ -268,11 +320,7 @@ module Hive
       def copy_legacy_phase!(state, payload, commit_sha, expected_phase: nil)
         return unless payload.is_a?(Hash) && payload["commit_sha"] == commit_sha
 
-        phase = case payload["operation"]
-        when "push_branch" then "push_intent"
-        when "push_branch_complete" then "push_complete"
-        when "create_pr" then "pr_create_intent"
-        end
+        phase = PHASE_OPERATIONS.key(payload["operation"])
         return unless phase && (!expected_phase || phase == expected_phase)
 
         state[phase] = payload

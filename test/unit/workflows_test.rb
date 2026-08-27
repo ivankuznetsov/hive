@@ -225,10 +225,11 @@ class WorkflowsTest < Minitest::Test
     )
 
     with_registered_workflow(descriptor) do
-      error = assert_raises(Hive::InvalidTaskPath) do
+      error = assert_raises(Hive::Workflows::AmbiguousStageRef) do
         Hive::Workflows.resolve_stage_ref_across_workflows("plan")
       end
 
+      assert_kind_of Hive::InvalidTaskPath, error
       assert_includes error.message, "ambiguous stage 'plan'"
       assert_includes error.message, "3-plan"
       assert_includes error.message, "1-plan"
@@ -249,5 +250,47 @@ class WorkflowsTest < Minitest::Test
     assert_includes error.message, "ambiguous stage 'done'"
     assert_includes error.message, "9-done"
     assert_includes error.message, "6-done"
+  end
+
+  def test_resolve_stage_ref_across_workflows_rejects_ambiguous_refs_with_typed_error
+    # Regression: the ambiguity classification must be by TYPE, not by parsing
+    # `e.message.start_with?("ambiguous stage")` at internal rescue sites.
+    error = assert_raises(Hive::Workflows::AmbiguousStageRef) do
+      Hive::Workflows.resolve_stage_ref_across_workflows("done")
+    end
+
+    assert_kind_of Hive::InvalidTaskPath, error
+    assert_includes error.message, "ambiguous stage 'done'"
+  end
+
+  def test_resolve_stage_ref_across_workflows_rejects_unknown_refs_with_typed_error
+    error = assert_raises(Hive::Workflows::UnknownStageRef) do
+      Hive::Workflows.resolve_stage_ref_across_workflows("no-such-stage")
+    end
+
+    # The typed subclasses must stay InvalidTaskPath instances: public rescue
+    # clauses and the USAGE exit-code mapping depend on that compatibility.
+    assert_kind_of Hive::InvalidTaskPath, error
+    assert_equal Hive::ExitCodes::USAGE, error.exit_code
+    assert_includes error.message, "unknown stage 'no-such-stage'"
+  end
+
+  def test_stages_for_project_classifies_by_type_not_message_text
+    # Regression for the message-based classification: an ambiguous ref whose
+    # MESSAGE were reworded (or localized) must still propagate through
+    # stages_for_project. Pin the typed contract directly.
+    error = assert_raises(Hive::Workflows::AmbiguousStageRef) do
+      Hive::Workflows.stages_for_project({ "path" => Dir.pwd }, stage_filter: "done")
+    end
+
+    assert_includes error.message, "ambiguous stage 'done'"
+  end
+
+  def test_assert_known_stage_filter_propagates_typed_ambiguity
+    error = assert_raises(Hive::Workflows::AmbiguousStageRef) do
+      Hive::Workflows.assert_known_stage_filter!("done", [ { "path" => Dir.pwd } ])
+    end
+
+    assert_includes error.message, "ambiguous stage 'done'"
   end
 end

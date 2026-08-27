@@ -1423,7 +1423,6 @@ class TuiStateSourceTest < Minitest::Test
   # The archive payload guard drops cached rows when the ordinary parse flags
   # a project with an explicit error (missing_project_path / not_initialised).
   def test_archive_payload_drops_cached_rows_for_errored_ordinary_project
-    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     archived_cache = {
       rows_by_path: {
         "/p" => [ { "slug" => "done-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
@@ -1433,8 +1432,8 @@ class TuiStateSourceTest < Minitest::Test
       "projects" => [ { "path" => "/p", "error" => "missing_project_path", "tasks" => [] } ]
     }
 
-    archive_payload = source.send(
-      :archive_payload_from_cache, active_payload, archived_cache
+    archive_payload = Hive::StatusProjection.archive_payload_from_cache(
+      active_payload, archived_cache
     )
 
     assert_empty archive_payload["projects"].first["tasks"],
@@ -1444,7 +1443,6 @@ class TuiStateSourceTest < Minitest::Test
   # A healthy project with no ordinary tasks keeps the dedicated cached
   # archive rows without merging them into the ordinary payload.
   def test_archive_payload_keeps_cached_rows_separate_for_healthy_project
-    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     archived_cache = {
       rows_by_path: {
         "/p" => [ { "slug" => "done-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
@@ -1452,8 +1450,8 @@ class TuiStateSourceTest < Minitest::Test
     }.freeze
     active_payload = { "projects" => [ { "path" => "/p", "tasks" => [] } ] }
 
-    archive_payload = source.send(
-      :archive_payload_from_cache, active_payload, archived_cache
+    archive_payload = Hive::StatusProjection.archive_payload_from_cache(
+      active_payload, archived_cache
     )
 
     assert_empty active_payload["projects"].first["tasks"]
@@ -1941,7 +1939,7 @@ class TuiStateSourceTest < Minitest::Test
       hidden_counts_by_path: { "/project" => 3 }
     }
 
-    merged = source.send(:merge_visible_archived_payload, active, cache)
+    merged = Hive::StatusProjection.merge_visible_archived_payload(active, cache)
       .fetch("projects").fetch(0)
 
     assert_equal [ "active" ], merged.fetch("tasks").map { |row| row["slug"] }

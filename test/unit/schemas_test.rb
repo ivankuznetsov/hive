@@ -12,6 +12,46 @@ require "test_helper"
 # reference these constants — a drift between any of those three surfaces
 # fails this test or the schema-drift test in schema_files_test.rb.
 class SchemasTest < Minitest::Test
+  # The Schemas namespace must be owned by its dedicated file, not by the
+  # root entrypoint. lib/hive.rb keeps only the require_relative so the
+  # public constant path (Hive::Schemas) stays unchanged for every
+  # `require "hive"` consumer.
+  def test_schemas_namespace_is_owned_by_dedicated_file_not_root_entrypoint
+    schemas_source = File.read(File.expand_path("../../lib/hive/schemas.rb", __dir__))
+    root_source = File.read(File.expand_path("../../lib/hive.rb", __dir__))
+
+    assert_includes schemas_source, "module Schemas",
+                    "Hive::Schemas must be defined in lib/hive/schemas.rb"
+    refute_includes root_source, "module Schemas",
+                    "the lib/hive.rb root entrypoint must not own the schema namespace"
+  end
+
+  def test_requiring_hive_loads_the_schemas_namespace_from_its_own_file
+    # test_helper already performed `require "hive"` for this process.
+    assert defined?(Hive::Schemas::SCHEMA_VERSIONS),
+           "require 'hive' must load Hive::Schemas"
+
+    # The namespace must be served by its dedicated file, not re-opened
+    # inside lib/hive.rb.
+    loaded_schemas = $LOADED_FEATURES.grep(%r{/lib/hive/schemas\.rb$})
+    assert_equal 1, loaded_schemas.length,
+                 "lib/hive/schemas.rb must be loaded exactly once when hive is required"
+
+    root_source = File.read(File.expand_path("../../lib/hive.rb", __dir__))
+    assert_match(%r{require_relative "hive/schemas"}, root_source,
+                 "lib/hive.rb must wire in the dedicated schemas file")
+  end
+
+  def test_schema_dir_resolves_to_the_published_schemas_directory
+    # The move of the namespace out of lib/hive.rb must not shift the
+    # published-schema root: schema_path feeds every producer and the
+    # schema_files drift tests.
+    expected = File.expand_path("schemas", File.expand_path("../..", __dir__))
+    assert_equal expected, Hive::Schemas.schema_dir
+    assert File.file?(Hive::Schemas.schema_path("hive-status")),
+           "schema_path must resolve to a real published schema file"
+  end
+
   def test_run_error_kind_all_contains_fifteen_values
     assert_equal 15, Hive::Schemas::RunErrorKind::ALL.length,
                  "RunErrorKind::ALL count is locked; adding a kind requires bumping this assertion deliberately"

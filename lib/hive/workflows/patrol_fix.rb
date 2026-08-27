@@ -19,7 +19,11 @@ module Hive
             name: name,
             index: index + 1,
             state_file: Hive::PatrolFix::TaskManifest::FILENAME,
-            kind: name == "done" ? :inert : :controller
+            kind: name == "done" ? :inert : :controller,
+            # Every stage — including the terminal inert one — executes through
+            # the workflow-owned controller runner. The explicit pin keeps
+            # dispatch descriptor-owned even where the kind derives no strategy.
+            runner: :controller
           )
         end
       )

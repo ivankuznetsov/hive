@@ -390,5 +390,4 @@ class HiveTuiInputDecoderTest < Minitest::Test
     key_types = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) }.map(&:key_type)
     assert_equal [ Bubbletea::KeyMessage::KEY_ESC, Bubbletea::KeyMessage::KEY_CTRL_C ], key_types
   end
-
 end

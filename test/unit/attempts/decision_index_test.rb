@@ -59,6 +59,253 @@ class AttemptsDecisionIndexTest < Minitest::Test
     assert_predicate acceptances.fetch("attempt-1"), :frozen?
   end
 
+  def test_live_reservation_round_trips_bounded_patrol_admission_metadata
+    admission = {
+      "workflow" => "patrol_fix", "stage" => "2-fix",
+      "runtime_digest" => "a" * 64, "utc_date" => NOW.to_date.iso8601
+    }
+    @index.reserve_live(
+      attempt_id: "attempt-1", project: "demo", task_slug: "task",
+      admission: admission
+    )
+    @index.confirm_live(
+      attempt_id: "attempt-1", project: "demo", task_slug: "task",
+      admission: admission
+    )
+
+    reservation = Hive::Attempts::DecisionIndex.new(root: @root)
+      .live_reservations.fetch("attempt-1")
+    assert_equal "active", reservation.fetch("phase")
+    assert_equal admission, reservation.fetch("admission")
+  end
+
+  def test_failure_cohort_opens_durably_and_allows_only_one_probe
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+
+    blocked = @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date, now: NOW + 10
+    )
+    assert_equal "blocked", blocked.fetch("status")
+    assert_equal "failure_cohort_cooldown", blocked.fetch("reason")
+
+    restarted = Hive::Attempts::DecisionIndex.new(root: @root)
+    probe = restarted.failure_cohort_admission(
+      identity: identity, date: NOW.to_date,
+      now: NOW + Hive::Attempts::DecisionIndex::FAILURE_COHORT_COOLDOWN_SEC + 10
+    )
+    assert_equal "probe", probe.fetch("status")
+    assert restarted.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: NOW + 4_000
+    )
+    refute restarted.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-2", now: NOW + 4_000
+    )
+  end
+
+  def test_explicit_release_bypasses_pacing_once_but_not_an_active_probe
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+
+    release = @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date, now: NOW + 10,
+      explicit_release: true
+    )
+    assert_equal "probe", release.fetch("status")
+    assert @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: NOW + 10,
+      explicit_release: true
+    )
+    assert_equal "blocked", @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date, now: NOW + 11,
+      explicit_release: true
+    ).fetch("status")
+  end
+
+  def test_concurrent_probe_claims_admit_exactly_one_attempt
+    skip "fork is unavailable" unless Process.respond_to?(:fork)
+
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+    release_read, release_write = IO.pipe
+    children = 2.times.map do |index|
+      result_read, result_write = IO.pipe
+      pid = fork do
+        release_write.close
+        result_read.close
+        release_read.read(1)
+        restarted = Hive::Attempts::DecisionIndex.new(root: @root)
+        Marshal.dump(
+          restarted.claim_failure_cohort_probe(
+            identity: identity, date: NOW.to_date,
+            attempt_id: "probe-#{index}", now: NOW + 4_000
+          ),
+          result_write
+        )
+      ensure
+        result_write.close unless result_write.closed?
+      end
+      result_write.close
+      [ pid, result_read ]
+    end
+    release_read.close
+    release_write.write("11")
+    release_write.close
+
+    claims = children.map do |pid, reader|
+      value = Marshal.load(reader)
+      Process.wait(pid)
+      reader.close
+      value
+    end
+    assert_equal [ false, true ], claims.sort_by { |value| value ? 1 : 0 }
+  end
+
+  def test_failed_probe_reopens_the_same_cohort
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+    @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: NOW + 4_000
+    )
+    @index.record_failure_cohort(
+      attempt_id: "probe-1", identity: identity,
+      occurred_at: NOW + 4_010
+    )
+
+    result = Hive::Attempts::DecisionIndex.new(root: @root)
+      .failure_cohort_admission(
+        identity: identity, date: NOW.to_date, now: NOW + 4_011
+      )
+    assert_equal "blocked", result.fetch("status")
+    assert_equal (NOW + 4_010 + 3_600).iso8601(6), result.fetch("retry_at")
+  end
+
+  def test_out_of_order_failure_cannot_shorten_an_open_cooldown
+    identity = failure_cohort_identity
+    [ 100, 200, 300 ].each_with_index do |offset, index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + offset
+      )
+    end
+    @index.record_failure_cohort(
+      attempt_id: "late-observed-old-failure", identity: identity,
+      occurred_at: NOW + 50
+    )
+
+    result = @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date, now: NOW + 400
+    )
+    assert_equal "blocked", result.fetch("status")
+    assert_equal (NOW + 300 + 3_600).iso8601(6), result.fetch("retry_at")
+  end
+
+  def test_probe_with_a_different_code_preserves_the_original_cohort
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+    @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: NOW + 4_000
+    )
+    changed = identity.merge("code" => "provider_timeout")
+    @index.record_failure_cohort(
+      attempt_id: "probe-1", identity: changed,
+      occurred_at: NOW + 4_010
+    )
+
+    original = @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date, now: NOW + 4_011
+    )
+    assert_equal "blocked", original.fetch("status")
+    assert_equal (NOW + 4_010 + 3_600).iso8601(6), original.fetch("retry_at")
+    assert_equal "open", @index.failure_cohort_admission(
+      identity: changed, date: NOW.to_date, now: NOW + 4_011
+    ).fetch("status")
+  end
+
+  def test_unrelated_failure_does_not_clear_a_live_probe
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+    @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: NOW + 4_000
+    )
+
+    @index.record_failure_cohort(
+      attempt_id: "concurrent-failure", identity: identity,
+      occurred_at: NOW + 4_010
+    )
+
+    refute @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-2", now: NOW + 4_011,
+      explicit_release: true
+    )
+  end
+
+  def test_successful_probe_closes_only_its_runtime_cohort_and_utc_rollover_releases
+    identity = failure_cohort_identity
+    3.times do |index|
+      @index.record_failure_cohort(
+        attempt_id: "failure-#{index}", identity: identity,
+        occurred_at: NOW + index
+      )
+    end
+    @index.claim_failure_cohort_probe(
+      identity: identity, date: NOW.to_date,
+      attempt_id: "probe-1", now: NOW + 4_000
+    )
+    @index.record_failure_cohort_success(
+      attempt_id: "probe-1", date: NOW.to_date
+    )
+
+    assert_equal "open", @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date, now: NOW + 4_001
+    ).fetch("status")
+
+    repaired = identity.merge("runtime_digest" => "b" * 64)
+    assert_equal "open", @index.failure_cohort_admission(
+      identity: repaired, date: NOW.to_date, now: NOW + 10
+    ).fetch("status")
+    assert_equal "open", @index.failure_cohort_admission(
+      identity: identity, date: NOW.to_date + 1, now: NOW + 86_400
+    ).fetch("status")
+  end
+
   def test_new_admission_observation_replaces_the_previous_projection
     @index.record_routing_decision(
       decision: selected_decision("decision-1"),
@@ -261,6 +508,16 @@ class AttemptsDecisionIndexTest < Minitest::Test
       "task_id" => "42",
       "task_slug" => "task",
       "intended_stage" => "4-execute"
+    }
+  end
+
+  def failure_cohort_identity
+    {
+      "runtime_digest" => "a" * 64,
+      "project" => "demo",
+      "workflow" => "patrol_fix",
+      "stage" => "2-fix",
+      "code" => "agent_exit_nonzero"
     }
   end
 

@@ -2028,34 +2028,12 @@ module Hive
         binding = status_attempt_store.fetch_terminal_diagnostic_binding(attempt_id)
         return nil unless binding.is_a?(Hash) && binding["attempt_id"] == attempt_id
 
-        receipt = binding["receipt"]
-        return nil unless receipt.is_a?(Hash)
-        # Exit 75 is durable scheduler contention. Its receipt remains
-        # auditable, but presenting the synthesized non-zero-exit artifact as
-        # a Patrol agent failure assigns the incident to the wrong owner.
-        return nil if receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
-
-        diagnostic_path = File.join(
-          "outputs", attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME
+        bound = Hive::PatrolFix::AttemptDiagnostic.read_bound(
+          store: status_attempt_store, binding: binding
         )
-        reference = Array(receipt["output_references"]).find do |candidate|
-          candidate.is_a?(Hash) && candidate["path"] == diagnostic_path
-        end
-        return nil unless reference
+        return nil unless bound
 
-        document = JSON.parse(status_attempt_store.read_output(
-          reference, max_bytes: Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
-        ))
-        Hive::PatrolFix::AttemptDiagnostic.validate!(document)
-        return nil unless document["attempt_id"] == attempt_id &&
-                          document["correlation_id"] == attempt_id &&
-                          document["stage"] == binding["stage"].to_s &&
-                          document["task_generation"] == binding["task_generation"].to_s &&
-                          document["log_reference"] == receipt["log_reference"]
-
-        diagnostic_projection(document, reference)
-      rescue JSON::ParserError, Hive::Error, SystemCallError, IOError
-        nil
+        diagnostic_projection(bound.fetch("document"), bound.fetch("reference"))
       end
 
       def diagnostic_projection(document, reference)

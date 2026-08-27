@@ -3127,13 +3127,26 @@ module Hive
 
           receipt = attempt.receipt
           if request.recovery.is_a?(Hash)
-            @recovery_coordinator.mark_dispatched(
+            terminal_transition = @recovery_coordinator.mark_dispatched(
               request,
               attempt_id: attempt.attempt_id,
               terminal: true,
               outcome: receipt["outcome"],
               now: now
             )
+            unless terminal_transition&.status == "terminal" &&
+                   terminal_transition&.phase == "terminal"
+              @logger.event(
+                :dispatch_request_reconciliation_failed,
+                request_id: request.request_id,
+                attempt_id: attempt.attempt_id,
+                project: request.project,
+                slug: request.slug,
+                phase: terminal_transition&.phase || request.recovery["phase"],
+                reason: terminal_transition&.reason || "terminal_transition_unavailable"
+              )
+              next
+            end
           end
           continuation = if receipt["exit_status"].zero?
             Hive::Daemon::DispatchRequestQueue.promote_sequence(

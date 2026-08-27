@@ -1181,7 +1181,7 @@ module Hive
           "terminal_outcome" => nil,
           "terminal_at" => nil
         }
-        @request_queue.update_recovery!(
+        @request_queue.requeue_recovery!(
           request.request_id, expected_phase: "terminal", changes: changes,
           state_home: @state_home
         )

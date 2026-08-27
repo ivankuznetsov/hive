@@ -67,6 +67,7 @@ module Hive
         dispatch_request_attached
         dispatch_request_terminal_replay
         dispatch_request_completed
+        dispatch_request_reconciliation_failed
         dispatch_request_rejected
         dispatch_request_blocked
         dispatch_request_expired

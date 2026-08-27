@@ -818,6 +818,17 @@ recovery receipts remain durable for history, while filesystem pruning is
 throttled to one pass per hour so a five-second dispatcher loop does not
 rescan and rewrite retention state continuously.
 
+Retrying a terminal markerless recovery is one queue transaction: the queue
+moves any `<id>.json.claimed` receipt back to `<id>.json`, removes its claim
+sidecar, and only then changes `terminal` to `admitted`. The ordering is
+crash-safe because interruption before the phase rewrite leaves a terminal
+pending receipt, which remains invisible to dispatch. Startup claim recovery
+also recognizes the older invalid `admitted` + claimed combination and
+requeues it without following or deleting the stale terminal attempt. During
+terminal delivery reconciliation, a rejected durable phase transition emits
+`dispatch_request_reconciliation_failed`; it is not acknowledged, written as
+a result, or reported as `dispatch_request_completed`.
+
 Recovery generation checks also share one immutable dependency-admission
 context per queue scan. The dispatcher creates it lazily only when a recovery
 request reaches the coordinator, then reuses its global project/task indexes
@@ -836,6 +847,7 @@ dispatch-failure pacing.
 :dispatch_request_dispatched pid=… command=…   (only when dispatched)
 :dispatch_request_blocked    reason=admission_error|dependency_unmet|in_flight|cooldown|…
 :dispatch_request_completed  pid=… exit_code=… elapsed_sec=…
+:dispatch_request_reconciliation_failed request_id=… attempt_id=… reason=transition_conflict
 :dispatch_request_rejected   reason=invalid_argv|unknown_project|…
 :dispatch_request_expired    created_at=…
 :dispatch_request_recovered  reason=owner_gone|claim_expired|malformed_claim  (startup claim sweep, C3)

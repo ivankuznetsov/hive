@@ -28,11 +28,58 @@ class OperationalActionTest < Minitest::Test
   end
 
   def test_provider_administration_is_not_a_confirmation_free_operational_action
-    assert_equal %w[workflow.advance workflow.retry],
+    assert_equal %w[workflow.advance workflow.retry patrol_fix.rework_publication],
                  Hive::OperationalAction::EXECUTABLE_ACTION_IDS
     refute Hive::OperationalAction.const_defined?(:PROVIDER_BLOCK_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:PROVIDER_RESET_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:FORCED_PROBE_ACTION_ID, false)
+  end
+
+  def test_publication_rework_descriptor_is_receipt_bound_and_uses_its_closed_executor_path
+    row = {
+      "slug" => "repair-one", "folder" => "/tmp/repair-one",
+      "workflow" => "patrol-fix", "stage" => "5-publish", "marker" => "none",
+      "attrs" => {}, "mtime" => "2026-08-20T12:00:00.000000Z",
+      "action" => "patrol_fix_publication_blocked",
+      "action_receipt_id" => "publication-block-one",
+      "blocked" => false, "held" => nil
+    }
+    descriptor = Hive::OperationalAction.descriptor(project: "demo", row: row)
+    changed = Hive::OperationalAction.descriptor(
+      project: "demo", row: row.merge("action_receipt_id" => "publication-block-two")
+    )
+
+    assert_equal "patrol_fix.rework_publication", descriptor.fetch("action_id")
+    refute_equal descriptor.fetch("observation_token"), changed.fetch("observation_token")
+
+    task = Object.new
+    executor = Hive::OperationalAction::Executor.new
+    executor.define_singleton_method(:registered_project) { |_| { "path" => "/tmp" } }
+    executor.define_singleton_method(:resolve_task) { |*| task }
+    calls = []
+    executor.define_singleton_method(:execute_publication_rework) do |value, **kwargs|
+      calls << [ value, kwargs ]
+    end
+    executor.define_singleton_method(:result_for) do |*|
+      { "task_state" => "ready_to_run", "stage" => "4-review", "marker" => "none" }
+    end
+    with_replaced_singleton_method(
+      Hive::OperationalAction, :observed_row,
+      ->(_task, project:) { row.merge("project" => project) }
+    ) do
+      with_replaced_singleton_method(
+        Hive::OperationalAction, :assert_current!, ->(*) { descriptor }
+      ) do
+        result = executor.execute(
+          action_id: descriptor.fetch("action_id"), target: descriptor.fetch("target"),
+          observation_token: descriptor.fetch("observation_token")
+        )
+        assert_equal "4-review", result.fetch("stage")
+      end
+    end
+    assert_equal task, calls.fetch(0).fetch(0)
+    assert_equal descriptor.fetch("observation_token"),
+                 calls.fetch(0).fetch(1).fetch(:observation_token)
   end
 
   def test_closure_is_advertised_but_cannot_be_executed_with_an_observation_token

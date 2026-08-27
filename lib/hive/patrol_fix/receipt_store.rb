@@ -18,7 +18,7 @@ module Hive
       DIGEST = /\A[0-9a-f]{64}\z/
       REVISION = /\A[0-9a-f]{40}\z/
       SLUG = TaskManifest::SLUG
-      KINDS = %w[decision fix validation publication reopen].freeze
+      KINDS = %w[decision fix validation publication publication_block reopen].freeze
       STAGES = %w[inbox fix validate review publish].freeze
       DECISION_ROUTES = {
         "inbox" => %w[fix escalate reject blocked],
@@ -158,6 +158,7 @@ module Hive
         when "fix" then validate_fix!(stage, payload, label)
         when "validation" then validate_validation!(stage, payload, label)
         when "publication" then validate_publication!(stage, payload, label)
+        when "publication_block" then validate_publication_block!(stage, payload, label)
         when "reopen" then validate_reopen!(stage, payload, label)
         end
       end
@@ -183,9 +184,14 @@ module Hive
       end
 
       def terminal_key(receipt)
+        kind = if %w[publication publication_block].include?(receipt.fetch("kind"))
+          "publication_result"
+        else
+          receipt.fetch("kind")
+        end
         [
           receipt.dig("task", "slug"), receipt.fetch("stage"),
-          receipt.dig("task", "generation"), receipt.fetch("kind")
+          receipt.dig("task", "generation"), kind
         ]
       end
 
@@ -244,8 +250,17 @@ module Hive
         invalid!("#{label}.payload #{e.message}")
       end
 
+      def validate_publication_block!(stage, payload, label)
+        invalid!("publication block receipts require the publish stage") unless stage == "publish"
+        require "hive/patrol_fix/publication_block_receipt"
+        Hive::PatrolFix::PublicationBlockReceipt.validate_payload!(payload)
+      rescue Hive::PatrolFix::PublicationBlockReceipt::InvalidBlock => e
+        invalid!("#{label}.payload #{e.message}")
+      end
+
       def validate_reopen!(stage, payload, label)
-        invalid!("reopen receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
+        invalid!("reopen receipts are only valid for inbox, review, or publish") unless
+          (DECISION_ROUTES.keys + [ "publish" ]).include?(stage)
         exact_keys!(payload, %w[outcome_receipt_id operator carried_receipts], "#{label}.payload")
         string!(payload.fetch("outcome_receipt_id"), "#{label}.payload.outcome_receipt_id", max: 128)
         string!(payload.fetch("operator"), "#{label}.payload.operator", max: 256)

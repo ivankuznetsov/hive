@@ -5,6 +5,7 @@ require "hive"
 require "hive/commands/status"
 require "hive/config"
 require "hive/tui/debug"
+require "hive/tui/io_capture"
 require "hive/tui/snapshot"
 
 module Hive
@@ -1093,19 +1094,15 @@ module Hive
 
       # Redirect `$stdout`/`$stderr` to throwaway buffers for the duration of
       # the block so an off-thread `Status#json_payload` call can't `warn`
-      # straight onto the alt-screen frame. Mirrors
-      # `BubbleModel#capture_command_io`; `capture_io` from minitest is not
-      # available in production. StateSource itself never `warn`s, so this only
-      # contains Status's degrade-path output.
-      def capture_status_io
-        orig_out = $stdout
-        orig_err = $stderr
-        $stdout = StringIO.new
-        $stderr = StringIO.new
-        yield
-      ensure
-        $stdout = orig_out
-        $stderr = orig_err
+      # straight onto the alt-screen frame. Delegates to the shared,
+      # mutex-coordinated `IoCapture` registry — this runs on the archive
+      # refresher thread and must not race `BubbleModel#capture_command_io`'s
+      # identical capture on the update thread into restoring a discarded
+      # StringIO as the process-global `$stdout`. `capture_io` from minitest
+      # is not available in production. StateSource itself never `warn`s, so
+      # this only contains Status's degrade-path output.
+      def capture_status_io(&block)
+        Hive::Tui::IoCapture.capture(&block)
       end
 
       # Sleep in 0.05s slices so #stop joins quickly. Reading @stop

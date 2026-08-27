@@ -63,6 +63,8 @@ module Hive
         return :shutdown unless admission_open?
 
         result = spawn_agent(worktree.path, context)
+        return :shutdown if result == :shutdown
+
         outcome = outcome_for(result, worktree.path)
         emit_agent_event(outcome, started)
         return outcome if %i[success dry_run].include?(outcome)
@@ -77,6 +79,8 @@ module Hive
 
       def admission_open?
         @admission_open.call == true
+      rescue StandardError
+        false
       end
 
       def number
@@ -182,7 +186,16 @@ module Hive
           )
           return rebase.conflict? ? :rebase_conflict : :failure
         end
-        return :shutdown unless admission_open?
+        unless admission_open?
+          Hive::Babysitter::Events.emit(
+            project: @project,
+            pr: number,
+            action: "rebase",
+            outcome: "shutdown",
+            duration_ms: duration_ms(started)
+          )
+          return :shutdown
+        end
 
         # Push to the PR's REAL head branch (worktree.branch is the
         # babysitter's INTERNAL `hive-babysitter/pr-<n>` name and would update
@@ -236,6 +249,8 @@ module Hive
         )
         prompt = render_prompt(worktree_path, context)
         spawn = lambda do
+          return :shutdown unless admission_open?
+
           Hive::Stages::Base.spawn_agent(
             task,
             prompt: prompt,
@@ -250,7 +265,8 @@ module Hive
               @cfg, "babysitter", profile,
               current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
             ),
-            status_mode: :exit_code_only
+            status_mode: :exit_code_only,
+            terminate_on_parent_signal: false
           )
         end
         @dry_run ? Hive::Babysitter::DryRunEnv.with_env(worktree_path, &spawn) : spawn.call

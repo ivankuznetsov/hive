@@ -65,7 +65,7 @@ Each action appends one JSON object:
 
 Closed action enum: `list-prs`, `noop`, `skipped`, `agent-fix`, `rebase`, `force-push`, `pr-comment`, `label-apply`, `give-up`, `dry_run`.
 
-Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhausted`, `gh-error`, `already-green`, `label_ignored`, `draft_pr`, `pipeline_owned`, `fork_pr`, `dry_run`.
+Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhausted`, `gh-error`, `already-green`, `label_ignored`, `draft_pr`, `pipeline_owned`, `fork_pr`, `dry_run`, `shutdown`.
 
 `emit` raises `ArgumentError` on any action/outcome outside these allowlists.
 

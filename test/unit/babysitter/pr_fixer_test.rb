@@ -78,6 +78,26 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_raising_admission_predicate_fails_closed
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      queried = false
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, lambda { |*_args, **_kwargs|
+        queried = true
+        {}
+      }) do
+        outcome = Hive::Babysitter::PrFixer.run(
+          pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+          admission_open: -> { raise IOError, "shutdown state unavailable" }
+        )
+        assert_equal :shutdown, outcome
+      end
+
+      refute queried, "an unavailable shutdown state must not admit PR work"
+    end
+  end
+
   def test_already_green_fork_pr_noops_without_needs_human_label
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -148,6 +168,38 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_shutdown_while_preparing_agent_prevents_provider_launch
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      admission_open = true
+      spawned = false
+      original_lookup = Hive::AgentProfiles.method(:lookup)
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lambda { |*args, **kwargs|
+          profile = original_lookup.call(*args, **kwargs)
+          admission_open = false
+          profile
+        }) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **_kwargs|
+            spawned = true
+            { status: :ok }
+          }) do
+            outcome = Hive::Babysitter::PrFixer.run(
+              pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+              admission_open: -> { admission_open }
+            )
+            assert_equal :shutdown, outcome
+          end
+        end
+      end
+
+      refute spawned, "shutdown during launch preparation must suppress the provider process"
+    end
+  end
+
   def test_agent_spawn_receives_babysitter_route
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -178,6 +230,7 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_equal [
         "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
       ], captured.fetch(:routing_arguments).global_arguments
+      assert_equal false, captured.fetch(:terminate_on_parent_signal)
     end
   end
 
@@ -488,6 +541,8 @@ class BabysitterPrFixerTest < Minitest::Test
       end
 
       refute pushed
+      events = read_events(project)
+      assert events.any? { |event| event["action"] == "rebase" && event["outcome"] == "shutdown" }
     end
   end
 

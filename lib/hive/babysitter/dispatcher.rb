@@ -30,9 +30,11 @@ module Hive
         enabled = enabled_projects
         @poll_interval_sec = next_interval(enabled.map { |entry| entry[:cfg] })
 
+        processed = 0
         enabled.each do |entry|
           break unless admission_open?
 
+          processed += 1
           Hive::Babysitter::ProjectTick.run(
             entry[:project],
             dry_run: @dry_run || entry[:cfg].dig("babysitter", "dry_run") == true,
@@ -50,9 +52,9 @@ module Hive
         end
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
-                                 projects: enabled.size,
+                                 projects: processed,
                                  next_interval_sec: @poll_interval_sec)
-        enabled.size
+        processed
       end
 
       def run_forever

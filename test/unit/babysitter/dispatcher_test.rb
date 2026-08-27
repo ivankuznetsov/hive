@@ -102,16 +102,23 @@ class BabysitterDispatcherTest < Minitest::Test
       end
       dispatcher.define_singleton_method(:enabled_projects) { entries }
       calls = []
+      predicate_states = []
 
-      with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, **_kwargs|
+      with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, admission_open:, **_kwargs|
         calls << project["name"]
+        predicate_states << admission_open.call
         dispatcher.request_shutdown!
+        predicate_states << admission_open.call
       }) do
-        dispatcher.tick
+        assert_equal 1, dispatcher.tick
       end
 
       assert_equal [ "one" ], calls,
                    "shutdown during one project must suppress later projects in the same tick"
+      assert_equal [ true, false ], predicate_states,
+                   "dispatcher must pass ProjectTick its live admission predicate"
+      events = File.readlines(File.join(dir, "babysitter.log")).map { |line| JSON.parse(line) }
+      assert_equal 1, events.last.fetch("projects"), "tick-end must count only projects that ran"
     ensure
       logger&.close
     end

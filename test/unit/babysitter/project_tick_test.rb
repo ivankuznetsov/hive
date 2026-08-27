@@ -82,6 +82,29 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_raising_admission_predicate_fails_closed
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      listed = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, lambda { |*_args, **_kwargs|
+        listed = true
+        []
+      }) do
+        summary = Hive::Babysitter::ProjectTick.run(
+          project,
+          dry_run: false,
+          logger: nil,
+          inflight: Set.new,
+          admission_open: -> { raise IOError, "shutdown state unavailable" }
+        )
+        assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+      end
+
+      refute listed, "an unavailable shutdown state must not admit project work"
+    end
+  end
+
   def test_problematic_merge_states_are_selected_before_older_neutral_prs
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -342,6 +365,7 @@ class BabysitterProjectTickTest < Minitest::Test
       ]
       admission_open = true
       called = []
+      status_written = false
 
       with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
         with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, *_args, **_kwargs|
@@ -349,18 +373,24 @@ class BabysitterProjectTickTest < Minitest::Test
           admission_open = false
           :success
         }) do
-          Hive::Babysitter::ProjectTick.run(
-            project,
-            dry_run: false,
-            logger: logger,
-            inflight: Set.new,
-            admission_open: -> { admission_open }
-          )
+          with_replaced_singleton_method(Hive::Babysitter::StatusWriter, :append, lambda { |**_kwargs|
+            status_written = true
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project,
+              dry_run: false,
+              logger: logger,
+              inflight: Set.new,
+              admission_open: -> { admission_open }
+            )
+            assert_equal({ total: 1, fixed: 1, untouched: 0, needs_human: 0 }, summary)
+          end
         end
       end
 
       assert_equal [ 1 ], called,
                    "shutdown during one PR must suppress later PRs in the same project"
+      refute status_written, "a shutdown-truncated project must not report a complete pass"
     ensure
       logger&.close
     end

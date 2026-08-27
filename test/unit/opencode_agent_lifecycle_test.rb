@@ -292,6 +292,37 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_parent_term_can_leave_native_opencode_running_for_babysitter_drain
+    with_fixture(mode: :drain) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "drain-260827-aaaa")
+      previous_called = false
+      previous = Signal.trap("TERM") { previous_called = true }
+      sender = Thread.new do
+        Timeout.timeout(5) do
+          loop do
+            break if File.exist?(fixture.fetch(:calls)) &&
+              File.readlines(fixture.fetch(:calls)).any? { |line| line.start_with?("run --auto ") }
+
+            sleep 0.02
+          end
+        end
+        Process.kill("TERM", Process.pid)
+      end
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(task, fixture, terminate_on_parent_signal: false).run!
+      end
+      sender.join
+
+      assert previous_called, "TERM must still reach the babysitter dispatcher"
+      assert_equal :ok, result.fetch(:status), "accepted OpenCode work must drain instead of being cancelled"
+      refute result.fetch(:cancelled)
+    ensure
+      sender&.kill if sender&.alive?
+      Signal.trap("TERM", previous || "DEFAULT")
+    end
+  end
+
   def test_explicit_native_configuration_supplies_the_route_when_role_has_no_model_override
     with_fixture(default_route: ROUTE) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "default-route-260812-aaaa")
@@ -819,6 +850,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
               (File.stat(credential_path).mode & 0777 if File.file?(credential_path))
           }))
           sleep 10 if #{%i[timeout cancelled].include?(mode)}
+          sleep 0.3 if #{mode == :drain}
           print #{run_output.dump}
           warn "authentication failed" if #{mode == :auth_failure}
           exit(#{%i[auth_failure rate_limited].include?(mode) ? 1 : 0})

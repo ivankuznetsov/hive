@@ -77,6 +77,41 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     end
   end
 
+  def test_profile_verification_is_scoped_to_the_actor_about_to_launch
+    with_env("HIVE_CODEX_BIN" => nil) do
+      configuration = build_configuration
+      drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
+
+      configuration.verify_profile!(workflow, "stages.review", cfg: drifted)
+      error = assert_raises(Hive::ConfigError) do
+        configuration.verify_profile!(workflow, "stages.draft", cfg: drifted)
+      end
+      assert_match(/profile drifted for stages\.draft/, error.message)
+    end
+  end
+
+  def test_read_only_apply_does_not_depend_on_current_profile_capabilities
+    configuration = build_configuration
+    pinless = Hive::AgentProfile.new(
+      name: :codex,
+      bin_default: "codex",
+      headless_flag: "exec",
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}"
+    )
+    Hive::AgentProfiles.register(:codex, pinless)
+
+    mapped = configuration.apply(workflow, verify_profiles: false)
+
+    assert_equal "codex", mapped.stage_named("draft").agent
+    error = assert_raises(Hive::ConfigError) do
+      configuration.verify_profile!(workflow, "stages.draft")
+    end
+    assert_match(/cannot pin model/, error.message)
+  ensure
+    Hive::AgentProfiles.register(:codex, Hive::AgentProfiles::CODEX)
+  end
+
   def test_explicit_pins_require_native_profile_support
     pinless = Hive::AgentProfile.new(
       name: :pi,

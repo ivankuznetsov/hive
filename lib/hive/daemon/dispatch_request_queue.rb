@@ -740,13 +740,9 @@ module Hive
           paths = if known_path
             expanded = File.expand_path(known_path)
             next false unless File.dirname(expanded) == File.expand_path(dir)
+            next false unless expanded.end_with?(CLAIMED_SUFFIX)
 
-            sibling = if expanded.end_with?(CLAIMED_SUFFIX)
-              expanded.delete_suffix(CLAIMED_SUFFIX)
-            else
-              "#{expanded}#{CLAIMED_SUFFIX}"
-            end
-            [ expanded, sibling ]
+            [ expanded, expanded.delete_suffix(CLAIMED_SUFFIX) ]
           else
             request_files(dir)
           end

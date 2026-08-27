@@ -143,6 +143,10 @@ module Hive
     def with_commit_lock(project_hive_state_path, timeout: COMMIT_LOCK_TIMEOUT_SEC)
       FileUtils.mkdir_p(project_hive_state_path)
       lock_path = File.join(project_hive_state_path, ".commit-lock")
+      lock_key = File.realpath(project_hive_state_path)
+      held = (Thread.current[:hive_commit_locks] ||= {})
+      return yield if held[lock_key] == Process.pid
+
       File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |f|
         deadline = Time.now + timeout
         until f.flock(File::LOCK_EX | File::LOCK_NB)
@@ -155,7 +159,12 @@ module Hive
 
           sleep [ 0.2, deadline - Time.now ].min.clamp(0, 0.2)
         end
-        return yield
+        held[lock_key] = Process.pid
+        begin
+          return yield
+        ensure
+          held.delete(lock_key) if held[lock_key] == Process.pid
+        end
       end
     end
 

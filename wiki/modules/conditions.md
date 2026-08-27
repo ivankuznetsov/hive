@@ -21,6 +21,14 @@ for `4-execute`. `BranchPushed`, `ArtifactCurrent`, `BabysitterActive`, and
 stages yet. Observations use `pending`, `satisfied`, `unsatisfied`, or
 `unverifiable`; the projector alone adds `superseded` history.
 
+Transition membership has exactly one internal representation: the gate
+rules registered in `Conditions::Policy.default`. The registry owns only
+condition semantics (family, supersession family, scope, allowed evidence,
+gate role, authoritative stages) and carries no condition-to-transition
+membership; `Definition` exposes no `default_transitions` field. Policy
+descriptors are validated against registered vocabulary, so an unknown or
+wrong-role condition in a gate rule raises `InvalidPolicy`.
+
 Every condition observation has a durable attempt ID, numeric task input
 epoch, optional commit generation, explicit reason/time, typed evidence, and
 provenance. The numeric epoch is distinct from the opaque attempt ownership

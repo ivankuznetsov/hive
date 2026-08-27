@@ -448,6 +448,9 @@ patrol:
     - build
     - vendor
     - .git
+  # Validation runs in a pristine detached checkout of the fixed commit.
+  # Ignored files are not copied or linked; include required bootstrap inline
+  # (for example, `npm ci && npm test`) in each configured command.
   commands:
     format: null
     lint: null
@@ -506,6 +509,8 @@ refactor_patrol:
   # Unfinished features remain durable and resume in a later patrol run. Hive
   # also applies a fixed 12-slice runaway guard without another config knob.
   max_review_seconds_per_run: 3600
+  # Commands selected for unified Patrol Fix validation share the pristine
+  # detached-checkout contract above; include required bootstrap inline.
   commands:
     # Optional project-owned API/contract check used to route risky theses.
     public_contract: null

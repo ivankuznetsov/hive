@@ -42,6 +42,9 @@ module Hive
       private
 
       def inspect_status(task, cfg)
+        return { state: :controller_workflow, would_rebase: false } if task.workflow.controller?
+        return { state: :managed_draft_pr_handoff, would_rebase: false } if task.workflow.draft_pr_handoff?
+
         enabled = cfg.dig("rebase", "enabled") != false
         return { state: :disabled, would_rebase: false } unless enabled
 
@@ -76,6 +79,10 @@ module Hive
 
       def emit_text(task, status)
         case status[:state]
+        when :controller_workflow
+          puts "#{task.slug}: controller workflow owns checkout movement; generic auto-rebase does not apply"
+        when :managed_draft_pr_handoff
+          puts "#{task.slug}: draft-PR handoff owns exact checkout identity; generic auto-rebase does not apply"
         when :disabled
           puts "#{task.slug}: auto-rebase DISABLED via cfg.rebase.enabled = false"
         when :no_worktree

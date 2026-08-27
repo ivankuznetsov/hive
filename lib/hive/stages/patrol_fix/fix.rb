@@ -86,7 +86,9 @@ module Hive
             Do not write Hive receipts, task metadata, publication state, push, or open a PR/issue.
             Write only strict JSON to #{output}: schema hive-patrol-fix-fix-report, schema_version 1,
             status fixed|blocked, summary, and validation_commands as structured identity/command pairs
-            that you deliberately selected. Hive will independently execute those commands later.
+            that you deliberately selected. Hive will independently execute those commands later in a
+            pristine detached checkout of this commit. Each command must include any dependency or
+            bootstrap setup it needs; do not depend on ignored state from the owned fix worktree.
           PROMPT
         end
 

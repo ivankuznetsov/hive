@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-26
+updated: 2026-08-27
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -151,7 +151,8 @@ Patrol Fix owns the repair workflow:
 1. Inbox re-investigates the current source and makes the semantic admission
    decision.
 2. Fix creates or recovers one exact local worktree generation.
-3. Validate runs only configured or structured validation commands.
+3. Validate runs only configured or structured validation commands in a
+   disposable detached checkout pinned to the fix receipt's exact HEAD.
 4. Review records an independent route decision.
 5. Publish uses `Hive::GithubPublication`.
 
@@ -163,6 +164,26 @@ the outcome receipt makes the following advance action a new semantic attempt
 instead of replaying the stage run forever. The worker mutation fence and
 recovery coordinator resolve that same receipt-aware identity before accepting
 side effects or retrying the task.
+
+The Fix stage alone owns the authoritative patch checkout. Validate proves that
+checkout is clean and at the fix receipt's exact HEAD both before and after the
+run, but executes operator commands in a separate root-confined detached
+materialization. Formatter and test writes are force-discarded with the
+disposable tree, including when the validator raises. Cleanup failure never
+masks that validator outcome or discards a completed validation result: Hive
+warns with the retained checkout path for operator recovery. A concurrent
+same-user write to the authoritative checkout cannot be prevented at this
+boundary; the post-run custody check detects it and fails closed without
+appending a validation receipt. Review and Publish continue to inspect the
+authoritative checkout read-only through `WorktreeSnapshot`.
+
+The disposable checkout starts from tracked files at the receipt-bound commit.
+Hive never copies or symlinks ignored dependencies, secrets, caches, or local
+tool state from the authoritative checkout. Operator-configured commands and
+agent-selected structured commands must therefore include any bootstrap they
+need inline, such as `npm ci && npm test`. The Fix prompt states this constraint
+before the agent selects commands, so validation cannot silently inherit a warm
+or secret-bearing development checkout.
 
 Inbox and review use the independent `patrol.agent` identity and the
 `models.patrol_review` route. Only the fix stage uses `patrol.fix.agent` and the
@@ -249,6 +270,8 @@ the standard task projections.
 - No legacy Patrol fixer, issue filer, PR opener, review handoff, action runner,
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
+- Generic `hive run` auto-rebase never runs for a controller workflow; exact
+  checkout movement belongs to the controller's receipts and transitions.
 - Historical import is explicit, local, one-time, and never daemon-triggered.
 - Existing admission index construction is explicit through `hive migrate`;
   runtime reads stay bounded and never scan-rebuild the projection.

@@ -3,7 +3,7 @@ title: Hive::AgentGitGate
 type: module
 source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
 created: 2026-07-26
-updated: 2026-08-26
+updated: 2026-08-27
 tags: [git, security, publication, worktree, boundary]
 ---
 
@@ -61,6 +61,13 @@ only a stale registration for the same missing destination.
 re-resolved remote fingerprint, fetches the observed ref, refuses movement,
 and then materializes the observed immutable OID.
 
+`remove_materialization` first proves that the root-confined destination is
+registered to the requested repository. Normal removal remains non-forcing;
+Hive-owned disposable callers may request force removal so formatter or test
+output can be discarded without leaving a registered worktree behind. The
+force flag is a strict boolean and does not relax destination confinement or
+registration ownership.
+
 `publish` requires either an exact expected remote OID or exact expected
 absence. It resolves the local commit, captures one exact push target, observes
 the branch, pushes
@@ -117,6 +124,12 @@ details rather than potentially credential-bearing transport output.
   branch push, and idempotent cleanup through the gate. The separate
   `Hive::GithubPublication` controller owns durable PR identity and replay;
   `AgentGitGate` still knows nothing about GitHub records or workflow stages.
+- Patrol Fix validation materializes the receipt-bound fix HEAD in a private
+  detached checkout and force-discards that exact registered materialization
+  after commands finish or raise. If removal fails, Validate preserves the
+  original outcome and warns with the retained checkout path for operator
+  recovery. Its authoritative patch checkout is never the validation command
+  working directory.
 - Refactor patrol captures one managed push URL, uses managed remote
   observations, and publishes through the exact expected-OID/absence gate.
   Its append-only action ledger remains the authority deciding which old OID is
@@ -140,8 +153,9 @@ data trustworthy. Agent invocation guarantees belong to
 
 - `test/unit/agent_git_gate_test.rb` uses real repositories and bare remotes for
   exact absence/OID leases, before/after receipts, ref-movement refusal,
-  detached materialization, destination confinement, forbidden transports,
-  unknown-operation rejection, immutable values, and helper suppression.
+  detached materialization, destination confinement, dirty disposable
+  force-removal, forbidden transports, unknown-operation rejection, immutable
+  values, and helper suppression.
 - `test/unit/managed_git_test.rb` pins environment/config/command hardening,
   absolute credential-helper selection, and deadline process-group cleanup.
 - `test/unit/gh_test.rb`, `test/unit/worktree_test.rb`,

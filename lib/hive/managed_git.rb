@@ -1,4 +1,5 @@
 require "open3"
+require "shellwords"
 
 module Hive
   # Hardened Git process boundary for controller work performed after a
@@ -7,6 +8,9 @@ module Hive
   # hooks, fsmonitor, external diff/textconv, custom transports, and arbitrary
   # credential/SSH helpers from executing in the controller process.
   module ManagedGit
+    NETWORK_TIMEOUT_SEC = 60
+    TERMINATION_GRACE_SEC = 0.1
+    GH_BIN_ENV = "HIVE_GH_BIN"
     COMMANDS = %w[
       cat-file diff fetch ls-remote merge-base push remote rev-list rev-parse
       show status symbolic-ref worktree
@@ -26,8 +30,7 @@ module Hive
       "protocol.git.allow=always",
       "protocol.https.allow=always",
       "protocol.ssh.allow=always",
-      "credential.helper=",
-      "credential.https://github.com.helper=!gh auth git-credential"
+      "credential.helper="
     ].freeze
     ENV_ALLOWLIST = %w[
       CURL_CA_BUNDLE GH_CONFIG_DIR GH_ENTERPRISE_TOKEN GH_HOST GH_TOKEN
@@ -46,26 +49,36 @@ module Hive
 
     module_function
 
-    def capture3(path, *args, allow_local_transport: false, **options)
-      Open3.capture3(
-        environment, *command(path, *args, allow_local_transport: allow_local_transport),
-        **options, unsetenv_others: true
+    def capture3(path, *args, allow_local_transport: false, timeout_sec: nil,
+                 env: ENV, **options)
+      argv = command(
+        path, *args, allow_local_transport: allow_local_transport, env: env
+      )
+      child_env = environment(env: env)
+      return Open3.capture3(
+        child_env, *argv, **options, unsetenv_others: true
+      ) unless timeout_sec
+
+      capture3_with_deadline(
+        child_env, argv, timeout_sec: timeout_sec, **options
       )
     end
 
-    def popen3(path, *args, allow_local_transport: false, **options, &block)
+    def popen3(path, *args, allow_local_transport: false, env: ENV,
+               **options, &block)
       Open3.popen3(
-        environment, *command(path, *args, allow_local_transport: allow_local_transport),
+        environment(env: env),
+        *command(path, *args, allow_local_transport: allow_local_transport, env: env),
         **options, unsetenv_others: true, &block
       )
     end
 
-    def command(path, *args, allow_local_transport: false)
+    def command(path, *args, allow_local_transport: false, env: ENV)
       command_name = args.first.to_s
       raise ArgumentError, "managed Git command is not allowed: #{command_name}" unless COMMANDS.include?(command_name)
 
       hardened_args = harden_diff_args(args)
-      config = CONFIG
+      config = git_config(env)
       if allow_local_transport
         config = config.reject { |entry| entry.start_with?("protocol.file.allow=") } +
                  [ "protocol.file.allow=always" ]
@@ -123,11 +136,11 @@ module Hive
     # The public facade uses this before every operation to refuse executable
     # helpers that cannot be neutralized generically (notably arbitrary
     # filter driver names from .gitattributes).
-    def executable_local_config(path)
+    def executable_local_config(path, env: ENV)
       out, err, status = Open3.capture3(
-        environment,
+        environment(env: env),
         "git", "-C", File.expand_path(path),
-        *CONFIG.flat_map { |entry| [ "-c", entry ] },
+        *git_config(env).flat_map { |entry| [ "-c", entry ] },
         "config", "--local", "--includes", "--name-only", "--null", "--list",
         unsetenv_others: true
       )
@@ -138,10 +151,10 @@ module Hive
         err, status ]
     end
 
-    def environment
-      ENV_ALLOWLIST.each_with_object({}) do |name, env|
-        value = ENV[name]
-        env[name] = value unless value.to_s.empty?
+    def environment(env: ENV)
+      ENV_ALLOWLIST.each_with_object({}) do |name, child_env|
+        value = env[name]
+        child_env[name] = value unless value.to_s.empty?
       end.merge(
         "GIT_ATTR_NOSYSTEM" => "1",
         "GIT_CONFIG_GLOBAL" => File::NULL,
@@ -160,5 +173,102 @@ module Hive
       [ command_name, "--no-ext-diff", "--no-textconv", *rest ]
     end
     private_class_method :harden_diff_args
+
+    def credential_helper_config(env)
+      configured = env[GH_BIN_ENV].to_s.strip
+      command = if configured.empty?
+        "gh"
+      else
+        path = File.expand_path(configured)
+        unless configured == path && File.file?(path) && File.executable?(path)
+          raise ArgumentError, "#{GH_BIN_ENV} must name an absolute executable file"
+        end
+        Shellwords.escape(path)
+      end
+      "credential.https://github.com.helper=!#{command} auth git-credential"
+    end
+    private_class_method :credential_helper_config
+
+    def git_config(env)
+      CONFIG + [ credential_helper_config(env) ]
+    end
+    private_class_method :git_config
+
+    def capture3_with_deadline(child_env, argv, timeout_sec:, **options)
+      timeout = Float(timeout_sec)
+      unless timeout.finite? && timeout.positive?
+        raise ArgumentError, "managed Git timeout must be positive"
+      end
+
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+      stdout_data = ""
+      stderr_data = ""
+      status = nil
+      timed_out = false
+      spawn_options = options.merge(pgroup: true, unsetenv_others: true)
+      Open3.popen3(child_env, *argv, **spawn_options) do |stdin, stdout, stderr, wait|
+        stdin.close
+        stdout.binmode
+        stderr.binmode
+        out_reader = Thread.new { read_stream(stdout) }
+        err_reader = Thread.new { read_stream(stderr) }
+        if [ wait, out_reader, err_reader ].all? { |thread| join_until(thread, deadline) }
+          status = wait.value
+          stdout_data = out_reader.value
+          stderr_data = err_reader.value
+        else
+          timed_out = true
+          terminate_process_group(wait.pid)
+          stdout.close unless stdout.closed?
+          stderr.close unless stderr.closed?
+          status = wait.value
+          stdout_data = thread_value(out_reader)
+          stderr_data = thread_value(err_reader)
+        end
+      ensure
+        stdout.close unless stdout.closed?
+        stderr.close unless stderr.closed?
+      end
+
+      if timed_out
+        detail = "managed Git command timed out after #{timeout_sec}s"
+        stderr_data = stderr_data.dup
+        stderr_data << "\n" unless stderr_data.empty? || stderr_data.end_with?("\n")
+        stderr_data << detail
+      end
+      [ stdout_data, stderr_data, status ]
+    end
+    private_class_method :capture3_with_deadline
+
+    def read_stream(stream)
+      stream.read
+    rescue IOError
+      ""
+    end
+    private_class_method :read_stream
+
+    def join_until(thread, deadline)
+      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      remaining.positive? && thread.join(remaining)
+    end
+    private_class_method :join_until
+
+    def thread_value(thread)
+      thread.join(TERMINATION_GRACE_SEC)
+      thread.kill if thread.alive?
+      thread.value.to_s
+    rescue StandardError
+      ""
+    end
+    private_class_method :thread_value
+
+    def terminate_process_group(pid)
+      Process.kill("TERM", -pid)
+      sleep(TERMINATION_GRACE_SEC)
+      Process.kill("KILL", -pid)
+    rescue Errno::ESRCH
+      nil
+    end
+    private_class_method :terminate_process_group
   end
 end

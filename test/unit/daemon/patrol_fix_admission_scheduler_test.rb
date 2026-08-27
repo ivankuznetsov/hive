@@ -331,6 +331,51 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     end
   end
 
+  def test_stale_materialization_reopens_admission_without_retry
+    with_initialized_scheduler_project do |project_root, hive_state, source, entry|
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      scheduler, services = scheduler_for(
+        project_root, source, admission,
+        decision_provider: lambda do |_input|
+          {
+            "decision" => "distinct", "candidate_identity" => nil,
+            "rationale" => "No shared root", "evidence" => [ "No candidate" ],
+            "model_receipt" => "fake-provider:distinct"
+          }
+        end,
+        materializer_factory: lambda do |**|
+          Object.new.tap do |materializer|
+            materializer.define_singleton_method(:call) do |occurrence_id|
+              admission.reset_decided_stale!(occurrence_id, now: NOW + 2)
+              raise Hive::PatrolFix::AdmissionStore::StaleDecision, "candidate set changed"
+            end
+          end
+        end
+      )
+
+      dispatch = scheduler.tick(now: NOW).fetch(0)
+      services.fetch(0).run_reserved(
+        occurrence_id: dispatch.occurrence_id,
+        reservation_id: dispatch.dispatch_token.fetch(:reservation_id)
+      )
+      scheduler.complete(
+        dispatch_token: dispatch.dispatch_token, exit_code: 0, envelope: { "ok" => true },
+        now: NOW + 1
+      )
+
+      event = scheduler.tick(now: NOW + 2).fetch(0)
+      record = admission.fetch(entry.fetch("occurrence_id"))
+
+      assert_equal :stale, event.status
+      assert_equal "candidate_digest_changed", event.reason
+      assert_equal "pending", record.fetch("status")
+      assert_nil record["retry"]
+      assert_equal [ :decision_dispatch ], scheduler.tick(now: NOW + 3).map(&:status)
+    end
+  end
+
   def test_durable_task_reconciles_when_admission_ack_write_fails_once
     with_initialized_scheduler_project do |project_root, hive_state, source, entry|
       admission = OneShotAcknowledgementFailureStore.new(

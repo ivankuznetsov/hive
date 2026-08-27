@@ -1,10 +1,14 @@
 require "json"
 require "rbconfig"
+require "hive/atomic_file"
 require "hive/attempts/capability"
+require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
+require "hive/attempts/command_progress"
 require "hive/attempts/store"
 require "hive/attempts/stream_log"
 require "hive/lock"
+require "hive/patrol_fix/attempt_diagnostic"
 
 module Hive
   module Attempts
@@ -35,6 +39,8 @@ module Hive
         @install_signal_handlers = install_signal_handlers
         @ready_sent = false
         @cancel_reason = nil
+        @cancel_signal = nil
+        @worker_signal = nil
         @worker_pid = nil
         @worker_pgid = nil
       end
@@ -57,7 +63,7 @@ module Hive
         signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
         install_signal_handlers! if @install_signal_handlers
 
-        exit_status, outcome, record, provider_signal = run_worker(record, log)
+        exit_status, outcome, record, provider_signal, diagnostic_frame = run_worker(record, log)
         log.close
         log_reference = OutputReference.build(log.path, root: @store.root)
         if provider_signal
@@ -69,10 +75,17 @@ module Hive
           record: record,
           source_reference: log_reference
         )
+        output_references = record["current_outputs"].dup
+        diagnostic_reference = materialize_attempt_diagnostic(
+          record, diagnostic_frame, log_reference: log_reference,
+          exit_status: exit_status, outcome: outcome,
+          provider_signal: provider_signal
+        )
+        output_references << diagnostic_reference if diagnostic_reference
         terminal = @store.terminalize(
           record, outcome: outcome, exit_status: exit_status,
           final_checkpoint: record.checkpoint,
-          output_references: record["current_outputs"],
+          output_references: output_references,
           log_reference: log_reference, provider_evidence: provider_evidence,
           now: @clock.call
         )
@@ -89,9 +102,15 @@ module Hive
           current = @store.fetch(@attempt_id)
           if current&.state == "running"
             reference = OutputReference.build(log.path, root: @store.root)
+            output_references = current["current_outputs"].dup
+            diagnostic_reference = materialize_attempt_diagnostic(
+              current, nil, log_reference: reference,
+              exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed"
+            )
+            output_references << diagnostic_reference if diagnostic_reference
             @store.terminalize(
               current, outcome: "failed", exit_status: Hive::ExitCodes::SOFTWARE,
-              final_checkpoint: current.checkpoint, output_references: current["current_outputs"],
+              final_checkpoint: current.checkpoint, output_references: output_references,
               log_reference: reference, now: @clock.call
             )
           end
@@ -120,18 +139,22 @@ module Hive
         if hive_worker?(record)
           gate_r, gate_w = IO.pipe
           context_r, context_w = IO.pipe
+          diagnostic_r, diagnostic_w = IO.pipe
           context_w.write(@claim_capability)
           context_w.close
           gate_r.close_on_exec = false
           context_r.close_on_exec = false
+          diagnostic_w.close_on_exec = false
           env.merge!(
             "HIVE_ATTEMPT_INTERNAL" => "1",
             "HIVE_ATTEMPT_ID" => record.attempt_id,
             "HIVE_ATTEMPT_GATE_FD" => gate_r.fileno.to_s,
-            "HIVE_ATTEMPT_CONTEXT_FD" => context_r.fileno.to_s
+            "HIVE_ATTEMPT_CONTEXT_FD" => context_r.fileno.to_s,
+            "HIVE_ATTEMPT_DIAGNOSTIC_FD" => diagnostic_w.fileno.to_s
           )
           spawn_options[gate_r.fileno] = gate_r.fileno
           spawn_options[context_r.fileno] = context_r.fileno
+          spawn_options[diagnostic_w.fileno] = diagnostic_w.fileno
           if record["routing"]["mode"] == "explicit"
             evidence_r, evidence_w = IO.pipe
             evidence_w.close_on_exec = false
@@ -145,6 +168,7 @@ module Hive
         gate_r&.close unless gate_r&.closed?
         context_r&.close unless context_r&.closed?
         evidence_w&.close unless evidence_w&.closed?
+        diagnostic_w&.close unless diagnostic_w&.closed?
         stdout_w.close
         stderr_w.close
         worker_identity = process_identity(@worker_pid)
@@ -230,19 +254,148 @@ module Hive
         end
 
         exit_status = forced_exit || status_exit(status)
+        @worker_signal = signal_name(status.termsig) if status && !status.exited?
         outcome = @cancel_reason ? "cancelled" : (exit_status.zero? ? "succeeded" : "failed")
         provider_signal = EvidenceChannel.read(
           evidence_r,
           route: record["routing"].fetch("route")
         ) if evidence_r
-        [ exit_status, outcome, record, provider_signal ]
+        diagnostic_frame = DiagnosticChannel.read(diagnostic_r) if diagnostic_r
+        [ exit_status, outcome, record, provider_signal, diagnostic_frame ]
       ensure
         [
           stdout_r, stdout_w, stderr_r, stderr_w, gate_r, gate_w,
-          context_r, context_w, evidence_r, evidence_w
+          context_r, context_w, evidence_r, evidence_w,
+          diagnostic_r, diagnostic_w
         ].compact.each do |io|
           io.close unless io.closed?
         end
+      end
+
+      def materialize_attempt_diagnostic(record, frame, log_reference:, exit_status:, outcome:,
+                                         provider_signal: nil)
+        return nil if outcome == "succeeded"
+        return nil unless patrol_fix_attempt?(record)
+
+        transport_status = frame&.status || "missing"
+        document = finalize_or_synthesize_diagnostic(
+          record, frame, log_reference: log_reference,
+          exit_status: exit_status, outcome: outcome,
+          transport_status: transport_status, provider_signal: provider_signal
+        )
+        path = @store.output_path(
+          record.attempt_id,
+          Hive::PatrolFix::AttemptDiagnostic::FILENAME,
+          create_directory: true
+        )
+        persist_diagnostic_once(path, document)
+        OutputReference.build(path, root: @store.root)
+      end
+
+      def finalize_or_synthesize_diagnostic(record, frame, log_reference:, exit_status:,
+                                            outcome:, transport_status:, provider_signal: nil)
+        if frame&.document
+          begin
+            return Hive::PatrolFix::AttemptDiagnostic.finalize(
+              frame.document,
+              log_reference: log_reference,
+              expected_attempt_id: record.attempt_id,
+              expected_stage: record["intended_stage"],
+              expected_task_generation: record.task_generation,
+              transport_status: transport_status,
+              provider_signal: provider_signal,
+              provider_name: record["provider"]
+            )
+          rescue Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic
+            transport_status = "malformed"
+          end
+        end
+
+        envelope = {
+          "phase" => "terminal",
+          "status" => outcome == "cancelled" ? "cancelled" : "error",
+          "exit_code" => exit_status,
+          "timed_out" => @cancel_reason == :timeout,
+          "cancelled" => outcome == "cancelled",
+          "signal" => @worker_signal || @cancel_signal,
+          "report_status" => "unknown",
+          "firewall_status" => "unknown",
+          "custody_status" => "unknown"
+        }
+        if provider_signal
+          envelope.merge!(
+            "provider" => record["provider"],
+            "provider_failure" => provider_signal.fetch("failure_class"),
+            "provider_provenance" => provider_signal.fetch("provenance"),
+            "retry_at" => provider_signal["reset_hint_seconds"]
+          )
+        end
+        Hive::PatrolFix::AttemptDiagnostic.normalize(
+          envelope,
+          stage: record["intended_stage"],
+          task_generation: record.task_generation,
+          attempt_id: record.attempt_id,
+          recorded_at: @clock.call,
+          transport_status: transport_status,
+          log_reference: log_reference
+        )
+      end
+
+      def patrol_fix_attempt?(record)
+        require "hive/task_resolver"
+        target = Array(record["worker_argv"])[2].to_s
+        return false if target.empty?
+
+        task = Hive::TaskResolver.new(target, project_filter: record["project"]).resolve
+        Hive::Attempts::CommandProgress.task_progress?(task)
+      rescue Hive::Error, SystemCallError
+        false
+      end
+
+      def persist_diagnostic_once(path, document)
+        source = JSON.generate(document) + "\n"
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(path, flags, 0o600) do |file|
+          file.write(source)
+          file.flush
+          file.fsync
+        end
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
+        true
+      rescue Errno::EEXIST
+        existing = read_existing_diagnostic(path)
+        raise Hive::Attempts::StoreError, "attempt diagnostic immutable bytes conflict" unless existing == document
+
+        true
+      rescue JSON::ParserError, SystemCallError, IOError => e
+        raise Hive::Attempts::StoreError, "attempt diagnostic storage failed: #{e.message}"
+      end
+
+      def read_existing_diagnostic(path)
+        flags = File::RDONLY | File::NONBLOCK
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        bytes = File.open(path, flags) do |file|
+          stat = file.stat
+          unless stat.file? && stat.nlink == 1
+            raise Hive::Attempts::StoreError, "attempt diagnostic is not a single regular file"
+          end
+          if stat.size > Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
+            raise Hive::Attempts::StoreError, "attempt diagnostic exceeds its size limit"
+          end
+
+          file.read(Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES + 1).to_s
+        end
+        if bytes.bytesize > Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
+          raise Hive::Attempts::StoreError, "attempt diagnostic exceeds its size limit"
+        end
+
+        document = JSON.parse(bytes)
+        Hive::PatrolFix::AttemptDiagnostic.validate!(document)
+        document
+      rescue JSON::ParserError, Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic,
+             SystemCallError, IOError => e
+        raise Hive::Attempts::StoreError, "attempt diagnostic storage failed: #{e.message}"
       end
 
       def drain_reader(io, readers, log)
@@ -362,8 +515,15 @@ module Hive
 
       def install_signal_handlers!
         %w[TERM INT].each do |signal|
-          Signal.trap(signal) { @cancel_reason ||= :signal }
+          Signal.trap(signal) do
+            @cancel_signal ||= signal
+            @cancel_reason ||= :signal
+          end
         end
+      end
+
+      def signal_name(number)
+        Signal.list.key(number.to_i) || number.to_s
       end
 
       def signal_ready(payload)

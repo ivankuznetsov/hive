@@ -286,7 +286,7 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
       "classified_at" => "2026-08-20T12:00:00Z",
       "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
     }
-    files = details.fetch("files").map { |file| file.merge("patch" => "@@ -1 +1 @@") }
+    files = details.fetch("files")
     provenance = {
       "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
         "classification_occurrence_id" => classification.fetch("occurrence_id"),
@@ -349,14 +349,20 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     end
   end
 
-  def test_v3_manifest_enforces_aggregate_patch_and_mapping_bounds
-    oversized_patches = v3_manifest(
-      17.times.map { |index| "lib/patch-#{index}.rb" }, patch: "x" * (32 * 1024)
+  def test_v3_manifest_accepts_legacy_unbounded_patches_but_new_manifests_are_path_only
+    legacy = v3_manifest([ "lib/feature.rb" ])
+    legacy.fetch("files").first["patch"] = "x" * (1024 * 1024)
+    legacy["manifest_checksum"] = Hive::RefactorPatrol::PrManifest.checksum(
+      legacy.reject { |key, _value| key == "manifest_checksum" }
     )
-    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
-      Hive::RefactorPatrol::PrManifest.validate!(oversized_patches)
-    end
+    assert_same legacy, Hive::RefactorPatrol::PrManifest.validate!(legacy)
 
+    current = v3_manifest([ "lib/feature.rb" ], patch: "new patch body")
+    assert current.fetch("files").none? { |file| file.key?("patch") }
+    assert_same current, Hive::RefactorPatrol::PrManifest.validate!(current)
+  end
+
+  def test_v3_manifest_enforces_mapping_bounds
     oversized_mapping = v3_manifest(
       513.times.map { |index| "lib/path-#{index}.rb" }
     )
@@ -386,7 +392,9 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
             "merged_at" => "2026-08-20T12:00:00Z", "target_head" => "b" * 40,
             "title" => "Add feature #{number}", "body" => "Adds behavior",
             "labels" => [], "author" => "dev", "changed_paths" => [ path ],
-            "files" => [ { "path" => path, "status" => "modified", "patch" => number.to_s } ],
+            "files" => [ {
+              "path" => path, "status" => "modified", "patch" => "legacy patch body"
+            } ],
             "publication_provenance" => { "kind" => "none", "marker" => nil }
           },
           now: Time.utc(2026, 8, 20, 12, 0, number)
@@ -428,6 +436,7 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
                    owner.dig("provenance", "merges").map { |merge| merge.fetch("classification_occurrence_id") }
       assert_equal mappings.values,
                    owner.dig("provenance", "merges").map { |merge| merge.fetch("path_mappings") }
+      assert owner.fetch("files").none? { |file| file.key?("patch") }
       assert_same owner, Hive::RefactorPatrol::PrManifest.validate!(owner)
     end
   end
@@ -479,7 +488,7 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
 
   private
 
-  def v3_manifest(paths, patch: "")
+  def v3_manifest(paths, patch: nil)
     source = details.slice(
       "url", "number", "repository", "base_branch", "base_sha", "merge_sha", "merged_at"
     ).merge("registration" => "demo")
@@ -491,7 +500,9 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
       "attempts" => 1, "classified_at" => "2026-08-20T12:00:00Z",
       "prefilter" => { "decision" => "ambiguous", "reason" => "no_match", "evidence" => [] }
     }
-    files = paths.map { |path| { "path" => path, "status" => "modified", "patch" => patch } }
+    files = paths.map do |path|
+      { "path" => path, "status" => "modified", "patch" => patch }.compact
+    end
     provenance = {
       "merges" => [ source.slice("repository", "number", "merge_sha", "merged_at").merge(
         "classification_occurrence_id" => classification.fetch("occurrence_id"),

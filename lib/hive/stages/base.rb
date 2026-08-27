@@ -34,10 +34,6 @@ module Hive
         HIVE_EVIDENCE_APP_PORT HIVE_EVIDENCE_BROWSER_ORIGIN
         HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
       ].freeze
-      DIRECT_PROVIDER_IDENTITIES = {
-        claude: "anthropic", codex: "openai", grok: "xai"
-      }.freeze
-
       module_function
 
       # Per-spawn random nonce for the user_supplied wrapper. Defends against
@@ -147,13 +143,10 @@ module Hive
 
       def format_verified_skill_invocation(profile, skill, project_root:)
         invocation = profile.format_skill_invocation(skill)
-        return invocation unless profile.name == :opencode
+        support = Hive::AgentSupport.for(profile)
+        return invocation unless support&.respond_to?(:verify_launch_skill)
 
-        status, evidence = profile.verify_skill(invocation, project_root: project_root)
-        return invocation if status == :present
-
-        raise Hive::AgentError,
-              "OpenCode skill readiness failed for #{invocation}: #{evidence}"
+        support.verify_launch_skill(profile:, invocation:, project_root:)
       end
 
       # Production stage launches run inside a durable attempt. Direct unit
@@ -265,11 +258,12 @@ module Hive
       end
 
       def legacy_model_routing_values(cfg, profile)
-        return Hive::ModelRouting::EMPTY_MODELS unless profile.name == :claude
+        support = Hive::AgentSupport.for(profile)
+        return Hive::ModelRouting::EMPTY_MODELS unless support&.respond_to?(:legacy_control)
 
         {
-          model: cfg.dig("claude", "model"),
-          effort: cfg.dig("claude", "effort")
+          model: support.legacy_control(cfg, :model),
+          effort: support.legacy_control(cfg, :effort)
         }.compact
       end
       private_class_method :legacy_model_routing_values
@@ -313,20 +307,9 @@ module Hive
             disallowed_tools: runtime_policy.disallowed_tools,
             runtime_policy: runtime_policy
           }
-          if profile.name == :opencode
-            values[:additional_read_roots] = runtime_policy.directories
-            values[:additional_write_roots] = opencode_write_roots(
-              profile, runtime_policy.allowed_tools, runtime_policy.directories,
-              host_outputs: runtime_policy.host_outputs?
-            )
-            values[:opencode_edit_patterns] = opencode_edit_patterns(
-              profile, runtime_policy.allowed_tools
-            )
-            values[:opencode_bash_patterns] = opencode_bash_patterns(
-              profile, runtime_policy.allowed_tools
-            )
-          end
-          return adapt_opencode_scope!(values, profile, stage_name)
+          return prepare_support_scope(
+            values, profile, stage_name, host_outputs: runtime_policy.host_outputs?
+          )
         end
 
         spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
@@ -343,16 +326,13 @@ module Hive
         base_dirs = Array(base_add_dirs)
 
         if scope.yolo?
-          if profile.name == :opencode
-            raise Hive::ConfigError,
-                  "stage #{stage_name} must select read-only or scoped permissions for OpenCode"
-          end
-          return {
+          values = {
             add_dirs: base_dirs,
             permission_mode: nil,
             allowed_tools: default_allowed_tools_for_mode(cfg, profile, default_allowed_tools),
             disallowed_tools: nil
           }
+          return prepare_support_scope(values, profile, stage_name, yolo: true)
         end
 
         values = {
@@ -361,20 +341,7 @@ module Hive
           allowed_tools: scope.allowed_tools,
           disallowed_tools: scope.disallowed_tools
         }
-        if profile.name == :opencode
-          directories = base_dirs + scope.add_dirs_extra
-          values[:additional_read_roots] = directories
-          values[:additional_write_roots] = opencode_write_roots(
-            profile, scope.allowed_tools, directories
-          )
-          values[:opencode_edit_patterns] = opencode_edit_patterns(
-            profile, scope.allowed_tools
-          )
-          values[:opencode_bash_patterns] = opencode_bash_patterns(
-            profile, scope.allowed_tools
-          )
-        end
-        adapt_opencode_scope!(values, profile, stage_name)
+        prepare_support_scope(values, profile, stage_name)
       end
 
       # Prepare one actor launch from one managed snapshot, so its prompt and
@@ -412,8 +379,8 @@ module Hive
           disallowed_tools: scope.fetch(:disallowed_tools),
           additional_read_roots: scope.fetch(:additional_read_roots, []),
           additional_write_roots: scope.fetch(:additional_write_roots, []),
-          opencode_edit_patterns: scope.fetch(:opencode_edit_patterns, []),
-          opencode_bash_patterns: scope.fetch(:opencode_bash_patterns, [])
+          edit_patterns: scope.fetch(:edit_patterns, []),
+          bash_patterns: scope.fetch(:bash_patterns, [])
         }
         kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
         kwargs
@@ -478,82 +445,22 @@ module Hive
 
       def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
         return nil unless default_allowed_tools
-        return nil unless profile.name == :claude
-        return nil unless cfg && Hive::Config.claude_mode(cfg) == :tmux
+        support = Hive::AgentSupport.for(profile)
+        return nil unless cfg && support&.respond_to?(:interactive_mode) &&
+                          support.interactive_mode(cfg) == :tmux
 
         default_allowed_tools
       end
 
-      def adapt_opencode_scope!(values, profile, stage_name)
-        return values unless profile.name == :opencode
+      def prepare_support_scope(values, profile, stage_name, yolo: false, **options)
+        support = Hive::AgentProfiles.support_for(profile)
+        return values unless support&.const_defined?(:LaunchPolicy, false)
 
-        granted = Array(values[:allowed_tools]).flat_map do |rule|
-          Hive::PermissionScope.granted_tool_names(rule)
-        end
-        if granted.include?("Bash") && Array(values[:opencode_bash_patterns]).empty?
-          raise Hive::ConfigError,
-                "stage #{stage_name} OpenCode permissions cannot grant unrestricted Bash"
-        end
-        writable = Array(values[:additional_write_roots]).any?
-        values.merge(
-          permission_mode: writable ? "workspace-write" : "read-only",
-          allowed_tools: nil,
-          disallowed_tools: nil
+        support::LaunchPolicy.prepare_scope(
+          values:, stage_name:, yolo:, **options
         )
       end
-      private_class_method :adapt_opencode_scope!
-
-      def opencode_write_roots(profile, allowed_tools, directories,
-                               host_outputs: false)
-        return [] unless profile.name == :opencode
-        return [] if host_outputs
-
-        granted = Array(allowed_tools).flat_map do |rule|
-          Hive::PermissionScope.granted_tool_names(rule)
-        end
-        return [] if (granted & Hive::PermissionScope::FILE_EDIT_TOOLS).empty?
-
-        qualified = Array(allowed_tools).filter_map do |rule|
-          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s)
-          next unless match && match[:tool] == "Edit" && match[:specifier]
-
-          match[:specifier].sub(%r{\A//}, "/").delete_suffix("/**")
-        end
-        return Array(directories) if qualified.empty?
-
-        Array(directories).select do |directory|
-          expanded = File.expand_path(directory)
-          qualified.any? do |root|
-            expanded == root || expanded.start_with?(root + File::SEPARATOR) ||
-              root.start_with?(expanded + File::SEPARATOR)
-          end
-        end
-      end
-      private_class_method :opencode_write_roots
-
-      def opencode_edit_patterns(profile, allowed_tools)
-        return [] unless profile.name == :opencode
-
-        Array(allowed_tools).filter_map do |rule|
-          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s)
-          next unless match && match[:tool] == "Edit" && match[:specifier]
-
-          match[:specifier].sub(%r{\A//}, "/")
-        end.uniq
-      end
-      private_class_method :opencode_edit_patterns
-
-      def opencode_bash_patterns(profile, allowed_tools)
-        return [] unless profile.name == :opencode
-
-        Array(allowed_tools).filter_map do |rule|
-          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s)
-          next unless match && match[:tool] == "Bash" && match[:specifier]
-
-          match[:specifier]
-        end.uniq
-      end
-      private_class_method :opencode_bash_patterns
+      private_class_method :prepare_support_scope
 
       MISSING_EXPLICIT_PERMISSION_SPEC = Object.new.freeze
 
@@ -579,6 +486,11 @@ module Hive
         event_task = task_after_controller_move(task, result)
         if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
           enforce_outcome = enforce_clean_exit!(event_task, cfg, stage)
+          if enforce_outcome.is_a?(Hash) && enforce_outcome[:status] == :auto_committed
+            result = reconcile_auto_committed_execute_residue(
+              event_task, cfg, stage, result
+            )
+          end
           # When CleanExit overwrites the runner's marker to
           # `:error reason=ensure_clean_on_exit_failed`, the stage's own
           # `result[:commit]` (e.g. "review_complete") is now stale —
@@ -611,6 +523,30 @@ module Hive
       rescue StandardError => e
         emit_rescue_close(task_after_controller_exception(task), stage, "#{e.class}: #{e.message}")
         raise
+      end
+
+      # Execute deliberately records ERROR reason=dirty_worktree before the
+      # generic stage-exit invariant runs. When that invariant safely commits
+      # the residue, leaving the error marker behind would make a clean,
+      # descendant implementation require a second harness pass merely to
+      # observe the commit. Reuse Execute's guarded recovery boundary so only
+      # an owned 4-execute worktree on the expected branch can be promoted.
+      def reconcile_auto_committed_execute_residue(task, cfg, stage, result)
+        return result unless stage == "4-execute" # coding-scoped: execute residue recovery
+
+        marker = Hive::Markers.current(task.state_file)
+        return result unless marker.name == :error && marker.attrs["reason"] == "dirty_worktree"
+        return result if Hive::Stages::Execute.research_execution?(task)
+
+        worktree_path = read_worktree_path(task)
+        return result unless worktree_path
+
+        Hive::Stages::Execute.recover_committed_residue!(
+          task, cfg, worktree_path
+        )
+      rescue Hive::WorktreeError => e
+        warn "[hive] execute residue auto-commit could not complete the stage: #{e.message}"
+        result
       end
 
       # Patrol Fix is the one controller workflow whose route action can move
@@ -817,15 +753,7 @@ module Hive
         existing_marker ||= safe_current_marker(task)
         return false if existing_marker && error_marker?(existing_marker.name)
 
-        attrs = {
-          reason: "ensure_clean_on_exit_failed",
-          detail: result[:message].to_s[0, 200]
-        }
-        if result[:paths]
-          paths = Array(result[:paths]).first(Hive::Events::MAX_EVENT_PATHS).map(&:to_s)
-          attrs[:residue_paths] = paths.join(",")[0, 200]
-          attrs[:residue_paths_b64] = Base64.strict_encode64(JSON.generate(paths))
-        end
+        attrs = Hive::Stages::CleanExit.failure_marker_attrs(result, task_folder: task.folder)
         Hive::Markers.set(task.state_file, :error, **attrs)
         true
       end
@@ -1026,12 +954,13 @@ module Hive
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
-                      opencode_edit_patterns: [], opencode_bash_patterns: [],
-                      opencode_permission_policy: nil,
+                      edit_patterns: [], bash_patterns: [],
+                      permission_policy: nil,
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
-                      isolate_environment: false, launch_environment: nil)
+                      isolate_environment: false, launch_environment: nil,
+                      terminate_on_parent_signal: true)
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
         unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
@@ -1083,7 +1012,10 @@ module Hive
                    error_message: "preflight failed: #{e.message}" }
         end
 
-        if profile.name != :opencode && !profile.add_dir_flag && Array(add_dirs).any?
+        support = Hive::AgentSupport.for(profile)
+        handles_add_dirs = support&.respond_to?(:handles_add_dirs?) &&
+          support.handles_add_dirs?
+        unless profile.add_dir_flag || handles_add_dirs || Array(add_dirs).empty?
           warn_isolation_reduced(task, profile, add_dirs)
         end
         if max_budget_usd && !profile.budget_flag
@@ -1118,9 +1050,9 @@ module Hive
             warn_model_effort_dropped(task, profile, model: model, effort: effort)
             identity_arguments = []
           end
-        elsif derive_flags_from_cfg && cfg && profile.name == :claude
-          permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-          cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
+        elsif derive_flags_from_cfg && cfg && support&.respond_to?(:legacy_launch_options)
+          legacy_permission, cli_flags = support.legacy_launch_options(cfg, model:, effort:)
+          permission_mode ||= legacy_permission
         end
 
         started_at = Time.now.utc.iso8601
@@ -1176,13 +1108,14 @@ module Hive
               provider_route: provider_route,
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
-              opencode_edit_patterns: opencode_edit_patterns,
-              opencode_bash_patterns: opencode_bash_patterns,
-              opencode_permission_policy: opencode_permission_policy,
-              isolate_environment: isolate_environment
+              edit_patterns: edit_patterns,
+              bash_patterns: bash_patterns,
+              permission_policy: permission_policy,
+              isolate_environment: isolate_environment,
+              terminate_on_parent_signal: terminate_on_parent_signal
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
-              agent_result.is_a?(Hash) && profile.name == :opencode
+              agent_result.is_a?(Hash) && agent_result.key?(:requested_route)
             enrich_execution_identity!(agent_result, profile)
             if agent_result[:status] == :ok && runtime_policy&.host_outputs?
               begin
@@ -1195,10 +1128,10 @@ module Hive
             end
             agent_result
           end
-          if profile.name == :opencode && implementation_stage &&
+          if support&.respond_to?(:record_observation) && implementation_stage &&
              !defer_implementation_observation && agent_custody_safe_after?(agent_custody)
-            record_deferred_opencode_observation(
-              task, cfg, implementation_stage, result
+            record_deferred_agent_observation(
+              task, cfg, implementation_stage, result, profile: profile
             )
           end
           record_usage(
@@ -1276,12 +1209,13 @@ module Hive
                          routing_arguments: nil, runtime_policy: nil,
                          implementation_stage: nil,
                          additional_read_roots: [], additional_write_roots: [],
-                         opencode_edit_patterns: [], opencode_bash_patterns: [],
+                         edit_patterns: [], bash_patterns: [],
                          resource_guards: nil, agent_custody: nil)
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
-        if context&.explicit_routing? && context.adapter != "claude"
+        if context&.explicit_routing? &&
+            !Hive::AgentSupport.supports?(context.adapter, :Interactive)
           return spawn_agent(
             task,
             prompt: prompt,
@@ -1303,8 +1237,8 @@ module Hive
             implementation_stage: implementation_stage,
             additional_read_roots: additional_read_roots,
             additional_write_roots: additional_write_roots,
-            opencode_edit_patterns: opencode_edit_patterns,
-            opencode_bash_patterns: opencode_bash_patterns,
+            edit_patterns: edit_patterns,
+            bash_patterns: bash_patterns,
             resource_guards: resource_guards,
             agent_custody: agent_custody
           )
@@ -1312,7 +1246,7 @@ module Hive
 
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if context&.explicit_routing?
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        unless profile.name == :claude
+        unless Hive::AgentSupport.supports?(profile, :Interactive)
           raise Hive::AgentError,
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
@@ -1332,8 +1266,8 @@ module Hive
             routing_arguments: routing_arguments, runtime_policy: runtime_policy,
             additional_read_roots: additional_read_roots,
             additional_write_roots: additional_write_roots,
-            opencode_edit_patterns: opencode_edit_patterns,
-            opencode_bash_patterns: opencode_bash_patterns,
+            edit_patterns: edit_patterns,
+            bash_patterns: bash_patterns,
             resource_guards: resource_guards, agent_custody: agent_custody
           )
         end
@@ -1370,8 +1304,8 @@ module Hive
               routing_arguments: routing_arguments, runtime_policy: runtime_policy,
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
-              opencode_edit_patterns: opencode_edit_patterns,
-              opencode_bash_patterns: opencode_bash_patterns
+              edit_patterns: edit_patterns,
+              bash_patterns: bash_patterns
             )
           end
           record_usage(
@@ -1552,18 +1486,17 @@ module Hive
 
       def execution_identity(profile, model)
         value = model.to_s
-        profile_name = profile.name.to_sym
-        if %i[opencode pi].include?(profile_name) && value.include?("/")
-          return value.split("/", 2)
-        end
+        support = Hive::AgentSupport.for(profile)
+        return support.execution_identity(value) if
+          support&.respond_to?(:execution_identity)
 
-        [ DIRECT_PROVIDER_IDENTITIES[profile_name], value.empty? ? nil : value ]
+        [ nil, value.empty? ? nil : value ]
       end
 
       def enrich_execution_identity!(result, profile)
         return result unless result.is_a?(Hash)
 
-        route = result[:actual_opencode_route]
+        route = result[:actual_route]
         model = route || result[:model] || result.dig(:usage, :model)
         provider, actual_model = execution_identity(profile, model)
         result[:actual_provider] ||= provider
@@ -1572,7 +1505,7 @@ module Hive
           if route
             "sanitized_export"
           elsif model
-            DIRECT_PROVIDER_IDENTITIES.key?(profile.name.to_sym) ?
+            provider ?
               "provider_usage_event_and_profile_contract" : "provider_usage_event"
           else
             "unavailable"
@@ -1656,8 +1589,8 @@ module Hive
           provider_reported_cost:
             usage[:provider_reported_cost].nil? ? usage[:cost] : usage[:provider_reported_cost],
           cost: usage[:cost],
-          requested_route: result[:requested_opencode_route],
-          actual_route: result[:actual_opencode_route],
+          requested_route: result[:requested_route],
+          actual_route: result[:actual_route],
           actual_provider: result[:actual_provider],
           actual_model: result[:actual_model],
           billing_route: billing_route,
@@ -1671,28 +1604,23 @@ module Hive
         warn "[hive] usage record failed: #{e.message}"
       end
 
-      def record_opencode_observation(task, cfg, stage, result)
-        normalized_usage = result[:normalized_outcome]&.usage || result[:usage]
-        Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).observe_opencode!(
-          stage: stage,
-          requested_route: result.fetch(:requested_opencode_route),
-          actual_route: result[:actual_opencode_route],
-          resolution_status: result.fetch(:route_resolution_status),
-          outcome_kind: result.fetch(:normalized_outcome_kind),
-          usage: normalized_usage,
-          observation_id: result[:hive_observation_id]
-        )
-      end
-
       # Implementation stages protect their journal/projection files while an
       # agent is running. They defer this controller-owned append until after
       # that custody check so valid observed-route evidence cannot be mistaken
       # for agent tampering.
-      def record_deferred_opencode_observation(task, cfg, stage, result)
+      def record_deferred_agent_observation(task, cfg, stage, result, profile: nil)
         return result unless Hive::Attempts::Context.current
-        return result unless result&.key?(:requested_opencode_route)
+        return result unless result&.key?(:requested_route)
 
-        record_opencode_observation(task, cfg, stage, result)
+        provider = result[:implementation_provider]
+        outcome = result[:normalized_outcome]
+        provider ||= outcome.provider if outcome&.respond_to?(:provider)
+        selected = profile || provider
+        support = Hive::AgentSupport.for(selected) if selected
+        if support&.respond_to?(:record_observation)
+          host = Hive::ImplementationIdentity::Store.new(task:, cfg:)
+          support.record_observation(host:, stage:, result:)
+        end
         result
       end
 

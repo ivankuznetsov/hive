@@ -38,6 +38,14 @@ class WorkflowsTest < Minitest::Test
                  "Registry.default must resolve to the CODING_ID workflow"
   end
 
+  def test_stage_dir_predicate_matches_descriptor_stage_vocabulary
+    assert Hive::Workflows.stage_dir?("1-inbox")
+    assert Hive::Workflows.stage_dir?("12-9numeric-and-#{'long' * 30}")
+    refute Hive::Workflows.stage_dir?("0-inbox")
+    refute Hive::Workflows.stage_dir?("1-UPPER")
+    refute Hive::Workflows.stage_dir?("archived-manual")
+  end
+
   def test_every_workflow_verb_has_thor_command
     missing = Hive::Workflows::VERBS.keys.reject do |verb|
       Hive::CLI.all_commands.key?(verb) || Hive::CLI.map.key?(verb)

@@ -462,7 +462,7 @@ class NewTest < Minitest::Test
     end
   end
 
-  def test_new_serializes_hive_state_commit
+  def test_new_nests_central_commit_lock_inside_transaction_lock
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         setup_project { initialize_project(dir) }
@@ -480,7 +480,8 @@ class NewTest < Minitest::Test
           capture_io { Hive::Commands::New.new(project, "serialized capture").call }
         end
 
-        assert_equal [ File.join(dir, ".hive-state") ], lock_paths
+        hive_state = File.join(dir, ".hive-state")
+        assert_equal [ hive_state, hive_state ], lock_paths
       end
     end
   end

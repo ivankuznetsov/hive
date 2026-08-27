@@ -7,6 +7,7 @@ require "hive/markers"
 require "hive/daemon/recovery_coordinator"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/status_consumer"
+require "hive/patrol_fix/projection"
 
 # StaleAgentHealer has two responsibilities:
 # - turn stale working observations into durable ERROR / REVIEW_ERROR markers;
@@ -43,12 +44,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   end
 
   class FakeRecoveryCoordinator
-    attr_reader :assessments, :requests, :retry_delay_counts
+    attr_reader :assessments, :requests, :markerless_requests, :retry_delay_counts
     attr_accessor :assessment_result, :request_status, :request_error
 
     def initialize
       @assessments = []
       @requests = []
+      @markerless_requests = []
       @retry_delay_counts = []
       @assessment_result = {
         due: true,
@@ -87,6 +89,25 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     def retry_delay_sec(retry_count)
       @retry_delay_counts << retry_count
       120
+    end
+
+    def request_markerless_failure(row:, requestor:, reason:, now:)
+      @markerless_requests << {
+        row: row, requestor: requestor, reason: reason, now: now
+      }
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: request_status,
+        request_id: request_status == "queued" ? "markerless-1" : nil,
+        attempt_id: nil,
+        phase: request_status == "queued" ? "admitted" : nil,
+        failure_origin: reason,
+        next_eligible_at: now.utc.iso8601(6),
+        owner: request_status == "queued" ? "scheduler" : "operator",
+        reason: request_status == "queued" ? nil : "safety_blocked",
+        remediation: request_status == "queued" ? nil : "repair worktree",
+        retry_count: 1,
+        provider_hint: nil
+      )
     end
   end
 
@@ -156,6 +177,192 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal :execute_waiting, Hive::Markers.current(state_file).name
       assert_empty @coordinator.requests
       assert_empty @logger.events
+    end
+  end
+
+  def test_controller_markerless_stall_queues_recovery_without_corrupting_manifest
+    Dir.mktmpdir do |dir|
+      state_file = File.join(dir, "patrol-fix-manifest.json")
+      File.write(state_file, JSON.generate(
+        "schema" => "hive-patrol-fix-task-manifest",
+        "schema_version" => 1,
+        "task" => { "slug" => "sample", "generation" => 1 },
+        "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 },
+        "target_revision" => "1" * 40,
+        "sources" => [ {
+          "engine" => "architecture_patrol",
+          "identity" => "run-1:finding-1",
+          "target_revision" => "1" * 40,
+          "evidence" => [ "controller recovery evidence" ],
+          "affected_code" => [ "lib/demo.rb" ],
+          "reproduction_guidance" => "run the focused test",
+          "discovery_run" => "run-1",
+          "semantic_lineage" => [ "lineage-1" ]
+        } ],
+        "aliases" => [],
+        "relations" => { "successor" => nil, "issues" => [] }
+      ) << "\n")
+      original = File.binread(state_file)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "2-fix",
+        workflow: "patrol-fix",
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      assert @healer.heal_markerless_stall(row)
+      assert_equal original, File.binread(state_file)
+      projection = Hive::PatrolFix::Projection.new(
+        task_folder: dir, stage: "2-fix"
+      ).to_h
+      assert_equal "current", projection.fetch("state"), projection.inspect
+      assert_empty @coordinator.requests
+      request = @coordinator.markerless_requests.fetch(0)
+      assert_equal "healer", request.fetch(:requestor)
+      assert_equal "agent_exited_without_terminal_marker", request.fetch(:reason)
+      event = @logger.events.find { |name, _attributes| name == :recovery_requested }
+      assert_equal "markerless-1", event.last.fetch(:request_id)
+    end
+  end
+
+  def test_markerless_stall_enters_existing_recovery_on_next_heal_pass
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "2-fix",
+        workflow: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      assert @healer.heal_markerless_stall(row)
+
+      marker = Hive::Markers.current(state_file)
+      error_row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "2-fix",
+        workflow: "patrol-fix",
+        marker: "error",
+        marker_attrs: marker.attrs,
+        action: "error",
+        live_task_lock: false
+      )
+      heal([ error_row ])
+
+      assert_equal 1, @coordinator.requests.size
+      assert_equal "agent_exited_without_terminal_marker",
+                   @coordinator.requests.first.fetch(:row).marker_attrs.fetch("reason")
+    end
+  end
+
+  def test_markerless_stall_is_not_healed_when_admission_is_closed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+      healer = build_healer(admission_open: -> { false })
+
+      refute healer.heal_markerless_stall(row)
+      assert_equal :none, Hive::Markers.current(state_file).name
+      assert_empty @logger.events
+    end
+  end
+
+  def test_markerless_stall_is_not_healed_while_controller_is_running_task
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+      healer = build_healer(
+        controller: FakeController.new(running_pairs: [ [ "p", "s" ] ])
+      )
+
+      refute healer.heal_markerless_stall(row)
+      assert_equal :none, Hive::Markers.current(state_file).name
+      assert_empty @logger.events
+    end
+  end
+
+  def test_markerless_stall_heal_loses_to_live_or_newer_task_state
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      live_row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: true
+      )
+
+      refute @healer.heal_markerless_stall(live_row)
+      assert_equal :none, Hive::Markers.current(state_file).name
+
+      Hive::Markers.set(state_file, :waiting, reason: "operator_input")
+      stale_row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      refute @healer.heal_markerless_stall(stale_row)
+      assert_equal :waiting, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_markerless_stall_heal_does_not_recreate_a_moved_task_folder
+    Dir.mktmpdir do |dir|
+      folder = File.join(dir, "moved-task")
+      row = make_row(
+        File.join(folder, "fix.md"),
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      refute @healer.heal_markerless_stall(row)
+      refute_path_exists folder
+    end
+  end
+
+  def test_markerless_stall_disk_failure_is_logged_without_crashing_the_tick
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "none",
+        action: "ready_to_run",
+        live_task_lock: false
+      )
+
+      with_markers_set_if_current_failure(state_file) do
+        refute @healer.heal_markerless_stall(row)
+      end
+
+      assert_equal :none, Hive::Markers.current(state_file).name
+      failure = @logger.events.find { |name, _attributes| name == :marker_heal_failed }
+      assert_equal "agent_exited_without_terminal_marker", failure.last.fetch(:reason)
+      assert_match(/ENOSPC/, failure.last.fetch(:error))
     end
   end
 
@@ -844,13 +1051,15 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def build_healer(controller: @controller,
                    recovery_coordinator: @coordinator,
-                   project_daemon_enabled: ->(_project) { true })
+                   project_daemon_enabled: ->(_project) { true },
+                   admission_open: -> { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: controller,
       logger: @logger,
       grace_sec: 300,
       project_daemon_enabled: project_daemon_enabled,
-      recovery_coordinator: recovery_coordinator
+      recovery_coordinator: recovery_coordinator,
+      admission_open: admission_open
     )
   end
 
@@ -969,5 +1178,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     yield
   ensure
     Hive::Markers.define_singleton_method(:set, &original)
+  end
+
+  def with_markers_set_if_current_failure(state_file)
+    original = Hive::Markers.method(:set_if_current)
+    Hive::Markers.define_singleton_method(:set_if_current) do |path, *args, **kwargs|
+      raise Errno::ENOSPC, "no space left" if path == state_file
+
+      original.call(path, *args, **kwargs)
+    end
+    yield
+  ensure
+    Hive::Markers.define_singleton_method(:set_if_current, &original)
   end
 end

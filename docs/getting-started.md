@@ -43,38 +43,16 @@ hive init .
 
 OpenCode is registered everywhere Hive accepts an agent profile but remains
 entirely opt-in: no default stage, reviewer council, or fallback selects it.
-Install OpenCode 1.18.16 or newer and configure the provider credential you
-intend to use. `opencode auth login` writes OpenCode's own auth file; automation
-may instead name one credential environment variable in project config. Hive
-never accepts the credential value in YAML.
+Install OpenCode 1.18.16 or newer and run `opencode auth login` for the provider
+you intend to use. Hive launches the same native OpenCode setup an operator
+uses directly: its normal config, plugins, project discovery, session store,
+and auth file remain in place. Automation may instead name credential
+environment variables in project config; Hive never copies credential values
+into YAML or durable task state.
 
-Create an explicit, non-secret provider definition in the project, for
-example `.hive/opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "anthropic": {
-      "npm": "@ai-sdk/anthropic"
-    }
-  }
-}
-```
-
-Then add the typed profile and route settings to `.hive-state/config.yml`.
-Replace the example route and credential variable name with the exact local
-provider/model you intend to run:
+Select the profile and an exact route in `.hive-state/config.yml`:
 
 ```yaml
-agents:
-  opencode:
-    config_path: .hive/opencode.json
-    credential_env: [ANTHROPIC_API_KEY]
-    plugins:
-      - compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git#compound-engineering-v3.21.4
-    isolation: hermetic
-
 execute:
   agent: opencode
   permissions:
@@ -89,10 +67,9 @@ models:
 
 OpenCode routes are nested values inside the Hive `opencode` profile. They
 must be full `provider/model` values; a different configured provider never
-satisfies the request. A top-level exact `model` in the selected OpenCode JSON
-may be used as the explicit default when the role has no `models.*.model`.
-Faithful effort values render as OpenCode variants only after the local route
-probe proves that variant exists.
+satisfies the request. A top-level exact `model` in an explicitly selected
+OpenCode JSON may be used as the default when the role has no
+`models.*.model`. Faithful effort values render as OpenCode variants.
 
 OpenCode does not accept Hive's default `yolo` stage permission. Use
 `read-only` or a scoped policy. Read-only denies edits, shell, unsafe tools,
@@ -100,11 +77,10 @@ and external writes. Scoped `Write`/`Edit` enables the generated
 workspace-write policy over Hive's resolved working/write roots. Qualified
 rules such as `Bash(git*)` opt into only the named OpenCode shell patterns;
 bare `Bash` remains invalid, while `Bash(*)` deliberately grants the full
-shell with the Hive OS user's authority. Hive redirects OpenCode config, data, cache, and
-state into a private per-invocation root, ignores ambient project/global
-configuration, forwards only the named credential source, and removes the
-overlay after every lifecycle outcome. This is application-level enforcement,
-not an OS/container boundary; use Hivebox for hostile-code containment.
+shell with the Hive OS user's authority. Hive supplies these per-run rules via
+OpenCode's `OPENCODE_PERMISSION` input without replacing native config or
+copying authentication. This is application-level enforcement, not an
+OS/container boundary; use Hivebox for hostile-code containment.
 
 Skill-bearing roles additionally require the native Compound Engineering
 OpenCode plugin. Preview and apply its pinned `3.21.4` entry with:
@@ -115,12 +91,12 @@ hive setup-agents --agent opencode \
 hive doctor
 ```
 
-Setup previews the selected OpenCode config change and asks once before its
-atomic write. Normal task execution never mutates that source config. A
+Setup previews the native OpenCode config change and asks once before its
+atomic write. Normal task execution never mutates native config. A
 missing/stale plugin or a higher-precedence project/user CE skill that shadows
 the selected plugin fails readiness before any model process starts.
 
-`hive status --json` keeps the Hive provider as `opencode`, retains the
+`hive task TARGET --json` keeps the Hive provider as `opencode`, retains the
 requested nested route, and appends sanitized-export-observed backend/model,
 resolution status, outcome, and nullable usage after an implementation
 attempt. A requested alias is never copied into the actual field without
@@ -172,7 +148,7 @@ Hive moves the task to `3-plan/`, writes `plan.md`, and pauses for edits if the 
 
 `hive new` wrote an `idea.md` file. `hive brainstorm` and `hive plan` moved the task directory between stage folders and ran the stage agents. The current marker at the bottom of each stage file tells Hive whether the next action is human input, another run, or promotion to the next stage.
 
-When the task reaches execute, Hive durably captures its concrete provider and model before spawning the implementation process. Later PR-opening and repair stages follow that owner automatically unless you explicitly configure a stage override. Run `hive status --json` for full provenance, or press `I` on the task in `hive tui` to inspect execute, PR-opening, review-fix, and CI-fix ownership without changing task state.
+When the task reaches execute, Hive durably captures its concrete provider and model before spawning the implementation process. Later PR-opening and repair stages follow that owner automatically unless you explicitly configure a stage override. Run `hive task TARGET --json` for task-local provenance, or press `I` on the task in `hive tui` to inspect execute, PR-opening, review-fix, and CI-fix ownership without changing task state.
 
 ## Artefacts
 

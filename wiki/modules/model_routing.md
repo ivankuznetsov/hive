@@ -107,7 +107,7 @@ the provider registry. An effective OpenCode model must be a complete
 `provider/model` route, and a different configured backend never satisfies the
 request. Faithful effort values are validated against the OpenCode variant
 allowlist before rendering `--variant`. A missing routed value may resolve
-only from the explicitly selected overlay config's top-level exact `model`.
+only from an explicitly selected OpenCode config's top-level exact `model`.
 
 The durable implementation selection stores that requested route as `model`.
 After execution, a separate journal observation may add requested and actual

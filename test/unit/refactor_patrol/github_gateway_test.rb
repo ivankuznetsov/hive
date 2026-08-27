@@ -21,7 +21,7 @@ class RefactorPatrolGithubGatewayTest < Minitest::Test
     end
   end
 
-  def test_merged_pr_details_retains_bounded_classifier_metadata_and_file_patches
+  def test_merged_pr_details_retains_classifier_metadata_and_path_inventory_without_patches
     transport = FakeTransport.new(
       pr: pr_document,
       pages: [ [
@@ -37,24 +37,21 @@ class RefactorPatrolGithubGatewayTest < Minitest::Test
     assert_equal "feature body", details.fetch("body")
     assert_equal %w[architecture feature], details.fetch("labels")
     assert_equal "dev", details.fetch("author")
-    assert_equal "@@ -1 +1 @@\n-old\n+new", details.fetch("files").first.fetch("patch")
-    assert_equal "", details.fetch("files").last.fetch("patch")
+    assert_equal(
+      [
+        { "path" => "lib/new.rb", "status" => "modified" },
+        { "path" => "app/logo.png", "status" => "modified" }
+      ],
+      details.fetch("files")
+    )
     fields = transport.commands.first.first.fetch(transport.commands.first.first.index("--json") + 1)
     %w[title body labels author].each { |field| assert_includes fields.split(","), field }
   end
 
-  def test_merged_pr_details_fails_closed_when_metadata_or_patch_bounds_are_exceeded
+  def test_merged_pr_details_fails_closed_when_metadata_bounds_are_exceeded
     oversized = pr_document.merge("body" => "x" * (32 * 1024 + 1))
     gateway = Hive::RefactorPatrol::GithubGateway.new(
       transport: FakeTransport.new(pr: oversized, pages: [ [] ])
-    )
-    assert_raises(Hive::GhError) { gateway.merged_pr_details(17, worktree_path: "/repo") }
-
-    gateway = Hive::RefactorPatrol::GithubGateway.new(
-      transport: FakeTransport.new(
-        pr: pr_document.merge("changedFiles" => 1),
-        pages: [ [ { "filename" => "lib/new.rb", "status" => "modified", "patch" => "x" * (32 * 1024 + 1) } ] ]
-      )
     )
     assert_raises(Hive::GhError) { gateway.merged_pr_details(17, worktree_path: "/repo") }
   end
@@ -89,13 +86,16 @@ class RefactorPatrolGithubGatewayTest < Minitest::Test
       assert_raises(Hive::GhError) { gateway.merged_pr_details(17, worktree_path: "/repo") }
     end
 
-    files = 17.times.map do |index|
-      { "filename" => "lib/#{index}.rb", "status" => "modified", "patch" => "x" * (32 * 1024) }
+    files = 430.times.map do |index|
+      patch = index < 21 ? "x" * 96_000 : "x" * 4_096
+      { "filename" => "lib/#{index}.rb", "status" => "modified", "patch" => patch }
     end
     gateway = Hive::RefactorPatrol::GithubGateway.new(
-      transport: FakeTransport.new(pr: pr_document.merge("changedFiles" => 17), pages: [ files ])
+      transport: FakeTransport.new(pr: pr_document.merge("changedFiles" => files.size), pages: [ files ])
     )
-    assert_raises(Hive::GhError) { gateway.merged_pr_details(17, worktree_path: "/repo") }
+    large_details = gateway.merged_pr_details(17, worktree_path: "/repo")
+    assert_equal 430, large_details.fetch("files").size
+    assert large_details.fetch("files").none? { |file| file.key?("patch") }
 
     markers = {
       "patrol" => "<!-- hive-publication:v1 id=pub-#{'a' * 32} base=#{'b' * 40} -->",

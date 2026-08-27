@@ -1,0 +1,38 @@
+{
+  "providers": {
+    "openrouter": {
+      "models": [
+        {
+          "id": "z-ai/glm-5.3-flash",
+          "name": "Ox Alpha (Z.ai GLM 5.3 Flash)",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "cost": {
+            "input": 0.075,
+            "output": 0.25,
+            "cacheRead": 0.015,
+            "cacheWrite": 0
+          },
+          "compat": {
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": true,
+            "thinkingFormat": "openrouter",
+            "requiresReasoningContentOnAssistantMessages": true
+          },
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -46,6 +46,29 @@ class PatrolFixReviewStageTest < Minitest::Test
     end
   end
 
+  def test_valid_utf8_diff_from_bounded_git_capture_reaches_independent_review
+    with_review_task(source: "puts \"fixed — now\"\n") do |task, worktree_root, _manifest, _fix, _validation|
+      captured = nil
+      runner = lambda do |**values|
+        captured = values
+        File.write(values.fetch(:output_path), JSON.generate(
+          "schema" => "hive-patrol-fix-review-report", "schema_version" => 1,
+          "route" => "publish", "rationale" => "The UTF-8 patch is bounded and correct.",
+          "evidence" => [ "The patch addresses the exact defect." ],
+          "blocker_owner" => "review_gate"
+        ))
+        { status: :ok, custody: :clean }
+      end
+
+      result = Hive::Stages::PatrolFix::Review.run!(
+        task, {}, agent_runner: runner, worktree_root: worktree_root
+      )
+
+      assert_equal :complete, result.fetch(:status)
+      assert_includes captured.fetch(:prompt), "fixed — now"
+    end
+  end
+
   def test_changed_worktree_head_after_review_cannot_write_a_decision
     with_review_task do |task, worktree_root, _manifest, _fix, _validation|
       runner = lambda do |**values|
@@ -290,7 +313,7 @@ class PatrolFixReviewStageTest < Minitest::Test
 
   private
 
-  def with_review_task
+  def with_review_task(source: "puts :fixed\n")
     PatrolFixStageFixture.with_task(stage: "4-review") do |task, root, manifest|
       store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
       store.append!(PatrolFixStageFixture.decision_receipt(manifest, "fix"))
@@ -303,7 +326,7 @@ class PatrolFixReviewStageTest < Minitest::Test
         generation: 1, evidence_digest: "a" * 64,
         base_revision: manifest.fetch("target_revision")
       )
-      File.write(File.join(owner.fetch("worktree"), "app.rb"), "puts :fixed\n")
+      File.write(File.join(owner.fetch("worktree"), "app.rb"), source)
       PatrolFixStageFixture.git(owner.fetch("worktree"), "add", "app.rb")
       PatrolFixStageFixture.git(owner.fetch("worktree"), "commit", "-m", "Fix")
       fix_payload = custody.capture!(generation: 1, evidence_digest: "a" * 64)

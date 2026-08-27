@@ -40,12 +40,12 @@ class TuiDropTaskE2ETest < Minitest::Test
   end
 
   def snapshot
-    out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
+    out, _err = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
     Hive::Tui::Snapshot.from_payload(JSON.parse(out))
   end
 
   def tasks
-    out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
+    out, _err = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
     JSON.parse(out)["projects"].flat_map { |project| Array(project["tasks"]) }
   end
 

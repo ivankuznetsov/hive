@@ -12,12 +12,14 @@ class HealthTest < ActionDispatch::IntegrationTest
     get "/health"
     assert_response :success
     assert_equal true, response.parsed_body["ok"]
+    assert_equal "release", response.parsed_body.dig("runtime", "channel")
   end
 
   test "deep health is 503 while the daemon is down" do
     FileUtils.rm_f(pid_file)
     get "/health", params: { deep: "1" }
     assert_response :service_unavailable
+    assert_equal "release", response.parsed_body.dig("runtime", "channel")
     assert_equal false, response.parsed_body.dig("daemon", "running"),
                  "a missing daemon must be visible to the container healthcheck"
   end
@@ -30,6 +32,7 @@ class HealthTest < ActionDispatch::IntegrationTest
     File.write(pid_file, pid_file_payload(Process.pid).to_yaml)
     get "/health", params: { deep: "1" }
     assert_response :success
+    assert_equal "release", response.parsed_body.dig("runtime", "channel")
     assert_equal Process.pid, response.parsed_body.dig("daemon", "pid")
   ensure
     FileUtils.rm_f(pid_file)

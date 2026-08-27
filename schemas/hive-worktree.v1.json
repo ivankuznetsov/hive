@@ -23,7 +23,7 @@
       "required": ["kind", "command", "instructions"],
       "properties": {
         "kind": { "const": "refresh_status" },
-        "command": { "const": "hive status --json" },
+        "command": { "const": "hive status --operational --json" },
         "instructions": { "type": "string" }
       }
     },

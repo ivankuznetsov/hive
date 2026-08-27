@@ -85,12 +85,14 @@ by `Hive::Daemon::PatrolFixAdmissionScheduler`; discovery allowance and workflow
 capacity are separate concerns.
 
 Historical local findings can be imported once with
-`script/migrate_patrol_findings.rb`. The importer creates tasks for active
-ordinary findings and reserves accepted historical Architecture Patrol `fix`
-and `discuss` dispositions in the same admission store. Legacy ordinary
-findings without `target_sha` bind to the current default-branch revision, and
-secret-like evidence is redacted before it enters task state. There is no
-runtime Patrol Fix migration, cutover, or dual-write subsystem.
+`script/migrate_patrol_findings.rb`. The importer reserves active ordinary
+findings and accepted historical Architecture Patrol `fix` and `discuss`
+dispositions in the same admission store. It creates no task folders; the
+admission scheduler materializes work only after semantic selection and
+capacity admission. Legacy ordinary findings without `target_sha` bind to the
+current default-branch revision, and secret-like evidence is redacted before
+it enters admission state. There is no runtime Patrol Fix migration, cutover,
+or dual-write subsystem.
 
 ## Backlinks
 

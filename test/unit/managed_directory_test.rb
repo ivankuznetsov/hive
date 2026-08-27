@@ -575,6 +575,112 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_read_session_reuses_the_anchor_without_creating_missing_state
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+
+      assert_raises(Hive::ConfigError) do
+        directory.with_read_session { flunk }
+      end
+      assert_nil directory.with_read_session(missing: true) { flunk }
+      refute_path_exists root
+
+      directory.prepare!
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_absolute_directory)
+      anchor_opens = 0
+
+      with_replaced_singleton_method(
+        native,
+        :open_absolute_directory,
+        lambda do |path|
+          anchor_opens += 1
+          original_open.call(path)
+        end
+      ) do
+        directory.with_read_session do
+          directory.each_child(".").to_a
+          assert_nil directory.read("missing", max_bytes: 1, missing: true)
+        end
+      end
+
+      assert_equal 1, anchor_opens
+      assert_nil Thread.current[:hive_managed_directory_sessions]
+
+      storage_error = assert_raises(Errno::EIO) do
+        directory.with_read_session { raise Errno::EIO, "block failure" }
+      end
+      assert_includes storage_error.message, "block failure"
+
+      config_error = assert_raises(Hive::ConfigError) do
+        directory.with_read_session do
+          raise Hive::ConfigError, "unsafe nested read"
+        end
+      end
+      assert_equal "unsafe nested read", config_error.message
+
+      with_replaced_singleton_method(
+        native,
+        :open_absolute_directory,
+        ->(_path) { raise Errno::EIO, "root failure" }
+      ) do
+        assert_raises(Hive::ConfigError) { directory.with_read_session { flunk } }
+      end
+    end
+  end
+
+  def test_read_children_streams_named_files_through_one_parent_session
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
+      directory.ensure_directory("records")
+      directory.atomic_write("records/a", "alpha")
+      directory.atomic_write("records/b", "beta")
+
+      assert_equal [ [ "b", "beta" ], [ "a", "alpha" ] ],
+                   directory.read_children(
+                     "records", names: %w[b a], max_bytes: 5
+                   ).to_a
+      assert_raises(Hive::ConfigError) do
+        directory.read_children(
+          "records", names: [ "../outside" ], max_bytes: 5
+        ).to_a
+      end
+
+      missing = Hive::ManagedDirectory.new(
+        root: File.join(root, "missing"), anchor: root, label: "missing state"
+      )
+      assert_empty missing.read_children(
+        ".", names: [ "record" ], max_bytes: 5, missing: true
+      ).to_a
+      assert_raises(Hive::ConfigError) do
+        missing.read_children(
+          ".", names: [ "record" ], max_bytes: 5
+        ).to_a
+      end
+
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_directory)
+      with_replaced_singleton_method(
+        native,
+        :open_directory,
+        lambda do |parent, name|
+          raise Errno::EIO, name if name == "records"
+
+          original_open.call(parent, name)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.read_children(
+            "records", names: [ "a" ], max_bytes: 5
+          ).to_a
+        end
+      end
+    end
+  end
+
   def test_missing_root_does_not_leak_the_session_registry
     with_tmp_dir do |anchor|
       directory = Hive::ManagedDirectory.new(
@@ -921,6 +1027,26 @@ class ManagedDirectoryTest < Minitest::Test
         ) do
           assert_raises(Hive::ConfigError) do
             directory.read("record", max_bytes: 4, missing: true)
+          end
+        end
+      ensure
+        original_rename.call(parked, root) if File.directory?(parked)
+      end
+
+      begin
+        with_replaced_singleton_method(
+          native,
+          :open_file,
+          lambda do |parent, name, flags, mode: nil|
+            file = original_open_file.call(parent, name, flags, mode: mode)
+            original_rename.call(root, parked) if name == "record"
+            file
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.read_children(
+              ".", names: [ "record" ], max_bytes: 4, missing: true
+            ).to_a
           end
         end
       ensure

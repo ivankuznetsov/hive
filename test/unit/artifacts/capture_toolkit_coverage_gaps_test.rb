@@ -23,7 +23,7 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
 
       os_error = Toolkit.new(
         tool_resolver: ->(*) { raise Errno::EIO, "broken" },
-        codex_runtime_resolver: ->(*) { [ "/managed/codex-runtime" ] }
+        runtime_resolver: ->(*) { [ "/managed/codex-runtime" ] }
       )
       error = assert_raises(Hive::ConfigError) { prepare_visual(os_error, root) }
       assert_match(/could not start/, error.message)
@@ -127,26 +127,26 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
   end
 
   def test_codex_runtime_resolution_requires_a_compatible_native_binary
-    toolkit = Toolkit.new
-    assert_raises(Hive::ConfigError) { toolkit.send(:resolve_codex_runtime, nil) }
+    policy = Hive::AgentSupport.for(:codex)::ArtifactPolicy
+    assert_raises(Hive::ConfigError) { policy.runtime_roots(nil) }
 
     Dir.mktmpdir("hive-codex-runtime") do |root|
       bin = File.join(root, "codex")
       File.binwrite(bin, "ELF fixture")
       FileUtils.chmod(0o755, bin)
       profile = fake_profile(bin)
-      assert_equal [ root ], toolkit.send(:resolve_codex_runtime, profile)
+      assert_equal [ root ], policy.runtime_roots(profile)
 
       script = File.join(root, "script")
       File.write(script, "#!/bin/sh\n")
       FileUtils.chmod(0o755, script)
       assert_raises(Hive::ConfigError) do
-        toolkit.send(:resolve_codex_runtime, fake_profile(script))
+        policy.runtime_roots(fake_profile(script))
       end
 
       path_profile = fake_profile("codex")
       with_env("PATH" => "#{root}#{File::PATH_SEPARATOR}") do
-        assert_equal [ root ], toolkit.send(:resolve_codex_runtime, path_profile)
+        assert_equal [ root ], policy.runtime_roots(path_profile)
       end
 
       realpath = File.method(:realpath)
@@ -154,23 +154,23 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
         File, :realpath, ->(path) { path == bin ? raise(Errno::EACCES) : realpath.call(path) }
       ) do
         assert_raises(Hive::ConfigError) do
-          toolkit.send(:resolve_codex_runtime, profile)
+          policy.runtime_roots(profile)
         end
       end
     end
 
     incompatible = fake_profile("codex")
     compatible = incompatible.with_overrides(
-      "min_version" => Toolkit::MIN_CODEX_PERMISSION_VERSION
+      "min_version" => policy::MINIMUM_VERSION
     )
     compatible.define_singleton_method(:check_version!) do
       raise Hive::AgentError, "old"
     end
     incompatible.define_singleton_method(:with_overrides) { |_| compatible }
     error = assert_raises(Hive::ConfigError) do
-      toolkit.send(:resolve_codex_runtime, incompatible)
+      policy.runtime_roots(incompatible)
     end
-    assert_includes error.message, "#{Toolkit::MIN_CODEX_PERMISSION_VERSION}+"
+    assert_includes error.message, "#{policy::MINIMUM_VERSION}+"
   end
 
   def test_native_browser_command_reports_failure_timeout_and_missing_binary
@@ -462,7 +462,7 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     bundle.define_singleton_method(:ensure!) { entry }
     Toolkit.new(
       browser_bundle: bundle, tool_resolver: ->(name) { "/usr/bin/#{name}" },
-      codex_runtime_resolver: ->(*) { [ "/managed/runtime" ] },
+      runtime_resolver: ->(*) { [ "/managed/runtime" ] },
       browser_command_runner: ->(*) { }
     )
   end

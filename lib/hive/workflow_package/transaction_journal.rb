@@ -23,7 +23,7 @@ module Hive
         decode(JSON.parse(File.read(path)))
       rescue Errno::ENOENT
         nil
-      rescue JSON::ParserError
+      rescue JSON::ParserError, ArgumentError
         raise Hive::ConfigError, "managed workflow transaction journal is malformed"
       end
 
@@ -43,7 +43,7 @@ module Hive
         when Array
           value.map { |child| encode(child) }
         when String
-          opaque_binary?(value) ? {BINARY_MARKER => Base64.strict_encode64(value)} : value
+          opaque_binary?(value) ? { BINARY_MARKER => Base64.strict_encode64(value) } : value
         else
           value
         end
@@ -52,7 +52,14 @@ module Hive
       def decode(value)
         case value
         when Hash
-          return Base64.strict_decode64(value.fetch(BINARY_MARKER)).b if binary_envelope?(value)
+          if binary_envelope?(value)
+            encoded = value.fetch(BINARY_MARKER)
+            unless encoded.is_a?(String)
+              raise Hive::ConfigError, "managed workflow transaction journal is malformed"
+            end
+
+            return Base64.strict_decode64(encoded).b
+          end
 
           value.each_with_object({}) { |(key, child), out| out[key] = decode(child) }
         when Array

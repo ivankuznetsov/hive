@@ -239,6 +239,34 @@ class WorkflowPackageTransactionTest < Minitest::Test
     end
   end
 
+  def test_invalid_binary_envelope_fails_closed
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, ".transaction.json"),
+        JSON.generate("old_lock" => { "__binary__" => "not base64!" })
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::TransactionJournal.new(dir).read
+      end
+      assert_equal "managed workflow transaction journal is malformed", error.message
+    end
+  end
+
+  def test_non_string_binary_envelope_fails_closed
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, ".transaction.json"),
+        JSON.generate("old_lock" => { "__binary__" => 123 })
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::TransactionJournal.new(dir).read
+      end
+      assert_equal "managed workflow transaction journal is malformed", error.message
+    end
+  end
+
   def test_mutation_lock_wraps_filesystem_failures
     with_tmp_dir do |dir|
       blocked = File.join(dir, "not-a-directory")

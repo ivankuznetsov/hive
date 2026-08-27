@@ -256,6 +256,50 @@ class WorkflowsBenchTest < Minitest::Test
                     'env << "HB_REQUIRE_SEALED_AGENT_RUNTIME=1" if isolation["sealed_agent_runtime"] == true'
   end
 
+  def test_packaged_sealed_runtime_restores_host_ownership_after_container_exit
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "json"
+      require "profiles/candidates"
+      require "lib/hive_driver"
+
+      sha = "a" * 40
+      labels = {
+        "io.hive.bench.hive-build-sha" => sha,
+        "io.hive.bench.runtime-visibility" => "sealed-control-bundle-v1"
+      }
+      hive_runtime = { root: "/host/hive", gem_home: "/host/gems", version: "0.7.2", build_sha: sha }
+      captured = nil
+      driver = HiveBench::HiveDriver.new(
+        reuse_existing: false,
+        reuse_unverified: false,
+        hive_runtime: hive_runtime,
+        image_inspector: ->(_image) { labels },
+        runner: ->(command) { captured = command }
+      )
+      driver.define_singleton_method(:network_args) { [] }
+      driver.define_singleton_method(:auth_mounts) { |_candidate, _out_dir| [] }
+      driver.define_singleton_method(:env_args) { |_candidate| [] }
+      driver.send(
+        :run_container,
+        "task-slug", "base-sha", "/host/work", HiveBench::Candidates.by_id("all-ox-alpha@max"),
+        "/host/out", hive_runtime: hive_runtime
+      )
+      puts JSON.generate(captured)
+    RUBY
+    out, err, status = Open3.capture3(
+      { "HB_REQUIRE_SEALED_AGENT_RUNTIME" => "1" },
+      RbConfig.ruby, "-I#{harness}", "-e", script
+    )
+
+    assert status.success?, out + err
+    command = JSON.parse(out)
+    shell = command.last
+    cleanup = "trap 'chown -R #{Process.uid}:#{Process.gid} /work 2>/dev/null || true' EXIT"
+    assert_includes shell, cleanup
+    assert_operator shell.index(cleanup), :<, shell.index("timeout ")
+  end
+
   def test_packaged_runtime_emits_a_hive_valid_opencode_config
     harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
     script = <<~'RUBY'

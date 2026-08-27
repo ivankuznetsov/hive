@@ -2438,12 +2438,45 @@ module Hive
 
           body << "#{section_labels[severity]}\n\n"
           entries.each do |m|
-            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: " \
-                    "#{m.snippet} (waiver sha256: #{m.match_sha256})\n"
+            # Control bytes in a decoded path or matched snippet (the
+            # guardrail's decode_git_path un-escapes C-quoted paths, so a
+            # rename target like ".github/workflows/de\nploy.yml" arrives
+            # with a literal newline) would split this checkbox line into
+            # several physical lines. fix_guardrail_approved? counts
+            # checkboxes line-by-line: a crafted path fragment such as
+            # "\n- [x] " renders checked boxes the user never ticked,
+            # and any count drift versus the marker's recorded matches
+            # deadlocks the approval round-trip entirely. Escape every
+            # control byte at the report boundary so one Match renders
+            # as exactly one checkbox line.
+            body << "- [ ] #{escape_control_bytes(m.pattern_name)}: #{escape_control_bytes(m.file)}:#{m.line || '?'}: " \
+                    "#{escape_control_bytes(m.snippet)} (waiver sha256: #{m.match_sha256})\n"
           end
           body << "\n"
         end
         File.write(path, body)
+      end
+
+      # Render control bytes as visible escapes so line-oriented
+      # consumers of orchestrator-owned reports (the checkbox-counting
+      # fix_guardrail_approved? reader, human reviewers) see one line
+      # per logical line. Printable non-ASCII bytes pass through
+      # untouched.
+      def escape_control_bytes(text)
+        text.to_s.gsub(/[[:cntrl:]]/) do |ch|
+          case ch
+          when "\n" then "\\n"
+          when "\t" then "\\t"
+          when "\r" then "\\r"
+          when "\f" then "\\f"
+          when "\v" then "\\v"
+          when "\e" then "\\e"
+          when "\b" then "\\b"
+          when "\a" then "\\a"
+          when "\0" then "\\0"
+          else format("\\x%02X", ch.ord)
+          end
+        end
       end
 
       def emit_guardrail_waivers(task, pass, matches)

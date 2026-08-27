@@ -959,7 +959,8 @@ module Hive
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
-                      isolate_environment: false, launch_environment: nil)
+                      isolate_environment: false, launch_environment: nil,
+                      terminate_on_parent_signal: true)
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
         unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
@@ -1110,7 +1111,8 @@ module Hive
               edit_patterns: edit_patterns,
               bash_patterns: bash_patterns,
               permission_policy: permission_policy,
-              isolate_environment: isolate_environment
+              isolate_environment: isolate_environment,
+              terminate_on_parent_signal: terminate_on_parent_signal
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
               agent_result.is_a?(Hash) && agent_result.key?(:requested_route)

@@ -66,18 +66,22 @@ and reach one focused hosted PR.
 The sanitized 600-charge incident replay pins the Patrol/coding, outcome,
 generation-stage repeat, stage, and failure-class aggregates without retaining
 task identities, provider output, secret material, credentials, or host paths.
-It also characterizes the current undifferentiated daily pool: once Patrol has
+It also characterizes the former undifferentiated daily pool: once Patrol had
 used all 600 charges, later-stage Patrol progress, first-attempt Patrol work,
-and non-Patrol work are all starved even though later-stage ordering remains
-stable. This is expected-failure evidence for the later containment units, not
-a scheduling-policy change.
+and non-Patrol work were all starved even though later-stage ordering remained
+stable. Source and focused tests now pace three matching receipt-bound typed
+Patrol failures with one durable probe across restart while leaving task
+capacity as the shared safety boundary. The remaining gap is installed-daemon load
+and UTC-rollover proof over a live representative backlog; the sanitized replay
+is deterministic local evidence, not that operational soak.
 
 The preceding seven complete UTC days cannot be reconstructed into a
 defensible non-Patrol demand series from the retained Attempts v4 records.
 Historical `1-inbox` attempts do not all carry an unambiguous durable workflow
-identity, so classifying them as Patrol or coding would invent evidence. Until
-workflow-attributed history exists, reserve calibration must use the documented
-10% fail-safe rather than a fabricated p95.
+identity, so classifying them as Patrol or coding would invent evidence. No
+task-capacity partition is inferred from that missing history: Patrol discovery
+already has separate scan concurrency and per-engine daily allowances, while
+Attempts capacity remains a shared safety boundary.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 

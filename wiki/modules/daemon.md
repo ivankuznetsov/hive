@@ -258,6 +258,8 @@ Durable admission results retain their real scheduler meaning in this record:
 only an accepted attempt is `dispatched`; an already-live attempt is
 `in_flight`, while capacity deferral, terminal replay, lost attempts, invalid
 predecessors, and launch handoff failures keep distinct owner/reason evidence.
+Durable typed failure-cohort pacing retains the distinct
+`failure_cohort_cooldown` reason instead of collapsing into generic capacity.
 Recovery retries do not exhaust. A terminal coordinator receipt remains visible
 only while no fresh recoverable marker or different live attempt has replaced
 the completed generation.
@@ -266,7 +268,10 @@ Operational task capacity uses the same accounting as dispatch admission:
 task-kind internal runs plus reconciled external task runs. Patrol scans and
 the global digest remain visible in the diagnostic `running` list but do not
 consume the global/per-project task slots or create phantom capacity projects;
-both have separate scheduler budgets.
+both have separate scheduler budgets. Attempts capacity remains the shared
+fail-safe accounting boundary for task dispatch; Patrol policy stays in its
+separate scan concurrency, per-engine discovery allowances, and typed failure
+cohort pacing rather than partitioning task capacity.
 
 The reader treats incomplete phases, a stopped/replaced daemon, generation
 mismatch, expiry, malformed content, unsafe symlink/hard-link/permissions, and

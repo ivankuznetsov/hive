@@ -49,20 +49,28 @@ module Hive
 
           Dir.glob(File.join(store.workflows_dir, "*", Hive::WorkflowPackage::ManagedStore::LOCK_FILE)).sort.map do |path|
             name = File.basename(File.dirname(path))
+            # #selected documents nil as a normal return (unsafe directory
+            # name, or the lock file vanishing between glob and read), so a
+            # nil here means unreadable state, not a crash.
             lock = store.selected(name, cfg: project_config)
-            result = store.verify_generation(name, lock.fetch("source_commit"), lock.fetch("manifest_digest"))
-            configuration = store.configuration(
-              name, lock.fetch("configuration_digest"), cfg: project_config
-            )
-            details = result.valid? ? configuration_details(configuration, result.manifest) : {}
-            row(
-              name, "managed", selection: "selected",
-              integrity: result.valid? ? "verified" : "tampered",
-              catalog_visibility: "unknown_offline",
-              source_commit: lock.fetch("source_commit"), manifest_digest: lock.fetch("manifest_digest"),
-              version: lock.fetch("version"), configuration_digest: lock.fetch("configuration_digest"),
-              **details
-            )
+            if lock.nil?
+              row(name, "managed", selection: "selected", integrity: "malformed",
+                  catalog_visibility: "unknown_offline")
+            else
+              result = store.verify_generation(name, lock.fetch("source_commit"), lock.fetch("manifest_digest"))
+              configuration = store.configuration(
+                name, lock.fetch("configuration_digest"), cfg: project_config
+              )
+              details = result.valid? ? configuration_details(configuration, result.manifest) : {}
+              row(
+                name, "managed", selection: "selected",
+                integrity: result.valid? ? "verified" : "tampered",
+                catalog_visibility: "unknown_offline",
+                source_commit: lock.fetch("source_commit"), manifest_digest: lock.fetch("manifest_digest"),
+                version: lock.fetch("version"), configuration_digest: lock.fetch("configuration_digest"),
+                **details
+              )
+            end
           rescue Hive::ConfigError, JSON::ParserError
             row(name, "managed", selection: "selected", integrity: "malformed",
                 catalog_visibility: "unknown_offline")

@@ -1186,6 +1186,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "blocked", receipt.status
       assert_equal "missing_task_id", receipt.reason
       assert_equal "hive", receipt.owner
+      assert_includes receipt.remediation, "hive migrate"
       assert_empty Q.pending(state_home: state_home)
       assert_equal :error, Hive::Markers.current(row.state_file).name
     end
@@ -1364,6 +1365,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         reason: "agent_exited_without_terminal_marker", now: NOW
       )
       assert_equal "missing_task_id", receipt.reason
+      assert_includes receipt.remediation, "hive migrate"
       assert_empty Q.pending(state_home: dir)
     end
   end
@@ -1739,6 +1741,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         request: request, decision: routing_decision(row, status: :no_route), now: NOW
       )
       assert_equal "missing_task_id", result.reason
+      assert_includes result.remediation, "hive migrate"
     end
 
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, _state_home|

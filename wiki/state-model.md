@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-08-24
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
@@ -98,7 +98,7 @@ tempfile-plus-rename.
 
 `hive status` v5 projects strict evidence into a three-state read model: clear; benign below-gate wait (`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`, `offending_ref`, `safe_correction`). Raw folder moves remain possible, but the next status or supported dispatch boundary observes and holds invalid state.
 
-`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids/names. Daemon display-name and id backfillers skip admission-error rows and strict-read failures, so background healing cannot erase dependency evidence. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
+`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids, names, and completion clocks through strict metadata reads. Daemon ticks and status projections never mutate that metadata. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
 
 ## Evidence-bound task closure
 
@@ -205,18 +205,13 @@ same move/finalization transaction. Rollback restores the exact prior metadata.
 Reopening deliberately keeps the clock, and a later return to the terminal
 stage reuses it.
 
-At the shared ordinary-status producer boundary, `CompletedAtBackfiller`
-converges archived legacy tasks that lack the field. Under the project commit
-lock and task lock it prefers the earliest credible Git event that first made
-the resolved terminal stage archived, then the terminal state-file mtime, then
-the task-folder mtime. A value is eligible for hiding only after its metadata
-write and `hive/state` commit both succeed. Missing/corrupt sources or failed
-persistence warn and keep the task visible; a successful first write is
-idempotent, including while policy is `never`. Each refresh reuses the status
-producer's captured workflow/config generation, bounds Git history and commit
-subprocesses by the shared deadline, commits only the metadata path without
-consuming unrelated index entries, and advances a durable per-project cursor so
-daemonless status calls remain fair across process restarts.
+`hive migrate` converges archived legacy tasks that lack the field. The explicit
+command prefers the earliest credible Git event that first made the resolved
+terminal stage archived, then the terminal state-file mtime, then the task-folder
+mtime, and commits the discovered clocks once. Missing sources warn and keep the
+task visible. Ordinary status, daemon ticks, and stage execution never discover
+or persist legacy completion clocks; rerunning an already-archived legacy task
+also leaves its missing clock for the explicit migration.
 
 `ArchiveFilter` captures one UTC `now` for a refresh and applies the currently
 resolved task pin, project default, or `coding` workflow policy. Positive
@@ -231,7 +226,7 @@ Task ids are allocated from the global counter file `<state_home>/task-counter.y
 next_id: 2
 ```
 
-`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for daemon backfill. `hive migrate` and the backfiller keep strict `next!` allocation; migration seeds the counter above existing sidecar ids before assigning new ones.
+`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for explicit migration. `hive migrate` uses strict `next!` allocation and seeds the counter above existing sidecar ids before assigning new ones.
 
 ## Slug grammar
 

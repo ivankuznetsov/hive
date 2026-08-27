@@ -44,17 +44,12 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
                 status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
                 logger: logger
               )
-              name_generation_requests = install_inline_display_name_backfiller(dispatcher, logger: logger)
-
               24.times do
                 break if File.file?(File.join(task_folder(project_root, "4-done", slug), "done.md"))
 
                 advance_tick(dispatcher, supervisor)
               end
 
-              assert_equal %w[1-inbox 2-research 3-draft 4-done],
-                           name_generation_requests.map { |folder| File.basename(File.dirname(folder)) },
-                           "daemon E2E must exercise display-name backfill without external child processes"
               @spawned_commands = supervisor.spawned.map { |s| s[:command] }
             end
           end

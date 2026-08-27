@@ -47,9 +47,6 @@ module Hive
         marker_heal_failed
         recovery_requested
         recovery_blocked
-        display_name_backfill
-        task_id_backfill
-        task_id_backfill_commit_skipped
         update_available
         update_check_no_result
         update_check_error

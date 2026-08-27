@@ -1264,6 +1264,237 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_backfills_archived_completion_times_explicitly
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        hive_state = File.dirname(stages)
+        folder = write_task_folder(stages, "9-done", "legacy-archive-260603-aaaa")
+        state_file = File.join(folder, "task.md")
+        File.write(state_file, "<!-- COMPLETE -->\n")
+        Hive::TaskMeta.write(
+          folder, id: 7, slug: File.basename(folder), display_name: "Legacy archive"
+        )
+        completed_at = Time.utc(2026, 6, 1, 12, 0, 0)
+        File.utime(completed_at, completed_at, state_file)
+        assert system("git", "-C", hive_state, "add", "-A", out: File::NULL, err: File::NULL)
+        assert system(
+          "git", "-C", hive_state, "commit", "-m", "test: add legacy archive",
+          out: File::NULL, err: File::NULL
+        )
+        operator_note = File.join(hive_state, "operator-note.txt")
+        File.write(operator_note, "keep me outside migration commits\n")
+
+        out, _err = capture_io { migrate_command(dir).call }
+
+        assert_equal completed_at.iso8601, Hive::TaskMeta.read(folder)[:completed_at]
+        assert_includes out, "backfilled 1 completion time"
+        log = `git -C #{hive_state.shellescape} log --oneline -5`
+        assert $CHILD_STATUS.success?, "git log must succeed"
+        assert_match(/hive: migrate completion times \(1 task\)/, log)
+        status = `git -C #{hive_state.shellescape} status --short -- operator-note.txt`.strip
+        assert_equal "?? operator-note.txt", status
+
+        migrated_head = `git -C #{hive_state.shellescape} rev-parse HEAD`.strip
+        second_out, _second_err = capture_io { migrate_command(dir).call }
+        assert_equal migrated_head, `git -C #{hive_state.shellescape} rev-parse HEAD`.strip
+        refute_includes second_out, "backfilled 1 completion time"
+      end
+    end
+  end
+
+  def test_completion_time_commit_failure_restores_metadata_for_a_retry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        hive_state = File.dirname(stages)
+        folder = write_task_folder(stages, "9-done", "legacy-archive-260603-bbbb")
+        state_file = File.join(folder, "task.md")
+        File.write(state_file, "<!-- COMPLETE -->\n")
+        Hive::TaskMeta.write(
+          folder, id: 8, slug: File.basename(folder), display_name: "Legacy archive"
+        )
+        completed_at = Time.utc(2026, 6, 1, 12, 0, 0)
+        File.utime(completed_at, completed_at, state_file)
+        assert system("git", "-C", hive_state, "add", "-A", out: File::NULL, err: File::NULL)
+        assert system(
+          "git", "-C", hive_state, "commit", "-m", "test: add legacy archive",
+          out: File::NULL, err: File::NULL
+        )
+        migrate = migrate_command(dir)
+        migrate.define_singleton_method(:commit_metadata_backfill!) do |*, **|
+          raise Hive::GitError, "simulated commit failure"
+        end
+
+        assert_raises(Hive::GitError) { capture_io { migrate.call } }
+
+        assert_nil Hive::TaskMeta.read(folder)[:completed_at]
+        assert system("git", "-C", hive_state, "diff", "--quiet")
+        assert system("git", "-C", hive_state, "diff", "--cached", "--quiet")
+
+        capture_io { migrate_command(dir).call }
+        assert_equal completed_at.iso8601, Hive::TaskMeta.read(folder)[:completed_at]
+      end
+    end
+  end
+
+  def test_invalid_completion_time_keeps_that_task_visible_and_commits_earlier_metadata
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        hive_state = File.dirname(stages)
+        completed_times = []
+        folders = %w[
+          legacy-archive-260603-cccc
+          legacy-archive-260603-dddd
+        ].map.with_index do |slug, index|
+          folder = write_task_folder(stages, "9-done", slug)
+          state_file = File.join(folder, "task.md")
+          File.write(state_file, "<!-- COMPLETE -->\n")
+          Hive::TaskMeta.write(
+            folder, id: 9 + index, slug: slug, display_name: "Legacy archive #{index + 1}"
+          )
+          completed_at = Time.utc(2026, 6, 1, 12, 0, index)
+          File.utime(completed_at, completed_at, state_file)
+          completed_times << completed_at
+          folder
+        end
+        File.open(Hive::TaskMeta.path(folders.last), "a") do |file|
+          file.write("completed_at: \"2026-06-01\"\n")
+        end
+        assert system("git", "-C", hive_state, "add", "-A", out: File::NULL, err: File::NULL)
+        assert system(
+          "git", "-C", hive_state, "commit", "-m", "test: add legacy archives",
+          out: File::NULL, err: File::NULL
+        )
+        out, err = capture_io { migrate_command(dir).call }
+
+        assert_equal completed_times.first.iso8601, Hive::TaskMeta.read(folders.first)[:completed_at]
+        invalid_clock = nil
+        capture_io { invalid_clock = Hive::TaskMeta.read(folders.last)[:completed_at] }
+        assert_nil invalid_clock
+        assert_includes out, "backfilled 1 completion time"
+        assert_includes err, "could not migrate a completion time"
+        assert system("git", "-C", hive_state, "diff", "--quiet")
+        assert system("git", "-C", hive_state, "diff", "--cached", "--quiet")
+      end
+    end
+  end
+
+  def test_completion_time_discovery_warns_when_no_credible_source_exists
+    command = migrate_command("/tmp/project")
+    task = Struct.new(:completed_at, :state_file, :slug).new(nil, "/tmp/task.md", "legacy")
+    command.define_singleton_method(:archived_task?) { |*, **| true }
+
+    with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { task }) do
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { nil }) do
+        with_replaced_singleton_method(Hive::CompletionTime, :discover, ->(*) { nil }) do
+          value = nil
+          _out, err = capture_io do
+            value = command.send(
+              :discover_completion_time, "/tmp/task",
+              workflow_generation: nil, config: {}, history: Object.new
+            )
+          end
+
+          assert_nil value
+          assert_includes err, "could not discover a completion time for legacy"
+        end
+      end
+    end
+  end
+
+  def test_completion_time_discovery_does_not_swallow_interrupts
+    command = migrate_command("/tmp/project")
+    task = Struct.new(:completed_at, :state_file, :slug).new(nil, "/tmp/task.md", "legacy")
+    command.define_singleton_method(:archived_task?) { |*, **| true }
+
+    with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { task }) do
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { nil }) do
+        with_replaced_singleton_method(
+          Hive::CompletionTime, :discover, ->(*) { raise Interrupt }
+        ) do
+          assert_raises(Interrupt) do
+            command.send(
+              :discover_completion_time, "/tmp/task",
+              workflow_generation: nil, config: {}, history: Object.new
+            )
+          end
+        end
+      end
+    end
+  end
+
+  def test_completion_time_transaction_restores_snapshots_after_an_interrupt
+    command = migrate_command("/tmp/project")
+    restored = nil
+    command.define_singleton_method(:persist_completion_time) do |folder, *, snapshots:, **|
+      snapshots[folder] = :before
+      true
+    end
+    command.define_singleton_method(:commit_metadata_backfill!) { |*, **| raise Interrupt }
+    command.define_singleton_method(:restore_completion_time_backfill) do |state, snapshots|
+      restored = [ state, snapshots.dup ]
+    end
+
+    assert_raises(Interrupt) do
+      command.send(
+        :persist_completion_times_and_commit,
+        "/state", { "/task" => Time.utc(2026, 7, 1) },
+        workflow_generation: nil, config: {}
+      )
+    end
+
+    assert_equal [ "/state", { "/task" => :before } ], restored
+  end
+
+  def test_completion_time_persistence_does_not_swallow_interrupts
+    with_tmp_dir do |folder|
+      command = migrate_command("/tmp/project")
+      task = Struct.new(:completed_at, :state_file).new(nil, File.join(folder, "task.md"))
+      command.define_singleton_method(:archived_task?) { |*, **| true }
+
+      with_replaced_singleton_method(Hive::Task, :new, ->(*, **) { task }) do
+        with_replaced_singleton_method(Hive::Markers, :current, ->(*) { nil }) do
+          with_replaced_singleton_method(Hive::TaskMeta, :snapshot, ->(*) { :before }) do
+            with_replaced_singleton_method(
+              Hive::TaskMeta, :write_completed_at_once, ->(*) { raise Interrupt }
+            ) do
+              assert_raises(Interrupt) do
+                command.send(
+                  :persist_completion_time, folder, Time.utc(2026, 7, 1),
+                  workflow_generation: nil, config: {}, snapshots: {}
+                )
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_completion_time_restore_reports_and_reraises_restore_failures
+    command = migrate_command("/tmp/project")
+
+    with_replaced_singleton_method(
+      Hive::TaskMeta, :restore, ->(*) { raise IOError, "restore failed" }
+    ) do
+      _out, err = capture_io do
+        assert_raises(IOError) do
+          command.send(
+            :restore_completion_time_backfill, "/state", { "/task" => :before }
+          )
+        end
+      end
+
+      assert_includes err, "could not restore completion-time metadata"
+      assert_includes err, "restore failed"
+    end
+  end
+
   def test_migrate_seeds_counter_above_existing_ids
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -1309,7 +1540,10 @@ class MigrateTest < Minitest::Test
 
     with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
       _out, err = capture_io do
-        migrate.send(:commit_display_name_backfill, "/tmp/project/.hive-state", 2)
+        migrate.send(
+          :commit_metadata_backfill, "/tmp/project/.hive-state",
+          label: "display names", count: 2
+        )
       end
 
       assert_includes err, "could not commit them to the hive-state git history"
@@ -1327,7 +1561,10 @@ class MigrateTest < Minitest::Test
 
     with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
       _out, err = capture_io do
-        migrate.send(:commit_display_name_backfill, "/tmp/project/.hive-state", 1)
+        migrate.send(
+          :commit_metadata_backfill, "/tmp/project/.hive-state",
+          label: "display names", count: 1
+        )
       end
 
       assert_includes err, "hive: migrate display names (1 task)'"

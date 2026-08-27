@@ -71,6 +71,11 @@ class WorkflowPackageConfigurationTest < Minitest::Test
 
     with_env("HIVE_CODEX_BIN" => nil) do
       configuration = build_configuration
+      missing_slot = assert_raises(Hive::ConfigError) do
+        configuration.verify_profile!(workflow, "stages.missing")
+      end
+      assert_match(/no executable slot "stages\.missing"/, missing_slot.message)
+
       drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
       error = assert_raises(Hive::ConfigError) { configuration.apply(workflow, cfg: drifted) }
       assert_match(/profile drifted/, error.message)

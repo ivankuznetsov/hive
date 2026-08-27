@@ -135,6 +135,9 @@ binding. If that set changed, it resets the admission to `pending` and the
 scheduler treats the resulting stale-decision signal as fresh semantic work;
 it never converts that intentional reset into a materialization retry. Genuine
 I/O or task-store failures continue through the bounded `retry_wait` path.
+Existing-task manifest and publication-receipt writes, their scoped commit,
+and any failure restoration plus index reset remain inside one project commit
+lock, so rollback staging cannot interleave with another hive-state writer.
 
 Architecture discovery claims retain PID, process-start-time, process-group,
 lease, heartbeat, owner, and generation. A stale generation cannot checkpoint.

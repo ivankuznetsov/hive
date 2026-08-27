@@ -179,7 +179,7 @@ module Hive
           slug: @task.slug,
           action: "named"
         )
-      rescue Hive::GitError
+      rescue Hive::GitError, Hive::ConcurrentRunError
         nil
       end
     end

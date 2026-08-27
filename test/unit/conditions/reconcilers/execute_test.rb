@@ -44,6 +44,39 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
     end
   end
 
+  def test_retransition_to_previously_recorded_state_is_journaled_again
+    with_fixture do |task, store, attempt, baseline|
+      reconciler = build_reconciler(task, store, attempt)
+      dirty_file = File.join(task.worktree_path, "dirty.txt")
+
+      File.write(dirty_file, "dirty\n")
+      first = reconciler.reconcile(baseline_head: baseline)
+      assert_equal "satisfied", first.projection.current_condition("ChangesPresent").fetch("state")
+      assert_equal "dirty_worktree", first.projection.current_condition("ChangesPresent").fetch("reason")
+
+      File.delete(dirty_file)
+      second = reconciler.reconcile(baseline_head: baseline)
+      assert_equal "unsatisfied", second.projection.current_condition("ChangesPresent").fetch("state")
+      assert_equal "no_worktree_changes", second.projection.current_condition("ChangesPresent").fetch("reason")
+
+      # Head stays constant, so run 3's ChangesPresent observation is
+      # field-identical to run 1's journaled record. Last-event-wins consumers
+      # still need it appended or the current condition stays stale.
+      File.write(dirty_file, "dirty\n")
+      third = reconciler.reconcile(baseline_head: baseline)
+      refute_nil third.append_result
+      assert_equal "satisfied", third.projection.current_condition("ChangesPresent").fetch("state")
+      assert_equal "dirty_worktree", third.projection.current_condition("ChangesPresent").fetch("reason")
+      assert_equal "not_waiting", third.projection.current_condition("AwaitingHuman").fetch("reason")
+
+      # An unchanged re-observation remains deduplicated.
+      journal_size = File.size(File.join(task.folder, "task-journal.jsonl"))
+      repeated = reconciler.reconcile(baseline_head: baseline)
+      assert_nil repeated.append_result
+      assert_equal journal_size, File.size(File.join(task.folder, "task-journal.jsonl"))
+    end
+  end
+
   def test_research_policy_records_no_change_honestly_without_activating_wait
     with_fixture do |task, store, attempt, baseline|
       result = build_reconciler(task, store, attempt).reconcile(

@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-25
+updated: 2026-08-27
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -135,6 +135,9 @@ binding. If that set changed, it resets the admission to `pending` and the
 scheduler treats the resulting stale-decision signal as fresh semantic work;
 it never converts that intentional reset into a materialization retry. Genuine
 I/O or task-store failures continue through the bounded `retry_wait` path.
+Existing-task manifest and publication-receipt writes, their scoped commit,
+and any failure restoration plus index reset remain inside one project commit
+lock, so rollback staging cannot interleave with another hive-state writer.
 
 Architecture discovery claims retain PID, process-start-time, process-group,
 lease, heartbeat, owner, and generation. A stale generation cannot checkpoint.
@@ -148,7 +151,8 @@ Patrol Fix owns the repair workflow:
 1. Inbox re-investigates the current source and makes the semantic admission
    decision.
 2. Fix creates or recovers one exact local worktree generation.
-3. Validate runs only configured or structured validation commands.
+3. Validate runs only configured or structured validation commands in a
+   disposable detached checkout pinned to the fix receipt's exact HEAD.
 4. Review records an independent route decision.
 5. Publish uses `Hive::GithubPublication`.
 
@@ -160,6 +164,26 @@ the outcome receipt makes the following advance action a new semantic attempt
 instead of replaying the stage run forever. The worker mutation fence and
 recovery coordinator resolve that same receipt-aware identity before accepting
 side effects or retrying the task.
+
+The Fix stage alone owns the authoritative patch checkout. Validate proves that
+checkout is clean and at the fix receipt's exact HEAD both before and after the
+run, but executes operator commands in a separate root-confined detached
+materialization. Formatter and test writes are force-discarded with the
+disposable tree, including when the validator raises. Cleanup failure never
+masks that validator outcome or discards a completed validation result: Hive
+warns with the retained checkout path for operator recovery. A concurrent
+same-user write to the authoritative checkout cannot be prevented at this
+boundary; the post-run custody check detects it and fails closed without
+appending a validation receipt. Review and Publish continue to inspect the
+authoritative checkout read-only through `WorktreeSnapshot`.
+
+The disposable checkout starts from tracked files at the receipt-bound commit.
+Hive never copies or symlinks ignored dependencies, secrets, caches, or local
+tool state from the authoritative checkout. Operator-configured commands and
+agent-selected structured commands must therefore include any bootstrap they
+need inline, such as `npm ci && npm test`. The Fix prompt states this constraint
+before the agent selects commands, so validation cannot silently inherit a warm
+or secret-bearing development checkout.
 
 Inbox and review use the independent `patrol.agent` identity and the
 `models.patrol_review` route. Only the fix stage uses `patrol.fix.agent` and the
@@ -179,6 +203,22 @@ the controller may materialize only that exact, untruncated JSON object before
 Artifact Firewall validation. Prose, arrays, truncated output, and any existing
 path are not accepted; in particular, a dangling report symlink remains a
 custody violation rather than being replaced by the fallback.
+
+Managed Inbox, Fix, and Review failures normalize the existing agent process,
+provider, parser, and Artifact Firewall facts into the versioned Patrol Fix
+attempt-diagnostic schema before custody returns. The artifact records the
+opaque attempt ownership generation (not the numeric task input epoch), a
+snake-case failure code and owner, process termination state, provider class
+and retry hint without provider response text, report/parser state, firewall
+restoration, and bounded publication-policy-redacted detail. A clean report
+after Pi's recovered internal provider retry remains successful and emits no
+failure frame. Invalid Fix reports emit `fix_report_invalid`; invalid reports
+from the other managed stages emit `agent_report_invalid`. Silent failures
+receive a supervisor-authored terminal diagnostic. The first-party controller
+also publishes semantic failure facts before reraising known worktree head
+drift, dirty worktrees, validation mutation, publication secret blocks, and
+Hive-state Git index-lock conflicts, so those failures retain their typed
+cohort codes even when no managed agent seam ran.
 
 Independent review hashes the bounded Git diff as raw bytes, then validates and
 labels a copy as UTF-8 before placing it in the canonical prompt context. Valid
@@ -230,6 +270,8 @@ the standard task projections.
 - No legacy Patrol fixer, issue filer, PR opener, review handoff, action runner,
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
+- Generic `hive run` auto-rebase never runs for a controller workflow; exact
+  checkout movement belongs to the controller's receipts and transitions.
 - Historical import is explicit, local, one-time, and never daemon-triggered.
 - Existing admission index construction is explicit through `hive migrate`;
   runtime reads stay bounded and never scan-rebuild the projection.

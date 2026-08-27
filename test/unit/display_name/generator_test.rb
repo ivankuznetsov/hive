@@ -128,6 +128,24 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_call_preserves_generated_name_when_commit_lock_is_contended
+    with_generator do |gen, task|
+      gen.define_singleton_method(:generate_name) { "A Readable Name" }
+      original_lock = Hive::Lock.singleton_class.instance_method(:with_commit_lock)
+      Hive::Lock.singleton_class.define_method(:with_commit_lock) do |_path, **_kwargs, &_block|
+        raise Hive::ConcurrentRunError.new("commit lock is held")
+      end
+
+      begin
+        assert_equal "A Readable Name", gen.call,
+                     "commit-lock contention must preserve best-effort generation success"
+      ensure
+        Hive::Lock.singleton_class.define_method(:with_commit_lock, original_lock)
+      end
+      assert_equal "A Readable Name", Hive::TaskMeta.read(task.folder)[:display_name]
+    end
+  end
+
   def test_call_swallows_unexpected_errors
     with_generator do |gen, task|
       FileUtils.mkdir_p(task.folder)

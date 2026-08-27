@@ -207,19 +207,13 @@ module Hive
       def persist_task_artifacts!(folder, current:, candidate:, record:, snapshot:)
         manifest_store = TaskManifest.new(task_folder: folder)
         originals = capture_originals(manifest_store.path, ReceiptStore.new(task_folder: folder).path)
-        begin
-          Hive::Lock.with_commit_lock(@hive_state) do
-            manifest_store.write!(candidate) unless current == candidate
-            append_publication_receipt!(folder, candidate, record, snapshot)
-            @git_ops.hive_commit(
-              stage_name: File.basename(File.dirname(folder)), slug: File.basename(folder),
-              action: "admission updated"
-            )
-          end
-        rescue StandardError, Interrupt
-          restore_originals!(originals)
-          reset_task_index!(folder)
-          raise
+        with_commit_rollback(folder, originals) do
+          manifest_store.write!(candidate) unless current == candidate
+          append_publication_receipt!(folder, candidate, record, snapshot)
+          @git_ops.hive_commit(
+            stage_name: File.basename(File.dirname(folder)), slug: File.basename(folder),
+            action: "admission updated"
+          )
         end
       end
 
@@ -232,18 +226,12 @@ module Hive
             raise InvalidAdmission, "task generation changed before publication provenance was linked"
           end
           originals = capture_originals(ReceiptStore.new(task_folder: folder).path)
-          begin
-            Hive::Lock.with_commit_lock(@hive_state) do
-              appended = append_publication_receipt!(folder, manifest, record, snapshot)
-              @git_ops.hive_commit(
-                stage_name: File.basename(File.dirname(folder)), slug: File.basename(folder),
-                action: "publication linked"
-              ) if appended
-            end
-          rescue StandardError, Interrupt
-            restore_originals!(originals)
-            reset_task_index!(folder)
-            raise
+          with_commit_rollback(folder, originals) do
+            appended = append_publication_receipt!(folder, manifest, record, snapshot)
+            @git_ops.hive_commit(
+              stage_name: File.basename(File.dirname(folder)), slug: File.basename(folder),
+              action: "publication linked"
+            ) if appended
           end
         end
       end
@@ -427,6 +415,16 @@ module Hive
           else
             File.delete(path) if File.exist?(path)
           end
+        end
+      end
+
+      def with_commit_rollback(folder, originals)
+        Hive::Lock.with_commit_lock(@hive_state) do
+          yield
+        rescue StandardError, Interrupt
+          restore_originals!(originals)
+          reset_task_index!(folder)
+          raise
         end
       end
 

@@ -17,6 +17,7 @@ module Hive
     OID = /\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
     REMOTE_NAME = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
     SAFE_REMOTE_SCHEMES = %w[git https ssh].freeze
+    NETWORK_TIMEOUT_SEC = Hive::ManagedGit::NETWORK_TIMEOUT_SEC
 
     class Error < Hive::Error; end
     class InvalidRequest < Error; end
@@ -296,6 +297,7 @@ module Hive
       command!(
         repository, "fetch", "--no-tags", target, observation.ref,
         allow_local_transport: allow_local_transport,
+        timeout_sec: NETWORK_TIMEOUT_SEC,
         error_class: MaterializationFailed,
         message: "observed remote object could not be fetched"
       )
@@ -358,7 +360,8 @@ module Hive
       refspec = "#{published}:#{ref}"
       _out, _err, status, _overflow = capture(
         repository, [ "push", lease, target, refspec ],
-        allow_local_transport: allow_local_transport
+        allow_local_transport: allow_local_transport,
+        timeout_sec: NETWORK_TIMEOUT_SEC
       )
       after = observe_resolved_remote(
         repository, target, name,
@@ -426,7 +429,11 @@ module Hive
       result.stdout.lines.map(&:strip).reject(&:empty?).map { |url| immutable(url) }.freeze
     end
 
-    def remove_materialization(repository_path:, destination:, destination_root:)
+    def remove_materialization(repository_path:, destination:, destination_root:, force: false)
+      unless force == true || force == false
+        raise InvalidRequest, "materialization removal force is invalid"
+      end
+
       repository = repository_path(repository_path)
       target = contained_destination(destination, destination_root)
       registered = worktree_paths(repository)
@@ -437,7 +444,7 @@ module Hive
       end
 
       command!(
-        repository, "worktree", "remove", target,
+        repository, "worktree", "remove", *(force ? [ "--force" ] : []), target,
         error_class: MaterializationFailed,
         message: "materialization removal failed"
       )
@@ -588,7 +595,8 @@ module Hive
       ref = "refs/heads/#{branch}"
       out, _err, status, _overflow = capture(
         repository, [ "ls-remote", "--heads", target, ref ],
-        allow_local_transport: allow_local_transport
+        allow_local_transport: allow_local_transport,
+        timeout_sec: NETWORK_TIMEOUT_SEC
       )
       raise CommandFailed, "remote branch observation failed" unless status.success?
 
@@ -766,9 +774,11 @@ module Hive
     private_class_method :realpath_or_expand
 
     def command!(repository, *args, allow_local_transport: false,
+                 timeout_sec: nil,
                  error_class:, message:)
       out, _err, status, _overflow = capture(
-        repository, args, allow_local_transport: allow_local_transport
+        repository, args, allow_local_transport: allow_local_transport,
+        timeout_sec: timeout_sec
       )
       raise error_class, message unless status.success?
 
@@ -789,7 +799,7 @@ module Hive
     private_class_method :read_result
 
     def capture(repository, args, max_stdout_bytes: nil,
-                allow_local_transport: false)
+                allow_local_transport: false, timeout_sec: nil)
       repository = repository_path(repository)
       validate_repository_config!(repository)
       if max_stdout_bytes
@@ -803,7 +813,8 @@ module Hive
       else
         out, err, status = Hive::ManagedGit.capture3(
           repository, *args,
-          allow_local_transport: allow_local_transport
+          allow_local_transport: allow_local_transport,
+          timeout_sec: timeout_sec
         )
         [ out, err, status, false ]
       end

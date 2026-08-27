@@ -25,15 +25,22 @@ module Hive
 
       def tick(now: Time.now)
         @logger.event(:tick_begin, now: now.utc.iso8601)
+        return 0 unless admission_open?
+
         enabled = enabled_projects
         @poll_interval_sec = next_interval(enabled.map { |entry| entry[:cfg] })
 
+        processed = 0
         enabled.each do |entry|
+          break unless admission_open?
+
+          processed += 1
           Hive::Babysitter::ProjectTick.run(
             entry[:project],
             dry_run: @dry_run || entry[:cfg].dig("babysitter", "dry_run") == true,
             logger: @logger,
-            inflight: @inflight
+            inflight: @inflight,
+            admission_open: -> { admission_open? }
           )
           @logger.event(:project_tick,
                         project: entry[:project]["name"],
@@ -45,9 +52,9 @@ module Hive
         end
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
-                                 projects: enabled.size,
+                                 projects: processed,
                                  next_interval_sec: @poll_interval_sec)
-        enabled.size
+        processed
       end
 
       def run_forever
@@ -84,6 +91,10 @@ module Hive
       end
 
       private
+
+      def admission_open?
+        @shutdown == false
+      end
 
       def enabled_projects
         projects = selected_projects

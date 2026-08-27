@@ -163,6 +163,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::PatrolFix", patrol_fix.dig("entrypoint", "constant")
     assert_equal %w[
       Hive::PatrolFix::AdmissionStore
+      Hive::PatrolFix::AttemptDiagnostic
       Hive::PatrolFix::FixReport
       Hive::PatrolFix::InboxReport
       Hive::PatrolFix::Projection

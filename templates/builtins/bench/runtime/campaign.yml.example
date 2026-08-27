@@ -23,6 +23,15 @@ effort_pins: {}
 # cannot enter judging. The default keeps paid-patch recovery compatibility.
 require_successful_execution: false
 
+# Publication-grade local campaigns seal the controller runtime from the model,
+# use a base-only shallow repository, and attach to a provider-only Docker
+# network. The runner image must be built from the exact active Hive commit.
+isolation:
+  sealed_agent_runtime: true
+  require_provider_egress: true
+  docker_network: hive-bench-provider-only
+  https_proxy: http://hive-bench-egress-proxy:3128
+
 # Judge samples. Use at least 3 for published results.
 seeds: 3
 

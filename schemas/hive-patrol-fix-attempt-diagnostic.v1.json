@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:patrol-fix-attempt-diagnostic:v1",
+  "title": "Hive Patrol Fix attempt diagnostic v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "workflow", "stage", "phase", "task_generation",
+    "attempt_id", "correlation_id", "code", "owner", "status", "agent_reason", "exit_code",
+    "timed_out", "cancelled", "signal", "provider", "report_status",
+    "report_parser", "firewall_status", "firewall_restoration", "custody_status",
+    "detail", "redaction_status", "secret_policy_version", "transport_status",
+    "log_reference", "recorded_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-patrol-fix-attempt-diagnostic" },
+    "schema_version": { "const": 1 },
+    "workflow": { "const": "patrol_fix" },
+    "stage": { "$ref": "#/$defs/Identifier" },
+    "phase": { "$ref": "#/$defs/Identifier" },
+    "task_generation": { "$ref": "#/$defs/Identifier" },
+    "attempt_id": { "$ref": "#/$defs/Identifier" },
+    "correlation_id": { "$ref": "#/$defs/Identifier" },
+    "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 128 },
+    "owner": { "enum": ["agent", "provider", "hive", "operator", "unknown"] },
+    "status": { "$ref": "#/$defs/Identifier" },
+    "agent_reason": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] },
+    "exit_code": { "type": ["integer", "null"] },
+    "timed_out": { "type": "boolean" },
+    "cancelled": { "type": "boolean" },
+    "signal": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] },
+    "provider": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "failure_class", "retry_hint", "provenance"],
+          "properties": {
+            "name": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] },
+            "failure_class": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] },
+            "retry_hint": { "type": ["string", "null"], "maxLength": 128 },
+            "provenance": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] }
+          }
+        }
+      ]
+    },
+    "report_status": { "$ref": "#/$defs/Identifier" },
+    "report_parser": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] },
+    "firewall_status": { "$ref": "#/$defs/Identifier" },
+    "firewall_restoration": { "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }] },
+    "custody_status": { "$ref": "#/$defs/Identifier" },
+    "detail": { "type": ["string", "null"], "maxLength": 2048 },
+    "redaction_status": { "enum": ["applied", "omitted", "failed"] },
+    "secret_policy_version": { "const": 1 },
+    "transport_status": { "enum": ["valid", "missing", "oversized", "malformed", "duplicate", "unavailable"] },
+    "log_reference": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["path", "size", "sha256"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "size": { "type": "integer", "minimum": 0 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    "recorded_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "Identifier": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    }
+  }
+}

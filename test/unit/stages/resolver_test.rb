@@ -117,7 +117,7 @@ class StagesResolverTest < Minitest::Test
         task(stage.name, workflow: descriptor), descriptor: descriptor
       )
 
-      assert_equal Hive::PatrolFix::Runner.method(:run!), runner
+      assert_equal Hive::Stages::PatrolFix::Runner.method(:run!), runner
     end
   end
 

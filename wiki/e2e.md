@@ -139,7 +139,7 @@ variable from silently overriding the harness-specific cleanup policy.
 | `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
-| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-10s-per-incident and below-30s-aggregate advisory check. |
+| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-11s-per-incident and below-30s-aggregate advisory check. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -293,7 +293,7 @@ Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
 retains the run directory even after failure, and feeds that functional job
 into the protected `rake test (Ruby 3.4)` aggregate. A downstream advisory job
 downloads the artifact and reads enabled incident durations from `report.json`.
-Durations include sandbox bootstrap; each enabled incident targets below ten
+Durations include sandbox bootstrap; each enabled incident targets below eleven
 seconds and the group targets below thirty seconds. Timing failures remain
 visible without blocking a merge. Missing enabled results, duplicate
 metadata/results, and invalid durations remain functional failures in the E2E

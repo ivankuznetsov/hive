@@ -93,6 +93,7 @@ module Hive
       )
       metadata = manifest.data.fetch("x-hive", {})
       configuration = store.configuration(name, selected.fetch("configuration_digest"), cfg: cfg)
+      configuration.verify_profile!(@workflow, slot_id, cfg: cfg)
       tools = Array(metadata["tools"]).map { |entry| File.join(root, entry.fetch("path")) }
       prompt_assets = Array(metadata["prompt_assets"]).map { |entry| File.join(root, entry.fetch("path")) }
       environment = configuration ? configuration.input_environment_for(slot_id, runtime_metadata: metadata) : {}
@@ -246,7 +247,8 @@ module Hive
           selected = current_managed_selection!(store, cfg)
           return store.workflow(
             meta[:workflow], selected.fetch("source_commit"), selected.fetch("manifest_digest"),
-            configuration_digest: selected.fetch("configuration_digest"), cfg: cfg
+            configuration_digest: selected.fetch("configuration_digest"), cfg: cfg,
+            verify_profiles: false
           )
         rescue Hive::UnsupportedProjectConfigError
           raise

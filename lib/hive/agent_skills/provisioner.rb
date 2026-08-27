@@ -1,7 +1,9 @@
 require "digest"
 require "json"
 
+require "hive/agent_skills/adapters/base"
 require "hive/agent_skills/adapters/registry"
+require "hive/agent_skills/inspector"
 require "hive/agent_skills/target_resolver"
 
 module Hive

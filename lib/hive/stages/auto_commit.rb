@@ -15,8 +15,8 @@ module Hive
     # shape Review consumers expect (`{ success: bool, ... }`).
     module AutoCommit
       AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
-      AutoCommitScopeViolation = Data.define(:path, :reason)
-      AutoCommitSafetyViolation = Data.define(:path, :reason)
+      AutoCommitScopeViolation = Data.define(:path, :reason, :recovery_path)
+      AutoCommitSafetyViolation = Data.define(:path, :reason, :recovery_path)
       AUTO_COMMIT_OP_TIMEOUT_SEC = 300
       AUTO_COMMIT_BLOB_SCAN_MAX_BYTES = 1024 * 1024
       AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
@@ -103,6 +103,23 @@ module Hive
         normalized
       end
 
+      # Recovery commands already pass path arguments to Git under
+      # `--literal-pathspecs`. On POSIX, a backslash is a legal filename byte,
+      # not a separator, so rejecting it would make an exact residue marker
+      # impossible to repair. Keep the stricter staged-policy validator above
+      # for allowlist matching, but admit literal backslashes here unless the
+      # host platform treats them as an alternate separator.
+      def normalize_recovery_path(path)
+        normalized = path.to_s
+        parts = normalized.split("/")
+        return nil if normalized.empty? || normalized.start_with?("/")
+        return nil if normalized.include?("\0")
+        return nil if File::ALT_SEPARATOR && normalized.include?(File::ALT_SEPARATOR)
+        return nil if parts.any? { |part| part.empty? || part == "." || part == ".." }
+
+        normalized
+      end
+
       def staged_path_matches_glob?(pattern, path)
         normalized_pattern = pattern.to_s.tr("\\", "/")
         return true if File.fnmatch?(normalized_pattern, path, AUTO_COMMIT_SCOPE_GLOB_FLAGS)
@@ -120,15 +137,20 @@ module Hive
         paths.filter_map do |raw_path|
           path = normalize_staged_path(raw_path)
           if path.nil?
-            AutoCommitScopeViolation.new(path: diagnostic_path(raw_path), reason: "invalid staged path")
+            AutoCommitScopeViolation.new(
+              path: diagnostic_path(raw_path), reason: "invalid staged path",
+              recovery_path: raw_path.to_s
+            )
           elsif (pattern = denied.find { |glob| staged_path_matches_glob?(glob, path) })
             AutoCommitScopeViolation.new(
-              path: diagnostic_path(path), reason: "matches denied path pattern #{pattern.inspect}"
+              path: diagnostic_path(path), reason: "matches denied path pattern #{pattern.inspect}",
+              recovery_path: path
             )
           elsif allowed.none? { |glob| staged_path_matches_glob?(glob, path) }
             AutoCommitScopeViolation.new(
               path: diagnostic_path(path),
-              reason: "outside review.fix.auto_commit.scope_check.allowed_paths"
+              reason: "outside review.fix.auto_commit.scope_check.allowed_paths",
+              recovery_path: path
             )
           end
         end
@@ -156,13 +178,15 @@ module Hive
           if !head_objects[:object_ids].key?(entry[:path]) && Hive::SecretPatterns.match?(entry[:path])
             next AutoCommitSafetyViolation.new(
               path: diagnostic_path(entry[:path]),
-              reason: "new staged path matches secret detectors"
+              reason: "new staged path matches secret detectors",
+              recovery_path: entry[:path]
             )
           end
           next if %w[100644 100755].include?(entry[:mode])
 
           AutoCommitSafetyViolation.new(
             path: diagnostic_path(entry[:path]),
+            recovery_path: entry[:path],
             reason: if entry[:mode] == "120000"
                       "staged symlinks are not eligible for automatic commit"
                     else
@@ -242,7 +266,8 @@ module Hive
           if blob[:oversized]
             next AutoCommitSafetyViolation.new(
               path: diagnostic_path(entry[:path]),
-              reason: "staged blob exceeds the #{AUTO_COMMIT_BLOB_SCAN_MAX_BYTES}-byte safety scan limit"
+              reason: "staged blob exceeds the #{AUTO_COMMIT_BLOB_SCAN_MAX_BYTES}-byte safety scan limit",
+              recovery_path: entry[:path]
             )
           end
 
@@ -257,7 +282,8 @@ module Hive
 
           AutoCommitSafetyViolation.new(
             path: diagnostic_path(entry[:path]),
-            reason: "staged content matches secret detectors: #{names.join(', ')}"
+            reason: "staged content matches secret detectors: #{names.join(', ')}",
+            recovery_path: entry[:path]
           )
         end
         { success: true, violations: violations.uniq }

@@ -18,7 +18,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_includes anchored, "plan.md"
   end
 
-  def test_hive_runner_capability_probe_uses_the_project_prepared_opencode_plugin
+  def test_hive_runner_capability_probe_uses_the_project_configured_opencode_plugin
     plugin = "compound-engineering@git+https://github.com/EveryInc/" \
       "compound-engineering-plugin.git#compound-engineering-v3.21.4"
     runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
@@ -32,7 +32,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     adapter = Hive::PlanReview::Adapters::CeDocReview.new(runner:)
 
     assert_equal "present", result.fetch("status")
-    assert_includes result.fetch("diagnostic"), "prepared pinned plugin"
+    assert_includes result.fetch("diagnostic"), "configured native plugin"
     assert_equal runner, adapter.instance_variable_get(:@capability_probe).receiver
   end
 
@@ -443,6 +443,48 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       assert_equal "unexpected-model", overridden.dig("actual_route", "model")
       refute overridden.fetch("actual_route").key?("family")
+    end
+  end
+
+  def test_production_runner_attests_only_the_exact_grok_46_build_served_name
+    with_runner do |runner, request, output_path|
+      cases = [
+        [ "grok", "grok-4.6", "grok-4.6-build", "grok", true ],
+        [ "grok", "grok-4.6", "grok-4.6-build", " GROK ", true ],
+        [ "grok", "grok-4.5", "grok-4.6-build", "grok", false ],
+        [ "grok", "grok-4.6", "grok-4.7-build", "grok", false ],
+        [ "grok", "grok-4.6", "grok-4.6-build", "openai", false ],
+        [ "codex", "grok-4.6", "grok-4.6-build", "grok", false ],
+        [ "grok", nil, "unknown-model", "grok", false ]
+      ]
+
+      cases.each do |provider, requested_model, served_model, family, attested|
+        grok_request = request.with(
+          reviewer: {
+            "provider" => provider, "model" => requested_model, "family" => family,
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          kind: "adversarial"
+        )
+        payload = valid_result(grok_request)
+        replacement = lambda do |_task, expected_output:, **|
+          File.write(expected_output, JSON.generate(payload))
+          { status: :ok, usage: { model: served_model } }
+        end
+
+        observed = nil
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+          observed = runner.call(
+            prompt: "review", cwd: grok_request.output_directory,
+            output_path:, request: grok_request
+          )
+        end
+
+        assert_equal served_model, observed.dig("actual_route", "model")
+        assert_equal attested, observed.fetch("actual_route").key?("family"),
+                     "provider=#{provider.inspect} requested=#{requested_model.inspect} " \
+                     "served=#{served_model.inspect} family=#{family.inspect}"
+      end
     end
   end
 

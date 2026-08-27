@@ -1,4 +1,6 @@
 require "hive/attempts/capability"
+require "hive/attempts/command_progress"
+require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
 require "hive/attempts/store"
 require "hive/stringify_keys"
@@ -67,6 +69,9 @@ module Hive
               route: record["routing"].fetch("route")
             )
           end
+          diagnostic_writer = DiagnosticChannel::Writer.for_fd(
+            values["HIVE_ATTEMPT_DIAGNOSTIC_FD"]
+          )
           @installed = new(
             attempt_id: record.attempt_id,
             task_generation: record.task_input_epoch,
@@ -77,7 +82,8 @@ module Hive
             progress_token: record["progress_token"],
             predecessor_attempt_id: record["predecessor_attempt_id"],
             routing: record["routing"],
-            evidence_writer: evidence_writer
+            evidence_writer: evidence_writer,
+            diagnostic_writer: diagnostic_writer
           )
         rescue Hive::Error, SystemCallError, IOError => e
           raise StoreError, "durable attempt context rejected: #{e.message}"
@@ -180,6 +186,7 @@ module Hive
       def initialize(attempt_id:, task_generation:, ownership_generation: nil,
                      project: nil, task_slug: nil, intended_stage: nil,
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
+                     diagnostic_writer: nil,
                      progress_token: nil, predecessor_attempt_id: nil)
         @attempt_id = attempt_id.to_s
         @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
@@ -192,6 +199,7 @@ module Hive
         @predecessor_attempt_id = predecessor_attempt_id&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
         @evidence_writer = evidence_writer
+        @diagnostic_writer = diagnostic_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
         raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
       rescue TypeError
@@ -219,8 +227,15 @@ module Hive
         @evidence_writer.write(signal)
       end
 
+      def publish_attempt_diagnostic(document)
+        return false unless @diagnostic_writer
+
+        @diagnostic_writer.write(document)
+      end
+
       def close
         @evidence_writer&.close
+        @diagnostic_writer&.close
         true
       end
 
@@ -232,9 +247,16 @@ module Hive
         return true if @generation_validated
 
         require "hive/attempts/generation"
-        current = Generation.resolve(
+        generation_options = {
           task: task, project: project, intended_stage: intended_stage
-        )
+        }
+        if CommandProgress.task_progress?(task)
+          fallback = Generation.artifact_token(task)
+          generation_options[:progress_token] = CommandProgress.task_token_for(
+            task: task, fallback: fallback
+          )
+        end
+        current = Generation.resolve(**generation_options)
         ownership_matches = current.ownership_generation == ownership_generation
         successor_progress_matches = !predecessor_attempt_id.to_s.empty? &&
                                      !progress_token.to_s.empty? &&

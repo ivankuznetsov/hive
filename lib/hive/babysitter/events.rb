@@ -31,6 +31,7 @@ module Hive
         pipeline_owned
         fork_pr
         dry_run
+        shutdown
       ].freeze
 
       module_function

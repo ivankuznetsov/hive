@@ -79,10 +79,10 @@ authorized actions), and
 [[commands/task]] as the bounded read-only semantic result/usage/diagnostic
 surface for one exact task,
 `--json` envelopes where the command page says they exist.
-The default human `hive status` is the concise operational projection;
-`--full` retains the detailed table, bare `--json` retains the complete v7
-graph, and `--operational --json` selects the v4 agent document with a required
-nullable exact routing decision.
+Bare `hive status` and `hive status --json` are the bounded current-liveness
+surface. `--operational --json` selects the v4 agent workflow document with a
+required nullable exact routing decision; `hive task`, `hive tui`, and
+`hive archive` own task detail, fleet browsing, and terminal history.
 [[commands/watch]] emits bounded semantic JSON Lines without shell polling.
 `hive act` accepts only a fresh observation token for the one closed routine
 workflow-advance action and recomputes the verb under the task lock.

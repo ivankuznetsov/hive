@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "hive/agent_profiles"
+require "hive/agent_support/pi"
 require "hive/scripts/workflow_policy_hook"
 require "hive/workflow_package/runtime_policy"
 
@@ -698,12 +699,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     resolved = with_replaced_singleton_method(
       Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
     ) do
-      Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+      Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
     end
 
     assert_equal File.realpath("/bin/true"), resolved
     assert_equal [ "codex-nonzero-doctor", "doctor", "--json" ], captured_argv
-    assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+    assert_equal Hive::AgentSupport.for(:codex)::Runtime::DOCTOR_TIMEOUT_SEC, captured_timeout
     assert_equal({ "CODEX_HOME" => probe_home, "MISE_QUIET" => "1" }, captured_environment)
     assert probe_home_visible
     refute File.exist?(probe_home)
@@ -729,12 +730,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
     ) do
       assert_raises(Hive::ConfigError) do
-        Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+        Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
       end
     end
 
     assert_includes error.message, "timed out after 30s"
-    assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC, captured_timeout
+    assert_equal Hive::AgentSupport.for(:codex)::Runtime::DOCTOR_TIMEOUT_SEC, captured_timeout
     assert probe_home_visible
     refute File.exist?(probe_home)
   ensure
@@ -759,7 +760,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
     ) do
       assert_raises(Hive::ConfigError) do
-        Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+        Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
       end
     end
 
@@ -1105,19 +1106,18 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       package = File.join(dir, "package")
       FileUtils.mkdir_p([ task, package ])
 
-      policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-        "read-only",
-        task_folder: task,
-        package_root: package,
-        profile: Hive::AgentProfiles.lookup(:codex),
-        prepare: false
-      )
-      refute policy.host_outputs?
-      assert_equal "prompt", policy.decorate_prompt("prompt")
-      assert_empty policy.cli_flags
-      assert_nil policy.executable
-      assert_empty policy.cleanup_paths
-      assert_equal({ status: :ok }, policy.materialize_outputs!(status: :ok))
+      %i[codex pi].each do |profile_name|
+        policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          "read-only", task_folder: task, package_root: package,
+          profile: Hive::AgentProfiles.lookup(profile_name), prepare: false
+        )
+        refute policy.host_outputs?
+        assert_equal "prompt", policy.decorate_prompt("prompt")
+        assert_empty policy.cli_flags
+        assert_nil policy.executable
+        assert_empty policy.cleanup_paths
+        assert_equal({ status: :ok }, policy.materialize_outputs!(status: :ok))
+      end
 
       [ "not-an-array", [ "" ], [ "bad\0root" ] ].each do |roots|
         error = assert_raises(Hive::ConfigError) do
@@ -1342,11 +1342,11 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
       ) do
         assert_raises(Hive::ConfigError) do
-          Hive::WorkflowPackage::RuntimePolicy.codex_executable(profile)
+          Hive::AgentSupport.for(:codex)::Runtime.executable(host: Hive::WorkflowPackage::RuntimePolicy, profile: profile)
         end
       end
       assert_includes error.message, expected
-      assert_equal Hive::WorkflowPackage::RuntimePolicy::CODEX_DOCTOR_TIMEOUT_SEC,
+      assert_equal Hive::AgentSupport.for(:codex)::Runtime::DOCTOR_TIMEOUT_SEC,
                    captured_timeout
       refute_nil captured_probe_home
       refute File.exist?(captured_probe_home)
@@ -1368,7 +1368,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       FileUtils.chmod(0o755, executable)
 
       assert_equal root,
-                   Hive::WorkflowPackage::RuntimePolicy.codex_runtime_root(executable)
+                   Hive::AgentSupport.for(:codex)::Runtime.runtime_root(executable)
 
       profile = Object.new
       profile.define_singleton_method(:bin) { "missing-grok-executable" }
@@ -1566,7 +1566,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
       policy = with_available_pi_sandbox do
         with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
-          Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+          compile_pi_evidence_actor(
             task_folder: source, package_root: task,
             profile: Hive::AgentProfiles.lookup(:pi),
             environment: {
@@ -1613,7 +1613,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   def test_pi_evidence_actor_rejects_wrong_profile_missing_sandbox_and_unconfined_roots
     wrong = Struct.new(:name).new(:codex)
     error = assert_raises(Hive::ConfigError) do
-      Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+      compile_pi_evidence_actor(
         task_folder: "/missing", package_root: "/missing", profile: wrong,
         environment: {}, mailbox_root: "/missing", writable_root: "/missing",
         hive_executable: "/missing"
@@ -1621,12 +1621,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
     assert_includes error.message, "requires the Pi agent"
 
-    sandbox = Hive::WorkflowPackage::RuntimePolicy::PI_SANDBOX_PATH
+    sandbox = Hive::AgentSupport::Pi::Runtime::SANDBOX_PATH
     original_file = File.method(:file?)
     file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
     error = with_replaced_singleton_method(File, :file?, file_check) do
       assert_raises(Hive::ConfigError) do
-        Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+        compile_pi_evidence_actor(
           task_folder: "/missing", package_root: "/missing",
           profile: Hive::AgentProfiles.lookup(:pi), environment: {},
           mailbox_root: "/missing", writable_root: "/missing",
@@ -1644,7 +1644,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       FileUtils.mkdir_p([ source, task, mailbox, outside ])
       error = with_available_pi_sandbox do
         assert_raises(Hive::ConfigError) do
-          Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+          compile_pi_evidence_actor(
             task_folder: source, package_root: task,
             profile: Hive::AgentProfiles.lookup(:pi), environment: {},
             mailbox_root: mailbox, writable_root: outside,
@@ -1671,7 +1671,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       error = with_available_pi_sandbox do
         with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
           assert_raises(Hive::ConfigError) do
-            Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+            compile_pi_evidence_actor(
               task_folder: source, package_root: task,
               profile: Hive::AgentProfiles.lookup(:pi), environment: {},
               mailbox_root: mailbox, writable_root: writable,
@@ -1688,7 +1688,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       error = with_available_pi_sandbox do
         with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
           assert_raises(Hive::ConfigError) do
-            Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+            compile_pi_evidence_actor(
               task_folder: source, package_root: task,
               profile: Hive::AgentProfiles.lookup(:pi),
               environment: { "NOT_CONTROLLER_OWNED" => "value" },
@@ -1724,7 +1724,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         with_env("HOME" => home, "HIVE_PI_BIN" => executable) do
           with_replaced_singleton_method(Hive::AtomicFile, :write, failed_write) do
             assert_raises(Hive::ConfigError) do
-              Hive::WorkflowPackage::RuntimePolicy.compile_pi_evidence_actor(
+              compile_pi_evidence_actor(
                 task_folder: source, package_root: task,
                 profile: Hive::AgentProfiles.lookup(:pi), environment: {},
                 mailbox_root: mailbox, writable_root: writable,
@@ -1735,12 +1735,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         end
       end
       assert_includes error.message, "synthetic extension write failure"
-      refute_includes Hive::WorkflowPackage::RuntimePolicy.pi_evidence_extension(
+      refute_includes Hive::AgentSupport::Pi::Runtime.evidence_extension(
         source_root: source, task_root: task, writable_root: writable,
         task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
         browser: false
       ), 'name: "evidence_browser"'
-      refute_includes Hive::WorkflowPackage::RuntimePolicy.pi_evidence_extension(
+      refute_includes Hive::AgentSupport::Pi::Runtime.evidence_extension(
         source_root: source, task_root: task, writable_root: writable,
         task_relative_write_root: "work", hive_executable: "/hive/bin/hive",
         browser: false
@@ -1806,7 +1806,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       package = File.join(dir, "package")
       FileUtils.mkdir_p([ task, package ])
 
-      sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+      sandbox = Hive::AgentSupport.for(:grok)::Runtime::SANDBOX_PATH
       original_file = File.method(:file?)
       file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
 
@@ -1944,7 +1944,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       package = File.join(dir, "package")
       FileUtils.mkdir_p([ task, package ])
 
-      sandbox = Hive::WorkflowPackage::RuntimePolicy::PI_SANDBOX_PATH
+      sandbox = Hive::AgentSupport::Pi::Runtime::SANDBOX_PATH
       original_file = File.method(:file?)
       file_check = ->(path) { path == sandbox ? false : original_file.call(path) }
 
@@ -2012,7 +2012,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         with_replaced_singleton_method(
           Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
         ) do
-          Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+          pi_executable(
             Hive::AgentProfiles.lookup(:pi)
           )
         end
@@ -2020,7 +2020,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
       assert_equal File.realpath(File.join(runtime, "pi")), resolved
       assert_equal [ File.join(path_dir, "mise"), "which", "pi" ], captured_argv
-      assert_equal Hive::WorkflowPackage::RuntimePolicy::PI_RESOLVE_TIMEOUT_SEC,
+      assert_equal Hive::AgentSupport::Pi::Runtime::RESOLVE_TIMEOUT_SEC,
                    captured_timeout
       assert_equal({ "MISE_QUIET" => "1" }, captured_environment)
     end
@@ -2034,7 +2034,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
       error = with_env("PATH" => empty_path, "HIVE_PI_BIN" => shim) do
         assert_raises(Hive::ConfigError) do
-          Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+          pi_executable(
             Hive::AgentProfiles.lookup(:pi)
           )
         end
@@ -2054,7 +2054,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
             Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, capture
           ) do
             assert_raises(Hive::ConfigError) do
-              Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+              pi_executable(
                 Hive::AgentProfiles.lookup(:pi)
               )
             end
@@ -2076,7 +2076,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
           Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, timeout
         ) do
           assert_raises(Hive::ConfigError) do
-            Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+            pi_executable(
               Hive::AgentProfiles.lookup(:pi)
             )
           end
@@ -2090,7 +2090,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
           Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded, missing
         ) do
           assert_raises(Hive::ConfigError) do
-            Hive::WorkflowPackage::RuntimePolicy.pi_executable(
+            pi_executable(
               Hive::AgentProfiles.lookup(:pi)
             )
           end
@@ -2101,6 +2101,18 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   private
+
+  def compile_pi_evidence_actor(**options)
+    Hive::AgentSupport::Pi::Runtime.compile_evidence_actor(
+      host: Hive::WorkflowPackage::RuntimePolicy, **options
+    )
+  end
+
+  def pi_executable(profile)
+    Hive::AgentSupport::Pi::Runtime.executable(
+      host: Hive::WorkflowPackage::RuntimePolicy, profile:
+    )
+  end
 
   def permissions
     {
@@ -2125,7 +2137,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   def reset_codex_executable_cache
-    Hive::WorkflowPackage::RuntimePolicy.instance_variable_set(:@codex_executables, {})
+    Hive::AgentSupport.for(:codex)::Runtime.instance_variable_set(:@executables, {})
   end
 
   def compile_two_output_codex_policy(task:, package:, article:)
@@ -2152,7 +2164,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   def with_available_grok_sandbox
-    sandbox = Hive::WorkflowPackage::RuntimePolicy::GROK_SANDBOX_PATH
+    sandbox = Hive::AgentSupport.for(:grok)::Runtime::SANDBOX_PATH
     original_file = File.method(:file?)
     original_executable = File.method(:executable?)
     file_check = ->(path) { path == sandbox || original_file.call(path) }
@@ -2187,7 +2199,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
   end
 
   def with_available_pi_sandbox
-    sandbox = Hive::WorkflowPackage::RuntimePolicy::PI_SANDBOX_PATH
+    sandbox = Hive::AgentSupport::Pi::Runtime::SANDBOX_PATH
     original_file = File.method(:file?)
     original_executable = File.method(:executable?)
     file_check = ->(path) { path == sandbox || original_file.call(path) }

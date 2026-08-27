@@ -3,7 +3,7 @@ require "hive/worktree"
 
 module Hive
   # Shared action builder for `EXECUTE_WAITING reason=...` recovery states.
-  # Used by `hive run --json`, `hive status --json`, and the TUI so every
+  # Used by `hive run --json`, the internal task graph, and the TUI so every
   # consumer sends the operator or agent to the same repair target.
   module ExecuteWaitingAction
     module_function

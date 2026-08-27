@@ -121,7 +121,7 @@ module Hive
 
         {
           "summary" => stale_agent_summary(reason),
-          "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, re-read `hive status --json` or use the standard red-status flow, then run the reported suggested_next_action.command so the current ERROR marker guard is included. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
+          "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, re-read `hive status --operational --json` or use the standard red-status flow, then run the reported suggested_next_action.command so the current ERROR marker guard is included. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
           "source" => "marker",
           "source_path" => nil,
           "artifact_paths" => [],
@@ -451,7 +451,7 @@ module Hive
         # Deeply-nested flow YAML in a corrupt red-status.md raises
         # SystemStackError (NOT a StandardError), which would escape the
         # per-project `rescue StandardError` in Hive::Commands::Status and crash
-        # the whole `hive status --json` snapshot — freezing daemon auto-advance.
+        # the whole internal task graph — freezing daemon auto-advance.
         # Catch it (and the sibling NoMemoryError) so a hostile artifact degrades
         # to "no frontmatter" instead. Mirrors the same widening in
         # Hive::DiagnosticEvidence#red_status_frontmatter_summary.

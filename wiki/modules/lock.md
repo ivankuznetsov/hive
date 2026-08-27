@@ -3,7 +3,7 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-08-26
 tags: [lock, concurrency, flock, commit-lock]
 ---
 
@@ -41,12 +41,22 @@ PID cannot target an unrelated process. If the platform cannot read a start
 time, the field is nil and that child-specific PID-reuse guard degrades to its
 existing PID-only behavior.
 
-`hive status --json` exposes the verified live holder's `task_lock_pid`,
+The internal scheduler graph exposes the verified live holder's `task_lock_pid`,
 `task_lock_process_start_time`, and `task_lock_id`. Recovery consumers bind
 destructive actions to that exact observed generation. The TUI snapshot keeps
 all three values losslessly even though its renderer currently uses only the
 derived `live_task_lock` flag, so the status/TUI schema boundary remains
 additive and future recovery actions can use the same generation identity.
+
+`hive status --json` is the compact polling boundary. It validates
+the runner and child process identities directly from bounded `.lock` reads
+and returns only rows where at least one is alive. A live child remains visible
+when the runner lock is stale; a stale lock with no live child is omitted. The
+contract exposes a closed `liveness.source` plus `liveness.running: true`, so
+clients do not infer activity from full-status attempt or marker internals.
+Unlike legacy full-status observation, the compact contract fails closed when
+the recorded process start identity is absent; this prevents a reused PID from
+becoming a false running row.
 
 ## Stale-lock detection (`stale_lock?`)
 
@@ -79,11 +89,24 @@ Reads `/proc/<pid>/stat` when procfs is available, splits on `") "` to handle `(
 2. Opens `<dir>/.commit-lock` with `RDWR | CREAT, 0o644`.
 3. Polls `flock(LOCK_EX | LOCK_NB)` until it acquires the lock or the caller's bounded deadline expires.
 4. On timeout, raises `Hive::ConcurrentRunError` with `lock_path: <dir>/.commit-lock`.
-5. Yields while the file descriptor is open; closing the descriptor releases the flock.
+5. Records same-thread ownership keyed by the canonical hive-state path and
+   current PID, then yields while the file descriptor is open; closing the
+   descriptor releases the flock.
 
-The lock file is *not* deleted on release (it persists for cheap re-locking). Held for milliseconds — long enough to wrap one `git add && git commit`.
+Nested acquisition for the same canonical path in the same thread and process
+reuses the outer lock. The PID check is required because Ruby thread-local
+state is copied across `fork`; a child never trusts the inherited ownership
+record and must contend for the process lock. Exceptions clear the local
+ownership record, and normal exit or `SIGKILL` closes the owning descriptor so
+the kernel releases the flock.
 
-Current command consumers include `hive run` post-stage commits, `hive new` capture commits, approve/finding toggles, marker clears, drops, and migrate commits. The lock serializes shared `.hive-state` worktree index writes across those processes; it does not make `Hive::GitOps#hive_commit` self-locking.
+The lock file is *not* deleted on release (it persists for cheap re-locking).
+`Hive::GitOps#hive_commit` is the central short critical section around scoped
+staging, the optional staged-index callback, diff inspection, and commit.
+Commands that need a larger filesystem-plus-index transaction still take an
+outer commit lock; reentrancy prevents their nested `hive_commit` from
+deadlocking. This serializes shared `.hive-state` index writes across commands,
+explicit migration, and Patrol Fix transitions.
 
 ## Why two-level
 
@@ -91,7 +114,7 @@ Per-task lock is held for the entire `hive run`, including long execute/review p
 
 ## Tests
 
-- `test/unit/lock_test.rb` — happy path, complete-before-visible publication, generation-scoped release, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, and commit-lock parallelism.
+- `test/unit/lock_test.rb` — happy path, complete-before-visible publication, generation-scoped release, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, process contention, same-thread reentrancy, fork-inherited ownership refusal, and kernel release after `SIGKILL`.
 - `test/integration/new_test.rb` — `hive new` wraps the captured-task hive-state commit in the project commit lock.
 
 ## Backlinks

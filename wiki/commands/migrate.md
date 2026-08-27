@@ -1,13 +1,13 @@
 ---
 title: hive migrate
 type: command
-source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
+source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/patrol_fix/admission_store.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-13
-tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage]
+updated: 2026-08-27
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage, patrol]
 ---
 
-**TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
+**TLDR**: `hive migrate [PROJECT_PATH]` is the sole explicit, idempotent upgrade
 path for one project. `hive migrate --all` checks global state and every
 registered project; `hive update` runs that fleet form automatically after a
 successful package update.
@@ -32,11 +32,12 @@ the command instead names the restore path plus exact `forget` and `prune`
 cleanup commands while keeping the fleet result visibly incomplete.
 
 Before project-local changes, the command runs the owner-private recovery-state
-cutover for the current Hive state home. Daemon and bot startup run the same
-cutover before opening their stores or queues. A foreground default attempt
-store opens only the physical v4 layout after the cutover. Obsolete v1 roots
-or competing material v2/v3/v4 roots fail closed, so an upgrade cannot
-silently choose or create a second authority.
+cutover for the current Hive state home. Stop the daemon and bot, run
+`hive migrate` or `hive migrate --all`, then restart them. Runtime commands do
+not discover or perform this cutover. A foreground default attempt store opens
+only the physical v4 layout that the explicit command prepared. Obsolete v1
+roots or competing material v2/v3/v4 roots fail closed inside the migration
+command, so the cutover never silently chooses a second authority.
 
 The v4 cutover verifies daily admission accounting against both bounded hot
 records and immutable permanent proofs. Terminal attempts may already have
@@ -117,6 +118,44 @@ folder move as a legacy bypass. Non-coding workflows are untouched.
 
 After the locked id/config/stage migration finishes, `hive migrate` also backfills missing/null `display_name` values for every canonical task folder using `Hive::DisplayName::Generator`, the same agent-backed pipeline as `hive generate-name <target>`. Generation runs outside the commit lock because agent naming can take seconds per task; successful names are committed in a separate `.hive-state` commit. Existing display names are skipped, including patrol handoff names such as `Patrol: <finding title>`. A generation failure is fail-soft: that task keeps its null display name and can be retried by rerunning `hive migrate` or `hive generate-name`.
 
+The same explicit command backfills missing `completed_at` values for tasks
+already classified as archived. It prefers the earliest credible Git completion
+event, then the terminal state-file mtime, then the task-folder mtime, and
+commits successful discoveries as `hive: migrate completion times (N tasks)`.
+History discovery runs before the project commit lock. The locked write phase
+re-resolves every candidate and persists only tasks that are still archived and
+unstamped, then stages and commits only their exact `meta.yml` paths. A failed
+commit restores the original metadata and exits non-zero, so rerunning
+`hive migrate` can complete the same repair. One malformed task warns and stays
+visible while valid candidates still commit. Missing sources likewise warn and
+leave the task visible. The daemon, status command, `approve`, and `run` do not
+perform legacy metadata discovery or migration.
+
+## Patrol Fix admission index cutover
+
+`hive migrate` scans an existing project-local Patrol Fix admission inventory
+once and writes its compact pending index. The index contains occurrence ids
+and their immediate or time-based eligibility only; full admission records
+remain authoritative. A successful rebuild reports the indexed and total
+record counts and is byte-idempotent on a rerun. If an old daemon is running,
+the command synchronously restarts it and performs one final index pass. That
+second pass closes the finite window in which the old process could have
+written without maintaining the new index. Fleet migration performs this
+cutover at most once and otherwise retains its single final restart. If Hive
+cannot replace a running daemon automatically, migration fails with exact
+stop, rerun, and start commands. Projects without an admission inventory are
+not materialized.
+
+Runtime `AdmissionStore#pending` reads the index once and opens at most twice
+its requested record limit when repairing crash residue; a clean tick opens
+only the records it returns. Inventory-lock contention skips one scheduler tick
+instead of stalling the daemon. An existing record inventory with a missing or
+invalid index fails closed with a `hive migrate` remediation instead of
+rebuilding during a daemon tick. There is no periodic migration, full-scan
+repair watcher, or compatibility reader. Normal writers maintain the
+projection, and bounded read-time repair corrects only selected stale entries
+after an interrupted record/index transition.
+
 ## Recovery marker identity cutover
 
 Recovery v2 recognizes each durable failure by a random `marker_id`; runtime
@@ -158,6 +197,10 @@ final records into permanent proof. Only then does it write
 documents, and remove superseded recovery receipts.
 
 Runtime opens only v4: there is no dual reader, reverse migration, or hydration
+path. This command is the sole authority that invokes the global recovery
+migration. `hive status`, daemon startup, bot startup, and ordinary attempt
+store construction neither perform nor monitor it. The operator must complete
+the one-off command before starting current runtime processes.
 back into v2/v3. An obsolete v1 tree, material competing-root collision, live
 writer or possibly active attempt, unsupported attempt schema, unsafe tree entry, changed corpus, or
 invalid checkpoint/fence fails closed with the evidence preserved. Re-running
@@ -223,6 +266,7 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate managed workflow tasks (N tasks)` for a managed-generation-only cutover.
 - `hive: migrate plan review requirements (N tasks)` for a plan-review-requirement-only cutover.
 - `hive: migrate project state (N ids, M recovery markers, P managed workflow tasks, Q plan review requirements)` when multiple non-stage upgrades land together; zero-value categories are omitted.
+- `hive: migrate completion times (N tasks)` for archived completion-clock backfills.
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.
@@ -240,6 +284,10 @@ A rerun after successful migration prints that there is nothing to move and keep
   backfill, managed semantic-stage generation/configuration migration,
   repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
+- `test/unit/patrol_fix/admission_store_test.rb` and
+  `test/integration/migrate_test.rb` cover bounded pending-record reads,
+  explicit index construction, stale selected-entry repair, idempotency, and
+  the daemon restart request.
 - `test/unit/workflow_package/task_migrator_test.rb` covers semantic stage
   moves, same-position repins, removed-stage refusal, lock contention, cleanup,
   and idempotency.

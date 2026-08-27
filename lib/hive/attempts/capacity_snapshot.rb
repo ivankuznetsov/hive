@@ -224,6 +224,14 @@ module Hive
         find(decision_index.terminal_attempt_id(request_id: request_id))
       end
 
+      def latest_terminal_attempt(task_generation:, subject:)
+        find(
+          decision_index.latest_terminal_attempt_id(
+            task_generation: task_generation, subject: subject
+          )
+        )
+      end
+
       def successful_attempt(task_generation:, subject:)
         find(
           decision_index.successful_attempt_id(

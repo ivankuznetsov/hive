@@ -62,6 +62,8 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal 600, launcher_options.fetch(:timeout_sec)
     assert_equal 8, launcher_options.fetch(:kill_grace_sec)
     assert_equal 13, dispatcher_options.fetch(:launch_timeout_sec)
+    assert_equal daemon.fetch("transient_retry_backoff_sec"),
+                 dispatcher_options.fetch(:transient_retry_backoff_sec)
     assert_equal daemon.fetch("max_concurrent_runs"),
                  dispatcher_options.dig(:limits, :max_global)
     assert_equal :launcher, dispatcher_options.fetch(:launcher)

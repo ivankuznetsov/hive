@@ -24,6 +24,33 @@ class WebServiceStatusTest < Minitest::Test
     assert_equal "http://127.0.0.1:4567", result["url"]
     assert_equal true, result["ready"]
     assert_equal "ready", result["readiness"]
+    assert_equal "unknown", result.dig("runtime", "channel")
+  end
+
+  def test_running_service_reports_identity_from_its_health_payload
+    runtime = Hive::RuntimeIdentity.new(environment: {
+      "HIVE_RUNTIME_CHANNEL" => "dogfood",
+      "HIVE_RUNTIME_BUILD_SHA" => "a" * 40,
+      "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-aaaaaaaaa"
+    }).to_h
+
+    result = Hive::Web::ServiceStatus.snapshot(
+      installer: installer(running_state), config: config,
+      probe: ->(*) { { "ok" => true, "runtime" => runtime } }
+    )
+
+    assert_equal true, result["ready"]
+    assert_equal runtime, result.fetch("runtime")
+  end
+
+  def test_running_service_rejects_malformed_health_identity
+    result = Hive::Web::ServiceStatus.snapshot(
+      installer: installer(running_state), config: config,
+      probe: ->(*) { { "ok" => true, "runtime" => { "channel" => "dogfood" } } }
+    )
+
+    assert_equal true, result["ready"]
+    assert_equal "unknown", result.dig("runtime", "channel")
   end
 
   def test_snapshot_advertises_environment_origin_but_probes_local_service
@@ -251,6 +278,20 @@ class WebServiceStatusTest < Minitest::Test
     end
 
     assert_equal 2, starts
+  end
+
+  def test_health_payload_returns_the_service_document
+    body = { "ok" => true, "runtime" => Hive::RuntimeIdentity.new.to_h }
+    healthy = response(Net::HTTPOK, JSON.generate(body))
+    with_replaced_singleton_method(Net::HTTP, :start, lambda { |*_args, **_kwargs, &block|
+      http = Object.new
+      http.define_singleton_method(:get) { |_path, _headers| healthy }
+      block.call(http)
+    }) do
+      assert_equal body, Hive::Web::ServiceStatus.health_payload(
+        "http://127.0.0.1:4567/health", attempts: 1, interval: 0
+      )
+    end
   end
 
   def test_ready_retries_transport_errors_then_returns_false

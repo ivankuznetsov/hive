@@ -220,7 +220,7 @@ module HiveBench
 
       outcome = build(opts).call(entries: entries, profiles: profiles,
                                  out_root: opts[:out], corpus_version: opts[:corpus_version])
-      JudgeProvenance.annotate_document!(outcome.results, efforts: judge_efforts(opts))
+      JudgeProvenance.annotate_document!(outcome.results, efforts: judge_efforts(opts), routes: judge_routes(opts))
       write_and_report(outcome, opts)
     end
 
@@ -230,6 +230,7 @@ module HiveBench
                claude_judge: true, judge_bin: "claude", judge_model: nil,
                codex_judge: false, codex_judge_model: CodexJudge::DEFAULT_MODEL,
                codex_judge_effort: CodexJudge::DEFAULT_EFFORT,
+               codex_judge_provider: CodexJudge::DEFAULT_PROVIDER, codex_judge_provider_model: nil,
                openrouter_judge: true, openrouter_judge_model: "openai/gpt-5.5-pro" }
       OptionParser.new do |o|
         o.banner = "Usage: OPENROUTER_API_KEY=… ruby harness/run_all.rb --source <clone> [opts]"
@@ -246,6 +247,8 @@ module HiveBench
         o.on("--[no-]codex-judge", "score through the Codex CLI") { |v| opts[:codex_judge] = v }
         o.on("--codex-judge-model M") { |v| opts[:codex_judge_model] = v }
         o.on("--codex-judge-effort LEVEL") { |v| opts[:codex_judge_effort] = v }
+        o.on("--codex-judge-provider PROVIDER", CodexJudge::PROVIDERS) { |v| opts[:codex_judge_provider] = v }
+        o.on("--codex-judge-provider-model M") { |v| opts[:codex_judge_provider_model] = v }
         o.on("--[no-]openrouter-judge", "score with the OpenRouter judge (default: on)") { |v| opts[:openrouter_judge] = v }
         o.on("--openrouter-judge-model M", "default: openai/gpt-5.5-pro") { |v| opts[:openrouter_judge_model] = v }
         o.separator ""
@@ -286,7 +289,8 @@ module HiveBench
     # The independent judges, keyed by the name recorded in results.json. The
     # dual-judge slate (maintainer decision 2026-07-09, superseding 2026-07-01):
     # fable-5 (local claude CLI, anthropic-family) + gpt-5.6-sol@xhigh (codex
-    # CLI, openai-family) — both subscription, so judging costs no API balance.
+    # CLI, openai-family). Codex uses subscription auth by default; campaigns
+    # may explicitly route the same logical judge through OpenRouter.
     # gpt-5.5-pro via OpenRouter remains available behind --openrouter-judge
     # (off by default). Two judges is the slate; no third. Keys DERIVE from the
     # pinned judge model so results.json never claims a model that didn't judge.
@@ -300,7 +304,12 @@ module HiveBench
       if opts[:codex_judge]
         model = opts[:codex_judge_model] || CodexJudge::DEFAULT_MODEL
         effort = opts[:codex_judge_effort] || CodexJudge::DEFAULT_EFFORT
-        j[model] = Judge.new(judge_fn: CodexJudge.judge_fn(model: model, effort: effort), seeds: opts[:seeds])
+        j[model] = Judge.new(
+          judge_fn: CodexJudge.judge_fn(model: model, effort: effort,
+                                        provider: opts[:codex_judge_provider],
+                                        provider_model: opts[:codex_judge_provider_model]),
+          seeds: opts[:seeds]
+        )
       end
       if opts[:openrouter_judge]
         j[opts[:openrouter_judge_model].split("/").last] =
@@ -315,6 +324,16 @@ module HiveBench
 
       { opts[:codex_judge_model] || CodexJudge::DEFAULT_MODEL =>
           opts[:codex_judge_effort] || CodexJudge::DEFAULT_EFFORT }
+    end
+
+    def judge_routes(opts)
+      return {} unless opts[:codex_judge]
+
+      model = opts[:codex_judge_model] || CodexJudge::DEFAULT_MODEL
+      { model => {
+        provider: opts[:codex_judge_provider],
+        provider_model: opts[:codex_judge_provider_model] || model
+      } }
     end
 
     def write_and_report(outcome, opts)

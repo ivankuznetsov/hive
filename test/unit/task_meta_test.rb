@@ -21,6 +21,20 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_restore_removes_metadata_created_after_an_absent_snapshot
+    with_tmp_dir do |root|
+      task = File.join(root, ".hive-state", "stages", "9-done", "finished")
+      FileUtils.mkdir_p(task)
+      snapshot = Hive::TaskMeta.snapshot(task)
+
+      refute snapshot.exists
+      Hive::TaskMeta.write(task, id: 7, slug: "finished", display_name: nil)
+      Hive::TaskMeta.restore(task, snapshot)
+
+      refute File.exist?(Hive::TaskMeta.path(task))
+    end
+  end
+
   def test_completed_at_round_trips_in_utc_and_survives_rewrites
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(

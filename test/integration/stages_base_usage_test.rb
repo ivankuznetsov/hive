@@ -379,8 +379,8 @@ class StagesBaseUsageTest < Minitest::Test
     recorded = nil
     result = {
       model: "anthropic/claude-actual",
-      requested_opencode_route: "anthropic/claude-requested",
-      actual_opencode_route: "anthropic/claude-actual",
+      requested_route: "anthropic/claude-requested",
+      actual_route: "anthropic/claude-actual",
       actual_provider: "anthropic",
       actual_model: "claude-actual",
       route_resolution_status: :resolved_differently,

@@ -163,7 +163,7 @@ module Hive
               )
             end
 
-            Hive::Stages::Base.record_deferred_opencode_observation(
+            Hive::Stages::Base.record_deferred_agent_observation(
               synthetic_task(ctx), cfg, "review.ci", spawn_result
             )
 
@@ -425,7 +425,7 @@ module Hive
             status_mode: :exit_code_only,
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
-          if profile.name == :claude
+          if Hive::AgentSupport.supports?(profile, :Interactive)
             Hive::Stages::Base.spawn_claude!(
               task,
               cfg,

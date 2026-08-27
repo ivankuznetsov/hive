@@ -132,10 +132,10 @@ steps:
     timeout: 9
 
   - kind: ruby_block
-    description: Keep the daemon alive until it reaps the successful successor and seals the one recovery receipt.
+    description: Keep the daemon alive until it reaps the successful successor and seals the one recovery receipt. The wait bound is a functional eventually-bound, not a latency budget — speed is tracked by the advisory incident-duration-budget job.
     block: |
       require "hive/daemon/dispatch_request_queue"
-      deadline = Time.now + 3
+      deadline = Time.now + 30
       loop do
         directory = Hive::Daemon::DispatchRequestQueue.directory(state_home: run_home)
         terminal = Dir.glob(File.join(directory, "*.json*")).any? do |path|

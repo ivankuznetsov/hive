@@ -6,6 +6,7 @@ require "securerandom"
 require "timeout"
 require "hive/agent_limit"
 require "hive/agent_profiles"
+require "hive/agent_support"
 require "hive/agent_skills"
 require "hive/artifact_firewall"
 require "hive/config"
@@ -76,11 +77,9 @@ module Hive
             }
           end
 
-          # Capability checks must use the same project-prepared profile as
-          # the launch below. In particular, OpenCode plugins live in
-          # agents.opencode.plugins and are projected into a hermetic overlay;
-          # probing the stock ambient profile falsely reports those skills as
-          # absent even though the subsequent launch would provide them.
+          # Capability checks must use the same project profile as the launch
+          # below. OpenCode uses native plugins plus any explicit project
+          # plugin selection, so the probe must resolve that effective setup.
           def capability_probe(agent:, invocation:, project_root:)
             profile = Hive::AgentProfiles.lookup(agent, cfg: @cfg)
             status, message = profile.verify_skill(invocation, project_root:)
@@ -119,7 +118,7 @@ module Hive
             }
             unless served_model.empty?
               actual["model"] = served_model
-              actual.delete("family") unless served_model == request.reviewer["model"]
+              actual.delete("family") unless same_model_identity?(request.reviewer, served_model)
             end
             {
               "status" => status,
@@ -127,6 +126,17 @@ module Hive
               "retry_at" => retry_at,
               "actual_route" => actual
             }
+          end
+
+          def same_model_identity?(reviewer, served_model)
+            requested_model = reviewer["model"]
+            return true if served_model == requested_model
+
+            support = Hive::AgentSupport.for(reviewer["provider"])
+            support&.respond_to?(:model_identity_equivalent?) &&
+              support.model_identity_equivalent?(
+                requested_model:, served_model:, family: reviewer["family"]
+              )
           end
 
           # Hive journals the review attempt itself — stage entry, agent
@@ -288,16 +298,13 @@ module Hive
 
         def capability_for(request)
           return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
-          if request.reviewer.fetch("provider") == "pi"
-            return {
-              "status" => "present", "diagnostic" => nil,
-              "invocation" => nil
-            }
-          end
+          provider = request.reviewer.fetch("provider")
+          support = Hive::AgentSupport.for(provider)
+          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
 
-          contract = @capability_resolver.call(CAPABILITY, request.reviewer.fetch("provider"))
+          contract = @capability_resolver.call(CAPABILITY, provider)
           stringify(@capability_probe.call(
-            agent: request.reviewer.fetch("provider"),
+            agent: provider,
             invocation: contract.invocation,
             project_root: request.project_root
           )).merge("invocation" => contract.invocation)

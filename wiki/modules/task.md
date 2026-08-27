@@ -28,9 +28,14 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    configuration digests. Historical pins are not executable: Hive raises an
    `InvalidTaskPath` instruction to run `hive migrate`, whose dedicated
    migration boundary reads the old descriptor and moves/repins the task to
-   the selected semantic stage. Launch-time context repeats the selection
-   check so a task object created immediately before an update cannot dispatch
-   the superseded package.
+   the selected semantic stage. Loading the selected immutable snapshot for
+   status, history, or task inspection does not resolve or compare its saved
+   agent profile against the current process: a later agent rename, capability
+   change, or compatible upgrade must not make a retained task unreadable.
+   Launch-time context repeats the selection check and verifies the current
+   capabilities and fingerprint only for the executable actor slot about to
+   run, so a task object created immediately before an update cannot dispatch
+   the superseded package and a genuinely drifted launch still fails closed.
 5. Validate the parsed stage name and numeric prefix against the selected
    descriptor. A policy-only repin may retain an existing directory when that
    directory is the exact terminal stage of another registered descriptor.
@@ -91,19 +96,19 @@ For stages 4 and later:
   pre-execute coding tasks from legacy execute tasks. Absence is the durable
   compatibility shape; malformed values fail closed.
 - `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` only when the sidecar is absent. It refuses corrupt input.
-- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; daemon backfill cannot sanitize dependency evidence by replacing a damaged mapping.
+- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; explicit migration cannot sanitize dependency evidence by replacing a damaged mapping.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
 - `next!` locks `<state_home>/.task-counter.lock`, returns the current id, then writes `next_id: id + 1`.
-- `next_or_nil` performs the same allocation but returns nil only when the counter lock times out, for capture paths that can be repaired by the daemon's id backfiller.
+- `next_or_nil` performs the same allocation but returns nil only when the counter lock times out, for capture paths that can be repaired by `hive migrate`.
 - `peek` returns the current `next_id`, defaulting to `1` on missing or corrupt YAML.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 - Lock timeout raises `Hive::ConcurrentRunError` with `lock_path` set to the counter lock.
 
 ## Tests
 
-- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
+- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers. `test/integration/honeycomb_workflow_lifecycle_test.rb` proves a saved managed task remains readable after agent-profile drift while runtime preparation still rejects that actor.
 - `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency validation, workflow selector preservation, corrupt-input mutation refusal, display-name updates, and id backfill.
 - `test/unit/task_counter_test.rb` — first id, sequential ids, fail-soft allocation, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 

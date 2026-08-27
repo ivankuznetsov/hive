@@ -2,7 +2,7 @@ require "hive/workflows"
 
 module Hive
   module Daemon
-    # Pure decision module: maps a `hive status --json` task row's
+    # Pure decision module: maps an internal task-graph row's
     # `action` field (a `Hive::Schemas::TaskActionKind` value) plus
     # state-file mtime and dependency context to one of these outcomes
     # (authoritative list: the `@return` tag on `decide` below):
@@ -269,11 +269,11 @@ module Hive
       end
 
       # Generic-stage run decision. First sight (no prior dispatch) runs the
-      # stage once. After that, only re-dispatch when the operator has
-      # touched the state file since the last dispatch (mtime advanced past
-      # the recorded baseline, then settled past the debounce window) — so a
-      # markerless agent run (marker stays `:none` → `ready_to_run` again)
-      # cannot re-spawn `hive run` on every tick.
+      # stage once. After that, only re-dispatch when the operator has touched
+      # the state file since the last dispatch (mtime advanced past the
+      # recorded baseline, then settled past the debounce window) -- so a
+      # markerless agent run cannot re-spawn on every tick. Recovery from a
+      # restored baseline is provenance-sensitive and belongs in Dispatcher.
       def decide_run(state_file_mtime:, last_dispatched:, now:, debounce_sec:)
         return :dispatch if last_dispatched.nil?
         return :skip if state_file_mtime.nil?

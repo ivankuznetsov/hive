@@ -95,7 +95,7 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
     before = legacy_state
     after = Marshal.load(Marshal.dump(before))
     apply_historical_schema_migrations!(after)
-    after.dig("status_json", "projects", 0, "tasks", 0)["stage"] = "9-done"
+    after.dig("tasks", "task-7")["stage"] = "9-done"
 
     diff = HiveReleaseCandidate::InvariantSnapshot.compare(
       before: HiveReleaseCandidate::InvariantSnapshot.build(
@@ -111,7 +111,7 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
 
     refute diff.fetch("passed")
     assert_equal(
-      [ "/status_json/projects/0/tasks/0/stage" ],
+      [ "/tasks/task-7/stage" ],
       diff.fetch("unexpected").map { |change| change.fetch("path") }
     )
   end
@@ -127,35 +127,6 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
       "schema" => "hive-doctor.v2",
       "summary" => { "legacy_failures" => 0, "warnings" => 0 },
       "managed_skills" => []
-    }
-    state["status_json"] = {
-      "schema" => "hive-status",
-      "projects" => [ {
-        "name" => "project",
-        "tasks" => [ {
-          "id" => 7,
-          "stage" => "1-inbox",
-          "admission_error" => nil,
-          "attempt_id" => nil,
-          "commit_generation" => 0,
-          "condition_gate" => nil,
-          "condition_history" => [],
-          "condition_migration" => { "effective" => "markers" },
-          "condition_overrides" => [],
-          "condition_provenance" => { "projector" => "TaskProjection/v1" },
-          "condition_task_generation" => 0,
-          "condition_warning" => nil,
-          "conditions" => [ { "condition" => "Merged", "state" => "pending" } ],
-          "current_attempt" => nil,
-          "evidence" => [],
-          "observation_mtime" => "2026-08-06T00:48:15Z",
-          "shadow_audit" => { "ready" => false },
-          "task_generation" => nil,
-          "task_lock_id" => nil,
-          "task_lock_pid" => nil,
-          "task_lock_process_start_time" => nil
-        } ]
-      } ]
     }
   end
 
@@ -178,13 +149,6 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
       },
       "builtin_runtime" => { "status" => "absent" },
       "install_identity" => { "gem_sha256" => "4" * 64 },
-      "status_json" => {
-        "schema" => "hive-status",
-        "projects" => [ {
-          "name" => "project",
-          "tasks" => [ { "id" => 7, "stage" => "1-inbox" } ]
-        } ]
-      },
       "doctor_json" => {
         "schema" => "hive-doctor.v1",
         "checks" => [ { "kind" => "stage", "status" => "missing" } ],

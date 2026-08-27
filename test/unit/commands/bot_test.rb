@@ -97,6 +97,10 @@ class HiveCommandsBotTest < Minitest::Test
     end
 
     assert_equal [ :run_forever ], supervisor.calls
+    refute File.exist?(File.join(@home, "attempts")),
+           "bot startup must not run attempt migration"
+    refute File.exist?(File.join(@home, "recovery-migration-v6.json")),
+           "bot startup must leave migration to hive migrate"
   end
 
   def test_start_ignores_lock_close_failures

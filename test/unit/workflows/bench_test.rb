@@ -305,6 +305,16 @@ class WorkflowsBenchTest < Minitest::Test
       origin = File.join(root, "origin.git")
       redirected = File.join(root, "redirected.git")
       work = File.join(root, "work")
+      controller_bin = File.join(root, "controller-bin")
+      controller_id = File.join(controller_bin, "id")
+      FileUtils.mkdir_p(controller_bin)
+      # Host runner UIDs vary; the sealed runtime always invokes Git as uid 1000.
+      File.write(controller_id, "#!/bin/sh\nprintf '1000\\n'\n")
+      FileUtils.chmod(0o755, controller_id)
+      controller_env = {
+        "HB_CONTROLLER_ORIGIN" => origin,
+        "PATH" => "#{controller_bin}:#{ENV.fetch("PATH")}"
+      }
       run_git = lambda do |*argv|
         out, err, status = Open3.capture3("/usr/bin/git", *argv)
         assert status.success?, "git #{argv.join(' ')} failed: #{out}#{err}"
@@ -326,14 +336,14 @@ class WorkflowsBenchTest < Minitest::Test
       FileUtils.chmod(0o755, hook)
 
       resolved, err, status = Open3.capture3(
-        { "HB_CONTROLLER_ORIGIN" => origin },
+        controller_env,
         "bash", wrapper, "-C", work, "remote", "get-url", "--push", "--all", "origin"
       )
       assert status.success?, err
       assert_equal origin, resolved.strip
 
       _out, err, status = Open3.capture3(
-        { "HB_CONTROLLER_ORIGIN" => origin },
+        controller_env,
         "bash", wrapper, "-C", work, "push", "-q", "origin", "main"
       )
 

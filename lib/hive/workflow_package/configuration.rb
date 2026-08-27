@@ -174,6 +174,17 @@ module Hive
         end
       end
 
+      def verify_profile!(workflow, slot_id, cfg: {})
+        slot = self.class.slots_for(workflow).find { |candidate| candidate.id == slot_id }
+        unless slot
+          raise Hive::ConfigError,
+                "managed workflow configuration has no executable slot #{slot_id.inspect}"
+        end
+
+        mapping_for(slot, cfg, true)
+        true
+      end
+
       def self.slots_for(workflow, runtime_metadata: {})
         authorized = Hash.new { |hash, key| hash[key] = [] }
         Array(runtime_metadata["optional_inputs"]).each do |entry|
@@ -344,15 +355,15 @@ module Hive
                mapping.fetch("mapping_contract") == slot.contract
           raise Hive::ConfigError, "managed workflow configuration contract drifted for #{slot.id}"
         end
+        return mapping unless verify_profiles
+
         profile = Hive::AgentProfiles.lookup(mapping.fetch("agent"), cfg: cfg)
         self.class.validate_pin_support!(
           profile, slot.id, model: mapping["model"], effort: mapping["effort"]
         )
-        if verify_profiles
-          unless mapping.fetch("profile_fingerprint") == self.class.profile_fingerprint(profile)
-            raise Hive::ConfigError,
-                  "managed workflow agent profile drifted for #{slot.id}; reinstall or update the workflow mapping"
-          end
+        unless mapping.fetch("profile_fingerprint") == self.class.profile_fingerprint(profile)
+          raise Hive::ConfigError,
+                "managed workflow agent profile drifted for #{slot.id}; reinstall or update the workflow mapping"
         end
         mapping
       end

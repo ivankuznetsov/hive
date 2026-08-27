@@ -115,8 +115,12 @@ module Hive
         end
 
         puts "#{verb} #{removed.size}, kept #{kept_count}"
+        # Normalize through entry_payload so malformed rows (non-Hash rows,
+        # rows missing `path`) render the same representation the --json
+        # success envelope emits, instead of crashing on `42["name"]`.
         removed.each do |entry|
-          puts "  - #{entry['name']} (#{entry['path']})"
+          payload = entry_payload(entry)
+          puts "  - #{payload['name']} (#{payload['path']})"
         end
         puts "(dry-run; rerun without --dry-run to apply)" if @dry_run
       end

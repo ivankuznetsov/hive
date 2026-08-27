@@ -72,15 +72,11 @@ identical failures at the ladder ceiling the request parks once with
 `reason=deterministic_failure`, its fingerprint, and bounded attempt history,
 so it stops consuming dispatch slots while other tasks continue. Terminal
 recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
-Independently,
-`Hive::Daemon::DisplayNameBackfiller`
-runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
-bounded by `max_per_tick`) for any task whose `display_name` never landed at
-`hive new`, so an interrupted name generation self-heals instead of leaving the
-task showing its raw slug. Per-folder inflight state stores `{pid, at}` and
-expires after 120 seconds so a reused or foreign pid cannot suppress retries
-forever. This is purely cosmetic — it touches no markers and never advances a
-stage.
+Daemon ticks never migrate task metadata. Missing task ids, display names, and
+legacy completion clocks are repaired only by the explicit [[commands/migrate]]
+command, so routine scheduling does not compete with stage commits. Recovery
+receipts for an id-less task instruct the operator to run `hive migrate --all`;
+they never claim a later daemon tick will allocate the id.
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|

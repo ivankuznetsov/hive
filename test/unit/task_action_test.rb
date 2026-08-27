@@ -2070,4 +2070,27 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_review_unsupported", unsupported.key
     assert_nil unsupported.command
   end
+
+  def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair
+    Dir.mktmpdir("task-action-stale-plan-review") do |root|
+      task = fake_task(stage_name: "plan", stage_index: 3, project_root: root)
+      FileUtils.mkdir_p(File.join(task.folder, Hive::PlanReview::Store::ROOT_BASENAME))
+      projection = Struct.new(:summary).new({ "state" => "approved" })
+
+      with_replaced_singleton_method(
+        Hive::PlanReview::Projection, :load, ->(task_folder:) { projection }
+      ) do
+        with_replaced_singleton_method(
+          Hive::PlanReview::TransitionGuard, :freshness,
+          ->(**) { { "status" => "stale", "reason" => "plan_changed" } }
+        ) do
+          summary = Hive::TaskAction.for(task, marker(:complete)).plan_review
+
+          assert_equal "hive", summary.fetch("blocker_owner")
+          assert_equal "plan_changed", summary.fetch("blocker_reason")
+          refute summary.fetch("execution_allowed")
+        end
+      end
+    end
+  end
 end

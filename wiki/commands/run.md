@@ -161,6 +161,13 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `unexpected_io_error` | A `Hive::GitError` / `SystemCallError` / `IOError` escaped the narrow rescue (programmer-error class) |
 
 `post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
+
+When this run first enters archived state, the final commit writes the current
+UTC `completed_at` clock in the same transaction. A legacy task that was
+already archived before the run keeps a missing clock unchanged; only the
+explicit [[commands/migrate]] command may discover and persist its historical
+completion time.
+
 ## next: hints (by marker)
 
 | Marker | `report` output |

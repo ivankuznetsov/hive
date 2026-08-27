@@ -106,7 +106,7 @@ staging, the optional staged-index callback, diff inspection, and commit.
 Commands that need a larger filesystem-plus-index transaction still take an
 outer commit lock; reentrancy prevents their nested `hive_commit` from
 deadlocking. This serializes shared `.hive-state` index writes across commands,
-background name/id backfillers, and Patrol Fix transitions.
+explicit migration, and Patrol Fix transitions.
 
 ## Why two-level
 

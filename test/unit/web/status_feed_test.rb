@@ -187,7 +187,7 @@ class StatusFeedTest < Minitest::Test
     assert_equal 1, source.calls
   end
 
-  def test_cached_status_command_retains_current_scheduler_receipts_during_tick_start
+  def test_cached_status_command_reads_the_daemon_owned_scheduler_snapshot_each_time
     now = Time.utc(2026, 8, 7, 14, 30)
     current = {
       "status" => "current",
@@ -214,39 +214,8 @@ class StatusFeedTest < Minitest::Test
     command.operational_recoveries([], status_payload: payload)
     command.operational_recoveries([], status_payload: payload)
 
-    assert_same current, recovery_status.scheduler_snapshot,
-                "an in-progress tick must retain the same generation's still-valid completed snapshot"
-  end
-
-  def test_cached_status_command_does_not_retain_snapshot_across_daemon_generation
-    now = Time.utc(2026, 8, 7, 14, 30)
-    current = {
-      "status" => "current",
-      "phase" => "complete",
-      "valid_until" => (now + 90).iso8601,
-      "daemon" => { "generation" => "daemon-1" }
-    }
-    restarted = {
-      "status" => "unavailable",
-      "reason" => "tick_started",
-      "phase" => "started",
-      "valid_until" => (now + 120).iso8601,
-      "daemon" => { "generation" => "daemon-2" }
-    }
-    recovery_status = RecordingRecoveryStatus.new
-    command = Hive::Web::CachedStatusCommand.new(
-      source: RecordingSource.new,
-      recovery_status_command: recovery_status,
-      scheduler_snapshot_reader: ScriptedSchedulerReader.new(current, restarted),
-      clock: -> { now }
-    )
-    payload = command.json_payload([])
-
-    command.operational_recoveries([], status_payload: payload)
-    command.operational_recoveries([], status_payload: payload)
-
-    assert_same restarted, recovery_status.scheduler_snapshot,
-                "a new daemon generation must never inherit the predecessor's scheduler authority"
+    assert_same started, recovery_status.scheduler_snapshot,
+                "Web must use the producer-owned snapshot instead of retaining local authority"
   end
 
   def test_cached_status_command_passes_through_a_malformed_current_receipt

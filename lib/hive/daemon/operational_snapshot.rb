@@ -224,6 +224,7 @@ module Hive
           @observations = {}
           @runtime_ready = false
           @attempt_storage = Hive::Attempts::StorageHealth.unknown_snapshot
+          @last_completed_record = nil
         end
 
         def reconfigure(poll_interval_sec:)
@@ -234,7 +235,11 @@ module Hive
           @tick_sequence += 1
           @started_at = now.utc
           @observations = {}
-          @store.write(base_record(phase: "started", now: now).merge("tasks" => []))
+          if @last_completed_record
+            retain_completed_record
+          else
+            @store.write(base_record(phase: "started", now: now).merge("tasks" => []))
+          end
           tick_sequence
         end
 
@@ -268,6 +273,8 @@ module Hive
         end
 
         def fail(reason:, now: Time.now.utc)
+          return if @last_completed_record
+
           @store.write(
             base_record(phase: "failed", now: now).merge(
               "reason" => reason.to_s,
@@ -311,7 +318,9 @@ module Hive
             "recoveries" => recoveries || {},
             "tasks" => tasks
           )
-          @store.write(record)
+          published = @store.write(record)
+          @last_completed_record = record
+          published
         end
 
         # Written only by Dispatcher after it has stopped admitting work and
@@ -334,6 +343,18 @@ module Hive
         end
 
         private
+
+        def retain_completed_record
+          observed_at = Time.iso8601(@last_completed_record.fetch("observed_at"))
+          prior_deadline = Time.iso8601(@last_completed_record.fetch("valid_until"))
+          deadline = [ prior_deadline, observed_at + @validity_sec ].min
+          deadline_string = deadline.iso8601(6)
+          return if @last_completed_record.fetch("valid_until") == deadline_string
+
+          retained = @last_completed_record.merge("valid_until" => deadline_string)
+          @store.write(retained)
+          @last_completed_record = retained
+        end
 
         def base_record(phase:, now:)
           instant = now.utc

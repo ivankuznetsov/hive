@@ -101,7 +101,6 @@ class PatrolFixStageTransitionTest < Minitest::Test
         end
       end
       command.define_singleton_method(:terminal_state_snapshot) { |_| nil }
-      command.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
       command.define_singleton_method(:commit_after) { |current, *| committed = current }
       command.define_singleton_method(:report) { |current, _result| reported = current }
 

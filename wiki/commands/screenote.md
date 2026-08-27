@@ -42,7 +42,11 @@ message.
    field is persisted as the MCP endpoint; it is not hard-coded.
 3. Start a one-shot loopback callback server on `127.0.0.1:0` and use that
    redirect URI for dynamic client registration unless an existing stored
-   `client_id` can be reused.
+   `client_id` can be reused. The server keeps waiting through junk local
+   traffic: non-`/callback` requests get a 404, and a per-connection read
+   failure (silent connect, stalled/slow-drip request, oversized headers,
+   reset) only drops THAT connection after the short read deadline — it never
+   aborts the overall OAuth wait. Only the accept-level timeout ends the wait.
 4. Build the authorize URL with `response_type=code`, PKCE S256, state, and
    scope `mcp_read mcp_write`. Hive opens the URL in a browser when possible and
    prints it as a fallback.

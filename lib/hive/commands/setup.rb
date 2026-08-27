@@ -57,7 +57,16 @@ module Hive
             install_babysitter
             enroll_project unless @no_init
             if @service
-              if web_bundle["ok"]
+              if web_config_error
+                # A malformed global `web` block must never be silently
+                # replaced by defaults for a real mutation: leave the service
+                # untouched and record why; add_web_phase fails the run below.
+                observe_web_service(
+                  mutation: "blocked",
+                  ok: false,
+                  message: "web service not installed because #{web_config_error.message}"
+                )
+              elsif web_bundle["ok"]
                 install_web_service
               else
                 observe_web_service(
@@ -389,8 +398,27 @@ module Hive
         Hive::Web::ServiceStatus.effective_url(web_config, environment: @environment)
       end
 
+      # The web URL is resolved inside `call` (add_web_phase) and AGAIN in
+      # `emit` — after the last chance to record a phase — plus on the
+      # consent-refusal path. Loading and validating the global `web` block is
+      # fallible (Hive::ConfigError on a malformed global config), so letting
+      # that raise propagate aborts `hive setup` with a raw backtrace BEFORE
+      # `emit` and no --json envelope at all. Resolve once, remember any
+      # ConfigError, and fall back to the documented defaults so the URL stays
+      # resolvable everywhere; the remembered error fails the web phase (→
+      # ok:false, exit 1) via add_web_phase instead of crashing.
       def web_config
-        @web_config ||= Hive::Config.load_global_web
+        @web_config ||= begin
+          Hive::Config.load_global_web
+        rescue Hive::ConfigError => e
+          @web_config_error = e
+          Hive::Config.global_web_defaults
+        end
+      end
+
+      def web_config_error
+        web_config # force resolution so the error is recorded before emit
+        @web_config_error
       end
 
       # Runtime identifies the producer reached by `hive web status`; it is
@@ -403,14 +431,17 @@ module Hive
       end
 
       def add_web_phase
+        config_error = web_config_error
+
         if @no_bootstrap
-          add_phase(
-            "web", true,
+          row = add_phase(
+            "web", config_error.nil?,
             "url" => web_url,
             "available" => false,
             "readiness" => "not_observed",
             "mutation" => "diagnose_only"
           )
+          row["message"] = config_error.message if config_error
           return
         end
 
@@ -420,12 +451,15 @@ module Hive
           "readiness" => "not_observed"
         }
         managed = @service
-        add_phase(
-          "web", managed ? state["ready"] == true || web_service_platform_exception? : true,
+        ok = (managed ? state["ready"] == true || web_service_platform_exception? : true) &&
+             config_error.nil?
+        row = add_phase(
+          "web", ok,
           "url" => state["url"],
           "available" => state["ready"] == true,
           "readiness" => state["readiness"]
         )
+        row["message"] = config_error.message if config_error
       end
 
       def web_service_platform_exception?

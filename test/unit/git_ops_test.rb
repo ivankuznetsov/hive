@@ -221,6 +221,133 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_commit_serializes_staging_callback_and_commit
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", "serialized")
+      FileUtils.mkdir_p(task_dir)
+      File.write(File.join(task_dir, "idea.md"), "serialize me\n")
+      lock_paths = []
+      lock_held = false
+      callback_invoked = false
+      run_git_operations = []
+      cached_diff_lock_states = []
+      original_run_git = ops.method(:run_git!)
+      ops.define_singleton_method(:run_git!) do |*args|
+        run_git_operations << { args: args, lock_held: lock_held }
+        original_run_git.call(*args)
+      end
+      replacement = lambda do |path, **, &block|
+        lock_paths << path
+        lock_held = true
+        block.call
+      ensure
+        lock_held = false
+      end
+      original_capture3 = Open3.method(:capture3)
+      capture3_replacement = lambda do |*args, **kwargs|
+        cached_diff_lock_states << lock_held if args == [
+          "git", "-C", ops.hive_state_path, "diff", "--cached", "--quiet"
+        ]
+        original_capture3.call(*args, **kwargs)
+      end
+
+      result = with_replaced_singleton_method(Hive::Lock, :with_commit_lock, replacement) do
+        with_replaced_singleton_method(Open3, :capture3, capture3_replacement) do
+          ops.hive_commit(
+            stage_name: "1-inbox", slug: "serialized", action: "captured",
+            after_stage: lambda {
+              callback_invoked = true
+              assert lock_held, "after_stage must run inside the commit lock"
+            }
+          )
+        end
+      end
+
+      assert_equal :committed, result
+      assert_equal [ ops.hive_state_path ], lock_paths
+      assert callback_invoked, "after_stage must be invoked"
+      %w[add commit].each do |operation|
+        observations = run_git_operations.select { |entry| entry[:args][2] == operation }
+        refute_empty observations, "git #{operation} must be observed"
+        assert observations.all? { |entry| entry[:lock_held] },
+               "git #{operation} must run inside the commit lock"
+      end
+      assert_equal [ true ], cached_diff_lock_states,
+                   "cached-diff inspection must run inside the commit lock"
+    end
+  end
+
+  def test_concurrent_hive_commits_do_not_contend_on_the_shared_index
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      reader, writer = IO.pipe
+      children = []
+      pending_children = []
+      8.times do |index|
+        task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", "task-#{index}")
+        FileUtils.mkdir_p(task_dir)
+        File.write(File.join(task_dir, "idea.md"), "task #{index}\n")
+        child = fork do
+          writer.close
+          reader.read(1)
+          Hive::GitOps.new(dir).hive_commit(
+            stage_name: "1-inbox", slug: "task-#{index}", action: "captured",
+            after_stage: -> { sleep 0.02 }
+          )
+          exit! 0
+        rescue StandardError
+          exit! 1
+        end
+        children << child
+        pending_children << child
+      end
+      reader.close
+      writer.write("x" * children.length)
+      writer.close
+
+      statuses = children.map do |child|
+        waited_child, status = Process.wait2(child)
+        pending_children.delete(waited_child)
+        status
+      end
+      assert statuses.all?(&:success?), "every concurrent commit must succeed"
+      count = run!("git", "-C", ops.hive_state_path, "rev-list", "--count", "HEAD").to_i
+      assert_equal 9, count, "bootstrap plus every task commit must be durable"
+
+      commits_by_subject = run!(
+        "git", "-C", ops.hive_state_path, "log", "--format=%H%x09%s"
+      ).lines.to_h do |line|
+        sha, subject = line.chomp.split("\t", 2)
+        [ subject, sha ]
+      end
+      8.times do |index|
+        subject = "hive: 1-inbox/task-#{index} captured"
+        sha = commits_by_subject.fetch(subject)
+        paths = run!(
+          "git", "-C", ops.hive_state_path, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
+        ).lines.map(&:strip).reject(&:empty?)
+        assert_equal [ "stages/1-inbox/task-#{index}/idea.md" ], paths,
+                     "each concurrent commit must contain only its own task"
+      end
+    ensure
+      pending_children.to_a.each do |child|
+        Process.kill("KILL", child)
+      rescue Errno::ESRCH
+        nil
+      end
+      pending_children.to_a.each do |child|
+        Process.wait(child)
+      rescue Errno::ECHILD
+        nil
+      end
+      reader&.close unless reader&.closed?
+      writer&.close unless writer&.closed?
+    end
+  end
+
   def test_hive_commit_skips_when_diff_empty
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

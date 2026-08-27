@@ -396,6 +396,47 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_pr_fixer_shutdown_stops_project_without_reporting_a_complete_pass
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 }
+      )
+      logger = make_logger(dir)
+      prs = [
+        { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 2, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+      called = []
+      status_written = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, *_args, **_kwargs|
+          called << pr["number"]
+          :shutdown
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::StatusWriter, :append, lambda { |**_kwargs|
+            status_written = true
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project,
+              dry_run: false,
+              logger: logger,
+              inflight: Set.new
+            )
+            assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+          end
+        end
+      end
+
+      assert_equal [ 1 ], called, "a shutdown outcome must stop the project immediately"
+      refute status_written, "a shutdown-truncated project must not report a complete pass"
+    ensure
+      logger&.close
+    end
+  end
+
   def test_shutdown_during_pr_listing_skips_the_task_ownership_scan
     with_tmp_dir do |dir|
       project = project_entry(dir)

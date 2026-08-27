@@ -79,6 +79,7 @@ class WorkflowsBenchTest < Minitest::Test
     runtime = Hive::Workflows::Bench::RUNTIME_DIR
 
     assert_path_exists File.join(runtime, "harness", "hive_run.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "campaign_contract.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "judge_slate.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_runtime.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh")
@@ -250,8 +251,12 @@ class WorkflowsBenchTest < Minitest::Test
 
   def test_generate_exports_campaign_sealed_runtime_requirement
     instruction = File.read(stages_by_name.fetch("generate").instruction)
+    contract = File.read(File.join(
+                           Hive::Workflows::Bench::RUNTIME_DIR,
+                           "harness", "lib", "campaign_contract.rb"
+                         ))
 
-    assert_includes instruction, "isolation.sealed_agent_runtime must be true or false"
+    assert_includes contract, "isolation.sealed_agent_runtime must be true or false"
     assert_includes instruction,
                     'env << "HB_REQUIRE_SEALED_AGENT_RUNTIME=1" if isolation["sealed_agent_runtime"] == true'
   end
@@ -621,36 +626,112 @@ class WorkflowsBenchTest < Minitest::Test
   end
 
   def test_judge_stage_maps_codex_openrouter_campaign_fields_to_harness_arguments
-    instruction = File.read(stages_by_name.fetch("judge").instruction)
-    prefix = instruction.split("\n' >.judge-args.out", 2).first
-    args_script = prefix.rpartition("ruby -ryaml -e '\n").last
-    refute_empty args_script
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    judges = {
+      "claude" => { "model" => "claude-fable-5" },
+      "codex" => {
+        "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra",
+        "provider" => "openrouter", "provider_model" => "openai/gpt-5.6-sol"
+      },
+      "openrouter" => { "model" => "moonshotai/kimi-k2" }
+    }
 
-    Dir.mktmpdir("hive-bench-judge-route") do |root|
-      File.write(File.join(root, "campaign.yml"), <<~YAML)
-        judges:
-          claude:
-            model: claude-fable-5
-          codex:
-            model: gpt-5.6-sol
-            reasoning_effort: ultra
-            provider: openrouter
-            provider_model: openai/gpt-5.6-sol
-          openrouter:
-      YAML
+    common = [
+      "--claude-judge", "--judge-model", "claude-fable-5",
+      "--codex-judge", "--codex-judge-model", "gpt-5.6-sol",
+      "--codex-judge-effort", "ultra",
+      "--codex-judge-provider", "openrouter",
+      "--codex-judge-provider-model", "openai/gpt-5.6-sol",
+      "--openrouter-judge"
+    ]
+    assert_equal common + [ "--openrouter-model", "moonshotai/kimi-k2" ],
+                 HiveBench::CampaignContract.judge_arguments(
+      judges, openrouter_model_flag: "--openrouter-model"
+    )
+    assert_equal common + [ "--openrouter-judge-model", "moonshotai/kimi-k2" ],
+                 HiveBench::CampaignContract.judge_arguments(
+      judges, openrouter_model_flag: "--openrouter-judge-model"
+    )
+    assert HiveBench::CampaignContract.judges_require_openrouter?(judges)
+  end
 
-      out, err, status = Open3.capture3(RbConfig.ruby, "-ryaml", "-e", args_script, chdir: root)
+  def test_campaign_contract_requires_openrouter_for_opencode_candidates
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "profiles/candidates")
+    require File.join(harness, "lib/campaign_contract")
+    campaign = {
+      "candidates" => [ "all-ox-alpha-opencode@high" ],
+      "judges" => {
+        "claude" => { "model" => "claude-fable-5" },
+        "codex" => {
+          "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra"
+        }
+      }
+    }
 
-      assert status.success?, err
-      assert_equal [
-        "--claude-judge", "--judge-model", "claude-fable-5",
-        "--codex-judge", "--codex-judge-model", "gpt-5.6-sol",
-        "--codex-judge-effort", "ultra",
-        "--codex-judge-provider", "openrouter",
-        "--codex-judge-provider-model", "openai/gpt-5.6-sol",
-        "--no-openrouter-judge"
-      ], out.lines.map(&:chomp)
+    assert HiveBench::CampaignContract.campaign_requires_openrouter?(campaign)
+  end
+
+  def test_campaign_contract_canonicalizes_relative_source_before_marker_use
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    repo = File.expand_path("../../..", __dir__)
+
+    source = HiveBench::CampaignContract.source({ "source" => "." }, repo_root: repo)
+
+    assert_equal repo, source
+    assert_nil HiveBench::CampaignContract.validate_marker_runtime!(source)
+  end
+
+  def test_campaign_contract_judge_validation_does_not_require_current_generation_catalogs
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    historical = {
+      "campaign_id" => "historical-campaign",
+      "source" => ".",
+      "seeds" => 1,
+      "judges" => {
+        "claude" => { "model" => "claude-fable-5" },
+        "codex" => { "model" => "gpt-5.6-sol", "reasoning_effort" => "high" }
+      }
+    }
+
+    assert_same historical, HiveBench::CampaignContract.validate_judging!(historical)
+  end
+
+  def test_campaign_contract_verifies_strict_egress_before_parallel_cells_start
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    campaign = {
+      "isolation" => {
+        "require_provider_egress" => true,
+        "docker_network" => "bench-provider-only",
+        "https_proxy" => "http://bench-egress:3128"
+      }
+    }
+    inspector = lambda do |_network|
+      {
+        "Internal" => true,
+        "Containers" => { "proxy" => { "Name" => "bench-egress" } }
+      }
     end
+
+    assert_nil HiveBench::CampaignContract.verify_generation_network!(
+      campaign, inspector: inspector
+    )
+    _stdout, stderr = capture_io do
+      assert_raises(SystemExit) do
+        HiveBench::CampaignContract.verify_generation_network!(
+          campaign,
+          inspector: ->(_network) { { "Internal" => false, "Containers" => {} } }
+        )
+      end
+    end
+    assert_includes stderr, "must be an internal Docker network"
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    assert_operator instruction.index("verify_generation_network!"), :<,
+                    instruction.index("generate_pids=()")
   end
 
   def test_judge_runtime_guard_rejects_a_pre_retry_snapshot_with_refresh_guidance

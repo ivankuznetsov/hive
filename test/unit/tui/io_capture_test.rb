@@ -21,12 +21,14 @@ class TuiIoCaptureTest < Minitest::Test
 
     a_installed = SizedQueue.new(1)
     b_entered = SizedQueue.new(1)
+    allow_inner_exit = SizedQueue.new(1)
 
     inner = Thread.new do
       a_installed.pop
       Hive::Tui::IoCapture.capture do
         b_entered.push(true)
         $stdout.puts "inner output discarded"
+        allow_inner_exit.pop
       end
     end
 
@@ -35,8 +37,10 @@ class TuiIoCaptureTest < Minitest::Test
       b_entered.pop
       $stdout.puts "outer output discarded"
     end
-    # Outer (A) has now fully exited while inner (B) may still be finishing;
-    # join guarantees B's ensure has run too.
+    # Outer (A) has exited while inner (B) is still active, so its ensure
+    # must hand the global bindings to B's live buffers before B restores
+    # the true originals.
+    allow_inner_exit.push(true)
     inner.join
 
     assert_same original_out, $stdout,

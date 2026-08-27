@@ -17,17 +17,19 @@ module Hive
         new(...).run
       end
 
-      def initialize(pr, project, cfg, dry_run:, logger:, inflight:)
+      def initialize(pr, project, cfg, dry_run:, logger:, inflight:, admission_open: -> { true })
         @pr = pr
         @project = project
         @cfg = cfg
         @dry_run = dry_run
         @logger = logger
         @inflight = inflight
+        @admission_open = admission_open
       end
 
       def run
         key = nil
+        return :shutdown unless admission_open?
         return :noop if @inflight.include?(inflight_key)
 
         key = inflight_key
@@ -40,6 +42,7 @@ module Hive
         # config, and the result is threaded into ContextBuilder so the second
         # call reuses this rollup rather than re-fetching.
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
+        return :shutdown unless admission_open?
         return handle_green(status, started) if already_green?(status) && !behind?(status)
 
         if fork_pr?
@@ -48,6 +51,7 @@ module Hive
         end
 
         return handle_green(status, started) if already_green?(status)
+        return :shutdown unless admission_open?
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
         context = Hive::Babysitter::ContextBuilder.build(
@@ -56,6 +60,8 @@ module Hive
           cfg: @cfg,
           status_rollup: status
         )
+        return :shutdown unless admission_open?
+
         result = spawn_agent(worktree.path, context)
         outcome = outcome_for(result, worktree.path)
         emit_agent_event(outcome, started)
@@ -68,6 +74,10 @@ module Hive
       end
 
       private
+
+      def admission_open?
+        @admission_open.call == true
+      end
 
       def number
         @pr.fetch("number")
@@ -150,7 +160,11 @@ module Hive
           return :dry_run
         end
 
+        return :shutdown unless admission_open?
+
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
+        return :shutdown unless admission_open?
+
         rebase = Hive::Babysitter::GhOps.rebase_onto_base(
           worktree.path,
           @pr.fetch("baseRefName"),
@@ -168,6 +182,7 @@ module Hive
           )
           return rebase.conflict? ? :rebase_conflict : :failure
         end
+        return :shutdown unless admission_open?
 
         # Push to the PR's REAL head branch (worktree.branch is the
         # babysitter's INTERNAL `hive-babysitter/pr-<n>` name and would update

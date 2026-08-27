@@ -14,15 +14,17 @@ module Hive
     module ProjectTick
       module_function
 
-      def run(project_entry, dry_run:, logger:, inflight:)
+      def run(project_entry, dry_run:, logger:, inflight:, admission_open: -> { true })
         started = Time.now
+        return empty_summary unless admission_open.call == true
+
         # Re-read config here (rather than accepting the dispatcher's cached
         # cfg) so a per-tick edit to babysitter.* takes effect on the next
         # tick without restarting the daemon.
         cfg = Hive::Config.load(project_entry.fetch("path"))
         unless cfg.dig("babysitter", "enabled") == true
           logger.event(:project_skipped, project: project_entry["name"], reason: "babysitter_disabled")
-          return { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+          return empty_summary
         end
 
         prs = Hive::Gh.list_open_prs(project_entry.fetch("path"), cfg: cfg)
@@ -33,11 +35,14 @@ module Hive
           duration_ms: duration_ms(started),
           count: prs.size
         )
+        return empty_summary unless admission_open.call == true
 
         owned_branches = pipeline_owned_branches(project_entry)
         selected = select_prs(prs, project_entry, cfg, inflight, owned_branches)
         summary = { total: selected.size, fixed: 0, untouched: 0, needs_human: 0 }
         selected.each do |pr|
+          break unless admission_open.call == true
+
           outcome =
             begin
               Hive::Babysitter::PrFixer.run(
@@ -46,7 +51,8 @@ module Hive
                 cfg,
                 dry_run: dry_run,
                 logger: logger,
-                inflight: inflight
+                inflight: inflight,
+                admission_open: admission_open
               )
             rescue StandardError => e
               Hive::Babysitter::Events.emit(
@@ -62,6 +68,8 @@ module Hive
                            message: "PrFixer raised: #{e.class}: #{e.message}")
               :failure
             end
+
+          break if outcome == :shutdown
 
           case outcome
           when :success, :rebased then summary[:fixed] += 1
@@ -87,8 +95,10 @@ module Hive
           message: e.message
         )
         logger.event(:fatal, project: project_entry["name"], message: "gh pr list failed: #{e.message}")
-        { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+        empty_summary
       end
+
+      def empty_summary = { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
 
       def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new)
         ignored = Array(cfg.dig("babysitter", "labels_ignore")).map { |label| label.to_s.downcase }

@@ -93,6 +93,48 @@ class BabysitterDispatcherTest < Minitest::Test
     end
   end
 
+  def test_tick_does_not_start_a_later_project_after_shutdown
+    with_tmp_dir do |dir|
+      logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
+      entries = %w[one two].map do |name|
+        { project: { "name" => name }, cfg: { "babysitter" => { "interval" => "10m" } } }
+      end
+      dispatcher.define_singleton_method(:enabled_projects) { entries }
+      calls = []
+
+      with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, **_kwargs|
+        calls << project["name"]
+        dispatcher.request_shutdown!
+      }) do
+        dispatcher.tick
+      end
+
+      assert_equal [ "one" ], calls,
+                   "shutdown during one project must suppress later projects in the same tick"
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_tick_does_not_enumerate_projects_after_shutdown
+    with_tmp_dir do |dir|
+      logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
+      enumerated = false
+      dispatcher.define_singleton_method(:enabled_projects) do
+        enumerated = true
+        []
+      end
+      dispatcher.request_shutdown!
+
+      assert_equal 0, dispatcher.tick
+      refute enumerated, "a stopped dispatcher must not start project enumeration"
+    ensure
+      logger&.close
+    end
+  end
+
   def test_tick_skips_local_and_unresolved_repositories_before_github_calls
     with_tmp_dir do |root|
       local = File.join(root, "local")

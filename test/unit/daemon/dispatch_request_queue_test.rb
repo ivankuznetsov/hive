@@ -359,6 +359,39 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_v5_markerless_controller_recovery_round_trips_and_has_exact_lookup
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      recovery = recovery_payload.merge(
+        "variant" => "markerless_failure",
+        "observed_marker_generation" => nil,
+        "expected_marker_attrs" => {},
+        "failure_origin" => "agent_exited_without_terminal_marker"
+      )
+      Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 2-fix --project hive --json],
+        requestor: "healer", trigger: "recovery/markerless_failure",
+        request_id: "markerless-controller-v5", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "2-fix", recovery: recovery,
+        state_home: dir, now: Time.utc(2026, 8, 10, 12)
+      )
+
+      parsed = Q.fetch("markerless-controller-v5", state_home: dir)
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
+      )
+      assert_empty schema.validate(JSON.parse(File.read(parsed.path))).to_a
+      assert_equal parsed, Q.find_markerless_recovery(
+        project: "hive", slug: "retry-task", task_generation: "c" * 64,
+        failure_origin: "agent_exited_without_terminal_marker", state_home: dir
+      )
+      assert_nil Q.find_markerless_recovery(
+        project: "hive", slug: "retry-task", task_generation: "f" * 64,
+        failure_origin: "agent_exited_without_terminal_marker", state_home: dir
+      )
+    end
+  end
+
   def test_v5_recovery_rejects_cross_variant_identity_and_unsafe_observations
     admission = recovery_payload.merge(
       "variant" => "admission_failure",
@@ -367,10 +400,20 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "policy_digest" => "e" * 64,
       "admission_observation" => admission_observation
     )
+    markerless = recovery_payload.merge(
+      "variant" => "markerless_failure",
+      "observed_marker_generation" => nil,
+      "expected_marker_attrs" => {},
+      "failure_origin" => "agent_exited_without_terminal_marker"
+    )
     invalid = [
       admission.merge("observed_marker_generation" => "a" * 64),
       admission.merge("expected_marker_attrs" => { "marker_id" => "invented" }),
       admission.merge("policy_digest" => nil),
+      markerless.merge("observed_marker_generation" => "a" * 64),
+      markerless.merge("expected_marker_attrs" => { "marker_id" => "invented" }),
+      markerless.merge("policy_digest" => "e" * 64),
+      markerless.merge("admission_observation" => admission_observation),
       recovery_payload.merge("policy_digest" => "e" * 64),
       admission.merge(
         "admission_observation" => admission.fetch("admission_observation").merge(

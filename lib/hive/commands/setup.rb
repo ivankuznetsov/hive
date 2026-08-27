@@ -305,10 +305,7 @@ module Hive
           # the backup-producing repair path.
           outcome = installer.install!(autostart: true, force: false)
           restarted = @web_bundle_refreshed && was_running && outcome.success? ? installer.restart! : false
-          state = Hive::Web::ServiceStatus.snapshot(
-            installer: installer, config: web_config, environment: @environment,
-            wait_for_running: true
-          )
+          state = setup_web_service_snapshot(installer: installer, wait_for_running: true)
           @web_service = state
           @web_service_platform_exception = outcome.success? &&
                                             outcome.wire_outcome == "unsupported" &&
@@ -335,9 +332,7 @@ module Hive
           add_phase("web_service", ok, data)
         rescue StandardError => e
           @web_service_platform_exception = false
-          state = Hive::Web::ServiceStatus.snapshot(
-            installer: installer, config: web_config, environment: @environment
-          )
+          state = setup_web_service_snapshot(installer: installer)
           @web_service = state
           add_phase(
             "web_service", false,
@@ -359,17 +354,13 @@ module Hive
             environment: @environment,
             config: web_config
           )
-          state = Hive::Web::ServiceStatus.snapshot(
-            installer: installer, config: web_config, environment: @environment
-          )
+          state = setup_web_service_snapshot(installer: installer)
           @web_service = state
           data = { "mutation" => mutation, "messages" => installer.messages }.merge(state)
           data["message"] = message if message
           add_phase("web_service", ok, data)
         rescue StandardError => e
-          state = Hive::Web::ServiceStatus.snapshot(
-            installer: nil, config: web_config, environment: @environment
-          )
+          state = setup_web_service_snapshot(installer: nil)
           @web_service = state
           add_phase(
             "web_service", false,
@@ -400,6 +391,15 @@ module Hive
 
       def web_config
         @web_config ||= Hive::Config.load_global_web
+      end
+
+      # Runtime identifies the producer reached by `hive web status`; it is
+      # not part of the older strict setup/install service-state contracts.
+      def setup_web_service_snapshot(installer:, wait_for_running: false)
+        Hive::Web::ServiceStatus.snapshot(
+          installer: installer, config: web_config, environment: @environment,
+          wait_for_running: wait_for_running
+        ).except("runtime")
       end
 
       def add_web_phase

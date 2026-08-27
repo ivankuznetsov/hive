@@ -8,6 +8,22 @@ class PackagingVerifyReleaseTest < Minitest::Test
   RELEASE_WORKFLOW = File.expand_path("../../../.github/workflows/release.yml", __dir__).freeze
   INSTALL_SMOKE_WORKFLOW = File.expand_path("../../../.github/workflows/install-smoke.yml", __dir__).freeze
   MANAGED_WEB_SETUP = File.expand_path("../../../packaging/verify-managed-web-setup.sh", __dir__).freeze
+  CHANNEL_SCRIPT = File.expand_path("../../../packaging/verify-channel.sh", __dir__).freeze
+
+  def test_release_and_channel_smokes_use_the_public_status_contracts_for_their_jobs
+    release = File.read(SCRIPT)
+    channel = File.read(CHANNEL_SCRIPT)
+
+    assert_includes release, "status --operational --json"
+    assert_includes release, '"hive-operational-status"'
+    assert_includes release, ".tasks[0].position.stage"
+    assert_includes release, ".tasks[0].evidence.task_action"
+    refute_includes release, ".projects[].tasks[]"
+
+    assert_includes channel, "status --json"
+    assert_includes channel, '"schema":"hive-running-status"'
+    refute_includes channel, '"schema":"hive-status"'
+  end
 
   def test_service_manager_is_stubbed_before_any_installed_hive_command_runs
     body = File.read(SCRIPT)

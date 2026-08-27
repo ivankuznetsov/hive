@@ -41,12 +41,22 @@ PID cannot target an unrelated process. If the platform cannot read a start
 time, the field is nil and that child-specific PID-reuse guard degrades to its
 existing PID-only behavior.
 
-`hive status --json` exposes the verified live holder's `task_lock_pid`,
+The internal scheduler graph exposes the verified live holder's `task_lock_pid`,
 `task_lock_process_start_time`, and `task_lock_id`. Recovery consumers bind
 destructive actions to that exact observed generation. The TUI snapshot keeps
 all three values losslessly even though its renderer currently uses only the
 derived `live_task_lock` flag, so the status/TUI schema boundary remains
 additive and future recovery actions can use the same generation identity.
+
+`hive status --json` is the compact polling boundary. It validates
+the runner and child process identities directly from bounded `.lock` reads
+and returns only rows where at least one is alive. A live child remains visible
+when the runner lock is stale; a stale lock with no live child is omitted. The
+contract exposes a closed `liveness.source` plus `liveness.running: true`, so
+clients do not infer activity from full-status attempt or marker internals.
+Unlike legacy full-status observation, the compact contract fails closed when
+the recorded process start identity is absent; this prevents a reused PID from
+becoming a false running row.
 
 ## Stale-lock detection (`stale_lock?`)
 

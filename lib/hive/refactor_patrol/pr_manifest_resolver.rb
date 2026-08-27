@@ -172,12 +172,7 @@ module Hive
                existing.fetch("changed_paths") == candidate.fetch("changed_paths")
           raise Conflict, "refactor patrol manifest conflict for #{candidate.fetch('job_id')}"
         end
-        expected_files = if existing.fetch("schema_version") == PrManifest::SCHEMA_VERSION
-          details.fetch("files").map(&:compact)
-        else
-          candidate.fetch("files")
-        end
-        unless existing.fetch("files") == expected_files
+        unless PrManifest.path_inventory(existing.fetch("files")) == candidate.fetch("files")
           raise Conflict, "refactor patrol manifest conflict for #{candidate.fetch('job_id')}"
         end
         existing
@@ -259,10 +254,7 @@ module Hive
           "merge_sha" => details.fetch("merge_sha"),
           "merged_at" => details.fetch("merged_at")
         }
-        files = details.fetch("files").map(&:compact).map do |file|
-          file.reject { |key, _value| key == "patch" }
-        end
-        PrManifest.build(source: source, files: files)
+        PrManifest.build(source: source, files: details.fetch("files"))
       end
 
       def project_classification(classification)
@@ -282,9 +274,7 @@ module Hive
       end
 
       def classification_snapshot(details, target_head:)
-        files = details.fetch("files").map do |file|
-          file.slice("path", "status", "patch", "previous_path")
-        end
+        files = PrManifest.path_inventory(details.fetch("files"))
         {
           "repository" => details.fetch("repository"),
           "number" => details.fetch("number"), "url" => details.fetch("url"),

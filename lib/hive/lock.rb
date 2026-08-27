@@ -8,6 +8,8 @@ module Hive
   module Lock
     module_function
 
+    PS_LSTART_TIMEOUT_SECONDS = 0.25
+
     def with_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
       lock_data = acquire_task_lock(task_folder, payload, create: create)
@@ -221,11 +223,58 @@ module Hive
       nil
     end
 
-    def ps_lstart_start_time(pid)
-      out = `ps -o lstart= -p #{pid.to_i} 2>/dev/null`.strip
+    def ps_lstart_start_time(pid, timeout: PS_LSTART_TIMEOUT_SECONDS)
+      reader, writer = IO.pipe
+      child_pid = Process.spawn(
+        "ps", "-o", "lstart=", "-p", pid.to_i.to_s,
+        out: writer, err: File::NULL
+      )
+      writer.close
+      status = wait_for_process(child_pid, timeout)
+      unless status
+        terminate_and_detach(child_pid)
+        child_pid = nil
+        return nil
+      end
+      child_pid = nil
+      return nil unless status.success?
+
+      out = reader.read(4_097)
+      return nil if out.bytesize > 4_096
+
+      out = out.strip
       out.empty? ? nil : out
     rescue StandardError
       nil
+    ensure
+      terminate_and_detach(child_pid) if child_pid
+      reader&.close unless reader&.closed?
+      writer&.close unless writer&.closed?
     end
+
+    def wait_for_process(pid, timeout)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+      loop do
+        result = Process.waitpid2(pid, Process::WNOHANG)
+        return result.last if result
+
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return nil unless remaining.positive?
+
+        IO.select(nil, nil, nil, [ remaining, 0.01 ].min)
+      end
+    end
+
+    def terminate_and_detach(pid)
+      begin
+        Process.kill("KILL", pid)
+      rescue SystemCallError
+        nil
+      end
+      Process.detach(pid)
+    rescue Errno::ECHILD
+      nil
+    end
+    private_class_method :wait_for_process, :terminate_and_detach
   end
 end

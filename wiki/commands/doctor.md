@@ -85,7 +85,7 @@ Health precedence is:
 Every unresolved managed row carries a scoped remediation such as
 `hive setup-agents --agent claude --skill ce-brainstorm`. Conflict messages
 name the winning path/owner and state that Hive will not replace it.
-OpenCode's exact pinned prepared-plugin identity is represented as
+OpenCode's exact pinned configured-plugin identity is represented as
 `configured:<package>` when the plugin has not materialized a stable on-disk
 install root yet. Doctor accepts that identity only when it byte-matches the
 native inventory's expected package id; arbitrary configured identities still

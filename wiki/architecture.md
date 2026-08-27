@@ -255,7 +255,7 @@ Cross-link: [[commands/tui]] for the user-facing surface, [[state-model]] for th
 ## Telegram bot pipeline
 
 The Telegram bot ([[commands/bot]]) is the mobile-shaped companion to
-the daemon. It watches the same `hive status --json` stream, uses the
+the daemon. It watches the same internal task projection, uses the
 same `Hive::TaskAction` classification, and turns rows that require
 human input into inline-keyboard or free-text conversations.
 

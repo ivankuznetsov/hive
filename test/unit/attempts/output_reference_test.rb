@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/output_reference"
+require "hive/attempts/store"
 
 class AttemptsOutputReferenceTest < Minitest::Test
   include HiveTestHelper
@@ -56,6 +57,63 @@ class AttemptsOutputReferenceTest < Minitest::Test
         Hive::Attempts::OutputReference.validate_shape!(base.merge("sha256" => "BAD"))
       end
       refute Hive::Attempts::OutputReference.verify(base.merge("path" => "../escape"), root: root)
+    end
+  end
+
+  def test_projection_reader_reads_only_verified_bounded_output_bytes
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      path = store.output_path("attempt-1", "diagnostic.json", create_directory: true)
+      File.binwrite(path, "typed diagnostic")
+      reference = Hive::Attempts::OutputReference.build(path, root: root)
+      reader = store.projection_reader
+
+      assert_equal "typed diagnostic", reader.read_output(reference, max_bytes: 64)
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(reference, max_bytes: 0)
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(reference, max_bytes: 4)
+      end
+
+      File.binwrite(path, "tampered bytes")
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(reference, max_bytes: 64)
+      end
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(reference.merge("path" => "../private.log"), max_bytes: 64)
+      end
+
+
+      target = store.output_path("attempt-1", "target.json")
+      File.binwrite(target, "typed diagnostic")
+      File.unlink(path)
+      File.symlink(target, path)
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(reference, max_bytes: 64)
+      end
+
+      real_parent = store.output_directory("attempt-real", create: true)
+      redirected_path = File.join(real_parent, "diagnostic.json")
+      File.binwrite(redirected_path, "typed diagnostic")
+      File.symlink(real_parent, File.join(store.outputs_root, "attempt-link"))
+      redirected_reference = {
+        "path" => "outputs/attempt-link/diagnostic.json",
+        "size" => 16,
+        "sha256" => Digest::SHA256.hexdigest("typed diagnostic")
+      }
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(redirected_reference, max_bytes: 64)
+      end
+
+      linked_target = store.output_path("attempt-real", "linked-target.json")
+      File.binwrite(linked_target, "linked diagnostic")
+      linked_path = store.output_path("attempt-real", "linked-diagnostic.json")
+      File.link(linked_target, linked_path)
+      linked_reference = Hive::Attempts::OutputReference.build(linked_path, root: root)
+      assert_raises(Hive::Attempts::StoreError) do
+        reader.read_output(linked_reference, max_bytes: 64)
+      end
     end
   end
 end

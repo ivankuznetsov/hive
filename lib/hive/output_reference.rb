@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "hive"
+require "hive/stringify_keys"
 require "pathname"
 
 module Hive
@@ -61,6 +62,40 @@ module Hive
       ::Digest::SHA256.file(candidate).hexdigest == reference.fetch("sha256")
     rescue InvalidOutputReference, Errno::ENOENT, Errno::EACCES
       false
+    end
+
+    def read(reference, root:, max_bytes:)
+      unless max_bytes.is_a?(Integer) && max_bytes.positive?
+        raise InvalidOutputReference, "attempt output read bound is invalid"
+      end
+
+      value = Hive::StringifyKeys.call(reference)
+      validate_shape!(value)
+      root_path = File.realpath(root)
+      path = File.join(root_path, value.fetch("path"))
+      lexical_parent = File.dirname(path)
+      parent = File.realpath(lexical_parent)
+      raise InvalidOutputReference, "attempt output parent is redirected" unless parent == lexical_parent
+
+      ensure_contained!(parent, root_path) unless parent == root_path
+      flags = File::RDONLY | File::NONBLOCK
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      bytes = File.open(path, flags) do |file|
+        stat = file.stat
+        unless stat.file? && stat.nlink == 1
+          raise InvalidOutputReference, "attempt output is not a single regular file"
+        end
+        raise InvalidOutputReference, "attempt output exceeds read bound" if stat.size > max_bytes
+
+        file.read(max_bytes + 1)
+      end
+      unless bytes.bytesize == value.fetch("size") &&
+             Digest::SHA256.hexdigest(bytes) == value.fetch("sha256")
+        raise InvalidOutputReference, "attempt output reference does not verify"
+      end
+      bytes
+    rescue SystemCallError, IOError => e
+      raise InvalidOutputReference, "attempt output is unavailable: #{e.message}"
     end
 
     def safe_relative_path?(path)

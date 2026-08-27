@@ -20,7 +20,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       script = File.join(dir, "fake-hive")
       File.write(script, <<~RUBY)
         #!/usr/bin/env ruby
-        if ARGV != %w[status --json]
+        if ARGV != %w[status --internal-task-graph --json]
           $stderr.puts "unexpected argv: \#{ARGV.inspect}"
           exit 64
         end

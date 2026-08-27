@@ -142,6 +142,13 @@ hive approve <slug> --from 2-brainstorm
 
 If the task is at `2-brainstorm`, advance to `3-plan` as usual. If it's at any other stage (because a prior call already advanced it, or because the user mv'd it manually), raise `Hive::WrongStage` (exit 4) with `task is at <actual> but --from expected 2-brainstorm`. Pass `--from` on every retry so a network blip mid-call doesn't silently advance the task two stages on the next attempt.
 
+The durable approval-operation identity is a bounded digest of the transition
+route, task's numeric input epoch, and opaque ownership generation. Attempts
+that retry the same lifecycle visit therefore reuse one operation receipt,
+while a workflow rework that legitimately revisits the same stage-to-stage
+route receives a distinct receipt instead of conflicting with the completed
+receipt from the earlier visit.
+
 ## Exit codes
 
 | Condition | Exit | Class |

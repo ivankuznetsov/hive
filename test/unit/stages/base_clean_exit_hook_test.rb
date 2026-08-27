@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/stages/base"
+require "hive/stages/execute"
 require "hive/task"
 require "hive/markers"
 require "hive/worktree"
@@ -103,6 +104,7 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     marker = Hive::Markers.current(task.state_file)
     assert_equal :error, marker.name
     assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
+    assert_equal "scope_violation", marker.attrs["failure_kind"]
     assert_includes marker.attrs["residue_paths"].to_s, "unrelated/path.txt"
   end
 
@@ -245,10 +247,10 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
   end
 
   # `Hive::ConfigError` (e.g. invalid `sign_policy`) is a programmer/
-  # operator misconfiguration, not a transient I/O blip — the generic
-  # `rescue StandardError` warn-and-continue path would silently
-  # swallow it, hiding the bad config from the operator. The dedicated
-  # rescue must surface it as `:error reason=ensure_clean_on_exit_failed`.
+  # operator misconfiguration, not a transient I/O blip. CleanExit
+  # normalizes this supported failure into a typed git_failed envelope
+  # with exact known-dirty recovery paths; Base then surfaces it as
+  # `:error reason=ensure_clean_on_exit_failed`.
   def test_with_stage_events_surfaces_config_error_as_clean_exit_failure
     root, task, worktree = make_task_and_worktree("6-review")
     remember(root, worktree)
@@ -269,7 +271,7 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     marker = Hive::Markers.current(task.state_file)
     assert_equal :error, marker.name
     assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
-    assert_match(/invalid sign_policy config/, marker.attrs["detail"].to_s)
+    assert_match(/invalid auto-commit config/, marker.attrs["detail"].to_s)
   end
 
   def test_with_stage_events_ignores_clean_exit_event_logging_failure
@@ -316,6 +318,36 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal "review_complete", result[:commit],
                  "result[:commit] must be preserved when CleanExit auto-commits residue"
     assert_equal :complete, result[:status]
+  end
+
+  def test_execute_auto_commit_warns_and_preserves_result_when_promotion_is_rejected
+    root, task, worktree = make_task_and_worktree("4-execute")
+    remember(root, worktree)
+    original_result = { commit: "execute_failed", status: :error }
+    rejected = lambda do |*_args|
+      raise Hive::WorktreeError, "synthetic recovery rejection"
+    end
+
+    result = nil
+    _out, err = capture_io do
+      with_replaced_singleton_method(
+        Hive::Stages::Execute, :recover_committed_residue!, rejected
+      ) do
+        result = Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+          FileUtils.mkdir_p(File.join(worktree, "wiki"))
+          File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+          Hive::Markers.set(task.state_file, :error, reason: "dirty_worktree")
+          original_result
+        end
+      end
+    end
+
+    assert_equal original_result, result
+    assert_includes err, "execute residue auto-commit could not complete the stage"
+    assert_includes err, "synthetic recovery rejection"
+    marker = Hive::Markers.current(task.state_file)
+    assert_equal :error, marker.name
+    assert_equal "dirty_worktree", marker.attrs.fetch("reason")
   end
 
   private

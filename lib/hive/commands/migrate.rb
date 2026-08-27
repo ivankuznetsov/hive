@@ -9,6 +9,7 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/markers"
 require "hive/paths"
+require "hive/patrol_fix/admission_store"
 require "hive/process_kill"
 require "hive/recovery"
 require "hive/recovery/migration"
@@ -75,17 +76,22 @@ module Hive
         new.send(:restart_daemon_if_running!)
       end
 
+      def self.restart_daemon_for_patrol_index_cutover!
+        new.send(:restart_daemon_for_patrol_index_cutover!)
+      end
+
       def initialize(project_path = Dir.pwd, display_name_generator: Hive::DisplayName::Generator,
                      managed_store_factory: Hive::WorkflowPackage::ManagedStore.method(:new),
                      config_loader: Hive::Config.method(:load),
                      global_migration: Hive::Recovery::Migration.method(:ensure!),
-                     daemon_restarter: nil)
+                     daemon_restarter: nil, daemon_cutover: nil)
         @project_path = File.expand_path(project_path)
         @display_name_generator = display_name_generator
         @managed_store_factory = managed_store_factory
         @config_loader = config_loader
         @global_migration = global_migration
         @daemon_restarter = daemon_restarter
+        @daemon_cutover = daemon_cutover
       end
 
       def call
@@ -198,6 +204,21 @@ module Hive
           prepared&.close
         end
 
+        patrol_admission_index = migrate_patrol_fix_pending_index(hive_state)
+        if patrol_admission_index.fetch(:changed)
+          cutover_restarted = (
+            @daemon_cutover || method(:restart_daemon_for_patrol_index_cutover!)
+          ).call
+          if cutover_restarted
+            # The first pass may race only with the old daemon, which does not
+            # maintain this index. A synchronous restart followed by one
+            # second explicit pass closes that finite cutover window. The new
+            # daemon uses the inventory lock for every mutation.
+            final_index = migrate_patrol_fix_pending_index(hive_state)
+            patrol_admission_index = final_index.merge(changed: true).freeze
+            restart_requested = true
+          end
+        end
         display_name_count = backfill_display_names(stages)
         if display_name_count.positive?
           Hive::Lock.with_commit_lock(hive_state) do
@@ -224,14 +245,26 @@ module Hive
         if repository_identity
           puts "hive: migrate backfilled registered repository identity #{repository_identity}"
         end
+        if patrol_admission_index.fetch(:changed)
+          puts "hive: migrate rebuilt Patrol Fix admission index " \
+               "(#{patrol_admission_index.fetch(:indexed)} pending of " \
+               "#{patrol_admission_index.fetch(:records)} records)"
+        end
         if !restart_requested && (config_changed || moved.any? ||
-           workflow_task_count.positive? || plan_review_requirement_count.positive?)
+           workflow_task_count.positive? || plan_review_requirement_count.positive? ||
+           patrol_admission_index.fetch(:changed))
           (@daemon_restarter || method(:restart_daemon_if_running!)).call
         end
         moved
       end
 
       private
+
+      def migrate_patrol_fix_pending_index(hive_state)
+        Hive::PatrolFix::AdmissionStore.new(
+          root: File.join(hive_state, "patrol-fix", "admissions")
+        ).rebuild_pending_index!
+      end
 
       def backfill_registered_repository_identity
         project = Hive::Config.registered_projects.find do |entry|
@@ -1029,6 +1062,33 @@ module Hive
         warn "hive: migrate detected a running hive-daemon (pid #{pid}); restart it " \
              "manually so its in-memory stage layout refreshes from the new Hive::Workflows::VERBS " \
              "(e.g., `hive daemon stop && hive daemon start`)"
+      end
+
+      # The admission index is a hard runtime cutover. Unlike ordinary
+      # best-effort migration restarts, a live old daemon must be replaced
+      # synchronously before the second index pass can certify the boundary.
+      def restart_daemon_for_patrol_index_cutover!
+        pid = read_daemon_pid
+        return false if pid.nil? || !daemon_alive?(pid)
+
+        unless systemctl_available?
+          raise Hive::Error,
+                "hive: migrate must replace the running hive-daemon before the Patrol Fix " \
+                "admission index cutover; run `hive daemon stop`, rerun `hive migrate`, " \
+                "then run `hive daemon start`"
+        end
+
+        ok = system("systemctl", "--user", "restart", "hive-daemon",
+                    out: File::NULL, err: File::NULL)
+        unless ok
+          raise Hive::Error,
+                "hive: migrate could not restart hive-daemon for the Patrol Fix admission " \
+                "index cutover; run `hive daemon stop`, rerun `hive migrate`, then run " \
+                "`hive daemon start`"
+        end
+
+        puts "hive: restarted hive-daemon (pid #{pid}) for the Patrol Fix admission index cutover"
+        true
       end
 
       def read_daemon_pid

@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/status"
@@ -13,7 +14,8 @@ class StatusTest < Minitest::Test
   def test_no_projects_message
     with_tmp_global_config do
       out, _err = capture_io { Hive::Commands::Status.new.call }
-      assert_includes out, "NO REGISTERED PROJECTS"
+      assert_includes out, "DAEMON STOPPED"
+      assert_includes out, "NO RUNNING TASKS"
     end
   end
 
@@ -115,7 +117,7 @@ class StatusTest < Minitest::Test
           }
         )
 
-        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+        out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
         payload = JSON.parse(out)
         row = payload.dig("projects", 0, "tasks", 0)
         review = row.fetch("plan_review")
@@ -175,7 +177,7 @@ class StatusTest < Minitest::Test
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "named-status-row-*")].first
         Hive::TaskMeta.update_display_name(folder, "Named Status Row")
 
-        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+        out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
         row = JSON.parse(out).dig("projects", 0, "tasks", 0)
 
         assert_equal File.basename(folder), row["slug"]
@@ -193,7 +195,7 @@ class StatusTest < Minitest::Test
         capture_io { Hive::Commands::New.new(project, "legacy status row").call }
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "legacy-status-row-*")].first
 
-        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+        out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
 
         refute File.exist?(File.join(folder, "events.jsonl"))
         refute File.exist?(File.join(folder, "task-projection.json"))
@@ -215,7 +217,7 @@ class StatusTest < Minitest::Test
           move_content_task(dir, slug, "1-inbox", "2-research", "research.md", "<!-- COMPLETE -->\n")
           seed_content_task(dir, "3-draft", "draft-row-260620-abcd", "draft.md", "<!-- COMPLETE -->\n")
 
-          out, = capture_io { Hive::Commands::Status.new(json: true).call }
+          out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
           rows = JSON.parse(out).dig("projects", 0, "tasks")
 
           assert_equal %w[2-research 3-draft], rows.map { |row| row.fetch("stage") }.sort
@@ -254,7 +256,7 @@ class StatusTest < Minitest::Test
           capture_io { Hive::Commands::New.new(project, "coding status row").call }
           capture_io { Hive::Commands::New.new(project, "content status row", workflow: "content_fixture").call }
 
-          out, = capture_io { Hive::Commands::Status.new(json: true).call }
+          out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
           rows = JSON.parse(out).dig("projects", 0, "tasks")
 
           coding = rows.find { |row| row.fetch("slug").start_with?("coding-status-row-") }
@@ -388,7 +390,7 @@ class StatusTest < Minitest::Test
         assert File.exist?(File.join(folder, "events.jsonl")), "emit must have produced events.jsonl on disk"
         assert File.exist?(File.join(folder, "status.md")), "emit must have produced status.md on disk"
 
-        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+        out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
         refute_match(/events\.jsonl/, out, "status --json must not reference events.jsonl")
         refute_match(/#{Regexp.escape(sentinel)}/, out, "status --json must not leak event messages")
         refute_match(/"status\.md"/, out, "status --json must not reference status.md")

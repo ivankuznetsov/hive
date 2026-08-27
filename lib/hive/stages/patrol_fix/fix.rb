@@ -4,9 +4,11 @@ require "hive/patrol_fix/fix_report"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_receipt"
+require "hive/git_ops"
 require "hive/stages/base"
 require "hive/stages/managed_agent_custody"
 require "hive/stages/patrol_fix/inbox"
+require "hive/worktree"
 
 module Hive
   module Stages
@@ -19,7 +21,7 @@ module Hive
         def run!(task, cfg = {}, agent_runner: nil, worktree_root: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
-          decision, rework = fix_authorization(receipts, manifest)
+          rework = fix_authorization(receipts, manifest)
           existing = current(receipts, manifest, "fix", "fix")
           return complete(existing) if existing
 
@@ -38,9 +40,8 @@ module Hive
           else
             custody.prepare!(
               generation: manifest.dig("task", "generation"),
-              evidence_digest: manifest.dig("evidence_revision", "digest"),
-              base_revision: decision.dig("payload", "head_revision")
-            )
+              evidence_digest: manifest.dig("evidence_revision", "digest")
+            ) { strict_origin_base!(task, cfg) }
           end
           output = File.join(task.folder, REPORT_FILENAME)
           prompt = render_prompt(task, manifest, owner, output)
@@ -60,7 +61,7 @@ module Hive
             )
           end
           validate_agent_run!(run)
-          report = Hive::PatrolFix::FixReport.read(output)
+          report = read_report!(output)
           raise Hive::StageError, "fix agent parked with partial work; preserving the owned worktree" unless report.status == "fixed"
           payload = custody.capture!(
             generation: manifest.dig("task", "generation"),
@@ -97,14 +98,29 @@ module Hive
             "recorded_at" => Time.now.utc.iso8601, "payload" => payload }
         end
         private_class_method :build_receipt
+        def read_report!(path)
+          Hive::Stages::ManagedAgentCustody.read_report(
+            stage: "fix", parser: "fix_report",
+            invalid_report: Hive::PatrolFix::FixReport::InvalidReport
+          ) { Hive::PatrolFix::FixReport.read(path) }
+        end
+        private_class_method :read_report!
 
         def current(store, manifest, kind, stage)
           store.read_all.find { |r| r["kind"] == kind && r["stage"] == stage && r["task"] == manifest["task"] && r["evidence_revision"] == manifest["evidence_revision"] }
         end
         private_class_method :current
+        def strict_origin_base!(task, cfg)
+          branch = (cfg || {})["default_branch"] ||
+            Hive::GitOps.new(task.project_root).detect_default_branch
+          Hive::Worktree.new(task.project_root, task.slug).fetch_strict_origin_base!(branch)
+        rescue Hive::GitError, Hive::WorktreeError => e
+          raise Hive::StageError, "Patrol Fix worktree base is unavailable: #{e.message}"
+        end
+        private_class_method :strict_origin_base!
         def fix_authorization(store, manifest)
           inbox = current(store, manifest, "decision", "inbox")
-          return [ inbox, false ] if inbox&.dig("payload", "route") == "fix"
+          return false if inbox&.dig("payload", "route") == "fix"
 
           reopen = current(store, manifest, "reopen", "review")
           prior = store.read_all.find do |row|
@@ -112,7 +128,7 @@ module Hive
           end
           if reopen&.dig("payload", "operator") == "controller:review" &&
              prior&.dig("payload", "route") == "rework"
-            return [ prior, true ]
+            return true
           end
           raise Hive::StageError, "fix requires a current inbox fix or controller rework authorization"
         end
@@ -120,8 +136,14 @@ module Hive
         def complete(receipt) = { status: :complete, commit: "patrol-fix fix complete", receipt: receipt }
         private_class_method :complete
         def validate_agent_run!(run)
-          raise Hive::StageError, "fix agent failed" unless run.is_a?(Hash) && run[:status] == :ok
-          raise Hive::StageError, "fix agent modified controller authority: #{run[:diagnostic]}" unless run[:custody] == :clean
+          unless run.is_a?(Hash) && run[:status] == :ok
+            code = run.is_a?(Hash) && run.dig(:attempt_diagnostic, "code")
+            raise Hive::StageError, [ "fix agent failed", code ].compact.join(": ")
+          end
+          unless run[:custody] == :clean
+            diagnostic = run.dig(:attempt_diagnostic, "code") || run[:diagnostic]
+            raise Hive::StageError, "fix agent modified controller authority: #{diagnostic}"
+          end
         end
         private_class_method :validate_agent_run!
       end

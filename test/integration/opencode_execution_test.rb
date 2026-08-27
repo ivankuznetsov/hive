@@ -52,7 +52,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     FileUtils.rm_rf(@driver_dir)
   end
 
-  def test_fake_cli_completes_execute_with_confined_policy_identity_and_cleanup
+  def test_fake_cli_completes_execute_with_native_state_policy_and_identity
     with_tmp_global_config do
       with_tmp_git_repo do |project|
         capture_io { Hive::Commands::Init.new(project).call }
@@ -117,7 +117,6 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         )
         assert observation.fetch("selected_credential_present")
         refute observation.fetch("ambient_credential_present")
-        refute File.exist?(observation.fetch("invocation_root"))
 
         projection = JSON.parse(
           File.read(File.join(folder, "task-projection.json"))
@@ -174,7 +173,6 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         working_directory: folder,
         additional_write_root: folder
       )
-      refute File.exist?(observation.fetch("invocation_root"))
       assert_equal 1, model_calls.count { |entry| entry["command"] == "run" }
       assert_equal 1,
                    model_calls.count { |entry| entry["command"] == "export" }
@@ -188,8 +186,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     config["agents"]["opencode"] = {
       "config_path" => @configuration,
       "credential_env" => [ "ANTHROPIC_API_KEY" ],
-      "plugins" => plugin ? [ "file://#{plugin}" ] : [],
-      "isolation" => "hermetic"
+      "plugins" => plugin ? [ "file://#{plugin}" ] : []
     }
     config[stage] ||= {}
     config[stage]["agent"] = "opencode"
@@ -315,12 +312,9 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         puts '{"variants":{"high":{}}}'
       else
         if command == "run"
-          config_path = ENV.fetch("OPENCODE_CONFIG")
-          config = JSON.parse(File.read(config_path))
-          permission = config.fetch("permission")
+          permission = JSON.parse(ENV.fetch("OPENCODE_PERMISSION"))
           observation = {
             "working_directory" => working_directory,
-            "invocation_root" => File.dirname(ENV.fetch("XDG_CONFIG_HOME")),
             "permission" => permission,
             "stdin_bytes" => prompt.bytesize,
             "prompt_in_argv" => ARGV.include?(prompt),

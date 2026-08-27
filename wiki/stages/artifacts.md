@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-22
+updated: 2026-08-25
 tags: [stage, artifacts, evidence, review]
 ---
 
@@ -170,7 +170,10 @@ reviewed runtime, locale, provider-session, and desktop-session keys. Arbitrary
 project credentials are not inherited. Before that environment is cleared,
 Hive resolves a bare provider command past tool-manager launchers to a concrete
 executable; opaque tool-manager session variables are never copied into the
-role. Producer paths are task-relative, must begin with the controller-issued
+role. OpenCode inference and reviewer roles receive their read-only access
+through OpenCode's typed per-run permission input; Hive never forwards the legacy
+`allowed_tools` or `disallowed_tools` channels to those launches. Producer
+paths are task-relative, must begin with the controller-issued
 attempt root, and cross a no-follow, hash-checked custody copy before the
 reviewer starts. Raw producer workspace files are removed after admission or
 failure. The reviewer reads the original task, plan when present, and exact

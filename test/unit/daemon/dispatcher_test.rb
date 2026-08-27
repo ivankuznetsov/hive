@@ -316,7 +316,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   class FakeRecoveryCoordinator
     attr_reader :resumes, :deferred, :marked, :admission_failures,
                 :admission_observations, :terminal_repairs
-    attr_accessor :defer_error, :terminal_repair_result
+    attr_accessor :defer_error, :mark_result, :terminal_repair_result
 
     def initialize(status: "blocked")
       @status = status
@@ -327,6 +327,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @admission_observations = []
       @terminal_repairs = []
       @defer_error = nil
+      @mark_result = nil
       @terminal_repair_result = false
     end
 
@@ -380,6 +381,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def mark_dispatched(request, **attributes)
       @marked << { request: request, **attributes }
+      return mark_result if mark_result
+
+      terminal = attributes.fetch(:terminal, false)
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: terminal ? "terminal" : "running",
+        request_id: request.request_id,
+        attempt_id: attributes[:attempt_id],
+        phase: terminal ? "terminal" : "dispatched",
+        failure_origin: request.recovery["failure_origin"],
+        next_eligible_at: request.recovery["next_eligible_at"],
+        owner: terminal ? "none" : "agent", reason: nil, remediation: nil,
+        retry_count: request.recovery["retry_count"], provider_hint: nil
+      )
     end
 
     def repair_failed_terminal_marker(request, refresh: true)
@@ -6682,6 +6696,59 @@ end
     assert_equal "attempt-terminal", marked.fetch(:attempt_id)
     assert_equal true, marked.fetch(:terminal)
     assert_equal "failed", marked.fetch(:outcome)
+  end
+
+  def test_terminal_recovery_transition_conflict_is_not_reported_as_completed
+    request = Q::Request.new(
+      request_id: "recovery-conflict", created_at: T0,
+      project: "p1", slug: "recovery-task",
+      argv: %w[hive run recovery-task], requestor: "healer", chat_id: nil,
+      recovery: dispatcher_recovery(phase: "admitted")
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request,
+      claim: { "attempt_id" => "attempt-terminal" },
+      path: "/claim"
+    )
+    receipt = { "exit_status" => 70, "outcome" => "failed" }
+    attempt = Struct.new(:attempt_id, :task_generation, :state, :receipt).new(
+      "attempt-terminal", "generation-1", "terminal", receipt
+    )
+    acknowledgements = []
+    reconciler = Object.new
+    reconciler.define_singleton_method(:fetch) { |_id| attempt }
+    reconciler.define_singleton_method(:acknowledge_finalization) do |seen, consumer|
+      acknowledgements << [ seen.attempt_id, consumer ]
+    end
+    coordinator = FakeRecoveryCoordinator.new
+    coordinator.mark_result = Hive::Daemon::RecoveryCoordinator::Receipt.new(
+      status: "unavailable", request_id: request.request_id,
+      attempt_id: attempt.attempt_id, phase: "admitted",
+      failure_origin: "agent_exited_without_terminal_marker",
+      next_eligible_at: nil, owner: "scheduler", reason: "transition_conflict",
+      remediation: "refresh status and retry", retry_count: 2, provider_hint: nil
+    )
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(
+      rows: [], attempt_reconciler: reconciler,
+      recovery_coordinator: coordinator
+    )
+    result_writes = []
+    dispatcher.define_singleton_method(:write_attempt_dispatch_result) do |*_args, **_kwargs|
+      result_writes << true
+    end
+
+    with_replaced_singleton_method(Q, :claimed, ->(**_kwargs) { [ delivery ] }) do
+      2.times { dispatcher.send(:reconcile_attempt_deliveries, now: T0) }
+    end
+
+    assert_empty result_writes
+    assert_empty acknowledgements
+    refute logger.events.any? { |name, _attrs| name == :dispatch_request_completed }
+    failures = logger.events.select do |name, attrs|
+      name == :dispatch_request_reconciliation_failed &&
+        attrs[:reason] == "transition_conflict"
+    end
+    assert_equal 2, failures.size
   end
 
   def test_legacy_manual_lost_delivery_remains_claimed_for_successor_recovery

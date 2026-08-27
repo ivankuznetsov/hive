@@ -1,33 +1,123 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-08-26
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
-**TLDR**: `hive status` now defaults to a compact operational snapshot for
-humans: closed state bands, counts, exact blocker ownership/reasons, and at
-most five representative rows per band. `hive status --operational --json`
-emits the agent contract `hive-operational-status.v4`. The complete task graph
-is available as `hive status --json` (`hive-status.v7`), and
-`hive status --full` keeps the former detailed human
-table.
+**TLDR**: `hive status` answers the ordinary operational question—whether the
+daemon is alive and what is running now—without constructing every task's
+workflow history. `hive status --json` emits the bounded
+`hive-running-status.v1` contract. Use `hive status --operational` for the
+broader active queue and blocker ownership, `hive task TARGET --json` for one
+task's detail, `hive tui` for the fleet browser, and `hive archive` for
+terminal history. The former public full-fleet status surface is removed.
 
 ## Mode contract
 
 | Invocation | Contract |
 |---|---|
-| `hive status` | Concise human operational snapshot. |
-| `hive status --operational` | Explicit alias for the same concise human view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. V4 adds a required nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
-| `hive status --json` | Complete `hive-status.v7` graph for daemon, bot, TUI, and current consumers. |
-| `hive status --full` | Former grouped detailed human table. |
-| `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
+| `hive status` | Bounded human daemon/liveness snapshot. |
+| `hive status --json` | `hive-running-status.v1`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. |
+| `hive status --operational` | Concise human active-work and blocker view. |
+| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
+| `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
+| `hive task TARGET --json` | Detailed semantic workspace for one task. |
+| `hive archive [--json]` | Retention-unfiltered terminal history. |
 
-`--full` cannot be combined with `--json` or `--operational`. Archive mode and
-diagnosis retain their established contracts.
+The daemon and bot temporarily use a hidden `--internal-task-graph` transport
+while their purpose-built projections are extracted. It is not a public CLI
+contract and must not be used by plugins or agents. The end state removes that
+fleet-wide v7 transport after those consumers migrate.
+
+## Bounded running-task contract
+
+`Hive::RunningStatus` scans at most 256 registered projects and 10,000 stage/task
+directory entries without materializing complete directory listings. It
+performs only small task-local reads: at most 16 KiB from a candidate `.lock`,
+then at most 64 KiB of `meta.yml` only after a live process is established.
+Task and daemon PID files are opened nonblocking and no-follow; daemon health
+reads at most 4 KiB through `Hive::Daemon::StatusReport#running_state`. The
+producer does not instantiate `Task`, open the attempts store, read conditions
+or history, project actions, inspect git, build `hive-status.v7`, or run daemon
+service/binary-drift subprocess probes.
+Bounded YAML parsing treats parser recursion and allocation failures as
+malformed input, so deeply nested lock, metadata, or daemon PID documents
+degrade the snapshot instead of crashing the command.
+
+A row is running when either:
+
+- the task lock's runner PID is alive and its recorded process start time still
+  matches, or
+- the lock's recorded agent child PID is alive and its child process start time
+  still matches. This keeps an orphaned live agent visible for recovery even
+  when its runner died.
+
+A live lock without a child PID is therefore a valid running row. A stale lock
+with no live child is counted under `source.stale_locks` and omitted. A lock
+without the recorded start identity required by this compact contract also
+fails closed as stale; the temporary internal graph retains its existing
+PID-only compatibility. Malformed
+locks and task folders that move during observation do not abort the fleet
+response: they are counted under `source.malformed_locks` or
+`source.transition_skips`, and `complete` becomes false because liveness could
+not be proven. Malformed, absent, unreadable, or oversized metadata does not
+hide a live task; the row falls back to its bounded folder identity and reports
+`metadata_status`.
+
+Every returned task has `status: "running"`, `action: "agent_running"`, and
+`liveness.running: true`; `liveness.source` says which process observation
+proved it. V1 deliberately emits `marker: null` rather than reading state
+files. It does not expose or reinterpret the full graph's `current_attempt`
+string. Clients must use the explicit liveness object.
+
+When a daemon is live, the producer carries the runtime identity attested by
+that daemon's ownership-checked PID receipt. A missing or malformed legacy
+receipt projects `unknown` rather than borrowing the observing CLI's identity.
+An unreadable or malformed receipt also projects `unknown` when daemon liveness
+cannot be established. When the daemon is observably absent, the runtime belongs
+to the observing CLI itself. This
+lets compact plugin calls distinguish release and dogfood without mislabeling
+a mixed cutover or expanding the task graph. The producer returns at most 32 rows and guarantees that the encoded document,
+including its trailing newline, is at most 65,536 bytes. `count` is the number
+returned. `observed_count` and `omitted_count` are exact when their paired
+`*_exact` flags are true; after a scan cap they are lower-bound/known-observed
+counts and `source.scan_truncated`, `truncated`, and `complete: false` make that
+omission explicit. `limits` publishes every row, byte, project, and directory
+entry cap.
+
+Operational status does not rescan every task when the live daemon already has an
+authoritative full graph. Each completed full daemon tick publishes that exact
+`hive-status` payload once in a dedicated owner-private atomic cache, separate
+from the small operational scheduler snapshot. Only `--operational` opts into
+the large cache. It accepts it only when
+its daemon generation, tick, deadline, schema, and registered project identities
+match the live scheduler observation and registry. An absent, invalid, expired,
+or mismatched cache falls back to the ordinary fresh graph scan. Default
+status never reads this cache. Archive, diagnosis, and the hidden internal
+task-graph surfaces keep their existing fresh-read contracts; the daemon's
+own graph producer cannot consume its cache recursively.
+
+The cache is a bounded freshness optimization, not a second source of truth.
+When it belongs to the same completed tick as the scheduler record, the shared
+tick sequence proves that it is the graph on which those scheduler decisions
+were made. The daemon preserves that coherent completed pair while a later tick
+is running or fails, so ordinary operational status does not transiently lose
+scheduler ownership. The retained observation keeps its original timestamp and
+deadline; expiry, daemon replacement, and every task-identity join still fail
+closed. Independently supplied status graphs still pass the timestamp and
+per-task scheduler-join fences.
+During a binary/daemon cutover, an older scheduler record has no dedicated
+payload-mtime field. A same-tick cached Patrol Fix controller graph may treat
+only that unavailable timestamp as unknown because the shared tick sequence
+already binds the graph to the decision. Fresh scans and ordinary legacy rows
+keep the mtime comparison, and current snapshots always compare the explicit
+payload timestamp.
+The operational human heading reports the cached graph's age. The operational
+JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
+`age_seconds` separately from the projection timestamp.
 
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
@@ -35,8 +125,8 @@ seven states: `running`, `needs_repair`, `waiting_on_you`,
 Classification precedence is running, repair, human input, provider/scheduler,
 completion, unknown, then idle. The human renderer deliberately displays
 running, human input, repair, provider/scheduler, completion, unknown, then
-idle; it caps each band at five rows and reports overflow with `hive status
---full`. The human view prints active/archive counts, exact project/slug
+idle; it caps each band at five rows and directs overflow to `hive tui`. The
+human view prints active/archive counts, exact project/slug
 identity, stage/marker, blocker owner, reason, and source issues. The JSON
 document additionally carries project counts, daemon/scheduler identity and
 freshness, structured provider/retry evidence, and the exact durable routing
@@ -50,6 +140,29 @@ A benign dependency-blocked row is always
 Explicit human input still has higher precedence, so a row that is both
 dependency-blocked and waiting for answers remains `waiting_on_you` while the
 dependency reason stays secondary.
+
+Patrol Fix outcomes parked by the controller are terminal, non-runnable rows.
+The hidden compatibility graph continues to expose their action as
+`needs_input`, but operational status recognizes the closed Patrol shape
+(`marker: none`, no suggested command) and reports `completion_ready` with
+`blocker_owner: none`. Rejected, blocked, and escalated findings therefore
+remain visible for audit without inflating the operator-decision count.
+
+A current failed Patrol attempt may project a receipt-bound typed diagnostic
+through the existing task `diagnostic` field. Status resolves only the
+diagnostic output reference named by the validated terminal Record, verifies
+its bounded bytes and digest, and requires its attempt, stage, opaque ownership
+generation, and log reference to match that Record. The task and operational
+documents expose the same diagnostic digest, owner, process/provider/parser/
+firewall fields, and safe references. Stale identity, tampered bytes, symlinks,
+or a mismatched log reference omit the projection; status never opens the raw
+log as a substitute. The task journal must first identify the current attempt
+as terminal and failed or cancelled, so running and successful rows do not
+point-fetch diagnostic receipts on the status hot path. A provider-owned typed
+failure is provider-waiting, while other typed failures are repair-owned.
+An exit-75 receipt is scheduler contention rather than a Patrol-agent verdict,
+so status does not synthesize or project its `agent_exit_nonzero` diagnostic.
+Durable recovery disposition and pacing remain separate policy.
 
 For a daemon-enrolled project with global automatic retry enabled, a real
 `ERROR` or `REVIEW_ERROR` defaults to
@@ -84,7 +197,10 @@ an idle verdict. Unclassifiable rows remain `unknown`; a partial snapshot may
 still report a stronger directly observed active state, but never claims idle
 from missing evidence.
 
-`hive-operational-status.v4` includes summary/state counts, daemon identity and
+`hive-operational-status.v4` includes the task-graph producer's `runtime`
+identity (the daemon-recorded identity for a cache hit, or the CLI identity
+for a fresh scan),
+summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
 the required bounded `attempt_storage` cell for the current physical
 `attempts/v4` layout, per-task liveness/freshness,
@@ -139,10 +255,14 @@ scanning any project's rows, captures one UTC `now`, and then publishes either
 the ordinary or dedicated archive projection. Dependency admission uses those
 same captured generations and is built from the complete
 graph before presentation filtering, so an expired completed dependency still
-satisfies its dependants. Daemon, bot, TUI, and web consume the ordinary
-projection. The TUI separately caches a fresh archive-mode payload for its
-dedicated archive pane and dependency context; it never reconstructs ordinary
-visibility from row timestamps.
+satisfies its dependants. When concise operational status builds that graph, it
+also derives each project's `daemon.enabled` context from the captured
+generation instead of parsing the project config a second time. Callers that
+provide an existing status payload retain the context-only config read and do
+not trigger a new workflow-generation scan. Daemon, bot, TUI, and web consume
+the ordinary projection. The TUI separately caches a fresh archive-mode
+payload for its dedicated archive pane and dependency context; it never
+reconstructs ordinary visibility from row timestamps.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report
@@ -152,14 +272,14 @@ array while healthy projects remain present. The machine-readable error keeps
 an unexpected failure distinguishable from a legitimately empty project, with
 the detailed exception retained in the stderr/daemon-log breadcrumb.
 `UnsupportedProjectConfigError` is the deliberate exception to project-local
-degradation: text, compatibility JSON, and operational status all propagate the
+degradation: archive text, the internal graph, and operational status all propagate the
 shared configuration failure (exit 78) instead of returning an `ok: true`
 snapshot that hides unsupported root keys.
 
-## Detailed compatibility output shape
+## Internal and archive row shape
 
-The following detailed grouping and row rules apply to `--full`, archive mode,
-and compatibility JSON where relevant.
+The following detailed grouping and row rules apply to archive mode, TUI/web
+projections, and the temporary internal graph where relevant.
 
 ```
 <project_name>
@@ -171,7 +291,7 @@ and compatibility JSON where relevant.
     🤖 —    —     add-cache-260424-9a8b agent_working pid=1234   - 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by task mtime (newest first). The human identity column renders `#id PR display_name` when available, falls back to `#id PR slug`, and uses `— PR slug` when pre-migration/counter-failed tasks have no id. The PR slot is fixed-width: rows with no parseable PR URL render `—`, while pull-request URLs render `#<number>` and become OSC 8 hyperlinks only when stdout is a TTY. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include `mtime` (state-file mtime when present, otherwise the directory mtime), `observation_mtime` (the stable action-token source: state file, then `meta.yml`, then directory), and `folder_mtime` (always the task-directory mtime). All three timestamps are ISO8601 with six fractional digits. Keeping the scheduler-facing `mtime` distinct from the action-facing `observation_mtime` lets stage moves invalidate dispatch baselines without letting lock-directory churn invalidate an action token. `folder_mtime` remains useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity.
+Detailed renderers print one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by task mtime (newest first). The human identity column renders `#id PR display_name` when available, falls back to `#id PR slug`, and uses `— PR slug` when pre-migration/counter-failed tasks have no id. The PR slot is fixed-width: rows with no parseable PR URL render `—`, while pull-request URLs render `#<number>` and become OSC 8 hyperlinks only when stdout is a TTY. Commands and internal paths continue to use the slug. Internal rows include `mtime` (state-file mtime when present, otherwise the directory mtime), `observation_mtime` (the stable action-token source: state file, then `meta.yml`, then directory), and `folder_mtime` (always the task-directory mtime). All three timestamps are ISO8601 with six fractional digits. Keeping the scheduler-facing `mtime` distinct from the action-facing `observation_mtime` lets stage moves invalidate dispatch baselines without letting lock-directory churn invalidate an action token. `folder_mtime` remains useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity.
 
 Rows also include `workflow`, the descriptor id that resolved the task (`"coding"` for legacy/default rows, or the `meta.yml workflow:`/project default id for registered non-coding tasks). Row-based consumers such as the daemon and Telegram bot use it to keep coding-only plan/brainstorm/review/finalize behavior from firing for generic tasks.
 
@@ -271,8 +391,8 @@ durable per-project cursor under Hive's state home rotates past persistent
 failures across one-shot CLI processes, and the path-only backfill commit
 preserves unrelated staged operator changes.
 
-Ordinary text, `hive status --full`, `hive status --json`, operational status,
-daemon snapshots, TUI, web, and Hivebox omit expired archived rows. Every
+Operational status, daemon snapshots, TUI, web, and Hivebox omit expired
+archived rows. Every
 successful ordinary project JSON object carries the non-negative
 `hidden_archived_task_count` (including `0`); task objects do not expose
 `completed_at`, retention, hidden details, or hidden reasons. Operational
@@ -290,7 +410,7 @@ same id/PR/display-name identity column as daily status. `hive archive --json`
 retains the existing task-object shape. `hive archive <slug>` still runs the
 workflow verb that advances a completed terminal predecessor.
 
-Every compatibility JSON task row has a nullable `closure` field. A validated
+Every internal task-graph row has a nullable `closure` field. A validated
 receipt exposes the exact reason, authority, digest, successor, and canonical
 evidence links; an invalid receipt exposes a bounded quarantine blocker and
 never overrides the current task state. Archived rows retain that same receipt,
@@ -307,7 +427,7 @@ continuing to omit ordinary archived rows.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 
-Every Project entry in `hive status --json` carries a `legacy_stage_dirs` array — `[]` for healthy projects, otherwise a list of `{ "stage_dir": "<name>", "task_count": <N> }` entries (sorted alphabetically by `stage_dir`). The field is populated by `Status#detect_legacy_stage_dirs`, which scans `<hive_state>/stages/` for directories that are **not** in the current workflow generation, are not status-private siblings such as `archived-manual/`, and contain at least one slug-shaped task subfolder that requires migration. A managed task is excluded only when it resolves against the selected workflow generation; a stale, corrupt, or incomplete generation pin fails closed and remains in the legacy count until `hive migrate` rewrites it. Stray non-slug siblings (`logs/`, `.gitkeep`, `.DS_Store`) are ignored.
+Every Project entry in the internal task graph carries a `legacy_stage_dirs` array — `[]` for healthy projects, otherwise a list of `{ "stage_dir": "<name>", "task_count": <N> }` entries (sorted alphabetically by `stage_dir`). The field is populated by `Status#detect_legacy_stage_dirs`, which scans `<hive_state>/stages/` for directories that are **not** in the current workflow generation, are not status-private siblings such as `archived-manual/`, and contain at least one slug-shaped task subfolder that requires migration. A managed task is excluded only when it resolves against the selected workflow generation; a stale, corrupt, or incomplete generation pin fails closed and remains in the legacy count until `hive migrate` rewrites it. Stray non-slug siblings (`logs/`, `.gitkeep`, `.DS_Store`) are ignored.
 
 When the field is non-empty, the text output prints a warning under the project header:
 
@@ -363,7 +483,36 @@ Error rows rather than disappearing. Marker is read with
 and otherwise the directory mtime; `observation_mtime` is the state-file mtime
 when present, then `meta.yml`, then the directory fallback.
 
-Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps `hive status --json` and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
+One full status scan opens one read-only durable attempt store and shares it
+across every task projection and closure projection. A scan-scoped projection
+reader also caches each immutable attempt binding, including a missing result,
+so journal replay and closure validation cannot repeat the same global point
+read within one snapshot. The default store opens only the current v4 layout
+and never runs or monitors migration. The store and cache are not
+process-global, so a later scan still observes fresh durable attempt data. The
+internal `--daemon-task` fast-tick scan shares one store and one reader the
+same way, across every requested project, so a bounded daemon tick never
+rebuilds them per project.
+
+Each task row first reads its bounded projection checkpoint instead of hashing
+and replaying the task's complete journal. A checkpoint is usable for exact
+status only when it is current, its journal identity/size/metadata and bounded
+head/tail anchors still match, and every durable attempt identity still
+matches. Mutable attempt state is refreshed through the scan-scoped attempt
+reader and reprojected from checkpoint seed facts, so a terminal or lost
+attempt is visible without replaying old journal history. A journal append,
+missing/stale/partial checkpoint, invalid attempt identity, or any bounded-read
+failure falls back to the authoritative full-journal `read`; status never
+publishes the partial workspace projection as exact task state.
+
+Terminal and lost attempt bindings in a validated checkpoint are final,
+permanent-proof metadata and are therefore reused without another global
+attempt-store point read. Only non-final bindings are refreshed on each scan,
+which preserves live running-to-terminal reconciliation while keeping status
+cost proportional to active attempts instead of every historical attempt named
+by every task.
+
+Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps the internal graph and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 
 Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. `collect_rows` also reads each task `.lock`, verifies the holder PID and recorded process start time through `Hive::Lock`, and passes `live_task_lock: true` to `TaskAction` while `hive run` is active even if the stage has not written an `AGENT_WORKING` or `REVIEW_WORKING` marker yet. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
 
@@ -395,7 +544,7 @@ hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] [--
 hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] --write [--json]
 ```
 
-Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and is read-only. For a **red-recovery** row it prints the same local diagnostic payload `hive status --json` carries on that row. For any **other** row with evidence on disk it diverges deliberately: where `hive status --json` reports `diagnostic: null` because the field doubles as a health signal there, `--diagnose` can synthesize a non-null diagnostic through `Hive::DiagnosticEvidence`. So `diagnostic == null` is not a health signal on this surface.
+Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and is read-only. For a **red-recovery** row it prints the same local diagnostic payload the internal graph carries on that row. For any **other** row with evidence on disk it diverges deliberately: where the internal graph reports `diagnostic: null` because the field doubles as a health signal there, `--diagnose` can synthesize a non-null diagnostic through `Hive::DiagnosticEvidence`. So `diagnostic == null` is not a health signal on this surface.
 
 `Hive::DiagnosticEvidence` fills the nil-diagnostic gap in tier order: `diagnostics/red-status.md` (a prior agent verdict), then the newest meaningful `logs/*.log` line by mtime, then the current marker on the task state file. It checks both in-folder `logs/` and the inferred global per-task log directory `.hive-state/logs/<slug>/`, derived from `Hive::Task::PATH_RE`. The result carries an explicit source label (`Diagnostics:`, `Log:`, or `Marker:`). The resolver is best-effort and must not block or raise: it refuses non-regular files, refuses symlinked evidence that escapes the trusted roots, byte-caps marker reads, catches deep YAML parse failures, and degrades to `nil` when evidence is unusable.
 

@@ -119,12 +119,11 @@ absolute `GROK_HOME`, and lets an absolute `GROK_AUTH_PATH` select the session
 file directly with higher precedence.
 
 OpenCode is selected nowhere by default. When opted in, Hive requires
-OpenCode 1.18.16 or newer, an exact nested `provider/model`, an explicit
-non-secret config and named credential source, and a non-yolo permission
-scope. The runtime prepares private config/data/cache/state homes, performs a
-local route-aware probe with remote model refresh disabled, runs one main
-process, correlates its terminal message with one sanitized session export,
-and removes the invocation-owned overlay in the process owner's `ensure` path.
+OpenCode 1.18.16 or newer, an exact nested `provider/model`, and a non-yolo
+permission scope. It uses OpenCode's native config, plugins, session store, and
+login in place. Hive adds its per-run deny-first policy through
+`OPENCODE_PERMISSION`, runs one main process, and correlates its terminal
+message with one sanitized session export from the same native state.
 Requested and observed OpenCode routes remain separate durable evidence.
 
 Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).

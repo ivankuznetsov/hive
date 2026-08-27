@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-21
+updated: 2026-08-27
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -53,9 +53,41 @@ Keep release/dogfood incomplete until the opt-in historical corpus has actual
 provider/model receipts and one naturally discovered finding reaches `done`
 with an exact PR and zero duplicate replay.
 
+An August 26 dogfood run exercised the real Pi/Ox Alpha Fix launch and durable
+markerless recovery, but exposed that pre-fix first-generation worktrees had
+treated Inbox's local checkout `HEAD` as their creation base. On a divergent
+operator checkout this carried unrelated local commits into the resulting PR.
+New first generations now fail closed onto exact `origin/<default>` OIDs; the
+remaining live-delivery proof must come from a task admitted after that cutover
+and reach one focused hosted PR.
+
+## Patrol dispatch incident demand baseline (2026-08-26)
+
+The sanitized 600-charge incident replay pins the Patrol/coding, outcome,
+generation-stage repeat, stage, and failure-class aggregates without retaining
+task identities, provider output, secret material, credentials, or host paths.
+It also characterizes the current undifferentiated daily pool: once Patrol has
+used all 600 charges, later-stage Patrol progress, first-attempt Patrol work,
+and non-Patrol work are all starved even though later-stage ordering remains
+stable. This is expected-failure evidence for the later containment units, not
+a scheduling-policy change.
+
+The preceding seven complete UTC days cannot be reconstructed into a
+defensible non-Patrol demand series from the retained Attempts v4 records.
+Historical `1-inbox` attempts do not all carry an unambiguous durable workflow
+identity, so classifying them as Patrol or coding would invent evidence. Until
+workflow-attributed history exists, reserve calibration must use the documented
+10% fail-safe rather than a fabricated p95.
+
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## OpenCode live validation (updated 2026-08-15)
+## OpenCode live validation (updated 2026-08-21)
+
+Strict benchmark campaigns can now require normal execute completion before
+judging. Retrying such a campaign intentionally permits the failed cell's
+preserved candidate patch to be replaced; the run tree retains attempt logs,
+but Hive does not yet provide a campaign-level archive view of every replaced
+patch.
 
 OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
 offline smoke, fake-CLI Hive execute and native Compound Engineering plan
@@ -67,6 +99,71 @@ on an explicit backend/model, selected config, credential environment key, and
 operator opt-in. Until that gate is supplied, real model transport and live
 provider permission behavior remain unverified; an offline inventory check is
 not equivalent to a model request.
+
+The Ox Alpha benchmark now supplies authenticated live OpenRouter transport and
+has exercised OpenCode `1.18.18` with the Compound Engineering plugin under
+parallel load. Repeated exports ending near the same JSON position were traced
+to OpenCode issuing one unawaited large stdout write: a controlled reproduction
+wrote only 245,760 of 983,152 bytes through a pipe, while regular-file stdout
+produced complete parseable JSON. Hive now sends sanitized export stdout to an
+unlinked private regular file, enforces the parser's four-MiB bound while
+reading it, and still fails closed on malformed evidence. Exports retain a
+60-second process deadline, and an inspection failure remains the surfaced task
+diagnostic instead of degrading to a generic missing-evidence message. The
+strict six-task OpenCode campaign subsequently completed generation, dual
+three-sample judging, deliberation, validation, and publication. Its original
+token gap is an extraction issue rather than missing provider evidence: Hive
+records OpenCode usage in `.hb/hive-home/usage.db` while redacting raw stream
+events. The packaged harness now reads those normalized rows when stream tokens
+are absent. The first OpenRouter-backed Sol
+deliberation also exposed that the pinned npm Codex entrypoint could see a mise
+Node shim but not its active runtime under Hive's narrow agent PATH; the
+harness now prepends that pinned entrypoint's own directory for the child only.
+The next retry reached OpenRouter but inherited the operator's Codex profile,
+project instructions, and tool integrations, turning a one-shot scoring prompt
+into a large agent session before OpenRouter rejected the in-flight credit
+reservation. OpenRouter-backed Codex judges now run from a private temporary
+home and empty working directory with user config, rules, and session
+persistence disabled. A real Ox Alpha probe returned the requested score
+directly through this boundary. The ChatGPT route now uses the same empty
+workspace and ephemeral/config/rules flags while retaining the operator Codex
+home only for subscription authentication; a real Sol-ultra probe returned its
+score directly there. The separate Pi `all-ox-alpha@max` route is source- and
+probe-pinned; its full six-cell campaign remains live evidence until completion.
+
+An August 26 contamination audit found that earlier local campaigns cloned the
+current Hive repository and then reset it to the historical base. That removed
+the remote but retained newer objects/refs; one Ox Alpha Pi review command did
+run `git log --all`, although its captured output did not include that task's
+gold commit. No Pi tool call fetched GitHub or named its own reference PR/hash.
+The old OpenCode streams omitted tool payloads, so the same negative audit is
+not possible for that row. These rows therefore retain a structural
+contamination-risk caveat even without confirmed gold retrieval. New candidate
+repositories fetch only the exact base at depth one, and strict campaigns bind
+provider-only proxy egress into generation identity. Training-time memorization
+of a public solution remains outside container control; post-run patch
+similarity and private/newer corpus tasks are still needed for that risk.
+
+The first post-audit replacement attempt still exposed a second local answer
+surface: the active dogfood Hive checkout was bind-mounted read-only and the
+runner's normal gem tree contained the installed `hive-cli` source. Candidate
+uid 1000 could read both even though logs show no Pi command opening the active
+checkout. Sealed campaigns now use a commit-labelled, root-only Hive control
+bundle, remove `hive-cli` from the candidate bundle, and drop Pi/OpenCode to an
+uncapable uid 1000 process. A real container proof established that boundary;
+the remaining gap is a fresh six-cell Pi/OpenCode generation and judgment run
+created after the sealed dogfood deployment.
+
+The same audit found a separate OpenCode fairness defect in the completed high
+campaign: its benchmark config granted only `Read`, `Write`, and `Edit`, while
+Pi retained shell access inside the disposable generation container. OpenCode
+could change files but could not run tests, inspect repository state through
+normal shell diagnostics, or verify its work; all six review attempts ended
+without an accepted review patch. The packaged runtime now adds the explicitly
+qualified `Bash(*)` permission. The container, exact-base checkout,
+provider-only proxy, and sealed controller bundle remain the isolation
+boundary. The old OpenCode score is superseded pending a sealed six-cell rerun
+with that parity grant.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 
@@ -117,6 +214,21 @@ foreign, empty, corrupt, error-marked, and unlisted inputs. Rebased exact-head
 run `31861365214` consumed all 1,727 process results across six shards, retained
 100% line coverage, and passed all 23 gates. This closes the artifact-transport
 and source-catalog ownership proof gap.
+
+## CI velocity measurement gaps (2026-08-22)
+
+PR #1167 now keeps required CI on the hosted-proven six-way byte partition and
+adds a complete-set nightly seed-sweep producer. Focused tests prove the sweep
+starts, admits exactly seeds 101/202/303 with one shared suite manifest, a
+completed suite load, and one positive test count, rejects partial or
+incompatible inputs before deriving artifacts, and preserves a
+complete failing analysis before its final red verdict. The scheduled workflow
+does not exist on the default branch yet, so there is no hosted three-seed
+artifact to justify runtime-based repartitioning or an evidence-backed retry
+entry. Those consumers remain deliberately absent until a later reviewed PR
+can cite the real artifact. The new absolute TUI latency job is likewise
+source- and local-run-pinned but has no stable hosted baseline yet; its signal
+is advisory while the deterministic scale gate remains required.
 
 ## Task workspace forward evidence and live-provider gaps (2026-08-12)
 
@@ -258,6 +370,10 @@ stable class and scope.
   process/mount/network isolation or an atomic multi-file rollback. Stronger
   hostile-agent containment remains an OS/Hivebox or separate-identity
   concern, not a future widening of the in-process report contract.
+  Patrol Fix validation now keeps Hive-launched commands in a disposable exact
+  checkout and detects authoritative-checkout drift afterward, but a separate
+  same-UID process can still race that check; preventing such writes remains
+  part of this stronger containment gap.
 
 - Hive now resolves and verifies the current `honeycomb-catalog/v2` and
   `packages/NAME/VERSION/manifest.yml` contract, but the manifest's coarse
@@ -332,7 +448,7 @@ stable class and scope.
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
 | `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover ordinary discovery, native finding state, direct Patrol Fix admission, scheduling, and launch allowances. |
 | `lib/hive/refactor_patrol/*`, `lib/hive/commands/refactor_patrol.rb`, daemon architecture-patrol scheduling | ✓ [[commands/refactor-patrol]], [[modules/daemon]], [[modules/config]], [[modules/gh]], [[state-model]], and [[testing]] cover merge classification, frozen batches, direct v4 jobs, scheduled slices, discovery claims/checkpoints, and direct Patrol Fix admission. |
-| `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
+| `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/babysitter/**`, `lib/hive/commands/babysit.rb`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh.rb` | ✓ [[modules/babysitter]] and [[commands/babysit]] cover the experimental PR babysitter process, lifecycle command, GitHub PR repair loop, generated dry-run launcher handoff, and executable `git`/`gh` default-deny stub API boundaries. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
 | `lib/hive/web/**`, `public/`, `hive.gemspec`, `lib/hive/commands/web.rb`, `lib/hive/commands/setup.rb`, `packaging/docker/`, `.github/workflows/release.yml` hivebox image job | ✓ [[commands/web]], [[commands/setup]], [[commands]], [[architecture]], [[modules/config]], [[dependencies]], and [[testing]] cover the web routes, managed bundle/install payload, config/API surface, Docker entrypoints/install scripts, GHCR image publish job, agent-login relay/polling boundaries, favicon assets, and manual e2e contract. |
@@ -411,7 +527,6 @@ Residual audits of commits `6a6cf990`, `2d15e9ee`, and `5e8723fa` carried this b
 28. **Finalize unpushed-commit auto-retry is unit-pinned but not live-smoked.** `Hive::Daemon::StaleAgentHealer` submits an `8-finalize` `ERROR reason=unpushed_commits` row after the universal cooldown when no task lock is live. `RecoveryCoordinator` then owns the identity-guarded transition and workflow-derived `hive finalize` retry, preserving normal clean-exit, auth, and push checks. `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb` covers live-lock refusal, marker identity, safety, and unbounded retry; `test/integration/run_finalize_test.rb` covers finalize writing the marker on persistent push failure. This refresh did not find an in-tree artifact showing a live daemon observing such a finalized red row, coordinating the retry, and eventually succeeding after the underlying push failure is repaired.
 29. **Wrapper help/JSON/new-text grammar is checkout-pinned but not release-install-smoked.** The PR #427 wrapper work keeps `bin/hive` and `bin/hive-e2e` aligned with Thor's boolean grammar: option-bearing help requests like `hive approve --from 2-brainstorm --help` / `bin/hive-e2e run --filter tui --help` stay non-mutating, leading accepted JSON booleans like `--json=true status` dispatch as command-local options, malformed JSON assignments such as `--json=1` / `--json=yes` fail before Thor treats the value as a command argument, task target, or e2e run pattern, and duplicate wrapper booleans use the last recognized flag so a final `--no-json` or `--json=false` chooses prose. Commit `36f7499a` expands `bin/hive`'s pre-dispatch JSON usage-error mapping beyond the original `run` / `approve` / `markers` cases to the required-argument workflow, drop, findings, and rebase-status surfaces; commit `25082ee4` adds the missing patrol mapping so `hive patrol --json` without `PROJECT` emits the `hive-patrol` envelope with `error_kind: "error"` instead of prose-only stderr. Registered schemas use `Hive::Schemas::ErrorEnvelope`, while `hive-rebase-status` remains an unversioned sibling payload. PR #478 added the `hive new PROJECT` text-tail boundary, later superseded by the lift-and-rebuild contract in `bin/hive`'s `lift_new_options!`: allow-listed `--workflow`/`--depends-on` (and their `=VALUE` and JSON-boolean forms) are lifted from anywhere outside an explicit `--`, the remaining `PROJECT TEXT...` tail is rebuilt with a protective `--`, and a trailing/value-less value option stays literal text instead of eating PROJECT; `test/integration/new_wrapper_argv_test.rb` pins this argv behavior. `test/integration/cli_version_test.rb`, `test/integration/cli_usage_error_json_test.rb`, and `test/e2e/lib/hive_e2e_binary_test.rb` cover the checkout binaries and representative schema/new-text mappings. This refresh did not find an in-tree artifact showing the packaged `hive` executable generated by RubyGems/Homebrew/AUR exercising the expanded wrapper path; `bin/hive-e2e` is intentionally excluded from the gem payload and remains a checkout harness only.
 30. **Bot Codex draft-assist retirement is source/unit-pinned but not live-smoked.** Commit `723906be` deletes `Hive::Bot::CodexConversation` and `templates/bot_brainstorm_codex_prompt.md.erb`, removes the `codex_write:` / `codex_edit:` / `codex_cancel:` callback parser branches, removes `start_codex` / `confirm_codex_draft` router actions, drops `bot.codex_budget_usd` / `bot.codex_timeout_sec`, and bumps bot structured logs to `hive-bot-log.v2` without the three `codex_*` events. Commit `c680ac29` then removes the leftover `ConversationStore` draft/confirm fields (`history`, `draft`, `awaiting_confirm`), deletes `pending_confirm_count`, and drops the unreachable `/done` pending-draft guard. Focused source-tree tests cover deterministic `:path_a` answer writes, legacy `path_a_yes` / `path_a_type` retirement replies, retired `codex_*` callback-data classification as `:unknown`, config-key removal, schema v2 validation, the smaller conversation-state shape, and `/done` dispatching directly from the active conversation. This refresh did not find an in-tree live Telegram artifact showing old Path-A buttons in a real chat steering to the deterministic answer flow, retired `codex_*` buttons degrading through the unknown-callback path, a live `:path_a` conversation writing an answer and sending the next question, or an installed log consumer accepting `hive-bot-log.v2`.
-31. **Daemon display-name backfill is unit-pinned but not live-smoked.** Commit `9516efb1` adds `Hive::Daemon::DisplayNameBackfiller`, wires it into dispatcher ticks and SIGHUP reloads, and adds the closed `display_name_backfill` daemon-log event. Commit `a0b0ca3b` bounds per-folder inflight entries with `MAX_INFLIGHT_AGE_SEC = 120` so pid reuse or EPERM cannot suppress a blank-name retry forever, and logs unexpected reap/backfill failures as `:fatal` while keeping daemon ticks non-raising. `test/unit/daemon/display_name_backfiller_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/unit/daemon/logger_test.rb` cover missing/blank-name selection, `max_per_tick`, inflight suppression, dead-pid reap, EPERM retention, TTL eviction, dry-run logging, nil-pid retry behavior, bad-row/backfill/reap/spawn degradation, dispatcher invocation/rescue, and event enum acceptance. No in-tree artifact was found showing a live daemon observing an existing task with blank `meta.yml` `display_name`, spawning `hive generate-name`, emitting `display_name_backfill`, and later surfacing the generated label through `hive status`, the TUI, or the bot.
 32. **TUI scrollable help overlay is unit-pinned but not live-terminal-smoked.** Commits `4d31fc65`, `f760bfa0`, and `0f70918a` added the bounded/wrapped help view, scroll keys, offset clamping, resize reclamping, Bubbletea mouse-cell reporting, and mouse-wheel translation. `test/unit/tui/views/help_overlay_test.rb`, `test/unit/tui/key_map_test.rb`, `test/unit/tui/update_test.rb`, and `test/unit/tui/bubble_model_test.rb` cover the renderer, key mapping, state transitions, and mouse-message adapter. This refresh did not find an in-tree PTY or Charm smoke artifact proving the full operator path in a real terminal: launch `hive tui`, press `?`, scroll with keys and mouse wheel, resize while scrolled, close with `q` / `Esc` / `?`, and verify the tiny-terminal fallback.
 33. **Merged-PR task closure is source/focused-test pinned but not live-smoked.** The former in-memory, finalize-only watcher and `--recover-merged-error-reason` bypass are removed. `Hive::Daemon::PrMergeWatcher` now observes every coding task with a PR in stages 5–8, persists exact-generation candidates and uncapped retry state in the project-local reconciliation ledger, verifies repository/head/reachable merge facts, checkpoints architecture intake, and invokes the daemon-only same-repository `TaskClosure` transition. Focused store/watcher/dispatcher/closure tests cover restart, fairness, phase receipts, held/open/closed/unsafe states, and archive replay. `Stages::Finalize.pr_already_merged?` still short-circuits a normal finalize run. This refresh does not yet contain U9 evidence from an installed current-main daemon archiving a real out-of-band merge, surviving restart, and showing the receipt on live status/web/bot surfaces.
 34. **Claude/tmux orphan-sweep server skip is unit-pinned but not post-fix parallel live-smoked.** Commit `024b29b0` changes `Hive::ClaudeLauncher.sweep_orphan_processes` from a blanket `pkill -f` to `pgrep` plus per-PID `TERM`, skipping matched `tmux` commands because the tmux server can retain the first session's full `new-session ... --add-dir <task.folder>` argv. `test/unit/stages/brainstorm_tmux_sentinel_test.rb` covers the observed shape: one matched tmux server line plus one matched Claude line must kill only the Claude PID and log `skipped=1`. The 2026-06-11 refreshes did not find an in-tree artifact showing two real Claude/tmux-backed Hive tasks running in parallel after the fix, one finishing, and the sibling session surviving without `tmux_session_terminated`.
@@ -464,7 +579,7 @@ completed real GitHub/Codex/Claude provider login plus a daemon-owned PR push.
 45. **Golden-path CI flake fixes are source-pinned but not post-fix CI-verified in-tree.** Commit `798beb74` changes `web/test/e2e/golden_path_e2e.rb` so the browser test reads the newly created task slug from one current-DOM JavaScript query instead of retaining a `.task-row` Capybara element across daemon-driven Turbo replacements. Follow-up changes wait for the daemon's `needs_input` classification and a distinct `brainstorm.md` mtime tick before submitting the answer, and fix `hive status --json` to emit subsecond `mtime` / `folder_mtime` values so daemon edit-resume baselines are compared against the same precision they store. Commit `d76b3f60` then fixes the adjacent PR #480 failure by capturing the slug while the status grid is still visible and carrying that value into `wait_for_answer_window!`, rather than calling a nonexistent `task_slug` helper after task-page navigation. This refresh inspected the committed diff, row markup, golden-path E2E source, prior wiki fragments, and testing docs; the checked-in fragment records local Rails web/e2e/rubocop verification, but this refresh did not find an in-tree artifact showing the PR #480 `hivebox web (Rails tests + system)` job passing after the `NameError` fix.
 46. **`bin/hive-eval` CLI contract is source/test-pinned but not judge-smoked.** Commit `ffa51d56` hardens the checkout-only eval runner's usage surface: positional scenario names are rejected before report creation, `--scenario` is confined to safe basenames under `test/eval/scenarios/`, and path separators/traversal/dotted names exit 64. `test/eval/support/reporter_test.rb` pins those structural paths plus inherited `TEST` isolation and successful report writing; `bundle exec ruby -Itest test/eval/support/reporter_test.rb` passed locally during this refresh. Remaining uncertainty: no in-tree artifact shows a full judge-enabled `bin/hive-eval` run after the hardening; the pinned structural path can run with `--no-judge` without exercising Codex judge subprocesses.
 47. **`bin/hive-eval` usage/env contract is focused-test pinned but not full judged-eval smoked.** The eval-wrapper follow-up changes the checkout-local eval wrapper's usage text so one unexpected positional argument prints `unexpected argument: ...`, multiple positional arguments print `unexpected arguments: ...`, path separators report `scenario basename must not contain path separators`, and unsafe separator-free names report a generic safe-basename error without echoing the value. Commit `ed404213` then changes environment propagation so inherited `HIVE_EVAL_NO_JUDGE=1` is cleared unless `--no-judge` is passed, preventing caller environment from silently disabling Codex judge assertions. The patrol follow-up also rejects inherited `RAKEOPT=-n`/`--dry-run`, clears `RAKEOPT` before launching Rake, and refuses a zero child exit unless the report is parseable, identifies itself as `hive-eval-report` version 1, contains at least one scenario, and includes the requested scenario when filtered. The current focused tests pin the first positional scenario argument, a trailing extra argument, the stray positional scenario argument, path separators, unsafe names, invalid options, missing option values, ambient `TEST` isolation, all-scenario filtering, successful report writes, deliberate failing-scenario report shape, the judge-enabled env-clear fixture, inherited Rake dry-run rejection, child `RAKEOPT` scrubbing, missing reports after a successful child, malformed/wrong-schema reports, empty reports, and filtered reports naming the wrong scenario. This refresh did not find an in-tree artifact from a full `bin/hive-eval` run with real Codex judge/persona calls enabled after `ed404213`; the verified surface is the local structural wrapper/test path.
-46. **`hive new` capture commit serialization is pinned, but adjacent display-name commits remain best-effort.** Commit `bdd9a9fa` wraps the captured-task `Hive::GitOps#hive_commit(stage_name: "1-inbox", action: "captured")` in `Hive::Lock.with_commit_lock(hive_state)`, and `test/integration/new_test.rb` now asserts the wrapper path. The committed wiki fragment records a local direct multi-process repro, but this refresh did not find an in-tree artifact proving the original parallel hivebox Rails/system-worker failure no longer reproduces. Source inspection also shows `Hive::DisplayName::Generator#commit_name` still calls `Hive::GitOps#hive_commit` directly and swallows `Hive::GitError`; that best-effort path may recover naturally through daemon backfill, but it is not serialized by `Hive::Lock.with_commit_lock` today.
+46. **Hive-state runtime commit serialization is process-tested, but first-time bootstrap and the original live workload remain separate gaps.** `Hive::GitOps#hive_commit` now owns the project commit lock for every scoped staging/callback/diff/commit sequence, including display-name and Patrol Fix transition callers. The lock is same-thread reentrant for transactional callers that already hold it, rejects fork-inherited ownership by PID, and is process-tested for contention and `SIGKILL` release. A direct eight-process GitOps regression also pins one successful commit per child. `GitOps#hive_state_init` still creates the orphan worktree and bootstrap commit before a worktree-local `.commit-lock` can safely exist; simultaneous first initialization therefore needs a separate project-level lifecycle lock. The historical fragment for commit `bdd9a9fa` records the original 3-of-8 `hive new` failure, but this refresh still has no external Rails/system-worker artifact reproducing that exact hivebox workload after centralization.
 49. **Append-only log.d fragment carries a stale `:marker` kind reference (U11).** `wiki/log.d/20260620T120000Z-task-action-review-fixes.md:7` says the `:none` inert fall-through gate "excludes `:agent`, `:marker`, and `nil`". That was accurate at its 2026-06-20 timestamp, but U11 retired the `:marker` kind: `Hive::Workflow::KNOWN_KINDS` is now `[nil, :agent, :inert, :execute, :review_council, :finalize]` (`refute_includes ..., :marker` pins the absence in `test/unit/workflow_test.rb`), and the live code comment in `lib/hive/task_action.rb` was updated to "coding runtime kinds". Per the repo's append-only `log.d` convention the fragment is NOT rewritten; this note exists so an `rg :marker` reader treats that line as historical, not current. The only authoritative kind list lives in `lib/hive/workflow.rb`. See [[modules/task_action]].
 
 49. **Screenote live capture test-token endpoint is blocked on Screenote-side availability.** The OAuth/MCP implementation has opt-in live discovery, dynamic-registration, and preseeded auth-code exchange coverage in `test/integration/screenote_oauth_live_test.rb`. The live `create_screenshot_upload` round-trip is written in `test/integration/screenote_capture_live_test.rb`, but it skips until the Screenote non-interactive test-token endpoint URL, secret, and project id are provided. As of 2026-06-22 the upload tool's request/response contract is covered in CI by `test_call_tool_create_screenshot_upload_round_trips_through_http_seam` (`test/unit/screenote/mcp_client_test.rb`) through the FakeHttp seam; the remaining gap is narrowed to proving the *signed upload* against a real Screenote bearer, which still requires the blocked live endpoint.
@@ -581,7 +696,7 @@ harness deliberately does not infer those formats or strings.
 Close this gap one fixture at a time after the corresponding sibling lands:
 replace its activation guard with real CLI reconciliation and exact
 state/reason assertions, remove `pending: true`, and keep the report-measured
-runtime below ten seconds. Full incident coverage is not complete until the
+runtime below eleven seconds. Full incident coverage is not complete until the
 incident report contains six ordinary green results and zero pending entries.
 
 ## Rails-native kanban live-update proof (2026-07-21)
@@ -670,7 +785,7 @@ post-fix failure sample. Next live triage failure should now carry the
 `expected_output_session_alive?`.
 ## codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
 
-`Hive::Reviewers::CodexReview` accepts a prose (non-checkbox) verdict as a
+`Hive::AgentSupport::Codex::Reviewer` accepts a prose (non-checkbox) verdict as a
 `:clean` pass only when `clean_verdict?` matches an affirmative no-findings
 phrase (`CLEAN_VERDICT`) and no `CONCERN_SIGNAL`. This closed the `all_failed`
 regression (genuine clean reviews failing) while preventing a prose-described
@@ -1018,7 +1133,8 @@ normal merge gate.
 
 Deterministic policy, adapter, lineage, decision, transition-bypass, status/TUI,
 and Rails Web tests pin the conditional plan-review contract, including
-requested native Grok Build / `grok-4.6` and different-family independence.
+requested native Grok Build / `grok-4.6`, its `grok-4.6-build` served identity,
+and different-family independence.
 `test/smoke/plan_review_smoke_test.rb` now provides the credential-preserving
 real route proof, but it deliberately requires `HIVE_LIVE_PLAN_REVIEW=1` and is
 excluded from normal CI. Until an operator runs that opt-in smoke on the exact
@@ -1130,3 +1246,43 @@ kept the consolidated engine description, so the custody anchor set, the
 late terminal execute observation are no longer described on the page even
 though the behaviour still exists in `lib/hive/stages/open_pr.rb`. Re-document
 those steps against the consolidated engine.
+
+## Benchmark-only plan-review opt-out live parity proven (2026-08-22)
+
+The local benchmark runtime can now grant an explicit process-local exception
+for projects that serialize `plan_review.enabled: false`; ordinary Hive loads
+still reject that configuration. The completed Ox Alpha campaign proved the
+grant and replacement transition live across six Pi cells and six OpenCode
+cells: all 12 reached generated terminal results without plan-review dispatch,
+pending rows, or failed rows. Focused coverage continues to pin that disabled
+review bypasses prepare, locked verification, and execute entry as well as
+policy dispatch. Keep the exception benchmark-local; the parity-evidence gap
+itself is closed.
+
+## Compact running status is not yet installed-plugin-smoked (2026-08-24)
+
+`hive status --json` has focused source coverage and has been run from
+the source checkout against the live Hivebox registry. That proves the compact
+producer over current task data, but not the final installed dogfood binary plus
+authenticated Omarchy plugin invocation. Keep this gap open until the feature
+PR is deployed and the plugin's unchanged bare status command consumes
+`hive-running-status.v1` below its 1 MiB capture limit.
+
+The public fleet-wide v7 status mode is removed, but daemon, bot, TUI, and web
+still share parts of its in-process producer. Daemon and bot temporarily reach
+it through a hidden internal transport. Separate consumer-specific projection
+PRs must remove those fields and then delete the v7 schema/producer entirely;
+this PR deliberately does not combine those independent scheduler and UI
+optimizations.
+
+## Dogfood runtime identity awaits installed replacement proof (2026-08-25)
+
+Source contracts now expose the active runtime channel, exact build SHA, and
+deployment ID through version, operational, daemon, and web status. The
+canonical Hive skill tells plugins to use the normal `hive` command and not
+bypass dogfood for another binary, registry, daemon, or web service. The
+machine-local dogfood launcher and service overrides are deployment-owned and
+not stored in this repository, so this remains unproven as an end-to-end
+installed flow until a later authorized dogfood cutover supplies all three
+`HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
+unchanged installed plugin observes the matching status identity.

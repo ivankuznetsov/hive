@@ -113,7 +113,7 @@
             "status_unavailable",
             "internal"
           ],
-          "description": "usage = malformed invocation (bad flag / unexpected arg), exit 64. config = bad --date / missing chat config (Hive::ConfigError), exit 78. status_unavailable = `hive status --json` came back unusable (StatusUnavailableError), exit 69, retryable. internal = an untyped fault wrapped in Hive::InternalError, exit 70."
+          "description": "usage = malformed invocation (bad flag / unexpected arg), exit 64. config = bad --date / missing chat config (Hive::ConfigError), exit 78. status_unavailable = the bot's internal task-graph projection came back unusable (StatusUnavailableError), exit 69, retryable. internal = an untyped fault wrapped in Hive::InternalError, exit 70."
         },
         "exit_code": {
           "type": "integer",

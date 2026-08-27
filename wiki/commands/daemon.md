@@ -3,14 +3,14 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-21
-tags: [command, daemon, automation, plan-review, json]
+updated: 2026-08-25
+tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
 auto-advancing dispatcher (ADR-024). One long-running process wakes
-every 1s for cheap child-exit/state-mtime probes, runs a full
-`hive status --json` scan on change or every 30s as a backstop, dispatches
+every 1s for bounded child-exit/state-mtime probes, refreshes only the changed
+task rows, and runs an internal full task-graph scan every 30s as repair. It dispatches
 workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
 `artifacts` / `finalize`) on tasks ready to advance, and
 auto-archives safely delivered coding tasks from any PR-bearing stage 5–8
@@ -42,7 +42,7 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 |-----------|----------|
 | `start`    | Takes the stable profile-wide daemon-activation lock before inspecting or replacing the PID file (`~/Dev/hive/.daemon.pid`) and retains it until the exact daemon generation publishes operational runtime readiness. A readiness publication failure exits without admitting the daemon. Without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. Both manual modes pin `HIVE_BIN` to the invoked `hive`/`hv` executable when the environment does not already provide an override, so status probes and dispatched children cannot drift to a different packaged Hive on `PATH`. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
 | `stop`     | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Ancillary children reaped during this drain are completed through their existing scheduler lifecycle before exit, so patrol and digest claims do not wait for lease expiry after a normal restart. Completion is fenced on a verified pre-signal descendant-tree snapshot plus the child's original process group: if either cannot be proven gone, the exit is withheld and the existing claim remains for lease recovery. Signal-derived nil exits count as failure, never success. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. With `--json`, emits a `hive-daemon-stop` envelope (fields: `running`, `was_running`, `stale_pid?`, `reason?` — `pid_reused` / `unverified` for safety bailouts). |
-| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The JSON envelope is produced by `Hive::Daemon::StatusReport`, which also feeds the web dashboard, and reports `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, `unreadable`, or `not_applicable`). An explicit runtime `HIVE_BIN` is the expected-binary authority before PATH lookup, so a managed web process cannot mistake its private gem wrapper for the daemon binary. Path comparison follows filesystem identity, so a stable service symlink that targets the expected deployment reports `none`; a symlink targeting another deployment still reports `path`. The producer is observation-only and skips update-state temporary-file cleanup. |
+| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with required producer-owned `runtime` identity, `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The daemon records its runtime in the ownership-checked PID file at startup; status never stamps the observing CLI's identity onto another process, and reports `unknown` for a legacy or unavailable producer. The JSON envelope is produced by `Hive::Daemon::StatusReport`, which also feeds the web dashboard, and reports `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, `unreadable`, or `not_applicable`). An explicit runtime `HIVE_BIN` is the expected-binary authority before PATH lookup, so a managed web process cannot mistake its private gem wrapper for the daemon binary. Path comparison follows filesystem identity, so a stable service symlink that targets the expected deployment reports `none`; a symlink targeting another deployment still reports `path`. The producer is observation-only and skips update-state temporary-file cleanup. |
 | `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. The daemon validates the daemon/update/answer-digest blocks and constructs the replacement healer before replacing live config, so a late loader failure cannot split the advertised retry switch from healer behavior. Reloaded concurrency limits (`max_concurrent_runs`, `max_concurrent_per_project`, `max_runs_per_day_per_project`, and `max_concurrent_patrol_scans`) are applied in place to the existing controller so active-child accounting, cooldowns, quarantine, daily counters, and dispatch baselines survive while new dispatch decisions use the new limits immediately. The structured `config_reloaded` daemon-log event reports all four effective limits for machine verification. Invalid numeric settings, including explicit YAML `null`, fail validation and leave the live limits unchanged. Exit 1 if no daemon running. With `--json`, emits a `hive-daemon-reload` envelope (`ok`, `reason`, `pid`, `message`). |
 | `tail`     | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Platform-neutral inspect/plan/apply mechanics live in `Hive::UserService`; `Daemon::ServiceInstaller` remains the thin Hive adapter for templates, binary resolution, the 900-second restart warning, and command wording. Command-side summaries, JSON envelopes, and typed outcome translation are shared with bot install through `ServiceInstaller::ResultPresenter`. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
@@ -52,8 +52,8 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 
 ## What the daemon dispatches
 
-Per `Hive::Daemon::Policy.decide`, the daemon classifies each `hive
-status --json` task row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
+Per `Hive::Daemon::Policy.decide`, the daemon classifies each internal
+task-graph row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
 value) and routes. `Hive::Daemon::StaleAgentHealer` runs before this policy
 step and submits eligible `ERROR` / `REVIEW_ERROR` observations to
 `Hive::Daemon::RecoveryCoordinator`. The coordinator waits for the shared
@@ -72,15 +72,11 @@ identical failures at the ladder ceiling the request parks once with
 `reason=deterministic_failure`, its fingerprint, and bounded attempt history,
 so it stops consuming dispatch slots while other tasks continue. Terminal
 recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
-Independently,
-`Hive::Daemon::DisplayNameBackfiller`
-runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
-bounded by `max_per_tick`) for any task whose `display_name` never landed at
-`hive new`, so an interrupted name generation self-heals instead of leaving the
-task showing its raw slug. Per-folder inflight state stores `{pid, at}` and
-expires after 120 seconds so a reused or foreign pid cannot suppress retries
-forever. This is purely cosmetic — it touches no markers and never advances a
-stage.
+Daemon ticks never migrate task metadata. Missing task ids, display names, and
+legacy completion clocks are repaired only by the explicit [[commands/migrate]]
+command, so routine scheduling does not compete with stage commits. Recovery
+receipts for an id-less task instruct the operator to run `hive migrate --all`;
+they never claim a later daemon tick will allocate the id.
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|
@@ -91,6 +87,7 @@ stage.
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
+| `ready_to_run` | Dispatch a generic workflow stage once. A stage transition discards the previous stage's persisted mtime baseline so its successor remains eligible. An unchanged state-file mtime after dispatch is surfaced as `markerless_stalled`; marker-driven workflows atomically convert it to `ERROR reason=agent_exited_without_terminal_marker`, while controller workflows enqueue the same generation on the durable markerless recovery route without modifying structured state. After a daemon restart, an older current mtime can recover once only when the baseline was loaded from the persisted store; same-process observations never gain that recovery authority. |
 | Any coding task with `pr_url` in stages `5-open-pr` through `8-finalize` | **Observe before policy dispatch.** Persist the exact task generation and PR binding, poll with per-candidate durable backoff, verify the observed head and reachable merge SHA, checkpoint required architecture intake, then use a daemon-owned `remote_merge` closure receipt to move the same generation to `9-done`. This includes recoverable error rows; no marker-reason allowlist or archive child exists. |
 | Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason. Current dependency, admission, repository, and PR-identity holds take precedence over historical head drift and do not poll or archive until a later status observation clears them. An `observed_head_changed` hold may poll only the identity-matched bound PR's remote state: `OPEN` or closed-unmerged releases ordinary error recovery so the new generation can be reviewed, while merged, delivered-elsewhere, or ambiguous evidence remains durably blocked before architecture intake or automatic archive and is not polled again. |
 | `plan_reviewing` or due `plan_review_retry` at coding `3-plan` | Dispatch `hive plan-review-run ...`. This automation can start/retry critique, perform an already-authorized revision, and verify, but cannot create approvals, answers, waivers, or mandatory downgrades. |
@@ -164,15 +161,15 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
-| `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
+| `poll_interval_sec` | 30 | Minimum completion-to-start interval between periodic full status repair scans. Min 5. Slow periodic scans cannot chain; ancillary completion can still request an immediate follow-up scan. |
+| `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and a rotating batch of at most 64 tracked state-file mtime probes between full scans. Only exact changed task rows refresh; dependency-bearing rows wait for the full scan. Min 1. |
 | `auto_retry.enabled` | — | **Inert.** Retired as a kill switch: `ERROR` / `REVIEW_ERROR` retries are unconditional and follow one backoff ladder. The key is still shape-validated so a typo fails loudly, but setting it changes nothing. Pause a project with `daemon.enabled: false` instead. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | Durable per-candidate merge reconciliation cadence. Min 60 to respect GitHub rate limits; failure counts remain uncapped and backoff is persisted. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
 | `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
-| `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
+| `transient_retry_backoff_sec` | 60 | First retry hold for a durable task attempt that exits `75 (TEMPFAIL)`; also the base of the ancillary-child `60 → 120 → 300 s` transient backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02), shared by ancillary children and detached durable task attempts. `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{answer-digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value is an integer ≥ 0 (0 disables that verb's cap). Fresh durable attempts resolve this map from current global daemon config. |
@@ -190,7 +187,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | 4 | `WRONG_STAGE` | 60s protective backoff (race or classifier bug) |
 | 64 | `USAGE` | Quarantine `(project, slug)` for daemon lifetime |
 | 70 / 1 | `SOFTWARE` / `GENERIC` | Transient: 60→120→300 s backoff, then quarantine |
-| 75 | `TEMPFAIL` | Refund daily slot, allow immediate retry next tick |
+| 75 | `TEMPFAIL` | Refund the daily slot. Ancillary children may retry next tick; durable task attempts retain a scheduler-owned point-indexed hold for `transient_retry_backoff_sec` before a fresh request is admitted. |
 | 78 | `CONFIG` | Drop the entire project from active dispatch until daemon restart |
 
 ## Structured log

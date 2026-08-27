@@ -6,12 +6,14 @@ module HiveBench
   # the reimplemented pipeline. `model_version` is what the leaderboard records;
   # Model fields describe provider-neutral stage identities. HiveConfig renders
   # them into Hive's native `models:` map; the shared Agent CLI runtime owns all
-  # provider-specific flag compilation.
+  # provider-specific flag compilation. Pi's benchmark launcher also supplies a
+  # minimal model catalog so the exact OpenRouter route is available offline.
   # Review fields feed the prod-default review config (hive_config.rb).
   module Candidates
     module_function
 
     Candidate = Data.define(:id, :plan, :execute, :review, :claude_model, :claude_effort, :pi_models,
+                            :opencode_models, :opencode_effort,
                             :codex_effort, :codex_model, :codex_models, :codex_efforts,
                             :grok_model, :grok_effort, :model_version,
                             :review_max_passes, :review_wall_clock_sec, :reviewers, :ci_command)
@@ -23,6 +25,12 @@ module HiveBench
     OPUS = "opus"
     SOL = "gpt-5.6-sol"
     TERRA = "gpt-5.6-terra"
+    # OpenRouter disclosed and retired the stealth route on 2026-08-26. Keep
+    # the Ox Alpha candidate ids for benchmark lineage, but route the revealed
+    # model through its stable public id.
+    PI_OX_ALPHA = "openrouter/z-ai/glm-5.3-flash:high"
+    PI_OX_ALPHA_MAX = "openrouter/z-ai/glm-5.3-flash:max"
+    OPENCODE_OX_ALPHA = "openrouter/z-ai/glm-5.3-flash"
 
     def all
       [all_opus, all_codex, opus_plan_codex_exec,
@@ -31,7 +39,8 @@ module HiveBench
        all_codex_sol_xhigh, sol_plan_terra_exec_sol_review,
        fable_plan_grok_exec_sol_review, sol_plan_grok_exec_sol_review,
        sol_plan_terra_exec_grok_review, sol_plan_exec_high_grok_review,
-       opus_plan_sol_exec_sol_opus_review, fable_plan_sol_exec_sol_opus_review].freeze
+       opus_plan_sol_exec_sol_opus_review, fable_plan_sol_exec_sol_opus_review,
+       all_ox_alpha_high, all_ox_alpha_max, all_ox_alpha_opencode_high].freeze
     end
 
     def by_id(id)
@@ -39,10 +48,12 @@ module HiveBench
     end
 
     def base(id, plan:, execute:, review:, model_version:, claude_model: nil, claude_effort: nil,
-             pi_models: nil, codex_effort: nil, codex_model: nil, codex_models: nil,
+             pi_models: nil, opencode_models: nil, opencode_effort: nil,
+             codex_effort: nil, codex_model: nil, codex_models: nil,
              codex_efforts: nil, grok_model: nil, grok_effort: nil, reviewers: [])
       Candidate.new(id: id, plan: plan, execute: execute, review: review,
                     claude_model: claude_model, claude_effort: claude_effort, pi_models: pi_models,
+                    opencode_models: opencode_models, opencode_effort: opencode_effort,
                     codex_effort: codex_effort, codex_model: codex_model,
                     codex_models: codex_models, codex_efforts: codex_efforts,
                     grok_model: grok_model, grok_effort: grok_effort,
@@ -124,8 +135,8 @@ module HiveBench
 
     # xhigh variants (maintainer decision 2026-07-08): the default-effort codex
     # cells reasoned at ~15% of output — these re-run every codex-touched
-    # candidate with model_reasoning_effort=xhigh through Hive's native stage
-    # routing.
+    # candidate with model_reasoning_effort=xhigh (driver mounts a codex
+    # config.toml carrying the pin; hive itself passes codex no flags).
     def all_codex_xhigh
       base("all-codex-xhigh", plan: "codex", execute: "codex", review: "codex",
                               codex_effort: "xhigh", model_version: "gpt-5.5-xhigh")
@@ -138,8 +149,8 @@ module HiveBench
     end
 
     # gpt-5.6-sol at xhigh (maintainer request 2026-07-09): the 5.6 generation
-    # joins the board alongside gpt-5.5. Needs codex >= 0.144
-    # (hive-bench-runner:sol image).
+    # joins the board alongside gpt-5.5. Model pinned via the generated codex
+    # config.toml; needs codex >= 0.144 (hive-bench-runner:sol image).
     def all_codex_sol_xhigh
       base("all-codex-5.6-sol-xhigh", plan: "codex", execute: "codex", review: "codex",
                                       codex_model: SOL, codex_effort: "xhigh",
@@ -148,9 +159,12 @@ module HiveBench
 
     # xAI grok (maintainer request 2026-07-09): grok-4.5 at xhigh — grok's
     # effort scale has a literal xhigh, so the pin is like-for-like with the
-    # codex xhigh candidates. Hive passes both controls through its native stage
-    # router and shared Agent CLI runtime. Grok reports no token usage — cost
-    # columns stay empty by design.
+    # codex xhigh candidates. hive's grok profile passes no model/effort
+    # flags; the in-container grok shim injects them (HB_GROK_MODEL /
+    # HB_GROK_EFFORT, mirroring the pi shim). Needs the :grok-enabled runner
+    # image (HB_RUNNER_IMAGE=hive-bench-runner:grok until hive PR #695 ships
+    # in the pinned image). Grok reports no token usage — cost columns stay
+    # empty by design.
     def all_grok
       base("all-grok-4.5", plan: "grok", execute: "grok", review: "grok",
                            grok_model: "grok-4.5", grok_effort: "xhigh",
@@ -235,6 +249,45 @@ module HiveBench
            codex_efforts: { "execute" => "high", "review" => "xhigh" },
            reviewers: sol_opus_ce_reviewers,
            model_version: "fable-5-xhigh-plan/sol-high-exec/sol-xhigh+opus-5-xhigh-review")
+    end
+
+    # Ox Alpha defaults to max reasoning at the provider. Pin high on all three
+    # Pi stages so the benchmark identity is stable and directly comparable to
+    # the OpenCode cell below.
+    def all_ox_alpha_high
+      base("all-ox-alpha@high", plan: "pi", execute: "pi", review: "pi",
+                                pi_models: {
+                                  "plan" => PI_OX_ALPHA,
+                                  "execute" => PI_OX_ALPHA,
+                                  "review" => PI_OX_ALPHA
+                                },
+                                model_version: "glm-5.3-flash-high")
+    end
+
+    # A separate Pi-only row at Ox Alpha's maximum reasoning tier. Keeping the
+    # effort in the route string makes the provider selection explicit rather
+    # than relying on OpenRouter's mutable default.
+    def all_ox_alpha_max
+      base("all-ox-alpha@max", plan: "pi", execute: "pi", review: "pi",
+                               pi_models: {
+                                 "plan" => PI_OX_ALPHA_MAX,
+                                 "execute" => PI_OX_ALPHA_MAX,
+                                 "review" => PI_OX_ALPHA_MAX
+                               },
+                               model_version: "glm-5.3-flash-max")
+    end
+
+    # Same model and reasoning tier through Hive's OpenCode profile. The
+    # separate id keeps every generated and judged artifact independent.
+    def all_ox_alpha_opencode_high
+      base("all-ox-alpha-opencode@high",
+           plan: "opencode", execute: "opencode", review: "opencode",
+           opencode_models: {
+             "plan" => OPENCODE_OX_ALPHA,
+             "execute" => OPENCODE_OX_ALPHA,
+             "review" => OPENCODE_OX_ALPHA
+           },
+           opencode_effort: "high", model_version: "glm-5.3-flash-high")
     end
   end
 end

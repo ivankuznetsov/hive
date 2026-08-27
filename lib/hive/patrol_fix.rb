@@ -25,6 +25,7 @@ module Hive
     autoload :Transition, "hive/patrol_fix/transition"
     autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
     autoload :PublicationReceipt, "hive/patrol_fix/publication_receipt"
+    autoload :AttemptDiagnostic, "hive/patrol_fix/attempt_diagnostic"
 
     module_function
 

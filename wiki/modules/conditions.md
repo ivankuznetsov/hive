@@ -3,7 +3,7 @@ title: Generation-scoped task conditions
 type: module
 source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb
 created: 2026-07-17
-updated: 2026-07-18
+updated: 2026-08-27
 tags: [conditions, projection, journal, execute, migration]
 ---
 
@@ -64,12 +64,25 @@ on read and rebuild, and rebuild cannot overwrite the last snapshot. Markers
 from non-execute stages do not claim this execute-journal handoff. Only
 mutating reconciliation republishes it.
 
+Full status scans have an exact-cache path over the separately bounded
+`task-projection.checkpoint.json`. It verifies the checkpoint against the
+current journal, refreshes mutable durable attempt fields, and reprojects from
+checkpoint seed facts when an attempt changed. It can avoid old-history replay
+only while the journal has not grown and the bounded source checks remain
+current. Otherwise status delegates to the ordinary authoritative read above;
+the bounded workspace API may report partial diagnostics, but status cannot
+turn those into a condition projection.
+
 Selection proceeds by current task generation, then latest compatible attempt
 within each registry family, then exact commit generation/HEAD for branch facts.
 Predecessor lineage outranks wall-clock timestamps, so a clock step backward
 cannot let an older lost attempt supersede its successful successor. Current
 `AgentHealthy` also reconciles directly from terminal/lost durable attempt
 state, closing the window before the daemon observer appends its lifecycle fact.
+Successful terminal attempts are satisfied and ordinary failed/cancelled/lost
+attempts fail closed. A terminal exit `75 (TEMPFAIL)` is instead pending with
+reason `attempt_terminal_retryable`: the scheduler owns that transient retry,
+so lock contention cannot be projected as an agent-health failure.
 Displaced facts stay in history. Required conditions pass only when satisfied.
 `AwaitingHuman=satisfied` blocks its named transition; an answered or
 superseding observation removes it from current gates.

@@ -18,7 +18,6 @@ require "hive/conditions/transition_guard"
 require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
-require "hive/completion_time"
 require "hive/terminal_outcome"
 
 module Hive
@@ -158,7 +157,8 @@ module Hive
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
           terminal_snapshot = terminal_state_snapshot(task)
-          legacy_completed_at = legacy_completed_at_before_run(task, marker, config: cfg)
+          archived_before_run = Hive::TaskAction.for(task, marker, config: cfg).key ==
+                                Hive::Schemas::TaskActionKind::ARCHIVED
           normalization = nil
           begin
             result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) do
@@ -177,7 +177,7 @@ module Hive
           task = task_after_patrol_fix_move(task, result)
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,
-            completion_time: legacy_completed_at,
+            stamp_completion: !archived_before_run,
             rollback_on_failure: normalization.changed
           )
           report(task, result)
@@ -228,7 +228,12 @@ module Hive
         # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
         # Use the same shape as the cfg-disabled path so JSON consumers
         # see the disabled result; distinguish by reason for ops debugging.
-        if task.workflow.draft_pr_handoff?
+        if task.workflow.controller?
+          # A controller workflow owns its checkout and stage receipts as one
+          # exact state machine. Generic task-stage rebasing must never rewrite
+          # that checkout before the controller validates its own custody.
+          result = Hive::Rebase::Result.skipped(:controller_workflow)
+        elsif task.workflow.draft_pr_handoff?
           # Managed handoff receipts pin an exact base/head pair. Rewriting the
           # task worktree before receipt reconciliation would invalidate the
           # controller's already-scanned identity and could invoke a second
@@ -295,7 +300,7 @@ module Hive
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
-      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil,
+      def commit_after(task, result, config: nil, terminal_snapshot: nil, stamp_completion: true,
                        rollback_on_failure: false)
         marker = Hive::Markers.current(task.state_file)
         archived = Hive::TaskAction.for(task, marker, config: config).key ==
@@ -309,7 +314,7 @@ module Hive
         terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if transactional_terminal
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           begin
-            stamp_completed_at(task, completion_time) if archived
+            stamp_completed_at(task) if archived && stamp_completion
             ops.hive_commit(
               stage_name: "#{task.stage_index}-#{task.stage_name}",
               slug: task.slug,
@@ -358,14 +363,6 @@ module Hive
         return nil unless [ :agent, :council ].include?(terminal.kind)
 
         TerminalStateSnapshot.capture(task.folder)
-      end
-
-      def legacy_completed_at_before_run(task, marker, config:)
-        return nil if task.completed_at
-        return nil unless Hive::TaskAction.for(task, marker, config: config).key ==
-                          Hive::Schemas::TaskActionKind::ARCHIVED
-
-        Hive::CompletionTime.discover(task)
       end
 
       def report(task, result)

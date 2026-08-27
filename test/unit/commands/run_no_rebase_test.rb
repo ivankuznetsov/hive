@@ -11,13 +11,13 @@ require "hive/rebase"
 class HiveCommandsRunNoRebaseTest < Minitest::Test
   include HiveTestHelper
 
-  FakeWorkflow = Struct.new(:draft_pr_handoff?)
+  FakeWorkflow = Struct.new(:draft_pr_handoff?, :controller?)
   FakeTask = Struct.new(:slug, :folder, :worktree_path, :stage_name, :project_root, :workflow)
 
-  def fake_task(draft_pr_handoff: false)
+  def fake_task(draft_pr_handoff: false, controller: false)
     FakeTask.new(
       "demo-260514-bbbb", "/tmp/folder", "/tmp/wt", "4-execute", "/tmp/proj",
-      FakeWorkflow.new(draft_pr_handoff)
+      FakeWorkflow.new(draft_pr_handoff, controller)
     )
   end
 
@@ -72,12 +72,26 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     end
   end
 
+  def test_controller_workflow_never_runs_auto_rebase
+    cmd = Hive::Commands::Run.new("demo-260514-bbbb")
+    replacement = lambda do |*_args|
+      raise "Hive::Rebase.perform must not rewrite a controller-owned checkout"
+    end
+
+    with_replaced_singleton_method(Hive::Rebase, :perform, replacement) do
+      result = cmd.send(:perform_rebase, fake_task(controller: true), {})
+      assert_equal :controller_workflow, result.reason
+      refute result.attempted
+    end
+  end
+
   def test_other_skipped_states_stay_quiet
     # Disabled / no_worktree / cli_override are intentionally silent
     # — they are expected operating modes, not failures. P2 fix
     # mustn't make every skip state spammy.
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")
     [ :disabled, :no_worktree, :cli_override, :managed_draft_pr_handoff,
+      :controller_workflow,
       :dirty_worktree, :detached_head ].each do |reason|
       result = Hive::Rebase::Result.skipped(reason)
       _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }

@@ -148,6 +148,65 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_admission_fingerprint_reuses_a_supplied_context
+    with_tmp_dir do |root|
+      slug = "independent-task"
+      write_task_meta(root, "4-execute", slug, id: 1)
+      project = File.basename(root)
+      task = FakeTask.new(slug: slug, id: 1, folder: execute_folder(root, slug),
+                          project_root: root, project_name: project)
+      registry_entries = [
+        { "name" => project, "path" => root, "repository_identity" => nil }
+      ]
+      context = Hive::DependencySnapshot.admission_context(registry_entries)
+
+      fingerprint = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :admission_context,
+        ->(*) { raise "supplied context must avoid another fleet snapshot" }
+      ) do
+        Hive::DependencySnapshot.admission_fingerprint(
+          task, admission_context: context
+        )
+      end
+      expected_payload = [
+        "hive-dependency-admission-v1", project, slug,
+        "clear", "", "", "", "", ""
+      ]
+
+      assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
+    end
+  end
+
+  def test_supplied_context_preserves_project_enrollment_fingerprints
+    with_tmp_dir do |root|
+      slug = "independent-task"
+      write_task_meta(root, "4-execute", slug, id: 1)
+      task = FakeTask.new(
+        slug: slug, id: 1, folder: execute_folder(root, slug),
+        project_root: root, project_name: File.basename(root)
+      )
+      registries = [
+        [],
+        [
+          { "name" => "first", "path" => root, "repository_identity" => nil },
+          { "name" => "second", "path" => root, "repository_identity" => nil }
+        ]
+      ]
+
+      registries.each do |registry_entries|
+        context = Hive::DependencySnapshot.admission_context(registry_entries)
+        without_context = Hive::DependencySnapshot.admission_fingerprint(
+          task, registry_entries: registry_entries
+        )
+        with_context = Hive::DependencySnapshot.admission_fingerprint(
+          task, admission_context: context
+        )
+
+        assert_equal without_context, with_context
+      end
+    end
+  end
+
   def test_semantic_fingerprint_is_order_independent_and_includes_fallback_layers
     task = lambda do |slug, depends_on = nil|
       Hive::DependencyAdmission::TaskSnapshot.new(

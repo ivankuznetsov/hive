@@ -19,7 +19,6 @@ require "hive/atomic_file"
 require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
-require "hive/completion_time"
 require "hive/plan_review/transition_guard"
 require "hive/task_activity"
 
@@ -153,7 +152,9 @@ module Hive
         rejection = direction == "backward"
         activity.begin_operation(
           kind: rejection ? "rejection_recorded" : "approval_recorded",
-          operation_id: "#{rejection ? 'reject' : 'approve'}:#{task.stage_index}-#{task.stage_name}:#{destination}:#{direction}",
+          operation_id: approval_operation_id(
+            activity, task, destination, direction, rejection: rejection
+          ),
           source: "command_service",
           reason: rejection ? "task stage rejection recorded" : "task stage approval recorded",
           precondition: {
@@ -162,6 +163,19 @@ module Hive
           },
           expected_postcondition: { "stage" => destination }
         )
+      end
+
+      def approval_operation_id(activity, task, destination, direction, rejection:)
+        binding = activity.binding
+        identity = Hive::TaskActivity.fingerprint(
+          "stage" => "#{task.stage_index}-#{task.stage_name}",
+          "destination" => destination,
+          "direction" => direction,
+          "task_generation" => binding.fetch("task_generation"),
+          "ownership_generation" => binding.fetch("ownership_generation")
+        )
+        verb = rejection ? "reject" : "approve"
+        "#{verb}:#{identity}"
       end
 
       def complete_approval_operation(operation, new_folder, destination, direction)
@@ -354,7 +368,6 @@ module Hive
         commit_action = nil
         human_state_snapshot = nil
         completion_snapshot = nil
-        completion_time = nil
         begin
           with_optional_commit_lock(task.hive_state_path) do
             Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
@@ -374,7 +387,6 @@ module Hive
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
-                completion_time = legacy_completion_time(task)
               end
               new_folder = move_task!(task, dest_stage)
             end
@@ -383,7 +395,7 @@ module Hive
             commit_action = "#{verb} #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
             record_commit_or_rollback!(
               task, dest_stage, new_folder, commit_action,
-              completion_snapshot: completion_snapshot, completion_time: completion_time
+              completion_snapshot: completion_snapshot
             )
           end
         rescue StandardError, Interrupt
@@ -576,10 +588,9 @@ module Hive
       #      re-created mid-flight). Both errors must surface — the
       #      original commit failure is the cause; the rollback failure
       #      is what actually blocks recovery.
-      def record_commit_or_rollback!(task, dest_stage, new_folder, action, completion_snapshot: nil,
-                                     completion_time: nil)
+      def record_commit_or_rollback!(task, dest_stage, new_folder, action, completion_snapshot: nil)
         if completion_snapshot
-          Hive::TaskMeta.write_completed_at_once(new_folder, completion_time || @clock.call)
+          Hive::TaskMeta.write_completed_at_once(new_folder, @clock.call)
         end
         record_hive_commit(task, dest_stage, action)
       rescue Hive::Error, Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError, ArgumentError, Interrupt => e
@@ -627,13 +638,6 @@ module Hive
       def completion_on_terminal_entry?(task, dest_stage)
         terminal = task.workflow.stages.last
         terminal.kind == :inert && dest_stage == terminal.dir
-      end
-
-      def legacy_completion_time(task)
-        stored = task.completed_at if task.respond_to?(:completed_at)
-        return stored if stored
-
-        Hive::CompletionTime.discover(task)
       end
 
       # ── Reporting ───────────────────────────────────────────────────────

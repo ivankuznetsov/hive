@@ -46,8 +46,8 @@ module Hive
 
       CONTROLLER_RUNNERS = {
         patrol_fix: lambda {
-          require "hive/patrol_fix/runner"
-          Hive::PatrolFix::Runner.method(:run!)
+          require "hive/stages/patrol_fix/runner"
+          Hive::Stages::PatrolFix::Runner.method(:run!)
         }
       }.freeze
 

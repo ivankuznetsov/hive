@@ -35,6 +35,12 @@ case "$cwd" in
     emit_usage=1
     printf '# Plan\n\n1. Implement the sample feature.\n\n<!-- COMPLETE -->\n' > plan.md
     ;;
+  */stages/5-open-pr/*)
+    emit_usage=1
+    printf '%s\n' \
+      '{"title":"Golden path sample implementation","body":"Created by the golden-path E2E."}' \
+      > pr-draft.json
+    ;;
   *worktrees/*)
     emit_usage=1
     # Execute runs in the project worktree: commit something real.

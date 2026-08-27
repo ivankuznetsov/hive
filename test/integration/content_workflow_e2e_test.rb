@@ -43,7 +43,6 @@ class ContentWorkflowE2ETest < Minitest::Test
               status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
               logger: logger
             )
-
             30.times do
               break if File.file?(File.join(task_folder(project_root, "6-done", slug), "article.md"))
 
@@ -62,7 +61,6 @@ class ContentWorkflowE2ETest < Minitest::Test
                          "terminal done stage must not re-dispatch an agent after article.md exists"
             assert_equal spawned_at_rest, supervisor.spawned.size,
                          "terminal done stage must not spawn another command after article.md exists"
-
             @spawned_commands = supervisor.spawned.map { |spawn| spawn.fetch(:command) }
             @logged_event_names = logger.events.map { |entry| entry.fetch(:name) }
           end

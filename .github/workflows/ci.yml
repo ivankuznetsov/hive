@@ -17,6 +17,7 @@ jobs:
   coverage-shards:
     name: coverage shard ${{ matrix.label }}/6
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -61,13 +62,31 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 1
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-shard-${{ matrix.shard }}
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
 
   test:
     name: coverage (Ruby 3.4)
     if: ${{ always() }}
     needs: coverage-shards
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
+      - name: Aggregation-only notice (no tests run in this job)
+        shell: bash
+        run: |
+          {
+            echo "### Coverage aggregation only"
+            echo ""
+            echo "This job runs **no tests**. It merges shard resultsets and enforces the exact coverage contract."
+            echo "- A red result here means a coverage shard failed or uncovered executable lines exist — check the \`coverage shard N/6\` jobs and the exported evidence."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require every coverage collector
         shell: bash
         env:
@@ -92,10 +111,21 @@ jobs:
           HIVE_COVERAGE_REVISION: ${{ github.sha }}
           HIVE_COVERAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: bundle exec rake coverage:report
+      - name: Retain coverage evidence (uncovered lines, shard map)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-evidence
+          path: |
+            coverage/uncovered.json
+            coverage/shards.json
+          if-no-files-found: warn
+          retention-days: 14
 
   expensive-test-gates:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +148,53 @@ jobs:
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-${{ matrix.name }}
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Absolute timings vary with hosted-runner load, so they remain visible but
+  # cannot make the functional merge gate flaky. The required matrix above
+  # still owns row completeness and archive-size scaling.
+  tui-reactivity-latency:
+    name: TUI reactivity absolute latency (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Measure absolute TUI latency
+        id: measure
+        continue-on-error: true
+        env:
+          HIVE_TUI_PERF_ABSOLUTE: "1"
+        run: bundle exec rake test:tui_reactivity_perf
+      - name: Report absolute TUI latency
+        if: ${{ always() }}
+        env:
+          HIVE_TUI_LATENCY_OUTCOME: ${{ steps.measure.outcome }}
+        run: |
+          if [[ "$HIVE_TUI_LATENCY_OUTCOME" == "failure" ]]; then
+            echo "### ⚠️ Absolute TUI latency exceeded its advisory budget" >> "$GITHUB_STEP_SUMMARY"
+            echo "The required archive-size scaling proof remains authoritative; see the retained failure evidence for this runner's measurement." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ✅ Absolute TUI latency stayed within its advisory budget" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain failure evidence
+        if: ${{ steps.measure.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-tui-reactivity-latency
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
 
   required-test-gate:
     name: rake test (Ruby 3.4)
@@ -127,7 +204,16 @@ jobs:
       - expensive-test-gates
       - e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Aggregation-only notice (no tests run in this job)
+        shell: bash
+        run: |
+          {
+            echo "### Required-gate aggregation only — this job runs no tests"
+            echo ""
+            echo "A red result here means one of its children failed: \`coverage (Ruby 3.4)\`, an \`expensive-test-gates\` entry, or \`real CLI scenario harness\`. Check those jobs, not this one."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require coverage, functional e2e, and expensive proof gates
         shell: bash
         env:
@@ -142,6 +228,7 @@ jobs:
   e2e:
     name: real CLI scenario harness
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -162,7 +249,7 @@ jobs:
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
-      - name: Retain e2e reports and failure evidence
+      - name: Retain e2e reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -171,12 +258,21 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-e2e
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
 
   incident-duration-budget:
     name: incident duration budget (advisory)
     needs: e2e
     continue-on-error: true
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -195,6 +291,7 @@ jobs:
   web-tests:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -215,6 +312,15 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
           working-directory: web
+      - name: Cache Playwright browsers
+        if: ${{ matrix.suite != 'integration' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Keyed on the pinned playwright version in web/package.json; a miss
+          # falls through to the full install step below, so caching can never
+          # skip or weaken the proof.
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json', 'web/package.json') }}
       - name: Install Playwright chromium for Capybara system tests
         if: ${{ matrix.suite != 'integration' }}
         run: |
@@ -226,6 +332,12 @@ jobs:
       - name: Rails system tests (Capybara + Playwright)
         if: ${{ matrix.suite == 'system' }}
         run: bin/rails test:system
+      - name: Cache the golden-path root gem bundle
+        if: ${{ matrix.suite == 'golden' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/vendor/root-bundle
+          key: root-bundle-${{ runner.os }}-${{ hashFiles('Gemfile.lock') }}
       - name: Install the gem bundle (the golden-path E2E spawns a real daemon)
         if: ${{ matrix.suite == 'golden' }}
         working-directory: .
@@ -249,7 +361,16 @@ jobs:
     if: ${{ always() }}
     needs: web-tests
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Aggregation-only notice (no tests run in this job)
+        shell: bash
+        run: |
+          {
+            echo "### Web-gate aggregation only — this job runs no tests"
+            echo ""
+            echo "A red result here means a \`web-tests\` matrix child failed (integration, system, or golden-path E2E). Check those jobs, not this one."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Require Rails integration, system, and golden-path gates
         shell: bash
         env:
@@ -263,6 +384,7 @@ jobs:
   hivebox-installer-windows:
     name: hivebox installer (Windows PowerShell)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Syntax-check both installers
@@ -278,6 +400,7 @@ jobs:
   rubocop:
     name: rubocop (37signals omakase)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -289,6 +412,7 @@ jobs:
   brakeman:
     name: brakeman
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -300,6 +424,7 @@ jobs:
   bundler-audit:
     name: bundler-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -320,6 +445,7 @@ jobs:
   launchd-macos:
     name: launchd service install (macOS)
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
@@ -392,3 +518,11 @@ jobs:
             launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null \
               || launchctl unload "$plist" 2>/dev/null || true
           done
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-evidence-launchd-macos
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: warn
+          retention-days: 14

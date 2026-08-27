@@ -310,6 +310,7 @@ class RunFinalizeTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"],
                      "scope-violating residue must surface via the new ensure_clean_on_exit_failed reason"
+        assert_equal "scope_violation", marker.attrs["failure_kind"]
         assert_includes marker.attrs["residue_paths"].to_s, "dirty"
       end
     end

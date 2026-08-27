@@ -1,10 +1,10 @@
 ---
 title: Operating Hive
 type: operating
-source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-08-13
-tags: [operating, daemon, bot, systemd, launchd, install, skills]
+updated: 2026-08-25
+tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
@@ -41,6 +41,30 @@ the direct set is `thor`, `telegram-bot-ruby`, `faraday`,
 `sqlite3`, and `unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
 separately through npm into Hive's data prefix when npm is available; Hive
 does not auto-install Node.js/npm itself.
+
+### Runtime identity and dogfood replacement
+
+Dogfood replaces the active installation; it is not a second Hive instance.
+The normal `hive` command, `hive-daemon` service, and `hive-web` service all
+resolve the selected dogfood deployment, so agents and plugins keep using the
+ordinary commands. Exactly one daemon unit and one web unit run. Do not add a
+parallel registry, service name, or stable-binary bypass merely to inspect
+status.
+
+The launcher/service environment identifies the selected runtime with
+`HIVE_RUNTIME_CHANNEL=dogfood`, a full 40-character lowercase
+`HIVE_RUNTIME_BUILD_SHA`, and a safe `HIVE_RUNTIME_DEPLOYMENT_ID` basename.
+`hive version --json`, `hive status --operational --json`,
+`hive daemon status --json`, and `hive web status --json` project those values
+through the same closed runtime object. Daemon status reads the identity the
+live daemon recorded in its PID receipt, web status reads the ready app's
+bounded health document, and operational cache hits carry the daemon producer's
+identity. Missing or invalid producer evidence reports `unknown` instead of
+borrowing the inspecting CLI's identity. Human `hive version` and the strict
+`hive --version` probe remain the release semver for package-manager and
+compatibility checks. Missing annotations default to `release`; incomplete,
+malformed, or invalidly encoded annotations degrade to `unknown`/null without
+echoing their input.
 
 | Tier | Platforms | Status |
 |------|-----------|--------|
@@ -246,7 +270,7 @@ script installs a published release into an isolated XDG/HIVE_HOME/HOME
 tmp prefix, authenticates the managed web bundle, and runs consent-approved
 managed `hive setup --no-init --yes --json` from that exact digest-pinned
 archive before walking the remaining command surface (`hive --version`, `hive doctor`,
-`hive init`, `hive new`, `hive status --json`, `hive daemon install
+`hive init`, `hive new`, `hive status --operational --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
 the published schemas, and asserts no state leaks outside the prefix. It also
 prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
@@ -667,7 +691,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | `poll_interval_sec`             | 30      | Tick cadence. ≥ 5 enforced.                                 |
 | `edit_debounce_sec`             | 30      | Mid-save grace for `needs_input` rows. 0 disables.          |
 | `pr_merge_poll_interval_sec`    | 300     | `gh pr view` cadence per task. ≥ 60 enforced (rate limits). |
-| `transient_retry_backoff_sec`   | 60      | Reserved (current backoff schedule is hardcoded).           |
+| `transient_retry_backoff_sec`   | 60      | First retry hold for durable task-attempt `TEMPFAIL`; ancillary transient retries also use it as their backoff base. |
 | `shutdown_grace_sec`            | 600     | TERM→KILL window for `hive daemon stop`.                    |
 | `log_max_bytes`                 | 10 MB   | Rotation threshold.                                         |
 | `log_max_files`                 | 5       | 5 × 10 MB = 50 MB log budget.                               |

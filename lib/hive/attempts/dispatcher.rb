@@ -1,4 +1,5 @@
 require "securerandom"
+require "time"
 require "hive/attempts/contracts"
 require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
@@ -24,7 +25,8 @@ module Hive
                      health_store: nil, health_store_factory: nil,
                      router: Hive::ProviderRouting::Router.new,
                      decision_id_generator: -> { SecureRandom.uuid },
-                     context_provenance: Hive::ContextProvenance)
+                     context_provenance: Hive::ContextProvenance,
+                     transient_retry_backoff_sec: 60)
         @store = store
         @launcher = launcher
         @limits = DEFAULT_LIMITS.merge(limits)
@@ -39,6 +41,7 @@ module Hive
         @router = router
         @decision_id_generator = decision_id_generator
         @context_provenance = context_provenance
+        @transient_retry_backoff_sec = transient_retry_backoff_sec.to_i
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
@@ -199,6 +202,18 @@ module Hive
               result = DispatchResult.new(
                 status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
                 attach_descriptor: nil, reason: nil
+              )
+              next
+            end
+
+            transient = transient_retry_terminal(
+              admission_view: view, generation: generation,
+              subject: subject || task_subject(generation), now: now
+            )
+            if transient
+              result = DispatchResult.new(
+                status: :deferred, attempt: transient, receipt: transient.receipt,
+                attach_descriptor: nil, reason: "transient_retry"
               )
               next
             end
@@ -463,6 +478,21 @@ module Hive
         terminals.reverse.find do |record|
           record.outcome == "succeeded" && required_artifact_valid?(task, record)
         end
+      end
+
+      # TEMPFAIL is a scheduler collision, not an agent verdict. Preserve its
+      # terminal receipt for idempotency and accounting, but pace a different
+      # request from the same generation before admitting another worker.
+      # The receipt timestamp makes the hold restart-safe without another
+      # watcher or retry-state store.
+      def transient_retry_terminal(admission_view:, generation:, subject:, now:)
+        terminal = admission_view.latest_terminal_attempt(
+          task_generation: generation.task_generation, subject: subject
+        )
+        return unless terminal&.receipt&.fetch("exit_status", nil) == Hive::ExitCodes::TEMPFAIL
+
+        ended_at = Time.iso8601(terminal.receipt.fetch("ended_at"))
+        terminal if now.utc < ended_at + @transient_retry_backoff_sec
       end
 
       def brainstorm_artifact_missing?(task, records)

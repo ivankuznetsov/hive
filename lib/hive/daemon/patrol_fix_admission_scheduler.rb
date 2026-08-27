@@ -184,6 +184,11 @@ module Hive
             store: store, source: source, entry: entry, snapshot: snapshot
           )
           result = materializer.call(occurrence_id)
+        rescue Hive::PatrolFix::AdmissionStore::StaleDecision
+          return event(
+            source, occurrence_id, :stale, source_name: source_name,
+            reason: "candidate_digest_changed"
+          )
         rescue StandardError => error
           return defer_failure(
             source, store, occurrence_id, error, source_name: source_name, now: now,

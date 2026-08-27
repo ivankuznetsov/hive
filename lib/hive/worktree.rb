@@ -578,8 +578,8 @@ module Hive
     # ~/Dev>/<repo>.worktrees`). Shared by Drop and other callers so the
     # resolution rule has one home; previously Drop duplicated the formula
     # and would have silently drifted on any future change here.
-    def self.canonical_root(project_root)
-      cfg = Hive::Config.load(project_root)
+    def self.canonical_root(project_root, config: nil)
+      cfg = config || Hive::Config.load(project_root)
       File.expand_path(
         cfg["worktree_root"] ||
           default_worktree_root(File.basename(File.expand_path(project_root)))

@@ -3,6 +3,7 @@ require "fileutils"
 require "securerandom"
 require_relative "test/support/coverage"
 require_relative "test/support/tmp_cleanup"
+require_relative "test/support/changed_coverage"
 
 # These expensive outer proofs are intentionally separate from the normal local
 # suite. CI runs them as named merge gates.
@@ -194,6 +195,9 @@ namespace :coverage do
     root = File.expand_path(__dir__)
     report_path = File.join(root, "coverage", "coverage.json")
     HiveTestCoverage.configure!(root: root)
+    # Evidence export precedes the gate abort so red runs still publish the
+    # complete uncovered-lines list and shard map.
+    HiveTestCoverage.export_shard_map!(HIVE_COVERAGE_SHARDS)
     if ENV.key?("HIVE_COVERAGE_EXPECTED_SHARDS")
       HiveTestCoverage.verify_shard_manifests!(
         expected_shards: Integer(ENV.fetch("HIVE_COVERAGE_EXPECTED_SHARDS")),
@@ -204,9 +208,67 @@ namespace :coverage do
     end
     HiveTestCoverage.report!
     report = HiveTestCoverage.read_report(report_path)
+    HiveTestCoverage.export_evidence!(report)
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   rescue ArgumentError, KeyError, HiveTestCoverage::ShardManifestError => e
     abort "coverage shard manifest error: #{e.message}"
+  end
+
+  # Fast local loop: run only the focused tests for git-diff-touched lib
+  # sources and enforce exact line coverage on those sources. The global
+  # 100% gate stays CI's job. HIVE_COVERAGE_BASE overrides the merge base.
+  desc "Run focused tests for changed lib sources with per-file exact coverage"
+  task :changed do
+    base = ENV["HIVE_COVERAGE_BASE"] || `git merge-base HEAD origin/main`.strip
+    abort "could not determine merge base; set HIVE_COVERAGE_BASE" if base.empty?
+
+    sources = HiveChangedCoverage.changed_sources(base: base)
+    if sources.empty?
+      puts "coverage:changed: no changed lib sources versus #{base}; nothing to run"
+      next
+    end
+
+    test_files = HiveChangedCoverage.test_files_for_sources(sources)
+    puts "coverage:changed: #{sources.length} changed source(s), #{test_files.length} focused test file(s)"
+    sources.each { |source| puts "  #{source}" }
+    if test_files.empty?
+      warn "coverage:changed: no focused test files matched; coverage enforcement still applies"
+    end
+
+    root = File.expand_path(__dir__)
+    run_id = "changed-#{Process.pid}-#{SecureRandom.hex(4)}"
+    env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+    old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
+
+    begin
+      FileUtils.rm_rf(File.join(root, "coverage", ".resultset", run_id))
+      ENV["HIVE_COVERAGE"] = "1"
+      ENV["HIVE_COVERAGE_ROOT"] = root
+      ENV["HIVE_COVERAGE_RUN_ID"] = run_id
+      ENV["RUBYOPT"] = [ "-I#{File.join(root, 'test')} -rhive_coverage_boot", ENV["RUBYOPT"] ].compact.join(" ")
+
+      # Reuse the focused runner so multiple mapped files are all loaded and
+      # Bundler/plain-Ruby selection has one implementation. The test helper
+      # is the coverage bootstrap for explicit no-focused-test overrides.
+      focused_files = test_files.empty? ? [ "test/test_helper.rb" ] : test_files
+      success = system(
+        { "HIVE_TEST_REQUIRE_BUNDLE" => "1" },
+        File.join(root, "bin", "test"),
+        *focused_files,
+        chdir: root
+      )
+      abort "coverage:changed: focused tests failed" unless success
+
+      HiveTestCoverage.configure!(root: root)
+      HiveTestCoverage.report!
+      report = HiveTestCoverage.read_report(File.join(root, "coverage", "coverage.json"))
+      failures = HiveChangedCoverage.enforce(report, sources: sources)
+      abort "coverage:changed failed:\n  - #{failures.join("\n  - ")}" unless failures.empty?
+      puts "coverage:changed: exact line coverage holds for all #{sources.length} changed source(s)"
+    ensure
+      FileUtils.rm_rf(File.join(root, "coverage", ".resultset", run_id)) if root && run_id
+      old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    end
   end
 end
 

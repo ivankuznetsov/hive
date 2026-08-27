@@ -1,8 +1,8 @@
-require "json"
 require "pty"
 require "securerandom"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/agent_support"
 
 module Hive
   module Web
@@ -183,15 +183,12 @@ module Hive
       end
 
       def write_pi_token(raw_json)
-        parsed = JSON.parse(raw_json.to_s)
-        raise Hive::Error, "pi token JSON must be a non-empty object" unless parsed.is_a?(Hash) && parsed.any?
-
-        path = File.expand_path("~/.pi/agent/auth.json")
+        support = Hive::AgentSupport.for(:pi)
+        content = support.parse_token(raw_json)
+        path = support.credential_path
         FileUtils.mkdir_p(File.dirname(path))
-        File.write(path, JSON.pretty_generate(parsed), mode: "w", perm: 0o600)
+        File.write(path, content, mode: "w", perm: 0o600)
         path
-      rescue JSON::ParserError => e
-        raise Hive::Error, "pi token JSON is invalid: #{e.message}"
       end
 
       private

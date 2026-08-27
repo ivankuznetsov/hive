@@ -23,7 +23,7 @@ module Hive
         {
           "mode" => "managed_service",
           "warnings" => Hive::Web::Environment.warnings(environment: environment)
-        }.merge(state)
+        }.merge(state.except("runtime"))
       rescue StandardError
         config = Hive::Config::DEFAULTS.fetch("web")
         {
@@ -39,6 +39,12 @@ module Hive
           "ready" => false,
           "readiness" => "manager_unavailable"
         }
+      end
+
+      def self.status_error_context(environment: ENV)
+        error_context(environment: environment).merge(
+          "runtime" => Hive::RuntimeIdentity.unknown
+        )
       end
 
       VALID_SUBCOMMANDS = %w[install start stop status capture capture-server].freeze
@@ -434,7 +440,7 @@ module Hive
           wait_for_running: true,
           attempts: INSTALL_READINESS_ATTEMPTS,
           interval: INSTALL_READINESS_INTERVAL_SEC
-        )
+        ).except("runtime")
         {
           "schema" => "hive-web-install",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"),
@@ -482,7 +488,7 @@ module Hive
           schema: "hive-web-status",
           error: error,
           error_kind: error_kind,
-          extras: self.class.error_context(environment: @environment)
+          extras: self.class.status_error_context(environment: @environment)
         )
         puts JSON.generate(payload)
       end

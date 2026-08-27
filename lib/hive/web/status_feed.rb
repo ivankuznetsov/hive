@@ -31,7 +31,6 @@ module Hive
         @recovery_status_command = recovery_status_command
         @scheduler_snapshot_reader = scheduler_snapshot_reader
         @clock = clock
-        @last_current_scheduler_snapshot = nil
         @mutex = Mutex.new
       end
 
@@ -52,46 +51,14 @@ module Hive
         @recovery_status_command.operational_recoveries(
           projects,
           status_payload: status_payload,
-          scheduler_snapshot: stable_scheduler_snapshot
+          scheduler_snapshot: scheduler_snapshot
         )
       end
 
       private
 
-      # A daemon tick briefly replaces its completed observation with a
-      # generation-bound `started` record. Keep the still-valid completed
-      # observation through that narrow window so web subscribers do not
-      # morph-refresh twice per tick. Every other unavailable/stale state is
-      # passed through immediately.
-      def stable_scheduler_snapshot
-        now = @clock.call.utc
-        observed = @scheduler_snapshot_reader.read(now: now)
-        @mutex.synchronize do
-          if current_scheduler_snapshot?(observed, now)
-            @last_current_scheduler_snapshot = observed
-          elsif reusable_during_tick?(observed, @last_current_scheduler_snapshot, now)
-            @last_current_scheduler_snapshot
-          else
-            @last_current_scheduler_snapshot = nil
-            observed
-          end
-        end
-      end
-
-      def current_scheduler_snapshot?(snapshot, now)
-        snapshot["status"] == "current" && snapshot["phase"] == "complete" &&
-          Time.parse(snapshot.fetch("valid_until")) >= now
-      rescue ArgumentError, KeyError, TypeError
-        false
-      end
-
-      def reusable_during_tick?(observed, previous, now)
-        return false unless observed["status"] == "unavailable" &&
-                            observed["phase"] == "started" &&
-                            observed["reason"] == "tick_started"
-        return false unless current_scheduler_snapshot?(previous, now)
-
-        observed.dig("daemon", "generation").to_s == previous.dig("daemon", "generation").to_s
+      def scheduler_snapshot
+        @scheduler_snapshot_reader.read(now: @clock.call.utc)
       end
     end
 

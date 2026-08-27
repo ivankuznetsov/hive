@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-21
+updated: 2026-08-24
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -36,6 +36,12 @@ Hive uses that inventory to remove ambient API credentials from child launches
 and select CLI subscription/session state. That is Hive policy, not a package
 restriction for independent consumers.
 
+`bin/hive` prefers `components/agent-cli-runtime/lib` when it is present in a
+source checkout. This keeps dogfood and benchmark clones on the component
+contract reviewed in the same commit, even when the operator also has an older
+published `agent-cli-runtime` gem installed. Packaged Hive remains unchanged
+because its gem does not include the monorepo component directory.
+
 Compilation returns argv and optional stdin without executing a process.
 Requested controls fail closed with `UnsupportedCapability` when a profile
 cannot represent them. Provider profiles and extractors are public,
@@ -61,6 +67,13 @@ non-secret child-environment overrides, requested-route evidence, generated
 paths, and idempotent `cleanup!`; it never starts `opencode run`. The process
 owner forwards only the named credential keys, binds any compiled `stdin_data`
 to the run process, and must invoke cleanup from its own lifecycle `ensure`.
+
+That prepared-overlay API remains available to independent component
+consumers, but Hive no longer selects it. Hive compiles `opencode run`
+directly against the operator's native config, plugins, project discovery,
+session store, and login, then supplies only its workflow permission document
+through `OPENCODE_PERMISSION`. Run/export parsing and normalization remain
+shared with the component.
 
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
 flags, a selected authentication source, and an exact `provider/model` plus
@@ -97,6 +110,11 @@ Nonzero OpenCode runs that carry an upstream idle-timeout/504 diagnostic are
 normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
 use marker-owned stages record the ordinary transient `timeout` reason while
 preserving any partial artifact bytes for scheduler-owned retry.
+OpenCode's profile-specific provider-error extractor reads only dedicated
+`error` events and their nested `error.data.message` payload. A structured
+upstream rate-limit refusal therefore reaches Hive as a typed `rate_limited`
+signal and writes the normal cooldown-retry marker, while identical prose in
+ordinary model output cannot forge a retryable provider wall.
 When OpenCode exits zero with an empty terminal assistant message after writing
 a current terminal stage artifact, Hive trusts that controller-scoped artifact;
 the strict malformed transcript remains a failure whenever the artifact itself

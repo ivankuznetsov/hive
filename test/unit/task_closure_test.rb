@@ -6,14 +6,16 @@ require "json_schemer"
 class TaskClosureTest < Minitest::Test
   include HiveTestHelper
 
-  def test_default_attempt_store_runs_layout_migration_without_an_override
+  def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         closure = Hive::TaskClosure.new
         assert_equal File.join(root, "attempts", "v4"),
-                     closure.instance_variable_get(:@attempt_store).root
+                     closure.instance_variable_get(:@attempt_store)
+                            .instance_variable_get(:@root)
       end
-      assert File.file?(File.join(root, "attempts", "v2"))
+      refute File.exist?(File.join(root, "attempts", "v2"))
+      refute File.exist?(File.join(root, "recovery-migration-v6.json"))
     end
   end
 
@@ -424,6 +426,30 @@ class TaskClosureTest < Minitest::Test
       result = service.read(task, project: project)
       assert_equal "invalid", result.status
       assert_match(/identity/, result.error)
+    end
+  end
+
+  def test_projection_reuses_injected_attempt_store_for_active_receipt
+    with_closure_project do |task, project|
+      attempt_store = EmptyAttempts.new
+      service = service_for(attempt_store: attempt_store)
+      preview = service.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      receipt = service.send(
+        :build_receipt, preview, operator: "tester", channel: "cli"
+      )
+      File.binwrite(File.join(task.folder, "closure.json"), JSON.generate(receipt))
+
+      with_replaced_singleton_method(
+        Hive::Attempts::Store, :new,
+        ->(**) { flunk "active closure projection rebuilt the attempt store" }
+      ) do
+        projection = Hive::TaskClosure.projection(
+          task, project: project, attempt_store: attempt_store
+        )
+        assert_equal receipt.fetch("receipt_digest"), projection.fetch("receipt_digest")
+      end
     end
   end
 

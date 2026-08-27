@@ -1,10 +1,10 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
+source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-16
-tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention]
+updated: 2026-08-25
+tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -111,8 +111,17 @@ enabled, running, and ready; an inactive or active-but-not-ready service emits
 samples at 250 ms intervals, allowing a cold Rails/bundle boot roughly ten
 seconds before reporting `active_not_ready`; read-only status still takes one
 immediate sample. Configuration failures from
-`status --json` retain the versioned status error envelope on stdout.
-Bootstrap and service-install exceptions from `install --json` likewise emit
+`status --json` retain the versioned status error envelope on stdout. The
+status success and error envelopes also carry producer-owned `runtime`
+identity. A ready service returns its own identity from the bounded `/health`
+document; inactive, unready, legacy, malformed, and pre-probe error paths
+report `unknown` rather than stamping the observing CLI identity onto the web
+process. A dogfood deployment points the ordinary `hive-web` service at the
+dogfood app and reports that channel/build; it does not create a parallel web
+unit or a second user-facing command. The strict `hive-web-install.v1` and
+`hive-setup.v1` service-state projections remain lifecycle-only and exclude
+this status-specific runtime field. Bootstrap and service-install exceptions from
+`install --json` likewise emit
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
 

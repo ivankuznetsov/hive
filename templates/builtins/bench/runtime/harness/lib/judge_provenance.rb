@@ -11,22 +11,29 @@ module HiveBench
 
     module_function
 
-    def metadata(judge_name, efforts: {})
+    def metadata(judge_name, efforts: {}, routes: {})
       name = judge_name.to_s
       effort = efforts.transform_keys(&:to_s).fetch(name, EXPLICIT_REASONING_EFFORTS[name])
       effort = nil if effort.to_s == "unspecified"
-      {
+      metadata = {
         "reasoning_effort" => effort || "unspecified",
         "reasoning_effort_explicit" => !effort.nil?
       }
+      route = routes.transform_keys(&:to_s)[name]
+      if route
+        route = route.transform_keys(&:to_s)
+        metadata["judge_provider"] = route.fetch("provider").to_s
+        metadata["judge_provider_model"] = route.fetch("provider_model").to_s
+      end
+      metadata
     end
 
-    def annotate_document!(document, efforts: {})
+    def annotate_document!(document, efforts: {}, routes: {})
       Array(document["cells"]).each do |cell|
         (cell["judges"] || {}).each do |judge_name, record|
           next unless record.is_a?(Hash)
 
-          record.merge!(metadata(judge_name, efforts: efforts))
+          record.merge!(metadata(judge_name, efforts: efforts, routes: routes))
         end
       end
       document

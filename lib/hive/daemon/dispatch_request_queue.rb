@@ -48,7 +48,7 @@ module Hive
       QUARANTINE_DIRNAME = "quarantine".freeze
 
       RECOVERY_PHASES = %w[admitted cleared dispatched terminal].freeze
-      RECOVERY_VARIANTS = %w[marker admission_failure].freeze
+      RECOVERY_VARIANTS = %w[marker admission_failure markerless_failure].freeze
       RECOVERY_KEYS = %w[
         variant phase observed_marker_generation expected_marker_attrs
         canonical_task_folder expected_post_clear_progress_fingerprint
@@ -388,6 +388,26 @@ module Hive
           # startup claim repair even when their original process is gone.
           next if data.dig("recovery", "phase") == "terminal"
 
+          # Older markerless rearm logic could update a terminal recovery to
+          # `admitted` without releasing its completed delivery claim. An
+          # admitted recovery has not crossed the dispatch boundary, so it
+          # must be pending and unclaimed. Repair that impossible persisted
+          # combination before consulting the stale attempt correlation.
+          if data.dig("recovery", "phase") == "admitted"
+            requeued = requeue_recovery!(
+              request_id, expected_phase: "admitted", changes: {},
+              state_home: state_home, known_path: path
+            )
+            handler&.call(
+              request_id: request_id,
+              reason: requeued ? "recovery_admitted_claim_requeued" :
+                "recovery_admitted_claim_requeue_failed",
+              path: path
+            )
+            removed += 1 if requeued
+            next
+          end
+
           claim = read_claim_metadata(path)
           attempt_id = claim && claim["attempt_id"]
           task_generation = claim && claim["task_generation"]
@@ -571,6 +591,22 @@ module Hive
         end.min_by { |request| [ request.created_at, request.request_id ] }
       end
 
+      # Controller workflows do not use inline compatibility markers. Their
+      # unchanged-generation failures therefore bind directly to the task
+      # generation and failure origin instead of inventing a marker identity.
+      def find_markerless_recovery(project:, slug:, task_generation:, failure_origin:,
+                                   state_home: Hive::Paths.state_home)
+        each_matching_request(state_home: state_home).filter_map do |parsed|
+          next unless parsed.recovery.is_a?(Hash)
+          next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
+          next unless parsed.recovery["variant"] == "markerless_failure"
+          next unless parsed.task_generation.to_s == task_generation.to_s
+          next unless parsed.recovery["failure_origin"].to_s == failure_origin.to_s
+
+          parsed
+        end.min_by { |request| [ request.created_at, request.request_id ] }
+      end
+
       # Highest durable retry count already recorded for this task stage. A
       # successful workflow transition starts a new failure series; plan-stage
       # recovery history must not put the first execute failure at the hourly
@@ -689,6 +725,55 @@ module Hive
         return operation.call(directory(state_home: state_home)) if request_locked
 
         with_request_lock(request_id, state_home: state_home, &operation)
+      rescue Errno::ENOENT
+        false
+      end
+
+      # Compare-and-swap a recovery transition while guaranteeing that its
+      # delivery is pending and unclaimed. When a claimed terminal receipt is
+      # retried, move it back to the pending filename before changing its
+      # phase. A crash between those operations therefore leaves a safe,
+      # invisible terminal receipt instead of an admitted claimed split.
+      def requeue_recovery!(request_id, expected_phase:, changes:,
+                            state_home: Hive::Paths.state_home, known_path: nil)
+        with_request_lock(request_id, state_home: state_home) do |dir|
+          paths = if known_path
+            expanded = File.expand_path(known_path)
+            next false unless File.dirname(expanded) == File.expand_path(dir)
+            next false unless expanded.end_with?(CLAIMED_SUFFIX)
+
+            [ expanded, expanded.delete_suffix(CLAIMED_SUFFIX) ]
+          else
+            request_files(dir)
+          end
+          matches = paths.filter_map do |path|
+            data = parse_json_hash(path)
+            [ path, data ] if data && data["request_id"].to_s == request_id.to_s
+          end
+          next false unless matches.one?
+
+          path, data = matches.fetch(0)
+          recovery = data["recovery"]
+          next false unless recovery.is_a?(Hash)
+          next false unless recovery["phase"].to_s == expected_phase.to_s
+
+          updated = recovery.merge(changes.to_h.transform_keys(&:to_s))
+          validate_recovery!(updated)
+          if path.end_with?(CLAIMED_SUFFIX)
+            pending_path = path.delete_suffix(CLAIMED_SUFFIX)
+            next false if File.exist?(pending_path)
+
+            File.rename(path, pending_path)
+            FileUtils.rm_f(claim_metadata_path(path))
+            fsync_directory(dir)
+            path = pending_path
+          end
+
+          data["recovery"] = updated
+          rewrite_request(path, data)
+          fsync_directory(dir)
+          true
+        end
       rescue Errno::ENOENT
         false
       end
@@ -1054,6 +1139,10 @@ module Hive
                    recovery["policy_digest"]
               raise ArgumentError, "admission-failure policy digest does not match observation"
             end
+          elsif recovery["variant"] == "markerless_failure"
+            unless recovery["source_receipt"].nil? && recovery["admission_observation"].nil?
+              raise ArgumentError, "markerless-failure recovery cannot carry route evidence"
+            end
           elsif recovery["failure_origin"] == "provider_route_failed" &&
                 recovery["source_receipt"].nil?
             raise ArgumentError, "provider-route recovery requires a source receipt"
@@ -1073,12 +1162,12 @@ module Hive
         end
 
         def validate_recovery_variant!(recovery)
-          marker = recovery["variant"] == "marker"
+          variant = recovery["variant"]
           generation = recovery["observed_marker_generation"]
           attrs = recovery["expected_marker_attrs"]
           policy_digest = recovery["policy_digest"]
 
-          if marker
+          if variant == "marker"
             unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(generation.to_s)
               raise ArgumentError, "observed_marker_generation must be a sha256"
             end
@@ -1089,12 +1178,19 @@ module Hive
             unless policy_digest.nil?
               raise ArgumentError, "marker recovery cannot carry policy_digest"
             end
-          else
+          elsif variant == "admission_failure"
             unless generation.nil? && attrs.empty?
               raise ArgumentError, "admission-failure recovery cannot carry marker identity"
             end
             unless Hive::Attempts::OutputReference::SHA256_PATTERN.match?(policy_digest.to_s)
               raise ArgumentError, "admission-failure policy_digest must be a sha256"
+            end
+          else
+            unless generation.nil? && attrs.empty?
+              raise ArgumentError, "markerless-failure recovery cannot carry marker identity"
+            end
+            unless policy_digest.nil?
+              raise ArgumentError, "markerless-failure recovery cannot carry policy_digest"
             end
           end
         end

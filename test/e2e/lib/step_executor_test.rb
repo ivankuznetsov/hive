@@ -224,7 +224,7 @@ class E2EStepExecutorTest < Minitest::Test
         steps:
           - kind: json_assert
             args: [status, --json]
-            schema: hive-status
+            schema: hive-running-status
       YAML
 
       Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
@@ -242,7 +242,7 @@ class E2EStepExecutorTest < Minitest::Test
             args: [version]
           - kind: json_assert
             args: [version]
-            schema: hive-status
+            schema: hive-running-status
       YAML
 
       Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all

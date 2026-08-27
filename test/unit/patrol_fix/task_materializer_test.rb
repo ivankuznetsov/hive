@@ -299,16 +299,111 @@ class PatrolFixTaskMaterializerTest < Minitest::Test
 
       restored = false
       reset = false
-      service.define_singleton_method(:restore_originals!) { |_| restored = true }
-      service.define_singleton_method(:reset_task_index!) { |_| reset = true }
+      lock_depth = 0
+      test = self
+      service.define_singleton_method(:restore_originals!) do |_|
+        test.assert_equal 1, lock_depth, "file rollback must stay inside the commit lock"
+        restored = true
+      end
+      service.define_singleton_method(:reset_task_index!) do |_|
+        test.assert_equal 1, lock_depth, "index rollback must stay inside the commit lock"
+        reset = true
+      end
       failing_git = Object.new
       failing_git.define_singleton_method(:hive_commit) { |**| raise "commit failed" }
       service.instance_variable_set(:@git_ops, failing_git)
-      assert_raises(RuntimeError) do
-        service.send(:persist_publication_receipt!, folder, manifest, record, snapshot)
+      lock = lambda do |_path, **, &block|
+        lock_depth += 1
+        block.call
+      ensure
+        lock_depth -= 1
+      end
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, lock) do
+        assert_raises(RuntimeError) do
+          service.send(:persist_publication_receipt!, folder, manifest, record, snapshot)
+        end
       end
       assert restored
       assert reset
+    end
+  end
+
+  def test_task_artifact_interrupt_restores_manifest_and_receipts_inside_commit_lock
+    with_initialized_project do |project_root|
+      store = admission_store(project_root)
+      service = materializer(project_root, store)
+      publication = exact_publication(number: 7)
+      snapshot = source_snapshot(existing_pull_requests: [ publication ])
+      record = {
+        "decision" => {
+          "decision" => "same_root", "candidate_identity" => publication.fetch("id")
+        },
+        "candidates" => [ {
+          "kind" => "pull_request", "identity" => publication.fetch("id")
+        } ]
+      }
+      folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "repair-artifacts")
+      FileUtils.mkdir_p(folder)
+      current = service.send(:build_initial_manifest, "repair-artifacts", snapshot)
+      manifest_store = Hive::PatrolFix::TaskManifest.new(task_folder: folder)
+      manifest_store.write!(current)
+      receipt_store = Hive::PatrolFix::ReceiptStore.new(task_folder: folder)
+      receipt_store.append!({
+        "schema" => Hive::PatrolFix::ReceiptStore::SCHEMA,
+        "schema_version" => Hive::PatrolFix::ReceiptStore::SCHEMA_VERSION,
+        "receipt_id" => "decision-before-update", "kind" => "decision", "stage" => "inbox",
+        "task" => current.fetch("task"),
+        "evidence_revision" => current.fetch("evidence_revision"),
+        "recorded_at" => NOW.iso8601,
+        "payload" => {
+          "route" => "fix", "rationale" => "Ready for repair",
+          "evidence" => [ "Reproduced failure" ], "blocker_owner" => "operator",
+          "head_revision" => "1" * 40
+        }
+      })
+      original_manifest = File.binread(manifest_store.path)
+      original_receipts = File.binread(receipt_store.path)
+      candidate = Marshal.load(Marshal.dump(current))
+      candidate.fetch("aliases") << { "kind" => "legacy_issue", "value" => "acme/demo#7" }
+
+      restored = false
+      reset = false
+      lock_depth = 0
+      test = self
+      original_restore = service.method(:restore_originals!)
+      service.define_singleton_method(:restore_originals!) do |originals|
+        test.assert_equal 1, lock_depth, "file rollback must stay inside the commit lock"
+        restored = true
+        original_restore.call(originals)
+      end
+      service.define_singleton_method(:reset_task_index!) do |_|
+        test.assert_equal 1, lock_depth, "index rollback must stay inside the commit lock"
+        reset = true
+      end
+      interrupting_git = Object.new
+      interrupting_git.define_singleton_method(:hive_commit) { |**| raise Interrupt }
+      service.instance_variable_set(:@git_ops, interrupting_git)
+      lock = lambda do |_path, **, &block|
+        lock_depth += 1
+        block.call
+      ensure
+        lock_depth -= 1
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, lock) do
+        assert_raises(Interrupt) do
+          service.send(
+            :persist_task_artifacts!, folder, current: current, candidate: candidate,
+            record: record, snapshot: snapshot
+          )
+        end
+      end
+
+      assert restored
+      assert reset
+      assert_equal original_manifest, File.binread(manifest_store.path)
+      assert_equal original_receipts, File.binread(receipt_store.path)
+      assert_equal 0, lock_depth
     end
   end
 

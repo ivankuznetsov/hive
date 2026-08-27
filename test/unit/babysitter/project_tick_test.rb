@@ -59,6 +59,52 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_closed_admission_skips_project_work
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      listed = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, lambda { |*_args, **_kwargs|
+        listed = true
+        []
+      }) do
+        summary = Hive::Babysitter::ProjectTick.run(
+          project,
+          dry_run: false,
+          logger: nil,
+          inflight: Set.new,
+          admission_open: -> { false }
+        )
+        assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+      end
+
+      refute listed, "a stopped dispatcher must not load project configuration or query GitHub"
+    end
+  end
+
+  def test_raising_admission_predicate_fails_closed
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      listed = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, lambda { |*_args, **_kwargs|
+        listed = true
+        []
+      }) do
+        summary = Hive::Babysitter::ProjectTick.run(
+          project,
+          dry_run: false,
+          logger: nil,
+          inflight: Set.new,
+          admission_open: -> { raise IOError, "shutdown state unavailable" }
+        )
+        assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+      end
+
+      refute listed, "an unavailable shutdown state must not admit project work"
+    end
+  end
+
   def test_problematic_merge_states_are_selected_before_older_neutral_prs
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -300,6 +346,125 @@ class BabysitterProjectTickTest < Minitest::Test
       end
 
       assert_empty called
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_shutdown_after_one_pr_suppresses_later_prs_in_the_same_project
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 }
+      )
+      logger = make_logger(dir)
+      prs = [
+        { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 2, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+      admission_open = true
+      called = []
+      status_written = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, *_args, **_kwargs|
+          called << pr["number"]
+          admission_open = false
+          :success
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::StatusWriter, :append, lambda { |**_kwargs|
+            status_written = true
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project,
+              dry_run: false,
+              logger: logger,
+              inflight: Set.new,
+              admission_open: -> { admission_open }
+            )
+            assert_equal({ total: 1, fixed: 1, untouched: 0, needs_human: 0 }, summary)
+          end
+        end
+      end
+
+      assert_equal [ 1 ], called,
+                   "shutdown during one PR must suppress later PRs in the same project"
+      refute status_written, "a shutdown-truncated project must not report a complete pass"
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_pr_fixer_shutdown_stops_project_without_reporting_a_complete_pass
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 }
+      )
+      logger = make_logger(dir)
+      prs = [
+        { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 2, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+      called = []
+      status_written = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, *_args, **_kwargs|
+          called << pr["number"]
+          :shutdown
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::StatusWriter, :append, lambda { |**_kwargs|
+            status_written = true
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project,
+              dry_run: false,
+              logger: logger,
+              inflight: Set.new
+            )
+            assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+          end
+        end
+      end
+
+      assert_equal [ 1 ], called, "a shutdown outcome must stop the project immediately"
+      refute status_written, "a shutdown-truncated project must not report a complete pass"
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_shutdown_during_pr_listing_skips_the_task_ownership_scan
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true })
+      logger = make_logger(dir)
+      admission_open = true
+      ownership_scanned = false
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, lambda { |_path, **_kwargs|
+        admission_open = false
+        []
+      }) do
+        with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :pipeline_owned_branches, lambda { |_project|
+          ownership_scanned = true
+          Set.new
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project,
+            dry_run: false,
+            logger: logger,
+            inflight: Set.new,
+            admission_open: -> { admission_open }
+          )
+          assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+        end
+      end
+
+      refute ownership_scanned, "shutdown must stop before the task ownership scan"
     ensure
       logger&.close
     end

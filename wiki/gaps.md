@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-26
+updated: 2026-08-27
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -370,6 +370,10 @@ stable class and scope.
   process/mount/network isolation or an atomic multi-file rollback. Stronger
   hostile-agent containment remains an OS/Hivebox or separate-identity
   concern, not a future widening of the in-process report contract.
+  Patrol Fix validation now keeps Hive-launched commands in a disposable exact
+  checkout and detects authoritative-checkout drift afterward, but a separate
+  same-UID process can still race that check; preventing such writes remains
+  part of this stronger containment gap.
 
 - Hive now resolves and verifies the current `honeycomb-catalog/v2` and
   `packages/NAME/VERSION/manifest.yml` contract, but the manifest's coarse
@@ -693,7 +697,7 @@ harness deliberately does not infer those formats or strings.
 Close this gap one fixture at a time after the corresponding sibling lands:
 replace its activation guard with real CLI reconciliation and exact
 state/reason assertions, remove `pending: true`, and keep the report-measured
-runtime below ten seconds. Full incident coverage is not complete until the
+runtime below eleven seconds. Full incident coverage is not complete until the
 incident report contains six ordinary green results and zero pending entries.
 
 ## Rails-native kanban live-update proof (2026-07-21)

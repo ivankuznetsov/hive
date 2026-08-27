@@ -8,6 +8,14 @@ require "hive/usage_db"
 class HivePatrolReviewerTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    Hive::Patrol::Shutdown.reset!
+  end
+
+  def teardown
+    Hive::Patrol::Shutdown.reset!
+  end
+
   def cfg
     Hive::Config.deep_dup(Hive::Config::DEFAULTS)
   end

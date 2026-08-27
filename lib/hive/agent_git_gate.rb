@@ -429,7 +429,11 @@ module Hive
       result.stdout.lines.map(&:strip).reject(&:empty?).map { |url| immutable(url) }.freeze
     end
 
-    def remove_materialization(repository_path:, destination:, destination_root:)
+    def remove_materialization(repository_path:, destination:, destination_root:, force: false)
+      unless force == true || force == false
+        raise InvalidRequest, "materialization removal force is invalid"
+      end
+
       repository = repository_path(repository_path)
       target = contained_destination(destination, destination_root)
       registered = worktree_paths(repository)
@@ -440,7 +444,7 @@ module Hive
       end
 
       command!(
-        repository, "worktree", "remove", target,
+        repository, "worktree", "remove", *(force ? [ "--force" ] : []), target,
         error_class: MaterializationFailed,
         message: "materialization removal failed"
       )

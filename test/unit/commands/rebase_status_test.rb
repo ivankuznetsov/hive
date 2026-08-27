@@ -11,13 +11,18 @@ require "json"
 class HiveCommandsRebaseStatusTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:slug, :stage_name, :folder, :worktree_path, :project_root)
+  FakeWorkflow = Struct.new(:controller, :draft_pr_handoff) do
+    def controller? = controller
+    def draft_pr_handoff? = draft_pr_handoff
+  end
+  FakeTask = Struct.new(:slug, :stage_name, :folder, :worktree_path, :project_root, :workflow)
 
-  def make_task(worktree:, dir: nil)
+  def make_task(worktree:, dir: nil, controller: false, draft_pr_handoff: false)
     project_root = dir || Dir.mktmpdir("rebase-status-proj")
     folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260514-aaaa")
     FileUtils.mkdir_p(folder)
-    FakeTask.new("demo-260514-aaaa", "4-execute", folder, worktree, project_root)
+    workflow = FakeWorkflow.new(controller, draft_pr_handoff)
+    FakeTask.new("demo-260514-aaaa", "4-execute", folder, worktree, project_root, workflow)
   end
 
   class FakeGit
@@ -96,9 +101,26 @@ class HiveCommandsRebaseStatusTest < Minitest::Test
   end
 
   def test_no_worktree_when_path_nil
-    task = FakeTask.new("demo-260514-aaaa", "2-brainstorm", Dir.mktmpdir("f"), nil, Dir.mktmpdir("p"))
+    task = FakeTask.new(
+      "demo-260514-aaaa", "2-brainstorm", Dir.mktmpdir("f"), nil,
+      Dir.mktmpdir("p"), FakeWorkflow.new(false, false)
+    )
     out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: FakeGit.new)
     assert_match(/no worktree at this stage/, out)
+  end
+
+  def test_controller_workflow_skips_before_the_generic_ladder
+    task = make_task(worktree: Dir.mktmpdir("wt"), controller: true)
+    out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: FakeGit.new)
+
+    assert_match(/controller workflow owns checkout movement/, out)
+  end
+
+  def test_draft_pr_handoff_skips_before_the_generic_ladder
+    task = make_task(worktree: Dir.mktmpdir("wt"), draft_pr_handoff: true)
+    out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: FakeGit.new)
+
+    assert_match(/draft-PR handoff owns exact checkout identity/, out)
   end
 
   def test_no_worktree_when_directory_missing
@@ -180,6 +202,17 @@ class HiveCommandsRebaseStatusTest < Minitest::Test
     payload = JSON.parse(out)
     assert_equal "disabled", payload["state"]
     assert_equal false, payload["would_rebase"]
+  end
+
+  def test_json_envelope_controller_workflow
+    task = make_task(worktree: Dir.mktmpdir("wt"), controller: true)
+    out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: FakeGit.new, json: true)
+    payload = JSON.parse(out)
+
+    assert_equal "controller_workflow", payload["state"]
+    assert_equal false, payload["would_rebase"]
+    assert_nil payload["commits_behind"]
+    assert_nil payload["default_branch"]
   end
 
   # ---- read-only invariant ----

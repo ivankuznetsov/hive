@@ -1,5 +1,7 @@
 require "digest"
+require "tmpdir"
 require "time"
+require "hive/agent_git_gate"
 require "hive/patrol/validator"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/task_manifest"
@@ -30,7 +32,9 @@ module Hive
           raise Hive::StageError, "fix worktree is dirty before validation" unless git_status(owner.fetch("worktree")).empty?
           commands = selected_commands(manifest, fix, cfg || {})
           runner = command_runner || lambda { |path, rows| default_validator(cfg || {}).validate_selected(path, rows) }
-          result = runner.call(owner.fetch("worktree"), commands)
+          result = with_validation_checkout(task.project_root, expected_head) do |path|
+            runner.call(path, commands)
+          end
           final_head = git_head(owner.fetch("worktree"))
           raise Hive::StageError, "validation changed the worktree HEAD" unless final_head == expected_head
           raise Hive::StageError, "validation changed the worktree bytes" unless git_status(owner.fetch("worktree")).empty?
@@ -75,6 +79,43 @@ module Hive
           end
         end
         private_class_method :append_configured
+
+        def with_validation_checkout(repository_path, expected_head)
+          root = Dir.mktmpdir("hive-patrol-fix-validation-")
+          checkout = File.join(root, "checkout")
+          begin
+            Hive::AgentGitGate.materialize(
+              repository_path: repository_path, oid: expected_head,
+              destination: checkout, destination_root: root
+            )
+            yield checkout
+          ensure
+            cleanup_validation_checkout(repository_path, checkout, root)
+          end
+        rescue Hive::AgentGitGate::Error => e
+          raise Hive::StageError, "validation checkout failed: #{e.message}"
+        end
+        private_class_method :with_validation_checkout
+
+        # Cleanup is recovery work, not validation authority. Losing a completed
+        # result or replacing the original validator/materialization exception is
+        # less honest than retaining the private checkout for operator cleanup.
+        def cleanup_validation_checkout(repository_path, checkout, root)
+          begin
+            Hive::AgentGitGate.remove_materialization(
+              repository_path: repository_path, destination: checkout,
+              destination_root: root, force: true
+            )
+          rescue Hive::AgentGitGate::Error, SystemCallError, IOError => e
+            warn "hive patrol fix: failed to remove disposable validation checkout #{checkout}: #{e.message}"
+            return
+          end
+
+          Dir.rmdir(root)
+        rescue SystemCallError, IOError => e
+          warn "hive patrol fix: failed to remove disposable validation root for checkout #{checkout}: #{e.message}"
+        end
+        private_class_method :cleanup_validation_checkout
 
         def build_receipt(manifest, payload)
           digest = Digest::SHA256.hexdigest(Hive::PatrolFix.canonical_json(payload))

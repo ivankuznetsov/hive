@@ -35,6 +35,9 @@ class PatrolFixFixStageTest < Minitest::Test
       assert_equal [ captured.fetch(:cwd), task.folder ], captured.fetch(:add_dirs)
       assert_equal "fix", captured.fetch(:stage)
       assert_equal "patrol-fix-fix", captured.fetch(:log_label)
+      assert_includes captured.fetch(:prompt), "pristine detached checkout of this commit"
+      assert_includes captured.fetch(:prompt), "include any dependency or"
+      assert_includes captured.fetch(:prompt), "do not depend on ignored state"
       receipt = result.fetch(:receipt)
       assert_equal "fix", receipt.fetch("kind")
       assert_equal "agent", receipt.dig("payload", "validation_commands", 0, "provenance")

@@ -87,6 +87,19 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
     end
   end
 
+  def test_archive_usage_errors_use_the_archive_contract
+    payload = run_usage_error(
+      "refactor-patrol", "demo", "extra", "--archive", "job-7", "--json"
+    )
+
+    assert_equal "hive-refactor-patrol-jobs", payload.fetch("schema")
+    assert_equal 2, payload.fetch("schema_version")
+    assert_equal "show", payload.fetch("action")
+    assert_equal "usage", payload.fetch("error_kind")
+    assert job_query_schema.valid?(payload),
+           job_query_schema.validate(payload).map { |error| error.fetch("error") }.inspect
+  end
+
 
   def test_malformed_query_limit_uses_the_jobs_usage_contract
     payload = run_usage_error(

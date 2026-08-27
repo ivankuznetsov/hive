@@ -38,6 +38,42 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_projection_reader_caches_terminal_diagnostic_bindings_including_absence
+    terminal = Object.new
+    terminal.define_singleton_method(:final?) { true }
+    terminal.define_singleton_method(:attempt_id) { "attempt-1" }
+    terminal.define_singleton_method(:task_generation) { "generation-1" }
+    terminal.define_singleton_method(:receipt) { { "outcome" => "failed" } }
+    terminal.define_singleton_method(:[]) do |key|
+      raise KeyError, key unless key == "intended_stage"
+
+      "4-review"
+    end
+    store = Struct.new(:record, :fetches) do
+      def fetch(_attempt_id)
+        self.fetches += 1
+        record
+      end
+    end.new(terminal, 0)
+    reader = Hive::Attempts::Store::ProjectionReader.new(store)
+
+    expected = {
+      "attempt_id" => "attempt-1", "stage" => "4-review",
+      "task_generation" => "generation-1", "receipt" => { "outcome" => "failed" }
+    }
+    assert_equal expected, reader.fetch_terminal_diagnostic_binding("attempt-1")
+    assert_equal expected, reader.fetch_terminal_diagnostic_binding("attempt-1")
+    assert_equal 1, store.fetches
+
+    nonterminal = Object.new
+    nonterminal.define_singleton_method(:final?) { false }
+    store.record = nonterminal
+    missing_reader = Hive::Attempts::Store::ProjectionReader.new(store)
+    assert_nil missing_reader.fetch_terminal_diagnostic_binding("attempt-2")
+    assert_nil missing_reader.fetch_terminal_diagnostic_binding("attempt-2")
+    assert_equal 2, store.fetches
+  end
+
   def test_stale_version_wrong_generation_and_wrong_deadline_do_not_mutate
     with_store do |store|
       launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)

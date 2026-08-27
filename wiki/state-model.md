@@ -693,6 +693,16 @@ candidate snapshots, decision leases, task-materialization intent, task
 binding, acknowledgement, and retry state. Acknowledgement follows durable
 task binding. Runtime discovery never reads migration or qualification state.
 
+Historical action-era aggregates remain immutable audit records after their
+accepted dispositions enter Patrol Fix. An operator may explicitly terminalize
+their pending legacy actions with `hive refactor-patrol PROJECT --archive
+JOB_ID`. JobStore permits that transition only behind an
+`authority_revoked` cutover fence and with no live claim, linked action,
+review error, or pending remote-effect continuation evidence. Already-terminal
+actions remain immutable. The transition retains all dispositions and
+histories and records each pending action's prior outcome in its archive
+receipt; no daemon watcher or periodic migration performs this work.
+
 ## Architecture-patrol split-generation state
 
 Only JobStore-owned authority uses v4. Manifests, merge reconciliation, child

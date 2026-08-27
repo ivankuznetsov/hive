@@ -626,6 +626,11 @@ module Hive
       if PLAN_REVIEW_REPAIR_ACTIONS.include?(row["action"])
         return [ "needs_repair", operational_review_owner(row) ]
       end
+      if (diagnostic = typed_attempt_diagnostic(row))
+        owner = diagnostic.fetch("owner")
+        state = owner == "provider" ? "waiting_on_provider_or_scheduler" : "needs_repair"
+        return [ state, owner ]
+      end
       return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
@@ -937,6 +942,12 @@ module Hive
       elsif row["admission_error"]
         error = row.fetch("admission_error")
         reasons << reason(error.fetch("reason_code"), error.fetch("safe_correction"), "dependency")
+      elsif (diagnostic = typed_attempt_diagnostic(row))
+        reasons << reason(
+          diagnostic.fetch("code"),
+          diagnostic["detail"] || diagnostic.fetch("summary"),
+          "attempt_diagnostic"
+        )
       elsif automatic_error_retry?(project, row)
         marker = row["marker"].to_s.upcase
         reasons << reason(
@@ -981,6 +992,16 @@ module Hive
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
       end
       reasons
+    end
+
+    def typed_attempt_diagnostic(row)
+      diagnostic = row["diagnostic"]
+      return nil unless diagnostic.is_a?(Hash)
+      return nil unless diagnostic["source"] == "artifact" &&
+                        diagnostic["code"].to_s.match?(Hive::PatrolFix::AttemptDiagnostic::CODE_PATTERN) &&
+                        Hive::PatrolFix::AttemptDiagnostic::OWNER_VALUES.include?(diagnostic["owner"])
+
+      diagnostic
     end
 
     def operational_review_owner(row)

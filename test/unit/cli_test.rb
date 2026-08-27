@@ -991,6 +991,15 @@ class HiveCliTest < Minitest::Test
       assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
     end
 
+    with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|
+      Hive::CLI.start([
+        "refactor-patrol", "proj", "--archive", "pr-1015-legacy", "--json"
+      ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal "pr-1015-legacy", calls.first.fetch(:kwargs).fetch(:archive)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
+    end
+
     with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|
       Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
       assert_equal [], calls.first.fetch(:args)

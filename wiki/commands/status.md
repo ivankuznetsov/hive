@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-26
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -145,6 +145,20 @@ The hidden compatibility graph continues to expose their action as
 (`marker: none`, no suggested command) and reports `completion_ready` with
 `blocker_owner: none`. Rejected, blocked, and escalated findings therefore
 remain visible for audit without inflating the operator-decision count.
+
+A current failed Patrol attempt may project a receipt-bound typed diagnostic
+through the existing task `diagnostic` field. Status resolves only the
+diagnostic output reference named by the validated terminal Record, verifies
+its bounded bytes and digest, and requires its attempt, stage, opaque ownership
+generation, and log reference to match that Record. The task and operational
+documents expose the same diagnostic digest, owner, process/provider/parser/
+firewall fields, and safe references. Stale identity, tampered bytes, symlinks,
+or a mismatched log reference omit the projection; status never opens the raw
+log as a substitute. The task journal must first identify the current attempt
+as terminal and failed or cancelled, so running and successful rows do not
+point-fetch diagnostic receipts on the status hot path. A provider-owned typed
+failure is provider-waiting, while other typed failures are repair-owned.
+Durable recovery disposition and pacing remain separate policy.
 
 For a daemon-enrolled project with global automatic retry enabled, a real
 `ERROR` or `REVIEW_ERROR` defaults to

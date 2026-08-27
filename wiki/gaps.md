@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-26
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -61,6 +61,24 @@ New first generations now fail closed onto exact `origin/<default>` OIDs; the
 remaining live-delivery proof must come from a task admitted after that cutover
 and reach one focused hosted PR.
 
+## Patrol dispatch incident demand baseline (2026-08-26)
+
+The sanitized 600-charge incident replay pins the Patrol/coding, outcome,
+generation-stage repeat, stage, and failure-class aggregates without retaining
+task identities, provider output, secret material, credentials, or host paths.
+It also characterizes the current undifferentiated daily pool: once Patrol has
+used all 600 charges, later-stage Patrol progress, first-attempt Patrol work,
+and non-Patrol work are all starved even though later-stage ordering remains
+stable. This is expected-failure evidence for the later containment units, not
+a scheduling-policy change.
+
+The preceding seven complete UTC days cannot be reconstructed into a
+defensible non-Patrol demand series from the retained Attempts v4 records.
+Historical `1-inbox` attempts do not all carry an unambiguous durable workflow
+identity, so classifying them as Patrol or coding would invent evidence. Until
+workflow-attributed history exists, reserve calibration must use the documented
+10% fail-safe rather than a fabricated p95.
+
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## OpenCode live validation (updated 2026-08-21)
@@ -91,9 +109,13 @@ produced complete parseable JSON. Hive now sends sanitized export stdout to an
 unlinked private regular file, enforces the parser's four-MiB bound while
 reading it, and still fails closed on malformed evidence. Exports retain a
 60-second process deadline, and an inspection failure remains the surfaced task
-diagnostic instead of degrading to a generic missing-evidence message. Final
-six-task generation and dual-judge completion remain open until the benchmark
-artifacts are assembled and validated. The first OpenRouter-backed Sol
+diagnostic instead of degrading to a generic missing-evidence message. The
+strict six-task OpenCode campaign subsequently completed generation, dual
+three-sample judging, deliberation, validation, and publication. Its original
+token gap is an extraction issue rather than missing provider evidence: Hive
+records OpenCode usage in `.hb/hive-home/usage.db` while redacting raw stream
+events. The packaged harness now reads those normalized rows when stream tokens
+are absent. The first OpenRouter-backed Sol
 deliberation also exposed that the pinned npm Codex entrypoint could see a mise
 Node shim but not its active runtime under Hive's narrow agent PATH; the
 harness now prepends that pinned entrypoint's own directory for the child only.
@@ -106,8 +128,42 @@ persistence disabled. A real Ox Alpha probe returned the requested score
 directly through this boundary. The ChatGPT route now uses the same empty
 workspace and ephemeral/config/rules flags while retaining the operator Codex
 home only for subscription authentication; a real Sol-ultra probe returned its
-score directly there. A completed six-cell Sol deliberation remains the live
-proof for the full recovery and provider capacity.
+score directly there. The separate Pi `all-ox-alpha@max` route is source- and
+probe-pinned; its full six-cell campaign remains live evidence until completion.
+
+An August 26 contamination audit found that earlier local campaigns cloned the
+current Hive repository and then reset it to the historical base. That removed
+the remote but retained newer objects/refs; one Ox Alpha Pi review command did
+run `git log --all`, although its captured output did not include that task's
+gold commit. No Pi tool call fetched GitHub or named its own reference PR/hash.
+The old OpenCode streams omitted tool payloads, so the same negative audit is
+not possible for that row. These rows therefore retain a structural
+contamination-risk caveat even without confirmed gold retrieval. New candidate
+repositories fetch only the exact base at depth one, and strict campaigns bind
+provider-only proxy egress into generation identity. Training-time memorization
+of a public solution remains outside container control; post-run patch
+similarity and private/newer corpus tasks are still needed for that risk.
+
+The first post-audit replacement attempt still exposed a second local answer
+surface: the active dogfood Hive checkout was bind-mounted read-only and the
+runner's normal gem tree contained the installed `hive-cli` source. Candidate
+uid 1000 could read both even though logs show no Pi command opening the active
+checkout. Sealed campaigns now use a commit-labelled, root-only Hive control
+bundle, remove `hive-cli` from the candidate bundle, and drop Pi/OpenCode to an
+uncapable uid 1000 process. A real container proof established that boundary;
+the remaining gap is a fresh six-cell Pi/OpenCode generation and judgment run
+created after the sealed dogfood deployment.
+
+The same audit found a separate OpenCode fairness defect in the completed high
+campaign: its benchmark config granted only `Read`, `Write`, and `Edit`, while
+Pi retained shell access inside the disposable generation container. OpenCode
+could change files but could not run tests, inspect repository state through
+normal shell diagnostics, or verify its work; all six review attempts ended
+without an accepted review patch. The packaged runtime now adds the explicitly
+qualified `Bash(*)` permission. The container, exact-base checkout,
+provider-only proxy, and sealed controller bundle remain the isolation
+boundary. The old OpenCode score is superseded pending a sealed six-cell rerun
+with that parity grant.
 
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 

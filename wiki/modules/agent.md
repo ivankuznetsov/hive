@@ -226,7 +226,10 @@ Controller-managed report stages use `ManagedAgentCustody` with
 one outer transaction. If Pi reports a failed provider turn, retries it
 internally, and later exits zero with a clean current report, that clean custody
 receipt is terminal completion evidence and the transient failure is recovered.
-Missing output, nonzero exit, timeout, or any protected-anchor change remains a
+This applies to typed `provider_error` failures and to a temporary 429 that
+`Hive::Agent` classifies as `limits_reached` with a rate-limit provider kind.
+Resource exhaustion, budget exhaustion, missing typed provider evidence,
+missing output, nonzero exit, timeout, or any protected-anchor change remains a
 failure.
 
 Claude/tmux launches record the managed pane PID in the same per-task lock.

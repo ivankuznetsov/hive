@@ -1081,6 +1081,11 @@ module Hive
       --json these operations emit hive-refactor-patrol-jobs.v2. List output is
       paginated with --limit/--cursor. Show output bounds retry/publication
       histories by --limit unless --full explicitly requests every entry.
+
+      Use --archive JOB_ID only for historical action-era jobs already fenced
+      by authority revocation after their findings entered Patrol Fix. Archive
+      preserves dispositions and audit evidence while making pending legacy
+      actions terminal.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "preview without persisting refactor-patrol state"
@@ -1098,6 +1103,8 @@ module Hive
                   desc: "list durable architecture-patrol jobs without changing state"
     option :show, type: :string,
                   desc: "show one durable architecture-patrol job without changing state"
+    option :archive, type: :string,
+                     desc: "archive one authority-revoked legacy action job"
     option :limit, type: :numeric,
                    desc: "query page/history limit (1-100; default: 100)"
     option :cursor, type: :string,
@@ -1119,6 +1126,7 @@ module Hive
         result_file: options[:result_file],
         list: options[:list],
         show: options[:show],
+        archive: options[:archive],
         limit: options[:limit],
         cursor: options[:cursor],
         full: options[:full]

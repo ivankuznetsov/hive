@@ -197,6 +197,11 @@ state, checksums it, installs it into a private gem home, proves a clean require
 and exercises the executable. Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
 and observable normalization/redaction across all five built-ins. The
+installed OpenCode offline smoke considers every matching PATH executable and
+prefers a native binary over an earlier package-manager launcher, including
+script and multicall-binary shims; an explicit offline binary override remains
+authoritative. This keeps read-only probe evidence from
+triggering package-manager setup or refresh side effects. The
 0.2.0 release promotes OpenCode to the public compatibility surface without
 changing the component's caller-owned process-supervision boundary or
 authorizing a Hive release.

@@ -54,6 +54,47 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_promotion_accounts_patrol_failure_before_removing_hot_evidence
+    with_store do |store|
+      admission = {
+        "workflow" => "patrol_fix", "stage" => "2-fix",
+        "runtime_digest" => "a" * 64, "utc_date" => NOW.to_date.iso8601
+      }
+      service = maintenance(store)
+
+      3.times do |index|
+        attempt_id = "patrol-failure-#{index}"
+        store.decision_index.reserve_live(
+          attempt_id: attempt_id, project: "demo", task_slug: "task",
+          admission: admission
+        )
+        terminal = terminal_attempt(
+          store, attempt_id: attempt_id, request_id: "request-#{index}",
+          now: NOW + (index * 10), exit_status: 7,
+          intended_stage: "2-fix", diagnostic: true
+        )
+        store.decision_index.confirm_live(
+          attempt_id: attempt_id, project: "demo", task_slug: "task",
+          admission: admission
+        )
+        assert service.prepare(terminal)
+        service.acknowledge(terminal, :journal)
+        service.acknowledge(terminal, :request_delivery)
+        assert service.promote(terminal)
+      end
+
+      result = store.decision_index.failure_cohort_admission(
+        identity: {
+          "runtime_digest" => "a" * 64, "project" => "demo",
+          "workflow" => "patrol_fix", "stage" => "2-fix",
+          "code" => "agent_exit_nonzero"
+        },
+        date: NOW.to_date, now: NOW + 40
+      )
+      assert_equal "blocked", result.fetch("status")
+    end
+  end
+
   def test_unresolved_loss_stays_hot_and_resolved_loss_promotes
     with_store do |store|
       lost = store.mark_lost(
@@ -600,12 +641,13 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   end
 
   def create_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                     predecessor_attempt_id: nil, now: NOW)
+                     predecessor_attempt_id: nil, now: NOW,
+                     intended_stage: "4-execute")
     store.create_launching(
       attempt_id: attempt_id, request_id: request_id,
       predecessor_attempt_id: predecessor_attempt_id,
       task_id: "42", project: "demo", task_slug: "task",
-      intended_stage: "4-execute", task_generation: "generation-1",
+      intended_stage: intended_stage, task_generation: "generation-1",
       ownership_generation: "generation-1", task_input_epoch: 1,
       progress_token: "progress", provider: "codex",
       worker_argv: [ "hive", "run", "task" ],
@@ -616,9 +658,11 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   end
 
   def terminal_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                       now: NOW, write_log: false, exit_status: 0)
+                       now: NOW, write_log: false, exit_status: 0,
+                       intended_stage: "4-execute", diagnostic: false)
     launching = create_attempt(
-      store, attempt_id: attempt_id, request_id: request_id, now: now
+      store, attempt_id: attempt_id, request_id: request_id, now: now,
+      intended_stage: intended_stage
     )
     if write_log
       writer = store.log_archive.open_writer(attempt_id, clock: -> { now })
@@ -631,14 +675,31 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       now: now + 1
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: now + 2)
+    log_reference = {
+      "path" => "logs/#{attempt_id}.frames", "size" => 0,
+      "sha256" => Digest::SHA256.hexdigest("")
+    }
+    output_references = []
+    if diagnostic
+      document = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "exit_code" => exit_status, "status" => "error" },
+        stage: intended_stage, task_generation: running.task_generation,
+        attempt_id: attempt_id, recorded_at: now + 3,
+        log_reference: log_reference
+      )
+      path = store.output_path(
+        attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME,
+        create_directory: true
+      )
+      File.write(path, JSON.generate(document))
+      output_references << Hive::OutputReference.build(path, root: store.root)
+    end
     store.terminalize(
       running, outcome: exit_status.zero? ? "succeeded" : "failed",
       exit_status: exit_status,
-      final_checkpoint: running.checkpoint, output_references: [],
-      log_reference: {
-        "path" => "logs/#{attempt_id}.frames", "size" => 0,
-        "sha256" => Digest::SHA256.hexdigest("")
-      },
+      final_checkpoint: running.checkpoint,
+      output_references: output_references,
+      log_reference: log_reference,
       now: now + 3
     )
   end

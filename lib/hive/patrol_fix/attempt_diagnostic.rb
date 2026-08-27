@@ -34,6 +34,36 @@ module Hive
 
       class InvalidDiagnostic < Hive::Error; end
 
+      # Read one terminal diagnostic only through its immutable receipt
+      # binding. Callers get no raw-log fallback and no partially trusted
+      # document when any identity or custody check fails.
+      def read_bound(store:, binding:)
+        value = Hive::StringifyKeys.call(binding)
+        attempt_id = value.fetch("attempt_id")
+        receipt = value.fetch("receipt")
+        return nil unless receipt.is_a?(Hash)
+        return nil if receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
+
+        path = File.join("outputs", attempt_id, FILENAME)
+        reference = Array(receipt["output_references"]).find do |candidate|
+          candidate.is_a?(Hash) && candidate["path"] == path
+        end
+        return nil unless reference
+
+        document = JSON.parse(store.read_output(reference, max_bytes: MAX_BYTES))
+        validate!(document)
+        return nil unless document["attempt_id"] == attempt_id &&
+                          document["correlation_id"] == attempt_id &&
+                          document["stage"] == value.fetch("stage").to_s &&
+                          document["task_generation"] == value.fetch("task_generation").to_s &&
+                          document["log_reference"] == receipt["log_reference"]
+
+        { "document" => document, "reference" => reference }.freeze
+      rescue JSON::ParserError, Hive::Error, SystemCallError, IOError,
+             KeyError, TypeError
+        nil
+      end
+
       def normalize(envelope, stage:, task_generation:, attempt_id:, recorded_at:, redactor: nil,
                     transport_status: "valid", log_reference: nil)
         source = Hive::StringifyKeys.call(envelope)

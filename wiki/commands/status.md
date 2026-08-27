@@ -103,10 +103,12 @@ own graph producer cannot consume its cache recursively.
 The cache is a bounded freshness optimization, not a second source of truth.
 When it belongs to the same completed tick as the scheduler record, the shared
 tick sequence proves that it is the graph on which those scheduler decisions
-were made. A retained cache from the previous tick can still provide cheap
-task visibility while a new tick is running, but scheduler completeness
-remains unavailable until that tick completes. Independently supplied status
-graphs still pass the timestamp and per-task scheduler-join fences.
+were made. The daemon preserves that coherent completed pair while a later tick
+is running or fails, so ordinary operational status does not transiently lose
+scheduler ownership. The retained observation keeps its original timestamp and
+deadline; expiry, daemon replacement, and every task-identity join still fail
+closed. Independently supplied status graphs still pass the timestamp and
+per-task scheduler-join fences.
 During a binary/daemon cutover, an older scheduler record has no dedicated
 payload-mtime field. A same-tick cached Patrol Fix controller graph may treat
 only that unavailable timestamp as unknown because the shared tick sequence

@@ -866,7 +866,19 @@ Terminal evidence runs controller-side, reuses Linux child-subreaper custody,
 and rejects detached descendants.
 The image sets git's system credential helper for `https://github.com`
 to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
-credentials for repos under `/data/repos`. The supervisor still spawns
+credentials for repos under `/data/repos`. The container supervisor
+(`lib/hive/web/supervisor.rb`) runs three children — `hive daemon start`,
+`hive web --bind 0.0.0.0 --allow-public`, and (when global config enables it)
+`hive bot start --foreground` — and respawns any crashed child, backing off
+5s for fast failures. The Telegram settings page's SIGHUP reload contract is
+state-authoritative, not pid-authoritative: an enabled running bot is TERMed
+and immediately respawned so credential rotations take effect; a disabled bot
+is stopped for good regardless of whether it is currently running or already
+crashed with a respawn queued — its desired-running state flips to false and
+the queued restart entry is cancelled, so the reap of the supervisor's own
+TERM and the due-restart scan can never bring it back. A later reload that
+sees the bot enabled starts it again and re-arms the desired state. The
+supervisor still spawns
 `hive web --bind 0.0.0.0` — unchanged
 interface, now exec-ing Rails. Plain `/health` is unauthenticated web-tier
 liveness; the Docker `HEALTHCHECK` hits `/health?deep=1`, which also verifies

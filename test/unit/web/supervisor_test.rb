@@ -192,6 +192,62 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  # Patrol rework regression: the live-PID disable path was fixed first, but a
+  # bot that had ALREADY crashed and was awaiting its scheduled respawn (pid
+  # nil, @restart_at entry queued) slipped through — the disable reload only
+  # acted when a pid was present, so start_due_restarts later fired the queued
+  # entry and respawned a bot the config no longer enables. Disable intent
+  # must be authoritative regardless of how the bot is currently down.
+  def test_handle_reload_disabled_bot_cancels_a_pending_crash_restart
+    with_tmp_global_config do
+      sup = build
+      bot = Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: nil,
+                      started_at: Time.now - 3600, desired: true)
+      sup.instance_variable_get(:@children) << bot
+      restart_at(sup)["bot"] = Time.now + 3600   # queued crash restart, not yet due
+
+      sup.send(:handle_reload)
+
+      assert_equal false, bot.desired,
+                   "disable intent must flip desired-running even without a live pid"
+      refute restart_at(sup).key?("bot"),
+             "the queued crash restart must be cancelled, not left to fire"
+
+      started = stub_start_child(sup)
+      restart_at(sup)["bot"] = Time.now - 1 unless restart_at(sup).empty?
+      sup.send(:start_due_restarts)
+      assert_empty started,
+                   "a config-disabled bot must never come back via its queued restart"
+    end
+  end
+
+  # Re-enable transition: a bot previously stopped by a disable reload (pid
+  # nil, desired false) must come back — desired re-armed — when a later
+  # reload sees it enabled again.
+  def test_handle_reload_re_enabling_respawns_a_previously_disabled_bot
+    with_tmp_global_config do
+      sup = build
+      bot = Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: nil,
+                      started_at: Time.now, desired: false)
+      sup.instance_variable_get(:@children) << bot
+
+      Hive::Config.update_global_config! do |data|
+        data["bot"] = { "enabled" => true, "chat_id_allowlist" => [ 1 ] }
+      end
+      sup.send(:handle_reload)
+
+      assert bot.pid, "re-enabling must start the stopped bot again"
+      assert_equal true, bot.desired,
+                   "the restarted bot must be desired again so later crashes respawn it"
+    ensure
+      bot = sup.instance_variable_get(:@children).find { |c| c.name == "bot" }
+      if bot&.pid
+        Process.kill("KILL", -bot.pid) rescue nil
+        Process.waitpid(bot.pid) rescue nil
+      end
+    end
+  end
+
   def test_handle_reload_is_a_noop_when_bot_disabled
     with_tmp_global_config do
       sup = build
@@ -307,11 +363,14 @@ class WebSupervisorTest < Minitest::Test
       sup = build
       sup.send(:start_child, "web", [ "sleep", "30" ])
       first = sup.instance_variable_get(:@children).first.pid
+      sup.instance_variable_get(:@children).first.desired = false
       sup.send(:start_child, "web", [ "sleep", "30" ])
       children = sup.instance_variable_get(:@children)
 
       assert_equal 1, children.size, "a restart must rebind the existing child, not append"
       refute_equal first, children.first.pid, "the rebind must record the new pid"
+      assert_equal true, children.first.desired,
+                   "(re)starting a child must re-arm desired-running so later crashes respawn it"
     ensure
       children = sup.instance_variable_get(:@children)
       children.each { |c| Process.kill("KILL", -c.pid) rescue nil; Process.waitpid(c.pid) rescue nil }

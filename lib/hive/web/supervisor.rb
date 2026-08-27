@@ -110,11 +110,12 @@ module Hive
       end
 
       # SIGHUP = config changed. Three bot cases:
-      #   enabled + not running → start it (first-time enable);
+      #   enabled + not running → start it (first-time enable, or bring back
+      #     a previously disabled bot — start_child re-arms desired);
       #   enabled + running     → RESTART it — the running process long-polls
       #     with the credentials it booted with, so a token/allowlist
       #     rotation saved via the web wizard never reaches it otherwise;
-      #   disabled + running    → stop it.
+      #   disabled + present    → stop it, whatever state it is in.
       # The restart works by TERMing the group and scheduling an immediate
       # respawn: reap_once collects the signal death and start_due_restarts
       # brings it back up (the pre-seeded @restart_at entry skips backoff).
@@ -124,20 +125,28 @@ module Hive
         running = bot && bot.pid
 
         if bot_enabled?
-          if running
-            signal_group(bot.pid, "TERM")
-            @restart_at["bot"] = Time.now
-          else
+          unless running
+            # A pending crash-respawn entry is superseded: the bot starts NOW.
+            @restart_at.delete("bot")
             start_child("bot", %w[hive bot start --foreground])
+            return
           end
-        elsif running
-          # Mark intent FIRST: the reap of this TERM must classify as an
-          # intentional stop, not as a crash that schedules a respawn.
-          # (@restart_at.delete alone cannot do that — reap_once re-adds the
-          # entry when it collects the signal death.)
+          signal_group(bot.pid, "TERM")
+          @restart_at["bot"] = Time.now
+        elsif bot
+          # Disable intent is authoritative regardless of HOW the bot is
+          # currently down:
+          #   running           → TERM it (a signal-death reap must classify
+          #     as an intentional stop, not a crash that schedules a respawn —
+          #     @restart_at.delete alone cannot do that, reap_once re-adds the
+          #     entry when it collects the death);
+          #   crashed, still awaiting its scheduled respawn (pid nil, entry
+          #     queued) → the operator's disable must also cancel that queued
+          #     restart, or start_due_restarts would fire it and bring back a
+          #     bot the config no longer enables.
           bot.desired = false
           @restart_at.delete("bot")
-          signal_group(bot.pid, "TERM")
+          signal_group(bot.pid, "TERM") if bot.pid
         end
       end
 

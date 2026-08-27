@@ -358,7 +358,7 @@ class WorkflowPackageValidatorTest < Minitest::Test
     validator.send(:validate_hive_inputs, invalid_slots, [ "stages.work" ], diagnostics)
     validator.send(
       :validate_hive_inputs,
-      [ { "name" => "REGION", "authorized_slots" => [1, "build"] } ], [ "build" ], diagnostics
+      [ { "name" => "REGION", "authorized_slots" => [ 1, "build" ] } ], [ "build" ], diagnostics
     )
 
     rules = diagnostics.map(&:rule_id)

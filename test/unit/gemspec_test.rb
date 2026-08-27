@@ -1,7 +1,9 @@
 require "test_helper"
+require "bundler/lockfile_parser"
 
 class GemspecTest < Minitest::Test
   GEMSPEC_PATH = File.expand_path("../../hive.gemspec", __dir__)
+  REPOSITORY_ROOT = File.expand_path("../..", __dir__)
 
   def test_gem_package_includes_babysitter_dry_run_stubs
     spec = Gem::Specification.load(GEMSPEC_PATH)
@@ -121,6 +123,19 @@ class GemspecTest < Minitest::Test
     assert_equal Gem::Requirement.new("= 2.7.2"), dependency.requirement
   end
 
+  def test_every_lockfile_resolves_all_hive_runtime_dependencies
+    expected = Gem::Specification.load(GEMSPEC_PATH).runtime_dependencies.map(&:name).sort
+
+    %w[Gemfile.lock web/Gemfile.lock].each do |relative_path|
+      lockfile = Bundler::LockfileParser.new(File.read(File.join(REPOSITORY_ROOT, relative_path)))
+      hive = lockfile.specs.find { |candidate| candidate.name == "hive-cli" }
+
+      refute_nil hive, "#{relative_path} does not resolve the local hive-cli gem"
+      assert_equal expected, hive.dependencies.map(&:name).sort,
+                   "#{relative_path} is stale: re-resolve it after changing hive.gemspec"
+    end
+  end
+
   def test_runtime_dependencies_exclude_prdigest
     spec = Gem::Specification.load(GEMSPEC_PATH)
     dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "prdigest" }
@@ -149,7 +164,7 @@ class GemspecTest < Minitest::Test
       next unless BUNDLED_OR_REMOVED_GEMS.include?(name)
       next if closure.include?(name)
 
-      offenders << %{#{path}: require "#{name}" is not covered by the hive.gemspec runtime dependency closure}
+      offenders << %(#{path}: require "#{name}" is not covered by the hive.gemspec runtime dependency closure)
     end
 
     assert_empty offenders,
@@ -167,7 +182,7 @@ class GemspecTest < Minitest::Test
         match = line.match(/\A\s*require\s+["']([^"'.][^"']*)["']/)
         next unless match
 
-        [path.delete_prefix("#{root}/"), match[1].split("/").first]
+        [ path.delete_prefix("#{root}/"), match[1].split("/").first ]
       end
     end
   end

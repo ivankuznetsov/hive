@@ -1597,7 +1597,7 @@ class WorktreeTest < Minitest::Test
 
   def test_strict_pointer_rejects_zero_byte_file_as_worktree_error
     Dir.mktmpdir do |folder|
-      File.open(File.join(folder, "worktree.yml"), "w") {}
+      File.open(File.join(folder, "worktree.yml"), "w") { }
 
       error = assert_raises(Hive::WorktreeError) do
         Hive::Worktree.read_strict_pointer(folder, expected_root: folder)
@@ -1610,7 +1610,7 @@ class WorktreeTest < Minitest::Test
     with_tmp_dir do |root|
       folder = File.join(root, "task")
       FileUtils.mkdir_p(folder)
-      File.open(File.join(folder, "worktree.yml"), "w") {}
+      File.open(File.join(folder, "worktree.yml"), "w") { }
 
       error = assert_raises(Hive::WorktreeError) do
         Hive::Worktree.read_owned_pointer(

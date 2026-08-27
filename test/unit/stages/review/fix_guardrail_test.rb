@@ -225,6 +225,107 @@ class FixGuardrailTest < Minitest::Test
     assert_nil trip.line
   end
 
+  def test_trips_on_c_quoted_rename_target_with_tab
+    # core.quotePath=false (set by capture_diff) only un-quotes non-ASCII
+    # bytes; paths containing control characters (tab, newline, quote) are
+    # still C-quoted by git: `rename to ".github/workflows/de\tploy.yml"`.
+    # Pre-rework, the quoted token kept its surrounding double quotes and
+    # backslash escapes, so the ci_workflow_edit anchor
+    # `\A(?:\.github/workflows/` never matched and run! returned :clean.
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, "docs"))
+      File.write(File.join(dir, "docs", "template.yml"), "name: template\n")
+      run!("git", "-C", dir, "add", "docs/template.yml")
+      run!("git", "-C", dir, "commit", "-m", "add template", "--quiet")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      run!("git", "-C", dir, "mv", "docs/template.yml",
+           ".github/workflows/de\tploy.yml")
+      run!("git", "-C", dir, "commit", "-m", "rename into workflows", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      raw = File.join(dir, "raw.diff")
+      File.write(raw, `git -C #{dir} diff --unified=0 #{base}..#{head}`)
+      assert File.read(raw).include?("rename to \".github/workflows/de\\tploy.yml\""),
+             "setup: git must emit a C-quoted rename header for the tab path"
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "C-quoted rename into .github/workflows/ must trip ci_workflow_edit (not return :clean)"
+      trip = result.matches.find { |m| m.pattern_name == "ci_workflow_edit" }
+      refute_nil trip
+      assert_equal ".github/workflows/de\tploy.yml", trip.file,
+                   "the decoded path (real tab, no quotes) must be surfaced"
+    end
+  end
+
+  def test_scan_diff_decodes_c_quoted_rename_and_header_paths
+    # Direct scan_diff coverage for the C-quoted forms git emits when a
+    # path contains control characters: rename/copy extended headers
+    # ("rename to \"…\"") and quoted ---/+++ pairs (prefix inside the
+    # quotes). Both must be decoded to the literal path before pattern
+    # matching.
+    diff = <<~DIFF
+      diff --git "a/docs/de\\tploy.yml" b/.github/workflows/de\\nploy.yml
+      similarity index 95%
+      rename from "docs/de\\tploy.yml"
+      rename to ".github/workflows/de\\nploy.yml"
+      --- "a/docs/de\\tploy.yml"
+      +++ "b/.github/workflows/de\\nploy.yml"
+      @@ -1 +1 @@
+      -name: template
+      +name: deploy
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(cfg)
+    )
+
+    trips = matches.select { |m| m.pattern_name == "ci_workflow_edit" }
+    assert trips.any? { |m| m.file == ".github/workflows/de\nploy.yml" },
+           "decoded C-quoted rename-to path must trip ci_workflow_edit"
+    assert trips.any?, "quoted rename and quoted ---/+++ paths must be scanned"
+  end
+
+  def test_custom_raw_diff_header_pattern_sees_rename_headers
+    # The rename/copy branch must not swallow the line: custom
+    # :raw_diff_header patterns have to see extended rename/copy headers
+    # too, the same way they see `diff --git` and mode-change lines.
+    custom_cfg = cfg(
+      "review" => {
+        "fix" => {
+          "guardrail" => {
+            "patterns_override" => {
+              "no_workflow_renames" => {
+                "regex" => '\Arename to \\.github/',
+                "severity" => "high",
+                "targets" => "raw_diff_header",
+                "description" => "no renames into .github/"
+              }
+            }
+          }
+        }
+      }
+    )
+    diff = <<~DIFF
+      diff --git a/docs/template.yml b/.github/workflows/deploy.yml
+      similarity index 100%
+      rename from docs/template.yml
+      rename to .github/workflows/deploy.yml
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(custom_cfg)
+    )
+
+    assert matches.any? { |m| m.pattern_name == "no_workflow_renames" },
+           "custom :raw_diff_header patterns must see rename-to extended headers"
+  end
+
   def test_trips_on_jenkinsfile_edit
     with_two_commits(file: "Jenkinsfile",
                      content: "pipeline { agent any }\n") do |dir, base, head|

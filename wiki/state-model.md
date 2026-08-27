@@ -594,7 +594,11 @@ manifest and those exact bytes immediately before appending the decision.
 manifest/evidence generation and appends a new-generation transition receipt
 before any fresh decision. Rework moves the same folder from Review to Fix,
 rotates the current worktree ownership file, retains the prior generation's
-owned bytes, and carries no validation receipt. A completed route intent remains
+owned bytes, and carries no validation receipt. The reopen receipt points to the
+prior Review decision; Fix resolves that decision as untrusted feedback and uses
+its referenced Fix receipt as the progress baseline. An unchanged diff and
+unchanged validation-command plan cannot produce a new Fix receipt, while a
+patch change or validation-plan correction can. A completed route intent remains
 replayable so a crash after the folder move is reconciled from either the old
 caller path or the new location. Parked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.

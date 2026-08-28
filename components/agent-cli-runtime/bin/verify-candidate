@@ -10,6 +10,7 @@ require "tmpdir"
 ROOT = File.expand_path("..", __dir__)
 $LOAD_PATH.unshift File.join(ROOT, "lib")
 require "agent_cli_runtime/version"
+require_relative "../test/support/conformance"
 
 gem_path = File.expand_path(ARGV.fetch(0) {
   abort "usage: verify-candidate PATH_TO_GEM [EXPECTED_SHA256]"
@@ -84,7 +85,7 @@ Dir.mktmpdir("agent-cli-runtime-candidate") do |sandbox|
     abort "wrong version" unless
       AgentCliRuntime::VERSION == #{AgentCliRuntime::VERSION.dump}
     abort "wrong providers" unless
-      AgentCliRuntime::Profiles.names == %i[claude codex pi grok opencode]
+      AgentCliRuntime::Profiles.names == #{AgentCliRuntime::Conformance::PROVIDER_NAMES.inspect}
   RUBY
   _out, err, status = Open3.capture3(
     runtime_env, Gem.ruby, "-e", require_script
@@ -122,9 +123,9 @@ Dir.mktmpdir("agent-cli-runtime-candidate") do |sandbox|
     when ["--version"]
       puts "opencode 1.18.16"
     when ["run", "--help"]
-      puts "--model --variant --format --dir --pure --auto"
+      puts #{AgentCliRuntime::Conformance.opencode_run_help.dump}
     when ["export", "--help"]
-      puts "--sanitize"
+      puts #{AgentCliRuntime::Conformance.opencode_export_help.dump}
     when ["auth", "list"]
       puts "anthropic"
     when ["models", "anthropic", "--verbose"]

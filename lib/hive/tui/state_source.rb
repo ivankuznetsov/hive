@@ -4,7 +4,9 @@ require "set"
 require "hive"
 require "hive/commands/status"
 require "hive/config"
+require "hive/status_projection"
 require "hive/tui/debug"
+require "hive/tui/io_capture"
 require "hive/tui/snapshot"
 
 module Hive
@@ -359,7 +361,7 @@ module Hive
             now: refresh_now
           )
           publish_snapshot(
-            merge_visible_archived_payload(active_payload, cache),
+            Hive::StatusProjection.merge_visible_archived_payload(active_payload, cache),
             archived_cache: cache,
             next_retention_boundary: cache[:next_retention_boundary]
           )
@@ -571,7 +573,8 @@ module Hive
       def publish_snapshot(payload, archived_cache:, next_retention_boundary: nil)
         snapshot = Snapshot.from_payload(
           payload,
-          archive_payload: archive_payload_from_cache(payload, archived_cache)
+          archive_payload:
+            Hive::StatusProjection.archive_payload_from_cache(payload, archived_cache)
         )
         next_mtime_fingerprint = mtime_fingerprint_for(snapshot)
         next_policy_fingerprint = policy_fingerprint_for(snapshot)
@@ -599,42 +602,10 @@ module Hive
         }.freeze
       end
 
-      def archive_payload_from_cache(ordinary_payload, archived_cache)
-        cached_rows_by_path = archived_cache.fetch(:rows_by_path)
-        copy = ordinary_payload.dup
-        copy["projects"] = Array(ordinary_payload["projects"]).map do |project|
-          project_copy = project.dup
-          cached_rows = project["error"] ? [] : cached_rows_by_path.fetch(project["path"], [])
-          project_copy["tasks"] = cached_rows
-          project_copy.delete("hidden_archived_task_count")
-          project_copy
-        end
-        copy
-      end
-
-      def merge_visible_archived_payload(active_payload, archived_cache)
-        visible_rows_by_path = archived_cache.fetch(:visible_rows_by_path)
-        hidden_counts_by_path = archived_cache.fetch(:hidden_counts_by_path)
-        copy = active_payload.dup
-        copy["projects"] = Array(active_payload["projects"]).map do |project|
-          project_copy = project.dup
-          active_rows = Array(project["tasks"])
-          active_folders = active_rows.to_h { |row| [ row["folder"], true ] }
-          cached_rows =
-            if project["error"]
-              []
-            else
-              visible_rows_by_path.fetch(project["path"], [])
-            end
-          project_copy["tasks"] =
-            active_rows + cached_rows.reject { |row| active_folders.key?(row["folder"]) }
-          project_copy["hidden_archived_task_count"] =
-            project["error"] ? 0 : hidden_counts_by_path.fetch(project["path"], 0)
-          project_copy
-        end
-        copy
-      end
-
+      # Payload interpretation for archive composition lives on the
+      # internal status projection boundary (`Hive::StatusProjection`);
+      # the state source only supplies the authoritative ordinary payload
+      # and its cached archived rows.
       def empty_archived_cache
         {
           rows_by_path: {}.freeze,
@@ -1093,19 +1064,15 @@ module Hive
 
       # Redirect `$stdout`/`$stderr` to throwaway buffers for the duration of
       # the block so an off-thread `Status#json_payload` call can't `warn`
-      # straight onto the alt-screen frame. Mirrors
-      # `BubbleModel#capture_command_io`; `capture_io` from minitest is not
-      # available in production. StateSource itself never `warn`s, so this only
-      # contains Status's degrade-path output.
-      def capture_status_io
-        orig_out = $stdout
-        orig_err = $stderr
-        $stdout = StringIO.new
-        $stderr = StringIO.new
-        yield
-      ensure
-        $stdout = orig_out
-        $stderr = orig_err
+      # straight onto the alt-screen frame. Delegates to the shared,
+      # mutex-coordinated `IoCapture` registry — this runs on the archive
+      # refresher thread and must not race `BubbleModel#capture_command_io`'s
+      # identical capture on the update thread into restoring a discarded
+      # StringIO as the process-global `$stdout`. `capture_io` from minitest
+      # is not available in production. StateSource itself never `warn`s, so
+      # this only contains Status's degrade-path output.
+      def capture_status_io(&block)
+        Hive::Tui::IoCapture.capture(&block)
       end
 
       # Sleep in 0.05s slices so #stop joins quickly. Reading @stop

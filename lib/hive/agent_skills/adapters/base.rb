@@ -252,10 +252,9 @@ module Hive
         end
 
         def alias_path(alias_spec)
-          home = @environment["HOME"] || Dir.home
-          config_root = @environment["CLAUDE_CONFIG_DIR"].to_s
-          config_root = File.join(home, ".claude") if config_root.empty?
-          File.join(config_root, alias_spec.path.delete_prefix(".claude/"))
+          profile = Hive::AgentProfiles.lookup(agent)
+          relative = alias_spec.path.delete_prefix("#{profile.default_configuration_directory}/")
+          File.join(profile.configuration_directory(environment: @environment), relative)
         end
 
         def execute_alias(operation)

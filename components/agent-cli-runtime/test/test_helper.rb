@@ -8,6 +8,7 @@ require "digest"
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 
 require "agent_cli_runtime"
+require_relative "support/conformance"
 
 module AgentCliRuntimeTestHelpers
   def write_executable(path, body)

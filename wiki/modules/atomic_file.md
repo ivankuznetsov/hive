@@ -20,6 +20,7 @@ The `ensure` cleanup removes an orphaned tempfile after either success or failur
 ## Representative callers
 
 - Bot pairing state and approval notices use `write`, with owner-private mode where required.
+- The web login relay (`Hive::Web::AgentsAuth#write_pi_token`) uses `write` with `mode: 0o600` so a rewrite of an existing `~/.pi/agent/auth.json` restores owner-private permissions — creation-time-only `perm:` arguments cannot.
 - Durable attempt records, lost-outcome evidence, task projections, workflow-package journals, and managed agent-skill aliases use `write` for structured state replacement.
 - Task journal/projection transitions, patrol handoff publication, architecture-patrol stores, and daemon reconciliation paths call `fsync_directory` after rename or unlink boundaries that require directory-entry durability.
 

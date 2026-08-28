@@ -148,9 +148,11 @@ fixed environment/config and allowlisted commands. The dedicated report is
 removed by the controller before a fresh spawn and must be recreated as a
 regular file.
 
-The coding pipeline's `brainstorm` and `plan` names still use their bespoke
+The coding pipeline's `brainstorm` and `plan` stages still use their bespoke
 tmux-capable runners even though their descriptor entries are `kind: :agent`;
-name-first resolver precedence preserves the current coding runtime.
+their descriptor pins the bespoke runner via the internal per-stage `runner:`
+execution-strategy key, which the resolver honors ahead of the kind-derived
+generic selection.
 
 ## Tests
 

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/tui/model"
+require "hive/tui/views/format"
 require "hive/tui/views/filter_prompt"
 
 class HiveTuiViewsFilterPromptTest < Minitest::Test
@@ -42,5 +43,27 @@ class HiveTuiViewsFilterPromptTest < Minitest::Test
       width: 10
     )
     refute_match(/x{50}/, out, "width: kwarg must clamp regardless of model.cols")
+  end
+
+  # Wide (CJK) characters occupy two terminal cells. Sliding the window by
+  # character count can render up to twice the available width and overflow
+  # the line — the window must be bounded in cells instead.
+  def test_wide_buffer_window_is_bounded_in_cells_not_characters
+    out = Hive::Tui::Views::FilterPrompt.render(model_with(buffer: "项" * 40, cols: 40))
+
+    rendered_width = Hive::Tui::Views::Format.display_width(out)
+    assert_operator rendered_width, :<=, 40,
+                   "rendered prompt must not exceed the terminal width when the buffer is wide"
+    assert_includes out, "项", "the tail of the wide buffer must remain visible"
+  end
+
+  # A wide buffer whose CELL width exceeds the budget must slide even when
+  # its CHARACTER count would have fit the old character-count window.
+  def test_wide_buffer_slides_even_when_character_count_fits_budget
+    buffer = "项" * 30 # 30 chars = 60 cells; old char-count check saw 30 <= 37 and never slid
+    out = Hive::Tui::Views::FilterPrompt.render(model_with(buffer: buffer, cols: 40))
+
+    assert_operator Hive::Tui::Views::Format.display_width(out), :<=, 40,
+                   "a 60-cell wide buffer must slide to fit the 40-cell line"
   end
 end

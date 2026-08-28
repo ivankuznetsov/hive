@@ -243,6 +243,45 @@ class EventsTest < Minitest::Test
     assert_operator truncated.bytesize, :<=, Hive::Events::MAX_MESSAGE_BYTES
   end
 
+  def test_truncate_message_scrubs_invalid_utf8_within_byte_budget
+    message = "boom \xFF"
+    assert_equal Encoding::UTF_8, message.encoding
+    refute_predicate message, :valid_encoding?
+
+    sanitized = Hive::Events.truncate_message(message)
+
+    assert_predicate sanitized, :valid_encoding?
+    assert_equal "boom ", sanitized
+  end
+
+  def test_truncate_message_scrubs_invalid_utf8_in_oversized_binary_message
+    message = (("ok" * 600) + "\xFF").b
+
+    truncated = Hive::Events.truncate_message(message)
+
+    assert_predicate truncated, :valid_encoding?
+    assert truncated.end_with?(Hive::Events::MESSAGE_TRUNCATION_SUFFIX)
+    assert_operator truncated.bytesize, :<=, Hive::Events::MAX_MESSAGE_BYTES
+  end
+
+  def test_emit_with_malformed_utf8_message_writes_parseable_line_instead_of_raising
+    with_tmp_dir do |dir|
+      record = Hive::Events.emit(
+        task_folder: dir,
+        slug: "event-test-260522-aaaa",
+        stage: "4-execute",
+        event_type: :error,
+        message: "boom \xFF".b
+      )
+
+      assert_equal "boom ", record.fetch("message")
+      line = File.readlines(File.join(dir, "events.jsonl"), chomp: true).first
+      parsed = JSON.parse(line)
+      assert_equal "error", parsed.fetch("event_type")
+      assert_equal "boom ", parsed.fetch("message")
+    end
+  end
+
   def test_render_status_body_handles_empty_event_list
     body = Hive::Events.render_status_body(
       {

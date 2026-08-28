@@ -12,6 +12,21 @@ require "hive/screenote/pkce"
 module Hive
   module Commands
     class Connect
+      # Internal typed error raised when `--json` connect cannot choose a
+      # default Screenote project non-interactively. It carries the project
+      # list so the SINGLE error-envelope owner (`call`'s rescue via
+      # emit_error_envelope) can render the structured
+      # `needs_project_selection` document — domain code never touches
+      # command-level presentation state or writes to stdout itself.
+      class NeedsProjectSelectionError < Hive::Error
+        attr_reader :projects
+
+        def initialize(projects)
+          @projects = projects
+          super("Screenote returned multiple projects; re-run connect interactively to choose a default project")
+        end
+      end
+
       def initialize(service, base_url: nil, json: false, output: $stdout, input: $stdin,
                      credential_store: Hive::Screenote::CredentialStore.new,
                      oauth_client_factory: nil, loopback_factory: nil, mcp_client_factory: nil,
@@ -151,9 +166,15 @@ module Hive
         return if @error_emitted
 
         @error_emitted = true
-        @output.puts JSON.generate(Hive::Commands::ScreenoteEnvelope.error_payload(error))
+        payload =
+          if error.is_a?(NeedsProjectSelectionError)
+            ScreenoteEnvelope.needs_selection_payload(error.projects)
+          else
+            ScreenoteEnvelope.error_payload(error)
+          end
+        @output.puts JSON.generate(payload)
       rescue Errno::EPIPE, JSON::GeneratorError
-        @error_emitted = true
+        nil
       end
 
       def ensure_screenote!
@@ -205,7 +226,10 @@ module Hive
         # Auto-select a lone project; with several, emit a structured
         # `needs_project_selection` envelope rather than silently defaulting.
         return projects.first if @json && @project_picker.nil? && projects.size == 1
-        raise_needs_project_selection(projects) if @json && @project_picker.nil?
+
+        # Raise the typed internal error carrying the normalized project list;
+        # envelope rendering is owned exclusively by emit_error_envelope.
+        raise NeedsProjectSelectionError.new(normalized_projects(projects)) if @json && @project_picker.nil?
 
         selected = @project_picker ? @project_picker.call(projects) : prompt_for_project(projects)
         project = selected.is_a?(Hash) ? selected : projects.find { |candidate| project_id(candidate) == selected.to_s }
@@ -214,24 +238,8 @@ module Hive
         project
       end
 
-      def raise_needs_project_selection(projects)
-        @error_emitted = true
-        # Carry the same `error_kind`/`exit_code` fields every other
-        # `{"ok":false}` line does so automation can branch uniformly: a
-        # distinct `needs_selection` kind tells "re-run with a project
-        # selection" apart from an unrecoverable auth/network failure, and the
-        # exit_code matches the GENERIC code bin/hive maps the raised
-        # Hive::Error to below.
-        @output.puts JSON.generate(
-          "ok" => false,
-          "service" => "screenote",
-          "stage" => "needs_project_selection",
-          "error_kind" => "needs_selection",
-          "exit_code" => Hive::ExitCodes::GENERIC,
-          "projects" => projects.map { |p| { "id" => project_id(p), "name" => project_display_name(p) } }
-        )
-        raise Hive::Error,
-              "Screenote returned multiple projects; re-run connect interactively to choose a default project"
+      def normalized_projects(projects)
+        projects.map { |p| { "id" => project_id(p), "name" => project_display_name(p) } }
       end
 
       def prompt_for_project(projects)

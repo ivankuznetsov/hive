@@ -169,7 +169,9 @@ class HiveCommandsDaemonTest < Minitest::Test
                 "immediate watcher and catch-up must share one intake boundary"
     assert_equal true, reconciler.instance_variable_get(:@dry_run)
     admission = captured.fetch(:patrol_fix_admission_scheduler)
-    assert_empty admission.instance_variable_get(:@sources).call
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+      assert_empty admission.instance_variable_get(:@sources).call
+    end
     capacity = admission.instance_variable_get(:@capacity_available)
     refute capacity.call(source: Object.new, now: Time.now.utc)
     assert capacity.call(source: Struct.new(:project).new("demo"), now: Time.now.utc)

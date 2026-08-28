@@ -28,6 +28,24 @@ class AgentsAuthTest < Minitest::Test
     end
   end
 
+  def test_pi_token_writer_replaces_an_existing_loose_mode_file_with_0600
+    with_tmp_dir do |home|
+      with_env("HOME" => home) do
+        path = File.join(home, ".pi", "agent", "auth.json")
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, "{}")
+        File.chmod(0o644, path)
+        auth = Hive::Web::AgentsAuth.new
+
+        auth.write_pi_token(JSON.generate("provider" => "x"))
+
+        assert_equal 0o600, File.stat(path).mode & 0o777,
+                     "rewriting an existing credential file must restore owner-private mode — " \
+                     "creation-time perm: alone would persist secrets into a world-readable file"
+      end
+    end
+  end
+
   def test_pi_token_writer_rejects_malformed_json
     auth = Hive::Web::AgentsAuth.new
     error = assert_raises(Hive::Error) { auth.write_pi_token("{not json") }

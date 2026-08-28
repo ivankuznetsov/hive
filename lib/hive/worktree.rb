@@ -373,13 +373,19 @@ module Hive
     # `GitOps#fetch_default_branch` (PR #69) so credential prompts
     # cannot hang the worktree-creation path.
     def freshest_base(default_branch)
-      return default_branch unless self.class.origin_configured?(@project_root)
+      # Local fallbacks return the fully-qualified ref, never the bare short
+      # name: under gitrevisions precedence a same-named tag
+      # (refs/tags/<default>) shadows refs/heads/<default>, so a bare start
+      # point would either fail with an ambiguity error or silently check out
+      # the tagged commit instead of the branch tip.
+      local_default = "refs/heads/#{default_branch}"
+      return local_default unless self.class.origin_configured?(@project_root)
 
       _, err, status = self.class.fetch_origin_branch(@project_root, default_branch)
       unless status.success?
         warn "[hive] worktree base: fetch origin #{default_branch} failed " \
              "(#{err.strip[0, 200]}); branching from local #{default_branch}"
-        return default_branch
+        return local_default
       end
 
       "origin/#{default_branch}"
@@ -459,7 +465,10 @@ module Hive
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
 
-        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        # IO#read(length) returns nil (not "") at EOF, e.g. for a zero-byte
+        # pointer file; normalize so the size check and YAML parse below see
+        # an empty String and fail as WorktreeError instead of NoMethodError.
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1) || ""
         if value.bytesize > STRICT_POINTER_MAX_BYTES
           raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes"
         end
@@ -516,7 +525,8 @@ module Hive
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
 
-        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        # See read_strict_pointer: read(2) at EOF yields nil, not "".
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1) || ""
         raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes" if value.bytesize > STRICT_POINTER_MAX_BYTES
 
         value
@@ -793,12 +803,17 @@ module Hive
     end
 
     # Default refs to measure a placeholder's emptiness against: `origin/<default>`
-    # when its tracking ref exists, and local `<default>` when that branch
-    # exists. A placeholder is empty if it carries no commits beyond either.
+    # when its tracking ref exists, and fully-qualified local
+    # `refs/heads/<default>` when that branch exists. A placeholder is empty if
+    # it carries no commits beyond either. The local ref is always fully
+    # qualified: existence was just verified against refs/heads/<default>, but
+    # a bare short name would let a same-named tag shadow it under gitrevisions
+    # precedence and measure emptiness against the wrong commit — deleting a
+    # branch that genuinely carries unique work.
     def default_base_refs(default_branch)
       refs = []
       refs << "origin/#{default_branch}" if self.class.origin_branch_ref_exists?(@project_root, default_branch)
-      refs << default_branch if self.class.local_branch_ref_exists?(@project_root, default_branch)
+      refs << "refs/heads/#{default_branch}" if self.class.local_branch_ref_exists?(@project_root, default_branch)
       refs
     end
 

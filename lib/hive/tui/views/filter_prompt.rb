@@ -1,5 +1,6 @@
 require "lipgloss"
 require "hive/tui/styles"
+require "hive/tui/views/format"
 
 module Hive
   module Tui
@@ -27,8 +28,11 @@ module Hive
           # behavior); without this the rendered line overflows the
           # terminal and disappears off the right side.
           buffer = model.filter_buffer.to_s
-          available = [ width - PROMPT.length - 2, 1 ].max
-          visible_buffer = buffer.length <= available ? buffer : buffer[-available, available].to_s
+          available = [ width - Format.display_width(PROMPT) - 2, 1 ].max
+          # Slide by terminal CELLS, not characters: wide (CJK) characters
+          # occupy two cells, so a character-count window can render at up
+          # to twice the available width and overflow the line.
+          visible_buffer = Format.display_width(buffer) <= available ? buffer : Format.tail_cells(buffer, available)
           cursor = Styles::CURSOR_HIGHLIGHT.render(" ")
           "#{PROMPT}#{visible_buffer}#{cursor}"
         end

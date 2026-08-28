@@ -330,45 +330,17 @@ class CommandsStageActionTest < Minitest::Test
     assert_empty out
   end
 
-  def test_closure_receipt_authorizes_only_archive_and_resumes_markerless_terminal_task
-    with_tmp_dir do |dir|
-      state_file = File.join(dir, "task.md")
-      File.write(state_file, "# task\n")
-      task = Struct.new(:folder, :state_file, :slug).new(
-        dir, state_file, "task"
-      )
-      wrong_verb = Hive::Commands::StageAction.new(
-        "plan", task.folder, closure_receipt_digest: "a" * 64
-      )
-      assert_raises(Hive::TaskClosure::InvalidReceipt) do
-        wrong_verb.send(
-          :close_with_receipt, task, "4-execute", Hive::Stages::DIRS.last
-        )
-      end
+  def test_closure_transition_is_authorized_only_for_the_terminal_archive_target
+    task = Struct.new(:stage_index, :stage_name).new(4, "execute")
+    service = Hive::TaskClosure.new
 
-      archive = Hive::Commands::StageAction.new(
-        "archive", task.folder, closure_receipt_digest: "a" * 64
-      )
-      runs = []
-      archive.define_singleton_method(:publish_task_completed) do |completed|
-        runs << [ :published, completed ]
+    with_replaced_singleton_method(
+      Hive::Workflows, :for_verb, ->(*) { { target: "3-plan" } }
+    ) do
+      error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        service.send(:transition!, task, nil, "receipt_digest" => "a" * 64)
       end
-      archive.define_singleton_method(:run_at) do |folder, observation_guard:, no_rebase:|
-        runs << [ folder, observation_guard, no_rebase ]
-      end
-      with_replaced_singleton_method(
-        Hive::Conditions::TransitionGuard, :validate_closure!, ->(*) { true }
-      ) do
-        with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
-          archive.send(
-            :close_with_receipt,
-            task,
-            Hive::Stages::DIRS.last,
-            Hive::Stages::DIRS.last
-          )
-        end
-      end
-      assert_equal [ [ task.folder, nil, true ], [ :published, task ] ], runs
+      assert_match(/only the archive transition/, error.message)
     end
   end
 end

@@ -95,9 +95,7 @@ class PatrolFixTaskActionTest < Minitest::Test
       tui_row = Hive::Tui::Snapshot.from_payload(payload).rows.first
       assert_equal "needs_input", tui_row.action_key
 
-      bot_row = Hive::Bot::StatusWatcher.new.send(
-        :extract_rows, payload, now: Time.utc(2026, 8, 20, 12, 5)
-      ).first
+      bot_row = Hive::Bot::StatusWatcher.new.send(:extract_rows, payload).first
       assert_equal "needs_input", bot_row.action
       assert_equal task.slug, bot_row.slug
     end

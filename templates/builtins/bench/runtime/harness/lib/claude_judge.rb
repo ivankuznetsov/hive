@@ -22,6 +22,11 @@ module HiveBench
     MISE_VERSION_LINE = /\Amise\s+\S+\s+tools:\s+claude@\S+\z/i.freeze
     CLAUDE_STDOUT_LIMIT_BANNER =
       /\Ayou(?:'ve| have) hit your (?:usage|session) limit\s*·\s*resets\s+\S.+\z/i.freeze
+    CLAUDE_STDOUT_CREDITS_BANNER = Regexp.new(
+      "\\Ayou're out of usage credits\\. switch to another model, or manage usage credits at " \
+      "claude\\.ai/settings/usage\\?from=cc_cli_limit_message, to continue\\.\\z",
+      Regexp::IGNORECASE
+    ).freeze
 
     # Per-call ceiling (seconds) so a wedged claude CLI can't hang the pass. Set
     # generous (20m) because the judge prompt can carry a large diff + reference.
@@ -70,7 +75,7 @@ module HiveBench
       lines.reject! { |line| line.match?(MISE_VERSION_LINE) }
       line = lines.first if lines.one?
       return unless line
-      return line if line.match?(CLAUDE_STDOUT_LIMIT_BANNER)
+      return line if line.match?(CLAUDE_STDOUT_LIMIT_BANNER) || line.match?(CLAUDE_STDOUT_CREDITS_BANNER)
 
       structured_limit_detail(line)
     end

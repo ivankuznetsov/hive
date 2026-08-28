@@ -3,7 +3,7 @@ title: 3-plan stage
 type: stage
 source: lib/hive/stages/plan.rb, templates/plan_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-28
 tags: [stage, plan, llm-wiki, ce-plan, critique, dependencies]
 ---
 
@@ -79,11 +79,15 @@ write canonical `plan.md`.
 `plan-review/current.json` is the authority projection. Its terminal states are
 `skipped`, `cleared`, standard-only `degraded_cleared`, or `blocked`; open
 gated/manual findings, missing mandatory coverage, stale plan/policy identity,
-or corrupt artifacts keep execution disabled. `<!-- COMPLETE -->` remains a
-coarse workflow signal and may be flipped only after the same current review is
-verified. Use `hive plan-review-run TARGET` for non-authority progress and the
-freshness-bound `hive plan-review TARGET ACTION ...` surface for explicit
-approvals, answers, waivers, raises, retries, or downgrades.
+or corrupt artifacts keep execution disabled. When the planner writes
+`<!-- COMPLETE -->` but required critique has not cleared, the stage runner
+atomically rewrites that current marker to `<!-- WAITING -->`; direct
+`plan-review-run` recovery performs the same reconciliation for older rows.
+After clearance, daemon plan approval owns the guarded `WAITING` to `COMPLETE`
+transition immediately before develop dispatch. Use `hive plan-review-run
+TARGET` for non-authority progress and the freshness-bound `hive plan-review
+TARGET ACTION ...` surface for explicit approvals, answers, waivers, raises,
+retries, or downgrades.
 
 ## Marker → commit action mapping (`Stages::Plan.action_for`)
 

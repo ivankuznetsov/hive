@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
 require "hive/patrol_fix/projection"
 require "hive/plan_review/approval_policy"
@@ -724,6 +725,10 @@ module Hive
       when "blocked"
         if stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_capability_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_adversarial_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
         else
@@ -963,6 +968,33 @@ module Hive
         Array(plan_review["routes"]).any? do |route|
           route["capability_result"] == "unsupported"
         end
+    end
+
+    # Older Hive builds terminalised missing reviewer binaries and emitted no
+    # command. Re-enter those exact persisted initial legs once so the current
+    # orchestrator can preserve successful coverage and move the missing leg
+    # onto its paced automatic retry schedule. Configuration-only blocks with
+    # no attempted route remain operator-owned.
+    def recoverable_capability_review?
+      %w[primary adversarial].any? do |role|
+        route = Array(plan_review["routes"]).reverse.find do |entry|
+          entry["role"] == role
+        end
+        route && route["outcome"] == "unsupported"
+      end
+    end
+
+    # A successful legacy Grok attempt can still carry the pre-alias-fix
+    # `reviewer_family_unknown` receipt. Re-enter only when current provider
+    # support can now attest the exact requested/served identity pair, and only
+    # until the orchestrator has recorded its versioned one-time retry.
+    def recoverable_adversarial_identity_review?
+      routes = Array(plan_review["routes"])
+      planner = routes.find { |entry| entry["role"] == "planner" }
+      planner_identity = planner&.fetch("actual", nil) || planner&.fetch("requested", nil)
+      !Hive::PlanReview::RouteResolver.recoverable_identity_route(
+        routes:, planner_identity:
+      ).nil?
     end
 
     def legacy_execute_findings?

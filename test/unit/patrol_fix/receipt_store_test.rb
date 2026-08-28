@@ -160,6 +160,11 @@ class PatrolFixReceiptStoreTest < Minitest::Test
       )
       assert_equal reopen, store.append!(reopen)
 
+      invalid_stage = Marshal.load(Marshal.dump(reopen))
+      invalid_stage["receipt_id"] = "reopen-invalid-stage"
+      invalid_stage["stage"] = "validate"
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) { store.append!(invalid_stage) }
+
       invalid_time = decision_receipt.merge("receipt_id" => "decision-time", "recorded_at" => "bad")
       assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) { store.append!(invalid_time) }
     end

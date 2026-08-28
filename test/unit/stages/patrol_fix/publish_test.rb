@@ -105,6 +105,18 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_publication_rework_defaults_to_review_when_no_specific_source_is_secret
+    snapshot = {
+      "manifest" => { "sources" => [{ "engine" => "git", "identity" => "commit", "evidence" => [ "clean" ] }] },
+      "validation" => { "payload" => { "commands" => [{ "identity" => "bundle exec rake test" }] } },
+      "review" => { "payload" => { "rationale" => "Reviewed cleanly.", "evidence" => [ "focused tests pass" ] } }
+    }
+
+    assert_equal "review", Hive::Stages::PatrolFix::Publish.send(
+      :publication_rework_stage, snapshot, []
+    )
+  end
+
   def test_existing_exact_owned_pr_is_imported_without_push_or_create
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new

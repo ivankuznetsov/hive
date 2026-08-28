@@ -133,6 +133,24 @@ class PatrolFixTransitionTest < Minitest::Test
     end
   end
 
+  def test_publication_block_rework_to_fix_carries_no_review_evidence
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = publication_block(manifest, decision, rework_stage: "fix")
+      store.append!(block)
+      publish_folder = File.join(task.hive_state_path, "stages", "5-publish", task.slug)
+      FileUtils.mkdir_p(File.dirname(publish_folder))
+      File.rename(task.folder, publish_folder)
+
+      result = Hive::PatrolFix::Transition.new(
+        Hive::Task.new(publish_folder), worktree_root: worktree_root, commit: ->(**) { }
+      ).apply_publication_block!(block)
+
+      assert_equal File.join(task.hive_state_path, "stages", "2-fix", task.slug), result.fetch(:task_folder)
+    end
+  end
+
   def test_operator_publication_rework_releases_the_exact_task_lock_after_the_move
     with_review_task(route: "publish") do |task, worktree_root, decision|
       store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
@@ -427,10 +445,10 @@ class PatrolFixTransitionTest < Minitest::Test
   end
 
 
-  def publication_block(manifest, decision, fix_receipt_id: "fix-1")
+  def publication_block(manifest, decision, fix_receipt_id: "fix-1", rework_stage: "review")
     Hive::PatrolFix::PublicationBlockReceipt.build(
       task: manifest.fetch("task"), evidence_revision: manifest.fetch("evidence_revision"),
-      blocked_fields: [ "body" ], rework_stage: "review",
+      blocked_fields: [ "body" ], rework_stage: rework_stage,
       review_receipt_id: decision.fetch("receipt_id"), fix_receipt_id: fix_receipt_id,
       validation_receipt_id: "validation-1",
       head_revision: decision.dig("payload", "head_revision"),

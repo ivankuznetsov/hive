@@ -85,7 +85,10 @@ module Hive
         # Strict schema (closes ce-code-review AC-7):
         #   - `false` (boolean) disables a default pattern.
         #   - Hash adds (or replaces) a custom pattern; must include
-        #     `regex`.
+        #     `regex`. Replacement is total: a Hash override of any
+        #     name — including `secrets_pattern_match` — swaps that
+        #     descriptor for a plain regex detector, so the special
+        #     SecretPatterns dispatch never survives an override.
         # Anything else (true, "false", integer, nil, …) raises
         # `Hive::ConfigError` so a typo at the YAML level fails fast at
         # `hive run` startup instead of silently no-op-ing the override.
@@ -122,6 +125,7 @@ module Hive
           end
 
           {
+            detector: :regex,
             regex: regex.is_a?(Regexp) ? regex : Regexp.new(regex.to_s),
             severity: severity,
             targets: targets,
@@ -239,7 +243,12 @@ module Hive
             patterns.each do |name, spec|
               next unless spec[:targets] == :code
 
-              if name == :secrets_pattern_match
+              # Dispatch on the descriptor's explicit detector strategy,
+              # not on the pattern name — a Hash override of any default
+              # (including secrets_pattern_match) always lands in the
+              # plain-regex arm below.
+              case spec[:detector]
+              when :secret_patterns
                 Hive::SecretPatterns.scan(added).each do |hit|
                   next if runtime_password_lookup?(added, hit)
 
@@ -252,16 +261,21 @@ module Hive
                     match_sha256: hit.fetch(:sha256)
                   )
                 end
-              elsif spec[:regex] && spec[:regex] =~ added
-                matched = Regexp.last_match[0]
-                matches << build_match(
-                  pattern_name: name.to_s,
-                  file: current_file,
-                  line: current_line,
-                  snippet: matched.length > 100 ? "#{matched[0, 100]}…" : matched,
-                  severity: spec[:severity],
-                  match_sha256: Digest::SHA256.hexdigest(matched)
-                )
+              when :regex
+                if spec[:regex] && spec[:regex] =~ added
+                  matched = Regexp.last_match[0]
+                  matches << build_match(
+                    pattern_name: name.to_s,
+                    file: current_file,
+                    line: current_line,
+                    snippet: matched.length > 100 ? "#{matched[0, 100]}…" : matched,
+                    severity: spec[:severity],
+                    match_sha256: Digest::SHA256.hexdigest(matched)
+                  )
+                end
+              else
+                raise Hive::AgentError,
+                      "fix guardrail pattern #{name.inspect} has unknown detector #{spec[:detector].inspect}"
               end
             end
 

@@ -297,7 +297,6 @@ module Hive
         end
         rows
       end
-
     end
   end
 end

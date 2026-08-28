@@ -194,6 +194,22 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_scan_diff_rejects_an_unknown_detector
+    patterns = {
+      custom: {
+        detector: :unknown,
+        severity: :high,
+        targets: :code
+      }
+    }
+
+    error = assert_raises(Hive::AgentError) do
+      Hive::Stages::Review::FixGuardrail.scan_diff("+danger\n", patterns)
+    end
+
+    assert_match(/custom.*unknown detector.*:unknown/, error.message)
+  end
+
   # Regression: dispatch previously branched on the pattern *name*
   # (`if name == :secrets_pattern_match`), so a Hash override of that
   # name still routed to Hive::SecretPatterns even though the override

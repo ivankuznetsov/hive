@@ -159,6 +159,26 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_explicit_migrate_preserves_malformed_refactor_patrol_scan_progress
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        progress_path = File.join(
+          dir, ".hive-state", "refactor_patrol", "v2", "reconciler-progress.json"
+        )
+        FileUtils.mkdir_p(File.dirname(progress_path))
+        File.write(progress_path, "{")
+
+        out, = capture_io do
+          migrate_command(dir, daemon_cutover: -> { flunk "unexpected cutover" }).call
+        end
+
+        assert_equal "{", File.read(progress_path)
+        refute_includes out, "discarded obsolete Architecture Patrol scan progress"
+      end
+    end
+  end
+
   def test_patrol_index_cutover_restarts_then_rebuilds_once_more
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

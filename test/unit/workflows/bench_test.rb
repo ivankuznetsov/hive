@@ -1428,22 +1428,33 @@ class WorkflowsBenchTest < Minitest::Test
         [ "partial answer", "you've hit your usage limit", status ],
         [ "mise ~/.config/mise/config.toml tools: claude@2.1.233\n" \
           "You've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
+        [ JSON.generate(
+          "type" => "result", "is_error" => true, "terminal_reason" => "api_error",
+          "api_error_status" => 429,
+          "result" => "You're out of usage credits. Switch to another model."
+        ), "mise ~/.config/mise/config.toml tools: claude@2.1.233\n", status ],
+        [ JSON.generate(
+          "type" => "result", "is_error" => false, "terminal_reason" => "end_turn",
+          "api_error_status" => 429,
+          "result" => "the candidate handles HTTP 429 rate limit exceeded"
+        ), "", status ],
         [ "analysis\nYou've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
         [ "the candidate handles HTTP 429 rate limit exceeded", "", status ]
       ]
       Open3.define_singleton_method(:capture3) { |*| responses.shift }
       judge = HiveBench::ClaudeJudge.judge_fn
-      errors = 4.times.map do
+      errors = 6.times.map do
         judge.call(prompt: "prompt", seed: 1)
       rescue StandardError => e
         [ e.class.name, e.message ]
       end
       abort errors.inspect unless errors.map(&:first) == [
-        "HiveBench::ProviderLimitError", "HiveBench::ProviderLimitError",
+        "HiveBench::ProviderLimitError", "HiveBench::ProviderLimitError", "HiveBench::ProviderLimitError",
+        "HiveBench::JudgeOutput::Error",
         "HiveBench::JudgeOutput::Error",
         "HiveBench::JudgeOutput::Error"
       ]
-      abort errors.inspect unless errors.first(2).all? { |error| error.last.start_with?("limits_reached: ") }
+      abort errors.inspect unless errors.first(3).all? { |error| error.last.start_with?("limits_reached: ") }
     RUBY
 
     out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)

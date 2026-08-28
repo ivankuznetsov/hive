@@ -204,7 +204,7 @@ plan_review:
     - Gemfile.lock
     - hive.gemspec
     - install.sh
-  attempts: {max_transient: 2, timeout_sec: 900}
+  attempts: {max_transient: 2, timeout_sec: 1800}
   coverage: {required: [whole_document, adversarial], optional: []}
   adapter: ce_doc_review
   reviewers:

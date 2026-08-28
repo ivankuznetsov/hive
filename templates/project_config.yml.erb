@@ -142,7 +142,7 @@ plan_review:
     - install.sh
   attempts:
     max_transient: 2
-    timeout_sec: 900
+    timeout_sec: 1800
 execute:
   agent: <%= development_agent %>
   # Provider routing is a separate explicit opt-in from `models:`. Accounts

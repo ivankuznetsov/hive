@@ -12,6 +12,7 @@ class ConfigTest < Minitest::Test
       assert_equal "skip", review.dig("coding", "minimum_level")
       assert_equal 5, review.dig("skip", "max_files")
       assert_equal 2, review.dig("attempts", "max_transient")
+      assert_equal 1800, review.dig("attempts", "timeout_sec")
       assert_equal "ce_doc_review", review.fetch("adapter")
       assert_equal "grok-4.6", review.dig("routes", "adversarial", "model")
       assert_equal "native_grok_build", review.dig("routes", "adversarial", "route")

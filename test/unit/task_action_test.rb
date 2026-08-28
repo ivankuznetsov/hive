@@ -2082,6 +2082,23 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan-review-run demo-260426-aaaa", unsupported.command
   end
 
+  def test_plan_review_unattempted_unsupported_route_remains_operator_owned
+    task = fake_task(stage_name: "plan", stage_index: 3)
+
+    unsupported = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "required_action" => "inspect route",
+        "routes" => [
+          { "role" => "adversarial", "capability_result" => "unsupported" }
+        ]
+      }
+    )
+
+    assert_equal "plan_review_unsupported", unsupported.key
+    assert_nil unsupported.command
+  end
+
   def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
     task = fake_task(stage_name: "plan", stage_index: 3)
     routes = [

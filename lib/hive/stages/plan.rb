@@ -1,5 +1,6 @@
 require "hive/stages/base"
 require "hive/claude_launcher"
+require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
@@ -33,6 +34,8 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         adopt_plan_dependency!(task, marker)
         review = start_plan_review(task, cfg, profile, result, marker)
+        Hive::PlanReview::MarkerSync.hold_until_cleared!(task:, projection: review)
+        marker = Hive::Markers.current(task.state_file)
         {
           commit: action_for(marker.name), status: marker.name,
           plan_review: review&.summary

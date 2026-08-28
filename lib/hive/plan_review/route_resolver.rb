@@ -8,6 +8,7 @@ module Hive
   module PlanReview
     module RouteResolver
       CANDIDATE_KEYS = %w[provider model family effort route].freeze
+      IDENTITY_CONTRACT_VERSION = 1
       ROLE_IDENTITIES = {
         "primary" => "plan_review",
         "adversarial" => "plan_review_adversarial",
@@ -178,6 +179,56 @@ module Hive
 
         [ true, "different_model_family" ]
       end
+
+      # A provider may report a served model alias rather than the configured
+      # model name. Promote the configured family only when provider support
+      # explicitly attests that exact requested/served pair. This keeps the
+      # alias rule in one place for new calls and legacy receipt recovery.
+      def attest_observed_identity(requested:, actual:)
+        requested = normalize_hash(requested)
+        actual = normalize_observed_identity(actual)
+        return actual if actual["family"]
+
+        provider = actual["provider"].to_s
+        requested_model = requested["model"].to_s
+        served_model = actual["model"].to_s
+        family = requested["family"].to_s
+        return actual if provider.empty? || requested_model.empty? || served_model.empty? || family.empty?
+        return actual unless provider == requested["provider"].to_s
+
+        support = Hive::AgentSupport.for(provider)
+        equivalent = served_model == requested_model ||
+                     support&.respond_to?(:model_identity_equivalent?) &&
+                       support.model_identity_equivalent?(
+                         requested_model:, served_model:, family:
+                       )
+        equivalent ? actual.merge("family" => redact(family)).freeze : actual
+      end
+
+      def recoverable_identity_route(routes:, planner_identity:)
+        routes = Array(routes)
+        return if routes.any? { |route| current_identity_contract?(route) }
+
+        route = routes.reverse.find { |entry| entry["role"] == "adversarial" }
+        return unless route && %w[success partial_coverage].include?(route["outcome"])
+        return if route["independence_verified"] == true
+
+        actual = attest_observed_identity(
+          requested: route["requested"], actual: route["actual"]
+        )
+        verified, = independence(planner_identity, actual)
+        route if verified
+      rescue Hive::ConfigError
+        nil
+      end
+
+      def current_identity_contract?(route)
+        route["identity_contract_recovery"] == true &&
+          Integer(route["identity_contract_version"]) >= IDENTITY_CONTRACT_VERSION
+      rescue ArgumentError, TypeError
+        false
+      end
+      private_class_method :current_identity_contract?
 
       def normalize_candidate(value, require_family: true)
         candidate = normalize_hash(value)

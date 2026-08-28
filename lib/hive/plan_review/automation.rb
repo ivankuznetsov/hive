@@ -1,5 +1,6 @@
 require "hive/config"
 require "hive/lock"
+require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
@@ -34,6 +35,7 @@ module Hive
           else
             Orchestrator.run!(task:, cfg:, planner_identity:)
           end
+          MarkerSync.hold_until_cleared!(task:, projection:)
         end
         projection || raise(
           TransitionBlocked.new(

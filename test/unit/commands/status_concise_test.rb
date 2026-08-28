@@ -37,8 +37,8 @@ class CommandsStatusConciseTest < Minitest::Test
       @routes << :concise
     end
 
-    def json_payload(_projects, **)
-      @routes << :legacy_json
+    def active_payload(_projects, **)
+      @routes << :active_payload
       { "schema" => "hive-status" }
     end
 
@@ -68,7 +68,7 @@ class CommandsStatusConciseTest < Minitest::Test
 
       internal_json = RoutingStatus.new(json: true, full: true)
       capture_io { internal_json.call }
-      assert_equal [ :legacy_json ], internal_json.routes
+      assert_equal [ :active_payload ], internal_json.routes
 
       operational_json = RoutingStatus.new(json: true, operational: true)
       capture_io { operational_json.call }

@@ -41,6 +41,11 @@ module Hive
     class Status
       include Hive::Schemas::EnvelopeEmitter
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
+      PreparedProject = Data.define(
+        :project, :base, :config, :rows, :hive_state, :workflow_generation,
+        :incremental, :exclude_archived
+      )
+      ActiveProjection = Data.define(:payload, :admission_context)
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
@@ -571,8 +576,51 @@ module Hive
       # skips inert terminal history and never serializes resolved archive
       # members. Non-inert terminal work remains active until its completion
       # contract succeeds. History has its own explicit `hive archive` surface.
+      # Collect and action-classify routine rows once, then derive dependency
+      # admission from those already-selected folders. Referenced archived
+      # prerequisites are still exact-loaded by DependencySnapshot's fallback.
       def active_payload(projects, **options)
-        json_payload(projects, **options, exclude_archived: true)
+        active_projection(projects, **options).payload
+      end
+
+      def active_projection(projects, stages: nil, admission_context: nil,
+                            now: Time.now.utc, workflow_generations: nil)
+        owns_attempt_store = acquire_status_attempt_store
+        now = now.utc
+        workflow_generations ||= capture_workflow_generations(projects)
+        prepared = projects.map do |project|
+          prepare_project_or_degraded(
+            project,
+            project_count: projects.size,
+            stages: stages,
+            exclude_archived: true,
+            now: now,
+            workflow_generation: workflow_generation_for(project, workflow_generations)
+          )
+        end
+        admission_context ||= active_admission_context_from_prepared(
+          projects, prepared, workflow_generations: workflow_generations
+        )
+        projection_kind = @archive ?
+          Hive::Schemas::StatusProjectionKind::ARCHIVE :
+          Hive::Schemas::StatusProjectionKind::ACTIVE
+        payload = {
+          "schema" => "hive-status",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+          "ok" => true,
+          "generated_at" => now.iso8601(6),
+          "projection" => projection_kind,
+          "projects" => prepared.map do |entry|
+            next entry unless entry.is_a?(PreparedProject)
+
+            with_project_degradation(entry.project) do
+              complete_project_payload(entry, admission_context: admission_context, now: now)
+            end
+          end
+        }
+        ActiveProjection.new(payload: payload, admission_context: admission_context)
+      ensure
+        @status_attempt_store = nil if owns_attempt_store
       end
 
       # Internal exact-task payload. Routine daemon refreshes avoid rebuilding
@@ -624,16 +672,43 @@ module Hive
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
                                       admission_context: nil, now: Time.now.utc,
                                       workflow_generation: nil, task_slugs: nil)
-        project_payload(
+        with_project_degradation(project) do
+          project_payload(
+            project,
+            project_count: project_count,
+            stages: stages,
+            exclude_archived: exclude_archived,
+            admission_context: admission_context,
+            now: now,
+            workflow_generation: workflow_generation,
+            task_slugs: task_slugs
+          )
+        end
+      end
+
+      def prepare_project_or_degraded(project, **options)
+        with_project_degradation(project) { prepare_project(project, **options) }
+      end
+
+      def project_payload(project, project_count:, stages: nil, exclude_archived: false,
+                          admission_context: nil, now: Time.now.utc,
+                          workflow_generation: nil, task_slugs: nil)
+        prepared = prepare_project(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
-          admission_context: admission_context,
           now: now,
           workflow_generation: workflow_generation,
           task_slugs: task_slugs
         )
+        return prepared unless prepared.is_a?(PreparedProject)
+
+        complete_project_payload(prepared, admission_context: admission_context, now: now)
+      end
+
+      def with_project_degradation(project)
+        yield
       rescue Hive::UnsupportedProjectConfigError
         raise
       rescue StandardError => e
@@ -652,17 +727,15 @@ module Hive
         degraded
       end
 
-      def project_payload(project, project_count:, stages: nil, exclude_archived: false,
-                          admission_context: nil, now: Time.now.utc,
-                          workflow_generation: nil, task_slugs: nil)
+      def prepare_project(project, project_count:, stages: nil, exclude_archived: false,
+                          now: Time.now.utc, workflow_generation: nil, task_slugs: nil)
         unless @status_attempt_store
           return with_status_attempt_store do
-            project_payload(
+            prepare_project(
               project,
               project_count: project_count,
               stages: stages,
               exclude_archived: exclude_archived,
-              admission_context: admission_context,
               now: now,
               workflow_generation: workflow_generation,
               task_slugs: task_slugs
@@ -677,94 +750,109 @@ module Hive
           "path" => path,
           "hive_state_path" => hive_state
         }
-        incremental = !task_slugs.nil?
-        if !File.directory?(path)
-          project_error_payload(base, "missing_project_path")
-        elsif !File.directory?(hive_state)
-          project_error_payload(base, "not_initialised")
-        else
-          # Hold the project overlay stable across load! + resolve: StatusFeed
-          # runs this on both the poller thread and per-request threads, so a
-          # concurrent load!(other project) must not clear THIS project's
-          # overlay mid-resolve (which would make its custom-workflow rows
-          # raise UnknownWorkflow and degrade the whole project). See
-          # Hive::Workflows::Project::LOCK.
-          Hive::Workflows::Project.synchronize do
-            raise workflow_generation if workflow_generation.is_a?(Exception)
-            Hive::Workflows::Project.load!(path) unless workflow_generation
-            # JSON path: pay the diagnostic-extraction cost because
-            # external consumers (TUI, daemon, bots) read `diagnostic` off
-            # every row. Schema mandates the field.
-            config = workflow_generation&.config || task_action_config(path)
-            workflow_generation ||= Hive::Task.capture_workflow_generation(path, config: config)
-            rows = annotate_implementation_identities(
-              collect_rows(
-                hive_state,
-                stages: stages,
-                exclude_archived: exclude_archived,
-                now: now,
-                workflow_generation: workflow_generation,
-                project_name: project["name"],
-                task_slugs: task_slugs
-              ),
-              config
-            )
-            rows = annotate_actions(
-              rows,
-              project, project_count, config: config, with_diagnostic: true
-            )
-            rows = if incremental && admission_context.nil?
-              annotate_incremental_dependencies(
-                rows, project, config: config, workflow_generation: workflow_generation
-              )
-            else
-              annotate_dependencies(rows, project, admission_context: admission_context)
-            end
-            projection = Hive::ArchiveFilter.project(
-              rows, now: now,
-              apply_retention: !@archive && !incremental
-            )
-            rows =
-              if @archive
-                projection.archive_rows
-              elsif exclude_archived
-                # Dependency annotation may replace an archived action with an
-                # admission error, but it preserves the resolved archive
-                # membership captured immediately beforehand. Exclude those
-                # real task rows while retaining synthetic invalid rows.
-                projection.ordinary_rows.reject do |row|
-                  row[:task] && Hive::ArchiveFilter.archive_member?(row)
-                end
-              else
-                projection.ordinary_rows
-              end
-            out = base.merge("tasks" => rows.map { |r| task_payload(r, now: now) })
-            out["config_summary"] = {
-              "stages" => {
-                "ensure_clean_on_exit" =>
-                  !config.is_a?(Hash) || config.dig("stages", "ensure_clean_on_exit") != false
-              }
-            }
-            out["hidden_archived_task_count"] = incremental ? 0 : projection.hidden_count unless @archive
-            # Always emit `legacy_stage_dirs` (default empty array) so
-            # consumers can branch on `.empty?` without a `key?` probe and
-            # the schema's optional-but-never-undefined contract holds.
-            legacy_stage_dirs = if incremental
-              []
-            else
-              detect_legacy_stage_dirs(hive_state, workflow_generation: workflow_generation)
-            end
-            out["legacy_stage_dirs"] = legacy_stage_dirs
-            # `legacy_migrate_command` is the machine-readable parity of the
-            # text-mode "run `hive migrate`" recovery hint. Agents reading
-            # the JSON envelope get a ready-to-execute command string when
-            # legacy_stage_dirs is non-empty; `null` otherwise. The field is
-            # always present (never absent) — same diagnostic-field
-            # convention as `diagnostic` on tasks. Issue #94.
-            out["legacy_migrate_command"] = legacy_stage_dirs.empty? ? nil : "hive migrate"
-            out
-          end
+        return project_error_payload(base, "missing_project_path") unless File.directory?(path)
+        return project_error_payload(base, "not_initialised") unless File.directory?(hive_state)
+
+        # Hold the project overlay stable while loading and classifying rows.
+        # StatusFeed runs this on poller and request threads, so every prepared
+        # row must capture its own project's workflow generation before unlock.
+        Hive::Workflows::Project.synchronize do
+          raise workflow_generation if workflow_generation.is_a?(Exception)
+          Hive::Workflows::Project.load!(path) unless workflow_generation
+          config = workflow_generation&.config || task_action_config(path)
+          workflow_generation ||= Hive::Task.capture_workflow_generation(path, config: config)
+          rows = annotate_implementation_identities(
+            collect_rows(
+              hive_state,
+              stages: stages,
+              exclude_archived: exclude_archived,
+              now: now,
+              workflow_generation: workflow_generation,
+              project_name: project["name"],
+              task_slugs: task_slugs
+            ),
+            config
+          )
+          rows = annotate_actions(
+            rows,
+            project, project_count, config: config, with_diagnostic: true
+          )
+          PreparedProject.new(
+            project: project,
+            base: base,
+            config: config,
+            rows: rows,
+            hive_state: hive_state,
+            workflow_generation: workflow_generation,
+            incremental: !task_slugs.nil?,
+            exclude_archived: exclude_archived
+          )
         end
+      end
+
+      def complete_project_payload(prepared, admission_context:, now: Time.now.utc)
+        rows = prepared.rows
+        rows = if prepared.incremental && admission_context.nil?
+          annotate_incremental_dependencies(
+            rows, prepared.project,
+            config: prepared.config, workflow_generation: prepared.workflow_generation
+          )
+        else
+          annotate_dependencies(rows, prepared.project, admission_context: admission_context)
+        end
+        projection = Hive::ArchiveFilter.project(
+          rows, now: now,
+          apply_retention: !@archive && !prepared.incremental
+        )
+        rows =
+          if @archive
+            projection.archive_rows
+          elsif prepared.exclude_archived
+            # Keep synthetic invalid rows visible, but omit real rows whose
+            # pre-admission action resolved to archived.
+            projection.ordinary_rows.reject do |row|
+              row[:task] && Hive::ArchiveFilter.archive_member?(row)
+            end
+          else
+            projection.ordinary_rows
+          end
+        out = prepared.base.merge("tasks" => rows.map { |row| task_payload(row, now: now) })
+        out["config_summary"] = {
+          "stages" => {
+            "ensure_clean_on_exit" => !prepared.config.is_a?(Hash) ||
+              prepared.config.dig("stages", "ensure_clean_on_exit") != false
+          }
+        }
+        out["hidden_archived_task_count"] = prepared.incremental ? 0 : projection.hidden_count unless @archive
+        legacy_stage_dirs = if prepared.incremental
+          []
+        else
+          detect_legacy_stage_dirs(
+            prepared.hive_state, workflow_generation: prepared.workflow_generation
+          )
+        end
+        out["legacy_stage_dirs"] = legacy_stage_dirs
+        out["legacy_migrate_command"] = legacy_stage_dirs.empty? ? nil : "hive migrate"
+        out
+      end
+
+      def active_admission_context_from_prepared(projects, prepared, workflow_generations:)
+        inputs = prepared.map do |entry|
+          next unless entry.is_a?(PreparedProject)
+
+          task_folders = entry.rows.filter_map do |row|
+            next if row[:task] && Hive::ArchiveFilter.archived_action?(row)
+
+            row[:folder]
+          end
+          Hive::DependencySnapshot::ActiveProjectInput.new(task_folders: task_folders)
+        end
+        build_admission_context(
+          projects,
+          exclude_archived: true,
+          workflow_generations: workflow_generations,
+          project_inputs: inputs
+        )
       end
 
       def project_error_payload(base, error)
@@ -1694,10 +1782,13 @@ module Hive
         end
       end
 
-      def build_admission_context(projects, exclude_archived: false, workflow_generations: nil)
+      def build_admission_context(projects, exclude_archived: false, workflow_generations: nil,
+                                  project_inputs: nil)
         if exclude_archived
           Hive::DependencySnapshot.active_admission_context(
-            projects, workflow_generations: workflow_generations
+            projects,
+            workflow_generations: workflow_generations,
+            project_inputs: project_inputs
           )
         else
           Hive::DependencySnapshot.admission_context(

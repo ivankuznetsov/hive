@@ -297,6 +297,32 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_active_refresh_publishes_one_projection_payload_and_context_pair
+    source = Hive::Tui::StateSource.new
+    payload = Object.new
+    admission_context = Object.new
+    projection = Hive::Commands::Status::ActiveProjection.new(
+      payload: payload, admission_context: admission_context
+    )
+    status = Object.new
+    status.define_singleton_method(:active_projection) { |*, **| projection }
+    published = nil
+    source.define_singleton_method(:publish_active_snapshot) do |received, admission_context:, **|
+      published = [ received, admission_context ]
+    end
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(**) { status }) do
+        source.send(:refresh_once)
+      end
+    end
+
+    assert_same payload, published.fetch(0)
+    assert_same admission_context, published.fetch(1)
+  ensure
+    source&.stop
+  end
+
   def test_idle_refresh_reuses_snapshot_until_a_watched_file_changes
     with_direct_project do |_project, hive_state|
       folder = write_task(

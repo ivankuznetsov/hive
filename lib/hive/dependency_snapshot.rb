@@ -24,6 +24,8 @@ module Hive
   module DependencySnapshot
     module_function
 
+    ActiveProjectInput = Data.define(:task_folders)
+
     def semantic_fingerprint(context)
       projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|
         layer_projects.map do |project|
@@ -148,13 +150,17 @@ module Hive
     # large unrelated archive has no effect on ordinary status cost, while an
     # archived prerequisite still participates in admission and validation.
     def active_admission_context(registry_entries = Hive::Config.registered_projects,
-                                 workflow_generations: nil)
+                                 workflow_generations: nil, project_inputs: nil)
       entries = Array(registry_entries)
-      projects = entries.map do |entry|
+      projects = entries.each_with_index.map do |entry, index|
+        input = project_inputs&.fetch(index, nil)
+        options = if input
+          { task_folders: input.task_folders }
+        else
+          { exclude_archived: true }
+        end
         admission_project(
-          entry,
-          exclude_archived: true,
-          live_repository_identity: nil,
+          entry, **options, live_repository_identity: nil,
           workflow_generation: workflow_generation_for(entry, workflow_generations)
         )
       end
@@ -303,7 +309,7 @@ module Hive
 
     def admission_project(entry, exclude_archived: false,
                           live_repository_identity: :detect, workflow_generation: nil,
-                          task_references: nil)
+                          task_references: nil, task_folders: nil)
       root = File.expand_path(entry.fetch("path"))
       if workflow_generation.is_a?(Exception)
         raise workflow_generation
@@ -324,6 +330,14 @@ module Hive
           Array(task_references).flat_map do |reference|
             dependency_tasks_for_reference(
               entry, reference, workflow_generation: workflow_generation
+            )
+          end
+        elsif !task_folders.nil?
+          Array(task_folders).uniq.sort.map do |folder|
+            admission_task(
+              root, folder, config,
+              project_name: entry.fetch("name"),
+              workflow_generation: workflow_generation
             )
           end
         else

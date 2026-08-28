@@ -107,8 +107,8 @@ class PatrolFixPublishStageTest < Minitest::Test
 
   def test_publication_rework_defaults_to_review_when_no_specific_source_is_secret
     snapshot = {
-      "manifest" => { "sources" => [{ "engine" => "git", "identity" => "commit", "evidence" => [ "clean" ] }] },
-      "validation" => { "payload" => { "commands" => [{ "identity" => "bundle exec rake test" }] } },
+      "manifest" => { "sources" => [ { "engine" => "git", "identity" => "commit", "evidence" => [ "clean" ] } ] },
+      "validation" => { "payload" => { "commands" => [ { "identity" => "bundle exec rake test" } ] } },
       "review" => { "payload" => { "rationale" => "Reviewed cleanly.", "evidence" => [ "focused tests pass" ] } }
     }
 

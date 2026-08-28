@@ -199,6 +199,26 @@ class PatrolFixTransitionTest < Minitest::Test
     end
   end
 
+  def test_publication_rework_rejects_an_exact_stored_block_without_payload
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = Marshal.load(Marshal.dump(publication_block(manifest, decision)))
+      block.delete("payload")
+      store = Object.new
+      store.define_singleton_method(:read_all) { [ block ] }
+      transition = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { flunk "must not commit" }
+      )
+
+      with_replaced_singleton_method(Hive::PatrolFix::ReceiptStore, :new, ->(**) { store }) do
+        error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+          transition.apply_publication_block!(block)
+        end
+        assert_includes error.message, "exact current block"
+      end
+    end
+  end
+
   def test_publication_rework_revalidates_the_receipt_evidence_chain
     with_review_task(route: "publish") do |task, worktree_root, decision|
       manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read

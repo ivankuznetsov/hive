@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-21
+updated: 2026-08-28
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -107,10 +107,26 @@ exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.
 An unsupported mandatory route is probed cheaply before another expensive
-review. An unchanged failed capability probe is recorded as operational
-evidence; after three identical observations the review parks as
-`reviewer_unlaunchable` instead of spawning forever. A changed probe resets the
-series and permits a new reviewer launch. Review identity includes adapter,
+review. Required legs recover independently: a successful primary receipt is
+retained when the adversarial route is unavailable, and only the unsupported
+leg is reset. Three unchanged capability observations may run immediately;
+after that the projection remains non-terminal as `retry_scheduled` on a
+five-minute cooldown. Repeated misses replace one rolling capability receipt
+per role; they do not copy the plan, create immutable attempt directories, or
+grow the route array. A normal immutable review attempt is materialized only
+after the launcher and adapter capability probes report present. Each due
+daemon pass probes again, so installing a skill, repairing a binary, or changing
+a route heals the same review lineage without an operator request or a new plan
+generation. Legacy `blocked` projections
+whose latest primary or adversarial route is explicitly `unsupported` classify
+as `plan_reviewing` once under the new code and enter the same paced recovery;
+configuration-only blocks without an attempted route remain operator-owned. A
+changed probe resets the stable-observation series and permits a new reviewer
+launch. A legacy successful adversarial receipt whose served-model alias is now
+explicitly attested by provider support receives one versioned rerun under the
+current identity contract. This repairs pre-contract `reviewer_family_unknown`
+coverage without rewriting old immutable attempt evidence or repeatedly
+launching a genuinely non-independent reviewer. Review identity includes adapter,
 reviewer, route configuration, and the effective `models.plan_review`,
 `models.plan_review_adversarial`, and `models.plan_review_verification`
 overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
@@ -250,6 +266,15 @@ will not read.
 status and the daemon. It may initialize review, dispatch/retry reviewers,
 perform an already-authorized revision, verify, and advance an already-cleared
 plan. It has no API for approvals, answers, waivers, or downgrades.
+
+Plan authoring and plan completion are distinct. If the planner writes
+`<!-- COMPLETE -->` but the resulting required review projection does not yet
+authorize execution, both the stage runner and `plan-review-run` atomically
+replace that current marker with `<!-- WAITING -->`. A cleared projection is
+left alone; for an already-waiting row, daemon `PlanApproval` owns the guarded
+`WAITING` to `COMPLETE` transition immediately before develop dispatch. Thus a
+required review that has not completed cannot leave the plan artifact claiming
+terminal completion, including on legacy capability-recovery re-entry.
 
 Authority-bearing actions use:
 

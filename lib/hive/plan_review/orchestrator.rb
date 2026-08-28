@@ -4,6 +4,7 @@ require "json"
 require "time"
 require "tmpdir"
 require "hive/atomic_file"
+require "hive/canonical_json"
 require "hive/lock"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
@@ -26,6 +27,8 @@ module Hive
       SUCCESS_OUTCOMES = Adapters::Base::SUCCESS_OUTCOMES
       TERMINAL_OUTCOMES = (Adapters::Base::OUTCOMES - TRANSIENT_OUTCOMES).freeze
       MAX_VERIFICATION_REVISION_ROUNDS = 3
+      CAPABILITY_STABLE_PROBE_LIMIT = 3
+      CAPABILITY_RETRY_COOLDOWN_SEC = 5 * 60
 
       class << self
         def run!(task:, cfg:, planner_identity:, **options)
@@ -123,6 +126,10 @@ module Hive
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
+        record, capability_pending = refresh_capability_probes(record)
+        return Projection.new(record) if capability_pending
+        record = refresh_adversarial_identity_contract(record)
+
         %w[primary adversarial].each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
           return Projection.new(record) if pending
@@ -134,7 +141,8 @@ module Hive
           adapter_outcomes: outcomes
         )
         if record.effective_level == "mandatory" && initial_coverage.blocked?
-          return handle_capability_block(record) if capability_only_block?(outcomes)
+          capability_recovery = handle_capability_block(record)
+          return capability_recovery if capability_recovery
 
           return terminal(
             record, state: "blocked", outcome: "blocked",
@@ -335,69 +343,178 @@ module Hive
       # the stale `blocked` replaying forever and the task parked on "waive
       # named coverage or restore required reviewer capability" — with no way
       # to act on the second half of that sentence.
-      # The test is whether any leg produced a *verdict*, not whether every leg
-      # failed the same way. A run can mix an `unsupported` primary with an
-      # adversarial refused for `same_model_family`: different causes, both
-      # about our configuration rather than the plan, and both fixed by
-      # changing routes. Caching either as "blocked" is caching an answer we
-      # never got.
-      CAPABILITY_STABLE_PROBE_LIMIT = 3
+      # A successful leg is durable evidence and must not be thrown away just
+      # because a different required reviewer was unavailable. Recover every
+      # unsupported initial leg independently, then evaluate any remaining
+      # non-capability blockers after that reviewer returns.
+      def unsupported_initial_routes(record)
+        %w[primary adversarial].filter_map do |role|
+          route = latest_route(record, role)
+          route if route && route["outcome"] == "unsupported"
+        end
+      end
 
-      def capability_only_block?(outcomes)
-        observed = Array(outcomes).map(&:to_s)
-        observed.any? && observed.all? { |outcome| outcome == "unsupported" }
+      # Grok reports the served alias `grok-4.6-build`. Reviews completed
+      # before Hive learned that exact alias were retained as successful
+      # attempts but denied adversarial coverage because their family was
+      # unknown. Re-run one such leg under the current identity contract so
+      # the immutable attempt evidence, not a projection rewrite, earns the
+      # missing coverage. The versioned reset makes this a one-time migration.
+      def refresh_adversarial_identity_contract(record)
+        route = RouteResolver.recoverable_identity_route(
+          routes: record["routes"], planner_identity: planner_identity(record)
+        )
+        return record unless route
+
+        reset = Hive::PlanReview.recovery_reset_route(
+          route,
+          "identity_contract_recovery" => true,
+          "identity_contract_version" => RouteResolver::IDENTITY_CONTRACT_VERSION,
+          "diagnostic" => "retry reviewer under the current served-model identity contract"
+        )
+        publish_transition(
+          record, state: "reviewing",
+          required_action: "retry adversarial review under the current identity contract",
+          routes: record["routes"] + [ reset ]
+        )
       end
 
       # Capability retries are cheap probes, not repeated reviewer launches.
-      # Retry while the observation changes; after three identical failed
-      # probes, park once with a durable diagnosis instead of appending route
-      # rows forever. Timeout/transport exhaustion is deliberately excluded:
-      # those are expensive attempts and must not masquerade as capability.
+      # Probe unchanged failures immediately three times, then continue on a
+      # five-minute schedule. This bounds record growth and daemon churn while
+      # retaining automatic recovery when a binary, skill, or route appears.
+      # Timeout/transport exhaustion is deliberately excluded: those are
+      # expensive attempts and must not masquerade as capability.
       def handle_capability_block(record)
-        routes = record["routes"]
-        latest = %w[primary adversarial].filter_map { |role| latest_route(record, role) }
-        fingerprint = capability_probe_fingerprint(latest)
-        previous = routes.reverse.find { |route| route["capability_probe_fingerprint"] }
+        unsupported_routes = unsupported_initial_routes(record)
+        return if unsupported_routes.empty?
+
+        probes = unsupported_routes.map do |route|
+          previous = latest_capability_probe(record, route.fetch("role"))
+          capability_probe_route(route, previous:)
+        end
+        Projection.new(publish_capability_wait(
+          record, routes: record["routes"] + probes, probes:
+        ))
+      end
+
+      # Re-probe only launcher/skill availability while a capability reset is
+      # current. Repeated unchanged misses replace that one rolling route row;
+      # they do not copy plan.md or create immutable attempt directories. Once
+      # every missing capability is present, the normal attempt path resumes.
+      def refresh_capability_probes(record)
+        routes = record["routes"].dup
+        entries = %w[primary adversarial].filter_map do |role|
+          index = routes.rindex { |route| route["role"] == role }
+          route = routes.fetch(index) if index
+          [ role, index, route ] if route && route["capability_probe_fingerprint"]
+        end
+        return [ record, false ] if entries.empty?
+
+        due = entries.reject { |_role, _index, route| retry_in_future?(route["retry_at"]) }
+        return [ record, true ] if due.empty?
+
+        due.each do |role, index, previous|
+          available, observation = probe_reviewer_capability(record, role)
+          routes[index] = if available
+            Hive::PlanReview.recovery_reset_route(
+              observation, "diagnostic" => "reviewer capability restored"
+            )
+          else
+            capability_probe_route(observation, previous:)
+          end
+        end
+
+        probes = %w[primary adversarial].filter_map do |role|
+          route = routes.reverse.find { |entry| entry["role"] == role }
+          route if route && route["capability_probe_fingerprint"]
+        end
+        if probes.any?
+          return [ publish_capability_wait(record, routes:, probes:), true ]
+        end
+
+        resumed = publish_transition(
+          record, state: "reviewing",
+          required_action: "run restored reviewer capability",
+          routes:, retry_at: nil
+        )
+        [ resumed, false ]
+      end
+
+      def probe_reviewer_capability(record, role)
+        resolution = @route_resolver.call(role:, planner_identity: planner_identity(record))
+        unless resolution.resolved?
+          return [ false, stringify(resolution.receipt).merge(
+            "outcome" => "unsupported",
+            "diagnostic" => "review route is unavailable"
+          ) ]
+        end
+
+        capability = if @adapter.respond_to?(:probe_capability)
+          stringify(@adapter.probe_capability(
+            kind: role, reviewer: resolution.candidate,
+            project_root: @task.project_root
+          ))
+        else
+          { "status" => "present" }
+        end
+        status = capability["status"].to_s
+        status = "unsupported" if status.empty?
+        observation = stringify(resolution.receipt).merge(
+          "capability_result" => status
+        )
+        return [ true, observation ] if status == "present"
+
+        [ false, observation.merge(
+          "outcome" => "unsupported",
+          "diagnostic" => capability["diagnostic"] || "reviewer capability is unavailable"
+        ) ]
+      end
+
+      def capability_probe_route(observation, previous:)
+        fingerprint = capability_probe_fingerprint(observation)
         count = if previous && previous["capability_probe_fingerprint"] == fingerprint
           Integer(previous["capability_probe_count"]) + 1
         else
           1
         end
-        if count >= CAPABILITY_STABLE_PROBE_LIMIT
-          diagnostics = latest.filter_map { |route| route["diagnostic"] }.uniq
-          return terminal(
-            record, state: "blocked", outcome: "blocked",
-            blockers: [ {
-              "owner" => "operator", "reason" => "reviewer_unlaunchable",
-              "fingerprint" => fingerprint,
-              "diagnostic" => diagnostics.join("; ")
-            } ],
-            required_action: "restore reviewer capability, then request a fresh review"
-          )
+        retry_at = if count >= CAPABILITY_STABLE_PROBE_LIMIT
+          (@clock.call + CAPABILITY_RETRY_COOLDOWN_SEC).utc.iso8601(6)
         end
-
-        reset = latest.map do |route|
-          Hive::PlanReview.recovery_reset_route(
-            route,
-            "capability_probe_fingerprint" => fingerprint,
-            "capability_probe_count" => count
-          )
-        end
-        Projection.new(publish_transition(
-          record, state: "reviewing",
-          required_action: "restore reviewer capability; the review retries on its own",
-          routes: routes + reset
-        ))
+        attributes = {
+          "capability_probe_fingerprint" => fingerprint,
+          "capability_probe_count" => count,
+          "retry_at" => retry_at,
+          "diagnostic" => observation["diagnostic"]
+        }
+        attributes["attempts"] = observation["attempts"] if observation["attempts"]
+        Hive::PlanReview.recovery_reset_route(observation, attributes)
       end
 
-      def capability_probe_fingerprint(routes)
-        rows = routes.map do |route|
-          route.slice(
-            "role", "requested", "actual", "capability_result", "outcome",
-            "independence_reason", "diagnostic", "attempts"
-          )
+      def publish_capability_wait(record, routes:, probes:)
+        immediate = probes.any? { |route| route["retry_at"].nil? }
+        retry_at = immediate ? nil : probes.filter_map { |route| route["retry_at"] }.min
+        publish_transition(
+          record, state: retry_at ? "retry_scheduled" : "reviewing",
+          required_action: retry_at ?
+            "restore reviewer capability; the review retries after #{retry_at}" :
+            "restore reviewer capability; the review retries on its own",
+          routes:, retry_at:
+        )
+      end
+
+      def latest_capability_probe(record, role)
+        record["routes"].reverse.find do |route|
+          route["role"] == role && route["capability_probe_fingerprint"]
         end
-        Digest::SHA256.hexdigest(JSON.generate(rows))
+      end
+
+      def capability_probe_fingerprint(route)
+        row = route.slice(
+          "role", "requested", "actual", "capability_result", "outcome",
+          "independence_reason", "diagnostic", "attempts"
+        )
+        Hive::CanonicalJSON.digest(row)
       end
 
       # A verifier can return a valid success result with no contrary finding

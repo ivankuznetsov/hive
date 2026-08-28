@@ -24,6 +24,24 @@ class PlanReviewRouteResolverTest < Minitest::Test
     assert resolution.receipt.fetch("independence_verified")
   end
 
+  def test_served_model_alias_attests_the_requested_family
+    requested = candidate("grok", "grok-4.6", "grok")
+    actual = {
+      "provider" => "grok", "model" => "grok-4.6-build",
+      "effort" => "high", "route" => "native_grok_build"
+    }
+
+    attested = Hive::PlanReview::RouteResolver.attest_observed_identity(
+      requested:, actual:
+    )
+    unknown = Hive::PlanReview::RouteResolver.attest_observed_identity(
+      requested:, actual: actual.merge("model" => "grok-4.7-build")
+    )
+
+    assert_equal "grok", attested.fetch("family")
+    refute unknown.key?("family")
+  end
+
   def test_fallback_counts_only_when_attested_family_differs
     same_family = Hive::PlanReview::RouteResolver.resolve(
       role: "adversarial",

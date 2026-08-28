@@ -7,13 +7,16 @@ class PlanReviewAutomationTest < Minitest::Test
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
     :folder, :project_root, :hive_state_path, :slug, :id, :workflow,
-    :meta_yml_path, :stage_index, :stage_name,
+    :meta_yml_path, :stage_index, :stage_name, :state_file,
     keyword_init: true
   )
 
+  ReviewRecord = Struct.new(:execution_allowed?)
+  ReviewProjection = Struct.new(:record)
+
   def test_runs_the_orchestrator_under_the_task_lock_without_operator_authority
     with_task do |task|
-      expected = Object.new
+      expected = ReviewProjection.new(ReviewRecord.new(true))
       observed = nil
       orchestrator = lambda do |task:, cfg:, planner_identity:|
         observed = { task:, cfg:, planner_identity: }
@@ -45,7 +48,7 @@ class PlanReviewAutomationTest < Minitest::Test
 
   def test_falls_back_to_the_real_orchestrator_when_none_is_injected
     with_task do |task|
-      expected = Object.new
+      expected = ReviewProjection.new(ReviewRecord.new(true))
       observed = nil
       replacement = lambda do |task:, cfg:, planner_identity:|
         observed = { task:, cfg:, planner_identity: }
@@ -64,6 +67,35 @@ class PlanReviewAutomationTest < Minitest::Test
     end
   end
 
+  def test_holds_a_complete_plan_at_waiting_until_required_review_clears
+    with_task do |task|
+      File.write(task.state_file, "# Plan\n<!-- COMPLETE -->\n")
+      projection = ReviewProjection.new(ReviewRecord.new(false))
+
+      result = Hive::PlanReview::Automation.run!(
+        task:, config: Hive::Config::DEFAULTS,
+        orchestrator: ->(**) { projection }
+      )
+
+      assert_same projection, result
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_leaves_a_complete_plan_terminal_after_review_clearance
+    with_task do |task|
+      File.write(task.state_file, "# Plan\n<!-- COMPLETE -->\n")
+      projection = ReviewProjection.new(ReviewRecord.new(true))
+
+      Hive::PlanReview::Automation.run!(
+        task:, config: Hive::Config::DEFAULTS,
+        orchestrator: ->(**) { projection }
+      )
+
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
   private
 
   def with_task(workflow: "coding")
@@ -78,7 +110,7 @@ class PlanReviewAutomationTest < Minitest::Test
         folder:, project_root: root, hive_state_path: File.join(root, ".hive-state"),
         slug: "automation-260812-abcd", id: 7,
         workflow: Workflow.new(id: workflow), meta_yml_path: meta,
-        stage_index: 3, stage_name: "plan"
+        stage_index: 3, stage_name: "plan", state_file: File.join(folder, "plan.md")
       )
       yield task
     end

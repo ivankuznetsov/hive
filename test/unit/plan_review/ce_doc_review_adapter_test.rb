@@ -74,6 +74,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_includes result.fetch("diagnostic"), "/ce-doc-review is available"
   end
 
+  def test_public_capability_probe_does_not_invoke_the_reviewer
+    runner_calls = 0
+    adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+      runner: ->(**) { runner_calls += 1 },
+      capability_probe: ->(**) do
+        { "status" => "unsupported", "diagnostic" => "missing skill" }
+      end
+    )
+
+    result = adapter.probe_capability(
+      kind: "primary", reviewer: { "provider" => "codex" },
+      project_root: Dir.pwd
+    )
+
+    assert_equal "unsupported", result.fetch("status")
+    assert_equal "missing skill", result.fetch("diagnostic")
+    assert_equal 0, runner_calls
+  end
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)

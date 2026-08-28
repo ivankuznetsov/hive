@@ -578,6 +578,26 @@ class CommandsWatchTest < Minitest::Test
     ], calls
   end
 
+  def test_default_source_normalizes_qualified_and_project_scoped_targets
+    projects = [ { "name" => "alpha" }, { "name" => "beta" } ]
+    slug = "watch-task-260828-abcd"
+    cases = [
+      [ [ "alpha:#{slug}" ], nil, [ "alpha:#{slug}" ], "alpha:#{slug}" ],
+      [ [ slug ], "beta", [ "beta:#{slug}" ], "beta:#{slug}" ],
+      [ [ slug ], nil, [ "alpha:#{slug}", "beta:#{slug}" ], slug ]
+    ]
+
+    cases.each do |targets, project, expected_references, authoritative_target|
+      source = Hive::Commands::Watch::DefaultSource.new
+      source.prepare(targets: targets, project: project)
+      source.send(:prepare_task_references, projects)
+
+      assert_equal expected_references,
+                   source.instance_variable_get(:@task_references)
+      assert source.authoritative_target?(authoritative_target)
+    end
+  end
+
   def test_default_source_uses_an_exact_initial_projection_for_an_archived_target
     projects = [ { "name" => "demo", "path" => "/tmp/demo" } ]
     archived_snapshot = snapshot(nil, archived: [ legacy_task(id: 7, action: "archived") ])

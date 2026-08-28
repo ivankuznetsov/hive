@@ -398,6 +398,29 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_active_admission_context_records_a_targeted_scan_failure
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "terminal-task"
+      )
+      project_name = File.basename(root)
+      entry = { "name" => project_name, "path" => root, "repository_identity" => nil }
+
+      context = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :dependency_tasks_for_reference,
+        ->(*) { raise IOError, "targeted scan unavailable" }
+      ) do
+        Hive::DependencySnapshot.active_admission_context([ entry ])
+      end
+
+      project = context.project_snapshot_layers.first.fetch(0)
+      assert_match(/targeted dependency scan failed: IOError: targeted scan unavailable/,
+                   project.validation_error)
+    end
+  end
+
   def test_active_admission_context_resolves_cross_project_terminal_identity
     with_tmp_dir do |home|
       app = File.join(home, "app")

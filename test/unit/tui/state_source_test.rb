@@ -317,6 +317,45 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_active_refresh_records_a_live_failure
+    source = Hive::Tui::StateSource.new
+    failure = IOError.new("active status unavailable")
+
+    source.define_singleton_method(:capture_status_io) { raise failure }
+    source.send(:refresh_once)
+
+    assert_same failure, source.last_error
+  ensure
+    source&.stop
+  end
+
+  def test_filesystem_probe_failures_degrade_to_safe_markers
+    source = Hive::Tui::StateSource.new
+    logs = []
+    project = Struct.new(:hive_state_path, :path).new("/tmp/hive-state", "/tmp/project")
+
+    with_replaced_singleton_method(Hive::Tui::Debug, :log, ->(*args) { logs << args }) do
+      with_replaced_singleton_method(Hive::Config, :global_config_path, -> { raise IOError, "registry unavailable" }) do
+        assert_nil source.send(:registry_config_path)
+      end
+      with_replaced_singleton_method(Dir, :glob, ->(*) { raise IOError, "workflow listing unavailable" }) do
+        assert_equal [ "/tmp/hive-state/workflows" ], source.send(:project_policy_paths, project)
+      end
+      with_replaced_singleton_method(File, :stat, ->(*) { raise IOError, "stat unavailable" }) do
+        assert_equal [ :stat_error, "IOError" ], source.send(:safe_content_signature, __FILE__)
+      end
+      with_replaced_singleton_method(File, :mtime, ->(*) { raise IOError, "mtime unavailable" }) do
+        markers = 5.times.map { source.send(:safe_mtime, __FILE__) }
+        assert markers.all? { |marker| marker.is_a?(Hive::Tui::StateSource::StatError) }
+      end
+    end
+
+    assert_equal 3, logs.length
+    assert_match(/stat error persists \(5x\)/, logs.last.fetch(1))
+  ensure
+    source&.stop
+  end
+
   def test_archive_churn_does_not_invalidate_the_active_snapshot
     with_direct_project do |_project, hive_state|
       write_task(

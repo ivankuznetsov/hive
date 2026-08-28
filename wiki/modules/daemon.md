@@ -258,6 +258,8 @@ Durable admission results retain their real scheduler meaning in this record:
 only an accepted attempt is `dispatched`; an already-live attempt is
 `in_flight`, while capacity deferral, terminal replay, lost attempts, invalid
 predecessors, and launch handoff failures keep distinct owner/reason evidence.
+Durable typed failure-cohort pacing retains the distinct
+`failure_cohort_cooldown` reason instead of collapsing into generic capacity.
 Recovery retries do not exhaust. A terminal coordinator receipt remains visible
 only while no fresh recoverable marker or different live attempt has replaced
 the completed generation.
@@ -266,7 +268,10 @@ Operational task capacity uses the same accounting as dispatch admission:
 task-kind internal runs plus reconciled external task runs. Patrol scans and
 the global digest remain visible in the diagnostic `running` list but do not
 consume the global/per-project task slots or create phantom capacity projects;
-both have separate scheduler budgets.
+both have separate scheduler budgets. Attempts capacity remains the shared
+fail-safe accounting boundary for task dispatch; Patrol policy stays in its
+separate scan concurrency, per-engine discovery allowances, and typed failure
+cohort pacing rather than partitioning task capacity.
 
 The reader treats incomplete phases, a stopped/replaced daemon, generation
 mismatch, expiry, malformed content, unsafe symlink/hard-link/permissions, and
@@ -922,7 +927,7 @@ at or before the attempt's validated `ended_at`; a later operator edit remains
 newer than the baseline and eligible for dispatch. The agent's own final marker
 write therefore cannot masquerade as operator input on the next tick.
 
-See [[architecture]] §"Dispatch flow" for the cross-layer picture.
+See [[architecture]] §"Process model" for the cross-layer picture.
 
 ### At-most-once dispatch via atomic claim (C3)
 
@@ -1113,8 +1118,11 @@ rejects every envelope (historically: 8,946 `got 2, want 1` events
 were logged between PR #78 on 2026-05-15 and the next restart on
 2026-05-20).
 
-At startup the dispatcher captures a SHA-256 fingerprint of `lib/hive.rb`
-(the file holding `SCHEMA_VERSIONS`). On every **full** tick (the
+At startup the dispatcher captures a SHA-256 fingerprint of the file
+that owns `Hive::Schemas` (resolved via
+`Hive::Schemas.method(:schema_path).source_location`, currently
+`lib/hive/schemas.rb` — the file holding `SCHEMA_VERSIONS`), so the
+fingerprint follows the namespace wherever it lives. On every **full** tick (the
 `poll_interval_sec` ~30s cadence, not the `fast_poll_sec` ~1s cheap
 probe) it rehashes the file and compares — gating the hash behind
 `full_tick_due?` keeps the per-second idle path to cheap waitpid + stat

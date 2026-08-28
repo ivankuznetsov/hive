@@ -161,8 +161,8 @@ module AgentCliRuntime
       @raw_cli_arguments_supported
     end
 
-    def binary_installed?(env: ENV)
-      executable = bin(env:)
+    def binary_installed?(env: ENV, executable: nil)
+      executable ||= bin(env:)
       return File.file?(executable) && File.executable?(executable) if executable.include?(File::SEPARATOR)
 
       env.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |directory|
@@ -173,8 +173,8 @@ module AgentCliRuntime
       false
     end
 
-    def check_version!(env: ENV)
-      executable = bin(env:)
+    def check_version!(env: ENV, executable: nil)
+      executable ||= bin(env:)
       out, _err, status = bounded_capture3(
         executable, @version_flag, timeout_sec: @version_check_timeout_sec, env: env
       )
@@ -292,9 +292,10 @@ module AgentCliRuntime
       flags.dup
     end
 
-    def capture_local(*arguments, env: ENV, timeout_sec: CAPTURE_TIMEOUT_SECONDS)
+    def capture_local(*arguments, env: ENV, timeout_sec: CAPTURE_TIMEOUT_SECONDS,
+                      executable: nil)
       bounded_capture3(
-        bin(env:), *arguments, timeout_sec: timeout_sec, env: env
+        executable || bin(env:), *arguments, timeout_sec: timeout_sec, env: env
       )
     end
 

@@ -1,5 +1,5 @@
 require "hive"
-require "hive/commands/status"
+require "hive/status_projection"
 require "time"
 
 module Hive
@@ -202,7 +202,8 @@ module Hive
         )
       end
 
-      # Rows are sorted by `Status::ACTION_LABEL_ORDER` at construction so
+      # Rows are sorted by the status projection boundary's
+      # `ACTION_LABEL_ORDER` at construction so
       # `row_at(cursor)` and the renderer's grouped-row traversal walk the
       # same list. Without this, a project whose tasks span multiple
       # action_labels has the cursor highlight one row while keystrokes
@@ -214,10 +215,8 @@ module Hive
         payload ||= {}
         name = payload["name"]
         indexed = Array(payload["tasks"]).map.with_index { |t, i| [ build_row(t, name), i ] }
-        order = Hive::Commands::Status::ACTION_LABEL_ORDER
         sorted = indexed.sort_by do |row, idx|
-          pos = order.index(row.action_label) || order.length
-          [ pos, idx ]
+          [ Hive::StatusProjection.label_position(row.action_label), idx ]
         end.map(&:first)
         ProjectView.new(
           name: name,

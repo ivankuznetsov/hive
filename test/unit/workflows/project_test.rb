@@ -428,8 +428,9 @@ class WorkflowsProjectTest < Minitest::Test
       project = { "path" => project_root, "hive_state_path" => File.join(project_root, ".hive-state") }
 
       # `done` is the terminal short name of BOTH built-ins (coding 9-done,
-      # content 6-done): ambiguous refs re-raise through stages_for_project.
-      error = assert_raises(Hive::InvalidTaskPath) do
+      # content 6-done): ambiguous refs re-raise through stages_for_project —
+      # classified by TYPE (AmbiguousStageRef), not by exception-message text.
+      error = assert_raises(Hive::Workflows::AmbiguousStageRef) do
         Hive::Workflows.stages_for_project(project, stage_filter: "done")
       end
 

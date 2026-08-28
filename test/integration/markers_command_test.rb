@@ -61,6 +61,49 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  # Regression: `hive markers clear` must resolve slugs through the shared
+  # Hive::TaskResolver, whose scan walks the project's registered workflow
+  # stage union — including runtime-registered descriptors — instead of the
+  # legacy coding-only Hive::Stages::DIRS list. A task living in a custom
+  # workflow stage (`2-gather` of the dispatch fixture) was invisible to the
+  # pre-fix copy and raised "no task folder for slug".
+  def test_clear_by_slug_resolves_task_in_runtime_registered_workflow_stage
+    descriptor = dispatch_workflow
+    with_registered_workflow(descriptor) do
+      with_tmp_git_repo do |dir|
+        project, folder, _slug, state = seed_dispatch_stage_task(dir, descriptor)
+
+        capture_io do
+          Hive::Commands::Markers.new(
+            "clear", "custom-task", name: "REVIEW_STALE", project: project
+          ).call
+        end
+
+        assert_equal :none, Hive::Markers.current(state).name
+        assert File.directory?(folder), "task folder must remain in place"
+      end
+    end
+  end
+
+  def seed_dispatch_stage_task(dir, descriptor)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    project = File.basename(dir)
+    folder = File.join(dir, ".hive-state", "stages", "2-gather", "custom-task")
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(
+      folder,
+      id: 9,
+      slug: "custom-task",
+      display_name: nil,
+      workflow: descriptor.id.to_s
+    )
+    state = File.join(folder, descriptor.stages[1].state_file.to_s)
+    File.write(state, "# custom task\n\nwip\n")
+    Hive::Markers.set(state, :review_stale)
+
+    [ project, folder, "custom-task", state ]
+  end
+
   def test_slug_resolution_error_includes_project_hint
     with_tmp_global_config do
       _out, err, status = with_captured_exit do
@@ -83,7 +126,7 @@ class MarkersCommandTest < Minitest::Test
         end
 
         assert_equal Hive::ExitCodes::USAGE, status
-        assert_match(/FOLDER path is in project/, err)
+        assert_match(/TARGET path is in project/, err)
         assert_match(/other/, err)
       end
     end

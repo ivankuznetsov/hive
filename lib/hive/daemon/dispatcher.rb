@@ -725,9 +725,11 @@ module Hive
         @logger.event(:update_check_error, error_class: e.class.name, message: e.message)
       end
 
-      # SHA-256 of lib/hive.rb (the file holding SCHEMA_VERSIONS). Used
-      # as a cheap drift signal — if the on-disk file's digest no longer
-      # matches what we captured at startup, the loaded code is stale.
+      # SHA-256 of the file that owns Hive::Schemas (resolved through
+      # source_location so it follows the namespace; currently
+      # lib/hive/schemas.rb). Used as a cheap drift signal — if the
+      # on-disk file's digest no longer matches what we captured at
+      # startup, the loaded code is stale.
       # Returns nil on any failure; a nil baseline disables drift checks
       # so a transient read failure never re-execs.
       def compute_code_fingerprint
@@ -1758,6 +1760,7 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
+          when "failure_cohort_cooldown" then :attempt_failure_cohort
           when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
@@ -1784,6 +1787,8 @@ module Hive
           [ "hive", "the matching durable attempt already reached a terminal receipt" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
+        when :attempt_failure_cohort
+          [ "scheduler", "this typed Patrol failure cohort is durably paced" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
@@ -3498,7 +3503,11 @@ module Hive
           when :existing_live then :attempt_duplicate
           when :terminal_replay then :attempt_terminal_replay
           when :deferred
-            result.reason == "transient_retry" ? :attempt_transient_retry : :attempt_capacity_deferred
+            case result.reason
+            when "transient_retry" then :attempt_transient_retry
+            when "failure_cohort_cooldown" then :attempt_failure_cohort_deferred
+            else :attempt_capacity_deferred
+            end
           when :no_route then :attempt_route_unavailable
           else return
           end

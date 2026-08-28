@@ -61,8 +61,10 @@ weakening owner-authored descriptor compatibility:
   nil child model/effort cannot leak the parent stage's provider-specific
   defaults. Owner-authored unmanaged councils retain their historical parent
   fallback. `TransactionJournal` plus the workflow mutation lock reconcile an
-  interrupted activation/removal before Loader or lifecycle access. Selection
-  reads participate in that lock. Invalid selected configurations are skipped
+  interrupted activation/removal before Loader or lifecycle access. Opaque
+  lock bytes use a base64 envelope, and malformed envelopes fail through the
+  same typed `ConfigError` boundary as invalid journal JSON. Selection reads
+  participate in that lock. Invalid selected configurations are skipped
   independently with one named warning, so one missing, malformed, or
   digest-tampered snapshot cannot hide itself or suppress healthy siblings.
   Immutable task reads apply their saved mapping without resolving the process's

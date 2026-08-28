@@ -23,7 +23,8 @@ task agents.
 | `Record`, `Store` | Read and write schema-v4 records in the physical v4 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. `Store::ProjectionReader` is a read-only scan-scoped view that caches each immutable projection binding once without making the long-lived runtime store stale. The default store opens only v4 and contains no migration trigger or legacy-layout monitor. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, expose the immutable admitted route, and provide one inherited bounded diagnostic writer after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
-| `Dispatcher` | Resolve receipt replay, live duplicate attachment, durable transient-contention pacing, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
+| `Dispatcher` | Resolve receipt replay, live duplicate attachment, durable transient-contention and typed Patrol-cohort pacing, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
+| `FailureCohortReconciler` | Consume a terminal Patrol diagnostic idempotently while its receipt and live admission metadata are still bound, including immediately before finalization removes hot evidence. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, validate one child diagnostic frame, bind its exact private log reference, and terminalize only after appending the diagnostic output reference. |
 | `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
@@ -39,6 +40,8 @@ other local producers call the same operation non-interactively, and daemon
 queue delivery or loss recovery call `dispatch_request` and
 `dispatch_successor`; the module daemon calls `dispatch_module_hook` through
 the same facade. An injected `Store` is shared by both adapter paths.
+Filesystem locks, atomic rename, and fsync keep the protocol host-local
+without adding an event bus.
 
 `Entrypoint` and `ConfiguredDispatcher` are internal adapters behind that
 boundary. `Dispatcher`, `DetachedLauncher`, `Client`, and the persistence
@@ -138,7 +141,7 @@ attempt subject.
 $HIVE_HOME/attempts/v4/
 ├── records/<attempt-id>.json              # live and finalization-pending hot set
 ├── proof/...                              # permanent point-addressed receipts
-├── decision-indexes/...                   # semantic/request/latest-terminal/successor and routed-decision indexes
+├── decision-indexes/...                   # ownership, accounting, routing, capacity, and Patrol cohort indexes
 ├── pending-finalization/...               # consumer acknowledgements
 ├── logs/<attempt-id>.frames               # active raw stream
 ├── cold-logs/<digest-shard>/...           # finalized raw stream awaiting expiry
@@ -201,6 +204,33 @@ Patrol stage directory names are not workflow identity. Output reads used by pro
 share the `OutputReference` custody primitive: they open the validated lexical
 path with `O_NOFOLLOW`, bound bytes, and verify the receipt size and SHA-256
 from the same descriptor. Raw log bytes are never a status fallback.
+
+Status and admission use the same `AttemptDiagnostic.read_bound` contract.
+It accepts a diagnostic only when the terminal receipt names the exact output
+reference and its attempt, generation, stage, correlation, log reference,
+size, and SHA-256 all agree. Admission never fingerprints a shared log tail or
+an unbound diagnostic.
+
+Patrol failure pacing is a bounded UTC-sharded decision index under the
+host-wide admission lock. A live Patrol reservation temporarily carries the
+workflow, stage, runtime digest, and admission date needed to attribute its
+terminal diagnostic; terminal reconciliation consumes that metadata before
+releasing the reservation, and finalization repeats the idempotent consume
+inside its admission-locked promotion boundary before removing hot evidence.
+Three matching failures for the same project,
+Patrol workflow, stage, typed diagnostic code, and runtime digest open a
+one-hour circuit. Once eligible, exactly one 24-hour-fenced probe may run. An
+explicit operator recovery request may claim that probe early, but cannot
+bypass global, project, task, or daily limits, and a second
+release cannot overlap it. A successful probe closes the cohort; a failed
+probe reopens it, and a failed pre-persistence or definitively unstarted
+handoff releases only its matching probe fence. The runtime digest uses the
+validated channel, release version, and dogfood build SHA; deployment identity
+alone cannot reset pacing. A different validated runtime build digest or the
+next UTC shard starts open, so repaired deployed code and daily rollover do not
+inherit stale pacing.
+Only a retry with its own receipt-bound matching failure identity is held;
+unrelated Patrol codes and healthy stages continue.
 
 For an explicit pool, admission freezes the task-generation policy before the
 first decision, including no-route and provider-capacity results. Under the
@@ -277,7 +307,8 @@ attempt blocks admission only until its explicit successor exists, so a
 terminally failed successor cannot leave the generation trapped behind a
 resolved ancestor loss. A loss successor has a new attempt ID but inherits
 generation, predecessor, outputs, worktree/branch, and an incremented retry
-charge. An omitted or empty successor-output override inherits the
+charge; healing is therefore a separate ledger successor admission and never
+projects a recovery marker. An omitted or empty successor-output override inherits the
 predecessor's complete output set; only a non-empty explicit override replaces
 it.
 

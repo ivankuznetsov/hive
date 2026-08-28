@@ -156,6 +156,38 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  def test_fresh_install_creates_the_hv_collision_fallback_link
+    Dir.mktmpdir("hive-installer-fresh-hv") do |dir|
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      hv = File.join(dir, "bin", "hv")
+      assert_path_exists hv
+      assert File.symlink?(hv)
+      assert_equal File.realpath(File.join(dir, "prefix", "hive", "gems", "bin", "hv")),
+                   File.realpath(hv)
+    end
+  end
+
+  def test_fresh_install_preserves_an_unowned_hv_when_hive_link_publishes
+    Dir.mktmpdir("hive-installer-unowned-hv") do |dir|
+      bin = File.join(dir, "bin")
+      fake_bin = File.join(dir, "fake-bin")
+      FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(fake_bin)
+      unowned = "#!/bin/sh\nprintf 'operator hv\\n'\n"
+      write_file_with_mode(File.join(bin, "hv"), unowned, 0o755)
+      File.symlink(File.join(dir, "prefix", "hive", "gems", "bin", "hive"),
+                   File.join(fake_bin, "hive"))
+
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      assert_equal unowned, File.binread(File.join(bin, "hv"))
+      assert_includes err, "existing hv"
+    end
+  end
+
   def test_reinstall_does_not_replace_an_existing_managed_user_link
     Dir.mktmpdir("hive-installer-managed-link") do |dir|
       _out, err, status = run_installer(dir, "none")
@@ -168,6 +200,31 @@ class InstallScriptTest < Minitest::Test
       assert status.success?, err
       assert_equal before.ino, File.lstat(link).ino
       assert File.symlink?(link)
+    end
+  end
+
+  def test_reinstall_recreates_a_removed_hv_collision_fallback_link
+    Dir.mktmpdir("hive-installer-reinstall-hv") do |dir|
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      hv = File.join(dir, "bin", "hv")
+      gem_hive = File.join(dir, "prefix", "hive", "gems", "bin", "hive")
+      assert File.symlink?(hv)
+      FileUtils.rm(hv)
+
+      # Resolve `hive` on PATH to the managed launcher so the reinstall takes
+      # the unconflicted branch instead of the collision-fallback branch.
+      File.symlink(gem_hive, File.join(dir, "fake-bin", "hive"))
+
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      refute_includes err, "existing hive"
+      assert File.symlink?(hv),
+             "an unconflicted reinstall must recreate a missing managed hv link"
+      assert_equal File.realpath(gem_hive.gsub("/gems/bin/hive", "/gems/bin/hv")),
+                   File.realpath(hv)
     end
   end
 

@@ -34,20 +34,9 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
       include Hive::Attempts::CommandDispatch
 
-      def self.archive_with_closure(task, project:, receipt_digest:,
-                                    observation_guard: nil)
-        new(
-          "archive", task.folder,
-          project: project,
-          quiet: true,
-          closure_receipt_digest: receipt_digest,
-          observation_guard: observation_guard
-        ).call
-      end
-
       def initialize(verb, target, project: nil, from: nil, json: false,
                      durable: false, attempt_entrypoint: nil, quiet: false,
-                     observation_guard: nil, closure_receipt_digest: nil,
+                     observation_guard: nil,
                      module_event_publisher: nil)
         @verb = verb
         @target = target
@@ -58,7 +47,6 @@ module Hive
         @attempts_api = attempt_entrypoint
         @quiet = quiet
         @observation_guard = observation_guard
-        @closure_receipt_digest = closure_receipt_digest
         @module_event_publisher = module_event_publisher || Hive::Modules::EventPublisher.new
       end
 
@@ -102,7 +90,6 @@ module Hive
         target_stage = config.fetch(:target)
         source_stage = config.fetch(:source)
 
-        return close_with_receipt(task, current_stage, target_stage) if @closure_receipt_digest
         if archive_noop?(task, current_stage)
           publish_task_completed(task)
           return emit_archive_noop(task)
@@ -187,58 +174,6 @@ module Hive
       # "Ready for PR" rows tripped on every dispatch.
       def terminal_marker?(marker)
         Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
-      end
-
-      # Evidence closure may retire a task from any active stage, but only
-      # through TaskClosure's private StageAction entrypoint. The dedicated
-      # receipt guard is checked before every move/resume; ordinary archive
-      # keeps its terminal-marker and 8-finalize source rules unchanged.
-      def close_with_receipt(task, current_stage, target_stage)
-        unless @verb == "archive" && target_stage == Hive::Stages::DIRS.last
-          raise Hive::TaskClosure::InvalidReceipt,
-                "closure receipts can authorize only the archive transition"
-        end
-        Hive::Conditions::TransitionGuard.validate_closure!(
-          task,
-          receipt_digest: @closure_receipt_digest,
-          project: @project_filter
-        )
-        if current_stage == target_stage
-          marker = Hive::Markers.current(task.state_file)
-          if marker.name == :complete
-            publish_task_completed(task)
-            return emit_archive_noop(task)
-          end
-
-          run_at(task.folder, observation_guard: nil, no_rebase: true)
-          resumed = Hive::Task.new(task.folder)
-          publish_task_completed(resumed)
-          return emit_phase(resumed, "closure_resumed")
-        end
-
-        new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
-        closure_guard = lambda do |locked_task|
-          Hive::Conditions::TransitionGuard.validate_closure!(
-            locked_task,
-            receipt_digest: @closure_receipt_digest,
-            project: @project_filter
-          )
-          @observation_guard&.call(locked_task)
-        end
-        Hive::Commands::Approve.new(
-          task.folder,
-          to: target_stage,
-          from: current_stage,
-          project: @project_filter,
-          force: true,
-          json: false,
-          quiet: true,
-          observation_guard: closure_guard
-        ).call
-        run_at(new_folder, observation_guard: nil, no_rebase: true)
-        closed = Hive::Task.new(new_folder)
-        publish_task_completed(closed)
-        emit_phase(closed, "closed_with_evidence")
       end
 
       # Inner Approve and Run are silent when the verb is in --json mode;

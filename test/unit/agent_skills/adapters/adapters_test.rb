@@ -317,6 +317,46 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_each_agent_profile_owns_its_default_config_root
+    expected = {
+      "claude" => ".claude",
+      "codex" => ".codex",
+      "pi" => File.join(".pi", "agent"),
+      "grok" => ".grok",
+      "opencode" => File.join(".config", "opencode")
+    }
+    manifest = Hive::AgentSkills::Manifest.load
+
+    expected.each do |agent, relative_root|
+      with_tmp_dir do |dir|
+        native_spec = manifest.package("compound-engineering").native_for(agent)
+        klass = Hive::AgentProfiles.support_for(agent).const_get(:SetupAdapter, false)
+        instance = adapter(klass, dir: dir)
+
+        assert_equal File.join(dir, relative_root),
+                     Hive::AgentProfiles.lookup(agent).configuration_directory(
+                       environment: { "HOME" => dir }
+                     )
+        assert_equal File.join(dir, relative_root),
+                     instance.send(:config_root, native_spec)
+      end
+    end
+  end
+
+  def test_config_root_still_honors_the_provider_config_home_override
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "claude")
+      native_spec = Hive::AgentSkills::Manifest.load
+                    .package("compound-engineering").native_for("claude")
+      instance = adapter(
+        Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir,
+        environment: { "CLAUDE_CONFIG_DIR" => override }
+      )
+
+      assert_equal override, instance.send(:config_root, native_spec)
+    end
+  end
+
   def test_registry_exposes_opencode_adapter
     with_tmp_dir do |dir|
       registry = Hive::AgentSkills::Adapters::Registry.new(
@@ -349,6 +389,24 @@ class AgentSkillAdaptersTest < Minitest::Test
       assert_equal Hive::AgentSkills::Manifest.alias_content(
         Hive::AgentSkills::Manifest.load.capability("wiki-plan").agent("claude").alias_spec
       ), File.read(alias_operation.files.first)
+    end
+  end
+
+  def test_claude_alias_path_follows_the_profile_configuration_root
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "claude")
+      row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
+                       health: "missing", bin: "/fake/claude")
+      prerequisite = inspection(
+        agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "healthy", bin: "/fake/claude"
+      )
+      adapter = adapter(Hive::AgentSupport.for(:claude)::SetupAdapter, dir: dir,
+                        environment: { "CLAUDE_CONFIG_DIR" => override })
+      plan = adapter.plan([ prerequisite, row ])
+      alias_operation = plan.operations.find { |operation| operation.kind == "alias_write" }
+
+      assert_equal [ File.join(override, "commands", "plan.md") ], alias_operation.files
     end
   end
 

@@ -126,6 +126,16 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.outcomes
   end
 
+  def test_stage_rejects_non_symbol_runner
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow::Stage.new(
+        name: "plan", index: 3, state_file: "plan.md", runner: "agent"
+      )
+    end
+
+    assert_equal 'stage "plan" runner must be a Symbol when present', error.message
+  end
+
   def test_known_kinds_include_coding_runtime_primitives
     assert_includes Hive::Workflow::KNOWN_KINDS, :council
     assert_includes Hive::Workflow::KNOWN_KINDS, :human

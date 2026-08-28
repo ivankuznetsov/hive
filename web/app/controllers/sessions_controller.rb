@@ -69,7 +69,10 @@ class SessionsController < ApplicationController
         return render "errors/show", status: :forbidden,
                       locals: { heading: "Sign-in failed", message: "The device code expired. Start again." }
       when :slow_down
-        device["interval"] = result[:interval]
+        # RFC 8628 §3.5 makes slow_down additive: grow OUR interval by the
+        # reported penalty instead of adopting an absolute value GitHub does
+        # not actually send.
+        device["interval"] = device["interval"].to_i + result.fetch(:increase_by)
       end
       device["next_poll_at"] = now + device["interval"].to_i
       session[:github_device] = device

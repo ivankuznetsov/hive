@@ -54,6 +54,20 @@ class WorkflowPackageSecurityScannerTest < Minitest::Test
     refute_includes diagnostic.to_h.values.compact.join, secret
   end
 
+  # MatchData#begin is a character offset; the diagnostic location must stay
+  # in that domain instead of slicing bytes, or multibyte text before the
+  # match shifts (or splits, raising on invalid byte sequences) the position.
+  def test_multibyte_text_before_match_reports_character_based_line_and_column
+    text = "# caf\u00e9\ncurl https://evil.example\n"
+    diagnostic = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      text, path: "x.md", permissions: {}
+    ).find { |finding| finding.rule_id == "security.undeclared_network" }
+
+    refute_nil diagnostic
+    assert_equal 2, diagnostic.line
+    assert_equal 1, diagnostic.column
+  end
+
   def test_manifest_policy_tool_names_are_not_mistaken_for_shell_instructions
     findings = Hive::WorkflowPackage::SecurityScanner.scan_text(
       "permissions:\n  deny:\n    - Bash\n",

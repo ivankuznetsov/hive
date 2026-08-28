@@ -2,7 +2,8 @@ require_relative "test_helper"
 
 class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
   def test_builtin_profile_is_appended_without_changing_legacy_transports
-    assert_equal %i[claude codex pi grok opencode], AgentCliRuntime::Profiles.names
+    assert_equal AgentCliRuntime::Conformance::PROVIDER_NAMES,
+                 AgentCliRuntime::Profiles.names
 
     profile = AgentCliRuntime::Profiles.fetch(:opencode)
     assert_equal "1.18.16", profile.min_version
@@ -28,19 +29,25 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     success.define_singleton_method(:success?) { true }
     profile = Object.new
     profile.define_singleton_method(:name) { :opencode }
-    profile.define_singleton_method(:binary_installed?) { |env:| !env.nil? }
+    profile.define_singleton_method(:binary_installed?) do |env:, executable: nil|
+      !env.nil?
+    end
     profile.define_singleton_method(:bin) { |env:| env && "opencode" }
-    profile.define_singleton_method(:check_version!) { |env:| env && "1.18.18" }
+    profile.define_singleton_method(:check_version!) do |env:, executable: nil|
+      env && "1.18.18"
+    end
     profile.define_singleton_method(:min_version) { "1.18.16" }
     profile.define_singleton_method(:launcher_identity) { "opencode-cli/v1" }
     profile.define_singleton_method(:env_bin_override_keys) { [] }
-    profile.define_singleton_method(:capture_local) do |*arguments, env:, timeout_sec: 10|
+    profile.define_singleton_method(:capture_local) do |*arguments, env:,
+                                                             timeout_sec: 10,
+                                                             executable: nil|
       calls << [ arguments, timeout_sec, env ]
       output = case arguments
       when [ "run", "--help" ]
-        "--model --variant --format --dir --pure --auto"
+        AgentCliRuntime::Conformance.opencode_run_help
       when [ "export", "--help" ]
-        "--sanitize"
+        AgentCliRuntime::Conformance.opencode_export_help
       when [ "auth", "list" ]
         "openrouter\n"
       when [ "models", "openrouter", "--verbose" ]
@@ -644,6 +651,73 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     refute_includes result.diagnostic, "secret-canary"
   end
 
+  def test_route_probe_carries_the_caller_resolved_executable
+    with_fixture_cli do |fixture|
+      bin = fixture.fetch(:bin)
+      request = AgentCliRuntime::ProbeRequest.new(
+        profile: :opencode,
+        route: "anthropic/claude-sonnet-4-5",
+        environment: {},
+        credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
+        executable: bin
+      )
+      env = {
+        "ANTHROPIC_API_KEY" => "secret-canary",
+        "PATH" => "/usr/bin:/bin"
+      }
+
+      result = AgentCliRuntime::OpenCode::Probe.call!(request, env: env)
+
+      assert result.ready
+      assert_equal bin, result.executable
+    end
+  end
+
+  def test_route_probe_fail_soft_reports_the_carried_executable
+    request = AgentCliRuntime::ProbeRequest.new(
+      profile: :opencode,
+      route: "anthropic/claude-sonnet-4-5",
+      environment: {},
+      credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
+      executable: "/missing/carried-opencode"
+    )
+
+    result = AgentCliRuntime.probe(request, env: { "PATH" => "/usr/bin:/bin" })
+
+    refute result.ready
+    refute result.installed
+    assert_equal "/missing/carried-opencode", result.executable
+    assert_match(/carried-opencode/, result.diagnostic)
+  end
+
+  def test_preparation_probe_and_invocation_share_one_resolved_executable
+    with_fixture_cli do |fixture|
+      Dir.mktmpdir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        source = selected_config(dir)
+        env = fixture.fetch(:env).dup
+        %w[
+          AGENT_CLI_RUNTIME_OPENCODE_BIN HIVE_OPENCODE_BIN
+        ].each { |key| env.delete(key) }
+        bin = fixture.fetch(:bin)
+
+        prepared = AgentCliRuntime.prepare!(
+          preparation_request(
+            work:, root: File.join(dir, "invocation"), source:,
+            executable: bin
+          ),
+          env:
+        )
+
+        assert prepared.probe_result.ready
+        assert_equal bin, prepared.invocation.argv.first
+        assert_equal prepared.probe_result.executable,
+                     prepared.invocation.argv.first
+      end
+    end
+  end
+
   def test_preparation_rejects_unsafe_roots_and_secret_inline_configuration
     with_fixture_cli do |fixture|
       Dir.mktmpdir do |dir|
@@ -738,14 +812,15 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
                           permission_mode: "read-only", permission_policy: nil,
                           additional_read_roots: [], additional_write_roots: [],
                           edit_patterns: [], bash_patterns: [],
-                          prompt: "make the atomic edit")
+                          prompt: "make the atomic edit", executable: nil)
     AgentCliRuntime::OpenCodePreparationRequest.new(
       request: AgentCliRuntime::Request.new(
         profile: :opencode,
         prompt:,
         permission_mode:,
         model:,
-        effort: "high"
+        effort: "high",
+        executable:
       ),
       working_directory: work,
       invocation_root: root,

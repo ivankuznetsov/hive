@@ -20,11 +20,11 @@ module AgentCliRuntime
         call!(request, env:)
       rescue Error => e
         profile = Profiles.resolve(request.profile)
-        executable = profile.bin(env:)
+        executable = request.executable || profile.bin(env:)
         RouteProbeResult.new(
           provider: profile.name,
           ready: false,
-          installed: profile.binary_installed?(env:),
+          installed: profile.binary_installed?(env:, executable:),
           executable: executable,
           version: nil,
           minimum_version: profile.min_version,
@@ -55,20 +55,25 @@ module AgentCliRuntime
           raise ArgumentError,
                 "route-aware ProbeRequest currently requires profile :opencode"
         end
-        installed = profile.binary_installed?(env:)
+        installed = profile.binary_installed?(env:, executable: request.executable)
         unless installed
           raise BinaryUnavailable,
-                "opencode binary not runnable: #{profile.bin(env:)}"
+                "opencode binary not runnable: " \
+                "#{request.executable || profile.bin(env:)}"
         end
 
         child_env = child_environment(profile, request, env:)
-        version = profile.check_version!(env: child_env)
+        version = profile.check_version!(
+          env: child_env, executable: request.executable
+        )
         evidence = [
           evidence(profile, :installation),
           evidence(profile, :version, [ version ])
         ]
 
-        run_help = capture!(profile, child_env, "run", "--help")
+        run_help = capture!(
+          profile, child_env, "run", "--help", executable: request.executable
+        )
         missing = REQUIRED_RUN_FLAGS.reject { |flag| advertised?(run_help, flag) }
         unless missing.empty?
           raise UnsupportedCapability,
@@ -78,14 +83,18 @@ module AgentCliRuntime
           evidence(profile, capability_for(flag), [ flag ])
         end)
 
-        export_help = capture!(profile, child_env, "export", "--help")
+        export_help = capture!(
+          profile, child_env, "export", "--help", executable: request.executable
+        )
         unless advertised?(export_help, "--sanitize")
           raise UnsupportedCapability,
                 "OpenCode export is missing required --sanitize capability"
         end
         evidence << evidence(profile, :sanitized_export, [ "--sanitize" ])
 
-        auth_output = capture!(profile, child_env, "auth", "list")
+        auth_output = capture!(
+          profile, child_env, "auth", "list", executable: request.executable
+        )
         configured_key = request.credential_environment_keys.find do |key|
           !env[key].to_s.empty?
         end
@@ -111,6 +120,7 @@ module AgentCliRuntime
         inventory_variants = if configured_variants.nil?
           models_output = capture!(
             profile, child_env, "models", request.route.provider, "--verbose",
+            executable: request.executable,
             timeout_sec: MODEL_INVENTORY_TIMEOUT_SECONDS
           )
           variants_for(models_output, request.route.to_s)
@@ -137,7 +147,7 @@ module AgentCliRuntime
           provider: profile.name,
           ready: true,
           installed: true,
-          executable: profile.bin(env: child_env),
+          executable: request.executable || profile.bin(env: child_env),
           version: version,
           minimum_version: profile.min_version,
           auth_configuration: auth,
@@ -176,8 +186,9 @@ module AgentCliRuntime
       end
       private_class_method :child_environment
 
-      def capture!(profile, environment, *arguments, timeout_sec: nil)
-        options = { env: environment }
+      def capture!(profile, environment, *arguments, executable: nil,
+                   timeout_sec: nil)
+        options = { env: environment, executable: executable }
         options[:timeout_sec] = timeout_sec if timeout_sec
         out, err, status = profile.capture_local(*arguments, **options)
         unless status.success?

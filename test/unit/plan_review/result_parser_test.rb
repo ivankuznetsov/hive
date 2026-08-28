@@ -87,6 +87,14 @@ class PlanReviewResultParserTest < Minitest::Test
     assert_empty Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
       [ legacy.merge("role" => "verification", "diagnostic_source" => "parser") ]
     )
+    malformed_current_marker = legacy.merge(
+      "selected_lenses_contract_recovery" => true,
+      "selected_lenses_contract_version" => "not-an-integer"
+    )
+    assert_equal [ malformed_current_marker ],
+                 Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
+                   [ malformed_current_marker ]
+                 )
   end
 
   def test_finding_anchor_must_match_the_immutable_snapshot

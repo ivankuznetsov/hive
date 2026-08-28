@@ -226,6 +226,26 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_adapter_config_error_preserves_the_actual_route_and_diagnostic_source
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        File.write(output_path, JSON.generate(valid_result(request)))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::PlanReview::ResultParser, :parse,
+        ->(*, **) { raise Hive::ConfigError, "invalid adapter configuration" }
+      ) do
+        adapter_for(runner).call(request)
+      end
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal request.reviewer, result.route_receipt.fetch("actual")
+      assert_equal "adapter", result.route_receipt.fetch("diagnostic_source")
+    end
+  end
+
   def test_pi_anchor_rewrite_defers_unparsable_output_to_the_result_parser
     with_request do |request, _plan_path|
       pi_request = request.with(

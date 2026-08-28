@@ -369,12 +369,13 @@ slow repository therefore cannot consume another project's turn or erase its
 backlog.
 
 Incremental state lives in the separate
-`.hive-state/refactor_patrol/v2/reconciler-progress.json` v1 sidecar. The
+`.hive-state/refactor_patrol/v2/reconciler-progress.json` v2 sidecar. The
 sidecar binds registration, host, repository, and default branch to a SHA-256
 fingerprint of the unchanged v2 checkpoint. Its scan section stores the fixed
 overlap start and upper time bound, the first page's frozen result count,
 pagination cursor and seen cursors, accumulated PR identities, then the
-manifest-intake index and already-enqueued PR numbers. GitHub search uses stable
+manifest-intake index, processed PR numbers, and already-enqueued PR numbers.
+GitHub search uses stable
 creation order and one exact ISO timestamp range qualifier inside that fixed
 merge-time window. This keeps GitHub's result count and the terminal traversal
 bound to the same second-level interval. If GitHub indexing changes the count
@@ -384,6 +385,12 @@ into its baseline. Every completed page and intake step is written atomically
 before the next step. A daemon restart therefore resumes the next page or item;
 if a crash occurred after a write-once job was enqueued but before the sidecar
 advanced, replay converges through idempotent intake.
+
+The processed PR list must exactly match the intake prefix, while the enqueued
+PR list must be an ordered subset of it. This records deterministic no-manifest
+classifications without weakening fail-closed validation of the intake index.
+`hive migrate` discards obsolete v1 scan progress so the daemon can replay it
+idempotently under v2; the daemon has no legacy progress migration path.
 
 The project slice begins before origin identity discovery: the local `git`
 remote lookup, authentication, page fetch, and exact-PR metadata/file hydration

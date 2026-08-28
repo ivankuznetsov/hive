@@ -18,6 +18,7 @@ class HiveDaemonRefactorPatrolMergeProgressStoreTest < Minitest::Test
       assert_match(/\A[a-f0-9]{64}\z/, progress.fetch("base_checkpoint_sha256"))
       assert_equal T0.iso8601, progress.dig("scan", "merged_until")
       assert_nil progress.dig("scan", "result_count")
+      assert_empty progress.dig("scan", "processed_prs")
       assert_equal 0o600, File.stat(store.path(dir)).mode & 0o777
 
       fsynced = []
@@ -150,7 +151,7 @@ class HiveDaemonRefactorPatrolMergeProgressStoreTest < Minitest::Test
     variants = [
       [],
       mutate(base) { |item| item["schema"] = "other" },
-      mutate(base) { |item| item["schema_version"] = 2 },
+      mutate(base) { |item| item["schema_version"] = 1 },
       mutate(base) { |item| item.delete("updated_at") },
       mutate(base) { |item| item["registration"] = "" },
       mutate(base) { |item| item["registration"] = 123 },
@@ -182,6 +183,8 @@ class HiveDaemonRefactorPatrolMergeProgressStoreTest < Minitest::Test
         item["scan"]["items"] = [ summary ]
       end,
       mutate(base) { |item| item["scan"]["ingest_index"] = -1 },
+      mutate(base) { |item| item["scan"]["processed_prs"] = [ 0 ] },
+      mutate(base) { |item| item["scan"]["processed_prs"] = [ 7, 7 ] },
       mutate(base) { |item| item["retry"] = { "failures" => 0, "not_before" => T0.iso8601, "last_error" => "x" } },
       mutate(base) { |item| item["retry"] = { "failures" => 1, "not_before" => "later", "last_error" => "x" } },
       mutate(base) { |item| item["retry"] = { "failures" => 1, "not_before" => 123, "last_error" => "x" } },

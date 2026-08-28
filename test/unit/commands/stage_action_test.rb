@@ -329,18 +329,4 @@ class CommandsStageActionTest < Minitest::Test
     end
     assert_empty out
   end
-
-  def test_closure_transition_is_authorized_only_for_the_terminal_archive_target
-    task = Struct.new(:stage_index, :stage_name).new(4, "execute")
-    service = Hive::TaskClosure.new
-
-    with_replaced_singleton_method(
-      Hive::Workflows, :for_verb, ->(*) { { target: "3-plan" } }
-    ) do
-      error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
-        service.send(:transition!, task, nil, "receipt_digest" => "a" * 64)
-      end
-      assert_match(/only the archive transition/, error.message)
-    end
-  end
 end

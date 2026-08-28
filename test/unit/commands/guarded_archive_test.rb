@@ -5,10 +5,13 @@ require "hive/commands/stage_action"
 class GuardedArchiveTest < Minitest::Test
   include HiveTestHelper
 
-  FakeStage = Struct.new(:dir)
-  FakeWorkflow = Struct.new(:stages)
+  FakeStage = Struct.new(:dir, :kind)
+  FakeWorkflow = Struct.new(:stages, :controller) do
+    def controller? = !controller.nil?
+  end
 
-  def fake_task(folder:, state_file:, workflow_stages:, hive_state_path: "/tmp/hive-state")
+  def fake_task(folder:, state_file:, workflow_stages:, hive_state_path: "/tmp/hive-state",
+                workflow_controller: nil)
     Struct.new(
       :folder, :state_file, :slug, :stage_index, :stage_name,
       :workflow, :hive_state_path, keyword_init: true
@@ -18,7 +21,7 @@ class GuardedArchiveTest < Minitest::Test
       slug: "guarded-task",
       stage_index: 4,
       stage_name: "execute",
-      workflow: FakeWorkflow.new(workflow_stages),
+      workflow: FakeWorkflow.new(workflow_stages, workflow_controller),
       hive_state_path: hive_state_path
     )
   end
@@ -79,6 +82,34 @@ class GuardedArchiveTest < Minitest::Test
       end
       assert_equal [ dir ], runs, "resume must run Done in place"
       assert_equal [ task ], guards
+    end
+  end
+
+  def test_markerless_inert_controller_terminal_completes_without_a_runner
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "patrol-fix-manifest.json")
+      File.write(state_file, "{}")
+      task = fake_task(
+        folder: dir,
+        state_file: state_file,
+        workflow_stages: [ FakeStage.new("4-execute", :inert) ],
+        workflow_controller: :patrol_fix
+      )
+      guards = []
+      protocol = build_protocol(
+        task, current_stage: dir, target_stage: dir, guards: guards, observations: []
+      )
+      protocol.define_singleton_method(:run_at) do |_folder|
+        flunk("an inert controller terminal must not dispatch a runner")
+      end
+      completed = []
+      events = Object.new
+      events.define_singleton_method(:task_completed) { |resolved| completed << resolved; resolved }
+      protocol.define_singleton_method(:publisher) { events }
+
+      assert_same task, protocol.call
+      assert_equal [ task ], guards
+      assert_equal [ task ], completed
     end
   end
 

@@ -51,15 +51,18 @@ module Hive
         end
         outcome = parked_outcome(decision) || publication_block_outcome(publication_block)
         done = stage == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
-        missing_publication = done && publication.nil?
-        state = missing_publication ? "invalid" : "current"
-        diagnostic = if missing_publication
-          { "summary" => "Patrol-fix done requires an exact current pull-request receipt." }
-        else
-          publication_block ? {
+        closure = done && publication.nil? && valid_evidence_closure?
+        missing_terminal_authority = done && publication.nil? && !closure
+        state = missing_terminal_authority ? "invalid" : "current"
+        diagnostic = if missing_terminal_authority
+          { "summary" => "Patrol-fix done requires an exact current pull-request receipt or valid evidence-closure receipt." }
+        elsif publication_block
+          {
             "code" => publication_block.dig("payload", "code"),
             "summary" => publication_block.dig("payload", "summary")
-          } : publication_diagnostic
+          }
+        elsif !closure
+          publication_diagnostic
         end
 
         data = {
@@ -80,7 +83,7 @@ module Hive
           "review" => last_decision && last_decision["stage"] == "review" ? last_decision.fetch("payload") : nil,
           "publication" => publication&.fetch("payload", nil),
           "timing" => timing_projection(receipts, current, outcome),
-          "archived" => done && publication && state == "current" ? true : false,
+          "archived" => done && state == "current",
           "diagnostic" => diagnostic,
           "action" => action_for(
             state: state, done: done, outcome: outcome,
@@ -216,6 +219,15 @@ module Hive
 
       def stage_name
         stage.split("-", 2).last
+      end
+
+      def valid_evidence_closure?
+        require "hive/task"
+        require "hive/task_closure"
+        task = Hive::Task.new(task_folder)
+        Hive::TaskClosure.read(task, quarantine: false).valid?
+      rescue Hive::Error, SystemCallError, IOError
+        false
       end
 
       def invalid_projection(message)

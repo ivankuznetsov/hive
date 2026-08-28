@@ -38,7 +38,8 @@ module Hive
         projection = Hive::PatrolFix::Projection.new(
           task_folder: @task.folder, stage: "#{@task.stage_index}-#{@task.stage_name}"
         ).to_h
-        unless projection.dig("action", "kind") == "advance"
+        unless projection.dig("action", "kind") == "advance" ||
+               evidence_closure_to_terminal?(destination)
           raise InvalidTransition, "patrol-fix transition requires a current terminal stage receipt"
         end
         pending = pending_record
@@ -71,6 +72,18 @@ module Hive
       end
 
       private
+
+      def evidence_closure_to_terminal?(destination)
+        return false unless destination == @task.workflow.stages.last.dir
+
+        path = File.join(@task.folder, "closure.json")
+        return false unless File.exist?(path) || File.symlink?(path)
+
+        require "hive/task_closure"
+        Hive::TaskClosure.read(@task, quarantine: false).valid?
+      rescue Hive::Error, SystemCallError, IOError
+        false
+      end
 
       def identity
         manifest = Hive::PatrolFix::TaskManifest.new(task_folder: @task.folder).read

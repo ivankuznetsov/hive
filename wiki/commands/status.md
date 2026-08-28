@@ -502,6 +502,11 @@ internal `--daemon-task` fast-tick scan shares one store and one reader the
 same way, across every requested project, so a bounded daemon tick never
 rebuilds them per project.
 
+Direct project projections also establish that same scope when no enclosing
+scan owns it. This keeps bounded consumers such as `hive task` able to resolve
+receipt-bound Patrol diagnostics without reopening the store per task or
+raising outside a fleet scan.
+
 Each task row first reads its bounded projection checkpoint instead of hashing
 and replaying the task's complete journal. A checkpoint is usable for exact
 status only when it is current, its journal identity/size/metadata and bounded

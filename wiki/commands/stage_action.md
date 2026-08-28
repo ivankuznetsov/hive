@@ -3,11 +3,11 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-07-25
+updated: 2026-08-28
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
-**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode and an interactive, evidence-bound `already_delivered` / `superseded` closure mode. Ordinary archive safety is unchanged: only `Hive::TaskClosure` can invoke the internal guarded-archive protocol (`Hive::Commands::GuardedArchive`) that retires an active task from outside `8-finalize`. Automatic same-repository merge closure uses that same protocol; there is no marker-reason archive bypass.
+**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode and an interactive, evidence-bound `already_delivered` / `superseded` closure mode. Ordinary archive safety is unchanged: only `Hive::TaskClosure` can invoke the internal guarded-archive protocol (`Hive::Commands::GuardedArchive`) that retires an active task from outside its workflow's ordinary terminal transition. Automatic same-repository merge closure uses that same protocol; there is no marker-reason archive bypass.
 
 ## Usage
 
@@ -61,8 +61,13 @@ The receipt is written atomically before transition. Its exact digest enters a
 separate `TransitionGuard.validate_closure!` path; it is not attempt success
 evidence and cannot weaken the ordinary marker/condition guard. `Hive::TaskClosure`
 then drives the one internal guarded-archive protocol, `Hive::Commands::GuardedArchive`,
-which may force the task from any active stage to `9-done`, run the Done stage
-with the internal no-rebase override, and retain `closure.json`. StageAction
+which may force the task from any active stage to the terminal stage declared by
+that task's workflow (`9-done` for coding and `6-done` for content or Patrol Fix),
+run an agent-owned terminal stage with the internal no-rebase override, and
+retain `closure.json`. A controller-owned inert terminal such as Patrol Fix
+has no terminal agent: its valid closure receipt authorizes only the move to
+that workflow's terminal stage, and that receipt remains the completion
+authority instead of synthesizing a publication receipt or marker. StageAction
 itself carries no closure branch: it dispatches only ordinary verb transitions,
 while GuardedArchive holds no receipt semantics — the caller injects the
 pre-transition guard (rechecked inside the atomic move lock) and an optional

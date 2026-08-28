@@ -59,17 +59,31 @@ module HiveBench
 
     # Claude CLI 2.1.233 prints its subscription wall to stdout and exits 1.
     # Keep stdout classification deliberately narrower than the shared stderr
-    # classifier: only the exact standalone CLI reset banner (plus mise's
-    # launcher version line) is trusted, never arbitrary model prose.
+    # classifier: trust only the exact standalone reset banner or a structured
+    # failed-result envelope whose API status and result both prove quota.
+    # Arbitrary model prose about limits must never manufacture retry evidence.
     def trusted_limit_detail(out:, err:)
       stderr = err.to_s.strip
       return stderr if AgentLimit.limit_hit?(stderr)
 
       lines = AgentLimit.normalize(out).lines.map(&:strip).reject(&:empty?)
       lines.reject! { |line| line.match?(MISE_VERSION_LINE) }
-      return unless lines.one? && lines.first.match?(CLAUDE_STDOUT_LIMIT_BANNER)
+      line = lines.first if lines.one?
+      return unless line
+      return line if line.match?(CLAUDE_STDOUT_LIMIT_BANNER)
 
-      lines.first
+      structured_limit_detail(line)
+    end
+
+    def structured_limit_detail(line)
+      result = JSON.parse(line)
+      return unless result.is_a?(Hash) && result["type"] == "result" && result["is_error"] == true
+      return unless result["terminal_reason"] == "api_error" && result["api_error_status"] == 429
+
+      detail = result["result"].to_s
+      detail if AgentLimit.limit_hit?(detail)
+    rescue JSON::ParserError
+      nil
     end
   end
 end

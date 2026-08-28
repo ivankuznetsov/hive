@@ -82,6 +82,98 @@ class OperationalActionTest < Minitest::Test
                  calls.fetch(0).fetch(1).fetch(:observation_token)
   end
 
+  def test_publication_rework_rejects_missing_task_lock_before_reading_receipts
+    require "hive/patrol_fix/stage_transition"
+    task = Struct.new(:folder, :slug, :stage_name).new("/tmp/repair-one", "repair-one", "5-publish")
+    executor = Hive::OperationalAction::Executor.new
+
+    with_replaced_singleton_method(Hive::OperationalAction, :assert_current!, ->(*) { {} }) do
+      with_replaced_singleton_method(Hive::PatrolFix::StageTransition, :with_lock, ->(*, &block) { block.call }) do
+        with_replaced_singleton_method(Hive::Lock, :with_task_lock, ->(*, &block) { block.call }) do
+          with_replaced_singleton_method(Hive::Lock, :read_task_lock, ->(*) { nil }) do
+            error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+              executor.send(
+                :execute_publication_rework, task, project_name: "demo",
+                target: "demo:repair-one", observation_token: "receipt-bound-token"
+              )
+            end
+            assert_includes error.message, "lock ownership"
+          end
+        end
+      end
+    end
+  end
+
+  def test_publication_rework_requires_its_current_block_receipt
+    require "hive/patrol_fix/stage_transition"
+    task = Struct.new(:folder, :slug, :stage_name).new("/tmp/repair-one", "repair-one", "5-publish")
+    executor = Hive::OperationalAction::Executor.new
+    manifest = Object.new
+    manifest.define_singleton_method(:read) { { "task" => { "slug" => "repair-one" }, "evidence_revision" => {} } }
+    receipts = Object.new
+    receipts.define_singleton_method(:read_all) { [] }
+
+    with_replaced_singleton_method(Hive::OperationalAction, :assert_current!, ->(*) { {} }) do
+      with_replaced_singleton_method(Hive::PatrolFix::StageTransition, :with_lock, ->(*, &block) { block.call }) do
+        with_replaced_singleton_method(Hive::Lock, :with_task_lock, ->(*, &block) { block.call }) do
+          with_replaced_singleton_method(Hive::Lock, :read_task_lock, ->(*) { { "lock_id" => "lock-1" } }) do
+            with_replaced_singleton_method(Hive::PatrolFix::TaskManifest, :new, ->(*) { manifest }) do
+              with_replaced_singleton_method(Hive::PatrolFix::ReceiptStore, :new, ->(*) { receipts }) do
+                error = assert_raises(Hive::StaleOperationalObservation) do
+                  executor.send(
+                    :execute_publication_rework, task, project_name: "demo",
+                    target: "demo:repair-one", observation_token: "receipt-bound-token"
+                  )
+                end
+                assert_includes error.message, "receipt changed"
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_publication_rework_fails_closed_when_the_exact_lock_cannot_be_released
+    require "hive/patrol_fix/stage_transition"
+    task = Struct.new(:folder, :slug, :stage_name).new("/tmp/repair-one", "repair-one", "5-publish")
+    executor = Hive::OperationalAction::Executor.new
+    manifest = Object.new
+    manifest.define_singleton_method(:read) { { "task" => { "slug" => "repair-one" }, "evidence_revision" => {} } }
+    receipt = {
+      "kind" => "publication_block", "stage" => "publish",
+      "task" => { "slug" => "repair-one" }, "evidence_revision" => {}
+    }
+    receipts = Object.new
+    receipts.define_singleton_method(:read_all) { [ receipt ] }
+    transition = Object.new
+    transition.define_singleton_method(:apply_publication_block!) { |_| { task_folder: "/tmp/moved" } }
+
+    with_replaced_singleton_method(Hive::OperationalAction, :assert_current!, ->(*) { {} }) do
+      with_replaced_singleton_method(Hive::PatrolFix::StageTransition, :with_lock, ->(*, &block) { block.call }) do
+        with_replaced_singleton_method(Hive::Lock, :with_task_lock, ->(*, &block) { block.call }) do
+          with_replaced_singleton_method(Hive::Lock, :read_task_lock, ->(*) { { "lock_id" => "lock-1" } }) do
+            with_replaced_singleton_method(Hive::Lock, :release_task_lock, ->(*) { false }) do
+              with_replaced_singleton_method(Hive::PatrolFix::TaskManifest, :new, ->(*) { manifest }) do
+                with_replaced_singleton_method(Hive::PatrolFix::ReceiptStore, :new, ->(*) { receipts }) do
+                  with_replaced_singleton_method(Hive::PatrolFix::Transition, :new, ->(*) { transition }) do
+                    error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+                      executor.send(
+                        :execute_publication_rework, task, project_name: "demo",
+                        target: "demo:repair-one", observation_token: "receipt-bound-token"
+                      )
+                    end
+                    assert_includes error.message, "could not be released"
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_closure_is_advertised_but_cannot_be_executed_with_an_observation_token
     row = {
       "slug" => "delivered-task",

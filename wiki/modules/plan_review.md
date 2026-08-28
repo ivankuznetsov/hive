@@ -101,8 +101,15 @@ Adapter outcomes are closed: `success`, `partial_coverage`, `unsupported`,
 `provider_limit`, `timeout`, `retryable_failure`, and `terminal_failure`.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
-initial attempt plus `plan_review.attempts.max_transient` retries for primary,
-adversarial, verification, and original-planner revision legs. Provider-route
+initial attempt plus `plan_review.attempts.max_transient` retries in one
+attempt series for primary, adversarial, verification, and original-planner
+revision legs. Exhausting a mandatory primary or adversarial series persists a
+recovery reset instead of converting missing required coverage into an
+operator waiver prompt. The daemon opens the next series after a deterministic
+five-minute exponential cooldown capped at 24 hours; a legacy blocked record
+whose latest required initial leg is an attempted transient outcome enters the
+same recovery path. Standard review degradation and the separately bounded
+verification and planner-revision loops are unchanged. Provider-route
 exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.

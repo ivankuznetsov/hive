@@ -724,6 +724,99 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_mandatory_exhausted_transient_series_retries_automatically_with_paced_backoff
+    with_task(mandatory_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      primary_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary" && (primary_calls += 1) <= 2
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "timeout")
+        else
+          successful_result(request)
+        end
+      end
+
+      first = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "retry_scheduled", first.state
+      assert_equal 1, primary_calls
+      first_due = Time.iso8601(first["retry_at"])
+      assert_operator first_due, :>, Time.utc(2026, 8, 12, 12)
+
+      second = orchestrator(
+        task, cfg, adapter:, clock: -> { first_due }
+      ).advance!.record
+
+      assert_equal "retry_scheduled", second.state
+      assert_equal 2, primary_calls
+      second_due = Time.iso8601(second["retry_at"])
+      assert_operator second_due - first_due, :>=, 10 * 60
+
+      cleared = orchestrator(
+        task, cfg, adapter:, clock: -> { second_due }
+      ).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 3, primary_calls
+      assert_equal 1, adapter.calls.count { |request| request.kind == "adversarial" }
+      recoveries = cleared["routes"].select { |route| route["transient_series_recovery"] }
+      assert_equal [ 1, 2 ], recoveries.map { |route| route.fetch("transient_series") }
+    end
+  end
+
+  def test_legacy_past_due_transient_series_retries_in_the_same_advance
+    with_task(mandatory_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      primary_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary" && (primary_calls += 1) == 1
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "timeout", retry_at: "2026-08-11T00:00:00Z"
+          )
+        else
+          successful_result(request)
+        end
+      end
+
+      cleared = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 2, primary_calls
+      reset = cleared["routes"].find { |route| route["transient_series_recovery"] }
+      assert_equal 1, reset.fetch("transient_series")
+    end
+  end
+
+  def test_standard_exhausted_transient_series_keeps_the_degraded_fallback
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      adapter = FakeAdapter.new do |request|
+        request.kind == "primary" ?
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "timeout") :
+          successful_result(request)
+      end
+
+      projection = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "degraded_cleared", projection.state
+      refute projection["routes"].any? { |route| route["transient_series_recovery"] }
+    end
+  end
+
+  def test_transient_series_retry_uses_the_current_clock_for_an_invalid_hint
+    with_task(mandatory_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      record = Struct.new(:review_id).new("pr-#{"a" * 64}")
+
+      due = runner.send(
+        :transient_series_retry_at, record, "primary",
+        { "retry_at" => "not-a-time" }, 1
+      )
+
+      assert_operator Time.iso8601(due), :>, Time.utc(2026, 8, 12, 12, 5)
+    end
+  end
+
   def test_standard_degradation_does_not_discard_open_manual_finding
     with_task(standard_plan) do |task, cfg|
       adapter = FakeAdapter.new do |request|

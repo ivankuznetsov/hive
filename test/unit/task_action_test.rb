@@ -2099,6 +2099,35 @@ class TaskActionTest < Minitest::Test
     assert_nil unsupported.command
   end
 
+  def test_plan_review_recovers_exhausted_mandatory_transient_coverage
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    exhausted = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "outcome" => "blocked",
+        "effective_level" => "mandatory",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "blockers" => [ { "owner" => "operator", "reason" => "coverage_failed" } ],
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "timeout",
+            "attempt_id" => "pra-legacy", "retry_at" => "2026-08-12T11:00:00Z"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", exhausted.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", exhausted.command
+
+    standard = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: exhausted.plan_review.merge("effective_level" => "standard")
+    )
+    assert_equal "plan_review_unsupported", standard.key
+    assert_nil standard.command
+  end
+
   def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
     task = fake_task(stage_name: "plan", stage_index: 3)
     routes = [

@@ -33,16 +33,25 @@ class PlanReviewOrchestratorTest < Minitest::Test
   )
 
   class FakeAdapter
-    attr_reader :calls
+    attr_reader :calls, :capability_calls
 
-    def initialize(&response)
+    def initialize(capability: nil, &response)
       @response = response
+      @capability = capability
       @calls = []
+      @capability_calls = []
     end
 
     def call(request)
       @calls << request
       @response.call(request)
+    end
+
+    def probe_capability(**arguments)
+      @capability_calls << arguments
+      return { "status" => "present" } unless @capability
+
+      @capability.call(**arguments)
     end
   end
 
@@ -367,12 +376,115 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  # Mandatory capability failures get cheap re-probes, but an unchanged probe
-  # eventually parks instead of growing current.json forever.
-  def test_mandatory_total_unavailability_parks_after_three_stable_probes
+  def test_mandatory_mixed_success_and_unavailability_retries_only_the_missing_leg
     with_task(mandatory_plan) do |task, cfg|
-      adapter = FakeAdapter.new do |_request|
-        Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+      adversarial_available = false
+      resolver = lambda do |role:, **|
+        if role == "adversarial" && !adversarial_available
+          requested = route_identity("grok", "grok-4.6", "grok", "native_adversarial")
+          Hive::PlanReview::RouteResolver::Resolution.new(
+            status: "unsupported", candidate: nil,
+            receipt: {
+              "role" => role, "requested" => requested, "actual" => {},
+              "capability_result" => "unsupported", "independence_verified" => false,
+              "independence_reason" => "reviewer_family_unavailable",
+              "attempts" => [
+                { "candidate" => requested, "status" => "unsupported" }
+              ]
+            }
+          )
+        else
+          resolve_route(role:)
+        end
+      end
+      adapter = success_adapter
+
+      pending = orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!.record
+
+      assert_equal "reviewing", pending.state
+      assert_equal %w[primary], adapter.calls.map(&:kind)
+      primary_routes = pending["routes"].select { |route| route["role"] == "primary" }
+      adversarial_routes = pending["routes"].select { |route| route["role"] == "adversarial" }
+      assert_equal 1, primary_routes.length
+      assert_equal "success", primary_routes.last.fetch("outcome")
+      assert_equal 2, adversarial_routes.length
+      assert_equal true, adversarial_routes.last.fetch("recovery_reset")
+
+      adversarial_available = true
+      cleared = orchestrator(
+        task, cfg, adapter:, route_resolver: resolver
+      ).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
+      assert_equal 1, adapter.calls.count { |request| request.kind == "adversarial" }
+      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
+  def test_legacy_grok_success_retries_once_under_the_current_identity_contract
+    with_task(mandatory_plan) do |task, cfg|
+      adversarial_calls = 0
+      adapter = FakeAdapter.new do |request|
+        unless request.kind == "adversarial" && (adversarial_calls += 1) == 1
+          next successful_result(request)
+        end
+
+        successful = successful_result(request)
+        Hive::PlanReview::Adapters::Base::Result.new(
+          outcome: successful.outcome,
+          findings: successful.findings,
+          coverage: successful.coverage,
+          residual_evidence: successful.residual_evidence,
+          route_receipt: {
+            "role" => "adversarial", "requested" => request.reviewer,
+            "actual" => {
+              "provider" => "grok", "model" => "grok-4.6-build",
+              "effort" => "high", "route" => "native_grok_build"
+            },
+            "capability_result" => "present", "independence_verified" => false,
+            "independence_reason" => "reviewer_family_unknown"
+          }
+        )
+      end
+
+      blocked = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "blocked", blocked.state
+      assert_equal [ "coverage_failed" ], blocked["blockers"].map { |row| row.fetch("reason") }
+      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
+      assert_equal 1, adapter.calls.count { |request| request.kind == "adversarial" }
+
+      cleared = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
+      assert_equal 2, adapter.calls.count { |request| request.kind == "adversarial" }
+      reset = cleared["routes"].find { |route| route["identity_contract_recovery"] }
+      assert_equal true, reset.fetch("recovery_reset")
+      assert_equal Hive::PlanReview::RouteResolver::IDENTITY_CONTRACT_VERSION,
+                   reset.fetch("identity_contract_version")
+    end
+  end
+
+  # Mandatory capability failures get cheap re-probes, then move to a paced
+  # retry instead of growing current.json on every daemon tick or parking
+  # forever after the provider becomes available.
+  def test_mandatory_total_unavailability_schedules_after_three_stable_probes
+    with_task(mandatory_plan) do |task, cfg|
+      available = false
+      capability = lambda do |**|
+        {
+          "status" => available ? "present" : "unsupported",
+          "diagnostic" => available ? nil : "missing reviewer"
+        }
+      end
+      adapter = FakeAdapter.new(capability:) do |request|
+        available ? successful_result(request) :
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "unsupported", diagnostic: "missing reviewer",
+            route_receipt: { "capability_result" => "unsupported" }
+          )
       end
       first = orchestrator(task, cfg, adapter:).advance!.record
       second = orchestrator(task, cfg, adapter:).advance!.record
@@ -380,15 +492,53 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
       assert_equal "reviewing", first.state
       assert_equal "reviewing", second.state
-      assert_equal "blocked", record.state
+      assert_equal "retry_scheduled", record.state
       refute record.execution_allowed?
-      assert_equal "reviewer_unlaunchable", record["blockers"].first.fetch("reason")
+      assert_empty record["blockers"]
       assert_includes record["required_action"], "restore reviewer capability"
-      assert_equal 6, adapter.calls.length
+      assert_equal "2026-08-12T12:05:00.000000Z", record["retry_at"]
+      assert_equal 2, adapter.calls.length
       counts = record["routes"].filter_map do |route|
         route["capability_probe_count"] if route["role"] == "primary"
       end
-      assert_equal [ 1, 2 ], counts
+      assert_equal [ 3 ], counts
+      route_count = record["routes"].length
+      attempt_count = record["attempt_ids"].length
+      attempt_directories = Dir[
+        File.join(task.folder, "plan-review", "reviews", "*", "attempts", "*")
+      ].length
+
+      available = true
+      held = orchestrator(
+        task, cfg, adapter:, clock: -> { Time.utc(2026, 8, 12, 12, 4, 59) }
+      ).advance!.record
+      assert_equal "retry_scheduled", held.state
+      assert_equal 2, adapter.calls.length
+
+      available = false
+      10.times do
+        due = Time.iso8601(record["retry_at"])
+        record = orchestrator(task, cfg, adapter:, clock: -> { due }).advance!.record
+        assert_equal "retry_scheduled", record.state
+        assert_equal route_count, record["routes"].length
+        assert_equal attempt_count, record["attempt_ids"].length
+        assert_equal attempt_directories, Dir[
+          File.join(task.folder, "plan-review", "reviews", "*", "attempts", "*")
+        ].length
+      end
+      primary_probe = record["routes"].find do |route|
+        route["role"] == "primary" && route["capability_probe_count"]
+      end
+      assert_equal 13, primary_probe.fetch("capability_probe_count")
+      assert_equal 2, adapter.calls.length
+
+      available = true
+      due = Time.iso8601(record["retry_at"])
+      cleared = orchestrator(
+        task, cfg, adapter:, clock: -> { due }
+      ).advance!.record
+      assert_equal "cleared", cleared.state
+      assert_equal 5, adapter.calls.length
     end
   end
 

@@ -118,7 +118,10 @@ module Hive
             }
             unless served_model.empty?
               actual["model"] = served_model
-              actual.delete("family") unless same_model_identity?(request.reviewer, served_model)
+              actual.delete("family")
+              actual = RouteResolver.attest_observed_identity(
+                requested: request.reviewer, actual:
+              )
             end
             {
               "status" => status,
@@ -126,17 +129,6 @@ module Hive
               "retry_at" => retry_at,
               "actual_route" => actual
             }
-          end
-
-          def same_model_identity?(reviewer, served_model)
-            requested_model = reviewer["model"]
-            return true if served_model == requested_model
-
-            support = Hive::AgentSupport.for(reviewer["provider"])
-            support&.respond_to?(:model_identity_equivalent?) &&
-              support.model_identity_equivalent?(
-                requested_model:, served_model:, family: reviewer["family"]
-              )
           end
 
           # Hive journals the review attempt itself — stage entry, agent
@@ -198,12 +190,36 @@ module Hive
           @capability_resolver = capability_resolver
         end
 
+        # Cheap preflight used by the orchestrator while an unsupported route
+        # is parked. It deliberately avoids disposable-worktree construction,
+        # immutable snapshot copies, and reviewer launch.
+        def probe_capability(kind:, reviewer:, project_root:)
+          return { "status" => "present", "diagnostic" => nil } if
+            kind.to_s == "adversarial"
+
+          provider = reviewer.fetch("provider")
+          support = Hive::AgentSupport.for(provider)
+          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
+
+          contract = @capability_resolver.call(CAPABILITY, provider)
+          stringify(@capability_probe.call(
+            agent: provider,
+            invocation: contract.invocation,
+            project_root:
+          )).merge("invocation" => contract.invocation)
+        rescue KeyError, Hive::ConfigError => e
+          { "status" => "unsupported", "diagnostic" => e.message }
+        end
+
         def call(request)
           runner_result = nil
           disposable = nil
           disposable_worktree = nil
           validate_snapshot!(request)
-          capability = capability_for(request)
+          capability = probe_capability(
+            kind: request.kind, reviewer: request.reviewer,
+            project_root: request.project_root
+          )
           if capability.fetch("status") != "present"
             return result(
               "unsupported",
@@ -295,22 +311,6 @@ module Hive
         end
 
         private
-
-        def capability_for(request)
-          return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
-          provider = request.reviewer.fetch("provider")
-          support = Hive::AgentSupport.for(provider)
-          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
-
-          contract = @capability_resolver.call(CAPABILITY, provider)
-          stringify(@capability_probe.call(
-            agent: provider,
-            invocation: contract.invocation,
-            project_root: request.project_root
-          )).merge("invocation" => contract.invocation)
-        rescue KeyError, Hive::ConfigError => e
-          { "status" => "unsupported", "diagnostic" => e.message }
-        end
 
         def default_capability_probe(agent:, invocation:, project_root:)
           profile = Hive::AgentProfiles.lookup(agent)

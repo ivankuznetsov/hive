@@ -1,9 +1,31 @@
 require "test_helper"
 require "hive/commands/approve"
 require "hive/commands/run"
+require "hive/task_closure"
 require_relative "../stages/patrol_fix/fix_test"
 
 class PatrolFixStageTransitionTest < Minitest::Test
+  def test_evidence_closure_authorizes_only_the_workflow_terminal_move
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, _manifest|
+      File.write(File.join(task.folder, "closure.json"), "{}")
+      valid_read = Object.new
+      valid_read.define_singleton_method(:valid?) { true }
+      original = Hive::TaskClosure.method(:read)
+      Hive::TaskClosure.define_singleton_method(:read, ->(*) { valid_read })
+      begin
+        transition = Hive::PatrolFix::StageTransition.new(task)
+        assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+          transition.begin!("2-fix")
+        end
+
+        intent = transition.begin!("6-done")
+        assert_equal "6-done", intent.fetch("to")
+      ensure
+        Hive::TaskClosure.define_singleton_method(:read, original)
+      end
+    end
+  end
+
   def test_intent_before_move_replays_and_reconciles_after_a_crash
     PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, manifest|
       Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(

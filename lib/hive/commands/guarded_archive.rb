@@ -51,7 +51,8 @@ module Hive
 
       def resume_at_terminal
         marker = Hive::Markers.current(@task.state_file)
-        return publish_completion(@task) if marker.name == :complete
+        return publish_completion(@task) if marker.name == :complete ||
+                                               inert_controller_terminal?(@task)
 
         run_at(@task.folder)
         resumed = Hive::Task.new(@task.folder)
@@ -76,8 +77,11 @@ module Hive
             @observation_guard&.call(locked_task)
           end
         ).call
-        run_at(new_folder)
         closed = Hive::Task.new(new_folder)
+        unless inert_controller_terminal?(closed)
+          run_at(new_folder)
+          closed = Hive::Task.new(new_folder)
+        end
         publish_completion(closed)
         closed
       end
@@ -92,15 +96,22 @@ module Hive
         ).call
       end
 
-      # Same completion broadcast conditions as StageAction: only a task
-      # sitting in its workflow's terminal stage with a :complete marker
-      # publishes the lifecycle event.
+      # Agent-owned terminal stages prove completion with :complete. A
+      # controller-owned inert terminal has no runner or marker; reaching it
+      # through this guarded protocol is itself the terminal side effect.
       def publish_completion(task)
         stage_dir = "#{task.stage_index}-#{task.stage_name}"
         return unless task.workflow.stages.last.dir == stage_dir
-        return unless Hive::Markers.current(task.state_file).name == :complete
+        return unless Hive::Markers.current(task.state_file).name == :complete ||
+                      inert_controller_terminal?(task)
 
         publisher.task_completed(task)
+      end
+
+      def inert_controller_terminal?(task)
+        terminal = task.workflow.stages.last
+        task.workflow.controller? && terminal.kind == :inert &&
+          terminal.dir == "#{task.stage_index}-#{task.stage_name}"
       end
 
       def publisher

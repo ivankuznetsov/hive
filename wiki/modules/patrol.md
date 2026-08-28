@@ -165,6 +165,13 @@ instead of replaying the stage run forever. The worker mutation fence and
 recovery coordinator resolve that same receipt-aware identity before accepting
 side effects or retrying the task.
 
+Ordinary Patrol Fix completion requires the current publication receipt. The
+separate evidence-closure protocol may instead retire a task whose change was
+already delivered through verified external evidence. Its `closure.json`
+authorizes only the workflow-terminal move, remains the terminal projection's
+completion authority, and does not fabricate a publication receipt or dispatch
+a runner for the controller-owned inert `6-done` stage.
+
 The Fix stage alone owns the authoritative patch checkout. Validate proves that
 checkout is clean and at the fix receipt's exact HEAD both before and after the
 run, but executes operator commands in a separate root-confined detached

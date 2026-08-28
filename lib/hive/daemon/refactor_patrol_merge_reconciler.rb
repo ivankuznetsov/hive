@@ -486,6 +486,7 @@ module Hive
         scan["items"] = []
         scan["seen_cursors"] = []
         scan["ingest_index"] = 0
+        scan["processed_prs"] = []
         scan["enqueued_prs"] = []
         progress["retry"] = nil
         @progress_store.touch!(progress, now)
@@ -506,6 +507,7 @@ module Hive
             entry, cfg, pr: item.fetch("url"), expected: item, now: now,
             timeout_sec: timeout_sec
           )
+          scan.fetch("processed_prs") << item.fetch("number")
           scan.fetch("enqueued_prs") << item.fetch("number") if result["job_id"]
           scan["enqueued_prs"].uniq!
         rescue Hive::GhError, Hive::RefactorPatrol::MergeClassifier::Conflict => e
@@ -706,7 +708,8 @@ module Hive
           raise Blocked, "reconciler progress contains duplicate merged-PR items"
         end
         if scan.fetch("phase") == "pages"
-          unless scan.fetch("ingest_index").zero? && scan.fetch("enqueued_prs").empty?
+          unless scan.fetch("ingest_index").zero? && scan.fetch("processed_prs").empty? &&
+                 scan.fetch("enqueued_prs").empty?
             raise Blocked, "reconciler progress advanced intake before pagination completed"
           end
           if scan.fetch("cursor") && scan.fetch("result_count").nil?
@@ -721,7 +724,11 @@ module Hive
         end
         candidates = previous ? scan_candidates(previous, scan) : []
         index = scan.fetch("ingest_index")
-        if index > candidates.length || scan.fetch("enqueued_prs") != candidates.first(index).map { |item| item.fetch("number") }.uniq
+        processed_prs = candidates.first(index).map { |item| item.fetch("number") }.uniq
+        enqueued_prs = scan.fetch("enqueued_prs")
+        if index > candidates.length ||
+           scan.fetch("processed_prs") != processed_prs ||
+           enqueued_prs != processed_prs.intersection(enqueued_prs)
           raise Blocked, "reconciler progress intake checkpoint is inconsistent"
         end
       rescue Blocked => e

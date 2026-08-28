@@ -766,14 +766,15 @@ repository, or branch change are quarantined and block intake rather than
 silently replacing the baseline.
 
 The authoritative checkpoint schema remains v2. Incremental catch-up uses a
-separate `hive-refactor-patrol-reconciler-progress` v1 sidecar rather than
+separate `hive-refactor-patrol-reconciler-progress` v2 sidecar rather than
 putting transient cursors into `reconciler.json`. The sidecar repeats the exact
 registration/host/repository/default-branch identity and binds itself to the
 SHA-256 fingerprint of the v2 checkpoint it started from. It persists two
 restart-safe phases: paginated scan state (fixed overlap start, next/seen
 cursors, accumulated merged-PR identities, fixed upper time bound, and frozen
-result count), followed by manifest intake state (next item index and
-already-enqueued PR numbers). Search traversal is creation-ordered inside that
+result count), followed by manifest intake state (next item index, the exact
+processed PR prefix, and its ordered subset of already-enqueued PR numbers).
+Search traversal is creation-ordered inside that
 fixed merge window. Count or terminal-size drift restarts page traversal while
 retaining the upper bound. Origin identity discovery and each remote page or
 intake item consume one shared project-step deadline within the reconciler's
@@ -794,6 +795,8 @@ progress only in memory. The sidecar is continuation evidence, never high-water
 or job-completion authority. Its timestamps, protocol scalars, merge OIDs, and
 cursors are strictly typed; a persisted current cursor already present in the
 consumed set is impossible state and is quarantined before any GitHub call.
+The explicit `hive migrate` command discards v1 continuation state before the
+daemon cutover; runtime ticks neither interpret nor migrate that legacy shape.
 
 The job aggregate remains the only completion authority. It stores the
 enqueue-time discovery snapshot, one pinned `analysis_sha`, feature-level

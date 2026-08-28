@@ -795,8 +795,8 @@ progress only in memory. The sidecar is continuation evidence, never high-water
 or job-completion authority. Its timestamps, protocol scalars, merge OIDs, and
 cursors are strictly typed; a persisted current cursor already present in the
 consumed set is impossible state and is quarantined before any GitHub call.
-The explicit `hive migrate` command discards v1 continuation state before the
-daemon cutover; runtime ticks neither interpret nor migrate that legacy shape.
+Runtime ticks accept only the current continuation schema; unsupported shapes
+are quarantined and block intake.
 
 The job aggregate remains the only completion authority. It stores the
 enqueue-time discovery snapshot, one pinned `analysis_sha`, feature-level

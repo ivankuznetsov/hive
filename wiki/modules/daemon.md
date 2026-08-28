@@ -389,8 +389,8 @@ advanced, replay converges through idempotent intake.
 The processed PR list must exactly match the intake prefix, while the enqueued
 PR list must be an ordered subset of it. This records deterministic no-manifest
 classifications without weakening fail-closed validation of the intake index.
-`hive migrate` discards obsolete v1 scan progress so the daemon can replay it
-idempotently under v2; the daemon has no legacy progress migration path.
+The daemon accepts only the current progress schema; unsupported progress is
+quarantined and blocks intake rather than being interpreted or rewritten.
 
 The project slice begins before origin identity discovery: the local `git`
 remote lookup, authentication, page fetch, and exact-PR metadata/file hydration

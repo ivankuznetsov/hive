@@ -8,8 +8,7 @@ module Hive
   module Daemon
     # Durable, identity-bound continuation state for incremental merge intake.
     # The authoritative reconciler checkpoint remains schema v2; this sidecar
-    # can be discarded after its base-checkpoint fingerprint is stale or by an
-    # explicit schema-cutover migration.
+    # can be discarded after its base-checkpoint fingerprint becomes stale.
     class RefactorPatrolMergeProgressStore
       SCHEMA = "hive-refactor-patrol-reconciler-progress".freeze
       SCHEMA_VERSION = 2

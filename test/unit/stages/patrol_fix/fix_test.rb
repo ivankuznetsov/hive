@@ -159,7 +159,8 @@ class PatrolFixFixStageTest < Minitest::Test
     }
     store = Struct.new(:rows) { def read_all = rows }.new([ block, reopen ])
 
-    assert Hive::Stages::PatrolFix::Fix.send(:fix_authorization, store, manifest)
+    assert_equal({ decision: nil, prior_fix: nil },
+                 Hive::Stages::PatrolFix::Fix.send(:fix_authorization, store, manifest))
 
     block.fetch("payload")["rework_stage"] = "review"
     assert_raises(Hive::StageError) do

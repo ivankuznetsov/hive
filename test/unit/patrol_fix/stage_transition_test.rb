@@ -26,6 +26,23 @@ class PatrolFixStageTransitionTest < Minitest::Test
     end
   end
 
+  def test_unreadable_evidence_closure_cannot_authorize_the_terminal_move
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, _manifest|
+      File.write(File.join(task.folder, "closure.json"), "{}")
+      original = Hive::TaskClosure.method(:read)
+      Hive::TaskClosure.define_singleton_method(:read) do |*|
+        raise Hive::TaskClosure::InvalidReceipt, "synthetic unreadable closure"
+      end
+      begin
+        assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+          Hive::PatrolFix::StageTransition.new(task).begin!("6-done")
+        end
+      ensure
+        Hive::TaskClosure.define_singleton_method(:read, original)
+      end
+    end
+  end
+
   def test_intent_before_move_replays_and_reconciles_after_a_crash
     PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, manifest|
       Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(

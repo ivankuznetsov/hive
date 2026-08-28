@@ -63,8 +63,11 @@ evidence and cannot weaken the ordinary marker/condition guard. `Hive::TaskClosu
 then drives the one internal guarded-archive protocol, `Hive::Commands::GuardedArchive`,
 which may force the task from any active stage to the terminal stage declared by
 that task's workflow (`9-done` for coding and `6-done` for content or Patrol Fix),
-run that terminal stage with the internal no-rebase override, and retain
-`closure.json`. StageAction
+run an agent-owned terminal stage with the internal no-rebase override, and
+retain `closure.json`. A controller-owned inert terminal such as Patrol Fix
+has no terminal agent: its valid closure receipt authorizes only the move to
+that workflow's terminal stage, and that receipt remains the completion
+authority instead of synthesizing a publication receipt or marker. StageAction
 itself carries no closure branch: it dispatches only ordinary verb transitions,
 while GuardedArchive holds no receipt semantics — the caller injects the
 pre-transition guard (rechecked inside the atomic move lock) and an optional

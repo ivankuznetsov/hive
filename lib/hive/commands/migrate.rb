@@ -111,7 +111,6 @@ module Hive
         workflow_task_count = 0
         workflow_moved_count = 0
         plan_review_requirement_count = 0
-        refactor_patrol_progress_reset = false
         no_move_message = nil
         begin
           plan = build_migration_plan(stages)
@@ -208,23 +207,17 @@ module Hive
           prepared&.close
         end
 
-        refactor_patrol_progress_reset = discard_v1_refactor_patrol_progress(hive_state)
         patrol_admission_index = migrate_patrol_fix_pending_index(hive_state)
-        if refactor_patrol_progress_reset || patrol_admission_index.fetch(:changed)
+        if patrol_admission_index.fetch(:changed)
           cutover_restarted = (
             @daemon_cutover || method(:restart_daemon_for_patrol_index_cutover!)
           ).call
           if cutover_restarted
-            # The first pass may race with the old daemon, which can recreate
-            # obsolete progress or omit the current index. A synchronous
-            # restart followed by one second explicit pass closes that finite
-            # cutover window.
-            if patrol_admission_index.fetch(:changed)
-              final_index = migrate_patrol_fix_pending_index(hive_state)
-              patrol_admission_index = final_index.merge(changed: true).freeze
-            end
-            refactor_patrol_progress_reset =
-              discard_v1_refactor_patrol_progress(hive_state) || refactor_patrol_progress_reset
+            # The first pass may race with the old daemon, which can omit the
+            # current index. A synchronous restart followed by one second
+            # explicit pass closes that finite cutover window.
+            final_index = migrate_patrol_fix_pending_index(hive_state)
+            patrol_admission_index = final_index.merge(changed: true).freeze
             restart_requested = true
           end
         end
@@ -277,34 +270,15 @@ module Hive
                "(#{patrol_admission_index.fetch(:indexed)} pending of " \
                "#{patrol_admission_index.fetch(:records)} records)"
         end
-        if refactor_patrol_progress_reset
-          puts "hive: migrate discarded obsolete Architecture Patrol scan progress"
-        end
         if !restart_requested && (config_changed || moved.any? ||
            workflow_task_count.positive? || plan_review_requirement_count.positive? ||
-           patrol_admission_index.fetch(:changed) || refactor_patrol_progress_reset)
+           patrol_admission_index.fetch(:changed))
           (@daemon_restarter || method(:restart_daemon_if_running!)).call
         end
         moved
       end
 
       private
-
-      def discard_v1_refactor_patrol_progress(hive_state)
-        path = File.join(hive_state, "refactor_patrol", "v2", "reconciler-progress.json")
-        return false unless File.file?(path)
-
-        progress = JSON.parse(File.binread(path))
-        return false unless progress.is_a?(Hash) &&
-                            progress["schema"] == "hive-refactor-patrol-reconciler-progress" &&
-                            progress["schema_version"] == 1
-
-        File.delete(path)
-        Hive::AtomicFile.fsync_directory(File.dirname(path))
-        true
-      rescue JSON::ParserError, SystemCallError, IOError
-        false
-      end
 
       def migrate_patrol_fix_pending_index(hive_state)
         Hive::PatrolFix::AdmissionStore.new(

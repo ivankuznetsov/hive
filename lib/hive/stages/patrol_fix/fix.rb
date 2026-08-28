@@ -142,11 +142,12 @@ module Hive
         end
         private_class_method :strict_origin_base!
         def fix_authorization(receipts, manifest)
-          inbox = current(receipts, manifest, "decision", "inbox")
+          rows = receipts.respond_to?(:read_all) ? receipts.read_all : receipts
+          inbox = current(rows, manifest, "decision", "inbox")
           return if inbox&.dig("payload", "route") == "fix"
 
-          reopen = current(receipts, manifest, "reopen", "review")
-          decision = receipts.find do |row|
+          reopen = current(rows, manifest, "reopen", "review")
+          decision = rows.find do |row|
             row["receipt_id"] == reopen&.dig("payload", "outcome_receipt_id")
           end
           if reopen&.dig("payload", "operator") == "controller:review" &&
@@ -158,7 +159,7 @@ module Hive
                    prior_revision.fetch("generation") + 1 == manifest.dig("evidence_revision", "generation")
               raise Hive::StageError, "rework authorization does not bind the prior generation"
             end
-            prior_fix = receipts.find do |row|
+            prior_fix = rows.find do |row|
               row["receipt_id"] == decision.dig("payload", "fix_receipt_id")
             end
             unless prior_fix&.fetch("kind", nil) == "fix" &&
@@ -172,14 +173,14 @@ module Hive
             return { decision: decision, prior_fix: prior_fix }
           end
 
-          reopen = current(store, manifest, "reopen", "publish")
-          prior = store.read_all.find do |row|
+          reopen = current(rows, manifest, "reopen", "publish")
+          prior = rows.find do |row|
             row["receipt_id"] == reopen&.dig("payload", "outcome_receipt_id")
           end
           if reopen&.dig("payload", "operator") == "operator:publication_policy" &&
              prior&.fetch("kind", nil) == "publication_block" &&
              prior.dig("payload", "rework_stage") == "fix"
-            return true
+            return { decision: nil, prior_fix: nil }
           end
           raise Hive::StageError, "fix requires a current inbox fix or controller rework authorization"
         end

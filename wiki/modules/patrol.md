@@ -259,7 +259,9 @@ authentication, or PR creation has occurred at this point. Status exposes the
 operator-only, receipt-bound `patrol_fix.rework_publication` action, including
 on daemon-enrolled projects. The action advances a new generation to Inbox,
 Fix, or Review according to the earliest authority that can change the blocked
-bytes. Generic `workflow.retry` cannot release this park.
+bytes. The Fix-stage authorization consumes the same current receipt rows as
+ordinary execution and returns the structured rework context expected by the
+stage runner. Generic `workflow.retry` cannot release this park.
 
 ## One-time historical import
 

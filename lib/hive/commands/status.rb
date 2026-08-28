@@ -638,6 +638,22 @@ module Hive
                           admission_context: nil, now: Time.now.utc,
                           workflow_generation: nil,
                           include_archive_index: false, task_slugs: nil)
+        unless @status_attempt_store
+          return with_status_attempt_store do
+            project_payload(
+              project,
+              project_count: project_count,
+              stages: stages,
+              exclude_archived: exclude_archived,
+              admission_context: admission_context,
+              now: now,
+              workflow_generation: workflow_generation,
+              include_archive_index: include_archive_index,
+              task_slugs: task_slugs
+            )
+          end
+        end
+
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {

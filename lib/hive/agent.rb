@@ -47,18 +47,6 @@ module Hive
       "HIVE_SCREENOTE_BASE_URL" => nil,
       **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }
     }.freeze
-    # Pi's shell must not inherit the controller's desktop credential
-    # transport. On Linux, `gh auth token` can retrieve the operator's stored
-    # GitHub token from Secret Service through the session bus even when no
-    # GH_* token variable or gh config file is present. Execute needs the
-    # repository and network, but publication belongs to Hive's later
-    # open-PR stage. Cutting the bus and any SSH agent keeps Pi's provider
-    # authentication intact while making those controller credentials
-    # unreachable.
-    PI_CONTROLLER_CREDENTIAL_ENV = {
-      "DBUS_SESSION_BUS_ADDRESS" => nil,
-      "SSH_AUTH_SOCK" => nil
-    }.freeze
     ISOLATED_CHILD_ENV_KEYS = %w[
       HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR
       XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR
@@ -143,10 +131,16 @@ module Hive
           SCRUBBED_CHILD_ENV
         end
       end
+      support = Hive::AgentSupport.for(@profile)
+      controller_environment_scrub = if support&.respond_to?(:controller_environment_scrub)
+        support.controller_environment_scrub
+      else
+        {}
+      end
       @child_environment = @child_environment
         .merge(@launch_environment)
         .merge(@profile.subscription_environment)
-        .merge(@profile.name == :pi ? PI_CONTROLLER_CREDENTIAL_ENV : {})
+        .merge(controller_environment_scrub)
         .freeze
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =

@@ -1,16 +1,19 @@
 require "fileutils"
 require "json"
 require "open3"
+require "yaml"
 
 require "hive/llm_wiki_bootstrap/context"
 require "hive/llm_wiki_bootstrap/pages"
 require "hive/llm_wiki_bootstrap/scheduler"
 require "hive/llm_wiki_bootstrap/scripts"
+require "hive/paths"
 
 module Hive
   module LlmWikiBootstrap
     HEADLESS_AGENT = "codex".freeze
     CONTEXT_AGENTS = %w[claude codex pi].freeze
+    MAIN_WIKI_QMD_COLLECTION = "hive-wiki".freeze
 
     MANAGED_BEGIN = "<!-- BEGIN LLM WIKI -->".freeze
     MANAGED_END = "<!-- END LLM WIKI -->".freeze
@@ -124,12 +127,27 @@ module Hive
 
     def detect_main_wiki_path(project_root)
       candidates = [
+        qmd_main_wiki_path,
         File.expand_path("~/wikis/master/wiki"),
         File.expand_path("~/wikis/main/wiki"),
         File.expand_path("../wikis/master/wiki", project_root),
         File.expand_path("../wikis/main/wiki", project_root)
-      ]
+      ].compact
       candidates.find { |path| File.directory?(path) }
+    end
+
+    def qmd_main_wiki_path
+      config_home = Hive::Paths.base_home("XDG_CONFIG_HOME", ".config")
+      config_path = File.join(config_home, "qmd", "index.yml")
+      payload = YAML.safe_load_file(config_path, permitted_classes: [], aliases: false)
+      collections = payload.is_a?(Hash) ? payload["collections"] : nil
+      collection = collections.is_a?(Hash) ? collections[MAIN_WIKI_QMD_COLLECTION] : nil
+      candidate = collection.is_a?(Hash) ? collection["path"] : nil
+      return unless candidate.is_a?(String) && !candidate.strip.empty?
+
+      File.expand_path(candidate, File.dirname(config_path))
+    rescue SystemCallError, Psych::Exception, ArgumentError
+      nil
     end
 
     def ensure_project_wiki(project_root)

@@ -99,6 +99,22 @@ adversarial coverage row is forced to `failed`.
 
 Adapter outcomes are closed: `success`, `partial_coverage`, `unsupported`,
 `provider_limit`, `timeout`, `retryable_failure`, and `terminal_failure`.
+The descriptive `selected_lenses` metadata accepts lowercase names that begin
+with a letter and then use letters, digits, hyphens, or underscores, up to 64
+characters. The primary, adversarial, and verification prompts publish that
+same grammar. Natural specialist names such as `product-lens` therefore remain
+valid without weakening the stricter machine-owned coverage-name contract or
+discarding otherwise valid findings and coverage. A blocked legacy primary or
+adversarial route with the exact old selected-lens diagnostic is classified as
+runnable and receives one versioned recovery reset; the daemon can therefore
+rerun each affected initial reviewer leg automatically after upgrade. Missing
+diagnostic provenance is accepted only for historical records. Current adapter
+receipts distinguish parser failures from reviewer- or runner-authored
+diagnostics, so a reviewer cannot request this migration retry by copying the
+old text. The reset is one-time, so a genuinely malformed current-contract
+result remains terminal instead of looping. Verification output uses the new
+grammar but is not eligible for the legacy reset, preserving the existing
+revision-round fence.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one

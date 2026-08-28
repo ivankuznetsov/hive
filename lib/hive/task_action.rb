@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
 require "hive/patrol_fix/projection"
@@ -730,6 +731,8 @@ module Hive
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_adversarial_identity_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_selected_lenses_contract_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
@@ -998,6 +1001,15 @@ module Hive
       !Hive::PlanReview::RouteResolver.recoverable_identity_route(
         routes:, planner_identity:
       ).nil?
+    end
+
+    # The old selected-lens grammar rejected natural lowercase kebab-case
+    # names. Surface that exact versionless parser verdict as runnable until the
+    # orchestrator records its one-time contract recovery reset.
+    def recoverable_selected_lenses_contract_review?
+      !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
+        plan_review["routes"]
+      ).empty?
     end
 
     # A mandatory initial reviewer can exhaust its bounded in-process retry

@@ -131,6 +131,7 @@ module Hive
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
         record = refresh_adversarial_identity_contract(record)
+        record = refresh_selected_lenses_contract(record)
 
         %w[primary adversarial].each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
@@ -378,6 +379,30 @@ module Hive
           record, state: "reviewing",
           required_action: "retry adversarial review under the current identity contract",
           routes: record["routes"] + [ reset ]
+        )
+      end
+
+      # Older parsers rejected lowercase specialist names such as
+      # `product-lens` and persisted the otherwise valid reviewer response as a
+      # terminal failure. Re-run that exact legacy diagnostic once under the
+      # widened contract; the versioned reset prevents repeated retries for a
+      # genuinely malformed result produced by the current parser.
+      def refresh_selected_lenses_contract(record)
+        routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
+        return record if routes.empty?
+
+        resets = routes.map do |route|
+          Hive::PlanReview.recovery_reset_route(
+            route,
+            "selected_lenses_contract_recovery" => true,
+            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION,
+            "diagnostic" => "retry reviewer under the current selected_lenses contract"
+          )
+        end
+        publish_transition(
+          record, state: "reviewing",
+          required_action: "retry plan review under the current selected_lenses contract",
+          routes: record["routes"] + resets
         )
       end
 
@@ -1115,6 +1140,7 @@ module Hive
           "independence_reason" => adapter["independence_reason"] || base["independence_reason"],
           "attempt_id" => attempt_id, "outcome" => outcome, "retry_at" => retry_at,
           "attempts" => base["attempts"] || adapter["attempts"],
+          "diagnostic_source" => adapter["diagnostic_source"] || base["diagnostic_source"],
           "diagnostic" => diagnostic
         }.compact
       end

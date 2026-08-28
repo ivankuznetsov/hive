@@ -13,6 +13,11 @@ module Hive
       SCHEMA_VERSION = 1
       MAX_BYTES = 1024 * 1024
       OUTCOMES = Adapters::Base::OUTCOMES
+      LENS_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/.freeze
+      SELECTED_LENSES_CONTRACT_VERSION = 2
+      LEGACY_SELECTED_LENSES_DIAGNOSTIC =
+        "plan review selected_lenses must contain lowercase names".freeze
+      LEGACY_SELECTED_LENSES_RECOVERY_ROLES = %w[primary adversarial].freeze
       KEYS = %w[
         schema schema_version attempt_id plan_digest policy_fingerprint outcome findings coverage
         selected_lenses residual_evidence diagnostic retry_at
@@ -148,11 +153,42 @@ module Hive
       end
 
       def validate_names!(value, label)
-        unless value.is_a?(Array) && value.all? { |name| name.to_s.match?(/\A[a-z][a-z0-9_]{0,63}\z/) }
-          raise InvalidRecord, "plan review #{label} must contain lowercase names"
+        unless value.is_a?(Array) &&
+               value.all? { |name| name.is_a?(String) && name.match?(LENS_NAME) }
+          raise InvalidRecord,
+                "plan review #{label} must contain lowercase names of 1-64 characters that " \
+                "start with a letter and use only lowercase letters, digits, hyphens, or underscores"
         end
-        value.map(&:to_s).uniq
+        value.uniq
       end
+
+      def recoverable_selected_lenses_routes(routes)
+        recoverable = {}
+        recovered_roles = Set.new
+        Array(routes).reverse_each do |route|
+          role = route["role"]
+          next unless LEGACY_SELECTED_LENSES_RECOVERY_ROLES.include?(role)
+
+          if current_selected_lenses_contract?(route)
+            recovered_roles.add(role)
+            recoverable.delete(role)
+          elsif !recovered_roles.include?(role) && !recoverable.key?(role) &&
+                route["outcome"] == "terminal_failure" &&
+                route["diagnostic"] == LEGACY_SELECTED_LENSES_DIAGNOSTIC &&
+                [ nil, "parser" ].include?(route["diagnostic_source"])
+            recoverable[role] = route
+          end
+        end
+        recoverable.values
+      end
+
+      def current_selected_lenses_contract?(route)
+        route["selected_lenses_contract_recovery"] == true &&
+          Integer(route["selected_lenses_contract_version"]) >= SELECTED_LENSES_CONTRACT_VERSION
+      rescue ArgumentError, TypeError
+        false
+      end
+      private_class_method :current_selected_lenses_contract?
 
       def validate_residual_evidence!(value)
         raise InvalidRecord, "residual_evidence must be an Array" unless value.is_a?(Array)

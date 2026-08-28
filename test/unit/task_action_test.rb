@@ -2177,6 +2177,26 @@ class TaskActionTest < Minitest::Test
     assert_nil unknown.command
   end
 
+  def test_plan_review_recovers_a_legacy_selected_lenses_parser_rejection
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    legacy = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "terminal_failure",
+            "diagnostic" => "plan review selected_lenses must contain lowercase names"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", legacy.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
+  end
+
   def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair
     Dir.mktmpdir("task-action-stale-plan-review") do |root|
       task = fake_task(stage_name: "plan", stage_index: 3, project_root: root)

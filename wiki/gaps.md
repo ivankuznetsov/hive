@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-27
+updated: 2026-08-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Main-wiki QMD freshness
+
+LLM-wiki bootstrap now resolves the live `hive-wiki` collection from QMD's
+local `index.yml` before legacy filesystem conventions, so stale deleted
+`main_wiki_path` values can migrate to the collection's current directory.
+This validates directory presence, not index freshness: QMD indexing remains
+owned by the bounded refresh runner, and an old collection index can still
+return stale search results until its next successful update.
 
 ## Unified Patrol Fix live execution
 

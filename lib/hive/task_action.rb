@@ -282,6 +282,7 @@ module Hive
     DEFAULT_AGENT_MARKER_GRACE_SEC = 300
 
     PLAN_REVIEW_UNRESOLVED = Object.new.freeze
+    PLAN_REVIEW_TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
 
     attr_reader :plan_review
 
@@ -729,6 +730,8 @@ module Hive
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_adversarial_identity_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_coverage_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
         else
@@ -929,7 +932,7 @@ module Hive
         entry["role"] == "planner_revision"
       end
       return false unless route
-      return false unless %w[provider_limit timeout retryable_failure].include?(route["outcome"])
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
 
       Integer(route["planner_revision_contract_version"] || 0) <
         Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
@@ -995,6 +998,27 @@ module Hive
       !Hive::PlanReview::RouteResolver.recoverable_identity_route(
         routes:, planner_identity:
       ).nil?
+    end
+
+    # A mandatory initial reviewer can exhaust its bounded in-process retry
+    # series while a provider is unavailable. That is still scheduler-owned:
+    # the orchestrator persists a paced recovery series and retries after the
+    # provider has had time to recover. Require both an attempted transient
+    # leg and the exact missing-coverage blocker so unrelated blocked verdicts
+    # remain inert.
+    def recoverable_transient_coverage_review?
+      return false unless plan_review["effective_level"] == "mandatory"
+      return false unless Array(plan_review["blockers"]).any? do |blocker|
+        blocker["reason"] == "coverage_failed"
+      end
+
+      %w[primary adversarial].any? do |role|
+        route = Array(plan_review["routes"]).reverse.find do |entry|
+          entry["role"] == role
+        end
+        route && !route["attempt_id"].to_s.empty? &&
+          PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+      end
     end
 
     def legacy_execute_findings?

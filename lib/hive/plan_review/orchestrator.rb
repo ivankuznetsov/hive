@@ -29,6 +29,8 @@ module Hive
       MAX_VERIFICATION_REVISION_ROUNDS = 3
       CAPABILITY_STABLE_PROBE_LIMIT = 3
       CAPABILITY_RETRY_COOLDOWN_SEC = 5 * 60
+      TRANSIENT_SERIES_RETRY_BASE_SEC = 5 * 60
+      TRANSIENT_SERIES_RETRY_CAP_SEC = 24 * 60 * 60
 
       class << self
         def run!(task:, cfg:, planner_identity:, **options)
@@ -564,7 +566,15 @@ module Hive
 
           if route
             attempts = attempts_in_current_run(record, role)
-            return [ record, false ] if attempts >= max_attempts
+            if attempts >= max_attempts
+              unless automatic_transient_series_recovery?(record, role, route)
+                return [ record, false ]
+              end
+
+              record, pending = schedule_transient_series_recovery(record, role, route)
+              return [ record, true ] if pending
+              next
+            end
             if retry_in_future?(route["retry_at"])
               scheduled = publish(
                 record, "state" => "retry_scheduled", "outcome" => nil,
@@ -1024,6 +1034,55 @@ module Hive
         reset = routes.rindex { |entry| entry["recovery_reset"] == true }
         routes = routes.drop(reset + 1) if reset
         routes.count { |entry| entry["attempt_id"] }
+      end
+
+      # Mandatory initial coverage is a liveness requirement, not an operator
+      # waiver prompt. The per-series max still bounds one invocation, while a
+      # persisted recovery reset lets later daemon ticks try again after a
+      # widening cooldown. Standard reviews retain their existing degraded
+      # fallback and verification/revision loops retain their own hard caps.
+      def automatic_transient_series_recovery?(record, role, route)
+        record.effective_level == "mandatory" &&
+          %w[primary adversarial].include?(role) &&
+          TRANSIENT_OUTCOMES.include?(route["outcome"]) &&
+          !route["attempt_id"].to_s.empty?
+      end
+
+      def schedule_transient_series_recovery(record, role, route)
+        series = record["routes"].count do |entry|
+          entry["role"] == role && entry["transient_series_recovery"] == true
+        end + 1
+        retry_at = transient_series_retry_at(record, role, route, series)
+        pending = retry_in_future?(retry_at)
+        reset = Hive::PlanReview.recovery_reset_route(
+          route,
+          "transient_series_recovery" => true,
+          "transient_series" => series,
+          "retry_at" => retry_at,
+          "diagnostic" => "transient reviewer attempt series exhausted; retrying automatically"
+        )
+        state = pending ? "retry_scheduled" : "reviewing"
+        required_action = pending ?
+          "retry #{role} review automatically after #{retry_at}" :
+          "retry #{role} review automatically"
+        resumed = publish_transition(
+          record, state:, required_action:,
+          routes: record["routes"] + [ reset ], retry_at: pending ? retry_at : nil
+        )
+        [ resumed, pending ]
+      end
+
+      def transient_series_retry_at(record, role, route, series)
+        exponent = [ series - 1, 9 ].min
+        delay = [ TRANSIENT_SERIES_RETRY_BASE_SEC * (2**exponent),
+                  TRANSIENT_SERIES_RETRY_CAP_SEC ].min
+        jitter_window = [ delay / 5, 5 * 60 ].min
+        jitter_seed = Digest::SHA256.hexdigest("#{record.review_id}:#{role}:#{series}")[0, 8]
+        jitter = jitter_seed.to_i(16) % (jitter_window + 1)
+        anchor = Time.iso8601(route["retry_at"].to_s)
+        (anchor + delay + jitter).utc.iso8601(6)
+      rescue ArgumentError
+        (@clock.call + delay + jitter).utc.iso8601(6)
       end
 
       def default_retry_at(record, role, attempt_id)

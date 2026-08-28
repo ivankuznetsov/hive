@@ -119,7 +119,7 @@ module Hive
         end
       end
 
-      # Large full-graph cache published once per successful daemon scan.
+      # Active-task cache published once per successful daemon scan.
       # It is deliberately separate from the scheduler snapshot: web/watch
       # consumers read the small snapshot, while concise status opts into this
       # file and joins it only to a generation-bound scheduler record.
@@ -288,13 +288,9 @@ module Hive
         end
 
         def complete(rows:, controller:, queue:, recoveries:,
-                     hidden_archived_task_count: 0,
                      status_payload: nil,
                      now: Time.now.utc)
           rows = Array(rows)
-          validate_hidden_count!(
-            hidden_archived_task_count, label: "hidden_archived_task_count"
-          )
           duplicate_keys = duplicate_row_keys(rows)
           unless duplicate_keys.empty?
             identities = duplicate_keys.sort.map { |project, slug| "#{project}:#{slug}" }
@@ -311,7 +307,6 @@ module Hive
           publish_status_cache(status_payload, now: now)
           record = base_record(phase: "complete", now: now).merge(
             "reason" => nil,
-            "hidden_archived_task_count" => hidden_archived_task_count,
             "capacity" => controller || {},
             "queue" => queue || {},
             "provider_holds" => holds,
@@ -371,7 +366,6 @@ module Hive
               "started_at" => (@started_at || instant).utc.iso8601(6),
               "completed_at" => phase == "started" ? nil : instant.iso8601(6)
             },
-            "hidden_archived_task_count" => nil,
             "attempt_storage" => @attempt_storage
           }
         end
@@ -403,12 +397,6 @@ module Hive
           true
         rescue ArgumentError, TypeError, KeyError
           false
-        end
-
-        def validate_hidden_count!(value, label:)
-          return if value.is_a?(Integer) && value >= 0
-
-          raise ArgumentError, "#{label} must be a non-negative integer"
         end
 
         def observed_tasks(rows)

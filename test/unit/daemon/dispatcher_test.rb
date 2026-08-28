@@ -1448,6 +1448,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_scheduler_snapshot_completes_before_project_patrol_candidate_scan
+    snapshot = FakeOperationalSnapshot.new
+    snapshot_calls_at_patrol = nil
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.define_singleton_method(:candidates) do |now:|
+      snapshot_calls_at_patrol = snapshot.calls.map(&:first)
+      []
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], operational_snapshot: snapshot, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %i[begin_tick complete], snapshot_calls_at_patrol,
+                 "slow Patrol discovery must not own scheduler snapshot freshness"
+  end
+
   def test_durable_dispatch_publishes_the_actual_admission_outcome
     attempt = Struct.new(:attempt_id, :task_generation, :state)
                     .new("attempt-1", "generation-1", "running")

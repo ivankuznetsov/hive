@@ -49,6 +49,7 @@ module Hive
       REMOTE_POLL_TERMINAL_STATES = %w[
         merged delivered_elsewhere ambiguous
       ].freeze
+      TERMINAL_ARCHIVE_STATES = %w[archived superseded].freeze
       MAX_DIAGNOSTIC_BYTES = 500
       DEFAULT_BACKOFF_BASE_SEC = 60
       DEFAULT_BACKOFF_MAX_SEC = 3600
@@ -150,7 +151,7 @@ module Hive
         start = cursor && keys.include?(cursor) ? keys.index(cursor) + 1 : 0
         keys.rotate(start).each do |key|
           candidate = state.fetch("candidates").fetch(key)
-          next if %w[archived superseded].include?(candidate.dig("archive", "status"))
+          next if terminal_candidate?(candidate)
           if candidate.dig("observation", "held") == true
             hold_reason = candidate.dig("observation", "hold_reason")
             next unless remote_poll_hold_reason?(hold_reason)
@@ -167,6 +168,10 @@ module Hive
           return candidate
         end
         nil
+      end
+
+      def terminal_candidate?(candidate)
+        TERMINAL_ARCHIVE_STATES.include?(candidate.dig("archive", "status"))
       end
 
       def remote_poll_hold_reason?(reason)
@@ -198,8 +203,7 @@ module Hive
       def compact_terminal_candidates!(state, now:)
         cutoff = now - TERMINAL_RETENTION_SEC
         removed = state.fetch("candidates").delete_if do |_key, candidate|
-          next false unless
-            %w[archived superseded].include?(candidate.dig("archive", "status"))
+          next false unless terminal_candidate?(candidate)
 
           Time.iso8601(candidate.fetch("updated_at")) < cutoff
         rescue ArgumentError

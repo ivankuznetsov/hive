@@ -75,7 +75,11 @@
     <h1><%= @status_view.titleize %></h1>
     <p class="muted">The same live Hive tasks, arranged for scanning or flow.</p>
   </div>
-  <%= render "status/view_switch", status_view: @status_view %>
+  <div class="status-view-actions">
+    <%= link_to "Archive", archive_path(project: @selected_project&.name),
+          class: "btn btn-ghost btn-sm status-archive-link" %>
+    <%= render "status/view_switch", status_view: @status_view %>
+  </div>
 </div>
 
 <% if @status_page_snapshot.unavailable? %>

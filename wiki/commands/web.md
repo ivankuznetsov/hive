@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-25
+updated: 2026-08-28
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
 ---
 
@@ -325,22 +325,23 @@ Honeycomb projections.
   pages share one five-second polling cadence regardless of their count. The
   subscribing page already rendered the primed snapshot, so the broadcaster
   does not send a duplicate first refresh.
-  The ordinary feed uses `Hive::Tui::StateSource` as a shared bounded
-  projection cache, serialized behind `CachedStatusCommand` for concurrent
-  Puma callers. Cold construction performs one authoritative ordinary scan but
-  no second unfiltered archive scan. Steady liveness refreshes scan only active
-  workflow stages and merge cached visible terminal rows, so the five-second
-  cadence is proportional to active work rather than total archive size.
+  The ordinary feed uses `Hive::Tui::StateSource` as a shared active-projection
+  cache, serialized behind `CachedStatusCommand` for concurrent Puma callers.
+  Cold construction and every five-second refresh scan only stages that can
+  contain active work; they do not build, retain, or merge archived task rows.
+  The cadence is therefore proportional to active work rather than total
+  archive size.
   During the same daemon generation's brief `started` phase,
   `CachedStatusCommand` retains the prior completed scheduler observation only
   while that observation remains valid. This prevents cooldown/recovery rows
   from flipping to transiently unavailable and triggering two full-page Turbo
   refreshes per daemon tick; restart, expiry, stale, and invalid observations
   still surface immediately.
-  Terminal-directory changes, policy edits, and retention boundaries rebuild
-  the ordinary projection immediately; a five-minute backstop repairs missed
-  signals. `/archive` remains lossless by invoking the unfiltered Status
-  producer on demand and never replacing the ordinary feed's cache. Archive
+  Stage-directory, workflow, project-policy, task-state, and lock changes
+  invalidate the active projection; a three-second liveness fallback refreshes
+  process state even when no filesystem signal changes. `/archive` remains
+  lossless by invoking the unfiltered Status producer on demand and never
+  replacing the ordinary feed's active publication. Archive
   task links resolve only the requested registered project and stage through
   the unfiltered producer, so their shell, log, media, diff, and action routes
   do not multiply lossless fleet scans.
@@ -352,9 +353,6 @@ Honeycomb projections.
   comparable key with the payload and reuses the existing semantic token when
   that key is unchanged, so volatile-only ticks do not repeat canonical JSON
   hashing.
-  `hidden_archived_task_count` remains in that comparison, making a
-  boundary- or policy-driven count change material even if every active row is
-  unchanged.
   The broadcaster first renders one Turbo Stream
   message containing the refresh plus the server-sorted composer selector,
   then sends that complete message once over solid_cable. The refresh GET
@@ -440,7 +438,8 @@ Honeycomb projections.
   down, not merely when `service_installed` is false. A
   stopped, otherwise healthy daemon points to `hive daemon start --detach`;
   a missing or drifted service points to `hive daemon install --force`.
-- **Archive (`/archive`)** — requests `StatusFeed#archive_snapshot`, whose
+- **Archive (`/archive`)** — is linked permanently from the status navigation
+  and requests `StatusFeed#archive_snapshot`, whose
   separate `Status.new(archive: true)` producer bypasses ordinary retention and
   is deliberately excluded from the live feed's priming and dedup baseline.
   It renders every workflow-aware archived task with the existing task

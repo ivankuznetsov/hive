@@ -3261,7 +3261,7 @@ module Hive
     #   poll_interval_sec >= 5         — anything tighter starves CPU on
     #                                    `hive status` subprocesses
     #   fast_poll_sec >= 1             — cheap reap/stat cadence between
-    #                                    full status polls
+    #                                    active status polls
     #   edit_debounce_sec >= 0         — 0 means "no debounce, dispatch
     #                                    on first mtime move"; valid choice
     #   pr_merge_poll_interval_sec >= 60 — `gh pr view` is rate-limited

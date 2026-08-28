@@ -1401,8 +1401,8 @@ module Hive
 
       --until settled returns when every selected task needs operator attention,
       needs repair, or is ready for completion. --until completion is stricter:
-      every task must be observed in the full status graph as archived. A task
-      disappearing from status is never treated as completion.
+      every task must be observed by its exact task projection as archived. A
+      task disappearing from status is never treated as completion.
 
       The observer is bounded by --timeout and --max-events. Three consecutive
       source failures or unexplained task absences fail with exit 69. SIGINT and

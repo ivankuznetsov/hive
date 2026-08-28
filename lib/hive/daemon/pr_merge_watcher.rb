@@ -155,9 +155,6 @@ module Hive
 
       def sync_candidates(identity, observed, rows, outcomes:, now:)
         observed_by_key = observed.to_h { |candidate| [ candidate.fetch("key"), candidate ] }
-        terminal_slugs = Array(rows).select { |row| terminal_row?(row) }.to_h do |row|
-          [ row.slug.to_s, true ]
-        end
         @store.transaction(identity, now: now) do |state|
           candidates = state.fetch("candidates")
           candidates_by_task = candidates.values.group_by do |candidate|
@@ -201,10 +198,10 @@ module Hive
             candidates_by_task[task_key] = task_candidates
           end
           candidates.each_value do |candidate|
-            next unless terminal_slugs.key?(candidate.dig("task", "slug"))
             next if observed_by_key.key?(candidate.fetch("key"))
+            next if @store.terminal_candidate?(candidate)
 
-            mark_terminal_candidate(candidate, identity, now: now)
+            reconcile_unobserved_candidate(candidate, identity, now: now)
           end
           state["backlog"] = {
             "watermark" => state.dig("backlog", "watermark") || now.utc.iso8601(6),
@@ -615,11 +612,17 @@ module Hive
         end
       end
 
-      def mark_terminal_candidate(candidate, identity, now:)
+      # Active-only scheduler frames intentionally omit terminal rows. Resolve
+      # only persisted candidates that disappeared from the active frame; a
+      # genuine terminal task carries its closure receipt, while a missing or
+      # still-active task leaves the candidate unchanged.
+      def reconcile_unobserved_candidate(candidate, identity, now:)
         task = Hive::TaskResolver.new(
           candidate.dig("task", "slug"),
           project_filter: identity.fetch("registration")
         ).resolve
+        return unless Hive::TaskClosure.terminal_task?(task)
+
         result = terminal_result(task, identity, now: now)
         apply_result!(candidate, result, now: now)
       rescue Hive::Error
@@ -707,10 +710,6 @@ module Hive
         return "dependency_blocked" if row.blocked == true
 
         nil
-      end
-
-      def terminal_row?(row)
-        row.stage.to_s == Hive::Stages::DIRS.last
       end
 
       def merge_observation(existing, observed)

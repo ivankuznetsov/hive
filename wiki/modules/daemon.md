@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-27
+updated: 2026-08-28
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -18,7 +18,7 @@ agents are detached durable attempts observed by the daemon;
 fair scheduling, and fenced completion for the
 language-neutral [[commands/refactor-patrol]] lifecycle. Each full tick also
 publishes an owner-private, atomic operational snapshot. The completed record
-also retains the exact full status graph that the tick already collected, so
+also retains the exact active status projection that the tick already collected, so
 concise `hive status` and `hive status --operational --json` can project it
 without another fleet scan. [[commands/watch]] and callers with their own graph
 still join scheduler evidence without making status itself perform daemon
@@ -55,15 +55,12 @@ global and project cutover explicitly through `hive migrate` or
 `hive migrate --all` while those processes are stopped. Startup opens only the
 current attempt layout and contains no legacy migration preflight or watcher.
 
-`StatusConsumer` passes through the additive condition projection fields and
-the project-level `hidden_archived_task_count` from ordinary `hive status
---json`. Its result sums that count without copying hidden rows into daemon
-memory. Dispatch still consumes the canonical visible `action` and diagnostic
-calculated by `TaskAction`; dependency admission was evaluated against the
-complete graph before presentation filtering, so an expired completed
-dependency remains satisfied. Operational snapshots publish the same aggregate
-count, and a count-only change is material snapshot state. The daemon defines
-no condition family, supersession, archive-retention, or gate rule of its own.
+`StatusConsumer` parses the active projection and retains only fields used by
+dispatch, recovery, capacity, dependency admission, and PR reconciliation. It
+does not copy condition histories, evidence arrays, diagnostics, plan-review
+payloads, terminal rows, or hidden-archive counts into daemon memory. Completed
+dependencies are resolved pointwise by the producer. The daemon defines no
+condition family, supersession, archive-retention, or gate rule of its own.
 Valid snapshots keep polling cheap. See [[modules/conditions]].
 
 ## Module map
@@ -73,8 +70,8 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and the brainstorm `answers_pending` / `answers_complete` signals. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps the hidden internal task-graph transport and bounded `--daemon-task project:slug` reads. Both return typed visible rows including `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry the validated source payload, project information, and the summed `hidden_archived_task_count`. Each row retains the task payload's exact `mtime` separately from the local state file's precise stat: scheduler/status identity uses the former, while edit-resume and recovery policy use the latter. Bounded responses never carry a fleet payload: they must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
-| `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery. Before the first successful reconciliation, `started` and `failed` remain explicit; afterward, an in-progress or failed tick cannot overwrite the same generation's still-valid completed scheduler authority. Scheduler task records bind to the exact source-payload `mtime`, including controller workflows whose folder and manifest mtimes differ, without changing the precise state-file timestamp used by recovery. Tick completion includes the final aggregate hidden-archive count. The large source `hive-status` graph is published once in a separate `StatusCache` file, so the ordinary scheduler `Reader`, web, and watch never parse or retain it; concise status explicitly reads and generation/tick/deadline-validates the cache. SIGHUP can only shorten retained authority to the reloaded poll interval; recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. Both stores atomically persist owner-private records. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps the hidden active task-graph transport and bounded `--daemon-task project:slug` reads. Both return only the typed row fields the daemon consumes; complete active results also carry the validated source payload and healthy-project information. Each row retains the payload's exact `mtime` separately from the local state file's precise stat. Bounded responses declare `partial: true`, match requested identities, and contain no project error; mismatch fails without replacing cached state. Missing admission state fails closed. Forward schema versions remain best-effort. |
+| `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery. Before the first successful reconciliation, `started` and `failed` remain explicit; afterward, an in-progress or failed tick cannot overwrite the same generation's still-valid completed scheduler authority. Scheduler task records bind to the exact source-payload `mtime`. The active source payload is published once in a separate `StatusCache` file, so the ordinary scheduler `Reader`, Web, and watch never parse it; concise status explicitly generation/tick/deadline-validates the cache. The completed snapshot is published before project-level Patrol discovery so a slow repository scan no longer withholds already-finished task reconciliation. Both stores atomically persist owner-private records. |
 | `Hive::Daemon::PatrolFixCandidateInventory` | `lib/hive/daemon/patrol_fix_candidate_inventory.rb` | Opens only exact `patrol-fix-manifest.json` files under workflow stage/task owners. It binds every owned manifest's canonical bytes into one full inventory count/digest, fails on owned corruption, ignores unrelated task metadata, and selects one deterministic relevance-ranked context of at most 64 rows and 192 KiB. Exact source identity, alias, and semantic-lineage overlap rank before path/lexical fallback; each selected row carries bounded secret-scanned remediation evidence and its own context digest. |
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared read-only `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, suppresses update-state orphan cleanup, bounds `installed_binary --version` probes to 10s, treats a stable service symlink and its current deployment target as the same binary by filesystem identity, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
@@ -87,7 +84,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` on the same retry ladder; it does not project or clear a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
 | `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
-| `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Durable task-bound reconciler for every coding task with a PR in stages 5–8, including error rows. It verifies the registered repository, observed PR head, immutable reachable merge SHA, current task generation, ownership, and local worktree safety; checkpoints GitHub and architecture-intake receipts before the next side effect; then calls the same evidence-bound closure transition used by an operator. Registrations with a blank or `local:` repository identity are quietly skipped because merge reconciliation is not applicable; a real GitHub identity mismatch still fails closed. New `pr.md` metadata carries the controller-observed head; older tasks may recover it only from a strictly owned registered worktree. A merged PR without that binding stays `ambiguous` and active. `OPEN`, closed-unmerged, cross-repository, held, unsafe, and failing candidates remain in the ledger. Observed-head drift stays held against automatic archive but continues bounded, identity-matched remote polling only when no current dependency, admission, repository, or PR-identity hold outranks it. `OPEN` or closed-unmerged facts release ordinary error recovery; merged, delivered-elsewhere, and ambiguous facts persist a terminal block before architecture intake or closure and stop polling. One candidate per project advances per tick, and retry counts never evict work. |
+| `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Durable task-bound reconciler for every coding task with a PR in stages 5–8, including error rows. It verifies the registered repository, observed PR head, immutable reachable merge SHA, current task generation, ownership, and local worktree safety; checkpoints GitHub and architecture-intake receipts before the next side effect; then calls the same evidence-bound closure transition used by an operator. When a persisted candidate disappears from the active frame, the watcher resolves only that exact task and accepts terminal state only through `TaskClosure.terminal_task?`; it no longer needs every `9-done` row as a tombstone. Registrations with a blank or `local:` repository identity are quietly skipped because merge reconciliation is not applicable; a real GitHub identity mismatch still fails closed. New `pr.md` metadata carries the controller-observed head; older tasks may recover it only from a strictly owned registered worktree. A merged PR without that binding stays `ambiguous` and active. `OPEN`, closed-unmerged, cross-repository, held, unsafe, and failing candidates remain in the ledger. Observed-head drift stays held against automatic archive but continues bounded, identity-matched remote polling only when no current dependency, admission, repository, or PR-identity hold outranks it. `OPEN` or closed-unmerged facts release ordinary error recovery; merged, delivered-elsewhere, and ambiguous facts persist a terminal block before architecture intake or closure and stop polling. One candidate per project advances per tick, and retry counts never evict work. |
 | `Hive::Daemon::PrMergeReconciliationStore` | `lib/hive/daemon/pr_merge_reconciliation_store.rb` | Owner-private project-local `daemon/pr-merge-reconciliation.json` ledger. Schema v1 binds registration/path/repository/default branch and stores a backlog watermark, fair cursor, generation-keyed candidates, remote/architecture/archive receipts, holds, and uncapped failure counts with capped hourly backoff. Writes lock, atomically replace, and fsync; corrupt or identity-drifted bytes are preserved under `daemon/quarantine/pr-merge-reconciliation/` and block only that project. |
 | `Hive::Daemon::RefactorPatrolMergeReconciler` | `lib/hive/daemon/refactor_patrol_merge_reconciler.rb` | Converges incremental exact-host GitHub catch-up and exact-PR intake into one durable merge-classification occurrence per repository/PR/merge identity. Deterministic skips settle inline; ambiguous provider work is only hydrated here and launches later as a supervised Patrol scan. Existing immutable PR-manifest v2 delivery is adopted without reclassification. The task-bound reconciler gets the first intake opportunity each tick; repository catch-up then uses the remaining bounded deadline. Persisted GitHub backoff begins at observed failure time (tick wall anchor plus monotonic elapsed), not stale tick start. First enablement still seeds a current high-water baseline instead of importing history; the authoritative checkpoint remains schema v2. |
 | `Hive::Daemon::RefactorPatrolMergeProgressStore` | `lib/hive/daemon/refactor_patrol_merge_progress_store.rb` | Crash-safe `reconciler-progress.json` sidecar for page cursors, accumulated merge identities, intake position, and GitHub retry state. It binds continuation to registration/repository identity plus the base v2 checkpoint fingerprint, writes atomically, fsyncs directory-entry changes, quarantines unsafe shapes/identity drift, and persists bounded exponential backoff with jitter. |
@@ -116,7 +113,7 @@ hive daemon start
             ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
-            ├─ Hive::Daemon::StatusConsumer      (hidden internal task graph)
+            ├─ Hive::Daemon::StatusConsumer      (hidden active task graph)
             ├─ Hive::Daemon::OperationalSnapshot (atomic scheduler observation)
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::RecoveryCoordinator  (durable guarded recovery)
@@ -142,7 +139,7 @@ retrying until one is durably dispatched.
 
 `run_forever` wakes at `daemon.fast_poll_sec` (default 1s) for a cheap
 probe: non-blocking child reap plus a rotating batch of at most 64 state-file
-mtime stats from the last full status scan. A child exit identifies its exact
+mtime stats from the last active status scan. A child exit identifies its exact
 tracked task; an mtime change identifies the task owning that file. The daemon
 then asks status for only those project/slug rows and applies only their
 per-task heal/dispatch path. Every refreshed row with a dependency fails closed
@@ -152,8 +149,8 @@ the last full attempt snapshot; a row that could heal or dispatch reconciles
 attempt ownership before policy runs. An ancillary child exit that has no task
 row triggers an immediate full tick so Patrol and digest follow-up keeps its
 existing wake behavior. `daemon.poll_interval_sec`
-(default 30s) remains the full-scan repair cadence for fleet schedulers, new or
-removed tasks, metadata/config changes, dependency release, archive counts,
+(default 30s) remains the active-fleet repair cadence for fleet schedulers, new or
+removed tasks, metadata/config changes, dependency release,
 and operational snapshot publication. The periodic interval starts when a full
 scan finishes, so a periodic scan that grows beyond 30 seconds cannot make its
 periodic replacement immediately overdue and pin the dispatcher in continuous
@@ -187,8 +184,9 @@ fetch status -> observe every task-bound PR in
 stages 5–8 -> advance one persisted merge candidate per project -> run
 repository-wide architecture catch-up -> heal stale ownership and cooled
 durable errors -> **process dispatch
-requests** -> patrol dispatches -> per-row dispatch -> prune baselines ->
-refresh cheap-probe mtime fingerprints. Merge reconciliation runs before
+requests** -> per-row dispatch -> prune baselines -> refresh cheap-probe mtime
+fingerprints -> publish the completed scheduler snapshot -> project-level
+Patrol discovery/dispatch. Merge reconciliation runs before
 automatic recovery so a safely delivered task cannot launch another provider
 attempt. Dependency/admission-held candidates stay persisted but ineligible;
 they are never dropped and become eligible when a later observation clears
@@ -207,8 +205,9 @@ be born with already-expired claim windows and fail every detached handoff as
 `launch_handoff_failed`.
 
 Scheduler decisions are captured in memory as each row is evaluated from the
-tick's one authoritative status frame. The dispatcher publishes that frame at
-completion without running a duplicate fleet projection and writes the exact
+tick's one authoritative active status frame. The dispatcher publishes that
+frame after task reconciliation and before project-level Patrol discovery,
+without running a duplicate fleet projection, and writes the exact
 validated source payload once to a separate owner-private atomic cache. This
 keeps scheduler phase writes and unrelated readers bounded to the small
 operational record. Concise status accepts the cache only while its effective

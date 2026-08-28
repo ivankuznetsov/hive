@@ -271,7 +271,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # hook). BubbleModel calling its hook and StateSource#request_archive_refresh
   # are each unit-tested in isolation; this pins the actual bound-method
   # handoff so the binding can't be dropped/mis-wired with both halves green.
-  def test_open_archive_pane_marks_state_source_cache_dirty_through_bound_method
+  def test_open_archive_pane_requests_state_source_refresh_through_bound_method
     require "hive/tui/state_source"
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     model = Hive::Tui::BubbleModel.new(
@@ -279,13 +279,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
       dispatch: @dispatch,
       archive_refresh: source.method(:request_archive_refresh)
     )
-    refute source.instance_variable_get(:@archive_refresh_dirty),
-           "a fresh StateSource starts with a clean archive cache"
+    refute source.instance_variable_get(:@archive_refresh_requested),
+           "a fresh StateSource has no pending archive request"
 
     model.update(Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
 
-    assert source.instance_variable_get(:@archive_refresh_dirty),
-           "opening the archive pane must flip StateSource's dirty flag via the bound hook"
+    assert source.instance_variable_get(:@archive_refresh_requested),
+           "opening the archive pane must reach StateSource via the bound hook"
   end
 
   # F2: full filter happy path through KeyMessage → KeyMap → Update.

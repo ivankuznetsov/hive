@@ -1290,3 +1290,32 @@ not stored in this repository, so this remains unproven as an end-to-end
 installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
+
+## Active-only status projections still need installed dogfood and Patrol decoupling (2026-08-28)
+
+Routine daemon, bot, TUI, Web, and watch consumers now request an active-only
+projection, while archive history is loaded only on demand. Focused tests and a
+read-only source-checkout run against the live registry prove that completed
+Patrol history is absent and per-project projection errors remain isolated.
+This has not yet been installed or dogfooded through the managed daemon, Web,
+bot, and TUI runtimes, so do not treat source-checkout evidence as rollout
+proof.
+
+The active projection is smaller, but it is not small: the sampled registry
+still contained 249 active rows, including 152 active Patrol Fix rows. The rich
+v7 producer emitted 1,578,516 JSON bytes and took 9.56 seconds; its admission
+pre-scan alone took 2.16 seconds before the 6.30-second rich row projection.
+Removing terminal transport therefore prevents unbounded archive growth but
+does not solve active-controller scale or the duplicate active metadata reads.
+Patrol discovery also still executes inside the
+coordinator tick. Publishing the operational snapshot before that scan keeps a
+completed scheduler pass visible sooner, but a Patrol scan that runs longer
+than the snapshot-validity window can still make scheduler status expire while
+work is running. A later change must decouple Patrol discovery from scheduler
+snapshot cadence rather than extending freshness or reintroducing a full-fleet
+projection.
+
+Finally, bot delivery of `auto_residue` on a row that becomes archived between
+polls has not been proven under the active-only transport. If that terminal
+transition carries a notification that was not visible before the move, the
+bot needs an exact event/receipt source instead of periodic archive scanning.

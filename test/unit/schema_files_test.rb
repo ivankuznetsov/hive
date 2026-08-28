@@ -37,6 +37,15 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_status_projection_enum_matches_the_runtime_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+
+    assert_equal Hive::Schemas::StatusProjectionKind::ALL.sort,
+                 document.dig(
+                   "$defs", "SuccessPayload", "properties", "projection", "enum"
+                 ).sort
+  end
+
   def test_plan_review_schema_is_registered_closed_and_versioned
     path = Hive::Schemas.schema_path("hive-plan-review")
     document = JSON.parse(File.read(path))

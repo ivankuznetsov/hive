@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-28
 tags: [architecture, overview]
 ---
 
@@ -245,7 +245,7 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 - **`Hive::Tui::PasteAwareRunner`** (`lib/hive/tui/paste_aware_runner.rb`) — `Bubbletea::Runner` subclass overriding `run_loop` / `process_input` to drain every raw read through `InputDecoder`. Pinned to bubbletea 0.1.4 (boot-time `VERSION` check) because the override touches private superclass instance variables.
 - **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, swallows unmapped-but-well-formed escape sequences atomically via generic grammars (ECMA-48 CSI, SS3, Alt-chords) so they cannot leak as KEY_ESC + literal bytes, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
 - **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns. Truncation is ANSI-aware: escape sequences carry zero visible width, survive cuts intact (a stranded SGR opener is closed with a trailing reset), and the cut is a strict prefix cut — once a visible grapheme does not fit, no later text token leaks through, even when mid-line escapes split the line into several visible runs. This lets views style a line before the final truncation pass (e.g. the new-idea project picker's reverse-video cursor row).
-- **`Hive::Tui::StateSource`** (`lib/hive/tui/state_source.rb`) — shared bounded projection cache. TUI mode keeps the complete archive for its in-process Archive pane; web mode keeps only visible terminal rows because `/archive` reads the unfiltered producer on demand. Idle ticks use fingerprints, liveness ticks parse active stages only, and policy/terminal/retention signals run one authoritative ordinary projection. Immutable cache replacement plus a generation-fenced writer prevents a stale background scan from winning a race. A refresh installs its mtime/policy fingerprints and cache pointers before publishing the lock-free `current` snapshot pointer, so observing a snapshot also guarantees its change-detection baseline is complete.
+- **`Hive::Tui::StateSource`** (`lib/hive/tui/state_source.rb`) — shared active-projection cache. Boot and routine ticks scan only stages that can hold active work; completed archive history is absent from the hot path. The TUI requests one background lossless archive projection only when the operator opens Archive, while Web's `/archive` invokes the lossless producer directly. Fingerprints gate unchanged active refreshes, a three-second fallback reparses liveness, and a publication mutex composes concurrently arriving active/archive results without one overwriting the other. Per-project archive degradation retains last-known rows with a visible warning. Lifecycle generations fence stopped workers, and restart serializes the replacement poller behind any scan that outlived the bounded stop join. A refresh installs its fingerprints before publishing the lock-free `current` snapshot pointer, so observing a snapshot also guarantees its change-detection baseline is complete.
 
 ### Key seams
 
@@ -331,10 +331,10 @@ live updates then flow over Turbo Streams, with production Action Cable acceptin
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast morph refresh plus a targeted composer-selector update over
 solid_cable. `StatusFeed` serializes concurrent Puma callers through
-`CachedStatusCommand`, which reuses a visible-only `StateSource`: its
-five-second hot path is active-task proportional, its missed-signal backstop is
-five minutes, and the complete archive producer runs only for an explicit
-archive request. Each accepted channel acquires one poller lease and releases it
+`CachedStatusCommand`, which reuses an active-only `StateSource`: its
+five-second hot path is active-task proportional, its three-second liveness
+fallback does not scan archive history, and the complete archive producer runs
+only for an explicit archive request. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
 release without serializing unrelated browser connections. A failed first

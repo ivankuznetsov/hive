@@ -58,10 +58,6 @@ class Project
   alias active_tasks tasks
   alias archived_tasks tasks
 
-  def hidden_archived_task_count
-    attributes.fetch("hidden_archived_task_count", 0)
-  end
-
   def default_workflow
     config["default_workflow"].presence
   rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e

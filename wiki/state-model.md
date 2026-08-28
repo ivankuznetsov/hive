@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-24
+updated: 2026-08-28
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -499,14 +499,13 @@ is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. Status-page HTTP requests read `StatusFeed#current_state`
 without scanning. A cold process returns an explicit loading snapshot; the
 first accepted Cable subscription computes
-`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` on the
-broadcaster thread, then overlays canonical recovery receipts from that same
-producer's operational payload by project/slug in memory. This performs no
-second registry scan. This ordinary archive projection includes each
-project's aggregate `hidden_archived_task_count`; task objects remain
-unchanged. `StatusFeed#archive_snapshot` separately requests lossless archive
-mode for the dedicated Archive route and never primes or replaces the ordinary
-live-feed baseline. Cached page renders carry the canonical SHA-256 token for
+`Hive::Commands::Status#active_payload(Hive::Config.registered_projects)` on
+the broadcaster thread, then overlays canonical recovery receipts from that
+same producer's operational payload by project/slug in memory. This performs
+no second registry scan. Archived task rows and hidden-archive aggregates are
+absent from the routine feed. `StatusFeed#archive_snapshot` separately requests
+lossless archive mode for the dedicated Archive route and never primes or
+replaces the active live-feed baseline. Cached page renders carry the canonical SHA-256 token for
 the exact semantic payload they saw. A cold loading page carries a bounded
 sentinel token that remains current only until its first background publication
 succeeds, preventing a catch-up request from racing that publication. The
@@ -541,11 +540,9 @@ before stream registration is queued, so rejection cannot race a late pub/sub
 handler into the adapter. While pages are connected,
 `StatusFeed#each_snapshot` polls at a five-second interval and compares
 snapshots with only volatile `generated_at` /
-`age_seconds` fields removed. `hidden_archived_task_count`, `mtime`, and
-`folder_mtime` deliberately remain
+`age_seconds` fields removed. `mtime` and `folder_mtime` deliberately remain
 part of the comparison key because task pages use those changes as the liveness
-signal for artifact/log refreshes while agents write and count-only retention
-changes must refresh ordinary surfaces. The key is published
+signal for artifact/log refreshes while agents write. The key is published
 beside the payload and an unchanged key reuses the existing SHA-256 token,
 avoiding a second normalization plus canonical serialization/hash each tick.
 `StatusBroadcaster`

@@ -993,15 +993,19 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
-  def test_terminal_rows_reconcile_candidates_and_terminal_receipts
+  def test_unobserved_active_candidates_resolve_exact_terminal_receipts
     with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
       task = tasks.first
       watcher, store = build_watcher
       watcher.observe([ row_for(task) ], now: T0)
 
-      terminal = row_for(task)
-      terminal.stage = Hive::Stages::DIRS.last
-      watcher.observe([ terminal ], now: T0 + 1)
+      terminal_folder = File.join(
+        task.hive_state_path, "stages", Hive::Stages::DIRS.last, task.slug
+      )
+      FileUtils.mkdir_p(File.dirname(terminal_folder))
+      FileUtils.mv(task.folder, terminal_folder)
+      archived_task = Hive::Task.new(terminal_folder)
+      watcher.observe([], now: T0 + 1, projects: [ "app" ])
 
       candidate = store.load(identity_for(task.project_root))
                        .fetch("candidates").values.first
@@ -1020,7 +1024,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       ) do
         result = watcher.send(
           :terminal_result,
-          task,
+          archived_task,
           identity_for(task.project_root),
           now: T0
         )
@@ -1032,11 +1036,37 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       missing = deep_copy(candidate)
       missing["task"]["slug"] = "missing-task"
       assert_nil watcher.send(
-        :mark_terminal_candidate,
+        :reconcile_unobserved_candidate,
         missing,
         identity_for(task.project_root),
         now: T0
       )
+    end
+  end
+
+  def test_unobserved_terminal_candidates_age_out_without_exact_reconciliation
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      task = tasks.first
+      watcher, store = build_watcher
+      watcher.observe([ row_for(task) ], now: T0)
+      identity = identity_for(task.project_root)
+      terminal_folder = File.join(
+        task.hive_state_path, "stages", Hive::Stages::DIRS.last, task.slug
+      )
+      FileUtils.mkdir_p(File.dirname(terminal_folder))
+      FileUtils.mv(task.folder, terminal_folder)
+      terminal_at = T0 + 1
+      store.transaction(identity, now: terminal_at) do |state|
+        candidate = state.fetch("candidates").values.first
+        candidate["archive"]["status"] = "archived"
+        candidate["updated_at"] = terminal_at.utc.iso8601(6)
+      end
+      retirement_time = terminal_at +
+                        Hive::Daemon::PrMergeReconciliationStore::TERMINAL_RETENTION_SEC + 1
+
+      watcher.observe([], now: retirement_time, projects: [ "app" ])
+
+      assert_empty store.load(identity).fetch("candidates")
     end
   end
 

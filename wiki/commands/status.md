@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-26
+updated: 2026-08-28
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -27,10 +27,13 @@ terminal history. The former public full-fleet status surface is removed.
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
 
-The daemon and bot temporarily use a hidden `--internal-task-graph` transport
-while their purpose-built projections are extracted. It is not a public CLI
-contract and must not be used by plugins or agents. The end state removes that
-fleet-wide v7 transport after those consumers migrate.
+The daemon and bot temporarily use a hidden `--internal-task-graph` transport,
+but it now carries only the active projection (`projection: active`). It is not
+a public CLI contract and must not be used by plugins or agents. Exact daemon
+refreshes use `projection: partial`; bounded Watch refreshes attach an
+authoritative exact-rooted dependency closure to that same partial row set.
+`hive archive --json` uses `projection: archive`. The compatibility v7 envelope
+remains only while purpose-built consumer contracts are extracted.
 
 ## Bounded running-task contract
 
@@ -88,16 +91,16 @@ counts and `source.scan_truncated`, `truncated`, and `complete: false` make that
 omission explicit. `limits` publishes every row, byte, project, and directory
 entry cap.
 
-Operational status does not rescan every task when the live daemon already has an
-authoritative full graph. Each completed full daemon tick publishes that exact
+Operational status does not rescan active tasks when the live daemon already has an
+authoritative active projection. Each completed daemon tick publishes that exact
 `hive-status` payload once in a dedicated owner-private atomic cache, separate
 from the small operational scheduler snapshot. Only `--operational` opts into
 the large cache. It accepts it only when
 its daemon generation, tick, deadline, schema, and registered project identities
 match the live scheduler observation and registry. An absent, invalid, expired,
 or mismatched cache falls back to the ordinary fresh graph scan. Default
-status never reads this cache. Archive, diagnosis, and the hidden internal
-task-graph surfaces keep their existing fresh-read contracts; the daemon's
+status never reads this cache. Archive and diagnosis keep their independent
+fresh-read contracts; the daemon's
 own graph producer cannot consume its cache recursively.
 
 The cache is a bounded freshness optimization, not a second source of truth.
@@ -119,14 +122,14 @@ The operational human heading reports the cached graph's age. The operational
 JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
 `age_seconds` separately from the projection timestamp.
 
-The operational document projects every non-archived task into exactly one of
+The operational document projects every active task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
 `waiting_on_provider_or_scheduler`, `completion_ready`, `idle`, or `unknown`.
 Classification precedence is running, repair, human input, provider/scheduler,
 completion, unknown, then idle. The human renderer deliberately displays
 running, human input, repair, provider/scheduler, completion, unknown, then
 idle; it caps each band at five rows and directs overflow to `hive tui`. The
-human view prints active/archive counts, exact project/slug
+human view prints the active count and an archive-on-demand hint, exact project/slug
 identity, stage/marker, blocker owner, reason, and source issues. The JSON
 document additionally carries project counts, daemon/scheduler identity and
 freshness, structured provider/retry evidence, and the exact durable routing
@@ -201,7 +204,8 @@ from missing evidence.
 identity (the daemon-recorded identity for a cache hit, or the CLI identity
 for a fresh scan),
 summary/state counts, daemon identity and
-phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
+phase, scheduler capacity/queue/provider holds, compatibility archive counts
+(zero on the active projection), typed issues,
 the required bounded `attempt_storage` cell for the current physical
 `attempts/v4` layout, per-task liveness/freshness,
 blocker ownership and reasons, nullable retry
@@ -252,17 +256,17 @@ status-issued tokens.
 
 Status captures every registered project's workflow/config generation before
 scanning any project's rows, captures one UTC `now`, and then publishes either
-the ordinary or dedicated archive projection. Dependency admission uses those
-same captured generations and is built from the complete
-graph before presentation filtering, so an expired completed dependency still
-satisfies its dependants. When concise operational status builds that graph, it
+the active or dedicated archive projection. Routine dependency admission scans
+active metadata plus only the exact terminal prerequisites those active tasks
+reference, recursively. Unrelated Patrol history is not parsed, while a
+completed dependency still satisfies its dependants. When concise operational status builds that graph, it
 also derives each project's `daemon.enabled` context from the captured
 generation instead of parsing the project config a second time. Callers that
 provide an existing status payload retain the context-only config read and do
-not trigger a new workflow-generation scan. Daemon, bot, TUI, and web consume
-the ordinary projection. The TUI separately caches a fresh archive-mode
-payload for its dedicated archive pane and dependency context; it never
-reconstructs ordinary visibility from row timestamps.
+not trigger a new workflow-generation scan. Daemon, bot, TUI, and Web consume
+the active projection. The TUI starts one background lossless archive read only
+after the operator opens its Archive pane; Web reads the archive only for
+`/archive`. Neither surface merges terminal rows back into its routine feed.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report
@@ -308,8 +312,9 @@ Condition-aware rows add `condition_task_generation`, `commit_generation`,
 `condition_gate`, `condition_migration`, `condition_provenance`,
 `condition_overrides`, `shadow_audit`, and `condition_warning`. Existing marker/action/attrs fields
 stay stable. Status reads the one canonical [[modules/conditions]] projection;
-daemon, TUI, bot, and web pass through that payload instead of deriving their
-own condition semantics. Snapshot validation or journal replay is read-only:
+task-detail and presentation consumers may use that payload, while daemon and
+bot adapters retain only the small fields they actually consume. Snapshot
+validation or journal replay is read-only:
 status never observes git/GitHub, creates a baseline/audit, or publishes a
 repaired snapshot.
 
@@ -363,7 +368,9 @@ another without being misclassified.
 Each resolved workflow supplies `archive_visibility_retention_days`: a
 positive integer or normalized `:never`. Descriptor omission means `3`.
 Resolution follows explicit task pin, project default, then `coding`.
-`never` remains visible in ordinary views. For integers, the immutable
+`never` remains visible only in the compatibility ordinary projection. Routine
+daemon, bot, watch, TUI, Web, and operational projections omit every resolved
+archived task regardless of retention. For integers, the immutable
 `completed_at` clock is compared in UTC seconds and hides only when
 `now - completed_at > days * 86_400`; equality remains visible. Descriptor,
 project-default, and task-pin changes reproject on the next refresh from the
@@ -391,15 +398,11 @@ durable per-project cursor under Hive's state home rotates past persistent
 failures across one-shot CLI processes, and the path-only backfill commit
 preserves unrelated staged operator changes.
 
-Operational status, daemon snapshots, TUI, web, and Hivebox omit expired
-archived rows. Every
-successful ordinary project JSON object carries the non-negative
-`hidden_archived_task_count` (including `0`); task objects do not expose
-`completed_at`, retention, hidden details, or hidden reasons. Operational
-status and daemon snapshots aggregate the same key without copying hidden
-rows. Human CLI and TUI surfaces render
-`… and 1 older archived task (hive archive to view)` or
-`… and N older archived tasks (hive archive to view)`.
+Operational status, daemon snapshots, TUI, Web, and Hivebox now omit all
+archived rows. The v7 project and operational v4 summary keep their legacy
+archive-count keys at zero for wire compatibility, but consumers no longer
+transport, merge, or render hidden counts. Operators use the permanent Archive
+entry point or `hive archive` for terminal history.
 
 `hive archive` with no target reuses Status in archive mode
 (`Hive::Commands::Status.new(archive: true)`). It lists every workflow-aware
@@ -459,19 +462,24 @@ The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` 
 - Project path missing → `"<name>: missing project path <path>"`.
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
-- Expired workflow-archived rows → hidden from ordinary text/JSON by the
-  resolved policy and immutable completion clock, with the per-project summary
-  line above.
+- Resolved archived rows → absent from routine projections; use
+  `hive archive` for lossless terminal history.
 - Daily and archive-mode task identity is left-padded to 49 chars; it includes id, fixed-width PR token, and display name/slug. State label is left-padded to 24 chars, followed by the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.
 
 ## How tasks are discovered
 
-For each stage in `Hive::Workflows.all_stage_dirs` (the union of every live
-registered descriptor; coding remains the default source of truth via
-`Hive::Stages::DIRS`), plus on-disk stages referenced by an explicit task pin
-or an unavailable project default, `collect_rows` walks
+Ordinary and archive projections walk each stage in the captured workflow
+generation. Active projections instead walk `Workflow#active_stage_dirs`: all
+nonterminal stages plus any non-inert terminal stage that can still require
+work. Inert terminal stages are excluded before their task directories
+are enumerated. Ordinary projections additionally include on-disk stages
+referenced by an explicit task pin or an unavailable project default. Exact
+partial projections address selected task folders directly across every stage
+and bypass ordinary archive-retention hiding; when requested by Watch,
+dependency admission begins at those exact roots and recursively loads only
+their referenced prerequisites. `collect_rows` walks
 `<hive_state>/stages/<stage>/*` through the `stage_task_entries(stage_dir)`
 seam. All project config/default-workflow/descriptor generations are captured
 before the first project scan and passed to every `Hive::Task` and dependency
@@ -483,7 +491,7 @@ Error rows rather than disappearing. Marker is read with
 and otherwise the directory mtime; `observation_mtime` is the state-file mtime
 when present, then `meta.yml`, then the directory fallback.
 
-One full status scan opens one read-only durable attempt store and shares it
+One detailed status projection opens one read-only durable attempt store and shares it
 across every task projection and closure projection. A scan-scoped projection
 reader also caches each immutable attempt binding, including a missing result,
 so journal replay and closure validation cannot repeat the same global point
@@ -592,11 +600,10 @@ task/commit locks and committed before the clock can hide a row.
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
 - `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
-- `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, workflow-aware retention/count projection, strict boundaries, and lossless archive-mode listing.
+- `test/unit/commands/status_test.rb` — status row collection, active/partial/archive projection identity, exact terminal dependency closure, generic active terminal stages, per-project `project_load_failed` degradation, stage-move races, legacy warnings, task metadata, and lossless archive-mode listing.
 - `test/integration/archive_visibility_retention_test.rb` — one fixed-clock
-  mixed legacy/`7`/`never` project drives ordinary status, operational
-  aggregation, daemon parsing, TUI ordinary/archive snapshots, and the web feed;
-  a preserved-mtime same-size policy edit reprojects on the next refresh.
+  mixed legacy/`7`/`never` project proves that every routine consumer remains
+  active-only while the explicit archive stays lossless.
 - `test/unit/operational_status_test.rb` — closed state projection, source
   completeness, scheduler joins/freshness, archive summaries, and schema.
 - `test/unit/operational_action_test.rb` and

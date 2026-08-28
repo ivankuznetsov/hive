@@ -8,8 +8,14 @@ require "hive/web/status_feed"
 class ArchiveVisibilityRetentionTest < Minitest::Test
   include HiveTestHelper
 
-  FixedStatus = Data.define(:command, :project, :now) do
+  FixedStatus = Data.define(:command, :project, :now, :active) do
+    def initialize(command:, project:, now:, active: false)
+      super
+    end
+
     def json_payload(_registered_projects)
+      return command.active_payload([ project ], now: now) if active
+
       command.json_payload([ project ], now: now)
     end
   end
@@ -24,7 +30,9 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
         ordinary_command = Hive::Commands::Status.new
         archive_command = Hive::Commands::Status.new(archive: true)
         feed = Hive::Web::StatusFeed.new(
-          status_command: FixedStatus.new(command: ordinary_command, project:, now: NOW),
+          status_command: FixedStatus.new(
+            command: ordinary_command, project:, now: NOW, active: true
+          ),
           archive_status_command: FixedStatus.new(command: archive_command, project:, now: NOW)
         )
 
@@ -35,18 +43,14 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
         ordinary_slugs = ordinary_project.fetch("tasks").map { |row| row.fetch("slug") }.sort
         archive_slugs = archive_project.fetch("tasks").map { |row| row.fetch("slug") }.sort
 
-        assert_equal %w[
-          active-coding-260724-abcd boundary-legacy-260721-abcd
-          visible-forever-260416-abcd visible-seven-260719-abcd
-          visible-three-260722-abcd
-        ], ordinary_slugs
+        assert_equal %w[active-coding-260724-abcd], ordinary_slugs
         assert_equal %w[
           boundary-legacy-260721-abcd expired-legacy-260720-abcd
           expired-seven-260716-abcd expired-three-260720-abcd
           visible-forever-260416-abcd visible-seven-260719-abcd
           visible-three-260722-abcd
         ], archive_slugs
-        assert_equal 3, ordinary_project.fetch("hidden_archived_task_count")
+        assert_equal 0, ordinary_project.fetch("hidden_archived_task_count")
         refute archive_project.key?("hidden_archived_task_count")
 
         (ordinary_project.fetch("tasks") + archive_project.fetch("tasks")).each do |row|
@@ -60,20 +64,20 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
           now: NOW
         ).to_h
         assert_equal 1, operational.dig("summary", "active")
-        assert_equal 4, operational.dig("summary", "archived")
-        assert_equal 3, operational.dig("summary", "hidden_archived_task_count")
+        assert_equal 0, operational.dig("summary", "archived")
+        assert_equal 0, operational.dig("summary", "hidden_archived_task_count")
 
         consumer = Hive::Daemon::StatusConsumer.new
         daemon_projects = consumer.send(:extract_projects, ordinary)
         daemon_rows = consumer.send(:extract_rows, ordinary)
         assert_equal 1, daemon_projects.size
-        assert_equal 3, daemon_projects.fetch(0).hidden_archived_task_count
+        refute_respond_to daemon_projects.fetch(0), :hidden_archived_task_count
         assert_equal ordinary_slugs, daemon_rows.map(&:slug).sort
 
         tui = Hive::Tui::Snapshot.from_payload(ordinary, archive_payload: archive)
         assert_equal ordinary_slugs, tui.rows.map(&:slug).sort
         assert_equal archive_slugs, tui.archive_rows.map(&:slug).sort
-        assert_equal 3, tui.hidden_archived_task_count
+        refute_respond_to tui, :hidden_archived_task_count
       ensure
         feed&.stop
         Hive::Workflows::Project.reset!
@@ -81,7 +85,7 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
     end
   end
 
-  def test_same_size_policy_edit_reprojects_on_the_next_web_refresh
+  def test_archive_retention_edit_does_not_change_the_active_web_projection
     with_tmp_global_config do
       with_tmp_dir do |project_root|
         project = build_mixed_project(project_root)
@@ -89,7 +93,7 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
         original_mtime = File.mtime(seven_path)
         feed = Hive::Web::StatusFeed.new(
           status_command: FixedStatus.new(
-            command: Hive::Commands::Status.new, project:, now: NOW
+            command: Hive::Commands::Status.new, project:, now: NOW, active: true
           )
         )
         initial = feed.snapshot
@@ -105,10 +109,10 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
         feed.send(:publish, changed)
 
         project_payload = changed.fetch("projects").fetch(0)
-        refute_includes project_payload.fetch("tasks").map { |row| row.fetch("slug") },
-                        "visible-seven-260719-abcd"
-        assert_equal 4, project_payload.fetch("hidden_archived_task_count")
-        refute feed.current_version?(initial_token)
+        assert_equal %w[active-coding-260724-abcd],
+                     project_payload.fetch("tasks").map { |row| row.fetch("slug") }
+        assert_equal 0, project_payload.fetch("hidden_archived_task_count")
+        assert feed.current_version?(initial_token)
       ensure
         feed&.stop
         Hive::Workflows::Project.reset!

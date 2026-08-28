@@ -409,50 +409,6 @@ module Hive
         # normal workflow capacity instead.
         run_patrol_fix_admission_scheduler_tick(now: now)
 
-        # 3c. Project-level patrol scans are not task rows, so they do
-        # not go through Policy. They still pass through the same
-        # daemon.enabled, legacy-layout, dry-run, and concurrency gates
-        # before any subprocess is spawned.
-        patrol_candidates = if @patrol_arbiter
-          begin
-            @patrol_arbiter.candidates(now: now)
-          rescue Hive::Daemon::PatrolArbiter::StateError => e
-            @logger.event(
-              :architecture_patrol_blocked,
-              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
-            )
-            []
-          end
-        else
-          @patrol_scheduler&.tick(now: now)
-        end
-        patrol_events = @patrol_scheduler&.drain_events
-        Array(patrol_events).each do |event|
-          @logger.event(
-            :patrol_recovery_blocked,
-            **event.reject { |key, _value| key == :status }
-          )
-        end
-        architecture_events = @refactor_patrol_scheduler&.drain_events
-        Array(architecture_events).each do |event|
-          @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
-        end
-        Array(patrol_candidates).each do |patrol_dispatch|
-          unless admission_open?
-            unless @patrol_arbiter
-              close_patrol_admission(
-                project: patrol_dispatch[:project],
-                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
-                reserved: patrol_dispatch,
-                now: now
-              )
-            end
-            next
-          end
-
-          dispatch_patrol_with_gates(patrol_dispatch, now: now)
-        end
-
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
         # ahead of newer earlier-stage work when slots are scarce.
@@ -480,10 +436,16 @@ module Hive
 
         publish_complete_operational_snapshot(
           rows: result.rows,
-          hidden_archived_task_count: result.hidden_archived_task_count,
           status_payload: result.status_payload,
           now: now
         )
+
+        # Publish task reconciliation before project-level Patrol discovery.
+        # Git/config inspection can be slow or blocked on one repository, while
+        # the task pass above is already authoritative and must become visible
+        # immediately. Patrol uses its own concurrency budget, so running it
+        # after task dispatch does not change normal workflow admission priority.
+        run_patrol_scheduler_tick(now: now)
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -1020,6 +982,49 @@ module Hive
           message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
           keeping_previous: true
         )
+      end
+
+      def run_patrol_scheduler_tick(now:)
+        patrol_candidates = if @patrol_arbiter
+          begin
+            @patrol_arbiter.candidates(now: now)
+          rescue Hive::Daemon::PatrolArbiter::StateError => e
+            @logger.event(
+              :architecture_patrol_blocked,
+              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
+            )
+            []
+          end
+        else
+          @patrol_scheduler&.tick(now: now)
+        end
+        Array(@patrol_scheduler&.drain_events).each do |event|
+          @logger.event(
+            :patrol_recovery_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
+        Array(@refactor_patrol_scheduler&.drain_events).each do |event|
+          @logger.event(
+            :architecture_patrol_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
+        Array(patrol_candidates).each do |patrol_dispatch|
+          unless admission_open?
+            unless @patrol_arbiter
+              close_patrol_admission(
+                project: patrol_dispatch[:project],
+                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
+                reserved: patrol_dispatch,
+                now: now
+              )
+            end
+            next
+          end
+
+          dispatch_patrol_with_gates(patrol_dispatch, now: now)
+        end
       end
 
       def dispatch_patrol_fix_semantic(result, now:)
@@ -1846,8 +1851,7 @@ module Hive
         log_operational_snapshot_failure(phase: "observe", error: e)
       end
 
-      def publish_complete_operational_snapshot(rows:, hidden_archived_task_count: 0,
-                                                status_payload: nil, now:)
+      def publish_complete_operational_snapshot(rows:, status_payload: nil, now:)
         return unless @operational_snapshot
 
         completed_at = operational_snapshot_now
@@ -1856,7 +1860,6 @@ module Hive
           :complete,
           phase: "complete",
           rows: rows,
-          hidden_archived_task_count: hidden_archived_task_count,
           status_payload: status_payload,
           controller: @controller.operational_snapshot(now: completed_at),
           queue: operational_queue_snapshot(now: completed_at, queue_state: queue_state),

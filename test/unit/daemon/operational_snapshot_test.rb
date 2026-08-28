@@ -116,7 +116,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         safety_reason: "worktree clean"
       )
       assembler.complete(
-        rows: [ observed ], hidden_archived_task_count: 2,
+        rows: [ observed ],
         controller: { "limits" => { "global" => 2 }, "in_flight" => 2 },
         queue: { "pending" => 1 },
         recoveries: {}, now: T0 + 1
@@ -135,28 +135,10 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
                    snapshot.dig("tasks", 0, "disposition", "routing", "decision_id")
       assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
       assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
-      assert_equal 2, snapshot.fetch("hidden_archived_task_count")
+      refute snapshot.key?("hidden_archived_task_count")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
       assert_equal 0o600, File.stat(path).mode & 0o777
       assert_empty Dir.glob(File.join(File.dirname(path), ".*tmp*"))
-    end
-  end
-
-  def test_hidden_archive_count_is_published_from_the_tick_snapshot
-    with_tmp_dir do |dir|
-      path = File.join(dir, "private", "operational-snapshot.json")
-      _store, assembler, reader = build(path)
-      observed = row
-
-      assembler.begin_tick(now: T0)
-      assembler.complete(
-        rows: [ observed ], hidden_archived_task_count: 2,
-        controller: {}, queue: {}, recoveries: {}, now: T0 + 1
-      )
-
-      snapshot = reader.read(now: T0 + 2)
-      assert_equal "current", snapshot.fetch("status")
-      assert_equal 2, snapshot.fetch("hidden_archived_task_count")
     end
   end
 
@@ -892,23 +874,6 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         reader.send(:expected_daemon)
       end
       assert_equal :unavailable, gone
-    end
-  end
-
-  def test_complete_rejects_invalid_hidden_archive_counts
-    with_tmp_dir do |dir|
-      _store, assembler, _reader = build(File.join(dir, "snapshot.json"))
-      assembler.begin_tick(now: T0)
-
-      error = assert_raises(ArgumentError) do
-        assembler.complete(
-          rows: [], hidden_archived_task_count: -1,
-          controller: {}, queue: {}, recoveries: {}, now: T0 + 1
-        )
-      end
-
-      assert_includes error.message, "hidden_archived_task_count"
-      assert_includes error.message, "non-negative integer"
     end
   end
 end

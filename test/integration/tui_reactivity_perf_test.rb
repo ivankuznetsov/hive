@@ -27,12 +27,10 @@ class TuiReactivityPerfTest < Minitest::Test
     small = measure_fixture(tasks_per_project: SMALL_TASKS_PER_PROJECT)
     large = measure_fixture(tasks_per_project: LARGE_TASKS_PER_PROJECT)
 
-    # Gate the parseability invariant in CI (previously only asserted behind
-    # HIVE_TUI_PROFILE=1): every fixture task must materialize into a row, so
-    # a regression that silently drops rows fails here, not just under the
-    # opt-in profile.
-    assert_equal PROJECTS * LARGE_TASKS_PER_PROJECT, large.fetch(:rows),
-                 "all #{PROJECTS}x#{LARGE_TASKS_PER_PROJECT} tasks must parse into rows"
+    # Routine TUI refreshes must materialize every active row and none of the
+    # much larger terminal history. This also pins archive-size independence.
+    assert_equal ACTIVE_TOTAL, large.fetch(:rows),
+                 "routine refresh must project only the #{ACTIVE_TOTAL} active tasks"
 
     # Absolute wall-clock budgets are host-dependent and PROVEN flaky on
     # slow/loaded machines (a reviewer's run measured the active parse at
@@ -99,7 +97,7 @@ class TuiReactivityPerfTest < Minitest::Test
 
   def force_active_reparse(source)
     source.instance_variable_set(
-      :@last_full_parse_at,
+      :@last_active_parse_at,
       Time.now - (Hive::Tui::StateSource::LIVENESS_REPARSE_FALLBACK_SECONDS + 1.0)
     )
     source.send(:refresh_once)

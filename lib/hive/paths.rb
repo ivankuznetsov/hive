@@ -34,7 +34,7 @@ module Hive
       File.join(root, "operational", "daemon-snapshot.json")
     end
 
-    # The daemon's last validated full status graph. Kept separate from the
+    # The daemon's last validated active-task status payload. Kept separate from the
     # small scheduler snapshot so unrelated readers never parse the fleet.
     def operational_status_cache_path(root = state_home)
       File.join(root, "operational", "daemon-status-cache.json")

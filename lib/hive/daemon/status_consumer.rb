@@ -21,14 +21,11 @@ module Hive
                        :status_payload_mtime, :state_file_mtime,
                        :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
-                       :task_lock_id, :diagnostic, :depends_on, :blocked_by,
+                       :task_lock_id, :depends_on, :blocked_by,
                        :dependency_stage, :blocked, :admission_error,
                        :attempt_id, :task_generation,
                        :condition_task_generation, :commit_generation, :current_attempt,
-                       :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
-                       :condition_migration, :condition_provenance, :shadow_audit,
-                       :condition_warning, :pr_url,
-                       :plan_review,
+                       :pr_url,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -36,11 +33,8 @@ module Hive
       # advancing on top of a renamed stage dir would silently lose work.
       # `legacy_stage_dirs` is the project payload's array verbatim (empty
       # when the project is clean). Issue #95.
-      ProjectInfo = Struct.new(
-        :name, :legacy_stage_dirs, :hidden_archived_task_count,
-        keyword_init: true
-      ) do
-        def initialize(name:, legacy_stage_dirs: [], hidden_archived_task_count: 0)
+      ProjectInfo = Struct.new(:name, :legacy_stage_dirs, keyword_init: true) do
+        def initialize(name:, legacy_stage_dirs: [])
           super
         end
 
@@ -64,7 +58,7 @@ module Hive
       # nil because they are not an authoritative fleet snapshot.
       Result = Struct.new(
         :ok, :rows, :projects, :error, :warning,
-        :hidden_archived_task_count, :status_payload,
+        :status_payload,
         keyword_init: true
       ) do
         def initialize(
@@ -73,7 +67,6 @@ module Hive
           projects: [],
           error: nil,
           warning: nil,
-          hidden_archived_task_count: 0,
           status_payload: nil
         )
           super
@@ -109,7 +102,7 @@ module Hive
         out, err, status = Open3.capture3(@extra_env, @hive_bin, *argv)
         unless status.success?
           return Result.new(
-            ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
+            ok: false, rows: [], projects: [],
             error: "hive status exited #{status.exitstatus}: #{err.strip}"
           )
         end
@@ -135,7 +128,7 @@ module Hive
         # long-running daemon process. The dispatcher logs `warning`.
         if skew == :older
           return Result.new(
-            ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
+            ok: false, rows: [], projects: [],
             error: older_skew_message(doc)
           )
         end
@@ -156,24 +149,23 @@ module Hive
           raise unless skew == :newer
 
           return Result.new(
-            ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
+            ok: false, rows: [], projects: [],
             error: forward_skew_message(doc, underlying: e)
           )
         end
         Result.new(
           ok: true, rows: rows, projects: projects, error: nil,
           warning: success_warning(skew, doc, err),
-          hidden_archived_task_count: projects.sum(&:hidden_archived_task_count),
           status_payload: require_partial ? nil : doc
         )
       rescue JSON::ParserError => e
         Result.new(
-          ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
+          ok: false, rows: [], projects: [],
           error: "malformed JSON from hive status: #{e.message}"
         )
       rescue StandardError => e
         Result.new(
-          ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
+          ok: false, rows: [], projects: [],
           error: "#{e.class}: #{e.message}"
         )
       end
@@ -305,18 +297,7 @@ module Hive
               condition_task_generation: task["condition_task_generation"],
               commit_generation: task["commit_generation"],
               current_attempt: task["current_attempt"],
-              conditions: Array(task["conditions"]),
-              condition_history: Array(task["condition_history"]),
-              evidence: Array(task["evidence"]),
-              condition_overrides: Array(task["condition_overrides"]),
-              condition_gate: task["condition_gate"],
-              condition_migration: task["condition_migration"],
-              condition_provenance: task["condition_provenance"] || {},
-              shadow_audit: task["shadow_audit"] || {},
-              condition_warning: task["condition_warning"],
               pr_url: task["pr_url"],
-              plan_review: task["plan_review"],
-              diagnostic: task["diagnostic"],
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],
               dependency_stage: task["dependency_stage"],
@@ -368,17 +349,9 @@ module Hive
       # correspondence with dispatchable projects. Issue #95.
       def extract_projects(doc)
         Array(doc["projects"]).reject { |p| p["error"] }.map do |project_doc|
-          hidden_count = project_doc.fetch("hidden_archived_task_count", 0)
-          unless hidden_count.is_a?(Integer) && hidden_count >= 0
-            raise ArgumentError,
-                  "project #{project_doc['name'].inspect} has invalid " \
-                  "hidden_archived_task_count #{hidden_count.inspect}"
-          end
-
           ProjectInfo.new(
             name: project_doc["name"],
-            legacy_stage_dirs: Array(project_doc["legacy_stage_dirs"]),
-            hidden_archived_task_count: hidden_count
+            legacy_stage_dirs: Array(project_doc["legacy_stage_dirs"])
           )
         end
       end

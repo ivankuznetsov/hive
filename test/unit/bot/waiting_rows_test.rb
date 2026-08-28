@@ -14,7 +14,6 @@ class HiveBotWaitingRowsTest < Minitest::Test
     Row.new(
       project: "hive",
       project_path: "/tmp/hive",
-      hive_state_path: "/tmp/hive/.hive-state",
       slug: slug,
       id: id,
       display_name: display_name,

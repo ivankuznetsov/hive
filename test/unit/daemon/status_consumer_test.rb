@@ -66,10 +66,6 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
   # ── happy path ────────────────────────────────────────────────────────
 
   def test_parses_envelope_into_rows
-    plan_review = {
-      "review_id" => "pr-#{'a' * 64}", "state" => "cleared",
-      "effective_level" => "standard", "execution_allowed" => true
-    }
     payload = make_envelope(projects: [ {
       "name" => "writero",
       "path" => "/tmp/writero",
@@ -77,8 +73,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "hidden_archived_task_count" => 3,
       "tasks" => [
         task_row(slug: "fix-bug").merge(
-          "pr_url" => "https://github.com/acme/writero/pull/42",
-          "plan_review" => plan_review
+          "pr_url" => "https://github.com/acme/writero/pull/42"
         )
       ]
     } ])
@@ -93,10 +88,9 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "ready_to_brainstorm", row.action
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
-      assert_equal plan_review, row.plan_review
       assert_equal payload, result.status_payload
-      assert_equal 3, result.hidden_archived_task_count
-      assert_equal 3, result.projects.first.hidden_archived_task_count
+      refute_respond_to result, :hidden_archived_task_count
+      refute_respond_to result.projects.first, :hidden_archived_task_count
     end
   end
 
@@ -115,7 +109,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert result.ok
       assert_equal [ "changed" ], result.rows.map(&:slug)
       assert_nil result.status_payload,
-                 "bounded task reads must not replace the daemon's authoritative full graph"
+                 "bounded task reads must not replace the daemon's authoritative active graph"
     end
 
     without_partial = payload.reject { |key, _value| key == "partial" }
@@ -177,29 +171,6 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
-  def test_missing_hidden_archived_count_defaults_to_zero_but_invalid_values_fail
-    legacy = make_envelope(projects: [ {
-      "name" => "legacy", "path" => "/tmp/legacy", "hive_state_path" => "/tmp/legacy/.h",
-      "tasks" => []
-    } ])
-    with_fake_status(JSON.generate(legacy)) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
-      assert result.ok
-      assert_equal 0, result.hidden_archived_task_count
-      assert_equal 0, result.projects.first.hidden_archived_task_count
-    end
-
-    malformed = make_envelope(projects: [ {
-      "name" => "bad", "path" => "/tmp/bad", "hive_state_path" => "/tmp/bad/.h",
-      "hidden_archived_task_count" => -1, "tasks" => []
-    } ])
-    with_fake_status(JSON.generate(malformed)) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
-      refute result.ok
-      assert_match(/hidden_archived_task_count/, result.error)
-    end
-  end
-
   # Issue #144: the daemon healer and dispatcher use `row.live_task_lock`
   # to recognise a live `hive run` during the pre-claude_pid window. Pin
   # the parse of the JSON key here so a regression in `task_payload`
@@ -235,23 +206,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
-  def test_passes_through_canonical_condition_projection_fields
-    condition = { "condition" => "ChangesPresent", "state" => "satisfied" }
+  def test_keeps_only_condition_identity_fields_used_by_scheduler_and_recovery
     task = task_row(slug: "conditioned").merge(
       "condition_task_generation" => 3,
       "commit_generation" => 2,
       "current_attempt" => "attempt-b",
-      "conditions" => [ condition ],
-      "condition_history" => [ condition.merge("state" => "superseded") ],
-      "evidence" => [ { "type" => "commit", "sha" => "b" * 40 } ],
-      "condition_overrides" => [ {
-        "reason" => "forced_condition_transition", "source_command" => "approve"
-      } ],
-      "condition_gate" => { "status" => "eligible" },
-      "condition_migration" => { "effective" => "conditions" },
-      "condition_provenance" => { "projector" => "TaskProjection/v1" },
-      "shadow_audit" => { "ready" => false },
-      "condition_warning" => nil
+      "conditions" => [ { "condition" => "ChangesPresent", "state" => "satisfied" } ]
     )
     payload = make_envelope(projects: [ {
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
@@ -263,10 +223,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal 3, row.condition_task_generation
       assert_equal 2, row.commit_generation
       assert_equal "attempt-b", row.current_attempt
-      assert_equal [ condition ], row.conditions
-      assert_equal "approve", row.condition_overrides.fetch(0).fetch("source_command")
-      assert_equal "eligible", row.condition_gate.fetch("status")
-      assert_equal "conditions", row.condition_migration.fetch("effective")
+      refute_respond_to row, :conditions
+      refute_respond_to row, :condition_gate
     end
   end
 

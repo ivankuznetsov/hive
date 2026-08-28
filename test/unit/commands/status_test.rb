@@ -230,12 +230,55 @@ class CommandsStatusTest < Minitest::Test
                     "--internal-task-graph cannot be combined with --operational"
   end
 
+  def test_internal_task_graph_projects_only_active_rows_without_losing_archived_dependency_admission
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      prerequisite = "completed-prerequisite-260828-abcd"
+      dependent = "active-dependent-260828-abcd"
+      completed = write_status_task(
+        hive_state, "9-done", prerequisite, state_file: "done.md", marker: "COMPLETE"
+      )
+      Hive::TaskMeta.write(
+        completed, id: 1, slug: prerequisite, display_name: nil,
+        completed_at: Time.utc(2026, 8, 27)
+      )
+      active = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        active, id: 2, slug: dependent, display_name: nil, depends_on: prerequisite
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new(json: true, full: true)
+
+      output, error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ project ] }
+      ) do
+        capture_io { command.call }
+      end
+
+      payload = JSON.parse(output)
+      rows = payload.dig("projects", 0, "tasks")
+      assert_equal "active", payload.fetch("projection")
+      assert_equal [ dependent ], rows.map { |row| row.fetch("slug") }
+      assert_equal false, rows.first.fetch("blocked"),
+                   "a completed prerequisite omitted from presentation must still satisfy admission"
+      assert_equal 0, payload.dig("projects", 0, "hidden_archived_task_count")
+      assert_equal "", error
+    end
+  end
+
   def test_status_payloads_preserve_subsecond_generation_time
     now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
     command = Hive::Commands::Status.new(json: true, daemon_tasks: [])
 
-    assert_equal now.iso8601(6), command.json_payload([], now: now).fetch("generated_at")
-    assert_equal now.iso8601(6), command.daemon_task_payload([], now: now).fetch("generated_at")
+    complete = command.json_payload([], now: now)
+    partial = command.daemon_task_payload([], now: now)
+
+    assert_equal now.iso8601(6), complete.fetch("generated_at")
+    assert_equal "ordinary", complete.fetch("projection")
+    assert_equal now.iso8601(6), partial.fetch("generated_at")
+    assert_equal "partial", partial.fetch("projection")
   end
 
   def test_daemon_task_payload_reads_only_exact_requested_rows
@@ -293,7 +336,7 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_daemon_task_payload_holds_dependencies_for_the_authoritative_full_scan
+  def test_daemon_task_payload_holds_dependencies_until_the_authoritative_scan
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       dependent = "dependent-task-260823-abcd"
@@ -320,7 +363,68 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "admission_error", row.fetch("action")
       assert_equal "dependency_validation_failed",
                    row.dig("admission_error", "reason_code")
-      assert_includes row.dig("admission_error", "safe_correction"), "full dependency scan"
+      assert_includes row.dig("admission_error", "safe_correction"), "active dependency scan"
+    end
+  end
+
+  def test_authoritative_daemon_task_payload_resolves_exact_dependency_closure
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task-260823-bcde"
+      prerequisite = "prerequisite-task-260823-bcde"
+      folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 2, slug: dependent, display_name: nil,
+        depends_on: prerequisite
+      )
+      write_status_task(
+        hive_state, "9-done", prerequisite,
+        state_file: "done.md", marker: "COMPLETE"
+      )
+      write_status_task(
+        hive_state, "1-inbox", "unrelated-task-260823-bcde",
+        state_file: "idea.md", marker: "WAITING"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}" ]
+      )
+
+      payload = command.daemon_task_payload(
+        [ status_project(project_root, hive_state) ],
+        authoritative_dependencies: true
+      )
+      row = payload.dig("projects", 0, "tasks", 0)
+
+      assert_equal dependent, row.fetch("slug")
+      assert_equal false, row.fetch("blocked")
+      assert_nil row.fetch("admission_error")
+      assert_equal [ dependent ], payload.dig("projects", 0, "tasks").map { |task| task.fetch("slug") }
+    end
+  end
+
+  def test_exact_task_payload_bypasses_ordinary_archive_retention
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "archived-task-260823-cdef"
+      now = Time.utc(2026, 8, 23)
+      write_completed_status_task(
+        hive_state, "9-done", slug, state_file: "done.md",
+        completed_at: now - (10 * 86_400)
+      )
+      project = status_project(project_root, hive_state)
+
+      ordinary = Hive::Commands::Status.new.json_payload([ project ], now: now)
+      exact = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{slug}" ]
+      ).daemon_task_payload(
+        [ project ], now: now, authoritative_dependencies: true
+      )
+
+      assert_empty ordinary.dig("projects", 0, "tasks")
+      assert_equal [ slug ], exact.dig("projects", 0, "tasks").map { |task| task.fetch("slug") }
+      assert_equal "archived", exact.dig("projects", 0, "tasks", 0, "action")
     end
   end
 
@@ -801,6 +905,40 @@ class CommandsStatusTest < Minitest::Test
         assert_equal "2-gather", task.fetch("stage")
         assert_equal "dispatch", task.fetch("workflow")
         assert_equal [], project.fetch("legacy_stage_dirs")
+      end
+    end
+  end
+
+  def test_active_payload_keeps_an_unfinished_generic_terminal_agent
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        active_slug = "active-terminal-agent-260828-abcd"
+        active = File.join(hive_state, "stages", "3-report", active_slug)
+        archived_slug = "complete-terminal-agent-260828-bcde"
+        archived = File.join(hive_state, "stages", "3-report", archived_slug)
+        FileUtils.mkdir_p(active)
+        FileUtils.mkdir_p(archived)
+        Hive::TaskMeta.write(
+          active, id: 77, slug: active_slug, display_name: nil,
+          workflow: descriptor.id.to_s
+        )
+        Hive::TaskMeta.write(
+          archived, id: 78, slug: archived_slug, display_name: nil,
+          workflow: descriptor.id.to_s
+        )
+        File.write(File.join(active, "report.md"), "<!-- WAITING -->\n")
+        File.write(File.join(archived, "report.md"), "report\n<!-- COMPLETE -->\n")
+
+        tasks = Hive::Commands::Status.new.active_payload([
+          status_project(project_root, hive_state)
+        ]).fetch("projects").first.fetch("tasks")
+
+        assert_equal [ active_slug ], tasks.map { |task| task.fetch("slug") },
+                     tasks.map { |task| task.slice("slug", "action", "marker", "attrs") }.inspect
+        assert_equal "needs_input", tasks.first.fetch("action")
       end
     end
   end
@@ -2469,6 +2607,7 @@ class CommandsStatusTest < Minitest::Test
       project = payload.fetch("projects").first
       slugs = project.fetch("tasks").map { |task| task.fetch("slug") }
 
+      assert_equal "archive", payload.fetch("projection")
       assert_equal [ "old-archived-260604-abcd" ], slugs
       refute project.key?("hidden_archived_task_count")
     end
@@ -3067,7 +3206,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_includes output,
-                    "SNAPSHOT COMPLETE — 0 active · 0 archived · task graph cached 32s ago"
+                    "SNAPSHOT COMPLETE — 0 active · archive on demand · task graph cached 32s ago"
   end
 
   def test_operational_project_context_fails_closed_when_config_is_unreadable
@@ -3555,9 +3694,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_nil cmd.send(:workflow_generation_for, {}, {})
-    expected_active = Hive::Workflows::Registry.all
-      .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
-      .uniq
+    expected_active = Hive::Workflows::Registry.all.flat_map(&:active_stage_dirs).uniq
     assert_equal expected_active, cmd.send(:workflow_active_stage_dirs, nil)
   end
 

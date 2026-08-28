@@ -532,7 +532,7 @@ module Hive
         nil
       end
 
-      def self.grok_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:)
+      def self.legacy_runtime_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:)
         paths = directories + [ cwd ]
         parent_dirs = paths.flat_map do |path|
           parents = []
@@ -570,8 +570,8 @@ module Hive
         ])
       end
 
-      def self.pi_bwrap_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:,
-                               readonly_mounts: {}, writable_directories: [])
+      def self.legacy_runtime_mount_prefix(executable:, auth_path:, runtime_home:, directories:, cwd:,
+                                           readonly_mounts: {}, writable_directories: [])
         parent_dirs = sandbox_parent_dirs(
           directories + [ cwd ] + writable_directories + readonly_mounts.values
         )
@@ -613,8 +613,8 @@ module Hive
         ])
       end
 
-      def self.pi_evidence_extension(source_root:, task_root:, writable_root:,
-                                     task_relative_write_root:, hive_executable:, browser:)
+      def self.legacy_evidence_extension(source_root:, task_root:, writable_root:,
+                                         task_relative_write_root:, hive_executable:, browser:)
         browser_tool = if browser
           <<~TYPESCRIPT
             pi.registerTool(defineTool({

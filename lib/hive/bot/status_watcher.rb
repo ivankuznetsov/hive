@@ -1,43 +1,28 @@
 require "json"
 require "open3"
-require "time"
 
 module Hive
   module Bot
     class StatusWatcher
-      Row = Data.define(:project, :project_path, :hive_state_path, :slug, :id, :display_name, :stage, :workflow, :marker,
-                        :attrs, :folder, :state_file, :pr_url, :state_file_mtime, :age_seconds,
+      Row = Data.define(:project, :project_path, :slug, :id, :display_name, :stage, :workflow, :marker,
+                        :attrs, :folder, :state_file, :pr_url,
                         :action, :action_label, :suggested_command, :next_action, :diagnostic,
-                        :condition_task_generation, :commit_generation, :current_attempt,
-                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
-                        :condition_migration, :condition_provenance, :shadow_audit,
-                        :condition_warning, :auto_residue) do
-        def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
+                        :auto_residue) do
+        def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil,
                        stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
-                       state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
+                       state_file: nil, pr_url: nil,
                        action: nil, action_label: nil, suggested_command: nil,
-                       next_action: nil, diagnostic: nil, condition_task_generation: nil,
-                       commit_generation: nil, current_attempt: nil, conditions: [],
-                       condition_history: [], evidence: [], condition_overrides: [], condition_gate: nil,
-                       condition_migration: nil, condition_provenance: {}, shadow_audit: {},
-                       condition_warning: nil, auto_residue: nil)
+                       next_action: nil, diagnostic: nil, auto_residue: nil)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
           # bare positional form, so a future member-order change in the
           # Data.define above can't silently misbind constructor arguments.
           super(
-            project: project, project_path: project_path, hive_state_path: hive_state_path,
+            project: project, project_path: project_path,
             slug: slug, id: id, display_name: display_name, stage: stage, workflow: workflow, marker: marker,
-            attrs: attrs, folder: folder, state_file: state_file, pr_url: pr_url,
-            state_file_mtime: state_file_mtime, age_seconds: age_seconds, action: action,
+            attrs: attrs, folder: folder, state_file: state_file, pr_url: pr_url, action: action,
             action_label: action_label, suggested_command: suggested_command,
             next_action: next_action, diagnostic: diagnostic,
-            condition_task_generation: condition_task_generation,
-            commit_generation: commit_generation, current_attempt: current_attempt,
-            conditions: conditions, condition_history: condition_history, evidence: evidence,
-            condition_overrides: condition_overrides,
-            condition_gate: condition_gate, condition_migration: condition_migration,
-            condition_provenance: condition_provenance, shadow_audit: shadow_audit,
-            condition_warning: condition_warning, auto_residue: auto_residue
+            auto_residue: auto_residue
           )
         end
       end
@@ -118,11 +103,9 @@ module Hive
         @logger = logger
       end
 
-      def tick(now: Time.now)
-        fetch(now: now)
-      end
+      def tick = fetch
 
-      def fetch(now: Time.now)
+      def fetch
         out, err, status = Open3.capture3(
           @extra_env, @hive_bin, "status", "--internal-task-graph", "--json"
         )
@@ -150,7 +133,7 @@ module Hive
         return failure(older_skew_message(doc)) if skew == :older
 
         begin
-          rows = extract_rows(doc, now: now)
+          rows = extract_rows(doc)
           legacy_stage_dirs = extract_legacy_stage_dirs(doc)
         rescue StandardError => e
           # ONLY a failure inside best-effort EXTRACTION degrades. On a
@@ -284,7 +267,7 @@ module Hive
         end
       end
 
-      def extract_rows(doc, now:)
+      def extract_rows(doc)
         rows = []
         Array(doc["projects"]).each do |project_doc|
           next if project_doc["error"]
@@ -293,7 +276,6 @@ module Hive
             rows << Row.new(
               project: project_doc["name"],
               project_path: project_doc["path"],
-              hive_state_path: project_doc["hive_state_path"],
               slug: task["slug"],
               id: task["id"],
               display_name: task["display_name"],
@@ -304,25 +286,11 @@ module Hive
               folder: task["folder"],
               state_file: task["state_file"],
               pr_url: task["pr_url"],
-              state_file_mtime: parse_mtime(task["mtime"], task["state_file"], now: now),
-              age_seconds: task["age_seconds"],
               action: task["action"],
               action_label: task["action_label"],
               suggested_command: task["suggested_command"],
               next_action: task["next_action"],
               diagnostic: task["diagnostic"],
-              condition_task_generation: task["condition_task_generation"],
-              commit_generation: task["commit_generation"],
-              current_attempt: task["current_attempt"],
-              conditions: Array(task["conditions"]),
-              condition_history: Array(task["condition_history"]),
-              evidence: Array(task["evidence"]),
-              condition_overrides: Array(task["condition_overrides"]),
-              condition_gate: task["condition_gate"],
-              condition_migration: task["condition_migration"],
-              condition_provenance: task["condition_provenance"] || {},
-              shadow_audit: task["shadow_audit"] || {},
-              condition_warning: task["condition_warning"],
               auto_residue: task["auto_residue"]
             )
           end
@@ -330,18 +298,6 @@ module Hive
         rows
       end
 
-      def parse_mtime(iso_string, state_file_path, now:)
-        if iso_string && !iso_string.empty?
-          begin
-            return Time.parse(iso_string)
-          rescue ArgumentError
-            nil
-          end
-        end
-        return File.mtime(state_file_path) if state_file_path && File.exist?(state_file_path)
-
-        now
-      end
     end
   end
 end

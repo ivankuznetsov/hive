@@ -77,7 +77,6 @@ module Hive
         Hive::Bot::StatusWatcher::Row.new(
           project: project,
           project_path: project_path(project),
-          hive_state_path: hive_state_path(project),
           slug: slug,
           stage: stage,
           marker: marker,

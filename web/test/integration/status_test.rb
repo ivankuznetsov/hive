@@ -257,7 +257,7 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "ordinary grid and board link exact hidden archive summaries" do
+  test "ordinary grid and board keep the archive explicitly reachable" do
     sign_in!
     project_name = create_hive_project!("archive-summary-status-app")
     project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
@@ -265,7 +265,6 @@ class StatusTest < ActionDispatch::IntegrationTest
       "name" => project_name,
       "path" => project_path,
       "hive_state_path" => File.join(project_path, ".hive-state"),
-      "hidden_archived_task_count" => 1,
       "tasks" => []
     }
 
@@ -274,16 +273,12 @@ class StatusTest < ActionDispatch::IntegrationTest
         get grid_path
 
         assert_response :success
-        assert_select ".archive-summary a[href='#{archive_path(project: project_name)}']",
-                      text: "… and 1 older archived task (hive archive to view)"
+        assert_select ".status-archive-link[href='#{archive_path}']", text: "Archive"
 
-        project["hidden_archived_task_count"] = 2
         get board_path
 
         assert_response :success
-        assert_select ".archive-summary a[href='#{archive_path(project: project_name)}']",
-                      text: "… and 2 older archived tasks (hive archive to view)",
-                      count: 1
+        assert_select ".status-archive-link[href='#{archive_path}']", text: "Archive"
       end
     end
   end

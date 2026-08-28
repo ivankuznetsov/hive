@@ -23,17 +23,14 @@ module Hive
       # ("hive migrate" when legacy_stage_dirs is non-empty; nil
       # otherwise) — agent-facing parity of the text recovery hint.
       ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
-                                :legacy_stage_dirs, :legacy_migrate_command,
-                                :hidden_archived_task_count) do
+                                :legacy_stage_dirs, :legacy_migrate_command) do
         # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
         # to nil so existing test factories (predating the fields) can keep
         # building ProjectView with the original 5-keyword shape.
         # Production callers in this file always pass them explicitly.
-        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil,
-                       hidden_archived_task_count: 0, **rest)
+        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil, **rest)
           super(legacy_stage_dirs: legacy_stage_dirs,
-                legacy_migrate_command: legacy_migrate_command,
-                hidden_archived_task_count: hidden_archived_task_count, **rest)
+                legacy_migrate_command: legacy_migrate_command, **rest)
         end
       end
 
@@ -225,15 +222,8 @@ module Hive
           error: payload["error"],
           rows: sorted.freeze,
           legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
-          legacy_migrate_command: payload["legacy_migrate_command"],
-          hidden_archived_task_count: normalized_hidden_count(
-            payload["hidden_archived_task_count"]
-          )
+          legacy_migrate_command: payload["legacy_migrate_command"]
         ).freeze
-      end
-
-      def self.normalized_hidden_count(value)
-        value.is_a?(Integer) && value >= 0 ? value : 0
       end
 
       def self.build_row(payload, project_name)
@@ -308,18 +298,6 @@ module Hive
         @archive_projects.flat_map(&:rows)
       end
 
-      def hidden_archived_task_count(scope: 0)
-        scoped =
-          if scope.zero?
-            @projects
-          elsif scope.between?(1, @projects.size)
-            [ @projects[scope - 1] ]
-          else
-            []
-          end
-        scoped.sum(&:hidden_archived_task_count)
-      end
-
       # Case-insensitive substring filter on each row's slug, display name,
       # or id. Empty
       # substring is a no-op (returns self). Projects with zero matches
@@ -337,16 +315,7 @@ module Hive
               row.id
             ].any? { |value| value.to_s.downcase.include?(needle) }
           end
-          ProjectView.new(
-            name: project.name,
-            path: project.path,
-            hive_state_path: project.hive_state_path,
-            error: project.error,
-            rows: matched.freeze,
-            legacy_stage_dirs: project.legacy_stage_dirs,
-            legacy_migrate_command: project.legacy_migrate_command,
-            hidden_archived_task_count: project.hidden_archived_task_count
-          ).freeze
+          project.with(rows: matched.freeze).freeze
         end
         self.class.new(
           generated_at: @generated_at,
@@ -363,10 +332,14 @@ module Hive
         return self if n.zero?
 
         if n.between?(1, @projects.size)
+          project = @projects[n - 1]
+          archive_project = @archive_projects.find do |candidate|
+            candidate.path == project.path
+          end
           self.class.new(
             generated_at: @generated_at,
-            projects: [ @projects[n - 1] ],
-            archive_projects: [ @archive_projects[n - 1] ].compact
+            projects: [ project ],
+            archive_projects: [ archive_project ].compact
           )
         else
           self.class.new(generated_at: @generated_at, projects: [], archive_projects: [])
@@ -377,7 +350,7 @@ module Hive
       # scope to the focused project, then apply the slug filter. Archive
       # retention has already been applied by Status; Snapshot never derives
       # visibility from row mtimes.
-      def visible_projection(scope:, filter:, now: nil)
+      def visible_projection(scope:, filter:)
         scope_to_project_index(scope)
           .filter_by_slug(filter)
       end

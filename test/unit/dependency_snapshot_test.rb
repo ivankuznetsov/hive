@@ -288,20 +288,140 @@ class DependencySnapshotTest < Minitest::Test
       project = { "name" => File.basename(root), "path" => root, "repository_identity" => nil }
       archived = write_task_meta(root, "9-done", "archived-task", id: 1)
       File.write(File.join(archived, "meta.yml"), "- invalid\n")
-      full_context = Hive::DependencySnapshot.admission_context([ project ])
-      fallback = Hive::DependencyAdmission::Context.new(
-        projects: full_context.projects.map do |snapshot|
-          snapshot.with(tasks: snapshot.tasks.select { |task| task.stage == "9-done" })
-        end
-      )
-      context = Hive::DependencySnapshot.admission_context(
-        [ project ], exclude_archived: true, fallback_context: fallback
-      )
+      context = Hive::DependencySnapshot.active_admission_context([ project ])
       verdict = context.verdict(project: File.basename(root), slug: "dependent-task")
 
       assert verdict.error?
       assert_equal "dependency_metadata_invalid", verdict.admission_error.reason_code
       assert_match(/Repair .*meta.yml/, verdict.admission_error.safe_correction)
+    end
+  end
+
+  def test_active_admission_context_does_not_read_unreferenced_terminal_metadata
+    with_tmp_dir do |root|
+      write_task_meta(root, "4-execute", "active-task", id: 1)
+      50.times do |index|
+        write_task_meta(root, "9-done", format("archived-task-%02d", index), id: index + 2)
+      end
+      project = { "name" => File.basename(root), "path" => root, "repository_identity" => nil }
+      original_read = Hive::TaskMeta.method(:read_for_admission)
+      reads = []
+      observed_read = lambda do |folder|
+        reads << folder
+        original_read.call(folder)
+      end
+
+      context = with_replaced_singleton_method(
+        Hive::TaskMeta, :read_for_admission, observed_read
+      ) do
+        Hive::DependencySnapshot.active_admission_context([ project ])
+      end
+
+      assert context.verdict(project: File.basename(root), slug: "active-task").clear?
+      refute reads.any? { |folder| folder.include?("/9-done/") },
+             "unrelated terminal history must not be parsed for active admission"
+    end
+  end
+
+  def test_active_admission_context_loads_only_the_referenced_terminal_closure
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)
+      Hive::TaskMeta.write(
+        dependent, id: 3, slug: "dependent-task", display_name: nil,
+        depends_on: "terminal-a"
+      )
+      terminal_a = write_task_meta(root, "9-done", "terminal-a", id: 2)
+      Hive::TaskMeta.write(
+        terminal_a, id: 2, slug: "terminal-a", display_name: nil,
+        depends_on: "terminal-b"
+      )
+      write_task_meta(root, "9-done", "terminal-b", id: 1)
+      write_task_meta(root, "9-done", "unrelated-terminal", id: 4)
+      project_name = File.basename(root)
+
+      context = Hive::DependencySnapshot.active_admission_context([
+        { "name" => project_name, "path" => root, "repository_identity" => nil }
+      ])
+
+      assert context.verdict(project: project_name, slug: "dependent-task").clear?
+      fallback_slugs = context.project_snapshot_layers.drop(1)
+                              .flatten
+                              .flat_map(&:tasks)
+                              .map(&:slug)
+      assert_equal %w[terminal-a terminal-b], fallback_slugs.sort
+    end
+  end
+
+  def test_targeted_admission_context_loads_only_roots_and_their_dependency_closure
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)
+      Hive::TaskMeta.write(
+        dependent, id: 3, slug: "dependent-task", display_name: nil,
+        depends_on: "terminal-base"
+      )
+      write_task_meta(root, "4-execute", "unrelated-active", id: 4)
+      write_task_meta(root, "9-done", "terminal-base", id: 2)
+      write_task_meta(root, "9-done", "unrelated-terminal", id: 1)
+      project_name = File.basename(root)
+      project = { "name" => project_name, "path" => root, "repository_identity" => nil }
+
+      context = Hive::DependencySnapshot.targeted_admission_context(
+        [ project ], targets: { project_name => [ "dependent-task" ] }
+      )
+
+      assert context.verdict(project: project_name, slug: "dependent-task").clear?
+      layers = context.project_snapshot_layers.map do |projects|
+        projects.flat_map(&:tasks).map(&:slug)
+      end
+      assert_equal [ [ "dependent-task" ], [ "terminal-base" ] ], layers
+    end
+  end
+
+  def test_active_admission_context_resolves_a_numeric_terminal_reference
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)
+      Hive::TaskMeta.write(
+        dependent, id: 3, slug: "dependent-task", display_name: nil,
+        depends_on: "1"
+      )
+      write_task_meta(root, "9-done", "terminal-target", id: 1)
+      write_task_meta(root, "9-done", "unrelated-terminal", id: 2)
+      project_name = File.basename(root)
+
+      context = Hive::DependencySnapshot.active_admission_context([
+        { "name" => project_name, "path" => root, "repository_identity" => nil }
+      ])
+
+      assert context.verdict(project: project_name, slug: "dependent-task").clear?
+      fallback_tasks = context.project_snapshot_layers.drop(1).flatten.flat_map(&:tasks)
+      assert_equal [ "terminal-target" ], fallback_tasks.map(&:slug)
+    end
+  end
+
+  def test_active_admission_context_resolves_cross_project_terminal_identity
+    with_tmp_dir do |home|
+      app = File.join(home, "app")
+      data = File.join(home, "data")
+      dependent = write_task_meta(app, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "data:base-task"
+      )
+      write_task_meta(data, "9-done", "base-task", id: 1)
+      looked_up = []
+
+      context = with_replaced_singleton_method(
+        Hive::RepositoryIdentity, :current,
+        ->(root) { looked_up << root; "github.com/acme/data" }
+      ) do
+        Hive::DependencySnapshot.active_admission_context([
+          { "name" => "app", "path" => app, "repository_identity" => "github.com/acme/app" },
+          { "name" => "data", "path" => data, "repository_identity" => "github.com/acme/data" }
+        ])
+      end
+
+      assert context.verdict(project: "app", slug: "dependent-task").clear?
+      assert_equal [ data ], looked_up
     end
   end
 
@@ -337,6 +457,30 @@ class DependencySnapshotTest < Minitest::Test
     Hive::Workflows::Registry.reset_runtime_registrations!
     reset_workflow_union_cache!
     Hive::Workflows::Project.reset!
+  end
+
+
+  def test_active_admission_snapshot_does_not_action_classify_nonterminal_folders
+    with_tmp_dir do |root|
+      write_task_meta(root, "4-execute", "active-task", id: 1)
+      action_calls = 0
+      original_for = Hive::TaskAction.method(:for)
+
+      rows = with_replaced_singleton_method(
+        Hive::TaskAction, :for,
+        lambda do |*args, **kwargs|
+          action_calls += 1
+          original_for.call(*args, **kwargs)
+        end
+      ) do
+        Hive::DependencySnapshot.admission_tasks(
+          root, {}, exclude_archived: true
+        )
+      end
+
+      assert_equal [ "active-task" ], rows.map(&:slug)
+      assert_equal 0, action_calls
+    end
   end
 
   def test_admission_snapshot_fails_closed_when_prerequisite_moves_after_enumeration

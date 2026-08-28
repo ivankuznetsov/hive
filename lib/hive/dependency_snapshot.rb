@@ -141,6 +141,75 @@ module Hive
       Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback_context)
     end
 
+    # Builds the routine dependency view without reparsing terminal history.
+    # Active tasks are scanned normally. When one names a prerequisite absent
+    # from that active set, only exact matching task folders are loaded, then
+    # the same lookup repeats for that prerequisite's own dependency. Thus a
+    # large unrelated archive has no effect on ordinary status cost, while an
+    # archived prerequisite still participates in admission and validation.
+    def active_admission_context(registry_entries = Hive::Config.registered_projects,
+                                 workflow_generations: nil)
+      entries = Array(registry_entries)
+      projects = entries.map do |entry|
+        admission_project(
+          entry,
+          exclude_archived: true,
+          live_repository_identity: nil,
+          workflow_generation: workflow_generation_for(entry, workflow_generations)
+        )
+      end
+      admission_context_with_fallback(
+        entries, projects, workflow_generations: workflow_generations
+      )
+    end
+
+    # Builds an authoritative dependency view rooted at an exact set of task
+    # slugs. The selected tasks and only their reachable prerequisites are
+    # loaded from disk; unrelated active work and terminal history stay out of
+    # the scan. This is the dependency counterpart to Status's partial exact-
+    # task projection used by bounded watchers.
+    def targeted_admission_context(registry_entries, targets:, workflow_generations: nil)
+      entries = Array(registry_entries)
+      projects = entries.map do |entry|
+        references = Array(targets[entry.fetch("name")]).map do |slug|
+          Hive::Dependencies::Reference.new(
+            project: nil, task: slug.to_s, explicit_project: false
+          )
+        end
+        admission_project(
+          entry,
+          live_repository_identity: nil,
+          workflow_generation: workflow_generation_for(entry, workflow_generations),
+          task_references: references
+        )
+      end
+      admission_context_with_fallback(
+        entries, projects, workflow_generations: workflow_generations
+      )
+    end
+
+    def admission_context_with_fallback(entries, projects, workflow_generations: nil)
+      fallback_tasks, scan_errors = dependency_fallback_tasks(
+        entries, projects, workflow_generations: workflow_generations
+      )
+      projects = projects.map do |project|
+        error = project.validation_error || scan_errors[project.name]
+        error ? project.with(validation_error: error) : project
+      end
+
+      fallback_projects = projects.map do |project|
+        project.with(tasks: fallback_tasks.fetch(project.name, []))
+      end
+      identity_targets = cross_project_identity_targets(projects + fallback_projects)
+      projects = projects.map do |project|
+        next project unless identity_targets.include?(project.name)
+
+        project.with(live_repository_identity: Hive::RepositoryIdentity.current(project.path))
+      end
+      fallback = Hive::DependencyAdmission::Context.new(projects: fallback_projects)
+      Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback)
+    end
+
     # Recompute dependency admission from disk and raise the typed manual
     # boundary error. Callers invoke this while holding the depending task's
     # lock immediately before forward side effects.
@@ -233,7 +302,8 @@ module Hive
     end
 
     def admission_project(entry, exclude_archived: false,
-                          live_repository_identity: :detect, workflow_generation: nil)
+                          live_repository_identity: :detect, workflow_generation: nil,
+                          task_references: nil)
       root = File.expand_path(entry.fetch("path"))
       if workflow_generation.is_a?(Exception)
         raise workflow_generation
@@ -247,17 +317,24 @@ module Hive
         else
           admission_project_config(root)
         end
-      tasks = if config_error
-        []
-      else
-        admission_tasks(
-          root,
-          config,
-          project_name: entry.fetch("name"),
-          exclude_archived: exclude_archived,
-          workflow_generation: workflow_generation
-        )
-      end
+      tasks =
+        if config_error
+          []
+        elsif task_references
+          Array(task_references).flat_map do |reference|
+            dependency_tasks_for_reference(
+              entry, reference, workflow_generation: workflow_generation
+            )
+          end
+        else
+          admission_tasks(
+            root,
+            config,
+            project_name: entry.fetch("name"),
+            exclude_archived: exclude_archived,
+            workflow_generation: workflow_generation
+          )
+        end
       Hive::DependencyAdmission::ProjectSnapshot.new(
         name: entry.fetch("name"),
         path: root,
@@ -291,6 +368,135 @@ module Hive
       end.keys.freeze
     end
 
+    def dependency_fallback_tasks(entries, projects, workflow_generations: nil)
+      entries_by_name = entries.group_by { |entry| entry["name"].to_s }
+      active_by_name = projects.to_h do |project|
+        [ project.name, dependency_task_indexes(project.tasks) ]
+      end
+      fallback = Hash.new { |hash, key| hash[key] = [] }
+      fallback_indexes = Hash.new do |hash, key|
+        hash[key] = dependency_task_indexes([])
+      end
+      errors = {}
+      queue = projects.flat_map do |project|
+        project.tasks.filter_map do |task|
+          [ task.project, task.depends_on ] if task.depends_on
+        end
+      end
+      seen = {}
+      cursor = 0
+
+      while cursor < queue.length
+        target_name = nil
+        begin
+          source_project, raw_reference = queue[cursor]
+          cursor += 1
+          reference = Hive::Dependencies.parse_optional_reference(raw_reference)
+          next unless reference
+
+          target_name = reference.explicit_project ? reference.project : source_project
+          lookup_key = dependency_lookup_key(reference)
+          next if dependency_index_matches?(active_by_name[target_name], lookup_key)
+          next if dependency_index_matches?(fallback_indexes[target_name], lookup_key)
+
+          observation = [ target_name, lookup_key ].freeze
+          next if seen[observation]
+
+          seen[observation] = true
+          matches = entries_by_name[target_name]
+          next unless matches&.one?
+
+          entry = matches.first
+          generation = workflow_generation_for(entry, workflow_generations)
+          tasks = dependency_tasks_for_reference(entry, reference, workflow_generation: generation)
+          fallback[target_name].concat(tasks)
+          tasks.each do |task|
+            add_dependency_task_to_indexes(fallback_indexes[target_name], task)
+            queue << [ task.project, task.depends_on ] if task.depends_on
+          end
+        rescue StandardError => e
+          errors[target_name] ||= "targeted dependency scan failed: #{e.class}: #{e.message}"
+        end
+      end
+
+      [ fallback, errors ]
+    end
+
+    def dependency_tasks_for_reference(entry, reference, workflow_generation: nil)
+      root = File.expand_path(entry.fetch("path"))
+      scan = lambda do
+        config, config_error = if workflow_generation
+          [ workflow_generation.admission_config, workflow_generation.admission_config_error ]
+        else
+          admission_project_config(root)
+        end
+        raise Hive::ConfigError, config_error if config_error
+
+        dependency_task_folders(root, reference).map do |folder|
+          admission_task(
+            root, folder, config,
+            project_name: entry.fetch("name"),
+            workflow_generation: workflow_generation
+          )
+        end
+      end
+      return scan.call if workflow_generation
+
+      Hive::Workflows::Project.synchronize do
+        Hive::Workflows::Project.load!(root)
+        scan.call
+      end
+    end
+
+    def dependency_task_folders(root, reference)
+      stage_dirs = Dir.glob(File.join(root, ".hive-state", "stages", "*-*"))
+                      .select { |path| File.directory?(path) }
+                      .sort
+      unless Hive::Dependencies.numeric?(reference.task)
+        return stage_dirs.filter_map do |stage_dir|
+          folder = File.join(stage_dir, reference.task)
+          folder if File.directory?(folder)
+        end
+      end
+
+      wanted_id = Integer(reference.task)
+      stage_dirs.flat_map do |stage_dir|
+        Dir.children(stage_dir).sort.filter_map do |entry|
+          folder = File.join(stage_dir, entry)
+          next unless File.directory?(folder)
+          next unless Hive::TaskMeta.read_for_admission(folder).data[:id] == wanted_id
+
+          folder
+        end
+      end
+    end
+
+    def dependency_task_indexes(tasks)
+      indexes = { slugs: Hash.new(0), ids: Hash.new(0) }
+      Array(tasks).each { |task| add_dependency_task_to_indexes(indexes, task) }
+      indexes
+    end
+
+    def add_dependency_task_to_indexes(indexes, task)
+      indexes.fetch(:slugs)[task.slug.to_s] += 1
+      indexes.fetch(:ids)[task.id] += 1 unless task.id.nil?
+    end
+
+    def dependency_lookup_key(reference)
+      if Hive::Dependencies.numeric?(reference.task)
+        [ :ids, Integer(reference.task) ]
+      else
+        [ :slugs, reference.task.to_s ]
+      end
+    end
+
+    def dependency_index_matches?(indexes, lookup_key)
+      return false unless indexes
+
+      index, value = lookup_key
+      indexes.fetch(index).fetch(value, 0).positive?
+    end
+
     def admission_project_config(root)
       path = File.join(root, ".hive-state", "config.yml")
       return [ {}, nil ] unless File.exist?(path)
@@ -316,7 +522,10 @@ module Hive
           Dir.glob(File.join(root, ".hive-state", "stages", stage_dir, "*"))
         end.select { |folder| File.directory?(folder) }.uniq.sort
         if exclude_archived
+          terminal_stage_dirs = terminal_stage_dirs_for(workflow_generation)
           folders.reject! do |folder|
+            next false unless terminal_stage_dirs.include?(File.basename(File.dirname(folder)))
+
             archived_folder?(
               folder, config: config, project_name: project_name,
               workflow_generation: workflow_generation
@@ -339,11 +548,11 @@ module Hive
     end
 
     def active_stage_dirs_for(workflow_generation)
-      return workflow_generation.active_stage_dirs if workflow_generation
+      workflow_generation ? workflow_generation.active_stage_dirs : Hive::Workflows.all_active_stage_dirs
+    end
 
-      Hive::Workflows::Registry.all
-        .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
-        .uniq
+    def terminal_stage_dirs_for(workflow_generation)
+      workflow_generation ? workflow_generation.terminal_stage_dirs : Hive::Workflows.all_terminal_stage_dirs
     end
 
     # Presentation-only active snapshots may omit archived rows for cost, but

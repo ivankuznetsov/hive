@@ -185,6 +185,15 @@ need inline, such as `npm ci && npm test`. The Fix prompt states this constraint
 before the agent selects commands, so validation cannot silently inherit a warm
 or secret-bearing development checkout.
 
+Review rework resolves the exact prior Review decision referenced by the
+current-generation reopen receipt and supplies that rationale and evidence to
+Fix inside the same untrusted prompt boundary as the finding. Before appending
+the new Fix receipt, Hive compares its diff digest and structured validation
+commands with the prior Fix receipt referenced by Review. If both are unchanged,
+the run fails without a new receipt and preserves the owned worktree for another
+attempt. A validation-plan-only correction remains valid even when the patch is
+unchanged.
+
 Inbox and review use the independent `patrol.agent` identity and the
 `models.patrol_review` route. Only the fix stage uses `patrol.fix.agent` and the
 `models.patrol_fix` route. For example, `patrol.fix.agent: opencode` with

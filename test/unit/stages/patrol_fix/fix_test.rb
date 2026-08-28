@@ -127,14 +127,13 @@ class PatrolFixFixStageTest < Minitest::Test
   end
 
   def test_fix_requires_current_controller_authorization
-    store = Struct.new(:rows) { def read_all = rows }.new([])
     manifest = {
       "task" => { "slug" => "repair-one", "generation" => 1 },
       "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }
     }
 
     error = assert_raises(Hive::StageError) do
-      Hive::Stages::PatrolFix::Fix.send(:fix_authorization, store, manifest)
+      Hive::Stages::PatrolFix::Fix.send(:fix_authorization, [], manifest)
     end
 
     assert_match(/requires a current inbox fix/, error.message)
@@ -158,7 +157,8 @@ class PatrolFixFixStageTest < Minitest::Test
       manifest_store.write!(manifest)
 
       with_replaced_singleton_method(
-        Hive::Stages::PatrolFix::Fix, :fix_authorization, ->(*) { true }
+        Hive::Stages::PatrolFix::Fix, :fix_authorization,
+        ->(*) { { decision: {}, prior_fix: {} } }
       ) do
         error = assert_raises(Hive::StageError) do
           Hive::Stages::PatrolFix::Fix.run!(task, {}, worktree_root: worktree_root)

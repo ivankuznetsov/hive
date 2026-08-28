@@ -131,6 +131,30 @@ class PatrolFixTransitionTest < Minitest::Test
     end
   end
 
+  def test_rework_rejects_authorization_from_a_nonadjacent_generation
+    with_review_task(route: "rework") do |task, worktree_root, decision|
+      result = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      ).apply_review!(decision)
+      moved = Hive::Task.new(result.fetch(:task_folder))
+      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder)
+      rows = File.readlines(receipts.path, chomp: true).map { |line| JSON.parse(line) }
+      stale = rows.find { |row| row["receipt_id"] == decision.fetch("receipt_id") }
+      stale.fetch("task")["generation"] = 2
+      stale.fetch("evidence_revision")["generation"] = 2
+      File.write(receipts.path, rows.map { |row| Hive::PatrolFix.canonical_json(row) }.join)
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Fix.run!(
+          moved, {}, agent_runner: ->(**) { flunk "must not launch against stale authorization" },
+          worktree_root: worktree_root
+        )
+      end
+
+      assert_includes error.message, "does not bind the prior generation"
+    end
+  end
+
   def test_rework_rejects_a_foreign_prior_fix_before_agent_launch
     with_review_task(route: "rework") do |task, worktree_root, decision|
       result = Hive::PatrolFix::Transition.new(

@@ -669,7 +669,7 @@ module Hive
       end
 
       def append_implementation_output(task, result)
-        final_message = result && result[:final_message].to_s.strip
+        final_message = result&.fetch(:final_message, nil).to_s.strip
         return if final_message.empty?
 
         output = final_message.byteslice(0, 64 * 1024).scrub

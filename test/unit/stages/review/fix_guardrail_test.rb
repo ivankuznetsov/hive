@@ -291,6 +291,14 @@ class FixGuardrailTest < Minitest::Test
     assert trips.any?, "quoted rename and quoted ---/+++ paths must be scanned"
   end
 
+  def test_decode_git_path_decodes_all_git_control_escapes
+    encoded = 'a\\ab\\bc\\vd\\fe\\rf\\"g\\\\h\\001'
+
+    decoded = Hive::Stages::Review::FixGuardrail.send(:decode_git_path, encoded)
+
+    assert_equal "a\ab\bc\vd\fe\rf\"g\\h\x01", decoded
+  end
+
   def test_custom_raw_diff_header_pattern_sees_rename_headers
     # The rename/copy branch must not swallow the line: custom
     # :raw_diff_header patterns have to see extended rename/copy headers

@@ -25,9 +25,13 @@ module Hive
 
       module_function
 
-      # Idempotent: strip ANSI CSI sequences first (so the trailing
-      # bytes do not survive into the second pass), then replace each
-      # remaining control byte with `?` so column-width math stays
+      # Idempotent: scrub invalid byte sequences first (subprocess output
+      # and exception messages frequently arrive tagged UTF-8 while
+      # carrying invalid bytes; Regexp#match validates the receiver's
+      # encoding and would otherwise raise ArgumentError before any
+      # sanitisation happens), then strip ANSI CSI sequences (so the
+      # trailing bytes do not survive into the second pass), then replace
+      # each remaining control byte with `?` so column-width math stays
       # one-cell-per-character. nil/non-string input returns the empty
       # string — every caller is concerned with display safety, not
       # with surfacing a TypeError on a missing field.
@@ -37,7 +41,7 @@ module Hive
       # constraint there). The replace-vs-delete split is deliberate; do
       # not unify the two.
       def sanitize(text)
-        text.to_s.gsub(ANSI_CSI_PATTERN, "").gsub(CONTROL_CHARS_PATTERN, "?")
+        text.to_s.scrub.gsub(ANSI_CSI_PATTERN, "").gsub(CONTROL_CHARS_PATTERN, "?")
       end
     end
   end

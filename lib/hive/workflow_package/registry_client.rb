@@ -47,33 +47,47 @@ module Hive
         @timeout_sec = timeout_sec
       end
 
+      # Rollback ownership contract: failures before the package tree is
+      # written (source parsing and the emptiness guard) never touch the
+      # destination, so their rollback must not either — a caller's pre-existing
+      # directory survives those errors untouched. Once materialization begins,
+      # the method owns the destination and its rollback removes partial writes,
+      # restoring a directory that existed before as empty.
       def fetch(source, destination:)
         name, requested_ref = parse_source(source)
         destination = File.expand_path(destination)
         raise RegistryError, "registry destination must be empty" if File.exist?(destination) && !Dir.empty?(destination)
 
-        Dir.mktmpdir("hive-honeycomb-registry-") do |checkout|
-          clone!(checkout)
-          catalog_commit = git!("-C", checkout, "rev-parse", "HEAD").strip
-          validate_full_sha!(catalog_commit, "catalog commit")
-          catalog_bytes = git!("-C", checkout, "show", "#{catalog_commit}:catalog.json", binary: true)
-          catalog = parse_catalog(catalog_bytes)
-          resolution = resolve_catalog(catalog, name, requested_ref, catalog_commit)
-          materialize(checkout, resolution, destination)
-          result = Validator.validate!(
-            destination,
-            expected_name: name,
-            expected_manifest_digest: resolution.manifest_digest
-          )
-          raise RegistryError, result.errors.first.to_s unless result.valid?
-          bind_catalog_metadata!(resolution, result.manifest)
+        owned_destination = false
+        destination_preexisted = false
+        begin
+          Dir.mktmpdir("hive-honeycomb-registry-") do |checkout|
+            clone!(checkout)
+            catalog_commit = git!("-C", checkout, "rev-parse", "HEAD").strip
+            validate_full_sha!(catalog_commit, "catalog commit")
+            catalog_bytes = git!("-C", checkout, "show", "#{catalog_commit}:catalog.json", binary: true)
+            catalog = parse_catalog(catalog_bytes)
+            resolution = resolve_catalog(catalog, name, requested_ref, catalog_commit)
+            destination_preexisted = File.exist?(destination)
+            owned_destination = true
+            materialize(checkout, resolution, destination)
+            result = Validator.validate!(
+              destination,
+              expected_name: name,
+              expected_manifest_digest: resolution.manifest_digest
+            )
+            raise RegistryError, result.errors.first.to_s unless result.valid?
+            bind_catalog_metadata!(resolution, result.manifest)
 
-          resolution
+            resolution
+          end
+        rescue StandardError
+          if owned_destination
+            FileUtils.rm_rf(destination)
+            FileUtils.mkdir_p(destination) if destination_preexisted
+          end
+          raise
         end
-      rescue StandardError
-        FileUtils.rm_rf(destination) if destination
-        FileUtils.mkdir_p(destination) if destination
-        raise
       end
 
       # Observe one immutable catalogue identity without materializing or

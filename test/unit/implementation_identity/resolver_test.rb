@@ -365,6 +365,40 @@ class ImplementationIdentityResolverTest < Minitest::Test
     assert_equal "explicit execute route must be a ProviderRouting::Route", error.message
   end
 
+  def test_materialize_persisted_is_the_single_routed_and_flat_projection_authority
+    routed_identity = {
+      "stage" => "execute", "provider" => "codex", "model" => "gpt-5.6-sol",
+      "profile_name" => "codex", "launcher_identity" => "codex-cli/v1",
+      "source" => "persisted_execute", "generation" => 2,
+      "originating_attempt" => "execute-2", "requested_effort" => "xhigh",
+      "effective_effort" => "xhigh", "effort_supported" => true,
+      "model_pinned" => true,
+      "routing" => {
+        "stage" => "execute_implementation",
+        "model" => "gpt-5.6-sol",
+        "effort" => "xhigh",
+        "provenance" => {
+          "model" => { "kind" => "exact", "key" => "execute_implementation" },
+          "effort" => { "kind" => "coarse", "key" => "execute" }
+        }
+      }
+    }.freeze
+    subject = resolver(config)
+
+    routed = subject.materialize_persisted(routed_identity)
+
+    assert_empty routed.native_arguments
+    assert_equal "gpt-5.6-sol", routed.routing.fetch("model")
+
+    flat = subject.materialize_persisted(
+      routed_identity.reject { |key, _| key == "routing" }
+    )
+
+    assert_nil flat.routing
+    assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh" ],
+                 flat.native_arguments
+  end
+
   private
 
   def resolver(cfg)

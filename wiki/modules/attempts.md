@@ -40,6 +40,8 @@ other local producers call the same operation non-interactively, and daemon
 queue delivery or loss recovery call `dispatch_request` and
 `dispatch_successor`; the module daemon calls `dispatch_module_hook` through
 the same facade. An injected `Store` is shared by both adapter paths.
+Filesystem locks, atomic rename, and fsync keep the protocol host-local
+without adding an event bus.
 
 `Entrypoint` and `ConfiguredDispatcher` are internal adapters behind that
 boundary. `Dispatcher`, `DetachedLauncher`, `Client`, and the persistence
@@ -305,7 +307,8 @@ attempt blocks admission only until its explicit successor exists, so a
 terminally failed successor cannot leave the generation trapped behind a
 resolved ancestor loss. A loss successor has a new attempt ID but inherits
 generation, predecessor, outputs, worktree/branch, and an incremented retry
-charge. An omitted or empty successor-output override inherits the
+charge; healing is therefore a separate ledger successor admission and never
+projects a recovery marker. An omitted or empty successor-output override inherits the
 predecessor's complete output set; only a non-empty explicit override replaces
 it.
 

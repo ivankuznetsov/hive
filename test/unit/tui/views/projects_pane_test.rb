@@ -192,6 +192,21 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     assert_includes out, "…", "truncated names should carry an ellipsis"
   end
 
+  def test_wide_project_name_rows_pad_to_inner_width_in_cells
+    # Regression: String#ljust counts characters, so a wide (non-ASCII)
+    # name like "プロジェクト" (6 chars / 12 cells) padded to 22 chars
+    # occupied 28 terminal cells — six wider than the 22-cell border
+    # interior — overflowing the box. Padding must be cell-aware.
+    model = Hive::Tui::Model.initial.with(snapshot: make_snapshot(names: [ "プロジェクト" ]),
+                                          pane_focus: :left)
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 24)
+    inner_width = 22
+    out.lines.map(&:chomp).each do |line|
+      assert_equal inner_width + 2, Hive::Tui::Views::Format.display_width(line),
+                   "every rendered line must be exactly border + #{inner_width} cells"
+    end
+  end
+
   def test_narrow_width_does_not_crash
     # Defensive: width = 3 (border + 1 inner cell). Should still render.
     model = make_model

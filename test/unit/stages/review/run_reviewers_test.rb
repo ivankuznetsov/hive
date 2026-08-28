@@ -2218,6 +2218,15 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_escape_control_bytes_renders_every_control_byte_visibly
+    escaped = Hive::Stages::Review.send(
+      :escape_control_bytes,
+      "\n\t\r\f\v\e\b\a\0\x01"
+    )
+
+    assert_equal "\\n\\t\\r\\f\\v\\e\\b\\a\\0\\x01", escaped
+  end
+
   def test_fix_guardrail_approved_rejects_truncated_file_with_count_mismatch
     # ce-review P1 #2: a user who deletes the findings they didn't
     # want to read and ticks `[x]` only on the survivor could

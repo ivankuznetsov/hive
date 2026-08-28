@@ -97,7 +97,7 @@ class TuiReactivityPerfTest < Minitest::Test
 
   def force_active_reparse(source)
     source.instance_variable_set(
-      :@last_full_parse_at,
+      :@last_active_parse_at,
       Time.now - (Hive::Tui::StateSource::LIVENESS_REPARSE_FALLBACK_SECONDS + 1.0)
     )
     source.send(:refresh_once)

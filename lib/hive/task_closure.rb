@@ -1218,11 +1218,7 @@ module Hive
 
     def transition!(task, project, receipt)
       require "hive/commands/guarded_archive"
-      target_stage = Hive::Workflows.for_verb("archive").fetch(:target)
-      unless target_stage == Hive::Stages::DIRS.last
-        raise InvalidReceipt,
-              "closure receipts can authorize only the archive transition"
-      end
+      target_stage = task.workflow.stages.last.dir
       digest = receipt.fetch("receipt_digest")
       Hive::Commands::GuardedArchive.call(
         task,

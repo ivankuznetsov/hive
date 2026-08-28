@@ -109,6 +109,33 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_verified_merge_closes_into_the_task_workflow_terminal_stage
+    with_closure_project(
+      workflow: "content", stage: "4-draft", state_file: "draft.md"
+    ) do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+
+      assert preview.valid?, preview.to_h.inspect
+
+      receipt = with_deterministic_content_agent do
+        service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+      end
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+
+      assert_equal "6-done", "#{archived.stage_index}-#{archived.stage_name}"
+      assert_equal :complete, Hive::Markers.current(archived.state_file).name
+      assert_equal receipt.fetch("receipt_digest"),
+                   JSON.parse(File.read(File.join(archived.folder, "closure.json")))
+                       .fetch("receipt_digest")
+    end
+  end
+
   def test_daemon_reconciles_same_repository_merge_and_replays_idempotently
     with_closure_project do |task, project|
       File.write(
@@ -1244,7 +1271,8 @@ class TaskClosureTest < Minitest::Test
     Hive::TaskClosure.new(gh: gh, attempt_store: attempt_store)
   end
 
-  def with_closure_project(successor: false)
+  def with_closure_project(successor: false, workflow: "coding",
+                           stage: "4-execute", state_file: "task.md")
     with_tmp_global_config do |home|
       project = File.join(home, "app")
       FileUtils.mkdir_p(project)
@@ -1261,14 +1289,14 @@ class TaskClosureTest < Minitest::Test
         File.join(hive_state, "config.yml"),
         {
           "default_branch" => "main",
-          "default_workflow" => "coding",
+          "default_workflow" => workflow,
           "worktree_root" => File.join(home, "worktrees")
         }.to_yaml
       )
-      folder = File.join(hive_state, "stages", "4-execute", "closure-task")
+      folder = File.join(hive_state, "stages", stage, "closure-task")
       FileUtils.mkdir_p(folder)
       Hive::TaskMeta.write(folder, id: 1, slug: "closure-task", display_name: "Closure Task")
-      File.write(File.join(folder, "task.md"), "# Closure task\n")
+      File.write(File.join(folder, state_file), "# Closure task\n")
       if successor
         successor_folder = File.join(hive_state, "stages", "1-inbox", "successor-task")
         FileUtils.mkdir_p(successor_folder)

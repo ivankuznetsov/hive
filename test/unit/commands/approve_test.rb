@@ -233,7 +233,16 @@ class HiveCommandsApproveTest < Minitest::Test
         folder: source, hive_state_path: state, project_root: root,
         stage_index: 7, stage_name: "artifacts"
       )
-      cmd = command
+      callback_markers = nil
+      cmd = command(
+        post_rearm_mutation: lambda do |locked|
+          callback_markers = originals.keys.to_h do |name|
+            [ name, Hive::Markers.current(File.join(locked.folder, name)).name ]
+          end
+          Hive::Markers.set(File.join(locked.folder, "task.md"), :review_waiting)
+          Hive::Markers.set(File.join(locked.folder, "artifact.md"), :waiting)
+        end
+      )
       cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "no commit" }
       fake_ops = Object.new
       fake_ops.define_singleton_method(:run_git!) { |*| nil }
@@ -246,6 +255,7 @@ class HiveCommandsApproveTest < Minitest::Test
 
       assert File.directory?(source)
       refute File.exist?(destination)
+      assert_equal({ "task.md" => :none, "artifact.md" => :none }, callback_markers)
       originals.each do |name, body|
         assert_equal body, File.binread(File.join(source, name))
       end
@@ -275,6 +285,40 @@ class HiveCommandsApproveTest < Minitest::Test
       assert_equal task_body, File.binread(File.join(source, "task.md"))
       assert_equal "external\n", File.read(outside)
       assert File.symlink?(File.join(source, "artifact.md"))
+    end
+  end
+
+  def test_backward_failure_removes_state_file_created_after_missing_snapshot
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "7-artifacts", "slug-260522-abcd")
+      destination = File.join(state, "stages", "6-review", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      task_body = "implementation\n<!-- REVIEW_COMPLETE pass=2 -->\n"
+      File.binwrite(File.join(source, "task.md"), task_body)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 7, stage_name: "artifacts"
+      )
+      cmd = command(
+        post_rearm_mutation: lambda do |locked|
+          Hive::Markers.set(File.join(locked.folder, "artifact.md"), :waiting)
+        end
+      )
+      cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "no commit" }
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          cmd.send(:perform_move_and_commit, current, "6-review")
+        end
+      end
+
+      assert File.directory?(source)
+      refute File.exist?(destination)
+      assert_equal task_body, File.binread(File.join(source, "task.md"))
+      refute File.exist?(File.join(source, "artifact.md"))
     end
   end
 

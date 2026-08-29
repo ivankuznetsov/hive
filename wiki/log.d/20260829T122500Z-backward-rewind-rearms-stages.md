@@ -9,6 +9,11 @@ restores exact bytes if validation or commit fails. Added coding integration
 coverage for `7-artifacts` to `6-review`, commit-failure rollback, partial
 multi-file failure rollback, and symlink refusal.
 
+Composed human decisions validate and snapshot their observation before the
+rewind, then write the decision record and new `WAITING` marker after stale
+markers have been removed. This preserves the newly selected workflow state
+without weakening exact rollback.
+
 **Why:** A task moved back from artifacts to review retained
 `REVIEW_COMPLETE` in `task.md` and `ERROR` in `artifact.md`. Review therefore
 reported itself already complete and the next artifacts visit immediately

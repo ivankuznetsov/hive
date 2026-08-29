@@ -66,7 +66,8 @@ module Hive
       end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
-                     observation_guard: nil, commit_lock: true, clock: DEFAULT_CLOCK)
+                     observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
+                     clock: DEFAULT_CLOCK)
         @target = target
         @to = to
         @from = from
@@ -78,6 +79,7 @@ module Hive
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
         @observation_guard = observation_guard
+        @post_rearm_mutation = post_rearm_mutation
         @commit_lock = commit_lock
         @clock = clock
       end
@@ -388,6 +390,7 @@ module Hive
                 config: @plan_review_config
               )
               rearm_backward_stages!(task, dest_stage, snapshots: rewind_state_snapshots)
+              @post_rearm_mutation&.call(task)
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
@@ -434,11 +437,11 @@ module Hive
           path = File.join(task.folder, state_file)
           Hive::Markers.with_markers_lock(path) do
             snapshot = read_rewind_state_snapshot!(path, state_file)
+            snapshots << snapshot
             next unless snapshot.fetch(:existed)
 
             # Record before mutation so a later file validation/write failure
             # can restore every earlier file from this same rewind attempt.
-            snapshots << snapshot
             body = snapshot.fetch(:body)
             rearmed = Hive::Markers.without_markers(body)
             Hive::AtomicFile.write(path, rearmed) unless rearmed == body
@@ -463,7 +466,11 @@ module Hive
         snapshots.reverse_each do |snapshot|
           path = File.join(folder, snapshot.fetch(:state_file))
           Hive::Markers.with_markers_lock(path) do
-            Hive::AtomicFile.write(path, snapshot.fetch(:body))
+            if snapshot.fetch(:existed)
+              Hive::AtomicFile.write(path, snapshot.fetch(:body))
+            else
+              File.delete(path) if File.exist?(path) || File.symlink?(path)
+            end
           end
         end
       end

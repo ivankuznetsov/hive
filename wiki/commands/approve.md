@@ -38,7 +38,9 @@ hive approve <slug> --json                 # machine-readable result (success AN
    not touch state files owned only by stages outside the rewind interval. The
    rewrite happens under the commit lock, task lock, and each file's marker
    lock. Exact snapshots are restored if validation, the move, or the Hive
-   state commit fails.
+   state commit fails. Composing commands apply their new transition state
+   after this cleanup, so a decision-created `WAITING` marker is not mistaken
+   for stale state and removed with the old markers.
 9. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.

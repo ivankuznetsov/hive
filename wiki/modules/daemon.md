@@ -198,6 +198,16 @@ dispatched this tick is already in-flight in the controller and the row
 scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
 tick from double-spawning.
 
+The per-row scan also carries a tick-local capacity fence. Durable admission
+reads live attempt state, so a high-priority row can be deferred just before a
+short-lived worker finishes; without a fence, a later lower-priority row can
+claim the reopened slot even though the earlier row is not reconsidered until
+the next tick. Global and generic durable-capacity deferrals fence all later
+dispatch attempts in the frame. Project and daily caps fence only that
+project. Rows whose policy does not dispatch still run, preserving a complete
+operational disposition set, and the next fresh status frame starts with no
+fence.
+
 The timestamp captured at tick start is an observation timestamp, not a
 durable-attempt launch timestamp. A full tick can exceed
 `attempt_launch_timeout_sec` while draining recovery work. Immediately before

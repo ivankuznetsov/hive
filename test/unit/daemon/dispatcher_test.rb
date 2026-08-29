@@ -3633,6 +3633,63 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "global_cap", blocked[1][:reason]
   end
 
+  def test_durable_capacity_deferral_fences_lower_priority_rows_for_the_tick
+    rows = [
+      row(slug: "lower", stage: "2-brainstorm", action: "ready_to_plan",
+          command: "hive plan lower --from 2-brainstorm"),
+      row(slug: "higher", stage: "6-review", action: "ready_to_plan",
+          command: "hive review higher --from 6-review")
+    ]
+    calls = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **_options|
+      calls << request.slug
+      Hive::Attempts::DispatchResult.new(
+        status: request.slug == "higher" ? :deferred : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil,
+        reason: request.slug == "higher" ? "capacity" : nil
+      )
+    end
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(
+      rows: rows, attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "higher" ], calls,
+                 "a lower-priority row must not take capacity that reopens later in the same tick"
+    lower_block = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "lower"
+    end
+    assert_equal "capacity", lower_block.last.fetch(:reason)
+    assert_equal true, lower_block.last.fetch(:priority_fence)
+  end
+
+  def test_project_capacity_fence_does_not_block_another_project
+    rows = [
+      row(project: "p1", slug: "first", stage: "6-review", action: "ready_to_plan",
+          command: "hive review first --from 6-review"),
+      row(project: "p1", slug: "second", stage: "2-brainstorm", action: "ready_to_plan",
+          command: "hive plan second --from 2-brainstorm"),
+      row(project: "p2", slug: "other", stage: "2-brainstorm", action: "ready_to_plan",
+          command: "hive plan other --from 2-brainstorm")
+    ]
+    dispatcher, supervisor, controller, logger = make_dispatcher(rows: rows)
+    original_gate = controller.method(:can_dispatch?)
+    controller.define_singleton_method(:can_dispatch?) do |project:, **options|
+      project == "p1" ? :project_cap : original_gate.call(project: project, **options)
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "other" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+    second_block = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "second"
+    end
+    assert_equal "project_cap", second_block.last.fetch(:reason)
+    assert_equal true, second_block.last.fetch(:priority_fence)
+  end
+
   def test_status_active_agent_row_counts_toward_project_cap
     rows = [
       row(slug: "running", stage: "6-review", marker: "review_working",

@@ -1310,3 +1310,14 @@ workflows, but no live managed-workflow task has yet been rewound through a
 deployed daemon. Keep this gap open until such a workflow proves that its
 destination reruns and later revisited stages do not consume prior terminal
 markers.
+
+## Durable capacity deferrals do not expose their limiting scope (2026-08-29)
+
+`Hive::Attempts::Dispatcher` currently returns the generic reason `capacity`
+when any global, per-project, or daily attempt limit closes between the
+daemon's controller precheck and durable admission. The daemon therefore
+conservatively treats that result as a global priority fence for the remainder
+of one status-row scan. This prevents lower-priority leapfrogging and is
+bounded to one tick, but a rare project-only race can leave an unrelated slot
+unused until the next frame. Keep this gap open until durable admission emits
+a typed capacity scope that the row scheduler can preserve directly.

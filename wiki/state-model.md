@@ -438,6 +438,11 @@ producers include Telegram and hivebox web. Every recoverable-marker surface
 submits through `Hive::Recovery::API`; `RecoveryCoordinator` is the only
 producer of a recovery transition. The `requestor` field records the actual
 adapter rather than disguising web or TUI requests as bot traffic.
+Pending requests are consumed in `(created_at, request_id)` order. If an older
+request observes global or generic durable-attempt capacity exhaustion, later
+requests stay pending for the next scan even when a short-lived worker frees a
+slot before the current scan ends. Project and daily caps preserve order only
+within that project, so unrelated projects can still use available capacity.
 Each pending request is one JSON file:
 
 ```yaml

@@ -6366,6 +6366,117 @@ end
     end
   end
 
+  def test_durable_capacity_deferral_fences_later_queue_requests_for_the_scan
+    Dir.mktmpdir("hive-dispatch-capacity-fence") do |state_home|
+      calls = []
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **_options|
+        calls << request.slug
+        Hive::Attempts::DispatchResult.new(
+          status: :deferred, attempt: nil, receipt: nil,
+          attach_descriptor: nil, reason: "capacity"
+        )
+      end
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher
+      )
+      Q.write_request!(
+        project: "p1", slug: "older", argv: %w[hive run older],
+        request_id: "older-capacity", state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "later", argv: %w[hive run later],
+        request_id: "later-capacity", state_home: state_home, now: T0 + 1
+      )
+      stub_find_project!(dispatcher, "p1")
+
+      begin
+        dispatcher.send(:process_dispatch_requests, now: T0 + 2, rows: [])
+      ensure
+        restore_find_project!
+      end
+
+      assert_equal [ "older" ], calls,
+                   "a later request must not steal capacity that reopens during the scan"
+      assert_equal %w[older-capacity later-capacity],
+                   Q.pending(state_home: state_home).map(&:request_id)
+    end
+  end
+
+  def test_global_cap_fences_later_queue_request_when_the_gate_reopens
+    Dir.mktmpdir("hive-dispatch-global-fence") do |state_home|
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      gates = [ :global_cap, :ok ]
+      controller.define_singleton_method(:can_dispatch?) { |**| gates.shift || :ok }
+      Q.write_request!(
+        project: "p1", slug: "older", argv: %w[hive run older],
+        request_id: "older-global", state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "later", argv: %w[hive run later],
+        request_id: "later-global", state_home: state_home, now: T0 + 1
+      )
+      stub_find_project!(dispatcher, "p1")
+
+      begin
+        dispatcher.send(:process_dispatch_requests, now: T0 + 2, rows: [])
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned,
+                   "a later request must wait even if the controller gate reopens"
+      assert_equal [ :ok ], gates
+      assert_equal %w[older-global later-global],
+                   Q.pending(state_home: state_home).map(&:request_id)
+    end
+  end
+
+  def test_project_cap_fences_only_later_requests_for_the_same_project
+    Dir.mktmpdir("hive-dispatch-project-fence") do |state_home|
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      controller.define_singleton_method(:can_dispatch?) do |project:, **|
+        project == "p1" ? :project_cap : :ok
+      end
+      Q.write_request!(
+        project: "p1", slug: "older", argv: %w[hive run older],
+        request_id: "older-project", state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "later", argv: %w[hive run later],
+        request_id: "later-project", state_home: state_home, now: T0 + 1
+      )
+      Q.write_request!(
+        project: "p2", slug: "other", argv: %w[hive run other],
+        request_id: "other-project", state_home: state_home, now: T0 + 2
+      )
+      projects = %w[p1 p2].map do |name|
+        {
+          "name" => name, "path" => "/tmp/#{name}",
+          "hive_state_path" => "/tmp/#{name}/.hive-state"
+        }
+      end
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_replaced_singleton_method(
+          Hive::Config, :find_project,
+          ->(name) { projects.find { |project| project.fetch("name") == name } }
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0 + 3, rows: [])
+        end
+      end
+
+      assert_equal [ "other" ], supervisor.spawned.map { |entry| entry.fetch(:slug) }
+      blocked = Q.pending(state_home: state_home).map(&:request_id)
+      assert_equal %w[older-project later-project], blocked
+    end
+  end
+
   def test_deferred_recovery_delivery_advances_hourly_pacing_before_releasing_claim
     Dir.mktmpdir("hive-recovery-deferred") do |state_home|
       result = Hive::Attempts::DispatchResult.new(

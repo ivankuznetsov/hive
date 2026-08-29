@@ -210,6 +210,15 @@ fence only that project. Rows whose policy does not dispatch still run,
 preserving a complete operational disposition set, and the next authoritative
 full scan starts with no inherited fence and replaces the snapshot.
 
+Chronological dispatch-request consumption applies the same rule within each
+queue scan. Once an older request observes the controller's global cap or a
+generic durable-attempt capacity deferral, the scan stops before a later
+request can claim a slot that reopens while the scan is still draining. Both
+requests remain pending and the next queue scan starts again from the oldest
+request. Project and daily caps fence only later requests from the same
+project; prior cooldowns, dependency holds, and malformed requests do not
+create a capacity fence.
+
 The timestamp captured at tick start is an observation timestamp, not a
 durable-attempt launch timestamp. A full tick can exceed
 `attempt_launch_timeout_sec` while draining recovery work. Immediately before

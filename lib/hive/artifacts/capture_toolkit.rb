@@ -26,6 +26,7 @@ module Hive
       VISUAL_KINDS = %w[screenshot video].freeze
       MEDIA_TOOLS = %w[ffmpeg ffprobe tesseract].freeze
       BROWSER_SESSION = "evidence".freeze
+      BROWSER_BOOTSTRAP_TIMEOUT_SECONDS = 30
       BROWSER_CLOSE_TIMEOUT_SECONDS = 10
       CAPTURE_KINDS = %w[screenshot terminal video].freeze
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
@@ -163,9 +164,12 @@ module Hive
             writable_root: writable_root, origin: @capture_proxy.origin,
             on_publish: method(:record_capture!)
           ).start!
-          @browser_command_runner.call(
-            browser_environment, browser_argv + [ "open", @capture_proxy.origin ]
-          )
+          bootstrap_command = if server
+            [ "open", @capture_proxy.origin ]
+          else
+            [ "snapshot", "-i" ]
+          end
+          @browser_command_runner.call(browser_environment, browser_argv + bootstrap_command)
           receipt["web"] = browser_receipt(entry, server, writable_root)
           receipt["media"] = media
         end
@@ -497,7 +501,9 @@ module Hive
           environment, *argv, unsetenv_others: true, pgroup: true,
           in: File::NULL, out: File::NULL, err: File::NULL
         )
-        status = Timeout.timeout(BROWSER_CLOSE_TIMEOUT_SECONDS) do
+        timeout_seconds = argv.last == "close" ?
+          BROWSER_CLOSE_TIMEOUT_SECONDS : BROWSER_BOOTSTRAP_TIMEOUT_SECONDS
+        status = Timeout.timeout(timeout_seconds) do
           _, value = Process.wait2(pid)
           value
         end

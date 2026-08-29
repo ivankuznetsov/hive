@@ -82,7 +82,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: a terminal `succeeded` receipt is satisfied, ordinary failed/cancelled/lost outcomes fail closed, and exit `75 (TEMPFAIL)` remains a scheduler-owned pending retry rather than an agent-health failure. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. A deleted task folder is `not_applicable`, not perpetually pending. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Durable TEMPFAIL admission holds emit the closed `attempt_transient_retry` event and a scheduler-owned operational disposition. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises), with source-parity coverage for both inline and multiline literal event calls so supervised Patrol Fix semantic completion cannot terminate the daemon through enum drift. Size-rotated. |
-| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound, explicit-route admission, and controller-markerless recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy/failure-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. An id-less task remains blocked and its receipt names the explicit `hive migrate --all` repair; no runtime backfiller is implied. Controller failures bind to the unchanged task generation and never append compatibility markers to structured JSON state. Failure fingerprints are stage-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. A parked request survives scheduler ticks unchanged; after correcting the cause, a freshness-bound operator `workflow.retry` explicitly clears the park without changing request identity. User-facing adapters only submit observations and render its receipt. |
+| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound, explicit-route admission, and controller-markerless recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy/failure-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. An id-less task remains blocked and its receipt names the explicit `hive migrate --all` repair; no runtime backfiller is implied. Controller failures bind to the unchanged task generation and never append compatibility markers to structured JSON state. Failure fingerprints and retry ladders are stage- and runtime-source-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. Same-runtime ticks keep a park inert; a different validated release/build digest automatically rearms one bounded fresh probe, while a freshness-bound operator `workflow.retry` remains the explicit same-runtime unpark. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` on the same retry ladder; it does not project or clear a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
@@ -534,19 +534,28 @@ advances a workflow stage directly:
    plan-review recovery therefore cannot put a task's first execute failure at
    the one-hour ceiling.
 
-   A `deterministic_failure` park is also durable: ordinary scheduler resume
-   passes return the existing receipt without clearing its blocker, consuming
-   a dispatch slot, or launching another child. Once the failing input,
-   provider, or implementation changes, the existing freshness-bound
-   `workflow.retry` action is the explicit unpark verb. It keeps the same
-   recovery request and generation, returns it to scheduler ownership, and
-   starts the next observed failure series from fresh evidence.
+   A `deterministic_failure` park is also durable. Ordinary scheduler resume
+   passes under the same validated runtime source digest return the existing
+   receipt without clearing its blocker, consuming a dispatch slot, or
+   launching another child. Recovery uses the same channel, release-version,
+   and dogfood-build digest as durable attempt pacing; deployment identity
+   alone cannot reopen work. A different digest automatically rearms the same
+   request and generation once, returns it to scheduler ownership, resets the
+   retry ladder and failure evidence, and makes one bounded health probe due
+   immediately. A legacy parked request with no digest receives that one-time
+   rearm when first read by a runtime-aware daemon. If the probe repeats the
+   defect, the new runtime builds its own bounded failure series and can park
+   again. The freshness-bound `workflow.retry` action remains the explicit
+   same-runtime unpark when the operator changed input, provider state, or
+   configuration instead of replacing Hive.
 
    Recovery replay rejects non-actionable work before reopening the task.
    Cooling requests return their existing cooldown receipt, while immutable
-   `generation_conflict`, `task_identity_conflict`, and
-   `deterministic_failure` blockers return their parked receipt without task
-   resolution, task locking, or generation reconstruction. Safety and health
+   `generation_conflict` and `task_identity_conflict` blockers return their
+   parked receipt without task resolution, task locking, or generation
+   reconstruction. A same-runtime `deterministic_failure` takes that same
+   inert path; only the first observation from a different runtime digest
+   updates it before normal guarded transition checks. Safety and health
    blockers remain actionable because their external condition can recover.
    This keeps a historical recovery queue from turning each daemon tick into
    one full task reconstruction per parked request.

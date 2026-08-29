@@ -5,7 +5,6 @@ require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
-require "hive/canonical_json"
 require "hive/runtime_identity"
 require "hive/patrol_fix/attempt_diagnostic"
 require "hive/provider_health"
@@ -21,8 +20,6 @@ module Hive
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
       OPERATOR_COHORT_RELEASE_REQUESTORS = %w[action bot cli web].freeze
-      RUNTIME_SOURCE_FIELDS = %w[channel release_version build_sha].freeze
-
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
                      id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
                      capability_generator: Capability.method(:generate),
@@ -55,7 +52,7 @@ module Hive
       end
 
       def self.runtime_source_digest(identity = Hive::RuntimeIdentity.new.to_h)
-        Hive::CanonicalJSON.digest(identity.slice(*RUNTIME_SOURCE_FIELDS))
+        Hive::RuntimeIdentity.source_digest(identity)
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,

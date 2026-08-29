@@ -56,7 +56,7 @@ module Hive
         blocked_reason blocked_remediation provider_hint attempt_id
         terminal_outcome terminal_at retry_count policy_digest source_receipt
         admission_observation failure_fingerprint identical_failure_count
-        failure_attempt_history
+        failure_attempt_history runtime_digest
       ].freeze
       SOURCE_RECEIPT_KEYS = %w[
         attempt_id receipt_version terminal_lease_version
@@ -611,12 +611,13 @@ module Hive
       # successful workflow transition starts a new failure series; plan-stage
       # recovery history must not put the first execute failure at the hourly
       # ceiling. Adapters still cannot supply or reset the ledger value.
-      def recovery_retry_count(project:, slug:, expected_stage: nil,
+      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil,
                                state_home: Hive::Paths.state_home)
         each_matching_request(state_home: state_home).filter_map do |parsed|
           next unless parsed.recovery.is_a?(Hash)
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next if expected_stage && parsed.expected_stage.to_s != expected_stage.to_s
+          next if runtime_digest && parsed.recovery["runtime_digest"] != runtime_digest
 
           count = parsed.recovery["retry_count"]
           count if count.is_a?(Integer) && count >= 0
@@ -1118,6 +1119,12 @@ module Hive
                recovery["failure_fingerprint"].to_s
              )
             raise ArgumentError, "failure_fingerprint must be a sha256 or null"
+          end
+          if recovery.key?("runtime_digest") &&
+             !Hive::Attempts::OutputReference::SHA256_PATTERN.match?(
+               recovery["runtime_digest"].to_s
+             )
+            raise ArgumentError, "runtime_digest must be a sha256"
           end
           if recovery.key?("failure_attempt_history") &&
              (!recovery["failure_attempt_history"].is_a?(Array) ||

@@ -71,7 +71,13 @@ unbounded. Repetition is exposed as `escalation_tier=degraded`; after three
 identical failures at the ladder ceiling the request parks once with
 `reason=deterministic_failure`, its fingerprint, and bounded attempt history,
 so it stops consuming dispatch slots while other tasks continue. Terminal
-recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
+recovery cleanup is stage-scoped and cannot erase a prior stage's ladder. The
+ladder and repeated-failure evidence are also scoped to the validated Hive
+runtime source digest (channel, release version, and dogfood build SHA). A new
+build automatically resets a parked request once and runs one guarded probe;
+redeploying the same build does not. Legacy digest-less parks receive the same
+one-time compatibility rearm. A same-runtime repair to project input,
+credentials, or provider state still uses the fresh `workflow.retry` action.
 Daemon ticks never migrate task metadata. Missing task ids, display names, and
 legacy completion clocks are repaired only by the explicit [[commands/migrate]]
 command, so routine scheduling does not compete with stage commits. Recovery

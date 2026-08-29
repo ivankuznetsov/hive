@@ -259,6 +259,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "retry count" => recovery_payload.merge("retry_count" => -1),
       "identical failure count" => recovery_payload.merge("identical_failure_count" => -1),
       "failure fingerprint" => recovery_payload.merge("failure_fingerprint" => "not-a-sha"),
+      "runtime digest" => recovery_payload.merge("runtime_digest" => "not-a-sha"),
       "failure attempt history" => recovery_payload.merge(
         "failure_attempt_history" => [ "" ]
       ),

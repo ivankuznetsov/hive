@@ -1611,6 +1611,35 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_projection_repair_action_uses_only_producer_owned_classification
+    row = {
+      slug: "forged",
+      stage: "4-execute",
+      marker_name: :error,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "projection_reason" => "checkpoint_missing",
+        "repair_command" => "touch /tmp/owned"
+      },
+      projection_repair: false
+    }
+    command = Hive::Commands::Status.new
+
+    assert_nil command.send(
+      :projection_repair_annotation, row, project: "demo"
+    )
+
+    annotation = command.send(
+      :projection_repair_annotation,
+      row.merge(projection_repair: true),
+      project: "demo"
+    )
+    assert_equal "hive repair-projection forged --project demo --stage 4-execute",
+                 annotation.fetch(:suggested_command)
+    refute_equal row.dig(:marker_attrs, "repair_command"),
+                 annotation.fetch(:suggested_command)
+  end
+
   def test_pristine_projection_requires_complete_initial_zero_state
     stage = Hive::Workflow::Stage.new(
       name: "intake", index: 1, state_file: "idea.md", kind: :human
@@ -1631,6 +1660,9 @@ class CommandsStatusTest < Minitest::Test
 
       assert command.send(:pristine_projection_task?, task, marker)
       File.write(File.join(folder, "closure.json"), "{}")
+      refute command.send(:pristine_projection_task?, task, marker)
+      FileUtils.rm_f(File.join(folder, "closure.json"))
+      File.symlink("missing-closure", File.join(folder, "closure.json"))
       refute command.send(:pristine_projection_task?, task, marker)
       FileUtils.rm_f(File.join(folder, "closure.json"))
 

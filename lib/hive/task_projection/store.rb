@@ -6,6 +6,7 @@ require "hive/paths"
 require "hive/task_projection"
 require "hive/task_journal"
 require "hive/task_workspace/limits"
+require "hive/workflows"
 
 module Hive
   class TaskProjection
@@ -15,6 +16,9 @@ module Hive
       CHECKPOINT_SCHEMA = "hive-task-projection-checkpoint".freeze
       CHECKPOINT_SCHEMA_VERSION = 1
       CHECKPOINT_ANCHOR_BYTES = 4 * 1024
+      PRISTINE_FORBIDDEN_ENTRIES = %w[
+        .lock closure.json handoff.yml patrol-fix-worktree.json worktree.yml
+      ].freeze
 
       BoundedRead = Data.define(
         :projection, :state, :diagnostics, :truncated, :journal_cursor,
@@ -42,6 +46,48 @@ module Hive
       end
 
       RepairResult = Data.define(:projection, :bounded)
+
+      def self.pristine_task?(task, marker)
+        return false unless task.respond_to?(:workflow) && task.respond_to?(:stage_index) &&
+                            task.respond_to?(:stage_name) && task.respond_to?(:folder) &&
+                            task.respond_to?(:log_dir)
+
+        workflow = task.workflow
+        return false unless workflow && workflow.respond_to?(:stages)
+
+        first_stage = workflow.stages.first
+        return false unless first_stage &&
+                            first_stage.dir == "#{task.stage_index}-#{task.stage_name}"
+
+        workflow_id = workflow.id if workflow.respond_to?(:id)
+        expected_marker = if Hive::Workflows.coding_id?(workflow_id) ||
+                             first_stage.kind == :human
+          :waiting
+        else
+          :none
+        end
+        return false unless marker.name == expected_marker
+        PRISTINE_FORBIDDEN_ENTRIES.each do |basename|
+          begin
+            File.lstat(File.join(task.folder, basename))
+            return false
+          rescue Errno::ENOENT
+            nil
+          end
+        end
+
+        log_stat = begin
+          File.lstat(task.log_dir)
+        rescue Errno::ENOENT
+          nil
+        end
+        return true unless log_stat
+        return false unless log_stat.directory? && !log_stat.symlink?
+
+        Dir.empty?(task.log_dir)
+      rescue SystemCallError, IOError
+        false
+      end
 
       # Counts exact predecessor point reads while the bounded journal suffix
       # is validated. Primary attempt IDs are collected from the checkpoint and
@@ -164,32 +210,24 @@ module Hive
                   "pristine projection initialization requires empty task projection storage"
           end
 
-          binding = journal_binding("")
-          projection = replay(binding, marker: marker)
-          publish(projection)
-          publish_checkpoint(binding: binding, bytes: "", projection: projection)
-          bounded = read_bounded_unlocked(
-            marker: marker, limits: limits, require_checkpoint: true,
-            pristine: false
-          )
-          unless bounded.current?
-            reason = bounded.diagnostics.first&.fetch("reason", bounded.state) ||
-                     bounded.state
-            raise Hive::TaskProjection::InvalidJournal,
-                  "pristine projection initialization did not produce a current checkpoint (#{reason})"
-          end
-
-          projection
+          publish_pristine!(marker: marker, limits: limits).projection
         end
       end
 
       # Explicit exact-task repair owns the only routine-external full replay.
       # The exclusive journal lock prevents a concurrent append from binding
       # the new derived files to two different authoritative cursors.
-      def repair!(marker: nil, limits: Hive::TaskWorkspace::Limits.new)
+      def repair!(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
+                  pristine: false)
         with_journal_write_lock do
-          stat = File.lstat(journal_path)
-          unless stat.file? && !stat.symlink? && stat.size.positive?
+          stat = begin
+            File.lstat(journal_path)
+          rescue Errno::ENOENT
+            nil
+          end
+          return publish_pristine!(marker: marker, limits: limits) if
+            stat.nil? && pristine
+          unless stat && stat.file? && !stat.symlink? && stat.size.positive?
             raise Hive::TaskProjection::InvalidJournal,
                   "authoritative task journal is missing, empty, or not a regular file"
           end
@@ -199,9 +237,6 @@ module Hive
           )
           RepairResult.new(projection: projection, bounded: bounded)
         end
-      rescue Errno::ENOENT
-        raise Hive::TaskProjection::InvalidJournal,
-              "authoritative task journal is missing, empty, or not a regular file"
       end
 
       # Workspace reads use a separately bounded checkpoint and only replay
@@ -221,6 +256,11 @@ module Hive
             require_checkpoint: require_checkpoint, pristine: pristine
           )
         end
+      rescue Hive::TaskProjection::RoutineLockUnavailable => e
+        degraded_bounded_read(
+          reason: "journal_lock_busy", state: "partial", error: e,
+          snapshot_limit: snapshot_limit
+        )
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              JSON::ParserError, KeyError, TypeError, ArgumentError,
              SystemCallError, IOError => e
@@ -250,6 +290,25 @@ module Hive
       end
 
       private
+
+      def publish_pristine!(marker:, limits:)
+        binding = journal_binding("")
+        projection = replay(binding, marker: marker)
+        publish(projection)
+        publish_checkpoint(binding: binding, bytes: "", projection: projection)
+        bounded = read_bounded_unlocked(
+          marker: marker, limits: limits, require_checkpoint: true,
+          pristine: false
+        )
+        unless bounded.current?
+          reason = bounded.diagnostics.first&.fetch("reason", bounded.state) ||
+                   bounded.state
+          raise Hive::TaskProjection::InvalidJournal,
+                "pristine projection initialization did not produce a current checkpoint (#{reason})"
+        end
+
+        RepairResult.new(projection: projection, bounded: bounded)
+      end
 
       def read_bounded_unlocked(marker:, limits:, snapshot_max_bytes: nil,
                                 journal_suffix_max_bytes: nil,
@@ -511,6 +570,7 @@ module Hive
 
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        flags |= File::NONBLOCK if defined?(File::NONBLOCK)
         File.open(journal_path, flags) do |io|
           stat = io.stat
           return false unless stat.file? && stat.size >= cursor &&
@@ -656,6 +716,7 @@ module Hive
 
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        flags |= File::NONBLOCK if defined?(File::NONBLOCK)
         File.open(journal_path, flags) do |io|
           before = io.stat
           raise IOError, "journal descriptor changed" unless
@@ -792,6 +853,7 @@ module Hive
 
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        flags |= File::NONBLOCK if defined?(File::NONBLOCK)
         File.open(path, flags) do |io|
           before = io.stat
           raise IOError, "source descriptor changed" unless
@@ -811,14 +873,28 @@ module Hive
 
       def with_journal_read_lock
         lock_path = File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME)
+        path_stat = File.lstat(lock_path)
+        unless path_stat.file? && !path_stat.symlink?
+          raise Hive::TaskProjection::RoutineLockUnavailable,
+                "task journal lock is not a regular file"
+        end
         flags = File::RDONLY
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        flags |= File::NONBLOCK if defined?(File::NONBLOCK)
         lock = File.open(lock_path, flags)
       rescue Errno::ENOENT
         yield
       else
         begin
-          lock.flock(File::LOCK_SH)
+          opened = lock.stat
+          unless opened.file? && opened.dev == path_stat.dev && opened.ino == path_stat.ino
+            raise Hive::TaskProjection::RoutineLockUnavailable,
+                  "task journal lock descriptor changed"
+          end
+          unless lock.flock(File::LOCK_SH | File::LOCK_NB)
+            raise Hive::TaskProjection::RoutineLockUnavailable,
+                  "task journal lock is busy"
+          end
           yield
         ensure
           lock&.flock(File::LOCK_UN)
@@ -828,9 +904,25 @@ module Hive
 
       def with_journal_write_lock
         lock_path = File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME)
+        path_stat = begin
+          File.lstat(lock_path)
+        rescue Errno::ENOENT
+          nil
+        end
+        if path_stat && (!path_stat.file? || path_stat.symlink?)
+          raise Hive::TaskProjection::InvalidJournal,
+                "task journal lock is not a regular file"
+        end
         flags = File::RDWR | File::CREAT
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        flags |= File::NONBLOCK if defined?(File::NONBLOCK)
         File.open(lock_path, flags, 0o644) do |lock|
+          opened = lock.stat
+          unless opened.file? && (!path_stat ||
+            (opened.dev == path_stat.dev && opened.ino == path_stat.ino))
+            raise Hive::TaskProjection::InvalidJournal,
+                  "task journal lock descriptor changed"
+          end
           lock.flock(File::LOCK_EX)
           yield
         ensure

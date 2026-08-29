@@ -3,7 +3,7 @@ title: hive repair-projection
 type: command
 source: lib/hive/commands/repair_projection.rb, lib/hive/task_projection/store.rb, schemas/hive-repair-projection.v1.json
 created: 2026-08-29
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [command, repair, projection, status, conditions, bounded-storage, operator]
 ---
 
@@ -36,6 +36,10 @@ are not changed. Repair atomically replaces each derived file—
 success only when the same strict bounded reader used by routine status proves
 the checkpoint current. An interruption can leave one complete derived file
 newer than the other, but the next scan still fails closed as repair-required.
+For a task that still proves the canonical initial zero-history state, repair
+may republish those two derived files without creating an authoritative
+journal. The same shared pristine predicate used by status must prove that
+exception; an arbitrary journal-less task is still rejected.
 
 On success, human output names the task and journal cursor; `--json` emits
 `hive-repair-projection.v1` with `outcome: repaired` and the next action
@@ -53,11 +57,12 @@ These bounded reasons are terminal under the current limits:
 
 - `checkpoint_oversized`
 - `attempt_ids_exhausted`
-- `predecessor_fetches_exhausted`
 
 For those rows, repeating repair cannot make the projection fit. Compact that
 single task's retained projection history before repairing again; Hive does not
 raise the limits, create a migration, or run periodic repair machinery.
+`predecessor_fetches_exhausted` is repairable because exact replay can move the
+validated history behind a fresh checkpoint.
 
 Ordinary `ERROR` and `REVIEW_ERROR` recovery is separate. A guarded
 `workflow.retry` reruns the owning workflow stage; it cannot rebuild a missing,

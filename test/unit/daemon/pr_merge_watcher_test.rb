@@ -535,6 +535,48 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_projection_outage_blocks_then_resumes_the_same_merge_candidate
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      task = tasks.first
+      marker = Hive::Markers.current(task.state_file)
+      Hive::TaskJournal::Writer.new(task_folder: task.folder).append(
+        event_type: "legacy_baseline",
+        task: { "id" => task.id&.to_s, "slug" => task.slug },
+        workflow: task.workflow.id,
+        stage: stage_dir(task),
+        attempt_id: Hive::TaskJournal::LEGACY_ATTEMPT_ID,
+        task_generation: 0,
+        ownership_generation: nil,
+        commit_generation: 0,
+        reason: "merge_watcher_fixture",
+        evidence: [],
+        provenance: { "source" => "test" },
+        payload: {}
+      )
+      projection_store = Hive::TaskProjection::Store.new(task_folder: task.folder)
+      projection_store.rebuild!(marker: marker)
+      watcher, store = build_watcher(gh: FakeGh.new(state: "OPEN"))
+      watcher.observe([ row_for(task) ], now: T0)
+      File.binwrite(projection_store.checkpoint_path, "{\n")
+
+      blocked = watcher.tick(now: T0).first
+
+      assert_equal :blocked, blocked.fetch(:status)
+      candidate = store.load(identity_for(task.project_root))
+                       .fetch("candidates").values.first
+      assert_equal "blocked", candidate.dig("archive", "status")
+      refute_equal "superseded", candidate.dig("archive", "status")
+
+      projection_store.repair!(marker: marker)
+      resumed = watcher.tick(now: T0 + 1).first
+
+      assert_equal :open, resumed.fetch(:status)
+      candidate = store.load(identity_for(task.project_root))
+                       .fetch("candidates").values.first
+      refute_equal "superseded", candidate.dig("archive", "status")
+    end
+  end
+
   def test_merged_candidate_without_an_immutable_head_binding_remains_ambiguous
     with_merge_project(stages: [ "6-review" ]) do |tasks, _home|
       task = tasks.first

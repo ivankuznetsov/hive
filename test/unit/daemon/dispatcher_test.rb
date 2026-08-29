@@ -1394,7 +1394,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
           attempt_id: nil, task_generation: nil,
-          condition_task_generation: nil, id: 1)
+          condition_task_generation: nil, projection_repair: false, id: 1)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, id: id, stage: stage, workflow: workflow, marker: marker,
@@ -1407,7 +1407,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dependency_stage: dependency_stage, blocked: blocked,
       admission_error: admission_error,
       attempt_id: attempt_id, task_generation: task_generation,
-      condition_task_generation: condition_task_generation
+      condition_task_generation: condition_task_generation,
+      projection_repair: projection_repair
     )
   end
 
@@ -1695,6 +1696,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
     observed = row(
       marker: "error", action: "error", command: nil,
+      projection_repair: true,
       marker_attrs: {
         "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
         "message" => "checkpoint missing",
@@ -1714,6 +1716,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_idle_projection_repair_does_not_block_ready_patrol_fix_in_same_tick
     repair = row(
       slug: "repair-me", marker: "error", action: "error", command: nil,
+      projection_repair: true,
       marker_attrs: {
         "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
       }
@@ -1731,8 +1734,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   # Exempting a class of error from automatic retry does not make it safe, it
   # makes it stuck: the exempt reason still needs the same retry, performed by
-  # hand at whatever delay a human happens to notice it. Every error marker is
-  # assessed now, and the assessment decides — not the reason string.
+  # hand at whatever delay a human happens to notice it. Every durable workflow
+  # error is assessed now, and the assessment decides — not the reason string.
+  # Producer-owned synthetic projection-repair rows are handled separately.
   def test_terminal_outcome_errors_are_assessed_for_automatic_retry
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       snapshot = FakeOperationalSnapshot.new
@@ -3885,6 +3889,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       row(
         slug: "repairing", marker: "error", action: "error", command: nil,
         live_task_lock: true,
+        projection_repair: true,
         marker_attrs: {
           "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
         }
@@ -5714,6 +5719,7 @@ end
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       repair = row(
         project: "p1", slug: "s1", marker: "error", action: "error", command: nil,
+        projection_repair: true,
         marker_attrs: {
           "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
           "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"

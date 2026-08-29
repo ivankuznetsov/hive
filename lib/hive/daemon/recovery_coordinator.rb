@@ -215,7 +215,7 @@ module Hive
           return receipt(
             "blocked", failure_origin: failure_origin, owner: "operator",
             reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: marker_attrs(row)["repair_command"] ||
+            remediation: value(row, :suggested_command) ||
               "repair the exact task projection before retrying"
           )
         end
@@ -790,7 +790,7 @@ module Hive
             "blocked", request_id: request.request_id,
             phase: recovery["phase"], failure_origin: recovery["failure_origin"],
             owner: "operator", reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: marker_attrs(row)["repair_command"] ||
+            remediation: value(row, :suggested_command) ||
               "repair the exact task projection before retrying",
             retry_count: recovery["retry_count"]
           )
@@ -1376,7 +1376,7 @@ module Hive
       end
 
       def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_marker?(marker_attrs(row))
+        Hive::TaskProjection.repair_required_row?(row)
       end
 
       def observed_marker_generation(row)

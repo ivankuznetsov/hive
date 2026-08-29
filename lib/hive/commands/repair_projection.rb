@@ -100,7 +100,10 @@ module Hive
           result = begin
             options = { task_folder: locked_task.folder }
             options[:attempt_store] = @attempt_store if @attempt_store
-            Hive::TaskProjection::Store.new(**options).repair!(marker: marker)
+            Hive::TaskProjection::Store.new(**options).repair!(
+              marker: marker,
+              pristine: Hive::TaskProjection::Store.pristine_task?(locked_task, marker)
+            )
           rescue Hive::TaskProjection::InvalidJournal => e
             raise Hive::TaskProjection::InvalidJournal,
                   "projection repair for #{identity_label} failed: #{e.message}"

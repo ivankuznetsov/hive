@@ -1599,7 +1599,7 @@ module Hive
       end
 
       def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_marker?(row.marker_attrs)
+        Hive::TaskProjection.repair_required_row?(row)
       end
 
       def merge_reconciliation_blocks_recovery?(row)
@@ -2638,7 +2638,7 @@ module Hive
             :dispatch_request_blocked,
             request_id: req.request_id, project: req.project,
             slug: req.slug, reason: "projection_repair_required",
-            remediation: row.marker_attrs["repair_command"] ||
+            remediation: row.suggested_command ||
               "repair the exact task projection before admission"
           )
           return

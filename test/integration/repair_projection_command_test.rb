@@ -178,7 +178,7 @@ class RepairProjectionCommandTest < Minitest::Test
         journal_cursor: 0
       )
       fake_store = Object.new
-      fake_store.define_singleton_method(:repair!) do |marker:|
+      fake_store.define_singleton_method(:repair!) do |marker:, **|
         Hive::TaskProjection::Store::RepairResult.new(
           projection: projection, bounded: bounded
         )

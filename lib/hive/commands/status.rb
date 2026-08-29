@@ -43,10 +43,6 @@ module Hive
       attr_reader :next_retention_boundary
 
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
-      PRISTINE_FORBIDDEN_ENTRIES = %w[
-        .lock closure.json handoff.yml patrol-fix-worktree.json worktree.yml
-      ].freeze
-
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
@@ -831,6 +827,7 @@ module Hive
           "pr_url" => row[:pr_url],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
+          "projection_repair" => row[:projection_repair] == true,
           "mtime" => row[:mtime].utc.iso8601(6),
           "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
@@ -1450,7 +1447,7 @@ module Hive
               else
                 Hive::Markers.current(task.state_file)
               end
-              marker, projection = status_projection(
+              marker, projection, projection_repair = status_projection(
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
@@ -1500,6 +1497,7 @@ module Hive
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
+                projection_repair: projection_repair == true,
                 projection: projection,
                 projection_data: projection.to_h,
                 icon: icon,
@@ -1586,7 +1584,7 @@ module Hive
           task_projection: projection
         )
         projection = projection.with_closure(closure) if closure
-        [ marker, projection ]
+        [ marker, projection, false ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e
         project ||= project_name_for(task)
@@ -1603,24 +1601,7 @@ module Hive
       end
 
       def pristine_projection_task?(task, marker)
-        first_stage = task.workflow.stages.first
-        return false unless first_stage && first_stage.dir == "#{task.stage_index}-#{task.stage_name}"
-
-        workflow_id = task.workflow.id if task.workflow.respond_to?(:id)
-        expected_marker = if Hive::Workflows.coding_id?(workflow_id) ||
-                             first_stage.kind == :human
-          :waiting
-        else
-          :none
-        end
-        return false unless marker.name == expected_marker
-        return false if PRISTINE_FORBIDDEN_ENTRIES.any? do |basename|
-          File.exist?(File.join(task.folder, basename))
-        end
-
-        !File.directory?(task.log_dir) || Dir.empty?(task.log_dir)
-      rescue SystemCallError, IOError
-        false
+        Hive::TaskProjection::Store.pristine_task?(task, marker)
       end
 
       def projection_repair_status(task, bounded, project:)
@@ -1633,7 +1614,8 @@ module Hive
              "(#{attrs.fetch('projection_reason')}); surfaced as a task-local Error row"
         [
           error_marker,
-          Hive::TaskProjection.project(records: [], marker: error_marker)
+          Hive::TaskProjection.project(records: [], marker: error_marker),
+          true
         ]
       end
 
@@ -1962,6 +1944,7 @@ module Hive
           task: nil,
           marker_name: marker.name,
           marker_attrs: marker.attrs,
+          projection_repair: false,
           icon: icon,
           state_label: state_label,
           mtime: folder_mtime,
@@ -2028,14 +2011,20 @@ module Hive
             patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
-          projection_repair_annotation(annotation) || annotation
+          projection_repair_annotation(annotation, project: project["name"]) || annotation
         end
       end
 
-      def projection_repair_annotation(row)
-        return nil unless Hive::TaskProjection.repair_required_marker?(row[:marker_attrs])
+      def projection_repair_annotation(row, project:)
+        return nil unless Hive::TaskProjection.repair_required_row?(row)
 
-        command = row.dig(:marker_attrs, "repair_command")
+        command = unless Hive::TaskProjection.terminal_repair_reason?(
+          row.dig(:marker_attrs, "projection_reason")
+        ) || row.dig(:marker_attrs, "projection_reason") == "journal_lock_busy"
+          Hive::TaskProjection.repair_command(
+            project: project, slug: row[:slug], stage: row[:stage]
+          )
+        end
         marker = marker_from_row(row)
         row.merge(
           action_key: Hive::Schemas::TaskActionKind::ERROR,

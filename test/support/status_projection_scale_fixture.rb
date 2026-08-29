@@ -27,12 +27,16 @@ module HiveStatusProjectionScaleFixture
       @point_fetches = 0
       @fetches_by_id = Hash.new(0)
       @proof_directory_enumerations = 0
+      @bindings = {}
     end
 
     def fetch_projection_binding(attempt_id)
+      key = attempt_id.to_s
+      return @bindings[key] if @bindings.key?(key)
+
       @point_fetches += 1
-      @fetches_by_id[attempt_id.to_s] += 1
-      @attempts[attempt_id.to_s]
+      @fetches_by_id[key] += 1
+      @bindings[key] = @attempts[key]
     end
 
     alias fetch fetch_projection_binding
@@ -161,6 +165,14 @@ module HiveStatusProjectionScaleFixture
         attempts: attempts, logical_proof_count: 0
       )
     ).rebuild!
+    suffix = activity_event(
+      event_id: "scale-suffix-#{id}", attempt_id: attempt_id,
+      slug: slug, id: id, stage: stage, workflow: workflow,
+      index: history_events + 1
+    )
+    File.open(File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME), "a") do |journal|
+      journal.write("#{JSON.generate(suffix)}\n")
+    end
     Hive::Task.new(folder)
   end
   private_class_method :write_task

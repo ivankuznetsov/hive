@@ -16,15 +16,22 @@ module Hive
     OPERATOR_ACTIONS_MAX = 20
     REPAIR_REQUIRED_REASON = "condition_projection_repair_required".freeze
     TERMINAL_REPAIR_REASONS = %w[
-      checkpoint_oversized attempt_ids_exhausted predecessor_fetches_exhausted
+      checkpoint_oversized attempt_ids_exhausted
     ].freeze
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
+    class RoutineLockUnavailable < Error; end
 
-    def self.repair_required_marker?(marker_or_attrs)
-      attrs = marker_or_attrs.respond_to?(:attrs) ? marker_or_attrs.attrs : marker_or_attrs
-      attrs.is_a?(Hash) && attrs["reason"].to_s == REPAIR_REQUIRED_REASON
+    # Projection repair is a producer-owned row classification. Marker attrs
+    # are agent-authored evidence and must never grant this control state.
+    def self.repair_required_row?(row)
+      value = if row.respond_to?(:projection_repair)
+        row.projection_repair
+      elsif row.is_a?(Hash)
+        row.key?(:projection_repair) ? row[:projection_repair] : row["projection_repair"]
+      end
+      value == true
     end
 
     def self.terminal_repair_reason?(reason)
@@ -46,7 +53,10 @@ module Hive
       }
       reason = diagnostic.fetch("reason", "bounded_projection_unavailable").to_s
       terminal = terminal_repair_reason?(reason)
-      message = if terminal
+      transient = reason == "journal_lock_busy"
+      message = if transient
+        "task projection is locked by an exact-task repair; wait for it to finish"
+      elsif terminal
         "#{diagnostic.fetch('message', 'bounded task projection exceeded its cap')}; " \
           "compact this task's retained projection history before repair"
       else
@@ -60,7 +70,7 @@ module Hive
         "projection_state" => bounded.state.to_s[0, 64],
         "message" => message.to_s[0, 500]
       }
-      unless terminal
+      unless terminal || transient
         attrs["repair_command"] = repair_command(
           project: project, slug: slug, stage: stage
         )

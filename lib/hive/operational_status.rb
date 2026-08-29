@@ -916,7 +916,7 @@ module Hive
     def automatic_error_retry?(project, row)
       daemon_enabled?(project["name"]) &&
         %w[error review_error].include?(row["marker"].to_s) &&
-        !Hive::TaskProjection.repair_required_marker?(row["attrs"])
+        !Hive::TaskProjection.repair_required_row?(row)
     end
 
     def reasons_for(project, row)

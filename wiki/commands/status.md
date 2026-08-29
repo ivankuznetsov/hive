@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, projection-repair]
 ---
 
@@ -158,7 +158,11 @@ the stale action is rejected without complete-journal replay.
 If those bounded facts cannot prove one task's current state, status emits a
 synthetic `ERROR` row with reason
 `condition_projection_repair_required`, `owner: operator`, and the underlying
-`projection_reason`. Operational status classifies only that row as
+`projection_reason`. The internal row's additive `projection_repair: true`
+field is producer-owned; daemon and action consumers never infer this control
+state from agent-writable marker attributes. Status also regenerates any
+suggested repair command from the trusted project, slug, and stage instead of
+executing a command carried in marker evidence. Operational status classifies only that row as
 `needs_repair`; healthy rows remain available and the daemon may continue
 dispatching unrelated workflow and Patrol Fix work. The synthetic state is
 recomputed on every scan and is not written as a marker. A verified live task
@@ -174,10 +178,12 @@ hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
 
 This is different from `workflow.retry`: retry reruns a workflow failure, but
 cannot reconstruct derived projection state. The terminal reasons
-`checkpoint_oversized`, `attempt_ids_exhausted`, and
-`predecessor_fetches_exhausted` omit a repair command because repeating it
-cannot fit the current fixed bounds; compact that task's retained projection
-history first. See [[commands/repair-projection]]. No migration, daemon
+`checkpoint_oversized` and `attempt_ids_exhausted` omit a repair command because
+repeating it cannot fit the current fixed bounds; compact that task's retained
+projection history first. `predecessor_fetches_exhausted` remains exact-task
+repairable. A transient `journal_lock_busy` row also omits the command and
+clears on the next scan after the writer releases its lock. See
+[[commands/repair-projection]]. No migration, daemon
 watcher, restart, or fleet repair is part of this flow.
 
 A benign dependency-blocked row is always

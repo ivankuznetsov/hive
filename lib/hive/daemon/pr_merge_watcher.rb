@@ -350,9 +350,20 @@ module Hive
       def process_candidate(identity, candidate, now:, projection_reader:)
         task = resolve_candidate_task(candidate)
         return terminal_result(task, identity, now: now) if Hive::TaskClosure.terminal_task?(task)
-        unless generation_current?(
+        generation = generation_status(
           task, candidate, attempt_store: projection_reader.call
         )
+        if generation.fetch(:status) == :unavailable
+          return {
+            status: :blocked,
+            archive: {
+              "status" => "blocked",
+              "last_error" => generation.fetch(:reason)
+            },
+            next_poll_at: now + @poll_interval_sec
+          }
+        end
+        unless generation.fetch(:status) == :current
           return {
             status: :superseded,
             archive: { "status" => "superseded",
@@ -643,19 +654,26 @@ module Hive
         nil
       end
 
-      def generation_current?(task, candidate, attempt_store:)
+      def generation_status(task, candidate, attempt_store:)
         marker = Hive::Markers.current(task.state_file)
         bounded = Hive::TaskProjection::Store.new(
           task_folder: task.folder, attempt_store: attempt_store
         ).read_routine(marker: marker)
-        return false unless bounded.current?
+        unless bounded.current?
+          reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
+          return {
+            status: :unavailable,
+            reason: "task projection requires repair before reconciliation (#{reason})"
+          }
+        end
 
-        Hive::TaskClosure.task_generation(
+        current = Hive::TaskClosure.task_generation(
           task, marker: marker, projection: bounded.projection
         ) ==
           candidate.dig("observation", "task_generation") &&
           Hive::TaskClosure.marker_generation(marker) ==
             candidate.dig("observation", "marker_generation")
+        { status: current ? :current : :changed }
       end
 
       def resolve_candidate_task(candidate)
@@ -700,7 +718,7 @@ module Hive
       def tracked_row?(row)
         SUPPORTED_STAGES.include?(row.stage.to_s) &&
           row.workflow.to_s == "coding" &&
-          !Hive::TaskProjection.repair_required_marker?(row.marker_attrs)
+          !Hive::TaskProjection.repair_required_row?(row)
       end
 
       def backlog_outcome(row, task_generation, status:, reason:,

@@ -83,6 +83,10 @@ journal, invokes `rebuild!`, or enumerates permanent proof storage.
 Operational-action token revalidation and downstream attempt-generation reads
 use the same strict reader; they surface repair-required state instead of
 guessing that an absent journal means a pristine task.
+Routine reads take the task-local journal lock with a nonblocking shared flock
+after regular-file, no-follow, and descriptor-identity checks. A concurrent
+exact repair or unsafe lock entry becomes the transient task-local
+`journal_lock_busy` diagnostic rather than stalling the fleet scan.
 
 Canonical task creation publishes a zero-history snapshot and checkpoint before
 the task is committed or admitted. The checkpoint is valid without creating an
@@ -98,7 +102,9 @@ recomputed rather than persisted; unrelated tasks continue. Only the complete
 initial-stage zero-state may project as pristine without a checkpoint. The
 explicit [[commands/repair-projection]] command owns full replay for one exact
 task. It changes derived snapshot/checkpoint files only; it is neither a
-workflow retry nor a migration or watcher.
+workflow retry nor a migration or watcher. The repair command may also restore
+missing derived files for a journal-less task only when the same shared
+creation-state predicate proves the canonical initial zero-history state.
 
 Selection proceeds by current task generation, then latest compatible attempt
 within each registry family, then exact commit generation/HEAD for branch facts.

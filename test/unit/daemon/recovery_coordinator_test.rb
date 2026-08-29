@@ -24,8 +24,12 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   FakeRow = Data.define(
     :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
     :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
-    :task_generation, :suggested_command
-  )
+    :task_generation, :suggested_command, :projection_repair
+  ) do
+    def initialize(projection_repair: false, **attributes)
+      super(projection_repair: projection_repair, **attributes)
+    end
+  end
   FakeGeneration = Data.define(:progress_token, :task_generation)
 
   def test_projection_repair_row_is_ineligible_for_request_and_resume
@@ -40,7 +44,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
           "repair_command" => command
         },
         state_file_mtime: NOW, live_task_lock: false, attempt_id: nil,
-        task_generation: nil, suggested_command: nil
+        task_generation: nil, suggested_command: command, projection_repair: true
       )
       coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
 
@@ -106,6 +110,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         id: 42, slug: "durable-task", folder: root, state_file: state_file,
         stage_index: 1, stage_name: "inbox",
         workflow: Hive::Workflows::PatrolFix::DESCRIPTOR
+      )
+      Hive::TaskProjection::Store.new(task_folder: root).initialize_pristine!(
+        marker: Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
       )
       Hive::PatrolFix::ReceiptStore.new(task_folder: root).append!(
         patrol_fix_decision_receipt(task.slug)

@@ -613,6 +613,113 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_pristine_initialization_refuses_preexisting_projection_authority
+    with_tmp_dir do |root|
+      marker = Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
+      authority_paths = [
+        Hive::TaskJournal::JOURNAL_BASENAME,
+        Hive::TaskProjection::Store::SNAPSHOT_BASENAME,
+        Hive::TaskProjection::Store::CHECKPOINT_BASENAME
+      ]
+
+      authority_paths.each_with_index do |basename, index|
+        folder = File.join(root, index.to_s)
+        FileUtils.mkdir_p(folder)
+        path = File.join(folder, basename)
+        original = "existing-#{basename}\n"
+        File.binwrite(path, original)
+
+        assert_raises(Hive::TaskProjection::InvalidJournal) do
+          projection_store(folder).initialize_pristine!(marker: marker)
+        end
+        assert_equal original, File.binread(path)
+      end
+    end
+  end
+
+  def test_explicit_repair_can_restore_a_legitimate_zero_history_checkpoint
+    with_tmp_dir do |dir|
+      marker = Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
+      store = projection_store(dir)
+      store.initialize_pristine!(marker: marker)
+      File.delete(store.checkpoint_path)
+
+      before = store.read_routine(marker: marker)
+      assert_equal "repair_required", before.state
+      assert_equal "checkpoint_missing", before.diagnostics.first.fetch("reason")
+
+      repaired = store.repair!(marker: marker, pristine: true)
+
+      assert repaired.bounded.current?
+      assert_equal "current", store.read_routine(marker: marker).state
+      refute File.exist?(store.journal_path),
+             "zero-history repair must not invent authoritative journal history"
+    end
+  end
+
+  def test_routine_read_degrades_immediately_while_exact_repair_holds_the_lock
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        assert lock.flock(File::LOCK_EX)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = store.read_routine
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        assert_operator elapsed, :<, 0.5
+        assert_equal "repair_required", result.state
+        assert_equal "journal_lock_busy", result.diagnostics.first.fetch("reason")
+      end
+    end
+  end
+
+  def test_routine_read_rejects_a_fifo_journal_lock_without_blocking
+    skip "File.mkfifo is unavailable" unless File.respond_to?(:mkfifo)
+
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+      FileUtils.rm_f(lock_path)
+      File.mkfifo(lock_path, 0o644)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = store.read_routine
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 0.5
+      assert_equal "repair_required", result.state
+      assert_equal "journal_lock_busy", result.diagnostics.first.fetch("reason")
+    end
+  end
+
+  def test_predecessor_fetch_exhaustion_remains_exact_task_repairable
+    bounded = Hive::TaskProjection::Store::BoundedRead.new(
+      projection: nil, state: "repair_required", truncated: true,
+      journal_cursor: 0, journal_records: [],
+      diagnostics: [ {
+        "reason" => "predecessor_fetches_exhausted",
+        "message" => "predecessor fetch budget exhausted",
+        "details" => { "cap" => "predecessor_fetches" }
+      } ]
+    )
+
+    attrs = Hive::TaskProjection.repair_marker_attrs(
+      bounded: bounded, project: "demo", slug: "repair-me", stage: "4-execute"
+    )
+
+    refute Hive::TaskProjection.terminal_repair_reason?(
+      "predecessor_fetches_exhausted"
+    )
+    assert_equal "hive repair-projection repair-me --project demo --stage 4-execute",
+                 attrs.fetch("repair_command")
+  end
+
   def test_explicit_repair_serializes_a_concurrent_journal_append
     release_projection = repair = append = nil
     with_tmp_dir do |dir|

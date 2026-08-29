@@ -314,7 +314,7 @@ class OperationalActionTest < Minitest::Test
         def to_h = { "identity" => {} }
       end.new
       store = Object.new
-      store.define_singleton_method(:read_routine) do |marker:|
+      store.define_singleton_method(:read_routine) do |marker:, **|
         projection.marker = marker
         Hive::TaskProjection::Store::BoundedRead.new(
           projection: projection, state: "current", diagnostics: [],

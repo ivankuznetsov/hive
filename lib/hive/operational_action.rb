@@ -92,7 +92,7 @@ module Hive
 
       def recoverable?(row)
         Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
-          !Hive::TaskProjection.repair_required_marker?(row["attrs"]) &&
+          !Hive::TaskProjection.repair_required_row?(row) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
           !Hive::Recovery.intervention_required?(
             marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
@@ -145,7 +145,10 @@ module Hive
         end
         bounded = Hive::TaskProjection::Store.new(
           task_folder: task.folder
-        ).read_routine(marker: marker)
+        ).read_routine(
+          marker: marker,
+          pristine: Hive::TaskProjection::Store.pristine_task?(task, marker)
+        )
         if bounded.current?
           projection = bounded.projection
           action_marker = marker
@@ -171,6 +174,7 @@ module Hive
           "stage" => "#{task.stage_index}-#{task.stage_name}",
           "marker" => action_marker.name.to_s,
           "attrs" => action_marker.attrs,
+          "projection_repair" => !bounded.current?,
           "mtime" => observation_mtime(task),
           "action" => action.key,
           "condition_task_generation" => projection_data.dig("identity", "task_generation"),

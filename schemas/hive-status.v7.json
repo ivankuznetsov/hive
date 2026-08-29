@@ -172,6 +172,7 @@
           ]
         },
         "attrs": { "type": "object", "additionalProperties": true },
+        "projection_repair": { "type": "boolean" },
         "held": {
           "type": "object",
           "additionalProperties": false,

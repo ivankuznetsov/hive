@@ -10,9 +10,9 @@ Operators repair a repairable row with its exact
 `hive repair-projection TASK --project PROJECT --stage STAGE` command. The
 command rebuilds only derived state for that task and verifies the strict
 bounded postcondition. Workflow retry, storage migration, daemon restart, and
-periodic repair watchers are not substitutes. Checkpoint size, attempt-ID, and
-predecessor-fetch cap exhaustion instead require task-local retained-history
-compaction before another repair.
+periodic repair watchers are not substitutes. Checkpoint size and attempt-ID
+cap exhaustion require task-local retained-history compaction;
+predecessor-fetch exhaustion remains exact-task repairable.
 
 Canonical CLI, idempotent/controller, Patrol Fix, and ad-hoc review task
 creation now publish a zero-history derived checkpoint before exposing the
@@ -22,4 +22,7 @@ the new-task gap without becoming an implicit repair or migration path.
 Operational-action freshness checks and downstream generation reads now use
 the strict projection path too. Bounded suffix preflight parses attempt IDs and
 event counts once, while PR merge reconciliation reuses one attempt projection
-reader across all selected projects in a tick.
+reader across all selected projects in a tick. Routine journal locks are
+nonblocking and unsafe or contended lock entries degrade only that task. Repair
+classification is a producer-owned status field, not an agent-writable marker
+claim, and merge candidates survive temporary projection outages.

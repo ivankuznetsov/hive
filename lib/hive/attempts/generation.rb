@@ -2,6 +2,7 @@ require "digest"
 require "hive/dependency_snapshot"
 require "hive/attempts/store"
 require "hive/conditions/generation_tracker"
+require "hive/markers"
 require "hive/paths"
 require "hive/task_projection/store"
 
@@ -88,9 +89,17 @@ module Hive
           File.dirname(task.state_file)
         end
         store = attempt_store || default_attempt_store
+        marker = if task.respond_to?(:workflow) && task.workflow&.controller?
+          Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+        elsif task.respond_to?(:workflow)
+          Hive::Markers.current(task.state_file)
+        end
         bounded = Hive::TaskProjection::Store.new(
           task_folder: folder, attempt_store: store
-        ).read_routine
+        ).read_routine(
+          marker: marker,
+          pristine: marker && Hive::TaskProjection::Store.pristine_task?(task, marker)
+        )
         unless bounded.current?
           reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
           raise Hive::TaskProjection::InvalidJournal,

@@ -22,8 +22,8 @@ class StatusProjectionScaleTest < Minitest::Test
       assert_equal 0, full.fetch(:attempt_store).proof_directory_enumerations
       assert_equal 0, empty.dig(:counters, :full_journal_reads)
       assert_equal 0, full.dig(:counters, :full_journal_reads)
-      assert_equal 0, empty.dig(:counters, :journal_suffix_bytes)
-      assert_equal 0, full.dig(:counters, :journal_suffix_bytes)
+      assert_operator empty.dig(:counters, :journal_suffix_bytes), :>, 0
+      assert_operator full.dig(:counters, :journal_suffix_bytes), :>, 0
       assert_equal empty.fetch(:counters), full.fetch(:counters)
       assert_equal Fixture::TASK_COUNT, full.dig(:counters, :stores)
       assert_equal empty.fetch(:attempt_store).point_fetches,

@@ -358,8 +358,7 @@ module Hive
       end
 
       def projection_repair_row?(row)
-        attrs = row.respond_to?(:marker_attrs) ? row.marker_attrs : nil
-        Hive::TaskProjection.repair_required_marker?(attrs)
+        Hive::TaskProjection.repair_required_row?(row)
       end
 
       def controller_workflow?(row)

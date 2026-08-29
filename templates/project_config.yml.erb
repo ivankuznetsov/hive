@@ -306,6 +306,10 @@ review:
   github_publish:
     enabled: true
     max_attempts: 2
+  # Set false only when hosted pull-request checks are intentionally managed
+  # outside Hive. When enabled, review settles checks on the exact final SHA.
+  github_checks:
+    enabled: true
   # Ad-hoc PR reviews (`hive review --pr`) are review-only by default:
   # reviewer/escalation comments can be published to GitHub, but Hive does
   # not prepare local fix commits unless init/operator explicitly enables it.

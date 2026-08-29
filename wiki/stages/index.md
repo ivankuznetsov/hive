@@ -3,7 +3,7 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-29
 tags: [stage, index]
 ---
 
@@ -16,7 +16,7 @@ tags: [stage, index]
 | 3-plan | `Hive::Stages::Plan` | `plan.md` | yes | [[stages/plan]] |
 | 4-execute | `Hive::Stages::Execute` | `task.md` (+ `worktree.yml`) | yes (impl-only since U9) | [[stages/execute]] |
 | 5-open-pr | `Hive::Stages::OpenPr` | `pr.md` | yes | [[stages/open-pr]] |
-| 6-review | `Hive::Stages::Review` (orchestrator) + `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Hive::Reviewers` adapters | `task.md` (+ `reviews/*-NN.md`, `reviews/escalations-NN.md`, `reviews/ci-blocked.md`, `reviews/browser-test-NN.md`, `reviews/fix-guardrail-NN.md`) | yes (CI-fix + reviewers + triage + fix + browser) | [[stages/review]] |
+| 6-review | `Hive::Stages::Review` (orchestrator) + `Review::{CiFix,RemoteCi,Triage,BrowserTest,FixGuardrail}` + `Hive::Reviewers` adapters | `task.md` (+ `reviews/*-NN.md`, `reviews/escalations-NN.md`, `reviews/ci-blocked.md`, `reviews/browser-test-NN.md`, `reviews/fix-guardrail-NN.md`) | yes (local/hosted CI-fix + reviewers + triage + fix + browser) | [[stages/review]] |
 | 7-artifacts | `Hive::Stages::Artifacts` | `artifact.md` | yes | [[stages/artifacts]] |
 | 8-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
 | 9-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
@@ -44,7 +44,7 @@ the markerless `nil` commit result that prevents empty audit commits.
 
 ## 6-review phase order
 
-1. **CI** (`Review::CiFix`, U7) — runs `review.ci.command` once on entry; on failure feeds log to fix agent up to `review.ci.max_attempts`. Hard-block → `REVIEW_CI_STALE` + `reviews/ci-blocked.md`.
+1. **CI** (`Review::CiFix` + `Review::RemoteCi`, U7) — runs optional `review.ci.command`, publishes with an exact PR-head lease, and settles the hosted check suite. Failure feeds bounded logs to the fix agent up to `review.ci.max_attempts`. The gates repeat when the reviewer-clean HEAD changed; a CI repair gets a fresh reviewer pass. Hard-block → `REVIEW_CI_STALE` + `reviews/ci-blocked.md`.
 2. **Reviewers** (`Hive::Reviewers`, U4) — dispatches each configured reviewer via `Hive::Reviewers.dispatch(spec, ctx)`. `kind: "agent"` spawns a CE-skill reviewer; `kind: "codex_review"` runs native `codex review` and captures stdout into `reviews/<output_basename>-<NN>.md`. All reviewers fail → `REVIEW_ERROR`. `kind: "linter"` is rejected (use `review.ci.command`).
 3. **Triage** (`Review::Triage`, U6) — `courageous` (default) or `safetyist` bias preset, with `review.triage.custom_prompt` override (path-escape-guarded). Concatenates `[x]` lines from per-reviewer files into accepted findings. SHA-256 protects `plan.md`/`worktree.yml`/`task.md`.
 4. **Fix** — spawns fix agent with `accepted_findings` wrapped in per-spawn nonce. Agent's commits must carry trailers (`Hive-Fix-Pass`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase: fix`) — surfaced by `hive metrics rollback-rate` (U14).

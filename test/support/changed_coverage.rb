@@ -16,7 +16,12 @@ module HiveChangedCoverage
   # Values are repo-relative test files or empty arrays (no focused test).
   SOURCE_TEST_OVERRIDES = {
     "lib/hive/version.rb" => [],
-    "lib/hive/errors.rb" => []
+    "lib/hive/errors.rb" => [],
+    "lib/hive/stages/review.rb" => [
+      "test/integration/run_review_test.rb",
+      "test/unit/stages/review/ci_gates_test.rb",
+      "test/unit/stages/review/run_reviewers_test.rb"
+    ]
   }.freeze
 
   module_function

@@ -121,6 +121,25 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_command_runner_reuses_the_bounded_ci_fix_loop
+    with_ci_dir do |dir, task_folder|
+      calls = []
+      runner = lambda do |max_bytes:, timeout_sec:|
+        calls << [ max_bytes, timeout_sec ]
+        Hive::Stages::Review::CiFix::Run.new("hosted checks green\n", 0)
+      end
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+        command: "hosted checks", command_runner: runner
+      )
+
+      assert_equal :green, result.status
+      assert_equal [ [ Hive::Stages::Review::CiFix::DEFAULT_MAX_LOG_BYTES, 5 ] ], calls
+      assert_equal "hosted checks green\n", result.last_output
+    end
+  end
+
   # --- green after fix --------------------------------------------------
 
   def test_returns_green_after_fix_agent_recovers_failing_ci

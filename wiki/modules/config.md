@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-29
 tags: [config, yaml, validation, plan-review, opencode]
 ---
 
@@ -681,7 +681,7 @@ two identities use different providers, use `models.patrol_review` for a
 discovery-only route; `models.patrol` is deliberately coarse and therefore
 applies to both review and fix identities.
 
-`timeout_sec.review_ci` (default 3600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
+`timeout_sec.review_ci` (default 3600) is enforced as a hard per-attempt deadline for both `Review::CiFix#run_ci_once` and `Review::RemoteCi` hosted-check settlement. Local subprocess expiry TERM/KILLs the pgid; hosted settlement expiry fails closed on the exact unsatisfied PR head. `review.github_checks.enabled` defaults true and is independent of `review.github_publish.enabled`: the former gates exact-head completion, while the latter only controls reviewer-comment mirroring.
 
 ## Stage runners reach into config like this
 
@@ -692,6 +692,7 @@ cfg.dig("review", "ci", "agent")
 cfg.dig("review", "reviewers")
 cfg.dig("review", "adhoc", "reviewers")
 cfg.dig("review", "adhoc", "fix")
+cfg.dig("review", "github_checks", "enabled")
 cfg.dig("plan_review", "routes", "adversarial")
 cfg.dig("plan_review", "coverage", "required")
 cfg.dig("babysitter", "enabled")

@@ -224,6 +224,10 @@ module Hive
         # they evaluated. The completed operational snapshot consumes these;
         # no selector is rerun for status rendering.
         @routing_observations = {}
+        # A successful full scan replaces this snapshot. Changed-task ticks
+        # inherit it so a freshly completed task cannot reuse its slot before
+        # older capacity-deferred rows are reconsidered by the next full scan.
+        @priority_capacity_fences = { global: nil, projects: {} }
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -456,7 +460,9 @@ module Hive
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
         # ahead of newer earlier-stage work when slots are scarce.
-        dispatch_rows_in_priority_order(result.rows, now: now)
+        @priority_capacity_fences = dispatch_rows_in_priority_order(
+          result.rows, now: now
+        )
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -542,7 +548,9 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
-        dispatch_rows_in_priority_order(result.rows, now: now)
+        @priority_capacity_fences = dispatch_rows_in_priority_order(
+          result.rows, now: now, capacity_fences: @priority_capacity_fences
+        )
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
                                  in_flight: @controller.in_flight_count,
@@ -2009,17 +2017,18 @@ module Hive
             .map(&:first)
       end
 
-      # Preserve the priority order for the entire status frame. Durable
-      # admission reads live capacity, so a higher-priority row can be
-      # deferred and a short-lived worker can finish before a later row is
-      # evaluated. Without a tick-local fence that later row steals the newly
-      # opened slot, while the deferred row is not reconsidered until the next
-      # tick. A global/durable capacity result fences every later dispatch;
+      # Preserve priority across the full status frame and any changed-task
+      # ticks before the next full scan. Durable admission reads live capacity,
+      # so a higher-priority row can be deferred and a short-lived worker can
+      # finish before a later row or incremental successor is evaluated.
+      # Without a remembered fence that row steals the newly opened slot,
+      # while the deferred row is not reconsidered until the next full scan. A
+      # global/durable capacity result fences every later dispatch;
       # project/daily caps fence only that project. Non-dispatch policy rows
       # still run so the operational snapshot remains complete.
-      def dispatch_rows_in_priority_order(rows, now:)
-        global_fence = nil
-        project_fences = {}
+      def dispatch_rows_in_priority_order(rows, now:, capacity_fences: nil)
+        global_fence = capacity_fences&.fetch(:global, nil)
+        project_fences = capacity_fences ? capacity_fences.fetch(:projects, {}).dup : {}
 
         dispatch_priority_order(rows).each do |row|
           break unless admission_open?
@@ -2034,6 +2043,8 @@ module Hive
             project_fences[project_key] ||= outcome
           end
         end
+
+        { global: global_fence, projects: project_fences }
       end
 
       def log_priority_capacity_fence(row, outcome)

@@ -781,6 +781,7 @@ class OperationalStatusTest < Minitest::Test
       "provider_hold" => [ "waiting_on_provider_or_scheduler", "provider" ],
       "dispatched" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "attempt_capacity" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "attempt_transient_retry" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/commands/guarded_archive"
 require "hive/commands/stage_action"
 require "hive/rebase"
 
@@ -185,7 +186,22 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
-  # ── archive idempotency ────────────────────────────────────────────────
+  # ── guarded-archive protocol (evidence closure retirement)
+
+  def close_with_evidence_receipt(slug, project:, receipt_digest:)
+    task = Hive::TaskResolver.new(slug, project_filter: project).resolve
+    Hive::Commands::GuardedArchive.call(
+      task,
+      current_stage: "#{task.stage_index}-#{task.stage_name}",
+      target_stage: Hive::Stages::DIRS.last,
+      project: project,
+      transition_guard: lambda do |locked_task|
+        Hive::Conditions::TransitionGuard.validate_closure!(
+          locked_task, receipt_digest: receipt_digest, project: project
+        )
+      end
+    )
+  end
 
   def test_evidence_receipt_path_can_archive_from_an_active_stage_only_after_guard
     with_tmp_global_config do
@@ -206,10 +222,9 @@ class RunStageActionTest < Minitest::Test
             ->(*) { raise "evidence closure must not invoke rebase" }
           ) do
             capture_io do
-              Hive::Commands::StageAction.new(
-                "archive", slug, project: project,
-                closure_receipt_digest: "a" * 64
-              ).call
+              close_with_evidence_receipt(
+                slug, project: project, receipt_digest: "a" * 64
+              )
             end
           end
         end
@@ -257,10 +272,9 @@ class RunStageActionTest < Minitest::Test
           Hive::Conditions::TransitionGuard, :validate_closure!, guard
         ) do
           error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
-            Hive::Commands::StageAction.new(
-              "archive", slug, project: project,
-              closure_receipt_digest: "a" * 64
-            ).call
+            close_with_evidence_receipt(
+              slug, project: project, receipt_digest: "a" * 64
+            )
           end
           assert_match(/generation changed/, error.message)
         end

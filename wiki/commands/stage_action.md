@@ -3,11 +3,11 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-07-25
+updated: 2026-08-28
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
-**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode and an interactive, evidence-bound `already_delivered` / `superseded` closure mode. Ordinary archive safety is unchanged: only `Hive::TaskClosure` can invoke the private receipt path that retires an active task from outside `8-finalize`. Automatic same-repository merge closure uses that same receipt transition; there is no marker-reason archive bypass.
+**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode and an interactive, evidence-bound `already_delivered` / `superseded` closure mode. Ordinary archive safety is unchanged: only `Hive::TaskClosure` can invoke the internal guarded-archive protocol (`Hive::Commands::GuardedArchive`) that retires an active task from outside its workflow's ordinary terminal transition. Automatic same-repository merge closure uses that same protocol; there is no marker-reason archive bypass.
 
 ## Usage
 
@@ -59,9 +59,19 @@ proof.
 
 The receipt is written atomically before transition. Its exact digest enters a
 separate `TransitionGuard.validate_closure!` path; it is not attempt success
-evidence and cannot weaken the ordinary marker/condition guard. StageAction
-may then force the task from any active stage to `9-done`, run the Done stage
-with the internal no-rebase override, and retain `closure.json`. The immutable
+evidence and cannot weaken the ordinary marker/condition guard. `Hive::TaskClosure`
+then drives the one internal guarded-archive protocol, `Hive::Commands::GuardedArchive`,
+which may force the task from any active stage to the terminal stage declared by
+that task's workflow (`9-done` for coding and `6-done` for content or Patrol Fix),
+run an agent-owned terminal stage with the internal no-rebase override, and
+retain `closure.json`. A controller-owned inert terminal such as Patrol Fix
+has no terminal agent: its valid closure receipt authorizes only the move to
+that workflow's terminal stage, and that receipt remains the completion
+authority instead of synthesizing a publication receipt or marker. StageAction
+itself carries no closure branch: it dispatches only ordinary verb transitions,
+while GuardedArchive holds no receipt semantics — the caller injects the
+pre-transition guard (rechecked inside the atomic move lock) and an optional
+locked-task observation. The immutable
 delivery evidence has already settled the feature branch, while Done only
 writes the terminal marker and cleanup instructions, so replaying stale branch
 commits cannot affect closure and must not dispatch conflict-resolution agents.
@@ -73,7 +83,7 @@ identity-mismatched receipts are quarantined and never authorize a move.
 
 1. Resolve TARGET via `Hive::TaskResolver` (path or slug). When `--from` is set, the resolver narrows to that stage.
 2. **`--from` retry-after-success rescue**: if the resolver fails with `InvalidTaskPath` AND `--from` was set, re-resolve without `stage_filter` and raise `WrongStage` (4) with the actual stage. Mirrors the pattern in `Hive::Commands::Approve` so a retry after a successful advance returns a meaningful `WRONG_STAGE` instead of "no task folder" (64).
-3. **Evidence-closure dispatch**: only an internal receipt digest from `Hive::TaskClosure` selects the dedicated closure guard and any-active-stage archive path.
+3. **Evidence-closure dispatch**: none. StageAction has no closure-specific branch or entrypoint; `Hive::TaskClosure` drives `Hive::Commands::GuardedArchive` directly with its injected receipt guard.
 4. **Archive idempotency check**: if the verb is `archive` AND the task is already at `9-done` with `:complete` marker, emit a `noop` payload and return.
 5. **At-target branch**: if the task is already at the verb's target stage, just run the stage's agent via `Hive::Commands::Run`. Phase: `ran`.
 6. **Wrong-stage guard**: if the task is at neither source nor target, raise `WrongStage` with the verb's expected source/target.

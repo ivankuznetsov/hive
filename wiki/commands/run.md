@@ -161,6 +161,13 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `unexpected_io_error` | A `Hive::GitError` / `SystemCallError` / `IOError` escaped the narrow rescue (programmer-error class) |
 
 `post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
+
+When this run first enters archived state, the final commit writes the current
+UTC `completed_at` clock in the same transaction. A legacy task that was
+already archived before the run keeps a missing clock unchanged; only the
+explicit [[commands/migrate]] command may discover and persist its historical
+completion time.
+
 ## next: hints (by marker)
 
 | Marker | `report` output |
@@ -186,10 +193,14 @@ terminal stage (`9-done` for coding) has no `next:`.
 
 ## Stage routing
 
-`Hive::Stages::Resolver` is name-first for coding compatibility: any registered
-coding stage name resolves to its bespoke runner, even when the descriptor says
-`kind: :agent` for `brainstorm` or `plan`. Descriptor `kind: :agent` only selects
-the generic [[stages/agent]] runner for non-coding stage names.
+`Hive::Stages::Resolver` dispatches on each stage descriptor's internal
+EXECUTION STRATEGY key (`Hive::Workflow::Stage#execution_strategy`) — never on
+workflow identity or a global stage-name table. Coding pins its bespoke runners
+with an explicit `runner:` key per stage in `Workflows::Coding::DESCRIPTOR`;
+every other active stage derives its generic strategy from `kind` (`:agent`,
+`:council`, or, for controller-owned workflows, `:controller`). A non-coding
+stage that shares a NAME with a coding stage (e.g. content's terminal `done`
+agent) resolves by its own declaration.
 
 | Stage name | Runner | Page |
 |-----------|--------|------|

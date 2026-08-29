@@ -72,15 +72,11 @@ identical failures at the ladder ceiling the request parks once with
 `reason=deterministic_failure`, its fingerprint, and bounded attempt history,
 so it stops consuming dispatch slots while other tasks continue. Terminal
 recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
-Independently,
-`Hive::Daemon::DisplayNameBackfiller`
-runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
-bounded by `max_per_tick`) for any task whose `display_name` never landed at
-`hive new`, so an interrupted name generation self-heals instead of leaving the
-task showing its raw slug. Per-folder inflight state stores `{pid, at}` and
-expires after 120 seconds so a reused or foreign pid cannot suppress retries
-forever. This is purely cosmetic — it touches no markers and never advances a
-stage.
+Daemon ticks never migrate task metadata. Missing task ids, display names, and
+legacy completion clocks are repaired only by the explicit [[commands/migrate]]
+command, so routine scheduling does not compete with stage commits. Recovery
+receipts for an id-less task instruct the operator to run `hive migrate --all`;
+they never claim a later daemon tick will allocate the id.
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|
@@ -95,7 +91,7 @@ stage.
 | Any coding task with `pr_url` in stages `5-open-pr` through `8-finalize` | **Observe before policy dispatch.** Persist the exact task generation and PR binding, poll with per-candidate durable backoff, verify the observed head and reachable merge SHA, checkpoint required architecture intake, then use a daemon-owned `remote_merge` closure receipt to move the same generation to `9-done`. This includes recoverable error rows; no marker-reason allowlist or archive child exists. |
 | Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason. Current dependency, admission, repository, and PR-identity holds take precedence over historical head drift and do not poll or archive until a later status observation clears them. An `observed_head_changed` hold may poll only the identity-matched bound PR's remote state: `OPEN` or closed-unmerged releases ordinary error recovery so the new generation can be reviewed, while merged, delivered-elsewhere, or ambiguous evidence remains durably blocked before architecture intake or automatic archive and is not polled again. |
 | `plan_reviewing` or due `plan_review_retry` at coding `3-plan` | Dispatch `hive plan-review-run ...`. This automation can start/retry critique, perform an already-authorized revision, and verify, but cannot create approvals, answers, waivers, or mandatory downgrades. |
-| future `plan_review_retry` | Hold until the projection's `retry_at`; provider/transient evidence remains attached to the same attempt lineage. |
+| future `plan_review_retry` | Hold until the projection's `retry_at`; provider/transient evidence remains attached to the same attempt lineage. Exhausted mandatory initial-review series widen from five minutes to a 24-hour cap and reopen automatically instead of requiring a coverage waiver. |
 | `plan_review_decision`, `plan_review_unsupported`, or `plan_review_blocked` | Skip. The row names the operator/configuration action; daemon enrollment creates no authority. |
 | `ready_to_develop` or `plan_review_degraded` at coding `3-plan` | `PlanApproval.prepare` rewrites to `hive develop ...`, revalidates the exact current plan-review observation under the task lock, and only then flips `:waiting` to `:complete`. A missing/stale/blocked review leaves the marker and folder untouched. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered. A non-empty, fully answered brainstorm observed before any baseline dispatches after the same debounce instead of consuming the answers as its baseline, so answers written while the daemon was down resume automatically. See [[modules/daemon]] "Brainstorm answers-pending gate". |
@@ -173,7 +169,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
 | `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
-| `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
+| `transient_retry_backoff_sec` | 60 | First retry hold for a durable task attempt that exits `75 (TEMPFAIL)`; also the base of the ancillary-child `60 → 120 → 300 s` transient backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02), shared by ancillary children and detached durable task attempts. `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{answer-digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value is an integer ≥ 0 (0 disables that verb's cap). Fresh durable attempts resolve this map from current global daemon config. |
@@ -191,7 +187,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | 4 | `WRONG_STAGE` | 60s protective backoff (race or classifier bug) |
 | 64 | `USAGE` | Quarantine `(project, slug)` for daemon lifetime |
 | 70 / 1 | `SOFTWARE` / `GENERIC` | Transient: 60→120→300 s backoff, then quarantine |
-| 75 | `TEMPFAIL` | Refund daily slot, allow immediate retry next tick |
+| 75 | `TEMPFAIL` | Refund the daily slot. Ancillary children may retry next tick; durable task attempts retain a scheduler-owned point-indexed hold for `transient_retry_backoff_sec` before a fresh request is admitted. |
 | 78 | `CONFIG` | Drop the entire project from active dispatch until daemon restart |
 
 ## Structured log

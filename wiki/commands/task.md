@@ -3,7 +3,7 @@ title: hive task
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/task.rb, lib/hive/task_workspace/builder.rb, schemas/hive-task-workspace.v2.json
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-28
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
@@ -28,6 +28,10 @@ task ID. Use `--project` for a bare slug or ID whenever more than one registered
 project could match. The command checks ordinary canonical status first and
 then the archive projection for that exact stage, so a retained archived task
 remains inspectable and is marked read-only.
+
+The exact project projection owns one read-only attempts-store scope through
+action and receipt-bound diagnostic annotation. It does not require a
+fleet-status caller to have opened that scope first.
 
 Without `--json`, the command prints a compact human summary: headline, action,
 primary-result reference, and usage coverage. `--json` is the stable machine

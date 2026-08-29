@@ -5,40 +5,61 @@ require "hive/workflows/registry"
 module Hive
   module Stages
     module Resolver
-      CODING_RUNNERS = {
-        "inbox" => lambda {
+      # Runner table keyed by each stage descriptor's INTERNAL EXECUTION
+      # STRATEGY (`Hive::Workflow::Stage#execution_strategy`) — never by stage
+      # name and never by workflow identity. Descriptors own selection:
+      #   - Workflows::Coding pins its bespoke runners with an explicit
+      #     `runner:` key per stage in its DESCRIPTOR;
+      #   - every other active stage derives a generic strategy from `kind`
+      #     (:agent, :council, :controller);
+      #   - everything else derives nil and raises StageError at dispatch.
+      #
+      # Because dispatch reads only the resolved stage's own declaration, a
+      # non-coding stage that happens to share a NAME with a coding stage
+      # (e.g. content's terminal "done" agent) resolves by its own kind — no
+      # `coding_id?` guard and no name-first precedence needed.
+      RUNNERS = {
+        agent: lambda {
+          require "hive/stages/agent"
+          Hive::Stages::Agent.method(:run!)
+        },
+        council: lambda {
+          require "hive/stages/council"
+          Hive::Stages::Council.method(:run!)
+        },
+        inbox: lambda {
           require "hive/stages/inbox"
           Hive::Stages::Inbox.method(:run!)
         },
-        "brainstorm" => lambda {
+        brainstorm: lambda {
           require "hive/stages/brainstorm"
           Hive::Stages::Brainstorm.method(:run!)
         },
-        "plan" => lambda {
+        plan: lambda {
           require "hive/stages/plan"
           Hive::Stages::Plan.method(:run!)
         },
-        "execute" => lambda {
+        execute: lambda {
           require "hive/stages/execute"
           Hive::Stages::Execute.method(:run!)
         },
-        "open-pr" => lambda {
+        "open-pr": lambda {
           require "hive/stages/open_pr"
           Hive::Stages::OpenPr.method(:run!)
         },
-        "review" => lambda {
+        review: lambda {
           require "hive/stages/review"
           Hive::Stages::Review.method(:run!)
         },
-        "artifacts" => lambda {
+        artifacts: lambda {
           require "hive/stages/artifacts"
           Hive::Stages::Artifacts.method(:run!)
         },
-        "finalize" => lambda {
+        finalize: lambda {
           require "hive/stages/finalize"
           Hive::Stages::Finalize.method(:run!)
         },
-        "done" => lambda {
+        done: lambda {
           require "hive/stages/done"
           Hive::Stages::Done.method(:run!)
         }
@@ -54,28 +75,15 @@ module Hive
       module_function
 
       def resolve(task, descriptor: Hive::Workflows::Registry.default)
-        # Coding keeps name-first precedence so brainstorm/plan stay on their
-        # bespoke runners even though they are declared kind: :agent in the
-        # coding descriptor. Non-coding workflows must route by their own
-        # descriptor kind, even when a stage name collides with a coding stage.
-        if Hive::Workflows.coding_id?(descriptor.id)
-          runner = CODING_RUNNERS[task.stage_name]
-          return runner.call if runner
-        end
-        if descriptor.stage_named(task.stage_name) && descriptor.controller
+        strategy = descriptor.stage_named(task.stage_name)&.execution_strategy
+
+        if strategy == :controller && descriptor.controller
           runner = CONTROLLER_RUNNERS[descriptor.controller]
           return runner.call if runner
         end
 
-        stage = descriptor.stage_named(task.stage_name)
-        if stage&.kind == :agent
-          require "hive/stages/agent"
-          return Hive::Stages::Agent.method(:run!)
-        end
-        if stage&.kind == :council
-          require "hive/stages/council"
-          return Hive::Stages::Council.method(:run!)
-        end
+        runner = RUNNERS[strategy]
+        return runner.call if runner
 
         raise Hive::StageError, "no runner for stage #{task.stage_name}"
       end

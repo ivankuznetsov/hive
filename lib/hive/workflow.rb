@@ -11,12 +11,17 @@ module Hive
     DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS = 3
     NEVER_ARCHIVE_VISIBILITY_RETENTION = :never
 
-    # :agent selects the agent runner, :controller selects a workflow-owned
-    # controller runner, :council selects the generic document
+    # Unspecified-default kinds derive no runner; see Stage#execution_strategy.
+    GENERIC_KIND_STRATEGIES = { agent: :agent, council: :council, controller: :controller }.freeze
+
+    # :agent selects the generic agent runner, :controller selects a
+    # workflow-owned controller runner, :council selects the generic document
     # council runner, :inert auto-advances with no runner,
     # :execute/:review_council/:finalize drive coding status/action
-    # classification (the coding runners are selected by name, not kind — see
-    # Stages::Resolver), and nil is the unspecified default.
+    # classification (those stages also pin their bespoke runners via the
+    # per-stage internal `runner:` execution-strategy key — see
+    # Stage#execution_strategy and Stages::Resolver), and nil is the
+    # unspecified default.
     KNOWN_KINDS = [ nil, :agent, :controller, :council, :human, :inert, :execute, :review_council, :finalize ].freeze
 
     # Single source of truth for the council triage artifact default. Referenced
@@ -181,8 +186,12 @@ module Hive
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
       :agent, :model, :effort, :input, :reviewers, :council, :deliverable,
       :workspace, :handoff, :condition_policy, :mapping_role, :mapping_contract,
-      :terminal_outcomes, :outcomes
+      :terminal_outcomes, :outcomes, :runner
     ) do
+      # `runner` pins the stage's internal EXECUTION STRATEGY key. It is a
+      # Ruby-descriptor-only field (DescriptorParser never accepts it), used by
+      # built-in workflows whose stages need a bespoke runner despite declaring
+      # a generic kind (e.g. coding's kind: :agent brainstorm/plan stages).
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
                      status_mode: nil, budget_usd: nil, timeout_sec: nil,
@@ -190,12 +199,28 @@ module Hive
                      input: nil, reviewers: nil, council: nil, deliverable: nil,
                      workspace: nil, handoff: nil,
                      condition_policy: nil, mapping_role: nil, mapping_contract: nil,
-                     terminal_outcomes: nil, outcomes: nil)
+                     terminal_outcomes: nil, outcomes: nil, runner: nil)
+        unless runner.nil? || runner.is_a?(Symbol)
+          raise ArgumentError, "stage #{name.inspect} runner must be a Symbol when present"
+        end
         outcomes = outcomes&.dup&.freeze unless outcomes&.frozen?
         super
       end
 
       def dir = "#{index}-#{name}"
+
+      # Internal execution-strategy key consumed by Stages::Resolver. The
+      # explicit `runner:` pin wins; otherwise the kind derives its generic
+      # strategy. nil means "no runner" — Resolver raises StageError at
+      # dispatch. Deriving the key HERE (on the descriptor) keeps runner
+      # ownership inside each workflow: dispatch never consults the workflow
+      # id or a global stage-name table, so a non-coding stage that happens to
+      # share a name with a coding stage resolves by its own declaration.
+      def execution_strategy
+        return runner if runner
+
+        GENERIC_KIND_STRATEGIES.fetch(kind, nil)
+      end
     end
 
     Outcome = Data.define(:name, :complete, :artifact, :to) do

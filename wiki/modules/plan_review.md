@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-21
+updated: 2026-08-28
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -99,18 +99,57 @@ adversarial coverage row is forced to `failed`.
 
 Adapter outcomes are closed: `success`, `partial_coverage`, `unsupported`,
 `provider_limit`, `timeout`, `retryable_failure`, and `terminal_failure`.
+The descriptive `selected_lenses` metadata accepts lowercase names that begin
+with a letter and then use letters, digits, hyphens, or underscores, up to 64
+characters. The primary, adversarial, and verification prompts publish that
+same grammar. Natural specialist names such as `product-lens` therefore remain
+valid without weakening the stricter machine-owned coverage-name contract or
+discarding otherwise valid findings and coverage. A blocked legacy primary or
+adversarial route with the exact old selected-lens diagnostic is classified as
+runnable and receives one versioned recovery reset; the daemon can therefore
+rerun each affected initial reviewer leg automatically after upgrade. Missing
+diagnostic provenance is accepted only for historical records. Current adapter
+receipts distinguish parser failures from reviewer- or runner-authored
+diagnostics, so a reviewer cannot request this migration retry by copying the
+old text. The reset is one-time, so a genuinely malformed current-contract
+result remains terminal instead of looping. Verification output uses the new
+grammar but is not eligible for the legacy reset, preserving the existing
+revision-round fence.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
-initial attempt plus `plan_review.attempts.max_transient` retries for primary,
-adversarial, verification, and original-planner revision legs. Provider-route
+initial attempt plus `plan_review.attempts.max_transient` retries in one
+attempt series for primary, adversarial, verification, and original-planner
+revision legs. Exhausting a mandatory primary or adversarial series persists a
+recovery reset instead of converting missing required coverage into an
+operator waiver prompt. The daemon opens the next series after a deterministic
+five-minute exponential cooldown capped at 24 hours; a legacy blocked record
+whose latest required initial leg is an attempted transient outcome enters the
+same recovery path. Standard review degradation and the separately bounded
+verification and planner-revision loops are unchanged. Provider-route
 exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.
 An unsupported mandatory route is probed cheaply before another expensive
-review. An unchanged failed capability probe is recorded as operational
-evidence; after three identical observations the review parks as
-`reviewer_unlaunchable` instead of spawning forever. A changed probe resets the
-series and permits a new reviewer launch. Review identity includes adapter,
+review. Required legs recover independently: a successful primary receipt is
+retained when the adversarial route is unavailable, and only the unsupported
+leg is reset. Three unchanged capability observations may run immediately;
+after that the projection remains non-terminal as `retry_scheduled` on a
+five-minute cooldown. Repeated misses replace one rolling capability receipt
+per role; they do not copy the plan, create immutable attempt directories, or
+grow the route array. A normal immutable review attempt is materialized only
+after the launcher and adapter capability probes report present. Each due
+daemon pass probes again, so installing a skill, repairing a binary, or changing
+a route heals the same review lineage without an operator request or a new plan
+generation. Legacy `blocked` projections
+whose latest primary or adversarial route is explicitly `unsupported` classify
+as `plan_reviewing` once under the new code and enter the same paced recovery;
+configuration-only blocks without an attempted route remain operator-owned. A
+changed probe resets the stable-observation series and permits a new reviewer
+launch. A legacy successful adversarial receipt whose served-model alias is now
+explicitly attested by provider support receives one versioned rerun under the
+current identity contract. This repairs pre-contract `reviewer_family_unknown`
+coverage without rewriting old immutable attempt evidence or repeatedly
+launching a genuinely non-independent reviewer. Review identity includes adapter,
 reviewer, route configuration, and the effective `models.plan_review`,
 `models.plan_review_adversarial`, and `models.plan_review_verification`
 overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
@@ -251,6 +290,15 @@ status and the daemon. It may initialize review, dispatch/retry reviewers,
 perform an already-authorized revision, verify, and advance an already-cleared
 plan. It has no API for approvals, answers, waivers, or downgrades.
 
+Plan authoring and plan completion are distinct. If the planner writes
+`<!-- COMPLETE -->` but the resulting required review projection does not yet
+authorize execution, both the stage runner and `plan-review-run` atomically
+replace that current marker with `<!-- WAITING -->`. A cleared projection is
+left alone; for an already-waiting row, daemon `PlanApproval` owns the guarded
+`WAITING` to `COMPLETE` transition immediately before develop dispatch. Thus a
+required review that has not completed cannot leave the plan artifact claiming
+terminal completion, including on legacy capability-recovery re-entry.
+
 Authority-bearing actions use:
 
 ```text
@@ -335,8 +383,8 @@ applies, the generic force-approve control is hidden.
   cross-surface proof snapshot for `skipped`, `cleared`, standard
   `degraded_cleared`, and mandatory `blocked`.
 - `test/smoke/plan_review_smoke_test.rb` is the explicitly opt-in authenticated
-  native Grok `grok-4.6` route/independence proof. It skips with a diagnostic
-  when opt-in, binary, or authentication is unavailable.
+  native Grok `grok-4.6` request / `grok-4.6-build` served-identity proof. It
+  skips with a diagnostic when opt-in, binary, or authentication is unavailable.
 
 ## Backlinks
 

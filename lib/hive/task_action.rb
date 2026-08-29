@@ -14,6 +14,8 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/result_parser"
+require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
 require "hive/patrol_fix/projection"
 require "hive/plan_review/approval_policy"
@@ -281,6 +283,7 @@ module Hive
     DEFAULT_AGENT_MARKER_GRACE_SEC = 300
 
     PLAN_REVIEW_UNRESOLVED = Object.new.freeze
+    PLAN_REVIEW_TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
 
     attr_reader :plan_review
 
@@ -724,6 +727,14 @@ module Hive
       when "blocked"
         if stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_capability_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_adversarial_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_selected_lenses_contract_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_coverage_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
         else
@@ -924,7 +935,7 @@ module Hive
         entry["role"] == "planner_revision"
       end
       return false unless route
-      return false unless %w[provider_limit timeout retryable_failure].include?(route["outcome"])
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
 
       Integer(route["planner_revision_contract_version"] || 0) <
         Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
@@ -963,6 +974,63 @@ module Hive
         Array(plan_review["routes"]).any? do |route|
           route["capability_result"] == "unsupported"
         end
+    end
+
+    # Older Hive builds terminalised missing reviewer binaries and emitted no
+    # command. Re-enter those exact persisted initial legs once so the current
+    # orchestrator can preserve successful coverage and move the missing leg
+    # onto its paced automatic retry schedule. Configuration-only blocks with
+    # no attempted route remain operator-owned.
+    def recoverable_capability_review?
+      %w[primary adversarial].any? do |role|
+        route = Array(plan_review["routes"]).reverse.find do |entry|
+          entry["role"] == role
+        end
+        route && route["outcome"] == "unsupported"
+      end
+    end
+
+    # A successful legacy Grok attempt can still carry the pre-alias-fix
+    # `reviewer_family_unknown` receipt. Re-enter only when current provider
+    # support can now attest the exact requested/served identity pair, and only
+    # until the orchestrator has recorded its versioned one-time retry.
+    def recoverable_adversarial_identity_review?
+      routes = Array(plan_review["routes"])
+      planner = routes.find { |entry| entry["role"] == "planner" }
+      planner_identity = planner&.fetch("actual", nil) || planner&.fetch("requested", nil)
+      !Hive::PlanReview::RouteResolver.recoverable_identity_route(
+        routes:, planner_identity:
+      ).nil?
+    end
+
+    # The old selected-lens grammar rejected natural lowercase kebab-case
+    # names. Surface that exact versionless parser verdict as runnable until the
+    # orchestrator records its one-time contract recovery reset.
+    def recoverable_selected_lenses_contract_review?
+      !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
+        plan_review["routes"]
+      ).empty?
+    end
+
+    # A mandatory initial reviewer can exhaust its bounded in-process retry
+    # series while a provider is unavailable. That is still scheduler-owned:
+    # the orchestrator persists a paced recovery series and retries after the
+    # provider has had time to recover. Require both an attempted transient
+    # leg and the exact missing-coverage blocker so unrelated blocked verdicts
+    # remain inert.
+    def recoverable_transient_coverage_review?
+      return false unless plan_review["effective_level"] == "mandatory"
+      return false unless Array(plan_review["blockers"]).any? do |blocker|
+        blocker["reason"] == "coverage_failed"
+      end
+
+      %w[primary adversarial].any? do |role|
+        route = Array(plan_review["routes"]).reverse.find do |entry|
+          entry["role"] == role
+        end
+        route && !route["attempt_id"].to_s.empty? &&
+          PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+      end
     end
 
     def legacy_execute_findings?

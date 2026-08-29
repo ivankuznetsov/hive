@@ -496,4 +496,13 @@ class LockTest < Minitest::Test
 
     assert_equal [ [ :kill, "KILL", 12_345 ], [ :detach, 12_345 ] ], calls
   end
+
+  def test_monotonic_now_uses_the_process_monotonic_clock
+    with_replaced_singleton_method(
+      Process, :clock_gettime,
+      ->(clock) { clock == Process::CLOCK_MONOTONIC ? 12.5 : flunk("wrong clock") }
+    ) do
+      assert_equal 12.5, Hive::Lock.monotonic_now
+    end
+  end
 end

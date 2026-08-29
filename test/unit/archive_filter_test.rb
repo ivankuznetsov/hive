@@ -3,12 +3,6 @@ require "hive/archive_filter"
 
 class ArchiveFilterTest < Minitest::Test
   FakeTask = Data.define(:folder, :workflow, :completed_at)
-  FakeBackfiller = Data.define(:values, :calls) do
-    def call(tasks)
-      calls << tasks.map(&:folder)
-      tasks.to_h { |task| [ task.folder, values[task.folder] ] }
-    end
-  end
 
   def test_default_policy_keeps_exact_boundary_and_hides_one_second_later
     now = Time.utc(2026, 6, 4, 12, 0, 0)
@@ -54,39 +48,31 @@ class ArchiveFilterTest < Minitest::Test
     )
   end
 
-  def test_projection_uses_action_membership_and_backfills_even_under_never
+  def test_projection_uses_action_membership_and_leaves_missing_clocks_visible
     now = Time.utc(2026, 6, 4, 12, 0, 0)
-    archived = row("/archived", action: "archived", retention: :never)
+    archived = row("/archived", action: "archived", retention: 3)
     same_directory_active = row("/active", action: "ready_to_run", retention: 3)
-    calls = []
-    backfiller = FakeBackfiller.new(values: { "/archived" => now - (20 * 86_400) }, calls: calls)
 
-    projection = Hive::ArchiveFilter.project(
-      [ archived, same_directory_active ], now: now, backfiller: backfiller
-    )
+    projection = Hive::ArchiveFilter.project([ archived, same_directory_active ], now: now)
 
     assert_equal [ archived, same_directory_active ], projection.ordinary_rows
     assert_equal [ archived ], projection.archive_rows
     assert_equal 0, projection.hidden_count
-    assert_equal [ [ "/archived" ] ], calls
   end
 
   def test_projection_derives_visible_set_and_hidden_count_from_same_rows
     now = Time.utc(2026, 6, 4, 12, 0, 0)
-    hidden = row("/hidden", action: "archived", retention: 3)
-    recent = row("/recent", action: "archived", retention: 3)
+    hidden = row(
+      "/hidden", action: "archived", retention: 3,
+      completed_at: now - (3 * 86_400) - 1
+    )
+    recent = row(
+      "/recent", action: "archived", retention: 3,
+      completed_at: now - (3 * 86_400)
+    )
     active = row("/active", action: "ready_to_run", retention: 3)
-    backfiller = FakeBackfiller.new(
-      values: {
-        "/hidden" => now - (3 * 86_400) - 1,
-        "/recent" => now - (3 * 86_400)
-      },
-      calls: []
-    )
 
-    projection = Hive::ArchiveFilter.project(
-      [ hidden, recent, active ], now: now, backfiller: backfiller
-    )
+    projection = Hive::ArchiveFilter.project([ hidden, recent, active ], now: now)
 
     assert_equal [ recent, active ], projection.ordinary_rows
     assert_equal [ hidden, recent ], projection.archive_rows

@@ -37,7 +37,7 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 ## Steps performed (`Commands::Markers#call`)
 
 1. Parse the subcommand (`clear` is the only verb in v1).
-2. Resolve `FOLDER`: path-shaped (contains `/` or starts with `~`/`.`) → used directly; bare slug → searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous (mirrors `hive approve`).
+2. Resolve `FOLDER` via the shared `Hive::TaskResolver`: path-shaped (contains `/` or starts with `~`/`.`) → expanded + realpath'd; bare slug or numeric task id → searched across registered projects (filtered by `--project` if given) over each project's registered workflow stage union, so tasks in runtime-registered workflow stages resolve too. Multi-stage hits inside one project are flagged as ambiguous — identical rules to [[commands/approve]] and the other resolver consumers.
 3. Validate the requested `--name` against `Hive::Commands::Markers::ALLOWED_NAMES`. Anything else raises `Hive::WrongStage` (exit 4).
 4. Read the current marker via `Hive::Markers.current(state_file)`. If the marker name does NOT match `--name`, raise `Hive::WrongStage` — refusing to silently clear a different state.
 5. If `--match-attr` is present, require every supplied `KEY=VALUE` pair to match the current marker. Comma-separated pairs such as `reason=exit_code,exit_code=143` are all checked; any mismatch raises `Hive::WrongStage`. TUI ERROR recovery prefers generated `marker_id` attrs when available and uses observed reason/exit_code attrs for legacy rows.

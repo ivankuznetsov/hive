@@ -96,12 +96,12 @@ For stages 4 and later:
   pre-execute coding tasks from legacy execute tasks. Absence is the durable
   compatibility shape; malformed values fail closed.
 - `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` only when the sidecar is absent. It refuses corrupt input.
-- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; daemon backfill cannot sanitize dependency evidence by replacing a damaged mapping.
+- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; explicit migration cannot sanitize dependency evidence by replacing a damaged mapping.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
 - `next!` locks `<state_home>/.task-counter.lock`, returns the current id, then writes `next_id: id + 1`.
-- `next_or_nil` performs the same allocation but returns nil only when the counter lock times out, for capture paths that can be repaired by the daemon's id backfiller.
+- `next_or_nil` performs the same allocation but returns nil only when the counter lock times out, for capture paths that can be repaired by `hive migrate`.
 - `peek` returns the current `next_id`, defaulting to `1` on missing or corrupt YAML.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 - Lock timeout raises `Hive::ConcurrentRunError` with `lock_path` set to the counter lock.

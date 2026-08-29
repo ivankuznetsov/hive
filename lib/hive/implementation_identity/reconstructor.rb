@@ -28,7 +28,9 @@ module Hive
         context = Hive::Attempts::Context.current ||
           raise(ResolutionError, "legacy identity reconstruction requires a durable attempt context")
         projected = @projection_store.read["implementation_identity"]&.dig("execute")
-        return selection_from(projected) if projected && projected["generation"] == context.task_generation
+        if projected && projected["generation"] == context.task_generation
+          return @resolver.materialize_persisted(projected)
+        end
 
         current_attempt = @attempt_store.fetch(context.attempt_id)
         unless current_attempt
@@ -138,26 +140,6 @@ module Hive
             "identity" => selection.to_h.reject { |key, _| key == "native_arguments" }
           }
         )
-      end
-
-      def selection_from(identity)
-        profile = Hive::AgentProfiles.lookup(identity.fetch("provider"), cfg: @cfg)
-        routing = identity["routing"]
-        native_arguments =
-          if routing
-            []
-          else
-            profile.identity_arguments(
-              model: identity.fetch("model"), effort: identity["requested_effort"],
-              pin_model: identity.fetch("model_pinned", true)
-            ).native_arguments
-          end
-        selection = Selection.new(
-          **identity.slice(*Selection.members.map(&:to_s)).transform_keys(&:to_sym)
-                    .merge(native_arguments: native_arguments, routing: routing)
-        )
-        selection.routing_arguments(profile) if routing
-        selection
       end
 
       def execute_attempts(current_attempt)

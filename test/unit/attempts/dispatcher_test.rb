@@ -17,6 +17,7 @@ class AttemptsDispatcherTest < Minitest::Test
   FakeRequest = Struct.new(
     :slug, :project, :argv, :request_id, :task_generation,
     :predecessor_attempt_id, :inherited_outputs, :recovery,
+    :requestor, :trigger,
     keyword_init: true
   )
 
@@ -457,6 +458,238 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "capacity", result.reason
       assert_empty launcher.launched
       assert_empty store.scan.records
+    end
+  end
+
+  def test_patrol_failure_cohort_survives_restart_and_runtime_change_releases_it
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      launcher = FakeLauncher.new
+      ids = (1..8).map { |index| "attempt-#{index}" }.each
+      runtime_digest = "a" * 64
+      dispatcher = Hive::Attempts::Dispatcher.new(
+        store: store, launcher: launcher,
+        limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
+        clock: -> { NOW }, id_generator: -> { ids.next },
+        capability_generator: -> { CLAIM_CAPABILITY },
+        runtime_digest: runtime_digest
+      )
+      tasks = 3.times.map do |index|
+        task_fixture(root, id: index + 1, slug: "patrol-#{index}").tap do |task|
+          task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
+          task.stage_index = 2
+          task.stage_name = "fix"
+          task.folder = File.dirname(task.state_file)
+        end
+      end
+      failures = tasks.each_with_index.map do |task, index|
+        result = dispatch(
+          dispatcher, task, request_id: "failure-#{index}", intended_stage: "2-fix",
+          now: NOW + (index * 10)
+        )
+        terminalize_attempt(
+          store, launcher, result, outcome: "failed", exit_status: 7,
+          now: NOW + (index * 10) + 3, diagnostic: true
+        )
+        result
+      end
+
+      capped = Hive::Attempts::Dispatcher.new(
+        store: Hive::Attempts::Store.new(root: store.root), launcher: launcher,
+        limits: { max_global: 6, max_per_project: 6, max_daily: 3 },
+        clock: -> { NOW + 40 }, id_generator: -> { ids.next },
+        capability_generator: -> { CLAIM_CAPABILITY },
+        runtime_digest: runtime_digest
+      )
+      hard_capped = dispatch(
+        capped, tasks.first, request_id: "hard-cap-precedence",
+        intended_stage: "2-fix", now: NOW + 40
+      )
+      assert_equal :deferred, hard_capped.status
+      assert_equal "capacity", hard_capped.reason
+
+      restarted = Hive::Attempts::Dispatcher.new(
+        store: Hive::Attempts::Store.new(root: store.root), launcher: launcher,
+        limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
+        clock: -> { NOW + 40 }, id_generator: -> { ids.next },
+        capability_generator: -> { CLAIM_CAPABILITY },
+        runtime_digest: runtime_digest
+      )
+      blocked = dispatch(
+        restarted, tasks.first, request_id: "blocked-retry",
+        intended_stage: "2-fix", now: NOW + 40
+      )
+      assert_equal :deferred, blocked.status
+      assert_equal "failure_cohort_cooldown", blocked.reason
+
+      restarted.instance_variable_set(:@task_resolver, ->(_request) { tasks[1] })
+      restarted.define_singleton_method(:provider_for) { |_task| "codex" }
+      automatic = restarted.dispatch_request(
+        FakeRequest.new(
+          slug: tasks[1].slug, project: "demo",
+          argv: [ "hive", "run", tasks[1].slug ],
+          request_id: "automatic-recovery", inherited_outputs: [],
+          recovery: { "phase" => "cleared" }, requestor: "action",
+          trigger: "recovery/admission_failure"
+        ),
+        now: NOW + 40
+      )
+      assert_equal :deferred, automatic.status
+      assert_equal "failure_cohort_cooldown", automatic.reason
+
+      restarted_store = restarted.instance_variable_get(:@store)
+      original_create = restarted_store.method(:create_launching)
+      restarted_store.define_singleton_method(:create_launching) do |**|
+        raise Hive::Attempts::StoreError, "injected create failure"
+      end
+      failed_release = FakeRequest.new(
+        slug: tasks[1].slug, project: "demo",
+        argv: [ "hive", "run", tasks[1].slug ],
+        request_id: "failed-operator-release", inherited_outputs: [],
+        recovery: { "phase" => "cleared" }, requestor: "action",
+        trigger: "recovery"
+      )
+      assert_raises(Hive::Attempts::StoreError) do
+        restarted.dispatch_request(failed_release, now: NOW + 40)
+      end
+      restarted_store.define_singleton_method(:create_launching, original_create)
+
+      launcher.instance_variable_set(
+        :@result, { "claimed" => false, "error" => "wrapper unavailable" }
+      )
+      lost_probe = restarted.dispatch_request(
+        FakeRequest.new(
+          slug: tasks[1].slug, project: "demo",
+          argv: [ "hive", "run", tasks[1].slug ],
+          request_id: "lost-operator-release", inherited_outputs: [],
+          recovery: { "phase" => "cleared" }, requestor: "action",
+          trigger: "recovery"
+        ),
+        now: NOW + 40
+      )
+      assert_equal :deferred, lost_probe.status
+      assert_equal "launch_handoff_failed", lost_probe.reason
+      launcher.instance_variable_set(:@result, { "claimed" => true })
+
+      restarted.instance_variable_set(:@task_resolver, ->(_request) { tasks[2] })
+      released_probe = restarted.dispatch_request(
+        FakeRequest.new(
+          slug: tasks[2].slug, project: "demo",
+          argv: [ "hive", "run", tasks[2].slug ],
+          request_id: "operator-release", inherited_outputs: [],
+          recovery: { "phase" => "cleared" }, requestor: "action",
+          trigger: "recovery"
+        ),
+        now: NOW + 40
+      )
+      assert_equal :accepted, released_probe.status
+
+      restarted.instance_variable_set(:@task_resolver, ->(_request) { tasks[0] })
+      second_release = restarted.dispatch_request(
+        FakeRequest.new(
+          slug: tasks[0].slug, project: "demo",
+          argv: [ "hive", "run", tasks[0].slug ],
+          request_id: "operator-release-two", inherited_outputs: [],
+          recovery: { "phase" => "cleared" }, requestor: "action",
+          trigger: "recovery"
+        ),
+        now: NOW + 40
+      )
+      assert_equal :deferred, second_release.status
+      assert_equal "failure_cohort_cooldown", second_release.reason
+
+      repaired = Hive::Attempts::Dispatcher.new(
+        store: Hive::Attempts::Store.new(root: store.root), launcher: launcher,
+        limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
+        clock: -> { NOW + 41 }, id_generator: -> { ids.next },
+        capability_generator: -> { CLAIM_CAPABILITY },
+        runtime_digest: "b" * 64
+      )
+      released = dispatch(
+        repaired, tasks.first, request_id: "repaired-retry",
+        intended_stage: "2-fix", now: NOW + 41
+      )
+      assert_equal :accepted, released.status
+      refute_includes failures.map { |result| result.attempt.attempt_id },
+                      released.attempt.attempt_id
+    end
+  end
+
+  def test_runtime_source_digest_ignores_deployment_identity_but_tracks_build
+    base = {
+      "channel" => "dogfood", "release_version" => "1.2.3",
+      "display_version" => "1.2.3+dogfood.aaaaaaaaa",
+      "build_sha" => "a" * 40, "deployment_id" => "deploy-a"
+    }
+
+    first = Hive::Attempts::Dispatcher.runtime_source_digest(base)
+    redeployed = Hive::Attempts::Dispatcher.runtime_source_digest(
+      base.merge("deployment_id" => "deploy-b")
+    )
+    repaired = Hive::Attempts::Dispatcher.runtime_source_digest(
+      base.merge("build_sha" => "b" * 40)
+    )
+
+    assert_equal first, redeployed
+    refute_equal first, repaired
+  end
+
+  def test_invalid_runtime_digest_is_rejected_before_dispatch
+    with_tmp_dir do |root|
+      assert_raises(ArgumentError) do
+        Hive::Attempts::Dispatcher.new(
+          store: Hive::Attempts::Store.new(root: File.join(root, "attempts")),
+          launcher: FakeLauncher.new,
+          runtime_digest: "invalid"
+        )
+      end
+    end
+  end
+
+  def test_already_lost_handoff_defers_and_releases_matching_probe
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      created = dispatch(dispatcher, task, request_id: "lost-handoff").attempt
+      lost = store.mark_lost(created, reason: "owner_gone", now: NOW + 1)
+      3.times do |index|
+        store.decision_index.record_failure_cohort(
+          attempt_id: "failure-#{index}", identity: failure_cohort_identity,
+          occurred_at: NOW + index
+        )
+      end
+      assert store.decision_index.claim_failure_cohort_probe(
+        identity: failure_cohort_identity, date: NOW.to_date,
+        attempt_id: lost.attempt_id, now: NOW + 4_000
+      )
+      view = Object.new
+      view.define_singleton_method(:record) { |_record| true }
+
+      result = dispatcher.send(
+        :resolve_failed_handoff, lost, interactive: false,
+        admission_view: view, cohort_identity: failure_cohort_identity,
+        cohort_date: NOW.to_date
+      )
+
+      assert_equal :deferred, result.status
+      assert_equal "launch_handoff_failed", result.reason
+      assert store.decision_index.claim_failure_cohort_probe(
+        identity: failure_cohort_identity, date: NOW.to_date,
+        attempt_id: "probe-2", now: NOW + 4_001, explicit_release: true
+      )
+    end
+  end
+
+  def test_unpersisted_probe_release_fails_closed_on_store_error
+    with_dispatcher do |dispatcher|
+      view = Object.new
+      view.define_singleton_method(:release_failure_cohort_probe) do |**|
+        raise Hive::Attempts::StoreError, "injected release failure"
+      end
+
+      refute dispatcher.send(
+        :release_unpersisted_failure_probe,
+        view: view, identity: failure_cohort_identity,
+        date: NOW.to_date, attempt_id: "missing-attempt"
+      )
     end
   end
 
@@ -1181,6 +1414,46 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_tempfail_receipt_defers_a_fresh_request_until_scheduler_backoff_expires
+    with_dispatcher(transient_retry_backoff_sec: 60) do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      terminal = terminalize_attempt(
+        store, launcher, first, outcome: "failed",
+        exit_status: Hive::ExitCodes::TEMPFAIL, now: NOW + 3
+      )
+      Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4)
+      store.permanent_proofs.publish(terminal)
+      File.unlink(store.record_path(terminal.attempt_id))
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW + 5)
+                                                  .admission_view
+
+      deferred = dispatch(
+        dispatcher, task, request_id: "request-two",
+        admission_view: admission_view, now: NOW + 62
+      )
+      accepted = dispatch(
+        dispatcher, task, request_id: "request-three",
+        admission_view: admission_view, now: NOW + 63
+      )
+      terminalize_attempt(
+        store, launcher, accepted, outcome: "failed", exit_status: 1,
+        now: NOW + 66
+      )
+      retry_after_regular_failure = dispatch(
+        dispatcher, task, request_id: "request-four",
+        admission_view: admission_view, now: NOW + 67
+      )
+
+      assert_equal :deferred, deferred.status
+      assert_equal "transient_retry", deferred.reason
+      assert_equal first.attempt.attempt_id, deferred.attempt.attempt_id
+      assert_equal :accepted, accepted.status
+      assert_equal :accepted, retry_after_regular_failure.status
+      assert_equal 3, launcher.launched.size
+    end
+  end
+
   def test_routing_collaborator_defaults_and_health_attempt_projection_fail_closed
     with_dispatcher do |dispatcher, _launcher, task, store|
       assert_match(
@@ -1227,8 +1500,19 @@ class AttemptsDispatcherTest < Minitest::Test
 
   private
 
+  def failure_cohort_identity
+    {
+      "runtime_digest" => "a" * 64,
+      "project" => "demo",
+      "workflow" => "patrol_fix",
+      "stage" => "2-fix",
+      "code" => "agent_exit_nonzero"
+    }
+  end
+
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
-                      context_provenance: Hive::ContextProvenance)
+                      context_provenance: Hive::ContextProvenance,
+                      transient_retry_backoff_sec: 60)
     with_tmp_dir do |root|
       state_file = File.join(root, "task.md")
       File.write(state_file, "task\n<!-- WAITING -->\n")
@@ -1240,7 +1524,8 @@ class AttemptsDispatcherTest < Minitest::Test
       dispatcher = Hive::Attempts::Dispatcher.new(
         store: store, launcher: launcher, limits: limits, clock: -> { NOW },
         id_generator: -> { ids.next }, capability_generator: -> { CLAIM_CAPABILITY },
-        context_provenance: context_provenance
+        context_provenance: context_provenance,
+        transient_retry_backoff_sec: transient_retry_backoff_sec
       )
       yield dispatcher, launcher, task, store
     end
@@ -1265,7 +1550,8 @@ class AttemptsDispatcherTest < Minitest::Test
     )
   end
 
-  def terminalize_attempt(store, launcher, result, outcome:, exit_status:, now:)
+  def terminalize_attempt(store, launcher, result, outcome:, exit_status:, now:,
+                          diagnostic: false)
     capability = launcher.launched.find do |record, _claim_capability|
       record.attempt_id == result.attempt.attempt_id
     end.fetch(1)
@@ -1283,6 +1569,29 @@ class AttemptsDispatcherTest < Minitest::Test
       now: now - 2
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: now - 1)
+    log_reference = {
+      "path" => "logs/#{result.attempt.attempt_id}.frames",
+      "size" => 0,
+      "sha256" => "0" * 64
+    }
+    output_references = []
+    if diagnostic
+      document = Hive::PatrolFix::AttemptDiagnostic.normalize(
+        { "exit_code" => exit_status, "status" => "error" },
+        stage: result.attempt["intended_stage"],
+        task_generation: result.attempt.task_generation,
+        attempt_id: result.attempt.attempt_id,
+        recorded_at: now,
+        log_reference: log_reference
+      )
+      path = store.output_path(
+        result.attempt.attempt_id,
+        Hive::PatrolFix::AttemptDiagnostic::FILENAME,
+        create_directory: true
+      )
+      File.write(path, JSON.generate(document))
+      output_references << Hive::OutputReference.build(path, root: store.root)
+    end
     store.terminalize(
       running,
       outcome: outcome,
@@ -1291,12 +1600,8 @@ class AttemptsDispatcherTest < Minitest::Test
         "revision" => "b" * 40,
         "progress_token" => result.attempt["progress_token"]
       },
-      output_references: [],
-      log_reference: {
-        "path" => "logs/#{result.attempt.attempt_id}.frames",
-        "size" => 0,
-        "sha256" => "0" * 64
-      },
+      output_references: output_references,
+      log_reference: log_reference,
       now: now
     )
   end

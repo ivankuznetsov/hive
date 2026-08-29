@@ -39,10 +39,6 @@ class Project
     attributes.fetch(...)
   end
 
-  def workflows
-    InitSetup.workflows(path)
-  end
-
   def config
     return @config if defined?(@config)
     raise @config_error if defined?(@config_error)

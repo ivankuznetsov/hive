@@ -53,6 +53,7 @@ module Hive
       private
 
       def run(old_bytes, new_bytes, commit)
+        committed = false
         @journal.write("schema_version" => 1, "phase" => "prepared", "lock_path" => @lock_path,
                        "old_lock" => old_bytes, "new_lock" => new_bytes)
         write_pointer(new_bytes)
@@ -62,14 +63,20 @@ module Hive
           @journal.write("schema_version" => 1, "phase" => "commit_started", "lock_path" => @lock_path,
                          "old_lock" => old_bytes, "new_lock" => new_bytes)
           commit.call
+          committed = true
           @journal.write("schema_version" => 1, "phase" => "commit_completed", "lock_path" => @lock_path,
                          "old_lock" => old_bytes, "new_lock" => new_bytes)
         end
         @journal.clear
         true
       rescue StandardError
-        restore(old_bytes)
-        @journal.clear
+        # Once commit.call has succeeded the change is irreversible: rolling
+        # the pointer back would contradict HEAD. Leave the surviving
+        # commit_started journal for reconcile! to resolve against git.
+        unless committed
+          restore(old_bytes)
+          @journal.clear
+        end
         raise
       end
 

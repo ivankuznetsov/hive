@@ -1154,6 +1154,93 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_progress_resume_distinguishes_processed_candidates_from_enqueued_jobs
+    with_tmp_dir do |dir|
+      intake = reconciler(dir, FakeGh.new)
+      previous = intake.send(
+        :build_state,
+        registration: "demo", host: "github.com", repository: "acme/demo",
+        default_branch: "main", high_water: intake.send(:occurrence, summary(1, at: T0)),
+        overlap_occurrences: [ intake.send(:occurrence, summary(1, at: T0)) ],
+        seeded_at: T0 - 3600, updated_at: T0
+      )
+      store = intake.instance_variable_get(:@progress_store)
+      progress = store.build(
+        registration: "demo", host: "github.com", repository: "acme/demo",
+        default_branch: "main", previous: previous,
+        merged_since: intake.send(:overlap_start, previous, T0), now: T0
+      )
+      progress.fetch("scan").merge!(
+        "phase" => "ingest",
+        "result_count" => 2,
+        "items" => [ summary(2, at: T0 + 1), summary(3, at: T0 + 2) ],
+        "ingest_index" => 1,
+        "processed_prs" => [ 2 ],
+        "enqueued_prs" => []
+      )
+
+      assert_nil intake.send(
+        :validate_progress_against_checkpoint!, progress, previous, dir
+      )
+
+      progress.fetch("scan").merge!(
+        "ingest_index" => 2, "processed_prs" => [ 2, 3 ], "enqueued_prs" => [ 2 ]
+      )
+      assert_nil intake.send(
+        :validate_progress_against_checkpoint!, progress, previous, dir
+      )
+
+      progress.fetch("scan")["processed_prs"] = [ 3, 2 ]
+      error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+        intake.send(:validate_progress_against_checkpoint!, progress, previous, dir)
+      end
+      assert_equal "reconciler progress intake checkpoint is inconsistent", error.message
+
+      progress.fetch("scan").merge!(
+        "ingest_index" => 1, "processed_prs" => [ 2 ], "enqueued_prs" => [ 3 ]
+      )
+      assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+        intake.send(:validate_progress_against_checkpoint!, progress, previous, dir)
+      end
+    end
+  end
+
+  def test_restart_resumes_after_processed_candidate_that_created_no_job
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.pages = { nil => page([ summary(1, at: T0) ]) }
+      clock = FakeMonotonic.new
+      resolution_calls = 0
+      resolver = Object.new
+      resolver.define_singleton_method(:resolve_classified) do |*_args, **_kwargs|
+        resolution_calls += 1
+        clock.advance(1) if resolution_calls == 1
+        Hive::RefactorPatrol::PrManifestResolver::Resolution.new(
+          manifests: [], classification: { "status" => "classified" }
+        )
+      end
+      options = {
+        resolver_factory: ->(*) { resolver }, monotonic_clock: clock,
+        tick_budget_sec: 1, max_call_timeout_sec: 1
+      }
+      assert_equal :seeded, reconciler(dir, gh, **options).tick(now: T0).fetch(0).fetch(:status)
+
+      gh.pages = { nil => page([ summary(2, at: T0 + 1), summary(3, at: T0 + 2) ]) }
+      gh.details = { 2 => details(2, at: T0 + 1), 3 => details(3, at: T0 + 2) }
+      intake = reconciler(dir, gh, **options)
+      assert_equal :partial, intake.tick(now: T0 + 3).fetch(0).fetch(:status)
+      assert_equal [ 2 ], JSON.parse(File.read(progress_path(dir))).dig("scan", "processed_prs")
+
+      resumed = reconciler(dir, gh, **options).tick(now: T0 + 4).fetch(0)
+
+      assert_equal :ok, resumed.fetch(:status)
+      assert_empty resumed.fetch(:enqueued_prs)
+      assert_equal 2, resolution_calls
+      assert_equal 3, JSON.parse(File.read(state_path(dir))).dig("high_water", "pr_number")
+      refute File.exist?(progress_path(dir))
+    end
+  end
+
   def test_deduplication_and_manifest_summary_conflicts_fail_closed
     with_tmp_dir do |dir|
       intake = reconciler(dir, FakeGh.new)

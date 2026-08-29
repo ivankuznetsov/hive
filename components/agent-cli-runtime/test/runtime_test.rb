@@ -2,7 +2,8 @@ require_relative "test_helper"
 
 class AgentCliRuntimeRuntimeTest < Minitest::Test
   def test_builtin_provider_order_and_profiles_are_immutable
-    assert_equal %i[claude codex pi grok opencode], AgentCliRuntime::Profiles.names
+    assert_equal AgentCliRuntime::Conformance::PROVIDER_NAMES,
+                 AgentCliRuntime::Profiles.names
     assert_predicate AgentCliRuntime::Profiles.names, :frozen?
     assert AgentCliRuntime::Profiles.names.all? do |name|
       AgentCliRuntime::Profiles.fetch(name).frozen?

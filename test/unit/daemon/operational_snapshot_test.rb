@@ -160,7 +160,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_full_status_cache_is_bound_to_the_completed_tick_and_retained_while_the_next_tick_runs
+  def test_completed_scheduler_and_status_cache_remain_current_while_the_next_tick_runs
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader, cache_reader = build(path)
@@ -184,14 +184,50 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal (T0 + 91).iso8601(6), cache.fetch("valid_until")
 
       assembler.begin_tick(now: T0 + 31)
-      started = reader.read(now: T0 + 32)
-      retained = cache_reader.read(snapshot: started, now: T0 + 32)
-      assert_equal "unavailable", started.fetch("status")
-      assert_equal "tick_started", started.fetch("reason")
-      refute started.key?("status_cache")
+      retained_snapshot = reader.read(now: T0 + 32)
+      retained = cache_reader.read(snapshot: retained_snapshot, now: T0 + 32)
+      assert_equal "current", retained_snapshot.fetch("status")
+      assert_equal "complete", retained_snapshot.fetch("phase")
+      refute retained_snapshot.key?("status_cache")
       assert_equal payload, retained.fetch("payload")
       assert_equal 1, retained.fetch("tick_sequence")
-      assert_equal 2, started.fetch("tick_sequence")
+      assert_equal 1, retained_snapshot.fetch("tick_sequence")
+    end
+  end
+
+  def test_failed_later_tick_preserves_the_last_completed_scheduler_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      observed = row
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [ observed ], controller: { "in_flight" => 1 },
+        queue: { "pending" => 2 }, recoveries: {}, now: T0 + 1
+      )
+      completed_bytes = File.binread(path)
+
+      assembler.begin_tick(now: T0 + 31)
+      assembler.fail(reason: "status_failure", now: T0 + 32)
+
+      assert_equal completed_bytes, File.binread(path)
+      retained = reader.read(now: T0 + 33)
+      assert_equal "current", retained.fetch("status")
+      assert_equal 1, retained.fetch("tick_sequence")
+      assert_equal 1, retained.dig("capacity", "in_flight")
+      assert_equal 2, retained.dig("queue", "pending")
+
+      assembler.begin_tick(now: T0 + 61)
+      assembler.complete(
+        rows: [ row(slug: "next") ], controller: { "in_flight" => 0 },
+        queue: { "pending" => 0 }, recoveries: {}, now: T0 + 62
+      )
+
+      replacement = reader.read(now: T0 + 63)
+      assert_equal "current", replacement.fetch("status")
+      assert_equal 3, replacement.fetch("tick_sequence")
+      assert_equal "next", replacement.dig("tasks", 0, "identity", "slug")
     end
   end
 
@@ -324,9 +360,9 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.reconfigure(poll_interval_sec: 30)
       assembler.begin_tick(now: T0 + 61)
 
-      started = reader.read(now: T0 + 92)
-      assert_equal "unavailable", started.fetch("status")
-      assert_nil cache_reader.read(snapshot: started, now: T0 + 92)
+      retained = reader.read(now: T0 + 92)
+      assert_equal "stale", retained.fetch("status")
+      assert_nil cache_reader.read(snapshot: retained, now: T0 + 92)
     end
   end
 
@@ -668,6 +704,29 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "duplicate_task_identity: demo:ship-it", snapshot.fetch("reason")
       assert_empty snapshot.fetch("tasks")
       assert_empty snapshot.fetch("provider_holds")
+    end
+  end
+
+  def test_duplicate_rows_in_a_later_tick_do_not_erase_the_last_completed_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      original = row
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [ original ], controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+      )
+      assembler.begin_tick(now: T0 + 31)
+      assembler.complete(
+        rows: [ original, row(stage: "5-open-pr", folder: "/tmp/5-open-pr/ship-it") ],
+        controller: {}, queue: {}, recoveries: {}, now: T0 + 32
+      )
+
+      retained = reader.read(now: T0 + 33)
+      assert_equal "current", retained.fetch("status")
+      assert_equal 1, retained.fetch("tick_sequence")
+      assert_equal [ "ship-it" ], retained.fetch("tasks").map { |task| task.dig("identity", "slug") }
     end
   end
 

@@ -399,6 +399,36 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_completion_returns_retry_when_the_registry_lookup_raises_config_error
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      broken_registry = lambda do
+        raise Hive::ConfigError, "corrupt registry"
+      end
+      scheduler.instance_variable_set(:@registry, broken_registry)
+
+      result = scheduler.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token),
+        exit_code: 0,
+        envelope: {},
+        now: T0 + 1
+      )
+
+      assert_equal :retry, result.fetch(:status)
+      assert_equal "job-7", result.fetch(:job_id)
+      assert_equal "analyzing", store.read_job("job-7").fetch("state")
+
+      recovered = scheduler(entry, store)
+      assert_equal :closed, recovered.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: complete_zero_envelope(entry), now: T0 + 2
+      ).fetch(:status),
+        "a healthy registry must still be able to settle the held claim"
+    end
+  end
+
   def test_reserve_reclaims_expired_discovery_claim_only_when_owner_is_provably_resolved
     with_project do |_dir, entry, store|
       enqueue(store)

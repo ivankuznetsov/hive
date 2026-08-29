@@ -78,7 +78,10 @@ shared with the component.
 The OpenCode route-aware probe requires `1.18.16+`, all pinned run/export
 flags, a selected authentication source, and an exact `provider/model` plus
 requested variant while remote model fetching and ambient project
-configuration are disabled. An exact route declared by the selected overlay is
+configuration are disabled. The probe accepts the caller's already-resolved
+executable on `ProbeRequest.executable` and otherwise falls back to declared
+environment overrides; either way it validates and reports exactly the
+executable the compiled invocation runs. An exact route declared by the selected overlay is
 authoritative and skips the large verbose CLI inventory; an undeclared route
 must still exist in that bounded local inventory. Generic `probe(profile)` and
 `prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary
@@ -203,9 +206,19 @@ JSON probe checks matched the retained workflow artifact before Hive's cutover.
 Package tests run directly from the subtree and through the root `rake test`
 task. Candidate tooling builds one gem, records its source commit and dirty
 state, checksums it, installs it into a private gem home, proves a clean require,
-and exercises the executable. Root parity fixtures cover non-default
+and exercises the executable. The repository keeps one internal conformance
+suite at `test/support/conformance.rb` as the single owner of the ordered
+provider inventory and the OpenCode capability contract; `bin/verify-candidate`,
+the source contract tests, and its synthetic probe stub all consume it, and
+`test/conformance_suite_test.rb` guards parity with shipped library behavior.
+Root parity fixtures cover non-default
 compilation, local probes, named capability evidence, provider usage variants,
 and observable normalization/redaction across all five built-ins. The
+installed OpenCode offline smoke considers every matching PATH executable and
+prefers a native binary over an earlier package-manager launcher, including
+script and multicall-binary shims; an explicit offline binary override remains
+authoritative. This keeps read-only probe evidence from
+triggering package-manager setup or refresh side effects. The
 0.2.0 release promotes OpenCode to the public compatibility surface without
 changing the component's caller-owned process-supervision boundary or
 authorizing a Hive release.

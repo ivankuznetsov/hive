@@ -252,10 +252,12 @@ model request:
 bundle exec ruby -Itest test/opencode_offline_smoke_test.rb
 ```
 
-If an installation command is itself a package-manager shim, set
-`AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN` to the already-installed native
-OpenCode executable so the smoke cannot trigger shim installation or refresh
-behavior.
+Auto-discovery considers every matching executable in `PATH` and prefers an
+already-installed native executable over an earlier package-manager launcher,
+including script and multicall-binary shims, so the
+smoke cannot trigger package-manager installation or refresh behavior. If only
+a shim is discoverable, set `AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN` to the
+native OpenCode executable explicitly.
 
 The authenticated atomic-edit smoke is separately gated and refuses to run
 without an explicit route, config path, credential variable name, opt-in, and

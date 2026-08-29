@@ -308,6 +308,6 @@
     "available": false,
     "required_window": "seven complete UTC days preceding 2026-08-26",
     "uncertainty": "Attempts v4 does not durably retain an unambiguous workflow identity for every historical 1-inbox record, so a non-Patrol daily series cannot be reconstructed without inventing classification.",
-    "fallback_policy": "use ten percent of the configured cap until defensible workflow-attributed history exists"
+    "fallback_policy": "retain existing Patrol discovery allowances and task safety caps; pace matching typed Patrol Fix failures without partitioning task capacity"
   }
 }

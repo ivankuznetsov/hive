@@ -1,4 +1,3 @@
-require "hive/completed_at_backfiller"
 require "hive/completion_time"
 require "hive/workflows"
 
@@ -17,8 +16,7 @@ module Hive
 
     module_function
 
-    def project(rows, now: Time.now.utc, backfiller: Hive::CompletedAtBackfiller.new,
-                apply_retention: true)
+    def project(rows, now: Time.now.utc, apply_retention: true)
       rows = Array(rows)
       archive_rows = rows.select { |row| archive_row?(row) }
       unless apply_retention
@@ -31,7 +29,7 @@ module Hive
       end
 
       archived_rows = archive_rows.select { |row| archive_member?(row) }
-      clocks = completion_clocks(archived_rows, backfiller: backfiller)
+      clocks = completion_clocks(archived_rows)
       hidden_rows = archived_rows.select do |row|
         hide?(
           action: "archived",
@@ -77,15 +75,10 @@ module Hive
       (now.utc - completed_at) > (retention * SECONDS_PER_DAY)
     end
 
-    def completion_clocks(rows, backfiller:)
-      tasks = rows.filter_map { |row| row[:task] }.uniq { |task| task.folder }
-      stored = tasks.to_h do |task|
+    def completion_clocks(rows)
+      rows.filter_map { |row| row[:task] }.uniq { |task| task.folder }.to_h do |task|
         [ task.folder, Hive::CompletionTime.parse(task.completed_at, warn_context: task.folder) ]
       end
-      missing = tasks.select { |task| stored[task.folder].nil? }
-      return stored if missing.empty?
-
-      stored.merge(backfiller.call(missing))
     end
 
     def next_retention_boundary(rows, clocks:, hidden_ids:, now:)

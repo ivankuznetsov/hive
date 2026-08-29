@@ -28,6 +28,7 @@ require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
 require "hive/pid_file"
+require "hive/status_projection"
 require "hive/operational_action"
 require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
@@ -201,14 +202,12 @@ module Hive
         admission_context = build_admission_context(
           projects, workflow_generations: workflow_generations
         )
-        archive_backfiller = shared_archive_backfiller
         owns_attempt_store = acquire_status_attempt_store
         projects.each do |project|
           render_project(
             project, project_count: projects.size,
             admission_context: admission_context, now: now,
-            workflow_generation: workflow_generation_for(project, workflow_generations),
-            archive_backfiller: archive_backfiller
+            workflow_generation: workflow_generation_for(project, workflow_generations)
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
@@ -541,7 +540,6 @@ module Hive
         admission_context ||= build_admission_context(
           projects, workflow_generations: workflow_generations
         )
-        archive_backfiller = shared_archive_backfiller
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -556,7 +554,6 @@ module Hive
               admission_context: admission_context,
               now: now,
               workflow_generation: workflow_generation_for(p, workflow_generations),
-              archive_backfiller: archive_backfiller,
               include_archive_index: include_archive_index
             )
           end
@@ -573,7 +570,6 @@ module Hive
         targets = daemon_task_targets(projects)
         selected = projects.select { |project| targets.key?(project.fetch("name")) }
         workflow_generations = capture_workflow_generations(selected)
-        archive_backfiller = shared_archive_backfiller
         owns_attempt_store = acquire_status_attempt_store
         {
           "schema" => "hive-status",
@@ -588,7 +584,6 @@ module Hive
               admission_context: nil,
               now: now.utc,
               workflow_generation: workflow_generation_for(project, workflow_generations),
-              archive_backfiller: archive_backfiller,
               task_slugs: targets.fetch(project.fetch("name"))
             )
           end
@@ -607,7 +602,7 @@ module Hive
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
                                       admission_context: nil, now: Time.now.utc,
-                                      workflow_generation: nil, archive_backfiller: nil,
+                                      workflow_generation: nil,
                                       include_archive_index: false, task_slugs: nil)
         project_payload(
           project,
@@ -617,7 +612,6 @@ module Hive
           admission_context: admission_context,
           now: now,
           workflow_generation: workflow_generation,
-          archive_backfiller: archive_backfiller,
           include_archive_index: include_archive_index,
           task_slugs: task_slugs
         )
@@ -642,8 +636,24 @@ module Hive
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
                           admission_context: nil, now: Time.now.utc,
-                          workflow_generation: nil, archive_backfiller: nil,
+                          workflow_generation: nil,
                           include_archive_index: false, task_slugs: nil)
+        unless @status_attempt_store
+          return with_status_attempt_store do
+            project_payload(
+              project,
+              project_count: project_count,
+              stages: stages,
+              exclude_archived: exclude_archived,
+              admission_context: admission_context,
+              now: now,
+              workflow_generation: workflow_generation,
+              include_archive_index: include_archive_index,
+              task_slugs: task_slugs
+            )
+          end
+        end
+
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -696,7 +706,6 @@ module Hive
             end
             projection = Hive::ArchiveFilter.project(
               rows, now: now,
-              backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
               apply_retention: !@archive
             )
             note_retention_boundary(projection.next_retention_boundary) unless @archive
@@ -1074,7 +1083,7 @@ module Hive
       end
 
       def render_project(project, project_count:, admission_context: nil, now: Time.now.utc,
-                         workflow_generation: nil, archive_backfiller: nil)
+                         workflow_generation: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -1110,7 +1119,6 @@ module Hive
           rows = annotate_dependencies(rows, project, admission_context: admission_context)
           projection = Hive::ArchiveFilter.project(
             rows, now: now,
-            backfiller: archive_backfiller || Hive::CompletedAtBackfiller.new,
             apply_retention: !@archive
           )
         end
@@ -1746,10 +1754,6 @@ module Hive
         generation ? generation.workflows.keys : Hive::Workflows::Registry.ids
       end
 
-      def shared_archive_backfiller
-        Hive::CompletedAtBackfiller.new(shared_refresh_deadline: true)
-      end
-
       def note_retention_boundary(boundary)
         return unless boundary
 
@@ -1867,53 +1871,11 @@ module Hive
         end
       end
 
-      ACTION_LABEL_ORDER = [
-        "Admission error",
-        "Ready to brainstorm",
-        # Generic-workflow actions (non-coding descriptors). Sorted high with
-        # the other actionable "ready"/"needs" rows so generic status rows
-        # don't fall to the bottom (below "Error") as unknown labels would.
-        "Ready to run",
-        "Ready to advance",
-        # Per-stage "needs input" labels (the differentiated NEEDS_INPUT rows
-        # plus the shared generic "Needs your input"). Deliberately ordered
-        # between "Ready to advance" and "Ready to plan" so these actionable
-        # rows sort high alongside the other "ready"/"needs" rows.
-        "Answer questions",
-        "Review plan draft",
-        "Needs your input",
-        "Awaiting human decision",
-        "Needs review decision",
-        "Confirm finalize",
-        "Ready to plan",
-        "Plan review in progress",
-        "Plan review retry ready",
-        "Plan review retry scheduled",
-        "Plan review needs an operator decision",
-        "Plan review cleared with degraded coverage",
-        "Plan reviewer configuration required",
-        "Plan review blocks execution",
-        "Ready to develop",
-        "Needs recovery",
-        "Retry draft PR handoff manually",
-        "Agent running",
-        "Ready to open PR",
-        "Ready for review",
-        "Ready to collect artifacts",
-        # Clean ad-hoc PR review parked at 6-review (REVIEW_PARKED): complete and
-        # non-advancing, so it sorts with the other review-complete rows rather
-        # than falling below "Error" as an unknown label.
-        "Ad-hoc review complete (parked)",
-        "Rejected (parked)",
-        "Blocked (parked)",
-        "Escalated (parked)",
-        "Ready to finalize",
-        "Ready to archive",
-        "Archived",
-        "Manually steered",
-        "Blocked",
-        "Error"
-      ].freeze
+      # Presentation ordering is owned by the internal status projection
+      # boundary (`Hive::StatusProjection`); the command re-exports the
+      # frozen constant so existing label-grouping call sites and tests
+      # keep one shared value.
+      ACTION_LABEL_ORDER = Hive::StatusProjection::ACTION_LABEL_ORDER
 
       # Synthetic Error row for a task folder that exists but won't load — e.g.
       # a typo'd `meta.yml workflow:` / project `default_workflow:` that resolves
@@ -2041,30 +2003,12 @@ module Hive
         binding = status_attempt_store.fetch_terminal_diagnostic_binding(attempt_id)
         return nil unless binding.is_a?(Hash) && binding["attempt_id"] == attempt_id
 
-        receipt = binding["receipt"]
-        return nil unless receipt.is_a?(Hash)
-
-        diagnostic_path = File.join(
-          "outputs", attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME
+        bound = Hive::PatrolFix::AttemptDiagnostic.read_bound(
+          store: status_attempt_store, binding: binding
         )
-        reference = Array(receipt["output_references"]).find do |candidate|
-          candidate.is_a?(Hash) && candidate["path"] == diagnostic_path
-        end
-        return nil unless reference
+        return nil unless bound
 
-        document = JSON.parse(status_attempt_store.read_output(
-          reference, max_bytes: Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
-        ))
-        Hive::PatrolFix::AttemptDiagnostic.validate!(document)
-        return nil unless document["attempt_id"] == attempt_id &&
-                          document["correlation_id"] == attempt_id &&
-                          document["stage"] == binding["stage"].to_s &&
-                          document["task_generation"] == binding["task_generation"].to_s &&
-                          document["log_reference"] == receipt["log_reference"]
-
-        diagnostic_projection(document, reference)
-      rescue JSON::ParserError, Hive::Error, SystemCallError, IOError
-        nil
+        diagnostic_projection(bound.fetch("document"), bound.fetch("reference"))
       end
 
       def diagnostic_projection(document, reference)

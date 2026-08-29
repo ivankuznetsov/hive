@@ -14,6 +14,9 @@ module Hive
 
       def validate_observation!(record, registry: Registry.default)
         payload = record.fetch("payload", {})
+        unless payload.is_a?(Hash)
+          raise InvalidCondition, "observation payload must be a hash"
+        end
         name = payload["condition"]
         definition = registry.fetch(name)
         state = payload["state"].to_s

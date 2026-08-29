@@ -171,10 +171,16 @@ class TaskActionTest < Minitest::Test
       task, waiting,
       plan_review: {
         "state" => "blocked", "required_action" => "inspect route",
-        "routes" => [ { "capability_result" => "unsupported" } ]
+        "routes" => [
+          {
+            "role" => "adversarial", "capability_result" => "unsupported",
+            "outcome" => "unsupported"
+          }
+        ]
       }
     )
-    assert_equal "plan_review_unsupported", unsupported_route.key
+    assert_equal "plan_reviewing", unsupported_route.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", unsupported_route.command
 
     blocked = Hive::TaskAction.for(
       task, waiting,
@@ -2055,7 +2061,7 @@ class TaskActionTest < Minitest::Test
     assert_nil malformed.command
   end
 
-  def test_plan_review_unsupported_route_capability_overrides_a_generic_required_action
+  def test_plan_review_unsupported_route_capability_recovers_a_legacy_block
     task = fake_task(stage_name: "plan", stage_index: 3)
 
     unsupported = Hive::TaskAction.for(
@@ -2063,11 +2069,154 @@ class TaskActionTest < Minitest::Test
       plan_review: {
         "state" => "blocked",
         "required_action" => "resolve verification blockers",
-        "routes" => [ { "capability_result" => "unsupported" } ]
+        "routes" => [
+          {
+            "role" => "adversarial", "capability_result" => "unsupported",
+            "outcome" => "unsupported"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", unsupported.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", unsupported.command
+  end
+
+  def test_plan_review_unattempted_unsupported_route_remains_operator_owned
+    task = fake_task(stage_name: "plan", stage_index: 3)
+
+    unsupported = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "required_action" => "inspect route",
+        "routes" => [
+          { "role" => "adversarial", "capability_result" => "unsupported" }
+        ]
       }
     )
 
     assert_equal "plan_review_unsupported", unsupported.key
     assert_nil unsupported.command
+  end
+
+  def test_plan_review_recovers_exhausted_mandatory_transient_coverage
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    exhausted = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "outcome" => "blocked",
+        "effective_level" => "mandatory",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "blockers" => [ { "owner" => "operator", "reason" => "coverage_failed" } ],
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "timeout",
+            "attempt_id" => "pra-legacy", "retry_at" => "2026-08-12T11:00:00Z"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", exhausted.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", exhausted.command
+
+    standard = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: exhausted.plan_review.merge("effective_level" => "standard")
+    )
+    assert_equal "plan_review_unsupported", standard.key
+    assert_nil standard.command
+  end
+
+  def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    routes = [
+      {
+        "role" => "planner",
+        "actual" => { "provider" => "codex", "family" => "openai" }
+      },
+      {
+        "role" => "adversarial", "outcome" => "unsupported",
+        "capability_result" => "unsupported"
+      },
+      {
+        "role" => "adversarial", "outcome" => "success",
+        "requested" => {
+          "provider" => "grok", "model" => "grok-4.6", "family" => "grok",
+          "effort" => "high", "route" => "native_grok_build"
+        },
+        "actual" => {
+          "provider" => "grok", "model" => "grok-4.6-build",
+          "effort" => "high", "route" => "native_grok_build"
+        },
+        "capability_result" => "present", "independence_verified" => false,
+        "independence_reason" => "reviewer_family_unknown"
+      }
+    ]
+    legacy = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "routes" => routes
+      }
+    )
+    unknown_routes = Marshal.load(Marshal.dump(routes))
+    unknown_routes.last["actual"]["model"] = "grok-4.7-build"
+    unknown = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "required_action" => "restore reviewer capability",
+        "routes" => unknown_routes
+      }
+    )
+
+    assert_equal "plan_reviewing", legacy.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
+    assert_equal "plan_review_unsupported", unknown.key
+    assert_nil unknown.command
+  end
+
+  def test_plan_review_recovers_a_legacy_selected_lenses_parser_rejection
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    legacy = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "terminal_failure",
+            "diagnostic" => "plan review selected_lenses must contain lowercase names"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", legacy.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
+  end
+
+  def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair
+    Dir.mktmpdir("task-action-stale-plan-review") do |root|
+      task = fake_task(stage_name: "plan", stage_index: 3, project_root: root)
+      FileUtils.mkdir_p(File.join(task.folder, Hive::PlanReview::Store::ROOT_BASENAME))
+      projection = Struct.new(:summary).new({ "state" => "approved" })
+
+      with_replaced_singleton_method(
+        Hive::PlanReview::Projection, :load, ->(task_folder:) { projection }
+      ) do
+        with_replaced_singleton_method(
+          Hive::PlanReview::TransitionGuard, :freshness,
+          ->(**) { { "status" => "stale", "reason" => "plan_changed" } }
+        ) do
+          summary = Hive::TaskAction.for(task, marker(:complete)).plan_review
+
+          assert_equal "hive", summary.fetch("blocker_owner")
+          assert_equal "plan_changed", summary.fetch("blocker_reason")
+          refute summary.fetch("execution_allowed")
+        end
+      end
+    end
   end
 end

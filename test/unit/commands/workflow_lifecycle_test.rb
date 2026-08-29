@@ -465,6 +465,23 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_list_treats_unreadable_selected_locks_as_malformed_instead_of_crashing
+    with_project_and_package do |project, _package, _resolution|
+      workflows = File.join(project, ".hive-state", "workflows")
+      lock = File.join(workflows, "Bad Name", Hive::WorkflowPackage::ManagedStore::LOCK_FILE)
+      FileUtils.mkdir_p(File.dirname(lock))
+      FileUtils.touch(lock)
+
+      rows = Hive::Commands::Workflow::List.new(
+        project_root: project, json: true, stdout: StringIO.new
+      ).call!.fetch("workflows")
+      row = rows.find { |entry| entry["name"] == "Bad Name" }
+      assert_equal "managed", row.fetch("origin")
+      assert_equal "selected", row.fetch("selection")
+      assert_equal "malformed", row.fetch("integrity")
+    end
+  end
+
   def test_remove_rejects_owned_and_missing_workflows_and_project_default
     with_project_and_package do |project, package, resolution|
       assert_raises(Hive::Commands::Workflow::OwnershipError) do

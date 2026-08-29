@@ -17,8 +17,6 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recovery_coordinator"
-require "hive/daemon/display_name_backfiller"
-require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
@@ -159,23 +157,6 @@ module Hive
           recovery_coordinator: @recovery_coordinator,
           admission_open: -> { admission_open? }
         )
-        # Additive self-heal for tasks whose one-shot name generation at
-        # `hive new` never landed (agent/codex outage). Re-spawns
-        # `hive generate-name <folder>` on later ticks; never touches
-        # markers or dispatch.
-        @display_name_backfiller = DisplayNameBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run,
-          admission_open: -> { admission_open? }
-        )
-        # Additive self-heal for tasks created outside `hive new` (hand-made
-        # folder, `mv`-ed in) whose meta.yml has no id. Assigns the next
-        # counter id and commits it; never touches markers or dispatch.
-        @task_id_backfiller = TaskIdBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run
-        )
-
         @shutdown = false
         @reload = false
         @reexec_requested = false
@@ -362,18 +343,6 @@ module Hive
 
         apply_external_running_counts
 
-        # Recovery requests require the immutable task id. Assign ids before
-        # the healer observes failures so an externally-created legacy task can
-        # become recoverable in this tick instead of producing an unusable
-        # request that no later backfill can repair.
-        begin
-          @task_id_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
         # Reconcile task-bound merged PRs before automatic error recovery.
         # This prevents an already-delivered task from launching another
         # provider attempt merely because its final local marker is an error.
@@ -425,19 +394,6 @@ module Hive
                         keeping_previous: true)
         end
         return unless admission_open?
-
-        # Self-heal tasks left showing their raw slug because name
-        # generation never landed at `hive new`. Purely additive and
-        # marker-free, so order relative to dispatch is irrelevant — but
-        # it shares the healer's defensive rescue so a backfiller bug
-        # can't crash the tick (and trip the unit's restart-loop cap).
-        begin
-          @display_name_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "display_name_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
 
         # 3b. Dispatch-request queue (plan 2026-05-28-002). Process
         # bot-written request files BEFORE the per-row scan so a slug
@@ -579,13 +535,6 @@ module Hive
         apply_external_running_counts
 
         begin
-          @task_id_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-        begin
           @stale_agent_healer.heal(
             rows_eligible_for_error_recovery(result.rows),
             now: now,
@@ -597,14 +546,6 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
-        begin
-          @display_name_backfiller.backfill(result.rows, now: now)
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "display_name_backfiller raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
         dispatch_priority_order(result.rows).each do |row|
           break unless admission_open?
 
@@ -784,9 +725,11 @@ module Hive
         @logger.event(:update_check_error, error_class: e.class.name, message: e.message)
       end
 
-      # SHA-256 of lib/hive.rb (the file holding SCHEMA_VERSIONS). Used
-      # as a cheap drift signal — if the on-disk file's digest no longer
-      # matches what we captured at startup, the loaded code is stale.
+      # SHA-256 of the file that owns Hive::Schemas (resolved through
+      # source_location so it follows the namespace; currently
+      # lib/hive/schemas.rb). Used as a cheap drift signal — if the
+      # on-disk file's digest no longer matches what we captured at
+      # startup, the loaded code is stale.
       # Returns nil on any failure; a nil baseline disables drift checks
       # so a transient read failure never re-execs.
       def compute_code_fingerprint
@@ -1817,6 +1760,8 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
+          when "failure_cohort_cooldown" then :attempt_failure_cohort
+          when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           when "invalid_predecessor" then :invalid_predecessor
@@ -1842,6 +1787,10 @@ module Hive
           [ "hive", "the matching durable attempt already reached a terminal receipt" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
+        when :attempt_failure_cohort
+          [ "scheduler", "this typed Patrol failure cohort is durably paced" ]
+        when :attempt_transient_retry
+          [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
@@ -3553,7 +3502,12 @@ module Hive
           when :accepted then :attempt_accepted
           when :existing_live then :attempt_duplicate
           when :terminal_replay then :attempt_terminal_replay
-          when :deferred then :attempt_capacity_deferred
+          when :deferred
+            case result.reason
+            when "transient_retry" then :attempt_transient_retry
+            when "failure_cohort_cooldown" then :attempt_failure_cohort_deferred
+            else :attempt_capacity_deferred
+            end
           when :no_route then :attempt_route_unavailable
           else return
           end
@@ -3796,18 +3750,6 @@ module Hive
         # captured at boot and only a full daemon restart applies new
         # values.
         @stale_agent_healer = stale_agent_healer
-        # Rebuild alongside the healer on SIGHUP reload so a future
-        # operator-tunable knob (e.g. max_per_tick) would take effect
-        # within one tick; today it carries only the dry_run flag.
-        @display_name_backfiller = DisplayNameBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run,
-          admission_open: -> { admission_open? }
-        )
-        @task_id_backfiller = TaskIdBackfiller.new(
-          logger: @logger,
-          dry_run: @dry_run
-        )
         @enabled_cache.clear
         @logger.event(
           :config_reloaded,

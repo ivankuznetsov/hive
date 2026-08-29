@@ -143,6 +143,9 @@ module Hive
       def health(attempt)
         return [ "unsatisfied", "attempt_lost" ] if attempt.state == "lost"
         return [ "satisfied", "attempt_terminal_succeeded" ] if attempt.outcome == "succeeded"
+        if attempt.receipt&.fetch("exit_status", nil) == Hive::ExitCodes::TEMPFAIL
+          return [ "pending", "attempt_terminal_retryable" ]
+        end
 
         [ "unsatisfied", "attempt_terminal_#{attempt.outcome || 'unknown'}" ]
       end

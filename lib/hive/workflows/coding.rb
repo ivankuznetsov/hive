@@ -52,7 +52,8 @@ module Hive
             name: "inbox",
             index: 1,
             state_file: "idea.md",
-            kind: :inert
+            kind: :inert,
+            runner: :inbox
           ),
           Hive::Workflow::Stage.new(
             name: "brainstorm",
@@ -60,6 +61,7 @@ module Hive
             state_file: "brainstorm.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "brainstorm", force_source: true),
             kind: :agent,
+            runner: :brainstorm,
             skill: "/ce-brainstorm",
             status_mode: :state_file_marker,
             budget_usd: 50,
@@ -71,6 +73,7 @@ module Hive
             state_file: "plan.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "plan"),
             kind: :agent,
+            runner: :plan,
             status_mode: :state_file_marker,
             budget_usd: 100,
             timeout_sec: 3600
@@ -81,6 +84,7 @@ module Hive
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "develop"),
             kind: :execute,
+            runner: :execute,
             status_mode: :exit_code_only,
             budget_usd: 500,
             timeout_sec: 14400,
@@ -92,6 +96,7 @@ module Hive
             state_file: "pr.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "open-pr"),
             kind: :agent,
+            runner: :"open-pr",
             status_mode: :state_file_marker,
             budget_usd: 50,
             timeout_sec: 1800
@@ -101,7 +106,8 @@ module Hive
             index: 6,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "review"),
-            kind: :review_council
+            kind: :review_council,
+            runner: :review
           ),
           Hive::Workflow::Stage.new(
             name: "artifacts",
@@ -109,6 +115,7 @@ module Hive
             state_file: "artifact.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "artifacts"),
             kind: :agent,
+            runner: :artifacts,
             status_mode: :state_file_marker,
             budget_usd: 100,
             timeout_sec: 3600
@@ -119,6 +126,7 @@ module Hive
             state_file: "pr.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "finalize"),
             kind: :finalize,
+            runner: :finalize,
             status_mode: :state_file_marker,
             budget_usd: 50,
             timeout_sec: 1800
@@ -128,7 +136,8 @@ module Hive
             index: 9,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "archive"),
-            kind: :inert
+            kind: :inert,
+            runner: :done
           )
         ]
       )

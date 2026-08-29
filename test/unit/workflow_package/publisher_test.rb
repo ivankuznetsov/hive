@@ -165,6 +165,26 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
+  # Regression: failures before packaging owns the destination (identity
+  # validation and the emptiness guard) must never destroy caller-owned
+  # directory contents through any cleanup path.
+  def test_package_preserves_pre_existing_destination_on_pre_ownership_failures
+    with_authored_workflow do |project, _authored_dir|
+      Dir.mktmpdir("publisher-test-") do |destination|
+        keeper = File.join(destination, "precious.txt")
+        File.write(keeper, "caller-owned")
+
+        error = assert_raises(Hive::ConfigError) do
+          publisher(project).package(destination: destination)
+        end
+
+        assert_match(/workflow package destination must be empty/, error.message)
+        assert_equal [ "precious.txt" ], Dir.children(destination)
+        assert_equal "caller-owned", File.read(keeper)
+      end
+    end
+  end
+
   def test_package_reports_missing_and_invalid_authored_inputs
     with_authored_workflow do |project, authored_dir|
       workflows = File.dirname(authored_dir)

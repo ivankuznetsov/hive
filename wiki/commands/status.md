@@ -103,10 +103,12 @@ own graph producer cannot consume its cache recursively.
 The cache is a bounded freshness optimization, not a second source of truth.
 When it belongs to the same completed tick as the scheduler record, the shared
 tick sequence proves that it is the graph on which those scheduler decisions
-were made. A retained cache from the previous tick can still provide cheap
-task visibility while a new tick is running, but scheduler completeness
-remains unavailable until that tick completes. Independently supplied status
-graphs still pass the timestamp and per-task scheduler-join fences.
+were made. The daemon preserves that coherent completed pair while a later tick
+is running or fails, so ordinary operational status does not transiently lose
+scheduler ownership. The retained observation keeps its original timestamp and
+deadline; expiry, daemon replacement, and every task-identity join still fail
+closed. Independently supplied status graphs still pass the timestamp and
+per-task scheduler-join fences.
 During a binary/daemon cutover, an older scheduler record has no dedicated
 payload-mtime field. A same-tick cached Patrol Fix controller graph may treat
 only that unavailable timestamp as unknown because the shared tick sequence
@@ -158,6 +160,8 @@ log as a substitute. The task journal must first identify the current attempt
 as terminal and failed or cancelled, so running and successful rows do not
 point-fetch diagnostic receipts on the status hot path. A provider-owned typed
 failure is provider-waiting, while other typed failures are repair-owned.
+An exit-75 receipt is scheduler contention rather than a Patrol-agent verdict,
+so status does not synthesize or project its `agent_exit_nonzero` diagnostic.
 Durable recovery disposition and pacing remain separate policy.
 
 For a daemon-enrolled project with global automatic retry enabled, a real
@@ -489,6 +493,11 @@ process-global, so a later scan still observes fresh durable attempt data. The
 internal `--daemon-task` fast-tick scan shares one store and one reader the
 same way, across every requested project, so a bounded daemon tick never
 rebuilds them per project.
+
+Direct project projections also establish that same scope when no enclosing
+scan owns it. This keeps bounded consumers such as `hive task` able to resolve
+receipt-bound Patrol diagnostics without reopening the store per task or
+raising outside a fleet scan.
 
 Each task row first reads its bounded projection checkpoint instead of hashing
 and replaying the task's complete journal. A checkpoint is usable for exact

@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-08-24
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
@@ -98,7 +98,7 @@ tempfile-plus-rename.
 
 `hive status` v5 projects strict evidence into a three-state read model: clear; benign below-gate wait (`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`, `offending_ref`, `safe_correction`). Raw folder moves remain possible, but the next status or supported dispatch boundary observes and holds invalid state.
 
-`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids/names. Daemon display-name and id backfillers skip admission-error rows and strict-read failures, so background healing cannot erase dependency evidence. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
+`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids, names, and completion clocks through strict metadata reads. Daemon ticks and status projections never mutate that metadata. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
 
 ## Evidence-bound task closure
 
@@ -205,18 +205,13 @@ same move/finalization transaction. Rollback restores the exact prior metadata.
 Reopening deliberately keeps the clock, and a later return to the terminal
 stage reuses it.
 
-At the shared ordinary-status producer boundary, `CompletedAtBackfiller`
-converges archived legacy tasks that lack the field. Under the project commit
-lock and task lock it prefers the earliest credible Git event that first made
-the resolved terminal stage archived, then the terminal state-file mtime, then
-the task-folder mtime. A value is eligible for hiding only after its metadata
-write and `hive/state` commit both succeed. Missing/corrupt sources or failed
-persistence warn and keep the task visible; a successful first write is
-idempotent, including while policy is `never`. Each refresh reuses the status
-producer's captured workflow/config generation, bounds Git history and commit
-subprocesses by the shared deadline, commits only the metadata path without
-consuming unrelated index entries, and advances a durable per-project cursor so
-daemonless status calls remain fair across process restarts.
+`hive migrate` converges archived legacy tasks that lack the field. The explicit
+command prefers the earliest credible Git event that first made the resolved
+terminal stage archived, then the terminal state-file mtime, then the task-folder
+mtime, and commits the discovered clocks once. Missing sources warn and keep the
+task visible. Ordinary status, daemon ticks, and stage execution never discover
+or persist legacy completion clocks; rerunning an already-archived legacy task
+also leaves its missing clock for the explicit migration.
 
 `ArchiveFilter` captures one UTC `now` for a refresh and applies the currently
 resolved task pin, project default, or `coding` workflow policy. Positive
@@ -231,7 +226,7 @@ Task ids are allocated from the global counter file `<state_home>/task-counter.y
 next_id: 2
 ```
 
-`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for daemon backfill. `hive migrate` and the backfiller keep strict `next!` allocation; migration seeds the counter above existing sidecar ids before assigning new ones.
+`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for explicit migration. `hive migrate` uses strict `next!` allocation and seeds the counter above existing sidecar ids before assigning new ones.
 
 ## Slug grammar
 
@@ -599,7 +594,11 @@ manifest and those exact bytes immediately before appending the decision.
 manifest/evidence generation and appends a new-generation transition receipt
 before any fresh decision. Rework moves the same folder from Review to Fix,
 rotates the current worktree ownership file, retains the prior generation's
-owned bytes, and carries no validation receipt. A completed route intent remains
+owned bytes, and carries no validation receipt. The reopen receipt points to the
+prior Review decision; Fix resolves that decision as untrusted feedback and uses
+its referenced Fix receipt as the progress baseline. An unchanged diff and
+unchanged validation-command plan cannot produce a new Fix receipt, while a
+patch change or validation-plan correction can. A completed route intent remains
 replayable so a crash after the folder move is reconciled from either the old
 caller path or the new location. Parked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.
@@ -767,14 +766,15 @@ repository, or branch change are quarantined and block intake rather than
 silently replacing the baseline.
 
 The authoritative checkpoint schema remains v2. Incremental catch-up uses a
-separate `hive-refactor-patrol-reconciler-progress` v1 sidecar rather than
+separate `hive-refactor-patrol-reconciler-progress` v2 sidecar rather than
 putting transient cursors into `reconciler.json`. The sidecar repeats the exact
 registration/host/repository/default-branch identity and binds itself to the
 SHA-256 fingerprint of the v2 checkpoint it started from. It persists two
 restart-safe phases: paginated scan state (fixed overlap start, next/seen
 cursors, accumulated merged-PR identities, fixed upper time bound, and frozen
-result count), followed by manifest intake state (next item index and
-already-enqueued PR numbers). Search traversal is creation-ordered inside that
+result count), followed by manifest intake state (next item index, the exact
+processed PR prefix, and its ordered subset of already-enqueued PR numbers).
+Search traversal is creation-ordered inside that
 fixed merge window. Count or terminal-size drift restarts page traversal while
 retaining the upper bound. Origin identity discovery and each remote page or
 intake item consume one shared project-step deadline within the reconciler's
@@ -795,6 +795,8 @@ progress only in memory. The sidecar is continuation evidence, never high-water
 or job-completion authority. Its timestamps, protocol scalars, merge OIDs, and
 cursors are strictly typed; a persisted current cursor already present in the
 consumed set is impossible state and is quarantined before any GitHub call.
+Runtime ticks accept only the current continuation schema; unsupported shapes
+are quarantined and block intake.
 
 The job aggregate remains the only completion authority. It stores the
 enqueue-time discovery snapshot, one pinned `analysis_sha`, feature-level
@@ -990,7 +992,7 @@ update:                          # update-check knobs (plan 2026-05-27-002, U4)
 
 Managed by `Hive::Config.register_project`; deregistered by `unregister_project` (one row, by name) and `prune_missing_projects!` (every row whose `path` is missing, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid). Registry writers serialize on the sticky sibling `config.yml.lock` and replace `config.yml` via tempfile + `fsync` + atomic rename. `HIVE_HOME` overrides the XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated when no XDG config exists.
 
-Loader tolerance (`Config.registered_projects` / `load_global_config`): a non-Hash row, a row missing `name`, or a row whose `path` isn't a String is *skipped silently* instead of raising — a single hand-edit accident can no longer brick `status`/`forget`/`prune`/TUI. `Psych::Exception` (any malformed YAML — syntax, disallowed-class, alias-not-enabled) plus `Errno::EACCES`/`EISDIR` are rewrapped as `ConfigError` (exit 78); `chmod 000 ~/.config/hive/config.yml` no longer leaks as exit-70 InternalError. `prune` is the cleanup verb for invalid rows surfaced this way (predicate `Config.droppable_registry_entry?` covers missing paths, stored valid-realpath mismatches, and invalid shape; `valid_registry_entry?` is the shared shape gate). Read-modify-write paths go through `update_global_config!` so concurrent `hive init` / `hive forget` / `hive prune` calls cannot lose updates; direct writes go through `write_global_config!` and take the same lock. See [[commands/forget]] · [[commands/prune]] · [[modules/config]]. Writer filesystem failures (`Errno::EACCES`/`EPERM`/`EISDIR`/`ENOTDIR`/`ELOOP`/`EROFS`/`ENOSPC`/rename-class errors) are rewrapped as `Hive::ConfigError` (exit 78). The reader (`load_global_config`) likewise rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` to `ConfigError` so a `chmod 000` on `~/.config/hive/config.yml` surfaces as exit 78, not exit 70. Name matching in `unregister_project` is `to_s`-symmetric so a hand-edited Integer `name:` in YAML still resolves. `forget`/`prune` `--json` envelopes use `Hive::Schemas::EnvelopeEmitter` (`lib/hive.rb`) and `File.expand_path` raw `path` / `hive_state_path` to honor the schemas' "Absolute path" contract regardless of how the registry row was hand-edited.
+Loader tolerance (`Config.registered_projects` / `load_global_config`): a non-Hash row, a row missing `name`, or a row whose `path` isn't a String is *skipped silently* instead of raising — a single hand-edit accident can no longer brick `status`/`forget`/`prune`/TUI. `Psych::Exception` (any malformed YAML — syntax, disallowed-class, alias-not-enabled) plus `Errno::EACCES`/`EISDIR` are rewrapped as `ConfigError` (exit 78); `chmod 000 ~/.config/hive/config.yml` no longer leaks as exit-70 InternalError. `prune` is the cleanup verb for invalid rows surfaced this way (predicate `Config.droppable_registry_entry?` covers missing paths, stored valid-realpath mismatches, and invalid shape; `valid_registry_entry?` is the shared shape gate). Read-modify-write paths go through `update_global_config!` so concurrent `hive init` / `hive forget` / `hive prune` calls cannot lose updates; direct writes go through `write_global_config!` and take the same lock. See [[commands/forget]] · [[commands/prune]] · [[modules/config]]. Writer filesystem failures (`Errno::EACCES`/`EPERM`/`EISDIR`/`ENOTDIR`/`ELOOP`/`EROFS`/`ENOSPC`/rename-class errors) are rewrapped as `Hive::ConfigError` (exit 78). The reader (`load_global_config`) likewise rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` to `ConfigError` so a `chmod 000` on `~/.config/hive/config.yml` surfaces as exit 78, not exit 70. Name matching in `unregister_project` is `to_s`-symmetric so a hand-edited Integer `name:` in YAML still resolves. `forget`/`prune` `--json` envelopes use `Hive::Schemas::EnvelopeEmitter` (`lib/hive/schemas.rb`) and `File.expand_path` raw `path` / `hive_state_path` to honor the schemas' "Absolute path" contract regardless of how the registry row was hand-edited.
 
 `bot:` is a global operator-surface block, not a per-project enrollment knob. `Config.load_global_bot(require_runtime: true)` merges it over `Config.global_bot_defaults`, validates integer chat IDs, poll bounds, booleans including `pairing_enabled`, and path strings, then requires `HIVE_TELEGRAM_BOT_TOKEN` plus either a non-empty allowlist or `pairing_enabled: true` before `hive bot start` can run. Runtime files are global under `~/.local/state/hive/`: `.bot.pid` for the single-instance lock, `logs/bot.log` for structured JSON lines, `.bot.last_seen_update_id` for Telegram reconnect summaries, `.bot.alert_state.json` for persisted notification fingerprints, row snapshots, first-seen timestamps, and reminder timestamps, `.bot.pairings.json` for pending Telegram pairing codes, and `pairing_approvals/` for owner-authored approval notices drained by the running bot.
 

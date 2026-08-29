@@ -308,11 +308,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
-  class FakeDisplayNameBackfiller
-    def backfill(_rows, now:)
-    end
-  end
-
   class FakeRecoveryCoordinator
     attr_reader :resumes, :deferred, :marked, :admission_failures,
                 :admission_observations, :terminal_repairs
@@ -549,12 +544,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
       clock: clock
     )
     # Generic dispatcher tests exercise routing, not the detached production
-    # name generator. Rows intentionally omit display names in many fixtures;
-    # leaving the real collaborator installed launches `hive generate-name`
-    # subprocesses that are unrelated to those assertions. Dedicated
-    # DisplayNameBackfiller tests cover its implementation, while the wiring
-    # and defensive-rescue tests below replace this fake explicitly.
-    dispatcher.instance_variable_set(:@display_name_backfiller, FakeDisplayNameBackfiller.new)
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
@@ -1468,6 +1457,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
       [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
+      [ :deferred, "failure_cohort_cooldown", :attempt_failure_cohort, "scheduler" ],
+      [ :deferred, "transient_retry", :attempt_transient_retry, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
       [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
       [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
@@ -1807,6 +1798,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, = make_dispatcher(operational_snapshot: snapshot)
     observed = row
     expected = {
+      attempt_transient_retry: [ "scheduler", "transient contention is waiting for its retry backoff" ],
       attempt_deferred: [ "hive", "durable attempt admission was deferred" ],
       daily_cap: [ "scheduler", "project daily dispatch budget is exhausted" ],
       cooldown: [ "scheduler", "task is inside its scheduler cooldown" ],
@@ -4033,17 +4025,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, gate.call("enabled-project"),
                  "the rebuilt healer must retain the live per-project gate"
     healer_admission = rebuilt.instance_variable_get(:@admission_open)
-    backfiller = dispatcher.instance_variable_get(:@display_name_backfiller)
-    backfiller_admission = backfiller.instance_variable_get(:@admission_open)
     assert healer_admission.call
-    assert backfiller_admission.call
 
     dispatcher.request_shutdown!
 
     refute healer_admission.call,
            "the reloaded healer must share the daemon's live shutdown gate"
-    refute backfiller_admission.call,
-           "the reloaded name backfiller must share the daemon's live shutdown gate"
   end
 
   def test_reload_config_rebuilds_the_universal_healer
@@ -4816,15 +4803,9 @@ end
 def test_changed_task_tick_contains_per_task_collaborator_failures
   status_row = row(action: nil, command: nil)
   dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [ status_row ])
-  task_ids = Object.new
-  task_ids.define_singleton_method(:backfill) { |*, **| raise "task id boom" }
   healer = Object.new
   healer.define_singleton_method(:heal) { |*, **| raise "healer boom" }
-  names = Object.new
-  names.define_singleton_method(:backfill) { |*, **| raise "name boom" }
-  dispatcher.instance_variable_set(:@task_id_backfiller, task_ids)
   dispatcher.instance_variable_set(:@stale_agent_healer, healer)
-  dispatcher.instance_variable_set(:@display_name_backfiller, names)
 
   assert dispatcher.tick_changed(
     task_keys: [ [ "p1", "s1" ] ], now: T0 + 1
@@ -4832,9 +4813,7 @@ def test_changed_task_tick_contains_per_task_collaborator_failures
   messages = logger.events.filter_map do |name, attrs|
     attrs[:message] if name == :fatal
   end
-  assert messages.any? { |message| message.include?("task_id_backfiller raised") }
   assert messages.any? { |message| message.include?("stale_agent_healer raised") }
-  assert messages.any? { |message| message.include?("display_name_backfiller raised") }
 end
 
 def test_request_methods_flip_lifecycle_flags
@@ -6786,21 +6765,27 @@ end
   def test_durable_auto_dispatch_logs_all_admission_outcomes_and_charges_only_new_starts
     attempt = Struct.new(:attempt_id, :task_generation, :state)
                     .new("attempt-1", "generation-1", "launching")
-    statuses = [ :accepted, :existing_live, :terminal_replay, :deferred ]
+    outcomes = [
+      [ :accepted, nil ],
+      [ :existing_live, nil ],
+      [ :terminal_replay, nil ],
+      [ :deferred, "capacity" ],
+      [ :deferred, "failure_cohort_cooldown" ]
+    ]
     calls = []
     attempt_dispatcher = Object.new
     attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
-      status = statuses.shift
+      status, reason = outcomes.shift
       calls << [ request, options ]
       Hive::Attempts::DispatchResult.new(
         status: status, attempt: (status == :deferred ? nil : attempt), receipt: nil,
-        attach_descriptor: nil, reason: (status == :deferred ? "capacity" : nil)
+        attach_descriptor: nil, reason: reason
       )
     end
     dispatcher, supervisor, _controller, logger = make_dispatcher(
       rows: [], attempt_dispatcher: attempt_dispatcher
     )
-    results = 4.times.map do |index|
+    results = 5.times.map do |index|
       dispatcher.send(
         :dispatch_command, "hive run demo-task", project: "p1", slug: "demo-task",
         stage: "4-execute", state_file_mtime: nil, state_file_path: nil,
@@ -6808,11 +6793,15 @@ end
       )
     end
 
-    assert_equal %i[accepted existing_live terminal_replay deferred], results.map(&:status)
-    assert_equal 4, calls.size
+    assert_equal %i[accepted existing_live terminal_replay deferred deferred],
+                 results.map(&:status)
+    assert_equal 5, calls.size
     assert_empty supervisor.spawned
     assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
-    assert_equal %i[attempt_accepted attempt_duplicate attempt_terminal_replay attempt_capacity_deferred],
+    assert_equal %i[
+      attempt_accepted attempt_duplicate attempt_terminal_replay
+      attempt_capacity_deferred attempt_failure_cohort_deferred
+    ],
                  logger.events.map(&:first).grep(/attempt_/)
     dispatched = logger.events.select { |name, _attrs| name == :dispatched }
     assert_equal 1, dispatched.size
@@ -8252,107 +8241,25 @@ end
     refute events_include?(logger, :child_timeout)
   end
 
-  # Wiring check: a tick must drive the display-name backfiller over the
-  # status rows. We swap in a backfiller with a fake spawn so no real
-  # `hive generate-name` subprocess is started, and assert the missing-
-  # name row produces a display_name_backfill event without disturbing
-  # the rest of the tick.
-  def test_tick_invokes_display_name_backfiller
-    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
-    Hive::TaskMeta.write(folder, id: 1, slug: "s1", display_name: nil)
-    rows = [ row(action: "working", marker: "agent_working", command: nil,
-                 folder: folder, claude_pid_alive: true) ]
-    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
-
-    spawned = []
-    backfiller = Hive::Daemon::DisplayNameBackfiller.new(
-      logger: dispatcher.instance_variable_get(:@logger),
-      dry_run: false,
-      spawn: ->(f) { spawned << f; Process.pid }
+  def test_tick_does_not_mutate_missing_task_metadata
+    folder = make_existing_row_folder(
+      project: "p1", stage: "1-inbox", slug: "legacy-task-260827-abcd"
     )
-    dispatcher.instance_variable_set(:@display_name_backfiller, backfiller)
-
-    dispatcher.tick(now: T0)
-
-    assert_equal [ folder ], spawned,
-                 "tick must drive the backfiller to spawn generate-name for the unnamed task"
-    assert events_include?(logger, :display_name_backfill),
-           "tick must emit a display_name_backfill event"
-    refute events_include?(logger, :fatal),
-           "backfiller wiring must not crash the tick"
-  end
-
-  # dispatcher.rb 239: a backfiller that raises must be caught by the
-  # tick's defensive rescue so a backfiller bug can't crash the tick (and
-  # trip the unit's restart-loop cap). The error is surfaced as :fatal.
-  def test_tick_survives_display_name_backfiller_raising
-    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
-    rows = [ row(action: "working", marker: "agent_working", command: nil,
-                 folder: folder, claude_pid_alive: true) ]
-    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
-
-    exploding = Object.new
-    def exploding.backfill(*); raise "backfiller boom"; end
-    dispatcher.instance_variable_set(:@display_name_backfiller, exploding)
-
-    dispatcher.tick(now: T0)
-
-    fatal = logger.events.find do |(n, a)|
-      n == :fatal && a[:message].to_s.include?("display_name_backfiller raised")
-    end
-    refute_nil fatal, "a raising backfiller must be caught and logged as :fatal"
-    assert_includes fatal[1][:message], "backfiller boom"
-  end
-
-  # Wiring check: a tick must drive the task-id backfiller over the status
-  # rows. We swap in a backfiller with a fake allocate/commit so no real
-  # counter or git commit happens, and assert the missing-id row gets an id
-  # and a task_id_backfill event without disturbing the rest of the tick.
-  def test_tick_invokes_task_id_backfiller
-    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
-    Hive::TaskMeta.write(folder, id: nil, slug: "s1", display_name: "Name")
-    rows = [ row(action: "working", marker: "agent_working", command: nil,
-                 folder: folder, claude_pid_alive: true) ]
-    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
-
-    backfiller = Hive::Daemon::TaskIdBackfiller.new(
-      logger: dispatcher.instance_variable_get(:@logger),
-      dry_run: false,
-      allocate: -> { 999 },
-      commit: ->(_row) { true }
+    Hive::TaskMeta.write(
+      folder, id: nil, slug: "legacy-task-260827-abcd", display_name: nil
     )
-    dispatcher.instance_variable_set(:@task_id_backfiller, backfiller)
+    meta_path = Hive::TaskMeta.path(folder)
+    before = File.binread(meta_path)
+    dispatcher, = make_dispatcher(
+      rows: [ row(folder: folder, slug: "legacy-task-260827-abcd", id: nil,
+                    action: nil, command: nil) ]
+    )
 
     dispatcher.tick(now: T0)
 
-    assert_equal 999, Hive::TaskMeta.read(folder)[:id],
-                 "tick must drive the backfiller to assign an id to the id-less task"
-    assert events_include?(logger, :task_id_backfill),
-           "tick must emit a task_id_backfill event"
-    refute events_include?(logger, :fatal),
-           "backfiller wiring must not crash the tick"
-  end
-
-  # A task-id backfiller that raises must be caught by the tick's defensive
-  # rescue so a backfiller bug can't crash the tick (and trip the unit's
-  # restart-loop cap). The error is surfaced as :fatal.
-  def test_tick_survives_task_id_backfiller_raising
-    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
-    rows = [ row(action: "working", marker: "agent_working", command: nil,
-                 folder: folder, claude_pid_alive: true) ]
-    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
-
-    exploding = Object.new
-    def exploding.backfill(*); raise "id backfiller boom"; end
-    dispatcher.instance_variable_set(:@task_id_backfiller, exploding)
-
-    dispatcher.tick(now: T0)
-
-    fatal = logger.events.find do |(n, a)|
-      n == :fatal && a[:message].to_s.include?("task_id_backfiller raised")
-    end
-    refute_nil fatal, "a raising id backfiller must be caught and logged as :fatal"
-    assert_includes fatal[1][:message], "id backfiller boom"
+    assert_equal before, File.binread(meta_path)
+    assert_nil Hive::TaskMeta.read(folder)[:id]
+    assert_nil Hive::TaskMeta.read(folder)[:display_name]
   end
 
   def test_shutdown_snapshot_failure_is_advisory

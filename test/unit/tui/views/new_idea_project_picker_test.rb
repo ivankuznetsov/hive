@@ -70,10 +70,55 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     assert_equal %w[project-3 project-4 project-5 project-6 project-7 project-8], visible.map(&:name)
   end
 
+  # Regression: with a populated snapshot and a project name whose cursor
+  # row exceeds the terminal width, every rendered row must stay within
+  # its visible cell budget. Truncation runs after styling in render(),
+  # so it has to measure escape bytes as zero-width cells rather than
+  # counting them as visible output.
+  def test_render_rows_fit_visible_width_when_project_name_overflows
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-17T00:00:00Z",
+      "projects" => [
+        { "name" => "a-very-long-project-name-that-overflows-narrow-views", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea_project,
+      snapshot: snap,
+      new_idea_project_cursor: 0
+    )
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model, width: 30)
+
+    out.each_line(chomp: true).each do |line|
+      assert_operator Hive::Tui::Views::Format.display_width(line), :<=, 30,
+        "row #{line.inspect} exceeds the render width"
+    end
+    assert_includes out, "a-very-long-pro", "visible prefix must survive the cut"
+  end
+
   def test_truncate_leaves_line_unchanged_when_width_is_not_positive
     line = "Choose project for new idea: hive"
 
     assert_equal line, Hive::Tui::Views::NewIdeaProjectPicker.truncate(line, 0)
     assert_equal line, Hive::Tui::Views::NewIdeaProjectPicker.truncate(line, -5)
+  end
+
+  # Regression: the cursor row is styled (reverse video) before the final
+  # `rows.map { truncate(line, width) }` pass, so truncation has to handle
+  # a line that already contains ANSI escapes — measuring only its visible
+  # cells and keeping the trailing reset intact. Hand-rolled SGR escapes
+  # stand in for Styles::CURSOR_HIGHLIGHT.render, which Lipgloss strips in
+  # non-tty test environments.
+  def test_truncate_keeps_styled_cursor_row_within_width_and_reset_intact
+    styled = "\e[7m> #{'hive-project-' * 5}\e[0m"
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.truncate(styled, 30)
+
+    assert_equal 30, Hive::Tui::Views::Format.display_width(out)
+    assert out.end_with?("…"), "expected ellipsis after truncation"
+    assert_includes out, "\e[0m",
+      "truncation must not slice off the style's reset sequence"
+    assert_includes out, "> hive-pro", "visible prefix must survive the cut"
   end
 end

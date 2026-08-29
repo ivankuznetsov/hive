@@ -673,13 +673,47 @@ class ConnectCommandTest < Minitest::Test
 
       lines = output.string.each_line.map { |line| JSON.parse(line) }
       failures = lines.select { |line| line["ok"] == false }
-      # The @error_emitted guard must suppress a duplicate envelope from
-      # call's rescue: exactly one ok:false line.
+      # Envelope emission is owned solely by call's rescue; domain code never
+      # writes stdout directly, so exactly one ok:false line appears.
       assert_equal 1, failures.length
       needs = failures.first
       assert_equal "needs_project_selection", needs["stage"]
       assert_equal "needs_selection", needs["error_kind"]
       assert_equal Hive::ExitCodes::GENERIC, needs["exit_code"]
+    end
+  end
+
+  def test_connect_needs_project_selection_raises_typed_internal_error_carrying_projects
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+
+      err = assert_raises(Hive::Commands::Connect::NeedsProjectSelectionError) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) {
+            FakeMcp.new([ { "id" => "proj_one", "name" => "One" }, { "id" => "proj_two", "name" => "Two" } ])
+          },
+          browser_opener: ->(_url) { false }
+        ).call
+        flunk "expected NeedsProjectSelectionError"
+      end
+
+      # The domain layer represents the outcome as a typed error carrying the
+      # normalized projects; the sole envelope emission comes from call's
+      # centralized error-envelope owner (exactly one failure line).
+      failures = output.string.each_line.select { |line| line.include?("needs_project_selection") }
+      assert_equal 1, failures.length
+      assert_match(/multiple projects/, err.message)
+      assert_equal %w[proj_one proj_two], err.projects.map { |project| project["id"] }
+      assert_equal [ "One", "Two" ], err.projects.map { |project| project["name"] }
     end
   end
 

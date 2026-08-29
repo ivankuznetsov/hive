@@ -88,15 +88,15 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` on the same retry ladder; it does not project or clear a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
 | `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Durable task-bound reconciler for every coding task with a PR in stages 5–8, including error rows. It verifies the registered repository, observed PR head, immutable reachable merge SHA, current task generation, ownership, and local worktree safety; checkpoints GitHub and architecture-intake receipts before the next side effect; then calls the same evidence-bound closure transition used by an operator. Registrations with a blank or `local:` repository identity are quietly skipped because merge reconciliation is not applicable; a real GitHub identity mismatch still fails closed. New `pr.md` metadata carries the controller-observed head; older tasks may recover it only from a strictly owned registered worktree. A merged PR without that binding stays `ambiguous` and active. `OPEN`, closed-unmerged, cross-repository, held, unsafe, and failing candidates remain in the ledger. Observed-head drift stays held against automatic archive but continues bounded, identity-matched remote polling only when no current dependency, admission, repository, or PR-identity hold outranks it. `OPEN` or closed-unmerged facts release ordinary error recovery; merged, delivered-elsewhere, and ambiguous facts persist a terminal block before architecture intake or closure and stop polling. One candidate per project advances per tick, and retry counts never evict work. |
-| `Hive::Daemon::PrMergeReconciliationStore` | `lib/hive/daemon/pr_merge_reconciliation_store.rb` | Owner-private project-local `daemon/pr-merge-reconciliation.json` ledger. Schema v1 binds registration/path/repository/default branch and stores a backlog watermark, fair cursor, generation-keyed candidates, remote/architecture/archive receipts, holds, and uncapped failure counts with capped hourly backoff. Writes lock, atomically replace, and fsync; corrupt or identity-drifted bytes are preserved under `daemon/quarantine/pr-merge-reconciliation/` and block only that project. |
+| `Hive::Daemon::PrMergeRepository` | `lib/hive/daemon/pr_merge_repository.rb` | Row-oriented runtime-control-plane persistence for merge candidates. Typed project/task/generation/state/retry/hold columns fence revision-CAS checkpoints and bounded SQL candidate selection; bounded JSON stores evidence only. |
 | `Hive::Daemon::RefactorPatrolMergeReconciler` | `lib/hive/daemon/refactor_patrol_merge_reconciler.rb` | Converges incremental exact-host GitHub catch-up and exact-PR intake into one durable merge-classification occurrence per repository/PR/merge identity. Deterministic skips settle inline; ambiguous provider work is only hydrated here and launches later as a supervised Patrol scan. Existing immutable PR-manifest v2 delivery is adopted without reclassification. The task-bound reconciler gets the first intake opportunity each tick; repository catch-up then uses the remaining bounded deadline. Persisted GitHub backoff begins at observed failure time (tick wall anchor plus monotonic elapsed), not stale tick start. First enablement still seeds a current high-water baseline instead of importing history; the authoritative checkpoint remains schema v2. |
 | `Hive::Daemon::RefactorPatrolMergeProgressStore` | `lib/hive/daemon/refactor_patrol_merge_progress_store.rb` | Crash-safe `reconciler-progress.json` sidecar for page cursors, accumulated merge identities, intake position, and GitHub retry state. It binds continuation to registration/repository identity plus the base v2 checkpoint fingerprint, writes atomically, fsyncs directory-entry changes, quarantines unsafe shapes/identity drift, and persists bounded exponential backoff with jitter. |
 | `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first merge-classification and post-merge batch-owner discovery. Classification and accepted discovery are supervised Patrol scans but consume no scheduled Architecture allowance or workflow-task slot. The scheduler freezes overlapping current-main mappings in `PostMergeBatchStore`, materializes only synthetic owner JobStore rows/events, validates exact registration/repository authority, and reuses each owner's durable `analysis_sha`. Scheduled and post-merge mapping share `FrozenRevisionMapRig`, which creates, asserts, and removes one detached exact-SHA worktree. Finalized post-merge groups and successfully admitted scheduled results compact safely instead of reaching lifetime hard caps. |
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestSchedulerBase` | `lib/hive/daemon/digest_scheduler_base.rb` | Shared daily-digest lifecycle: one pending date, cancellation, bounded failure backoff, dispatch envelope construction, observable tolerant state reads, and atomic cursor persistence. Concrete schedulers retain their cadence and cursor rules. |
 | `Hive::Daemon::AnswerDigestScheduler` | `lib/hive/daemon/answer_digest_scheduler.rb` | Host-local daily answer reminder cadence. Persists `last_fired_date` in `<state_home>/answer_digest_state.json` and emits at most one `hive answer-digest --date D --json` child per day after the configured hour. |
-| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed delivery queue for all adapters. Runtime readers accept only current v5; the one-off state migration upgrades pending v1-v4 files before opening the queue. V5 carries marker-bound, markerless provider-admission, and markerless controller-failure recovery through the same restartable phases, with canonical task/marker/generation identity, owner/remediation, and terminal outcome/time. Managed-workflow migration removes nonterminal requests for each migrated task while preserving terminal evidence receipts. New task-action requests bind the observed task id, stage, and generation; the daemon rejects a bound request after the task advances or migrates. A producer that catches the short task-folder move window keeps a stage-bound request without claiming a task identity, which the daemon rejects rather than losing the delivery or running it. Requestors are validated against one closed adapter enum, including the explicit `operator` source. Nonterminal recovery requests do not expire; bounded request-keyed lock shards serialize claim, phase CAS, and pruning without accumulating one lock file per request. The dispatcher shares one pending/claimed scan between queue accounting and recovery projection per tick, and runs terminal recovery pruning at most hourly. Request IDs are bounded filesystem-safe identifiers. The single-dispatcher invariant remains: producers write, the daemon dispatches. |
-| `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
+| `Hive::RuntimeControlPlane::DispatchRepository` | `lib/hive/runtime_control_plane/dispatch_repository.rb` | Durable request, claim, recovery, sequence, and completion-outbox rows shared by bot, web, daemon, and recovery. Typed conflicts prevent a second active subject; bounded SQL projections serve queue and recovery status. |
+| `Hive::RuntimeControlPlane::AdmissionTransition` | `lib/hive/runtime_control_plane/admission_transition.rb` | Sole cross-domain immediate transaction for final source/generation recheck, request claim, capacity and route validation, probe claim, attempt insert, accounting, lineage, and routing decision. Provider, filesystem, network, and process work stays outside. |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. Start takes `ActivationLock` before its single-instance check and releases it only through Dispatcher's runtime-ready callback (or fail-closed cleanup). A manual foreground or detached start fills an absent `HIVE_BIN` from `Hive::InvokedBinary`, keeping status probes and dispatched children on the same checkout/package as the daemon itself; an explicit operator/service override still wins. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
 | `Hive::Commands::Daemon::QueueCommand` | `lib/hive/commands/daemon/queue_command.rb` | Extracted read-only queue-inspection surface (`hive daemon queue list/show/prune`) — touches only `queue_args`/`json`/`hive_home`, orthogonal to the daemon lifecycle, mirroring the `ServiceInstaller` extraction (#254). Internal IO/parse failures are wrapped in `Hive::InternalError` (exit 70). |
 | `Hive::Commands::ServiceInstaller::ResultPresenter` | `lib/hive/commands/service_installer/result_presenter.rb` | Shared command-side service-install boundary for daemon and bot. It invokes their platform installer, preserves human outcome summaries, builds the service-specific success/error envelopes, translates drift/failure outcomes to the service-specific typed exceptions, and degrades hostile installer accessors safely while each command supplies only its label, schema, and error classes. |
@@ -118,10 +118,10 @@ hive daemon start
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
             ├─ Hive::Daemon::StatusConsumer      (hidden internal task graph)
             ├─ Hive::Daemon::OperationalSnapshot (atomic scheduler observation)
-            ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
+            ├─ Hive::RuntimeControlPlane::DispatchRepository (request/claim/outbox rows)
             ├─ Hive::Daemon::RecoveryCoordinator  (durable guarded recovery)
             ├─ Hive::Daemon::PrMergeWatcher      (task-bound merge reconciliation)
-            ├─ Hive::Daemon::PrMergeReconciliationStore (durable fair backlog)
+            ├─ Hive::Daemon::PrMergeRepository (typed durable fair backlog)
             ├─ Hive::Daemon::RefactorPatrolMergeReconciler (incremental merge manifests/high-water)
             ├─ Hive::Daemon::RefactorPatrolMergeProgressStore (restart-safe page/intake cursor)
             ├─ Hive::RefactorPatrol::MergeClassifier (durable feature/skip queue)
@@ -784,6 +784,13 @@ the persisted baseline unchanged.
 
 ## Single-dispatcher: producers write requests, daemon dispatches
 
+> **SQLite cutover (2026-08-29):** Request/claim/recovery/sequence state and
+> the completion outbox are rows owned by `DispatchRepository`. The
+> filesystem queue, claimed-file rename, sidecar, malformed-file quarantine,
+> and directory-scan details retained later in this section describe the
+> superseded implementation. Queue and recovery projections are bounded SQL
+> reads, and corrupt rows fail the repository read closed.
+
 The original queue-only single-dispatcher design below explains why producers
 stopped spawning competing task children. Current task execution goes one step
 further: queue consumption, CLI calls, auto-advance, and recovery all resolve
@@ -805,15 +812,14 @@ redundant runner that held the per-task lock for 1-2 min, during
 which the bot rejected legitimate user answers with "Try again —
 another run holds the lock".
 
-The fix collapses the two dispatchers into one. The bot and hivebox web are
-producer-only for state-mutating stage runs: they write JSON request files via
-`Hive::Bot::DispatchRequestWriter.write!` into
-`<state_home>/dispatch_requests/`. Recovery adapters reuse the queue through
-`RecoveryCoordinator`; no adapter writes a clear-and-run sequence.
-The daemon tick consumes `DispatchRequestQueue.pending`, validates the argv
-allowlist, and resolves task verbs through durable admission. Request IDs stay
-on the delivery while attempt IDs own execution; receipt reconciliation
-unlinks the claim and logs completion.
+The fix collapses the two dispatchers into one. The bot and Hive Web are
+producer-only for state-mutating stage runs: `DispatchRequestWriter` inserts a
+validated row through `RuntimeControlPlane::DispatchRepository`. Recovery
+adapters use the same repository through `RecoveryCoordinator`; no adapter
+writes a clear-and-run sequence. The daemon consumes bounded pending SQL rows,
+validates the argv allowlist, and resolves task verbs through durable
+admission. Request IDs own delivery while attempt IDs own execution; terminal
+receipt reconciliation completes the request and its outbox row.
 
 Current request schema is v5. It carries generation intent, predecessor
 attempt, inherited output references, and a restartable recovery object with
@@ -884,7 +890,7 @@ dispatch-failure pacing.
 Lifecycle gates inside `process_dispatch_requests`:
 
 1. Allowlist (`valid_argv?`) — invalid → reject + remove.
-2. Expiry (`DispatchRequestQueue::EXPIRY_SEC` = 600s) — old → expire + remove.
+2. Expiry (`DispatchRepository::EXPIRY_SEC` = 600s) — old → expire + remove.
 3. `find_project` lookup — unknown → reject + remove.
 4. For every project-scoped verb except `markers`, locate the same tick's
    status row; `admission_error` or `blocked: true` → blocked, file stays.
@@ -945,7 +951,14 @@ write therefore cannot masquerade as operator input on the next tick.
 
 See [[architecture]] §"Process model" for the cross-layer picture.
 
-### At-most-once dispatch via atomic claim (C3)
+### Historical file-claim protocol (superseded by SQL revision CAS)
+
+This subsection records the removed implementation for historical context only.
+Current claims are revision-fenced `queued → claimed` row updates.
+`DispatchRepository#claimed` correlates attempts by `request_id` in the same
+database, and startup recovery retains live owners or attempts, retires dead or
+aged ordinary claims, and requeues unowned recovery claims. There are no claim
+files, sidecars, queue directories, or quarantine artifacts at runtime.
 
 A pending request file used to stay as `<id>.json` from spawn until
 reap. A daemon crash in that window re-dispatched the request on
@@ -1069,57 +1082,42 @@ Operators tuning the grace for a hard real-time bound should account for
 the poll interval. Detached attempt supervisors use their own monotonic loop,
 so their escalation does not add the daemon poll interval.
 
-### Queue sequence continuations
+### Sequence continuations
 
-Legacy non-recovery callers may still express a multi-command queue operation
-with `<request_id>.sequence`: on successful reap (`exit_code == 0`),
+Legacy non-recovery callers may still express a multi-command operation. The
+continuation is stored in the request payload; on successful reap
 `Dispatcher#promote_dispatch_sequence` writes the next request with the
-original routing metadata; on non-zero or nil exit it discards the sidecar.
+original routing metadata, while failure discards the continuation.
 Recoverable marker flows do not use sequences. They persist one v5 recovery
 request whose coordinator-owned phases are `admitted`, `cleared`, `dispatched`,
 and `terminal`, so a crash cannot separate marker mutation from its only retry
 continuation.
 
-Malformed claimed deliveries are never deleted as if they completed. Startup
-recovery moves the exact request bytes and claim metadata into the owner-private
-`dispatch_requests/quarantine/` directory and writes a SHA-256 evidence
-sidecar. Queue readers skip one malformed delivery without hiding healthy
-receipts from the same scan.
+Malformed rows fail the repository read closed as a runtime-control-plane
+integrity error; there is no parallel quarantine authority.
 
 ### Completion feedback to Telegram (ADV-1)
 
-Because the daemon (not the bot) now spawns request-driven children and
-has no Telegram handle, the operator who tapped a button needs a
-reverse-direction reply path for both failures and successful
-completion. On request-driven completion, `reap_completed` reads the
-request's `chat_id`/`update_id` (from the still-present claimed file,
-before unlink) and writes a notice via
-`Hive::Daemon::DispatchResultQueue` into
-`<state_home>/dispatch_results/*.json` (logged
-`:dispatch_result_written`). Successful intermediate sequence steps are
-the exception: when `exit_code == 0` promotes another queued command
-from the hidden sequence sidecar, the daemon suppresses the result
-notice for that step. Durable recovery does not use sequence sidecars and
-therefore has no intermediate marker-clear success to suppress.
+Because the daemon (not the bot) spawns request-driven children and has no
+Telegram handle, completion feedback uses the SQL outbox. The daemon writes a
+result row before completing its request row, preserving the reverse-direction
+reply across crashes. Successful intermediate sequence steps suppress the
+notice until the continuation settles.
 
-The bot drains that directory each `reaper_loop` iteration
-(`Supervisor#drain_dispatch_results`) and relays either a positive
+The bot drains bounded ready outbox rows each `reaper_loop` iteration and relays either a positive
 command-specific confirmation for exit 0 or a `⚠️ <slug>: hive <verb>
 failed (exit N | killed)` message for non-zero/nil exits. This is the
-reverse-direction sibling of the dispatch-request queue; schema
+reverse-direction sibling of the dispatch request; schema
 `hive-dispatch-result` v1. The schema machine-checks `chat_id` as
 **non-zero** (`not: {const: 0}`), not merely a positive integer (#258):
 0 is the only id no Telegram chat ever has, while private chats are
 positive and group/supergroup/channel chats are negative, so a `minimum:
 1` would have wrongly rejected a valid group relay target.
 
-Reliability contract on the consumer side: a notice is removed **only
-after the relay is confirmed sent** — if Telegram is down it stays on
-disk to retry next tick (never a silent drop). Notices older than
-`DispatchResultQueue::EXPIRY_SEC` (1h) are dropped without relaying
-(no stale-completion spam), and the daemon prunes them each tick
-(`prune_dispatch_results`) so a down bot can't grow the dir without
-bound. A reconnect backlog larger than `DISPATCH_RESULT_SEND_CAP`
+Reliability contract on the consumer side: an outbox row is acknowledged only
+after the relay is confirmed sent. Notices older than
+`DispatchRepository::OUTBOX_EXPIRY_SEC` (1h) are dropped without relaying, and
+bounded pruning prevents unbounded growth. A reconnect backlog larger than `DISPATCH_RESULT_SEND_CAP`
 relays the cap individually and collapses the tail into one
 per-chat summary, so it can't flood Telegram.
 

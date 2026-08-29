@@ -7,24 +7,26 @@ class CommandsCircuitsTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
 
-  class DecisionIndex
-    def initialize(rows = []) = @rows = rows
-    def routing_decisions(limit:) = @rows.first(limit)
-  end
-
-  AttemptStore = Data.define(:decision_index) do
+  AttemptStore = Data.define(:rows) do
     def scan
       Hive::Attempts::Scan.new(records: [].freeze, invalid_records: [].freeze)
     end
+    def live_reservations = {}
+    def daily_counts(date:) = {}
+    def routing_decisions(limit:) = rows.first(limit)
   end
 
   def setup
     @root = Dir.mktmpdir("circuits-command")
-    @health = Hive::ProviderHealth::Store.new(root: File.join(@root, "health"), clock: -> { NOW })
-    @attempts = AttemptStore.new(decision_index: DecisionIndex.new)
+    @database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(@root, "runtime.sqlite3")
+    ).migrate!
+    @health = Hive::ProviderHealth::Repository.new(database: @database, clock: -> { NOW })
+    @attempts = AttemptStore.new(rows: [])
   end
 
   def teardown
+    @database.disconnect
     FileUtils.remove_entry(@root)
   end
 
@@ -46,7 +48,7 @@ class CommandsCircuitsTest < Minitest::Test
   end
 
   def test_json_includes_exact_durable_decision_and_admitted_attempt_identity
-    @attempts = AttemptStore.new(decision_index: DecisionIndex.new([ decision_entry ]))
+    @attempts = AttemptStore.new(rows: [ decision_entry ])
 
     payload = invoke("list")
     identity = payload.dig("decisions", 0, "identity")
@@ -58,7 +60,7 @@ class CommandsCircuitsTest < Minitest::Test
   end
 
   def test_human_inspection_explains_durable_decision_and_ordered_candidates
-    @attempts = AttemptStore.new(decision_index: DecisionIndex.new([ decision_entry ]))
+    @attempts = AttemptStore.new(rows: [ decision_entry ])
 
     stdout, = capture_io { command("list", json: false).call }
 
@@ -121,93 +123,6 @@ class CommandsCircuitsTest < Minitest::Test
     assert_equal "closed", @health.inspect_scope(model_scope("model-b")).circuit.effective_state(now: NOW)
   end
 
-  def test_corrupt_reset_requires_full_fresh_token_and_preserves_manual_block
-    invoke(
-      "block", yes: true, reason: "planned provider maintenance", expected_generation: 0
-    )
-    journal = File.join(
-      @health.root, "scopes", "provider-account", provider_scope.key, "journal.jsonl"
-    )
-    File.open(journal, "ab") { |file| file.write("interior-corruption\n") }
-    unavailable = invoke("inspect").dig("accounts", 0, "circuit")
-    token = unavailable.fetch("corruption_token")
-
-    repaired = invoke(
-      "reset", yes: true, reason: "verified scoped journal repair",
-      journal_epoch: token.fetch("journal_epoch"),
-      corruption_fingerprint: token.fetch("corruption_fingerprint"),
-      last_verified_generation: token.fetch("last_verified_generation")
-    )
-
-    circuit = repaired.dig("accounts", 0, "circuit")
-    assert_equal "manual_block", circuit.fetch("state")
-    assert_equal 2, circuit.fetch("generation")
-    assert_equal 1, circuit.fetch("journal_epoch")
-    assert_equal "reset", repaired.dig("mutation", "audit", "action")
-    assert repaired.dig("mutation", "audit", "artifact_reference", "path")
-    assert_raises(Hive::ProviderHealth::StaleGeneration) do
-      command(
-        "reset", yes: true, reason: "repeat stale scoped repair",
-        journal_epoch: token.fetch("journal_epoch"),
-        corruption_fingerprint: token.fetch("corruption_fingerprint"),
-        last_verified_generation: token.fetch("last_verified_generation")
-      ).call
-    end
-  end
-
-  def test_corrupt_probe_intent_is_visible_and_requires_exact_approved_quarantine
-    intent = File.join(@health.root, "intents", "bad.json")
-    File.binwrite(intent, "{")
-
-    unavailable = invoke("list")
-    corruption = unavailable.fetch("intent_corruptions").fetch(0)
-    assert_equal "degraded", unavailable.fetch("status")
-    assert_equal "bad.json", corruption.fetch("intent_file")
-    assert_includes unavailable.fetch("issues").join(" "), "probe intent state is unavailable"
-    assert_empty schemer.validate(unavailable).to_a
-
-    repaired = invoke(
-      "reset-intent",
-      provider: nil,
-      yes: true,
-      reason: "quarantine corrupt global probe intent",
-      intent_file: corruption.fetch("intent_file"),
-      corruption_fingerprint: corruption.fetch("corruption_fingerprint")
-    )
-    assert_equal "available", repaired.fetch("status")
-    assert_empty repaired.fetch("intent_corruptions")
-    assert_equal "reset_intent", repaired.dig("mutation", "action")
-    assert_equal "probe_intent", repaired.dig("mutation", "target", "kind")
-    assert_nil repaired.dig("mutation", "generation")
-    assert File.file?(File.join(
-      @health.root,
-      repaired.dig("mutation", "audit", "artifact_reference", "path")
-    ))
-    assert_empty schemer.validate(repaired).to_a
-
-    assert_raises(Hive::ProviderHealth::StaleGeneration) do
-      command(
-        "reset-intent",
-        provider: nil,
-        yes: true,
-        reason: "repeat stale probe intent repair",
-        intent_file: corruption.fetch("intent_file"),
-        corruption_fingerprint: corruption.fetch("corruption_fingerprint")
-      ).call
-    end
-  end
-
-  def test_human_inspection_renders_multiple_corrupt_probe_intent_tokens
-    File.binwrite(File.join(@health.root, "intents", "first.json"), "{")
-    File.binwrite(File.join(@health.root, "intents", "second.json"), "[")
-
-    stdout, = capture_io { command("list", json: false).call }
-
-    assert_includes stdout, "2 corrupt artifacts"
-    assert_includes stdout, "probe-intent first.json repair_fingerprint="
-    assert_includes stdout, "probe-intent second.json repair_fingerprint="
-  end
-
   def test_fractional_generation_and_model_without_provider_are_rejected
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command(
@@ -242,37 +157,12 @@ class CommandsCircuitsTest < Minitest::Test
     assert_match(/unknown action/, error.message)
   end
 
-  def test_mutation_options_require_reason_scope_generation_and_complete_tokens
+  def test_mutation_options_require_reason_scope_and_generation
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command("block", yes: true, reason: " ", expected_generation: 0).call
     end
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command("block", yes: true, reason: "maintenance").call
-    end
-    assert_raises(Hive::Commands::Circuits::UsageError) do
-      command(
-        "block", yes: true, reason: "maintenance", expected_generation: 0,
-        journal_epoch: 0
-      ).call
-    end
-    assert_raises(Hive::Commands::Circuits::UsageError) do
-      command(
-        "block", yes: true, reason: "maintenance", expected_generation: 0,
-        intent_file: "bad.json"
-      ).call
-    end
-    assert_raises(Hive::Commands::Circuits::UsageError) do
-      command(
-        "reset", yes: true, reason: "repair", journal_epoch: 0,
-        corruption_fingerprint: "a" * 64
-      ).call
-    end
-    assert_raises(Hive::Commands::Circuits::UsageError) do
-      command(
-        "reset", yes: true, reason: "repair", expected_generation: 0,
-        journal_epoch: 0, corruption_fingerprint: "a" * 64,
-        last_verified_generation: 0
-      ).call
     end
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command(
@@ -297,18 +187,6 @@ class CommandsCircuitsTest < Minitest::Test
     end
     assert_raises(Hive::Commands::Circuits::UsageError) do
       command("list").send(:integer_option, -1, "--expected-generation")
-    end
-    assert_raises(Hive::Commands::Circuits::UsageError) do
-      command(
-        "reset-intent", provider: nil, yes: true, reason: "repair",
-        corruption_fingerprint: "a" * 64
-      ).call
-    end
-    assert_raises(Hive::Commands::Circuits::UsageError) do
-      command(
-        "reset-intent", yes: true, reason: "repair", intent_file: "bad.json",
-        corruption_fingerprint: "a" * 64
-      ).call
     end
   end
 
@@ -348,7 +226,7 @@ class CommandsCircuitsTest < Minitest::Test
     assert_includes summary, "repair_epoch=1"
     assert_includes summary, "repair_last_verified_generation=3"
 
-    @attempts = AttemptStore.new(decision_index: DecisionIndex.new([ decision_entry ]))
+    @attempts = AttemptStore.new(rows: [ decision_entry ])
     entry = Marshal.load(Marshal.dump(invoke("list").fetch("decisions").fetch(0)))
     candidate = entry.dig("decision", "candidates", 0)
     candidate["capacity"] = nil

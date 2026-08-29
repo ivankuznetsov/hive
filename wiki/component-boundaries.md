@@ -56,6 +56,7 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core --> workflow_values[Workflow Creator Values]
   patrol_fix[Patrol Fix Workflow Core] --> git_gate[Safe Agent Git Gate]
+  provider_health[Provider Health] --> runtime[Runtime Control Plane]
   provider_routing[Provider Routing Policy] --> runtime[Runtime Control Plane]
   attempts[Attempts] --> provider_health[Provider Health]
   attempts --> provider_routing[Provider Routing Policy]
@@ -82,8 +83,9 @@ per-source disposition ledger for the last filesystem runtime layout;
 addresses only at terminal publication; and `CutoverManifest` publishes a
 digest-bound, owner-private inventory outside both the legacy roots and the
 candidate database. Attempts and routing-policy persistence now use the
-activated runtime control plane directly; later activation units still own the
-remaining domains. Normal runtime never creates, migrates, imports, or repairs
+activated runtime control plane directly. Dispatch, provider health, and PR
+merge reconciliation now use the same database through their typed
+repositories. Normal runtime never creates, migrates, imports, or repairs
 legacy state.
 
 ## Patrol Fix boundary

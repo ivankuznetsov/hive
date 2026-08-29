@@ -25,8 +25,7 @@ require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
 require "hive/bot/row_actions"
 require "hive/bot/waiting_rows"
-require "hive/daemon/dispatch_request_queue"
-require "hive/daemon/dispatch_result_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/diagnostic_evidence"
 require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
@@ -60,6 +59,7 @@ module Hive
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
                      dispatch_request_writer: nil, dispatch_result_state_home: nil,
+                     dispatch_repository: nil,
                      pairing_approval_state_home: nil,
                      idea_draft_store: nil, transcriber: nil, transcriber_factory: nil,
                      pairing_store: nil)
@@ -68,6 +68,7 @@ module Hive
         # ADV-1: where the daemon drops dispatch-result notices.
         # Tests inject a sandbox; production resolves Hive::Paths.state_home.
         @dispatch_result_state_home = dispatch_result_state_home
+        @dispatch_repository = dispatch_repository
         @pairing_approval_state_home = pairing_approval_state_home
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
@@ -315,32 +316,27 @@ module Hive
       # Reliability contract:
       #   - A notice is removed ONLY after the relay is confirmed sent. If
       #     Telegram is down, `safe_send_message` returns nil and the
-      #     notice stays on disk to retry on the next reaper tick (#1) —
+      #     notice stays pending to retry on the next reaper tick (#1) —
       #     never a silent drop.
       #   - Stale notices (older than EXPIRY_SEC) are removed WITHOUT
-      #     sending: an hour-old completion ping is noise, and this bounds
-      #     directory growth alongside the daemon's prune (#6).
-      #   - Malformed notices are removed quietly so they can't wedge the
-      #     drain.
+      #     sending: an hour-old completion ping is noise, and retention
+      #     pruning bounds the outbox (#6).
       # Public + `now:`-injectable so tests can drive one drain
       # deterministically.
       def drain_dispatch_results(now: Time.now)
-        notices = Hive::Daemon::DispatchResultQueue.pending(
-          state_home: dispatch_result_state_home,
-          bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
-        )
+        notices = dispatch_repository.pending_results(now: now)
         fresh = notices.reject do |notice|
-          next false unless Hive::Daemon::DispatchResultQueue.expired?(notice, now: now)
+          next false unless dispatch_repository.result_expired?(notice, now: now)
 
           remove_dispatch_result(notice) # stale: drop without relaying
           true
         end
 
-        # Defense-in-depth (#263): the chat_id round-trips from the on-disk
-        # request file through the daemon with no re-validation, so re-check
+        # Defense-in-depth (#263): the chat_id round-trips from the persisted
+        # request row through the daemon with no re-validation, so re-check
         # the allowlist before relaying — drop+remove a notice for a chat
         # removed from the allowlist while its request was in flight, or a
-        # notice forged in the 0700 dir with an arbitrary chat_id. Mirrors
+        # forged outbox row with an arbitrary chat_id. Mirrors
         # the allowlist filtering on the nudge/reconnect push paths.
         allowed = chat_ids
         fresh = fresh.reject do |notice|
@@ -377,7 +373,7 @@ module Hive
       end
 
       def remove_dispatch_result(notice)
-        Hive::Daemon::DispatchResultQueue.remove(
+        dispatch_repository.remove_result(
           notice.result_id, state_home: dispatch_result_state_home
         )
       end
@@ -466,6 +462,12 @@ module Hive
 
       def dispatch_result_state_home
         @dispatch_result_state_home || Hive::Paths.state_home
+      end
+
+      def dispatch_repository
+        @dispatch_repository ||= Hive::RuntimeControlPlane::DispatchRepository.open_default(
+          state_home: dispatch_result_state_home
+        )
       end
 
       def pairing_approval_state_home
@@ -1151,12 +1153,9 @@ module Hive
         pid
       end
 
-      # True iff argv[1] is in the daemon's queue allowlist. The bot
-      # rewrites this kind of dispatch into a request-file write; the
-      # daemon picks the request up on its next tick and spawns the
-      # child. See plan 2026-05-28-002 for why.
+      # True iff argv[1] is in the daemon's durable-dispatch allowlist.
       def queue_routable?(argv)
-        Hive::Daemon::DispatchRequestQueue.valid_argv?(Array(argv))
+        Hive::RuntimeControlPlane::DispatchRepository.valid_argv?(Array(argv))
       end
 
       # Write a dispatch request for `result.command_argv` and log

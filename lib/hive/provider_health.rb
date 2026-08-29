@@ -197,38 +197,6 @@ module Hive
       end
     end
 
-    ProbeIntent = Data.define(
-      :intent_id, :attempt_id, :task_generation, :ownership_fence, :requirements
-    ) do
-      def initialize(intent_id:, attempt_id:, task_generation:, ownership_fence:, requirements:)
-        values = Array(requirements)
-        unless !values.empty? && values.all? { |value| value.is_a?(ProbeRequirement) }
-          raise InvalidMutation, "probe intent requires one or more probe requirements"
-        end
-        if values.map { |value| value.scope.key }.uniq.length != values.length
-          raise InvalidMutation, "probe intent cannot repeat a scope"
-        end
-        super(
-          intent_id: ProviderHealth.identifier(intent_id, "probe intent"),
-          attempt_id: ProviderHealth.identifier(attempt_id, "attempt"),
-          task_generation: ProviderHealth.identifier(task_generation, "task generation"),
-          ownership_fence: ProviderHealth.identifier(ownership_fence, "ownership fence"),
-          requirements: values.dup.freeze
-        )
-        freeze
-      end
-
-      def to_h
-        {
-          "intent_id" => intent_id,
-          "attempt_id" => attempt_id,
-          "task_generation" => task_generation,
-          "ownership_fence" => ownership_fence,
-          "requirements" => requirements.map(&:to_h)
-        }.freeze
-      end
-    end
-
     AttemptBinding = Data.define(
       :attempt_id, :task_generation, :ownership_fence, :route, :probe_bindings
     ) do
@@ -257,38 +225,6 @@ module Hive
           "ownership_fence" => ownership_fence,
           "route" => route.to_h,
           "probe_bindings" => probe_bindings.map(&:to_h)
-        }.freeze
-      end
-    end
-
-    CorruptionToken = Data.define(
-      :scope, :journal_epoch, :corruption_fingerprint, :last_verified_generation
-    ) do
-      def initialize(scope:, journal_epoch:, corruption_fingerprint:, last_verified_generation:)
-        unless scope.is_a?(Scope)
-          raise InvalidMutation, "corruption token requires a provider-health scope"
-        end
-        fingerprint = corruption_fingerprint.to_s
-        unless SHA256_PATTERN.match?(fingerprint)
-          raise InvalidMutation, "corruption fingerprint must be lowercase SHA-256"
-        end
-        super(
-          scope: scope,
-          journal_epoch: ProviderHealth.nonnegative_integer(journal_epoch, "journal epoch"),
-          corruption_fingerprint: fingerprint.freeze,
-          last_verified_generation: ProviderHealth.nonnegative_integer(
-            last_verified_generation, "last verified generation"
-          )
-        )
-        freeze
-      end
-
-      def to_h
-        {
-          "scope" => scope.to_h,
-          "journal_epoch" => journal_epoch,
-          "corruption_fingerprint" => corruption_fingerprint,
-          "last_verified_generation" => last_verified_generation
         }.freeze
       end
     end
@@ -362,7 +298,7 @@ module Hive
     autoload :Circuit, File.expand_path("provider_health/circuit.rb", __dir__)
     autoload :Event, File.expand_path("provider_health/event.rb", __dir__)
     autoload :Evidence, File.expand_path("provider_health/evidence.rb", __dir__)
-    autoload :Store, File.expand_path("provider_health/store.rb", __dir__)
+    autoload :Repository, File.expand_path("provider_health/repository.rb", __dir__)
 
     module_function
 
@@ -462,14 +398,14 @@ module Hive
       raise InvalidMutation, "#{label} must be an RFC3339 timestamp"
     end
 
-    def open(root: nil, attempt_reader: nil, **options)
-      require "hive/paths"
+    def open(database: nil, **options)
+      require "hive/runtime_control_plane"
+      require "hive/provider_health/repository"
 
-      Store.new(
-        root: root || Hive::Paths.provider_health_root,
-        attempt_reader: attempt_reader,
-        **options
-      )
+      database ||= RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path
+      ).open!
+      Repository.new(database: database, **options)
     end
   end
 end

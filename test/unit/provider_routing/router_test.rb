@@ -1,5 +1,5 @@
 require_relative "../../test_helper"
-require "hive/provider_health/store"
+require "hive/provider_health/repository"
 require "hive/provider_routing/router"
 
 class ProviderRoutingRouterTest < Minitest::Test
@@ -7,13 +7,17 @@ class ProviderRoutingRouterTest < Minitest::Test
 
   def setup
     @root = Dir.mktmpdir("provider-router")
-    @health = Hive::ProviderHealth::Store.new(
-      root: File.join(@root, "health"),
+    @database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(@root, "runtime.sqlite3")
+    ).migrate!
+    @health = Hive::ProviderHealth::Repository.new(
+      database: @database,
       clock: -> { NOW }
     )
   end
 
   def teardown
+    @database.disconnect
     FileUtils.remove_entry(@root)
   end
 

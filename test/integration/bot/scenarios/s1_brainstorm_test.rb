@@ -4,7 +4,7 @@ require "hive/bot/supervisor"
 require "hive/bot/status_watcher"
 require "hive/bot/telegram"
 require "hive/bot/brainstorm_parser"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 
 class HiveBotScenarioBrainstormTest < Minitest::Test
   include HiveTestHelper

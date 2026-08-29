@@ -8,7 +8,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
 
   test "derives queueable actions from the canonical task action vocabulary" do
     expected = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
-      Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+      Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb)
     end
 
     assert_equal expected, TaskMutations::STAGE_VERB_BY_ACTION
@@ -405,8 +405,24 @@ class TaskMutationsTest < ActiveSupport::TestCase
   private
 
   def reset_task_mutation_state
-    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path
+    ).migrate!
+    now = Time.current.utc.iso8601(6)
+    database.transaction do |db|
+      db[:dispatch_requests].delete
+      installation = db[:installations].first.fetch(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: "web-test-demo", installation_id: installation,
+        registration_id: "web-test-demo", name: "demo",
+        observed_path: ENV.fetch("HIVE_TEST_HOME_ROOT"),
+        state_root_path: File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "demo-state"),
+        active: 1, registered_at: now, last_observed_at: now
+      )
+    end
     Hive::Workflows::Project.reset!
+  ensure
+    database&.disconnect
   end
 
   def task(attributes = {}, project: nil, slug: "demo-task", **extra_attributes)
@@ -455,7 +471,13 @@ class TaskMutationsTest < ActiveSupport::TestCase
   end
 
   def queue_files(request_id = nil)
-    pattern = request_id ? "*#{request_id}*" : "*"
-    Dir[File.join(Hive::Paths.state_home, "dispatch_requests", pattern)].select { |path| File.file?(path) }
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path
+    ).open!
+    requests = Hive::RuntimeControlPlane::DispatchRepository.new(database: database).pending
+    requests.select! { |request| request.request_id.include?(request_id) } if request_id
+    requests
+  ensure
+    database&.disconnect
   end
 end

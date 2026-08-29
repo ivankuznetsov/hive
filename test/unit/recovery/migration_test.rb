@@ -3,8 +3,7 @@ require "digest"
 require "json"
 require "hive/attempts/decision_index"
 require "hive/attempts/repository"
-require "hive/daemon/dispatch_request_queue"
-require "hive/daemon/dispatch_result_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/recovery/migration"
 
 class RecoveryMigrationTest < Minitest::Test

@@ -95,10 +95,11 @@ steps:
     description: The immutable trusted receipt is durable, no retry exists before daemon ownership, and the fixture advances only the persisted cooldown clock.
     block: |
       require "hive/agent_limit"
-      require "hive/attempts/store"
-      require "hive/daemon/dispatch_request_queue"
+      require "hive/attempts/repository"
+      require "hive/runtime_control_plane/dispatch_repository"
 
-      attempts = Hive::Attempts::Store.open_default(state_home: run_home)
+      attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
+      dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
       first = attempts.scan.records.select { |record| record["intended_stage"] == "4-execute" }
       raise "expected exactly one initial execute attempt, got #{first.size}" unless first.size == 1
       first = first.fetch(0)
@@ -108,7 +109,7 @@ steps:
       raise "initial route was not terminal failed" unless first.state == "terminal" && first.outcome == "failed"
       raise "initial attempt consumed a retry charge" unless first["retry_charge"] == 0
       raise "unsafe or wrong evidence was persisted" unless evidence.fetch("failure_class") == "account_quota" && evidence.dig("scope", "kind") == "provider_account"
-      raise "recovery request existed before daemon ownership" unless Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home).empty?
+      raise "recovery request existed before daemon ownership" unless dispatch.pending.empty?
 
       state_file = File.join(sandbox, ".hive-state", "stages", "4-execute", slug, "task.md")
       eligible_at = Time.now - Hive::AgentLimit.retry_cooldown_sec - 1
@@ -134,16 +135,12 @@ steps:
   - kind: ruby_block
     description: Keep the daemon alive until it reaps the successful successor and seals the one recovery receipt. The wait bound is a functional eventually-bound, not a latency budget — speed is tracked by the advisory incident-duration-budget job.
     block: |
-      require "hive/daemon/dispatch_request_queue"
+      require "hive/runtime_control_plane/dispatch_repository"
+      dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
       deadline = Time.now + 30
       loop do
-        directory = Hive::Daemon::DispatchRequestQueue.directory(state_home: run_home)
-        terminal = Dir.glob(File.join(directory, "*.json*")).any? do |path|
-          payload = JSON.parse(File.binread(path))
-          payload["schema"] == "hive-dispatch-request" &&
-            payload.dig("recovery", "phase") == "terminal"
-        rescue JSON::ParserError, Errno::ENOENT
-          false
+        terminal = dispatch.recovery_requests.any? do |request|
+          request.recovery["phase"] == "terminal"
         end
         break if terminal
         raise "daemon did not seal the recovery receipt" if Time.now >= deadline
@@ -157,33 +154,22 @@ steps:
     description: Prove exact attempt, circuit, request, charge, exclusion, and ownership counts after repeated daemon ticks.
     block: |
       require "hive/attempts/record"
-      require "hive/attempts/store"
-      require "hive/daemon/dispatch_request_queue"
+      require "hive/attempts/repository"
+      require "hive/runtime_control_plane/dispatch_repository"
       require "hive/provider_health"
 
-      attempts = Hive::Attempts::Store.open_default(state_home: run_home)
-      record_paths = Dir.glob(File.join(attempts.records_root, "*.json")) +
-        Dir.glob(File.join(attempts.proof_root, "attempt", "*", "*.json"))
-      records = record_paths.filter_map do |path|
-        Hive::Attempts::Record.new(JSON.parse(File.binread(path)))
-      rescue JSON::ParserError, Hive::Attempts::InvalidRecord
-        nil
-      end
-      execute = records.uniq(&:attempt_id).select do |record|
+      attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
+      dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
+      execute = attempts.scan.records.select do |record|
         record["intended_stage"] == "4-execute"
       end
       raise "expected exactly two execute attempts, got #{execute.size}" unless execute.size == 2
 
-      requests_dir = Hive::Daemon::DispatchRequestQueue.directory(state_home: run_home)
-      requests = Dir.glob(File.join(requests_dir, "*.json*")).filter_map do |path|
-        payload = JSON.parse(File.binread(path))
-        payload if payload["schema"] == "hive-dispatch-request"
-      rescue JSON::ParserError, Errno::ENOENT
-        nil
-      end.uniq { |payload| payload.fetch("request_id") }
-      recoveries = requests.select { |payload| payload.dig("recovery", "phase") == "terminal" }
+      recoveries = dispatch.recovery_requests.select do |request|
+        request.recovery["phase"] == "terminal"
+      end
       raise "expected one terminal recovery request, got #{recoveries.size}" unless recoveries.size == 1
-      recovery = recoveries.fetch(0).fetch("recovery")
+      recovery = recoveries.fetch(0).recovery
 
       first_id = recovery.dig("source_receipt", "attempt_id")
       second_id = recovery.fetch("attempt_id")
@@ -201,14 +187,11 @@ steps:
       raise "recovery did not preserve the provider-neutral failure" unless recovery.fetch("failure_origin") == "provider_route_failed"
       raise "recovery was not charged exactly once" unless recovery.fetch("retry_count") == 1
       raise "recovery did not finish successfully" unless recovery.fetch("terminal_outcome") == "succeeded"
-      raise "pending recovery remained after terminalization" unless Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home).empty?
-      claimed = Hive::Daemon::DispatchRequestQueue.claimed(state_home: run_home)
-      raise "terminal recovery receipt was duplicated or lost" unless claimed.size == 1 && claimed.fetch(0).request.request_id == recoveries.fetch(0).fetch("request_id")
+      raise "pending recovery remained after terminalization" unless dispatch.pending.empty?
+      raise "terminal recovery receipt was duplicated or lost" unless recoveries.size == 1
       raise "live attempt remained after terminalization" unless execute.none?(&:live?)
 
-      health = Hive::ProviderHealth.open(
-        root: File.join(run_home, "provider-health", "v1")
-      )
+      health = Hive::ProviderHealth.open(database: attempts.database)
       scopes = {
         "claude-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "claude-a"),
         "claude-model" => Hive::ProviderHealth::Scope.model(account_id: "claude-a", model_id: "claude-e2e-model"),

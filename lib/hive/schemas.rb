@@ -108,15 +108,12 @@ module Hive
       "hive-bot-install" => 1,
       "hive-pairing-list" => 1,
       "hive-pairing-approve" => 1,
-      # File-backed dispatch request the bot writes for the daemon to
-      # consume. One JSON file per pending request under the state-home
-      # `dispatch_requests/` directory. See
-      # `Hive::Daemon::DispatchRequestQueue` and
-      # `Hive::Bot::DispatchRequestWriter`.
+      # Dispatch request payload retained in the SQLite control plane and
+      # consumed by the daemon. See `Hive::Bot::DispatchRequestWriter`.
       "hive-dispatch-request" => 5,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
-      # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
+      # chat through the transactional dispatch outbox (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
       "hive-attempt" => 4,

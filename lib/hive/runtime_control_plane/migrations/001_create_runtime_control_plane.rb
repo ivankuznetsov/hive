@@ -70,7 +70,11 @@ Sequel.migration do
       Integer :priority, null: false, default: 0
       String :idempotency_key
       String :claim_owner
+      Integer :claim_pid
+      String :claim_process_identity
       String :claimed_at
+      String :due_at
+      Integer :revision, null: false, default: 0
       String :source_fingerprint, null: false
       String :routing_policy_digest
       String :payload_json, text: true, null: false
@@ -78,6 +82,8 @@ Sequel.migration do
       String :updated_at, null: false
       String :retain_until
       check Sequel.lit("priority >= 0")
+      check Sequel.lit("revision >= 0")
+      check Sequel.lit("claim_pid IS NULL OR claim_pid > 0")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
       check Sequel.lit("state IN ('queued', 'claimed', 'admitted', 'completed', 'cancelled')")
       index [ :state, :priority, :created_at ], name: :dispatch_requests_ready_idx
@@ -85,7 +91,7 @@ Sequel.migration do
             where: Sequel.lit("idempotency_key IS NOT NULL"),
             name: :dispatch_requests_idempotency_uidx
       index [ :task_id, :subject_key, :task_generation ], unique: true,
-            where: Sequel.lit("task_id IS NOT NULL AND state IN ('queued', 'claimed', 'admitted')"),
+            where: Sequel.lit("task_id IS NOT NULL AND state IN ('queued', 'claimed')"),
             name: :dispatch_requests_active_subject_uidx
     end
 
@@ -273,21 +279,27 @@ Sequel.migration do
       String :model, null: false, default: ""
       String :automatic_state, null: false
       Integer :manual_block, null: false, default: 0
+      String :manual_block_json, text: true
       Integer :generation, null: false, default: 0
-      String :journal_epoch, null: false
+      Integer :journal_epoch, null: false, default: 0
       foreign_key :probe_attempt_id, :attempts, type: String, key: :attempt_id,
                   on_delete: :set_null, on_update: :cascade
+      String :probe_json, text: true
       String :eligible_at
       String :evidence_json, text: true
+      String :last_event_id
       String :updated_at, null: false
-      check Sequel.lit("scope_kind IN ('provider', 'model')")
+      check Sequel.lit("scope_kind IN ('provider_account', 'model')")
       check Sequel.lit("automatic_state IN ('closed', 'open')")
       check Sequel.lit("manual_block IN (0, 1)")
       check Sequel.lit("generation >= 0")
+      check Sequel.lit("journal_epoch >= 0")
+      check Sequel.lit("(manual_block = 0 AND manual_block_json IS NULL) OR (manual_block = 1 AND manual_block_json IS NOT NULL)")
+      check Sequel.lit("(probe_attempt_id IS NULL AND probe_json IS NULL) OR (probe_attempt_id IS NOT NULL AND probe_json IS NOT NULL)")
       unique [ :scope_kind, :provider_account_id, :model ], name: :provider_circuits_scope_uidx
-      index [ :probe_attempt_id ], unique: true,
+      index [ :probe_attempt_id ],
             where: Sequel.lit("probe_attempt_id IS NOT NULL"),
-            name: :provider_circuits_probe_uidx
+            name: :provider_circuits_probe_idx
     end
 
     create_table(:provider_audit) do
@@ -295,12 +307,19 @@ Sequel.migration do
       foreign_key :circuit_id, :provider_circuits, type: String, key: :circuit_id,
                   null: false, on_delete: :cascade, on_update: :cascade
       Integer :generation, null: false
+      Integer :sequence, null: false
       String :event_type, null: false
+      String :idempotency_key, null: false
+      String :status, null: false
+      String :reason
       String :payload_json, text: true, null: false
       String :occurred_at, null: false
       String :retain_until
-      check Sequel.lit("generation > 0")
-      unique [ :circuit_id, :generation ], name: :provider_audit_generation_uidx
+      check Sequel.lit("generation >= 0")
+      check Sequel.lit("sequence > 0")
+      check Sequel.lit("status IN ('accepted', 'rejected')")
+      unique [ :circuit_id, :idempotency_key ], name: :provider_audit_idempotency_uidx
+      unique [ :circuit_id, :sequence ], name: :provider_audit_sequence_uidx
       index [ :occurred_at ], name: :provider_audit_occurred_idx
     end
 
@@ -308,18 +327,51 @@ Sequel.migration do
       String :reconciliation_id, primary_key: true, null: false
       foreign_key :project_id, :projects, type: String, key: :project_id,
                   null: false, on_delete: :cascade, on_update: :cascade
+      foreign_key :task_id, :task_subjects, type: String, key: :task_id,
+                  on_delete: :set_null, on_update: :cascade
+      String :task_generation, null: false
       String :repository_identity, null: false
+      String :registration_id, null: false
+      String :project_path, null: false
+      String :state_root_path, null: false
+      String :host, null: false
+      String :default_branch, null: false
       Integer :pr_number, null: false
       String :merge_sha
       String :state, null: false
+      Integer :retry_failures, null: false, default: 0
+      String :retry_not_before
+      String :remote_state, null: false, default: "unknown"
+      String :architecture_state, null: false, default: "pending"
+      String :archive_state, null: false, default: "pending"
+      Integer :held, null: false, default: 0
+      String :hold_reason
+      Integer :revision, null: false, default: 0
       String :observation_json, text: true, null: false
       String :observed_at, null: false
+      String :updated_at, null: false
       String :completed_at
       check Sequel.lit("pr_number > 0")
       check Sequel.lit("state IN ('pending', 'merged', 'closed', 'failed')")
-      unique [ :project_id, :repository_identity, :pr_number ],
-             name: :pr_merge_reconciliations_pr_uidx
+      check Sequel.lit("retry_failures >= 0")
+      check Sequel.lit("held IN (0, 1)")
+      check Sequel.lit("revision >= 0")
+      check Sequel.lit("remote_state IN ('unknown', 'open', 'merged', 'closed_unmerged', 'delivered_elsewhere', 'ambiguous')")
+      check Sequel.lit("architecture_state IN ('pending', 'accepted', 'deferred', 'failed', 'blocked', 'not_required')")
+      check Sequel.lit("archive_state IN ('pending', 'blocked', 'archived', 'failed', 'superseded')")
+      index [ :project_id, :repository_identity, :pr_number ],
+            name: :pr_merge_reconciliations_pr_idx
       index [ :state, :observed_at ], name: :pr_merge_reconciliations_pending_idx
+      index [ :project_id, :archive_state, :retry_not_before, :reconciliation_id ],
+            name: :pr_merge_reconciliations_ready_idx
+    end
+
+    create_table(:pr_merge_project_state) do
+      foreign_key :project_id, :projects, type: String, key: :project_id,
+                  primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
+      String :cursor
+      String :backlog_json, text: true, null: false
+      String :updated_at, null: false
     end
 
     create_table(:task_leases) do

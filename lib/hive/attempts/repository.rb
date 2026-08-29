@@ -10,6 +10,7 @@ require "hive/output_reference"
 require "hive/paths"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/payload_store"
+require "hive/runtime_control_plane/admission_transition"
 require "hive/stringify_keys"
 
 module Hive
@@ -17,6 +18,7 @@ module Hive
     class RepositoryError < Hive::Error; end
     class CompareAndSwapFailed < RepositoryError; end
     class CapacityExceeded < RepositoryError; end
+    class StaleTaskSource < RepositoryError; end
 
     InvalidStoredRecord = Data.define(:path, :error)
     Scan = Data.define(:records, :invalid_records)
@@ -166,13 +168,19 @@ module Hive
       end
 
       def create_launching(source_fingerprint: nil, admission: nil, limits: nil,
-                           failure_cohort_probe: nil, **attributes)
-        record = Record.launching(**attributes)
-        source_fingerprint ||= record["progress_token"]
-        persist_new(
-          record, source_fingerprint: source_fingerprint,
+                           failure_cohort_probe: nil, routing_policy: nil,
+                           route_decision: nil, health_repository: nil, **attributes)
+        source_fingerprint ||= attributes[:progress_token]
+        routing_policy ||= Hive::ProviderRouting::Policy.legacy(
+          stage: attributes.fetch(:intended_stage)
+        )
+        RuntimeControlPlane::AdmissionTransition.new(
+          repository: self, health_repository: health_repository
+        ).call(
+          attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
-          failure_cohort_probe: failure_cohort_probe
+          failure_cohort_probe: failure_cohort_probe,
+          routing_policy: routing_policy, route_decision: route_decision
         )
       rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt could not be created")
@@ -199,7 +207,9 @@ module Hive
         row = read_row(attempt_id)
         return nil unless row
         return record_from(row) if %w[launching running].include?(row.fetch(:state))
-        return nil unless database.read { |db| db[:terminal_pending_publications].where(attempt_id: row[:attempt_id]).any? }
+        return nil unless database.read do |db|
+          db[:terminal_pending_publications].where(attempt_id: row[:attempt_id]).any?
+        end
 
         record_from(row)
       end
@@ -227,6 +237,31 @@ module Hive
       end
 
       def projection_reader = ProjectionReader.new(self)
+
+      # Internal seams used only by AdmissionTransition's one SQL transaction.
+      def admission_subject_in(db, record, source_fingerprint:) =
+        ensure_subject!(db, record, source_fingerprint: source_fingerprint)
+      def admission_validate_subject_in(db, task_id:, source_fingerprint:, generation:)
+        row = db[:task_subjects].where(task_id: task_id).first
+        unless row && row[:source_fingerprint].to_s == source_fingerprint.to_s &&
+               row.fetch(:generation) == Integer(generation)
+          raise StaleTaskSource, "attempt task source changed before admission"
+        end
+        true
+      rescue ArgumentError, TypeError
+        raise StaleTaskSource, "attempt task source generation is invalid"
+      end
+      def admission_row(record, task_id:, source_fingerprint:) =
+        row_for(record, task_id: task_id, source_fingerprint: source_fingerprint)
+      def admission_validate_capacity_in(db, record, limits) = validate_capacity!(db, record, limits)
+      def admission_reservation(record, admission) = live_reservation(
+        project: record["project"], task_slug: record["task_slug"], admission: admission
+      )
+      def admission_claim_cohort_in(db, record, probe)
+        return unless probe
+        return if claim_failure_cohort_probe_in(db, attempt_id: record.attempt_id, **probe)
+        raise RepositoryError, "failure cohort probe claim became stale"
+      end
 
       def scan
         rows = database.read do |db|
@@ -382,52 +417,6 @@ module Hive
         end
       end
 
-      def persist_new(record, source_fingerprint:, admission:, limits:, failure_cohort_probe:)
-        database.transaction do |db|
-          raise RepositoryError, "attempt #{record.attempt_id} already exists" if
-            db[:attempts].where(attempt_id: record.attempt_id).any?
-          task_id, project_id = ensure_subject!(db, record)
-          ensure_dispatch_request!(
-            db, record, task_id, project_id,
-            source_fingerprint: source_fingerprint
-          )
-          validate_capacity!(db, record, limits) if limits
-          row = row_for(record, task_id: task_id, source_fingerprint: source_fingerprint)
-          db[:attempts].insert(row)
-          db[:attempt_accounting].insert(
-            attempt_id: record.attempt_id,
-            provider_account_id: record["routing"].dig("route", "provider_account_id"),
-            retry_charge: record["retry_charge"],
-            refunded: 0,
-            reservation_json: RuntimeControlPlane::Codec.dump_json(
-              live_reservation(
-                project: record["project"], task_slug: record["task_slug"],
-                admission: admission
-              )
-            ),
-            billing_json: RuntimeControlPlane::Codec.dump_json("refunded" => false),
-            updated_at: record["accepted_at"]
-          )
-          db[:capacity_reservations].insert(
-            reservation_id: "attempt:#{record.attempt_id}", attempt_id: record.attempt_id,
-            scope_kind: "host", scope_key: "global", units: 1, state: "reserved",
-            created_at: record["accepted_at"]
-          )
-          if record["predecessor_attempt_id"]
-            db[:attempt_relationships].insert(
-              attempt_id: record.attempt_id,
-              related_attempt_id: record["predecessor_attempt_id"],
-              kind: "successor", created_at: record["accepted_at"]
-            )
-          end
-          if failure_cohort_probe &&
-             !claim_failure_cohort_probe_in(db, attempt_id: record.attempt_id, **failure_cohort_probe)
-            raise RepositoryError, "failure cohort probe claim became stale"
-          end
-        end
-        record
-      end
-
       def validate_capacity!(db, record, limits)
         limits = limits.to_h
         reserved = db[:capacity_reservations].where(
@@ -491,11 +480,6 @@ module Hive
             db[:capacity_reservations].where(
               attempt_id: replacement.attempt_id, state: "reserved"
             ).update(state: "released", released_at: replacement["ended_at"])
-            if replacement["request_id"]
-              db[:dispatch_requests].where(request_id: replacement["request_id"]).update(
-                state: "completed", updated_at: replacement["ended_at"]
-              )
-            end
           end
         end
         replacement
@@ -581,12 +565,11 @@ module Hive
         translate_store_error(error, "attempt lookup failed")
       end
 
-      def ensure_subject!(db, record)
+      def ensure_subject!(db, record, source_fingerprint:)
         project_id = "isolated-#{Digest::SHA256.hexdigest(record['project'])[0, 40]}"
         task_id = "isolated-#{Digest::SHA256.hexdigest([ record['project'], record['task_id'], record['task_slug'] ].join("\0"))[0, 40]}"
         unless @isolated_identity
-          task = db[:task_subjects].where(task_id: task_id).first ||
-            db[:task_subjects].where(observed_path: record["task_id"].to_s).first
+          task = db[:task_subjects].where(task_id: record["task_id"].to_s).first
           raise RepositoryError, "attempt task identity is not registered in the runtime control plane" unless task
           return [ task.fetch(:task_id), task.fetch(:project_id) ]
         end
@@ -598,42 +581,20 @@ module Hive
           registration_id: project_id, name: record["project"], observed_path: @root,
           state_root_path: @root, active: 1, registered_at: now, last_observed_at: now
         )
-        db[:task_subjects].insert_conflict.insert(
+        db[:task_subjects].insert_conflict(
+          target: :task_id,
+          update: {
+            source_fingerprint: source_fingerprint.to_s,
+            generation: record.task_input_epoch,
+            last_observed_at: now
+          }
+        ).insert(
           task_id: task_id, project_id: project_id, workflow_id: "attempt-runtime",
           task_slug: record["task_slug"], observed_path: record["task_id"].to_s,
-          source_fingerprint: record["progress_token"], generation: record.task_input_epoch,
+          source_fingerprint: source_fingerprint.to_s, generation: record.task_input_epoch,
           created_at: now, last_observed_at: now
         )
         [ task_id, project_id ]
-      end
-
-      def ensure_dispatch_request!(db, record, task_id, project_id, source_fingerprint:)
-        request_id = record["request_id"]
-        return unless request_id
-        existing = db[:dispatch_requests].where(request_id: request_id).first
-        if existing
-          expected = {
-            project_id: project_id, task_id: task_id,
-            subject_kind: record.subject_kind, subject_key: subject_key(record.subject),
-            task_generation: record.task_generation,
-            intended_stage: record["intended_stage"],
-            source_fingerprint: source_fingerprint.to_s
-          }
-          mismatch = expected.any? { |key, value| existing.fetch(key) != value }
-          raise RepositoryError, "dispatch request identity conflicts with attempt" if mismatch
-          return
-        end
-
-        timestamp = record["accepted_at"]
-        db[:dispatch_requests].insert(
-          request_id: request_id, project_id: project_id, task_id: task_id,
-          subject_kind: record.subject_kind, subject_key: subject_key(record.subject),
-          task_generation: record.task_generation, intended_stage: record["intended_stage"],
-          state: "admitted", priority: 0, source_fingerprint: source_fingerprint.to_s,
-          routing_policy_digest: record["routing"]["policy_digest"],
-          payload_json: RuntimeControlPlane::Codec.dump_json("source" => "attempt-admission"),
-          created_at: timestamp, updated_at: timestamp
-        )
       end
 
       def subject_key(subject)

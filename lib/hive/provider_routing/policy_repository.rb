@@ -46,29 +46,39 @@ module Hive
       # and always returns that winner. A changed candidate for the same point
       # never overwrites the original snapshot.
       def fetch_or_store(ownership_generation:, subject:, policy:)
+        @database.transaction do |db|
+          fetch_or_store_in(
+            db, ownership_generation: ownership_generation,
+            subject: subject, policy: policy
+          )
+        end
+      rescue Sequel::UniqueConstraintViolation
+        fetch_snapshot(ownership_generation: ownership_generation, subject: subject)
+      end
+
+      # AdmissionTransition supplies the transaction so policy freeze, route
+      # validation, probe ownership, capacity, and attempt creation commit as
+      # one unit. This method performs no I/O beyond the supplied dataset.
+      def fetch_or_store_in(db, ownership_generation:, subject:, policy:)
         return policy if legacy_policy?(policy)
 
         key = storage_key(ownership_generation, subject)
         candidate = normalize_policy(policy, key: key)
-        @database.transaction do |db|
-          installation = db[:installations].first&.fetch(:installation_id)
-          invalid! unless installation
-          current = db[:routing_policies].where(
-            installation_id: installation, policy_key: key_digest(key)
-          ).first
-          next parse(current.fetch(:policy_json), expected_key: key) if current
+        installation = db[:installations].first&.fetch(:installation_id)
+        invalid! unless installation
+        current = db[:routing_policies].where(
+          installation_id: installation, policy_key: key_digest(key)
+        ).first
+        return parse(current.fetch(:policy_json), expected_key: key) if current
 
-          payload = dump(snapshot(key, candidate.to_h))
-          invalid! if payload.bytesize > MAX_SNAPSHOT_BYTES
-          db[:routing_policies].insert(
-            installation_id: installation, policy_key: key_digest(key), revision: 0,
-            policy_digest: candidate.digest, policy_json: payload,
-            updated_at: Time.now.utc.iso8601(6)
-          )
-          candidate
-        end
-      rescue Sequel::UniqueConstraintViolation
-        fetch_snapshot(ownership_generation: ownership_generation, subject: subject)
+        payload = dump(snapshot(key, candidate.to_h))
+        invalid! if payload.bytesize > MAX_SNAPSHOT_BYTES
+        db[:routing_policies].insert(
+          installation_id: installation, policy_key: key_digest(key), revision: 0,
+          policy_digest: candidate.digest, policy_json: payload,
+          updated_at: Time.now.utc.iso8601(6)
+        )
+        candidate
       end
 
       private

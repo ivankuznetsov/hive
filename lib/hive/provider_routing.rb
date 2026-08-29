@@ -18,6 +18,11 @@ module Hive
     PERMISSION_CAPABILITIES = %w[network read write].freeze
     BILLING_ROUTES = Hive::BillingEvidence::ROUTES
     BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
+    EXCLUSION_REASONS = %w[
+      hard_pin_mismatch requirements_incompatible manual_block circuit_open
+      circuit_cooldown half_open_probe_owned provider_concurrency_saturated
+      health_state_unavailable
+    ].freeze
     DIRECT_SUBSCRIPTION_ADAPTERS = Hive::BillingEvidence::DIRECT_SUBSCRIPTION_ADAPTERS
 
     ACCOUNT_HEALTH_CLASSES = %w[

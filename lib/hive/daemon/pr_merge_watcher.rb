@@ -3,7 +3,7 @@ require "json"
 require "time"
 require "uri"
 require "hive/config"
-require "hive/daemon/pr_merge_reconciliation_store"
+require "hive/daemon/pr_merge_repository"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
@@ -18,7 +18,7 @@ module Hive
     #
     # Every PR-bearing coding stage is observed, not only a clean completed
     # finalize. Remote state, architecture intake, retry/backoff, and archive
-    # receipt live in PrMergeReconciliationStore, so daemon restart and a
+    # receipt live in PrMergeRepository, so daemon restart and a
     # transient GitHub or intake failure cannot silently forget a task.
     class PrMergeWatcher
       SUPPORTED_STAGES = %w[open-pr review artifacts finalize].map do |verb|
@@ -28,7 +28,7 @@ module Hive
 
       def initialize(poll_interval_sec: 300, merge_intake: nil,
                      poll_timeout_sec: DEFAULT_POLL_TIMEOUT_SEC,
-                     store: PrMergeReconciliationStore.new,
+                     store: PrMergeRepository.new,
                      gh: Hive::Gh, config_lookup: Hive::Config.method(:find_project),
                      config_loader: Hive::Config.method(:load),
                      task_factory: Hive::Task.method(:new),
@@ -110,10 +110,7 @@ module Hive
         selected = projects ? @contexts.keys & Array(projects).map(&:to_s) : @contexts.keys
         selected.sort.filter_map do |project|
           identity = @contexts.fetch(project)
-          state = @store.load(identity)
-          next unless state
-
-          candidate = @store.next_candidate(state, now: now)
+          candidate = @store.next_candidate(identity, now: now)
           next unless candidate
 
           process_and_record(identity, candidate, now: now)
@@ -158,61 +155,53 @@ module Hive
         terminal_slugs = Array(rows).select { |row| terminal_row?(row) }.to_h do |row|
           [ row.slug.to_s, true ]
         end
-        @store.transaction(identity, now: now) do |state|
-          candidates = state.fetch("candidates")
-          candidates_by_task = candidates.values.group_by do |candidate|
+        candidates = @store.candidates(identity).to_h do |candidate|
+          [ candidate.fetch("key"), candidate ]
+        end
+        candidates_by_task = candidates.values.group_by do |candidate|
             [ candidate.dig("task", "project"), candidate.dig("task", "slug") ]
+        end
+        observed.each do |candidate|
+          key = candidate.fetch("key")
+          task_key = [ candidate.dig("task", "project"), candidate.dig("task", "slug") ]
+          task_candidates = candidates_by_task.fetch(task_key, [])
+          same_generation = task_candidates.find do |existing|
+            existing.dig("observation", "task_generation") ==
+                candidate.dig("observation", "task_generation") &&
+              existing.fetch("key") != key && existing.dig("archive", "status") != "archived"
           end
-          observed.each do |candidate|
-            key = candidate.fetch("key")
-            task_key = [
-              candidate.dig("task", "project"),
-              candidate.dig("task", "slug")
-            ]
-            task_candidates = candidates_by_task.fetch(task_key, [])
-            same_generation = task_candidates.find do |existing|
+          if same_generation && binding_drift?(same_generation, candidate)
+            candidate["observation"]["held"] = true
+            candidate["observation"]["hold_reason"] ||=
+              binding_drift_reason(same_generation, candidate)
+          end
+          task_candidates.each do |existing|
+            next if existing.fetch("key") == key ||
+              existing.dig("archive", "status") == "archived"
+
+            existing["archive"]["status"] = "superseded"
+            existing["archive"]["last_error"] = if
               existing.dig("observation", "task_generation") ==
-                  candidate.dig("observation", "task_generation") &&
-                existing.fetch("key") != key &&
-                existing.dig("archive", "status") != "archived"
+                candidate.dig("observation", "task_generation")
+              "pull request binding changed within one task generation"
+            else
+              "a newer task generation was observed"
             end
-            if same_generation && binding_drift?(same_generation, candidate)
-              candidate["observation"]["held"] = true
-              candidate["observation"]["hold_reason"] ||=
-                binding_drift_reason(same_generation, candidate)
-            end
-            task_candidates.each do |existing|
-              next if existing.fetch("key") == key
-              next if existing.dig("archive", "status") == "archived"
-
-              existing["archive"]["status"] = "superseded"
-              existing["archive"]["last_error"] =
-                if existing.dig("observation", "task_generation") ==
-                   candidate.dig("observation", "task_generation")
-                  "pull request binding changed within one task generation"
-                else
-                  "a newer task generation was observed"
-                end
-              existing["updated_at"] = now.utc.iso8601(6)
-            end
-            candidates[key] = merge_observation(candidates[key], candidate)
-            task_candidates.reject! { |existing| existing.fetch("key") == key }
-            task_candidates << candidates.fetch(key)
-            candidates_by_task[task_key] = task_candidates
+            existing["updated_at"] = now.utc.iso8601(6)
           end
-          candidates.each_value do |candidate|
-            next unless terminal_slugs.key?(candidate.dig("task", "slug"))
-            next if observed_by_key.key?(candidate.fetch("key"))
-
+          candidates[key] = merge_observation(candidates[key], candidate)
+          task_candidates.reject! { |existing| existing.fetch("key") == key }
+          task_candidates << candidates.fetch(key)
+          candidates_by_task[task_key] = task_candidates
+        end
+        candidates.each_value do |candidate|
+          if terminal_slugs.key?(candidate.dig("task", "slug")) &&
+             !observed_by_key.key?(candidate.fetch("key"))
             mark_terminal_candidate(candidate, identity, now: now)
           end
-          state["backlog"] = {
-            "watermark" => state.dig("backlog", "watermark") || now.utc.iso8601(6),
-            "scanned_at" => now.utc.iso8601(6),
-            "complete" => true,
-            "outcomes" => outcomes.to_h { |outcome| [ outcome.fetch("key"), outcome ] }
-          }
+          @store.upsert_candidate(identity, candidate, now: now)
         end
+        @store.update_backlog(identity, outcomes: outcomes, now: now)
       end
 
       def candidate_for(row, identity, now:)
@@ -301,28 +290,31 @@ module Hive
 
       def process_and_record(identity, candidate, now:)
         result = process_candidate(identity, candidate, now: now)
-        @store.transaction(identity, now: now) do |state|
-          current = state.fetch("candidates")[candidate.fetch("key")]
-          next unless current
-          next unless current.dig("observation", "task_generation") ==
-            candidate.dig("observation", "task_generation")
-
-          apply_result!(current, result, now: now)
-          @store.advance_cursor!(state, current.fetch("key"))
+        current = @store.candidates(identity).find do |item|
+          item.fetch("key") == candidate.fetch("key")
         end
+        return result unless current
+        apply_result!(current, result, now: now)
+        @store.checkpoint(
+          identity, current,
+          expected_task_generation: candidate.dig("observation", "task_generation"), now: now
+        )
+        @store.advance_cursor(identity, current.fetch("key"), now: now)
         result.merge(
           project: identity.fetch("registration"),
           slug: candidate.dig("task", "slug")
         )
       rescue StandardError => e
-        @store.transaction(identity, now: now) do |state|
-          current = state.fetch("candidates")[candidate.fetch("key")]
-          if current
-            message = @store.record_failure!(current, e, now: now)
-            current["archive"]["status"] = "failed"
-            current["archive"]["last_error"] = message
-            @store.advance_cursor!(state, current.fetch("key"))
-          end
+        current = @store.candidates(identity).find do |item|
+          item.fetch("key") == candidate.fetch("key")
+        end
+        if current
+          failed, = @store.retry_after_failure(current, e, now: now)
+          @store.checkpoint(
+            identity, failed,
+            expected_task_generation: candidate.dig("observation", "task_generation"), now: now
+          )
+          @store.advance_cursor(identity, current.fetch("key"), now: now)
         end
         {
           status: :failed,
@@ -561,14 +553,18 @@ module Hive
         candidate["archive"].merge!(result[:archive]) if result[:archive]
         candidate["updated_at"] = now.utc.iso8601(6)
         if result[:status] == :failed
-          @store.record_failure!(candidate, Hive::Error.new(result[:reason]), now: now)
+          candidate.replace(
+            @store.retry_after_failure(
+              candidate, Hive::Error.new(result[:reason]), now: now
+            ).fetch(0)
+          )
         elsif result[:next_poll_at]
           candidate["retry"] = {
             "failures" => candidate.dig("retry", "failures").to_i,
             "not_before" => result.fetch(:next_poll_at).utc.iso8601(6)
           }
         else
-          @store.clear_retry!(candidate)
+          candidate["retry"] = { "failures" => 0, "not_before" => nil }
         end
       end
 
@@ -577,17 +573,18 @@ module Hive
       # therefore resumes from that receipt instead of repeating the earlier
       # side effect.
       def checkpoint!(identity, candidate, result, now:)
-        @store.transaction(identity, now: now) do |state|
-          current = state.fetch("candidates")[candidate.fetch("key")]
-          unless current &&
-                 current.dig("observation", "task_generation") ==
-                   candidate.dig("observation", "task_generation")
-            raise Hive::ConcurrentRunError,
-                  "merge reconciliation candidate changed before checkpoint"
-          end
-
-          apply_result!(current, result, now: now)
+        current = @store.candidates(identity).find do |item|
+          item.fetch("key") == candidate.fetch("key")
         end
+        unless current
+          raise Hive::ConcurrentRunError,
+                "merge reconciliation candidate changed before checkpoint"
+        end
+        apply_result!(current, result, now: now)
+        @store.checkpoint(
+          identity, current,
+          expected_task_generation: candidate.dig("observation", "task_generation"), now: now
+        )
         apply_result!(candidate, result, now: now)
       end
 
@@ -782,7 +779,7 @@ module Hive
       def candidates_for(project)
         identity = @contexts[project.to_s] || identity_for(project)
         @contexts[project.to_s] = identity
-        @store.load(identity)&.fetch("candidates", {})&.values || []
+        @store.candidates(identity)
       rescue StandardError
         []
       end
@@ -827,7 +824,7 @@ module Hive
       end
 
       def bounded_error(error)
-        "#{error.class}: #{error.message}"[0, PrMergeReconciliationStore::MAX_DIAGNOSTIC_BYTES]
+        "#{error.class}: #{error.message}"[0, PrMergeRepository::MAX_DIAGNOSTIC_BYTES]
       end
 
       def positive_number(value, label, allow_zero: false)

@@ -185,6 +185,37 @@ FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze
 
+  def prepare_runtime_project(state_home:, name:, path: state_home,
+                              state_root_path: File.join(path, ".hive-state"))
+    require "digest"
+    require "time"
+    require "hive/runtime_control_plane"
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).migrate!
+    timestamp = Time.now.utc.iso8601(6)
+    database.transaction do |db|
+      installation = db[:installations].first.fetch(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: "test-project-#{Digest::SHA256.hexdigest(name)[0, 16]}",
+        installation_id: installation, registration_id: name, name: name,
+        observed_path: path, state_root_path: state_root_path, active: 1,
+        registered_at: timestamp, last_observed_at: timestamp
+      )
+    end
+    database
+  end
+
+  def with_runtime_dispatch_repository(state_home)
+    require "hive/runtime_control_plane/dispatch_repository"
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).open!
+    yield Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+  ensure
+    database&.disconnect
+  end
+
   # Register a tmpdir that must outlive its creating statement. The global
   # teardown hook removes it securely after the current test, including trees
   # whose subject changed nested directories/files to 0555/0444.

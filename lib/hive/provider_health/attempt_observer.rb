@@ -1,4 +1,4 @@
-require "hive/provider_health/store"
+require "hive/provider_health/repository"
 
 module Hive
   module ProviderHealth
@@ -6,7 +6,9 @@ module Hive
     # no task marker, retry, deadline, successor, or dispatch operation.
     class AttemptObserver
       def initialize(store:)
-        raise InvalidMutation, "attempt observer requires a provider-health Store" unless store.is_a?(Store)
+        unless store.is_a?(Repository)
+          raise InvalidMutation, "attempt observer requires a provider-health repository"
+        end
 
         @store = store
       end

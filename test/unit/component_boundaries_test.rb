@@ -39,8 +39,8 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "hive/provider_health", provider_health.dig("entrypoint", "require")
     assert_equal "Hive::ProviderHealth", provider_health.dig("entrypoint", "constant")
     assert_includes provider_health.dig("public_contract", "values"),
-                    "Hive::ProviderHealth::Store"
-    assert_empty provider_health.fetch("component_dependencies")
+                    "Hive::ProviderHealth::Repository"
+    assert_equal [ "runtime-control-plane" ], provider_health.fetch("component_dependencies")
     assert_includes provider_health.fetch("allowed_hive_dependencies"),
                     "hive/output_reference"
     refute provider_health.fetch("allowed_hive_dependencies").any? { |path| path.start_with?("hive/attempts") }
@@ -721,6 +721,7 @@ class ComponentBoundariesTest < Minitest::Test
           "provider-health", "provider-routing-policy", "runtime-control-plane"
         ],
         "patrol-fix" => [ "safe-agent-git-gate" ],
+        "provider-health" => [ "runtime-control-plane" ],
         "provider-routing-operations" => [
           "attempts", "provider-health", "provider-routing-policy"
         ],

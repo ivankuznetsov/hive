@@ -20,6 +20,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     maintenance_checkpoints
     patrol_allowances
     payload_references
+    pr_merge_project_state
     pr_merge_reconciliations
     projections
     projects
@@ -72,7 +73,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     end
   end
 
-  def test_partial_unique_indexes_protect_active_attempt_probe_and_idempotency_identity
+  def test_partial_indexes_protect_active_attempt_and_idempotency_identity
     with_database do |database|
       ids = seed_project_and_task(database)
       database.transaction do |connection|
@@ -105,17 +106,18 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
 
       database.transaction do |connection|
         circuit = {
-          circuit_id: uuid("6"), scope_kind: "provider", provider_account_id: "acct",
+          circuit_id: uuid("6"), scope_kind: "provider_account", provider_account_id: "acct",
           model: "", automatic_state: "closed", manual_block: 0,
-          generation: 0, journal_epoch: uuid("7"), probe_attempt_id: uuid("4"),
+          generation: 0, journal_epoch: 0, probe_attempt_id: uuid("4"),
+          probe_json: "{}",
           updated_at: timestamp
         }
         connection[:provider_circuits].insert(circuit)
-        assert_raises(Sequel::UniqueConstraintViolation) do
-          connection[:provider_circuits].insert(
-            circuit.merge(circuit_id: uuid("8"), provider_account_id: "other")
-          )
-        end
+        connection[:provider_circuits].insert(
+          circuit.merge(circuit_id: uuid("8"), scope_kind: "model", model: "model-a")
+        )
+        assert_equal 2,
+                     connection[:provider_circuits].where(probe_attempt_id: uuid("4")).count
       end
 
       database.transaction do |connection|

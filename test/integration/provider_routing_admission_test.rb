@@ -1,6 +1,6 @@
 require_relative "../test_helper"
 require "hive/attempts/dispatcher"
-require "hive/provider_health/store"
+require "hive/provider_health/repository"
 require "hive/provider_routing"
 
 class ProviderRoutingAdmissionTest < Minitest::Test
@@ -38,10 +38,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     def reconcile! = @store.reconcile!
 
     def evaluate_routes(**attributes)
-      @store.evaluate_routes(**attributes)
-    end
-
-    def with_route_admission(**attributes, &block)
+      evaluation = @store.evaluate_routes(**attributes)
       unless @raced
         @raced = true
         @store.block(
@@ -51,8 +48,11 @@ class ProviderRoutingAdmissionTest < Minitest::Test
           reason: "race before admission"
         )
       end
-      @store.with_route_admission(**attributes, &block)
+      evaluation
     end
+
+    def validate_route_in(...) = @store.validate_route_in(...)
+    def claim_probe_bindings_in(...) = @store.claim_probe_bindings_in(...)
   end
 
   def setup
@@ -63,16 +63,15 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     @launcher = Launcher.new
     @ids = (1..20).map { |number| "attempt-#{number}" }.each
     @decision_ids = (1..20).map { |number| "decision-#{number}" }.each
-    @attempt_bindings = {}
-    @health = Hive::ProviderHealth::Store.new(
-      root: File.join(@root, "health"),
-      clock: -> { NOW },
-      attempt_reader: method(:read_health_attempt)
+    @health = Hive::ProviderHealth::Repository.new(
+      database: @store.database,
+      clock: -> { NOW }
     )
     @dispatcher = build_dispatcher
   end
 
   def teardown
+    @store.database.disconnect
     FileUtils.remove_entry(@root)
   end
 
@@ -432,7 +431,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
       ownership_fence: "evidence-fence",
       route: route
     )
-    @attempt_bindings[attempt.attempt_id] = attempt
+    persist_terminal_health_attempt(attempt)
     evidence = Hive::ProviderHealth::Evidence.new(
       scope: scope,
       failure_class: failure_class,
@@ -456,18 +455,25 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     )
   end
 
-  def read_health_attempt(attempt_id)
-    return @attempt_bindings[attempt_id] if @attempt_bindings.key?(attempt_id)
-
-    record = @store.fetch_hot(attempt_id)
-    return nil unless record
-
-    {
-      "attempt_id" => record.attempt_id,
-      "task_generation" => record.task_generation,
-      "ownership_fence" => record["ownership_generation"],
-      "state" => record.state,
-      "probe_bindings" => record["routing"].fetch("probe_bindings", [])
-    }
+  def persist_terminal_health_attempt(attempt)
+    @store.create_launching(
+      attempt_id: attempt.attempt_id, request_id: nil, predecessor_attempt_id: nil,
+      task_id: attempt.attempt_id, project: "demo", task_slug: attempt.attempt_id,
+      intended_stage: "4-execute", task_generation: attempt.task_generation,
+      ownership_generation: attempt.ownership_fence, task_input_epoch: 1,
+      progress_token: "source-#{attempt.attempt_id}", provider: "codex",
+      routing: { "mode" => "legacy" }, worker_argv: %w[hive run evidence],
+      claim_capability_digest: Hive::Attempts::Capability.digest("e" * 64),
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: NOW
+    )
+    @store.database.transaction do |db|
+      db[:attempts].where(attempt_id: attempt.attempt_id).update(
+        state: "terminal", outcome: "failed", ended_at: NOW.iso8601(6)
+      )
+      db[:capacity_reservations].where(attempt_id: attempt.attempt_id).update(
+        state: "released", released_at: NOW.iso8601(6)
+      )
+    end
   end
 end

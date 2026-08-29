@@ -43,16 +43,33 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   class FakeDispatcher
     attr_reader :calls
 
-    Attempt = Data.define(:attempt_id)
-
-    def initialize
+    def initialize(store)
+      @store = store
       @calls = []
     end
 
     def dispatch_successor(**attributes)
       @calls << attributes
+      predecessor = attributes.fetch(:predecessor)
+      successor = @store.create_launching(
+        attempt_id: "successor-#{calls.length}", request_id: attributes.fetch(:request_id),
+        predecessor_attempt_id: predecessor.attempt_id,
+        task_id: predecessor["task_id"], project: predecessor["project"],
+        task_slug: predecessor["task_slug"], intended_stage: predecessor["intended_stage"],
+        task_generation: predecessor.task_generation,
+        ownership_generation: predecessor.ownership_generation,
+        task_input_epoch: predecessor.task_input_epoch,
+        progress_token: Hive::Attempts::Generation.artifact_token(attributes.fetch(:task)),
+        provider: predecessor["provider"], routing: predecessor["routing"],
+        worker_argv: attributes.fetch(:argv),
+        claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+        starting_revision: predecessor["starting_revision"],
+        retry_charge: attributes.fetch(:retry_charge),
+        inherited_outputs: attributes.fetch(:inherited_outputs),
+        launch_timeout_sec: 30, now: attributes.fetch(:now)
+      )
       Hive::Attempts::DispatchResult.new(
-        status: :accepted, attempt: Attempt.new(attempt_id: "successor-1"),
+        status: :accepted, attempt: successor,
         receipt: nil, attach_descriptor: nil, reason: nil
       )
     end
@@ -71,7 +88,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store, retry_charge: 1, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
         logger = FakeLogger.new
         processor = FakeProcessor.new(outcomes, task.folder)
         outcomes.ensure_for(lost, now: NOW + 1)
@@ -110,7 +127,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         ]
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
         admission_open = true
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
         dispatcher.define_singleton_method(:dispatch_successor) do |**attributes|
           result = super(**attributes)
           admission_open = false
@@ -137,7 +154,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-      dispatcher = FakeDispatcher.new
+      dispatcher = FakeDispatcher.new(store)
       service = healer(
         store, outcomes, FakeProcessor.new(outcomes, root),
         dispatcher, FakeLogger.new,
@@ -155,7 +172,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store, retry_charge: 3, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
         logger = FakeLogger.new
         processor = FakeProcessor.new(outcomes, task.folder)
 
@@ -175,7 +192,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
         dispatcher.define_singleton_method(:dispatch_successor) do |**attributes|
           @calls << attributes
           Hive::Attempts::DispatchResult.new(
@@ -217,7 +234,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           intended_stage: "2-brainstorm", worker_argv: worker_argv
         )
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
@@ -242,7 +259,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           intended_stage: "2-brainstorm", worker_argv: worker_argv
         )
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
@@ -272,7 +289,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
         )
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
         processor = FakeProcessor.new(outcomes, task.folder)
 
         healer(store, outcomes, processor, dispatcher, FakeLogger.new)
@@ -291,7 +308,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_attempt(store, retry_charge: 0, task_folder: "durable-task")
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-      dispatcher = FakeDispatcher.new
+      dispatcher = FakeDispatcher.new(store)
       logger = FakeLogger.new
       processor = FakeProcessor.new(outcomes, nil)
       service = healer(store, outcomes, processor, dispatcher, logger)
@@ -322,7 +339,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       lost = lost_attempt(store, retry_charge: 0, task_folder: "durable-task")
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       service = healer(
-        store, outcomes, FakeProcessor.new(outcomes, nil), FakeDispatcher.new, FakeLogger.new
+        store, outcomes, FakeProcessor.new(outcomes, nil), FakeDispatcher.new(store), FakeLogger.new
       )
       task = Object.new
       resolver = Struct.new(:task) { def resolve = task }.new(task)
@@ -343,7 +360,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
@@ -364,7 +381,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
@@ -379,7 +396,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
-  def test_successor_detection_uses_decision_index_without_scanning_hot_or_cold_history
+  def test_successor_detection_uses_the_sql_relationship_without_scanning_attempts
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
@@ -396,19 +413,14 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           starting_revision: lost["starting_revision"], retry_charge: 1,
           inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
         )
-        store.decision_index.record_unresolved_loss(lost)
-        store.decision_index.record_successor(successor)
         store.define_singleton_method(:scan) { raise "unexpected hot scan" }
-        store.permanent_proofs.define_singleton_method(:fetch) do |_attempt_id|
-          raise "unexpected cold proof read"
-        end
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
         outcomes.ensure_for(lost, now: NOW + 1)
         outcomes.update(
           lost, now: NOW + 1, status: "ready", task_folder: task.folder,
           cleanup: "absent", capture_references: []
         )
-        dispatcher = FakeDispatcher.new
+        dispatcher = FakeDispatcher.new(store)
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),

@@ -20,50 +20,28 @@ module Hive
 
       def self.runtime(store:, state_home: Hive::Paths.state_home, **options)
         require "hive/conditions/attempt_observer"
-        require "hive/daemon/dispatch_request_queue"
+        require "hive/runtime_control_plane/dispatch_repository"
         require "hive/provider_health/attempt_observer"
-        require "hive/provider_health/store"
+        require "hive/provider_health/repository"
         observer = Hive::Conditions::AttemptObserver.new(store: store)
         new(
           store: store,
           condition_observer: observer,
           provider_health_observer_factory: lambda do
-            health_store = Hive::ProviderHealth::Store.new(
-              root: File.join(state_home, "provider-health", "v1"),
-              cooldown_resolver: cooldown_resolver(store),
-              attempt_reader: lambda do |attempt_id|
-                attempt = store.fetch(attempt_id)
-                attempt && {
-                  "attempt_id" => attempt.attempt_id,
-                  "task_generation" => attempt.task_generation,
-                  "ownership_fence" => attempt.ownership_generation,
-                  "state" => attempt.state
-                }
-              end
+            health_store = Hive::ProviderHealth::Repository.new(
+              database: store.database
             )
             Hive::ProviderHealth::AttemptObserver.new(store: health_store)
           end,
           delivery_pending: lambda do |record|
-            Hive::Daemon::DispatchRequestQueue.claimed(state_home: state_home).any? do |delivery|
+            Hive::RuntimeControlPlane::DispatchRepository.new(
+              database: store.database
+            ).claimed.any? do |delivery|
               delivery.claim["attempt_id"].to_s == record.attempt_id
             end
           end,
           **options
         )
-      end
-
-      def self.cooldown_resolver(store)
-        lambda do |evidence|
-          record = store.fetch(evidence.attempt_id)
-          policy = record && store.routing_policies.fetch_snapshot(
-            ownership_generation: record.ownership_generation,
-            subject: record.subject
-          )
-          policy&.account_policy&.dig(evidence.route.account_id, "cooldown_sec", evidence.failure_class) ||
-            Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
-        rescue Hive::Attempts::RepositoryError
-          Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
-        end
       end
 
       def initialize(store:, condition_observer: nil, delivery_pending: nil,

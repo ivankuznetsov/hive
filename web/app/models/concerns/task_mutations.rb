@@ -4,7 +4,7 @@ require "hive/commands/answer"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/config"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/plan_review/automation"
@@ -40,7 +40,7 @@ module TaskMutations
   extend ActiveSupport::Concern
 
   STAGE_VERB_BY_ACTION = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
-    Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+    Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb)
   end.freeze
 
   def approve!(from: nil, to: nil, force: false)

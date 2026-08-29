@@ -1,6 +1,6 @@
 require "fileutils"
 require "pathname"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/lock"
 require "hive/task_meta"
 
@@ -68,7 +68,9 @@ module Hive
         end
         @project_name = cfg.fetch("project_name", File.basename(File.dirname(@hive_state_path)))
         @recovery_pruner = recovery_pruner || lambda do |project, slug|
-          Hive::Daemon::DispatchRequestQueue.remove_nonterminal_for_task(
+          Hive::RuntimeControlPlane::DispatchRepository.new(
+            database: @store.database
+          ).remove_nonterminal_for_task(
             project: project, slug: slug
           )
         end

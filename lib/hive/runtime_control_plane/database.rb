@@ -13,7 +13,7 @@ module Hive
       attempt_relationships attempts capacity_reservations
       daemon_runtime dispatch_outbox dispatch_requests installations
       maintenance_checkpoints patrol_allowances payload_references
-      pr_merge_reconciliations projections projects provider_audit
+      pr_merge_project_state pr_merge_reconciliations projections projects provider_audit
       provider_circuits routing_policies task_counters task_leases task_subjects
       terminal_pending_publications token_usage attempt_routing_decisions
     ].freeze
@@ -21,7 +21,7 @@ module Hive
     EXPECTED_INDEXES = %i[
       attempts_active_subject_generation_uidx attempts_request_uidx
       capacity_reservations_active_uidx dispatch_requests_active_subject_uidx
-      dispatch_requests_idempotency_uidx provider_circuits_probe_uidx
+      dispatch_requests_idempotency_uidx provider_circuits_probe_idx
       token_usage_session_uidx
     ].freeze
 

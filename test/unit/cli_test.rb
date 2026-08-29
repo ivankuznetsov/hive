@@ -106,8 +106,7 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "--expected-generation"
     assert_includes out, "--reason"
     assert_includes out, "--yes"
-    assert_includes out, "reset-intent"
-    assert_includes out, "--intent-file"
+    assert_includes out, "SQLite integrity failures"
     assert_includes out, "intentionally absent from `hive act`"
 
     with_command_new_stub(Hive::Commands::Circuits) do |calls|
@@ -120,8 +119,7 @@ class HiveCliTest < Minitest::Test
       assert_equal(
         {
           provider: "account-a", model: "model-a", reason: "planned maintenance",
-          expected_generation: 7, journal_epoch: nil, corruption_fingerprint: nil,
-          last_verified_generation: nil, intent_file: nil, yes: true, json: true
+          expected_generation: 7, yes: true, json: true
         },
         calls.first.fetch(:kwargs)
       )

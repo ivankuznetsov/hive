@@ -74,15 +74,13 @@ components:
         - Hive::ProviderHealth::AttemptObserver
         - Hive::ProviderHealth::AttemptBinding
         - Hive::ProviderHealth::Circuit
-        - Hive::ProviderHealth::CorruptionToken
         - Hive::ProviderHealth::Evidence
         - Hive::ProviderHealth::Inspection
         - Hive::ProviderHealth::ProbeBinding
-        - Hive::ProviderHealth::ProbeIntent
         - Hive::ProviderHealth::ProbeRequirement
+        - Hive::ProviderHealth::Repository
         - Hive::ProviderHealth::RouteEvaluation
         - Hive::ProviderHealth::RouteIdentity
-        - Hive::ProviderHealth::Store
       errors:
         - Hive::ProviderHealth::Error
         - Hive::ProviderHealth::InvalidScope
@@ -97,33 +95,32 @@ components:
       - lib/hive/provider_health/circuit.rb
       - lib/hive/provider_health/evidence.rb
       - lib/hive/provider_health/event.rb
-      - lib/hive/provider_health/store.rb
+      - lib/hive/provider_health/repository.rb
       - schemas/hive-provider-health.v1.json
       - schemas/hive-provider-health-event.v1.json
     state_contracts:
-      - "Provider-account and exact-model circuits are independent scoped journals composed only at read time"
-      - "The authoritative journal event contains its sanitized operator audit; current.json is a rebuildable projection"
-      - "Evidence, probe, and operator mutations use scoped generation CAS under one host-global health lock"
-      - "Probe intents bind only to durable attempt identity and ownership fences; no timer, lease, retry, successor, or dispatch owner exists here"
-      - "Only a malformed torn final suffix is automatically repaired; interior corruption and gaps fail the affected scope closed"
+      - "Provider-account and exact-model circuits are constrained runtime-control-plane rows composed only at read time"
+      - "Evidence, probe, and operator mutations use generation CAS in short immediate transactions"
+      - "Probe ownership binds directly to durable attempt identity and ownership fences; no timer, lease, retry, successor, or dispatch owner exists here"
+      - "Malformed or corrupt SQL rows fail closed without a filesystem fallback"
     schema_contracts:
       - "Projection and event schemas are recursively closed against raw prompts, messages, stdout, stderr, tool output, tokens, and credentials"
       - "Evidence fingerprints derive only from canonical allowlisted class, scope, provenance, route ID, and bounded reset hint"
-      - "Corrupt-scope reset requires a fresh epoch, fingerprint, and last-verified-generation token and quarantines exact owner-private bytes"
+      - "Audit rows are bounded and idempotent per circuit without retaining raw provider output"
     lock_contracts:
-      - "The host-global provider-health mutation lock is innermost after admission and task-generation locks"
-      - "Store code holding the health lock must not acquire admission or task-generation locks"
-    component_dependencies: []
+      - "AdmissionTransition is the only cross-domain transaction that binds provider probes to a launching attempt"
+      - "Repository transactions acquire no filesystem, provider, process, or task-generation lock"
+    component_dependencies:
+      - runtime-control-plane
     allowed_hive_dependencies:
       - hive
       - hive/canonical_json
-      - hive/managed_directory
       - hive/output_reference
-      - hive/paths
+      - hive/runtime_control_plane
       - hive/secret_patterns
     internal_collaborators:
-      - Hive::ManagedDirectory
       - Hive::OutputReference
+      - Hive::RuntimeControlPlane
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -134,7 +131,7 @@ components:
       - lib/hive/attempts/finalization_maintenance.rb
       - lib/hive/commands/circuits.rb
       - lib/hive/provider_routing/operational_projection.rb
-    mutation_authority: "Scoped provider-health journals, rebuildable projections, probe intents, quarantine artifacts, and their typed audit receipts only."
+    mutation_authority: "Provider circuit and bounded audit rows in the runtime control plane only."
     recovery_surface: "Conservative eligibility and attempt-fenced probe reconciliation only; RecoveryCoordinator remains the sole retry, charge, deadline, successor, and dispatch owner."
     wiki_page: wiki/modules/provider_health.md
     focused_tests:
@@ -142,8 +139,8 @@ components:
       - test/unit/provider_health/circuit_test.rb
       - test/unit/provider_health/evidence_test.rb
       - test/unit/provider_health/schema_test.rb
-      - test/unit/provider_health/store_test.rb
-      - test/integration/provider_health_replay_test.rb
+      - test/unit/provider_health/repository_test.rb
+      - test/unit/provider_health/attempt_observer_test.rb
     migration_exceptions: []
 
   - id: provider-routing-policy
@@ -216,7 +213,7 @@ components:
       - lib/hive/attempts/entrypoint.rb
       - lib/hive/attempts/repository.rb
       - lib/hive/commands/circuits.rb
-      - lib/hive/daemon/dispatch_request_queue.rb
+      - lib/hive/runtime_control_plane/dispatch_repository.rb
       - lib/hive/daemon/recovery_coordinator.rb
       - lib/hive/implementation_identity/resolver.rb
       - lib/hive/provider_routing/operational_projection.rb
@@ -269,7 +266,7 @@ components:
     internal_collaborators:
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::Repository
-      - Hive::ProviderHealth::Store
+      - Hive::ProviderHealth::Repository
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -473,7 +470,7 @@ components:
       - hive/provider_health
       - hive/provider_health/attempt_observer
       - hive/provider_health/evidence
-      - hive/provider_health/store
+      - hive/provider_health/repository
       - hive/provider_routing
       - hive/provider_routing/decision
       - hive/provider_routing/policy_repository

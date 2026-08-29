@@ -106,7 +106,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       results = watcher.observe(tasks.map { |task| row_for(task) }, now: T0)
 
       assert_equal [ :observed ], results.map { |result| result.fetch(:status) }.uniq
-      state = store.load(identity_for(tasks.first.project_root))
+      state = store_state(store, identity_for(tasks.first.project_root))
       assert_equal 4, state.fetch("candidates").length
       assert_equal true, state.dig("backlog", "complete")
       assert_equal T0.iso8601(6), state.dig("backlog", "scanned_at")
@@ -126,7 +126,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       assert_equal :observed, result.fetch(:status)
       assert_equal 0, result.fetch(:candidates)
-      state = store.load(identity_for(tasks.first.project_root))
+      state = store_state(store, identity_for(tasks.first.project_root))
       assert_equal true, state.dig("backlog", "complete")
       assert_empty state.dig("backlog", "outcomes")
     end
@@ -147,7 +147,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal :observed, result.fetch(:status)
       assert_equal 2, result.fetch(:candidates)
       assert_empty watcher.tick(now: T0)
-      candidates = store.load(identity_for(tasks.first.project_root))
+      candidates = store_state(store, identity_for(tasks.first.project_root))
                         .fetch("candidates").values
       dependency = candidates.find { |item| item.dig("task", "slug") == tasks.first.slug }
       mismatch = candidates.find { |item| item.dig("task", "slug") == tasks.last.slug }
@@ -158,7 +158,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
                    mismatch.dig("observation", "hold_reason")
 
       watcher.observe([ base ], now: T0 + 1)
-      candidate = store.load(identity_for(tasks.first.project_root))
+      candidate = store_state(store, identity_for(tasks.first.project_root))
                        .fetch("candidates").values
                        .find { |item| item.dig("task", "slug") == tasks.first.slug }
       assert_equal false, candidate.dig("observation", "held")
@@ -181,7 +181,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal :blocked, blocked.fetch(:status)
       assert_equal tasks.first.slug, blocked.fetch(:slug)
       assert_match(/canonical GitHub pull request/, blocked.fetch(:reason))
-      outcomes = store.load(identity_for(tasks.first.project_root))
+      outcomes = store_state(store, identity_for(tasks.first.project_root))
                       .dig("backlog", "outcomes").values
       rejected = outcomes.find { |outcome| outcome.fetch("slug") == tasks.first.slug }
       assert_equal "rejected", rejected.fetch("status")
@@ -228,7 +228,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal :archived, result.fetch(:status)
       assert_equal 1, intake.calls.length
       assert_equal 1, closure.calls.length
-      state = store.load(identity_for(tasks.first.project_root))
+      state = store_state(store, identity_for(tasks.first.project_root))
       candidate = state.fetch("candidates").values.first
       assert_equal "accepted", candidate.dig("architecture", "status")
       assert_equal "archived", candidate.dig("archive", "status")
@@ -281,7 +281,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       watcher.observe([ row_for(tasks.first) ], now: T0)
 
       assert_equal :archived, watcher.tick(now: T0).first.fetch(:status)
-      candidate = store.load(identity_for(tasks.first.project_root))
+      candidate = store_state(store, identity_for(tasks.first.project_root))
         .fetch("candidates").values.first
       assert_equal "not_required", candidate.dig("architecture", "status")
       assert_equal "a" * 64, candidate.dig("architecture", "request_id")
@@ -307,7 +307,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       watcher.observe([ row_for(tasks.first) ], now: T0)
 
       assert_equal :blocked, watcher.tick(now: T0).first.fetch(:status)
-      candidate = store.load(identity_for(tasks.first.project_root))
+      candidate = store_state(store, identity_for(tasks.first.project_root))
         .fetch("candidates").values.first
       assert_equal "blocked", candidate.dig("architecture", "status")
       assert_equal "blocked", candidate.dig("archive", "status")
@@ -333,7 +333,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       result = watcher.tick(now: T0).first
 
       assert_equal :deferred, result.fetch(:status)
-      candidate = store.load(identity_for(tasks.first.project_root))
+      candidate = store_state(store, identity_for(tasks.first.project_root))
         .fetch("candidates").values.first
       assert_equal "deferred", candidate.dig("architecture", "status")
       assert_match(/retry_wait/, candidate.dig("architecture", "last_error"))
@@ -355,7 +355,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       result = watcher.tick(now: T0).first
       assert_equal :deferred, result.fetch(:status)
-      persisted = store.load(identity_for(tasks.first.project_root))
+      persisted = store_state(store, identity_for(tasks.first.project_root))
                        .fetch("candidates").values.first
       assert_equal "merged", persisted.dig("remote", "state")
       assert_equal "failed", persisted.dig("architecture", "status")
@@ -387,7 +387,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       watcher.observe([ row ], now: T0)
 
       assert_raises(Interrupt) { watcher.tick(now: T0) }
-      persisted = store.load(identity_for(tasks.first.project_root))
+      persisted = store_state(store, identity_for(tasks.first.project_root))
                        .fetch("candidates").values.first
       assert_equal "merged", persisted.dig("remote", "state")
       assert_equal "accepted", persisted.dig("architecture", "status")
@@ -424,7 +424,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         watcher.observe([ row ], now: now)
       end
 
-      state = store.load(identity_for(tasks.first.project_root))
+      state = store_state(store, identity_for(tasks.first.project_root))
       candidate = state.fetch("candidates").values.first
       assert_equal 26, candidate.dig("retry", "failures")
       assert_match(/offline/, candidate.dig("archive", "last_error"))
@@ -468,7 +468,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       mismatch = watcher.tick(now: T0).first
       assert_equal :blocked, mismatch.fetch(:status)
       assert_empty closure.calls
-      candidate = store.load(identity_for(task.project_root)).fetch("candidates").values.first
+      candidate = store.candidates(identity_for(task.project_root)).first
       assert_equal "delivered_elsewhere", candidate.dig("remote", "state")
 
       gh.head_oid = "b" * 40
@@ -478,7 +478,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       refute_nil generation
       assert_includes %i[merged archived], generation.fetch(:status) if
         generation.fetch(:status) != :superseded
-      assert store.load(identity_for(task.project_root)).fetch("candidates").values.any? do |item|
+      assert store.candidates(identity_for(task.project_root)).any? do |item|
         item.dig("archive", "status") == "superseded"
       end
     end
@@ -497,7 +497,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       assert_equal :blocked, result.fetch(:status)
       assert_empty closure.calls
-      candidate = store.load(identity_for(task.project_root)).fetch("candidates").values.first
+      candidate = store.candidates(identity_for(task.project_root)).first
       assert_equal "ambiguous", candidate.dig("remote", "state")
       assert_equal "blocked", candidate.dig("archive", "status")
       assert_match(/immutable local PR head binding/,
@@ -526,11 +526,16 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       watcher.observe([ row_for(task) ], now: T0)
 
-      candidate = store.load(identity_for(task.project_root)).fetch("candidates").values.first
+      candidate = store.candidates(identity_for(task.project_root)).first
       assert_equal head, candidate.dig("pull_request", "observed_head")
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path
+      ).migrate!
       with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(home, "attempts")) do
-        assert_equal :archived, watcher.tick(now: T0).first.fetch(:status)
+        result = watcher.tick(now: T0).first
+        assert_equal :archived, result.fetch(:status), result.inspect
       end
+      database.disconnect
       archived = Hive::TaskResolver.new(task.slug, project_filter: "app").resolve
       assert_equal "9-done", stage_dir(archived)
     end
@@ -550,7 +555,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       File.write(pr_path, repaired)
       watcher.observe([ row_for(task) ], now: T0 + 1)
 
-      candidates = store.load(identity_for(task.project_root)).fetch("candidates").values
+      candidates = store.candidates(identity_for(task.project_root))
       assert_equal 2, candidates.length
       assert_equal 1, candidates.count { |item| item.dig("archive", "status") == "superseded" }
       assert_equal :archived, watcher.tick(now: T0 + 1).first.fetch(:status)
@@ -581,7 +586,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       assert_equal :superseded, result.fetch(:status)
       assert_empty closure.calls
-      candidate = store.load(identity_for(task.project_root))
+      candidate = store_state(store, identity_for(task.project_root))
                        .fetch("candidates").values.first
       assert_equal "superseded", candidate.dig("archive", "status")
     end
@@ -598,7 +603,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       watcher.observe([ changed ], now: T0 + 1)
 
-      candidates = store.load(identity_for(task.project_root))
+      candidates = store_state(store, identity_for(task.project_root))
                         .fetch("candidates").values
       held = candidates.find do |candidate|
         candidate.dig("pull_request", "number") == 99
@@ -614,7 +619,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     with_merge_project(stages: [ "8-finalize" ]) do |tasks, _home|
       gh = FakeGh.new(state: "MERGED")
       closure = FakeClosure.new
-      store = Hive::Daemon::PrMergeReconciliationStore.new(dry_run: true)
+      store = Hive::Daemon::PrMergeRepository.new(dry_run: true)
       watcher, = build_watcher(
         gh: gh, task_closure: closure, store: store, dry_run: true
       )
@@ -623,7 +628,8 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal :dry_run, watcher.tick(now: T0).first.fetch(:status)
       assert_empty closure.calls
       assert_equal "8-finalize", stage_dir(tasks.first)
-      refute File.exist?(store.path(tasks.first.hive_state_path))
+      assert_equal "pending", store.candidates(identity_for(tasks.first.project_root))
+                                   .first.dig("archive", "status")
     end
   end
 
@@ -632,12 +638,17 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       gh = FakeGh.new(state: "MERGED")
       watcher, = build_watcher(gh: gh, task_closure: Hive::TaskClosure)
       rows = tasks.map { |task| row_for(task) }
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path
+      ).migrate!
       with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(home, "attempts")) do
         watcher.observe(rows, now: T0)
         tasks.length.times do |index|
-          assert_equal :archived, watcher.tick(now: T0 + index).first.fetch(:status)
+          result = watcher.tick(now: T0 + index).first
+          assert_equal :archived, result.fetch(:status), result.inspect
         end
       end
+      database.disconnect
 
       tasks.each do |task|
         archived = Hive::TaskResolver.new(task.slug, project_filter: "app").resolve
@@ -649,7 +660,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
-  def test_non_github_identity_is_skipped_and_corrupt_store_blocks_only_observation
+  def test_non_github_identity_is_skipped_without_remote_observation
     with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
       gh = FakeGh.new
       gh.define_singleton_method(:repository_identity) do |*, **|
@@ -666,14 +677,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         assert_equal :skipped, result.fetch(:status)
         assert_match(/not applicable/, result.fetch(:reason))
       end
-
-      watcher, store = build_watcher(gh: FakeGh.new)
-      watcher.observe([ row_for(tasks.first) ], now: T0)
-      identity = identity_for(tasks.first.project_root)
-      File.binwrite(store.path(identity.fetch("hive_state_path")), "{")
-      result = watcher.observe([ row_for(tasks.first) ], now: T0 + 1).first
-      assert_equal :blocked, result.fetch(:status)
-      assert_match(/cannot continue/, result.fetch(:reason))
     end
   end
 
@@ -712,12 +715,15 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       refute watcher.recovery_blocked?(project: "app", slug: task.slug)
       refute watcher.recovery_blocked?(project: "app", slug: "missing")
 
-      store.define_singleton_method(:load) do |_identity|
+      store.define_singleton_method(:next_candidate) do |_identity, **|
         raise IOError, "ledger unreadable"
       end
       result = watcher.tick(now: T0 + 1).first
       assert_equal :blocked, result.fetch(:status)
       assert_match(/ledger unreadable/, result.fetch(:reason))
+      store.define_singleton_method(:candidates) do |_identity|
+        raise IOError, "ledger unreadable"
+      end
       assert_nil watcher.state_for(project: "app", slug: task.slug)
     end
   end
@@ -741,7 +747,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         gh.head_oid = observed_head
         watcher.observe([ row_for(task) ], now: T0 + 1)
 
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal true, candidate.dig("observation", "held")
@@ -754,7 +760,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         refute_nil result, "held observed-head drift must still poll remote PR state"
         assert_equal :open, result.fetch(:status)
         refute watcher.recovery_blocked?(project: "app", slug: task.slug)
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal true, candidate.dig("observation", "held")
@@ -788,7 +794,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
         assert_equal :closed_unmerged, result.fetch(:status)
         refute watcher.recovery_blocked?(project: "app", slug: task.slug)
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal true, candidate.dig("observation", "held")
@@ -815,7 +821,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         blocked = base.dup.tap { |row| row.blocked = true }
         watcher.observe([ blocked ], now: T0 + 1)
 
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal "dependency_blocked",
@@ -824,7 +830,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         assert_empty gh.fact_calls
 
         watcher.observe([ base ], now: T0 + 2)
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal "observed_head_changed",
@@ -859,7 +865,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         observed_head = "c" * 40
         watcher.observe([ cross ], now: T0 + 1)
 
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal "pull_request_repository_mismatch",
@@ -893,7 +899,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         assert_equal "merged", result.dig(:remote, "state")
         assert_match(/observed head changed/, result.dig(:archive, "last_error"))
         assert_empty closure.calls
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal true, candidate.dig("observation", "held")
@@ -921,7 +927,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
         assert_equal :blocked, result.fetch(:status)
         assert_equal "delivered_elsewhere", result.dig(:remote, "state")
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal "blocked", candidate.dig("archive", "status")
@@ -948,7 +954,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
         assert_equal :blocked, result.fetch(:status)
         assert_equal "ambiguous", result.dig(:remote, "state")
-        candidate = store.load(identity_for(task.project_root))
+        candidate = store_state(store, identity_for(task.project_root))
                          .fetch("candidates").values
                          .find { |item| item.dig("archive", "status") != "superseded" }
         assert_equal "blocked", candidate.dig("archive", "status")
@@ -972,20 +978,23 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         watcher.observe([ row_for(task) ], now: T0 + 1)
       end
       identity = identity_for(task.project_root)
-      store.transaction(identity, now: T0 + 1) do |state|
-        candidate = state.fetch("candidates").values
-                         .find { |item| item.dig("archive", "status") != "superseded" }
-        candidate["remote"] = {
-          "state" => "merged", "merge_oid" => "a" * 40,
-          "merged_at" => T0.iso8601(6), "observed_at" => T0.iso8601(6)
-        }
-      end
+      candidate = store.candidates(identity)
+                       .find { |item| item.dig("archive", "status") != "superseded" }
+      candidate["remote"] = {
+        "state" => "merged", "merge_oid" => "a" * 40,
+        "merged_at" => T0.iso8601(6), "observed_at" => T0.iso8601(6)
+      }
+      store.checkpoint(
+        identity, candidate,
+        expected_task_generation: candidate.dig("observation", "task_generation"),
+        now: T0 + 1
+      )
 
       result = watcher.tick(now: T0 + 2).first
 
       assert_equal :blocked, result.fetch(:status)
       assert_empty closure.calls
-      candidate = store.load(identity).fetch("candidates").values
+      candidate = store.candidates(identity)
                        .find { |item| item.dig("archive", "status") != "superseded" }
       assert_equal "blocked", candidate.dig("archive", "status")
       assert_match(/observed head changed/, candidate.dig("archive", "last_error"))
@@ -1003,7 +1012,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       terminal.stage = Hive::Stages::DIRS.last
       watcher.observe([ terminal ], now: T0 + 1)
 
-      candidate = store.load(identity_for(task.project_root))
+      candidate = store_state(store, identity_for(task.project_root))
                        .fetch("candidates").values.first
       assert_equal "blocked", candidate.dig("archive", "status")
       assert_match(/no valid merge closure receipt/,
@@ -1046,7 +1055,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       watcher, store = build_watcher
       watcher.observe([ row_for(task) ], now: T0)
       identity = identity_for(task.project_root)
-      candidate = store.load(identity).fetch("candidates").values.first
+      candidate = store.candidates(identity).first
 
       facts = {
         "state" => "MERGED",
@@ -1089,7 +1098,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       watcher, store = build_watcher
       watcher.observe([ row_for(task) ], now: T0)
       identity = identity_for(task.project_root)
-      base = store.load(identity).fetch("candidates").values.first
+      base = store.candidates(identity).first
 
       held = deep_copy(base)
       held["observation"]["hold_reason"] = "pull_request_binding_changed"
@@ -1130,6 +1139,15 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
   private
 
+  def store_state(store, identity)
+    {
+      "candidates" => store.candidates(identity).to_h do |candidate|
+        [ candidate.fetch("key"), candidate ]
+      end,
+      "backlog" => store.backlog(identity)
+    }
+  end
+
   def deep_copy(value)
     Marshal.load(Marshal.dump(value))
   end
@@ -1137,8 +1155,8 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
   def build_watcher(gh: FakeGh.new, task_closure: FakeClosure.new,
                     merge_intake: nil, store: nil, poll_interval_sec: 0,
                     poll_timeout_sec: 7, config_lookup: nil, dry_run: false)
-    store ||= Hive::Daemon::PrMergeReconciliationStore.new(
-      dry_run: dry_run, backoff_base_sec: 1, backoff_max_sec: 3600
+    store ||= Hive::Daemon::PrMergeRepository.new(
+      dry_run: true, backoff_base_sec: 1, backoff_max_sec: 3600
     )
     watcher = Hive::Daemon::PrMergeWatcher.new(
       poll_interval_sec: poll_interval_sec,

@@ -1331,28 +1331,11 @@ class AttemptsDispatcherTest < Minitest::Test
         ->(_task, stage) { Hive::ProviderRouting::Policy.legacy(stage: stage) }
       )
 
-      result = dispatch(dispatcher, task, request_id: "request-one")
-      state = dispatcher.send(:health_attempt_state, result.attempt.attempt_id)
-      assert_equal result.attempt.attempt_id, state.fetch("attempt_id")
-      assert_equal "launching", state.fetch("state")
-      assert_empty state.fetch("probe_bindings")
-
-      original_fetch = store.method(:fetch_hot)
-      store.define_singleton_method(:fetch_hot) do |_attempt_id|
-        raise Hive::Attempts::RepositoryError, "unavailable"
-      end
-      assert_nil dispatcher.send(:health_attempt_state, result.attempt.attempt_id)
-      store.define_singleton_method(:fetch_hot, original_fetch)
-
       opened = Object.new
-      test_case = self
       dispatcher.instance_variable_set(:@health_store, nil)
       with_replaced_singleton_method(
         Hive::ProviderHealth, :open,
-        lambda { |attempt_reader:|
-          test_case.assert_kind_of Method, attempt_reader
-          opened
-        }
+        -> { opened }
       ) do
         assert_same opened, dispatcher.send(:provider_health_store)
       end

@@ -14,18 +14,8 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
         root: File.join(root, "attempts"), migrate: true
       )
       terminal = terminal_attempt(attempts)
-      health = Hive::ProviderHealth::Store.new(
-        root: File.join(root, "health"),
-        clock: -> { NOW },
-        attempt_reader: lambda do |id|
-          record = attempts.fetch(id)
-          record && {
-            "attempt_id" => record.attempt_id,
-            "task_generation" => record.task_generation,
-            "ownership_fence" => record.ownership_generation,
-            "state" => record.state
-          }
-        end
+      health = Hive::ProviderHealth::Repository.new(
+        database: attempts.database, clock: -> { NOW }
       )
       factory = -> { Hive::ProviderHealth::AttemptObserver.new(store: health) }
       maintenance = Hive::Attempts::FinalizationMaintenance.new(

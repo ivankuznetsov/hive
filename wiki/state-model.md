@@ -1,13 +1,18 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-24
+updated: 2026-08-29
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Evidence-bound delivered/superseded closure is a separate task-local authority retained with an archived task, never fabricated attempt success.
+**TLDR**: Authored task/project documents remain in `.hive-state` and feature
+worktrees. A Sequel/SQLite runtime control plane owns coordination state:
+attempt lifecycle, dispatch requests/outbox, capacity, provider circuits and
+audit, routing decisions, and PR merge reconciliation. Evidence-bound
+delivered/superseded closure remains a task-local authority retained with an
+archived task; it is never fabricated attempt success.
 
 ## Stage directory layout
 
@@ -474,7 +479,7 @@ remain delivery records: after admission the claim stores the attempt
 ID/generation, follows a loss successor, and completes from its terminal
 receipt.
 
-`Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
+`Hive::RuntimeControlPlane::DispatchRepository.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
 Ordinary pending requests expire after `EXPIRY_SEC = 600`. V5 recovery

@@ -18,7 +18,7 @@ require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
@@ -237,7 +237,7 @@ module Hive
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           merge_intake: refactor_patrol_merge_reconciler,
-          store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
+          store: Hive::Daemon::PrMergeRepository.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
@@ -583,17 +583,13 @@ module Hive
       end
 
       # `hive daemon queue [list|show <id>|prune]` (AN-1/2/3) — read-only
-      # operator/agent inspection of the file-backed dispatch-request
-      # queue the bot writes and the daemon consumes. Runs in the CLI
-      # process (no daemon contact); reads the same `<state_home>/
-      # dispatch_requests/` directory the daemon scans each tick.
+      # operator/agent inspection of the SQLite dispatch rows the bot writes
+      # and the daemon consumes. Runs in the CLI process without daemon contact.
       #
       #   list   default — every pending request with age, verb, and
       #          whether it is expired / still allowlisted.
       #   show   <id> — full payload for one request_id.
-      #   prune  remove expired + malformed request files (the daemon
-      #          does this lazily on its own tick; this lets an operator
-      #          force it without waiting).
+      #   prune  remove expired requests (the daemon also does this lazily).
       # Read-only dispatch-request queue inspection. Delegates to the
       # extracted QueueCommand (#254) — the queue concern touches only
       # @queue_args / @json / @hive_home, orthogonal to the daemon

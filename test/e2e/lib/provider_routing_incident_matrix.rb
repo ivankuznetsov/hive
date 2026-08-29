@@ -7,13 +7,13 @@ require "hive/attempts/dispatcher"
 require "hive/attempts/evidence_channel"
 require "hive/attempts/repository"
 require "hive/attempts/supervisor"
-require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/recovery_coordinator"
 require "hive/lock"
 require "hive/markers"
 require "hive/provider_health/attempt_observer"
-require "hive/provider_health/store"
+require "hive/provider_health/repository"
 require "hive/provider_routing"
+require "hive/runtime_control_plane/dispatch_repository"
 
 module Hive
   module E2E
@@ -161,7 +161,7 @@ module Hive
           if reason == "requirements_incompatible"
             begin
               dispatch("strict-pin-#{reason}", policy: strict_policy)
-            rescue Hive::ProviderRouting::PolicyStore::InvalidSnapshot
+            rescue Hive::ProviderRouting::PolicyRepository::InvalidSnapshot
               assert!(@store.scan.records.empty?, "AE4 invalid requirements created an attempt")
               next
             end
@@ -174,7 +174,9 @@ module Hive
           assert!(result.status == :no_route, "AE4 #{reason} selected outside a strict pin")
           assert!(result.reason == "no_eligible_provider_route", "AE4 #{reason} returned wrong disposition")
           expected = reason == "circuit_cooldown" ? %w[circuit_open circuit_cooldown] : [ reason ]
-          assert!(pinned.exclusions.map(&:reason) == expected, "AE4 #{reason} lost its exact exclusion")
+          actual = pinned.exclusions.map(&:reason)
+          assert!(actual == expected,
+                  "AE4 #{reason} lost its exact exclusion: expected #{expected.inspect}, got #{actual.inspect}")
           assert!(outside.exclusions.map(&:reason).include?("hard_pin_mismatch"), "AE4 crossed pin boundary")
           assert_decision_persisted!(result)
         end
@@ -222,15 +224,24 @@ module Hive
         routed = dispatch_task(task, policy: policy, generation: generation.task_generation)
         assert!(routed.status == :no_route, "AE6 exhaustion did not cross durable admission")
         assert_decision_persisted!(routed)
+        @store.database.transaction do |db|
+          installation = db[:installations].first.fetch(:installation_id)
+          db[:projects].insert_conflict.insert(
+            project_id: "matrix-demo", installation_id: installation,
+            registration_id: "matrix-demo", name: "demo",
+            observed_path: root, state_root_path: root,
+            active: 1, registered_at: NOW.iso8601(6), last_observed_at: NOW.iso8601(6)
+          )
+        end
 
         coordinator = Hive::Daemon::RecoveryCoordinator.new(
           state_home: root,
           task_resolver: ->(**) { task },
           safety: ->(_row) { [ true, "safe" ] },
           generation_resolver: generation_resolver,
-          attempt_store: @store
+          attempt_store: @store, dispatch_repository: @dispatch_repository
         )
-        request = Hive::Daemon::DispatchRequestQueue::Request.new(
+        request = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
           request_id: "initial-route-admission", created_at: NOW,
           project: "demo", slug: task.slug,
           argv: [ "hive", "run", task.slug, "--stage", "4-execute", "--project", "demo" ],
@@ -240,11 +251,13 @@ module Hive
         first = coordinator.request_admission_failure(
           request: request, decision: routed.decision, now: NOW
         )
-        persisted = Hive::Daemon::DispatchRequestQueue.pending(state_home: root).fetch(0)
+        pending = @dispatch_repository.pending
+        assert!(!pending.empty?, "AE6 recovery was not persisted: #{first.inspect}")
+        persisted = pending.fetch(0)
         observed = coordinator.observe_admission_result(
           request: persisted, result: routed, now: NOW + 1
         )
-        pending = Hive::Daemon::DispatchRequestQueue.pending(state_home: root)
+        pending = @dispatch_repository.pending
         assert!(first.retry_count == 1 && observed.retry_count == 1, "AE6 charged exhaustion twice")
         assert!(pending.size == 1, "AE6 created a second recovery request")
         assert!(
@@ -277,26 +290,6 @@ module Hive
         end
         eligible = dispatch("operator-restored", policy: policy(routes: [ routes.first ]))
         assert!(eligible.accepted?, "AE7 operator reset did not restore durable admission")
-
-        start_cell("ae7-corruption")
-        blocked = @health.block(
-          scope: provider_scope, expected_generation: 0,
-          actor: ACTOR, reason: "preserve this block"
-        )
-        journal = @health.send(:journal_path, provider_scope)
-        path = File.join(@health.root, journal)
-        File.binwrite(path, File.binread(path) + "corrupt-interior\n")
-        unavailable_route = dispatch("corrupt-health", policy: policy(routes: [ routes.first ]))
-        unavailable = @health.inspect_scope(provider_scope)
-        repaired = @health.reset(
-          scope: provider_scope, corruption_token: unavailable.corruption_token,
-          actor: ACTOR, reason: "repair corrupt health scope"
-        )
-        assert!(unavailable_route.reason == "health_state_unavailable",
-                "AE7 corrupt health did not fail closed at admission")
-        assert!(unavailable.unavailable?, "AE7 corruption did not fail closed")
-        assert!(repaired.generation == blocked.generation + 1, "AE7 repair lost verified generation")
-        assert!(repaired.current.blocked?, "AE7 repair lost the verified manual block")
       end
 
       def implicit_and_explicit_one_route!
@@ -342,10 +335,14 @@ module Hive
       end
 
       def restart_cell!
-        @store = Hive::Attempts::Repository.new(root: File.join(@cell_root, "attempts"))
-        @health = Hive::ProviderHealth::Store.new(
-          root: File.join(@cell_root, "health"), clock: -> { NOW },
-          attempt_reader: method(:read_health_attempt)
+        @store = Hive::Attempts::Repository.new(
+          root: File.join(@cell_root, "attempts"), migrate: true
+        )
+        @health = Hive::ProviderHealth::Repository.new(
+          database: @store.database, clock: -> { NOW }
+        )
+        @dispatch_repository = Hive::RuntimeControlPlane::DispatchRepository.new(
+          database: @store.database
         )
         @observer = Hive::ProviderHealth::AttemptObserver.new(store: @health)
         @dispatcher = build_dispatcher
@@ -473,21 +470,6 @@ module Hive
         }
       end
 
-      def read_health_attempt(attempt_id)
-        record = @store.fetch_hot(attempt_id)
-        return nil unless record
-
-        {
-          "attempt_id" => record.attempt_id,
-          "task_generation" => record.task_generation,
-          "ownership_fence" => record.ownership_generation,
-          "state" => record.state,
-          "probe_bindings" => record["routing"].fetch("probe_bindings", [])
-        }
-      rescue Hive::Attempts::RepositoryError
-        nil
-      end
-
       def attempt_binding(record)
         route = record["routing"].fetch("route")
         Hive::ProviderHealth::AttemptBinding.new(
@@ -524,7 +506,7 @@ module Hive
       end
 
       def assert_decision_persisted!(result)
-        persisted = @store.decision_index.routing_decisions.find do |entry|
+        persisted = @store.routing_decisions.find do |entry|
           entry.fetch("decision").fetch("decision_id") == result.decision.decision_id
         end&.fetch("decision")
         assert!(persisted == result.decision.to_h, "routing decision was not durably indexed")

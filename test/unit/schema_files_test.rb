@@ -24,8 +24,7 @@ require "hive/agent_skills/provisioner"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
-require "hive/daemon/dispatch_request_queue"
-require "hive/daemon/dispatch_result_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/attempts/record"
 require "hive/provider_health"
 require "tmpdir"
@@ -100,7 +99,7 @@ class SchemaFilesTest < Minitest::Test
   end
 
   def test_provider_routing_exclusion_reason_vocabularies_do_not_drift
-    expected = Hive::Daemon::DispatchRequestQueue::ADMISSION_EXCLUSIONS.sort
+    expected = Hive::ProviderRouting::EXCLUSION_REASONS.sort
     %w[
       hive-dispatch-request.v5.json
       hive-attempt.v4.json
@@ -2941,29 +2940,6 @@ class SchemaFilesTest < Minitest::Test
     }
   end
 
-  # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
-
-  # A `<id>.json.claimed` file still self-declares schema=hive-dispatch-request
-  # /schema_version=1. The sidecar design (claim metadata in a separate
-  # `.claim` file) keeps the claimed JSON byte-identical to the original
-  # request, so it must still validate against the strict
-  # additionalProperties:false schema — no stray `claim` key.
-  def test_hive_dispatch_request_claimed_file_stays_schema_valid
-    q = Hive::Daemon::DispatchRequestQueue
-    Dir.mktmpdir("hive-dispatch-queue") do |dir|
-      q.write_request!(project: "hive", slug: "my-task",
-                       argv: [ "hive", "review", "my-task", "--json" ],
-                       request_id: "abc12345", state_home: dir,
-                       now: Time.utc(2026, 6, 3, 12, 0, 0))
-      claimed = q.claim("abc12345", pid: 4321, state_home: dir,
-                        now: Time.utc(2026, 6, 3, 12, 0, 1))
-      payload = JSON.parse(File.read(claimed))
-      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request"))))
-      assert_empty schemer.validate(payload).to_a,
-                   "claimed request JSON must remain a valid hive-dispatch-request (no extra `claim` key)"
-    end
-  end
-
   # ── hive-dispatch-result (#256, #258) ───────────────────────────────────
 
   def test_hive_dispatch_result_schema_file_exists_and_is_valid_json
@@ -2979,7 +2955,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_required_keys_match_producer
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result")))
     schema_required = doc["required"].sort
-    # Mirrors Hive::Daemon::DispatchResultQueue.write! — every emitted key
+    # Mirrors the runtime control-plane outbox producer — every emitted key
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
@@ -2991,18 +2967,35 @@ class SchemaFilesTest < Minitest::Test
 
   def test_hive_dispatch_result_producer_round_trip_validates
     Dir.mktmpdir("hive-dispatch-result") do |dir|
-      # Actual producer output, with a nil update_id and a negative
-      # (group/supergroup) chat_id — both must validate.
-      Hive::Daemon::DispatchResultQueue.write!(
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      timestamp = Time.utc(2026, 6, 3, 12, 0, 0).iso8601(6)
+      database.transaction do |db|
+        installation = db[:installations].first.fetch(:installation_id)
+        db[:projects].insert(
+          project_id: "project-hive", installation_id: installation,
+          registration_id: "hive", name: "hive", observed_path: "/tmp/hive",
+          state_root_path: "/tmp/hive/.hive-state", active: 1,
+          registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+      repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+      repository.write_request!(
+        project: "hive", slug: "my-task", argv: %w[hive review my-task --json],
+        request_id: "abc12345", now: Time.iso8601(timestamp)
+      )
+      repository.write_result!(
         chat_id: -1001234567890, project: "hive", slug: "my-task",
         request_id: "abc12345", exit_code: 1, command: "hive review my-task --json",
-        update_id: nil, state_home: dir, now: Time.utc(2026, 6, 3, 12, 0, 0)
+        update_id: nil, now: Time.iso8601(timestamp)
       )
-      written = Dir.glob(File.join(dir, "dispatch_results", "*.json")).first
-      payload = JSON.parse(File.read(written))
+      payload = database.read do |db|
+        Hive::RuntimeControlPlane::Codec.load_json(db[:dispatch_outbox].get(:payload_json))
+      end
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
       assert_empty schemer.validate(payload).to_a,
-                   "DispatchResultQueue.write! output (nil update_id, negative chat_id) must validate"
+                   "SQL outbox output (nil update_id, negative chat_id) must validate"
     end
   end
 
@@ -3028,13 +3021,17 @@ class SchemaFilesTest < Minitest::Test
     # queue_request_hash / queue_envelope were extracted from Commands::Daemon
     # into QueueCommand (#254); exercise them on the extracted class.
     require "hive/commands/daemon/queue_command"
+    repository = Object.new
+    repository.define_singleton_method(:expired?) { |_request| false }
+    repository.define_singleton_method(:valid_argv?) { |_argv| true }
     queue_cmd = Hive::Commands::Daemon::QueueCommand.new(
-      queue_args: [ "list" ], json: false, hive_home: Dir.mktmpdir
+      queue_args: [ "list" ], json: false, hive_home: Dir.mktmpdir,
+      dispatch_repository: repository
     )
-    req = Hive::Daemon::DispatchRequestQueue::Request.new(
+    req = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
       request_id: "req00001", created_at: Time.utc(2026, 6, 3, 12, 0, 0),
       project: "hive", slug: "my-task", argv: [ "hive", "review", "my-task", "--json" ],
-      requestor: "bot", chat_id: 12_345, update_id: nil, trigger: "autofix", path: nil
+      requestor: "bot", chat_id: 12_345, update_id: nil, trigger: "autofix"
     )
     request_hash = queue_cmd.send(:queue_request_hash, req)
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue"))))

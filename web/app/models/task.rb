@@ -9,7 +9,6 @@ require "hive/task_workspace/artifacts"
 require "hive/task_workspace/publication"
 require "hive/task_workspace/correlated_log"
 require "hive/artifacts/outcome_evidence/store"
-require "hive/attempts/store"
 require "hive/output_reference"
 
 class Task

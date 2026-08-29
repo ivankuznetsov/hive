@@ -4,13 +4,13 @@ require "fileutils"
 require "tmpdir"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/bot/dispatch_request_writer"
 
 # Plan 2026-05-28-002 §"Tests":
 #   "Two requests for same slug → second blocked until first reaps.
-#    Request blocked by per-slug quarantine → not dispatched, file
-#    stays for retry."
+#    Request blocked by per-slug quarantine → not dispatched, row
+#    stays queued for retry."
 class HiveDispatchRequestConcurrencyTest < Minitest::Test
   include HiveTestHelper
 
@@ -75,6 +75,10 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     @slug = "concurrent-260528-aaaa"
     @hive_state_path = File.join(@state_home, "project_state")
     FileUtils.mkdir_p(File.join(@hive_state_path, "stages", "2-brainstorm", @slug))
+    prepare_runtime_project(
+      state_home: @state_home, name: @project, path: @state_home,
+      state_root_path: @hive_state_path
+    )
 
     @supervisor = FakeSupervisor.new
     @status_consumer = FakeStatusConsumer.new
@@ -115,8 +119,10 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     end
   end
 
-  def queue_files
-    Dir.glob(File.join(@state_home, "dispatch_requests", "*.json")).sort
+  def queued_request_ids
+    with_runtime_dispatch_repository(@state_home) do |repository|
+      repository.pending.map(&:request_id)
+    end
   end
 
   def test_two_requests_for_same_slug_serialise_by_per_slug_gate
@@ -148,9 +154,8 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     refute_nil blocked, "the second same-slug request must log :dispatch_request_blocked"
     assert_equal "in_flight", blocked[1][:reason]
 
-    # The deferred request's file must remain on disk for the next tick.
-    remaining_ids = queue_files.map { |path| JSON.parse(File.read(path))["request_id"] }
-    assert_includes remaining_ids, request_b
+    # The deferred request row must remain queued for the next tick.
+    assert_includes queued_request_ids, request_b
 
     # Reap the first child. SUCCESS completion has no cooldown, so once A is
     # reaped the deferred request can dispatch in the same tick.
@@ -169,7 +174,7 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     assert_equal request_b, @supervisor.spawned.last[:request_id]
   end
 
-  def test_quarantined_slug_request_stays_on_disk_for_retry
+  def test_quarantined_slug_request_stays_queued_for_retry
     @controller.instance_variable_get(:@quarantine).add([ @project, @slug ])
 
     request_id = Hive::Bot::DispatchRequestWriter.write!(
@@ -186,6 +191,7 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     }
     refute_nil blocked, "the quarantined request must log :dispatch_request_blocked"
     assert_equal "quarantined", blocked[1][:reason]
-    refute_empty queue_files, "blocked-by-quarantine requests stay on disk for a later tick"
+    assert_includes queued_request_ids, request_id,
+                    "blocked-by-quarantine requests stay queued for a later tick"
   end
 end

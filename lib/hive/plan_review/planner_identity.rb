@@ -36,8 +36,9 @@ module Hive
       # codex/claude-* pair which every planner revision retried forever.
       def recoverable?(identity)
         row = stringify(identity)
-        row["provider"].to_s == "codex" &&
-          row["model"].to_s.downcase.match?(%r{\A(?:claude-|anthropic/claude-)})
+        support = Hive::AgentSupport.for(row["provider"])
+        support&.respond_to?(:recoverable_planner_identity?) &&
+          support.recoverable_planner_identity?(row)
       end
 
       def repair(identity, cfg:)

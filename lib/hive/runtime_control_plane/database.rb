@@ -8,12 +8,14 @@ require "sqlite3"
 module Hive
   module RuntimeControlPlane
     EXPECTED_TABLES = %i[
-      attempt_accounting attempt_relationships attempts capacity_reservations
+      attempt_accounting attempt_failure_cohorts attempt_failure_events
+      attempt_lost_outcomes
+      attempt_relationships attempts capacity_reservations
       daemon_runtime dispatch_outbox dispatch_requests installations
       maintenance_checkpoints patrol_allowances payload_references
       pr_merge_reconciliations projections projects provider_audit
       provider_circuits routing_policies task_counters task_leases task_subjects
-      terminal_pending_publications token_usage
+      terminal_pending_publications token_usage attempt_routing_decisions
     ].freeze
 
     EXPECTED_INDEXES = %i[

@@ -3,7 +3,7 @@ require "fileutils"
 require "json"
 require "time"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/module/install"
 require "hive/commands/module/update"
 require "hive/module_package/catalog_client"
@@ -349,7 +349,7 @@ module Hive
       end
 
       def attempt_store(run_home)
-        Hive::Attempts::Store.new(root: File.join(run_home, "attempts"))
+        Hive::Attempts::Repository.new(root: File.join(run_home, "attempts"))
       end
 
       def state_path(sandbox) = File.join(sandbox, ".hive-state")

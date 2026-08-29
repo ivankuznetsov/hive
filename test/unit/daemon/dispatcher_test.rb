@@ -5531,7 +5531,7 @@ end
 
   def test_one_daemon_tick_performs_one_hot_attempt_scan_and_no_cold_proof_reads
     Dir.mktmpdir("hive-attempt-tick") do |root|
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       scans = 0
       original_scan = store.method(:scan)
       store.define_singleton_method(:scan) do
@@ -5586,7 +5586,7 @@ end
 
   def test_terminal_attempt_receipt_completes_claimed_delivery_without_wait2
     Dir.mktmpdir("hive-attempt-delivery") do |state_home|
-      store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(state_home, "attempts"), migrate: true)
       launching = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "p1", task_slug: "demo-task",
@@ -5651,7 +5651,7 @@ end
 
   def test_failed_claimed_delivery_leaves_request_ack_pending_and_hot_record_present
     Dir.mktmpdir("hive-attempt-delivery-failure") do |state_home|
-      store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(state_home, "attempts"), migrate: true)
       launching = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "p1", task_slug: "demo-task",

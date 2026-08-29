@@ -1636,10 +1636,10 @@ class CommandsStatusTest < Minitest::Test
         Hive::Task.new(folder)
       end
       stores = []
-      original_new = Hive::Attempts::Store.method(:new)
+      original_new = Hive::Attempts::Repository.method(:new)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :new,
+        Hive::Attempts::Repository, :new,
         lambda do |**kwargs|
           stores << kwargs unless kwargs.key?(:root)
           original_new.call(**kwargs)
@@ -1696,10 +1696,10 @@ class CommandsStatusTest < Minitest::Test
         { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
       end
       opens = 0
-      original_runtime = Hive::Attempts::Store.method(:runtime)
+      original_runtime = Hive::Attempts::Repository.method(:runtime)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :runtime,
+        Hive::Attempts::Repository, :runtime,
         lambda do |**kwargs|
           opens += 1
           original_runtime.call(**kwargs)
@@ -1725,7 +1725,7 @@ class CommandsStatusTest < Minitest::Test
       store
     end
 
-    with_replaced_singleton_method(Hive::Attempts::Store, :runtime, factory) do
+    with_replaced_singleton_method(Hive::Attempts::Repository, :runtime, factory) do
       command = Hive::Commands::Status.new
       2.times { command.send(:json_payload, []) }
     end

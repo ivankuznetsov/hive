@@ -31,7 +31,7 @@ class WebModuleLifecycleTest < Minitest::Test
       catalog = FakeCatalog.new(package, resolution)
       lifecycle = Hive::Web::ModuleLifecycle.new(
         catalog_client_factory: -> { catalog }, committer: ->(*) { },
-        attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
+        attempt_store: Hive::Attempts::Repository.new(root: File.join(root, "attempts"), create_directories: false),
         clock: -> { Time.utc(2026, 7, 22, 12, 0, 0) }
       )
       choices = {

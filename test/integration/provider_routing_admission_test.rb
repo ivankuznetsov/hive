@@ -57,7 +57,9 @@ class ProviderRoutingAdmissionTest < Minitest::Test
 
   def setup
     @root = Dir.mktmpdir("provider-routing-admission")
-    @store = Hive::Attempts::Store.new(root: File.join(@root, "attempts"))
+    @store = Hive::Attempts::Repository.new(
+      root: File.join(@root, "attempts"), migrate: true
+    )
     @launcher = Launcher.new
     @ids = (1..20).map { |number| "attempt-#{number}" }.each
     @decision_ids = (1..20).map { |number| "decision-#{number}" }.each
@@ -105,7 +107,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_equal policy.digest, result.attempt["routing"].fetch("policy_digest")
     assert_equal 2, result.attempt["routing"].fetch("circuit_generations").length
     assert_empty result.attempt["routing"].fetch("probe_bindings")
-    assert_equal result.decision.to_h, @store.decision_index.routing_decision(
+    assert_equal result.decision.to_h, @store.routing_decision(
       task_generation: result.attempt.task_generation,
       subject: result.attempt.subject
     )
@@ -255,7 +257,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
       assert_nil result.attempt
     end
     assert_equal results.map { |result| result.decision.to_h }.sort_by { |decision| decision["decision_id"] },
-                 @store.decision_index.routing_decisions.map { |entry| entry.fetch("decision") }
+                 @store.routing_decisions.map { |entry| entry.fetch("decision") }
                    .sort_by { |decision| decision["decision_id"] }
   end
 

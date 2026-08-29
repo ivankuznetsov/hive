@@ -56,8 +56,10 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core --> workflow_values[Workflow Creator Values]
   patrol_fix[Patrol Fix Workflow Core] --> git_gate[Safe Agent Git Gate]
+  provider_routing[Provider Routing Policy] --> runtime[Runtime Control Plane]
   attempts[Attempts] --> provider_health[Provider Health]
   attempts --> provider_routing[Provider Routing Policy]
+  attempts --> runtime
   routing_operations[Provider Routing Operations] --> attempts
   routing_operations --> provider_health
   routing_operations --> provider_routing
@@ -73,14 +75,16 @@ stable identity adapters, and the complete target coordination schema. The
 boundary does not activate any legacy runtime consumer or move task/workflow
 authority out of project task folders.
 
-The clean cutover has three migration-only helpers that are deliberately not
-loaded by that entry point. `LegacyImport` is a total read-only decoder with a
+The clean cutover has three helpers that are deliberately not loaded by the
+minimal entry point. `LegacyImport` is a migration-only total decoder with a
 per-source disposition ledger for the last filesystem runtime layout;
 `PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
 addresses only at terminal publication; and `CutoverManifest` publishes a
 digest-bound, owner-private inventory outside both the legacy roots and the
-candidate database. Existing runtime consumers still use their legacy stores
-until the fleet-wide activation unit switches them together.
+candidate database. Attempts and routing-policy persistence now use the
+activated runtime control plane directly; later activation units still own the
+remaining domains. Normal runtime never creates, migrates, imports, or repairs
+legacy state.
 
 ## Patrol Fix boundary
 

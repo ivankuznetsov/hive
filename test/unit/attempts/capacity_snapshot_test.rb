@@ -4,208 +4,96 @@ require "hive/attempts/capacity_snapshot"
 class AttemptsCapacitySnapshotTest < Minitest::Test
   include HiveTestHelper
 
-  NOW = Time.utc(2026, 7, 16, 12, 0, 0)
-  CLAIM_CAPABILITY = "c" * 64
+  NOW = Time.utc(2026, 8, 10, 12)
 
-  def test_live_reservations_are_authoritative_and_terminal_lost_are_excluded
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      live = create(store, attempt_id: "live", project: "p1", task_slug: "s1")
-      claimed = store.claim(
-        live, owner: owner, claim_capability: CLAIM_CAPABILITY,
-        first_heartbeat_timeout_sec: 30, now: NOW + 1
-      )
-      store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+  def test_durable_reservations_are_the_capacity_authority
+    with_repository do |repository|
+      live = create(repository, attempt_id: "live", task_slug: "task-1")
+      lost = create(repository, attempt_id: "lost", task_slug: "task-2")
+      repository.mark_lost(lost, reason: "stale_generation", now: NOW + 1)
 
-      lost = create(store, attempt_id: "lost", project: "p1", task_slug: "s2", generation: "g2")
-      store.mark_lost(lost, reason: "owner_gone", now: NOW + 1)
-
-      snapshot = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 3)
-      assert_equal 1, snapshot.global_count
-      assert_equal 1, snapshot.project_count("p1")
-      assert snapshot.task_reserved?(project: "p1", task_slug: "s1")
-      refute snapshot.task_reserved?(project: "p1", task_slug: "s2")
-      assert_equal 2, snapshot.daily_count("p1", NOW.to_date),
-                   "daily starts retain lost work while live capacity excludes it"
-    end
-  end
-
-  def test_corrupt_records_reserve_global_capacity_fail_closed
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      File.write(File.join(store.records_root, "corrupt.json"), "{")
-
-      snapshot = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW)
-      assert_equal 1, snapshot.global_count
-      assert_equal 1, snapshot.invalid_count
-      assert snapshot.at_limit?(project: "p1", task_slug: "s1", date: NOW.to_date,
-                                max_global: 1, max_per_project: 2, max_daily: 10)
-    end
-  end
-
-  def test_lost_worker_reserves_capacity_until_safe_absence_is_recorded
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      launching = create(store, attempt_id: "lost-worker", project: "p1", task_slug: "s1")
-      claimed = store.claim(
-        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
-        first_heartbeat_timeout_sec: 30, now: NOW + 1
-      )
-      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
-      running = store.checkpoint(
-        running, checkpoint: running.checkpoint, worker: owner, now: NOW + 3
-      )
-      lost = store.mark_lost(running, reason: "owner_gone", now: NOW + 4)
-
-      pending = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 5)
-      assert pending.task_reserved?(project: "p1", task_slug: "s1")
-
-      outcome_dir = File.join(store.outputs_root, lost.attempt_id)
-      FileUtils.mkdir_p(outcome_dir)
-      corrupt_outcome = File.join(outcome_dir, "lost-outcome.json")
-      File.write(corrupt_outcome, "{")
-      corrupt = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 5)
-      assert corrupt.task_reserved?(project: "p1", task_slug: "s1"),
-             "an unreadable cleanup outcome must reserve capacity fail-closed"
-      File.unlink(corrupt_outcome)
-
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
-      outcomes.ensure_for(lost, now: NOW + 5)
-      outcomes.update(lost, now: NOW + 6, status: "manual", cleanup: "still_alive")
-      unsafe = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 6)
-      assert unsafe.task_reserved?(project: "p1", task_slug: "s1")
-      assert_includes unsafe.reserved_attempt_ids, lost.attempt_id
-
-      outcomes.update(lost, now: NOW + 7, status: "ready", cleanup: "absent")
-      safe = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 7)
-      refute safe.task_reserved?(project: "p1", task_slug: "s1")
-      refute_includes safe.reserved_attempt_ids, lost.attempt_id
-    end
-  end
-
-  def test_invalid_future_timestamp_is_ignored_by_daily_accounting
-    record = Object.new
-    record.define_singleton_method(:live?) { false }
-    record.define_singleton_method(:receipt) { nil }
-    record.define_singleton_method(:[]) do |key|
-      { "accepted_at" => "not-a-time", "project" => "demo" }.fetch(key)
-    end
-    scan = Hive::Attempts::Scan.new(records: [ record ], invalid_records: [])
-    store = Object.new
-    store.define_singleton_method(:scan) { scan }
-
-    snapshot = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW)
-    assert_equal 0, snapshot.daily_count("demo", NOW.to_date)
-  end
-
-  def test_supplied_hot_scan_is_reused_without_store_rescan
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      create(store, attempt_id: "live", project: "p1", task_slug: "s1")
-      hot_scan = store.scan
-      store.define_singleton_method(:scan) { raise "unexpected rescan" }
-
-      snapshot = Hive::Attempts::CapacitySnapshot.build(
-        store: store, scan: hot_scan, now: NOW
-      )
+      snapshot = Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW)
 
       assert_equal 1, snapshot.global_count
-      assert_equal 1, snapshot.daily_count("p1", NOW.to_date)
+      assert_equal [ live.attempt_id ], snapshot.reserved_attempt_ids
+      assert_equal 1, snapshot.project_count("demo")
+      assert snapshot.task_reserved?(project: "demo", task_slug: "task-1")
+      refute snapshot.task_reserved?(project: "demo", task_slug: "task-2")
     end
   end
 
-  def test_admission_view_delegates_routing_decision_lookup_to_the_point_index
-    index = Object.new
-    index.define_singleton_method(:routing_decision) do |task_generation:, subject:|
-      { "task_generation" => task_generation, "subject" => subject }
-    end
-    store = Object.new
-    store.define_singleton_method(:decision_index) { index }
-    view = Hive::Attempts::AdmissionView.new(
-      store: store,
-      hot_scan: Hive::Attempts::Scan.new(records: [], invalid_records: [])
-    )
-    subject = { "kind" => "task_stage" }
-
-    assert_equal(
-      { "task_generation" => "generation-1", "subject" => subject },
-      view.routing_decision(task_generation: "generation-1", subject: subject)
-    )
-  end
-
-  def test_find_forgets_a_cached_record_when_point_authority_is_missing
+  def test_admission_view_refreshes_from_sql_without_repairing_indexes
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      record = create(store, attempt_id: "gone", project: "p1", task_slug: "s1")
-      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
-      File.unlink(store.record_path(record.attempt_id))
+      first = Hive::Attempts::Repository.new(root: root, migrate: true)
+      view = Hive::Attempts::AdmissionView.new(store: first, hot_scan: first.scan)
+      second = Hive::Attempts::Repository.new(root: root, migrate: true)
+      created = create(second, attempt_id: "external", task_slug: "external")
 
-      assert_nil view.find(record.attempt_id)
-      assert_nil view.find(record.attempt_id)
+      assert_empty view.refresh_for_admission
+      assert_equal created.to_h, view.find(created.attempt_id).to_h
+      assert_equal 1, view.capacity(now: NOW).global_count
     end
   end
 
-  def test_records_refreshes_cached_records_and_indexes_the_latest_state
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      record = create(store, attempt_id: "live", project: "p1", task_slug: "s1")
-      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
-      claimed = store.claim(
-        record, owner: owner, claim_capability: CLAIM_CAPABILITY,
-        first_heartbeat_timeout_sec: 30, now: NOW + 1
+  def test_daily_accounting_is_queryable_and_refunds_an_unstarted_loss
+    with_repository do |repository|
+      charged = create(repository, attempt_id: "charged", task_slug: "task-1")
+      refundable = create(repository, attempt_id: "refundable", task_slug: "task-2")
+      lost = repository.mark_lost(refundable, reason: "handoff_failed", now: NOW + 1)
+      repository.refund_unstarted(lost)
+
+      snapshot = Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW)
+      assert_equal 1, snapshot.daily_count("demo", NOW.to_date)
+      assert_equal false,
+                   repository.daily_acceptances(date: NOW.to_date).fetch(charged.attempt_id).fetch("refunded")
+      assert_equal true,
+                   repository.daily_acceptances(date: NOW.to_date).fetch(lost.attempt_id).fetch("refunded")
+    end
+  end
+
+  def test_capacity_limits_cover_host_project_task_and_daily_dimensions
+    with_repository do |repository|
+      create(repository, attempt_id: "live", task_slug: "task-1")
+      snapshot = Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW)
+
+      assert snapshot.at_limit?(
+        project: "demo", task_slug: "task-2", date: NOW.to_date,
+        max_global: 1, max_per_project: 2, max_daily: 10
       )
-
-      refreshed = view.records.fetch(0)
-
-      assert_equal claimed.lease_version, refreshed.lease_version
-      assert_equal claimed.state, refreshed.state
-      assert_equal 1, store.decision_index.daily_count(project: "p1", date: NOW.to_date)
-    end
-  end
-
-  def test_records_raise_when_a_cached_record_becomes_unreadable
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      record = create(store, attempt_id: "corrupt", project: "p1", task_slug: "s1")
-      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
-      File.write(store.record_path(record.attempt_id), "{")
-
-      assert_raises(Hive::Attempts::StoreError) { view.records }
-    end
-  end
-
-  def test_admission_refresh_keeps_an_unreadable_active_reservation_fail_closed
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      record = create(store, attempt_id: "corrupt", project: "p1", task_slug: "s1")
-      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
-      File.write(store.record_path(record.attempt_id), "{")
-
-      records = store.with_admission_lock { view.refresh_for_admission }
-
-      assert_empty records
-      reservation = store.decision_index.live_reservations.fetch(record.attempt_id)
-      assert_equal "active", reservation.fetch("phase")
-      assert_equal "p1", reservation.fetch("project")
+      assert snapshot.at_limit?(
+        project: "demo", task_slug: "task-1", date: NOW.to_date,
+        max_global: 2, max_per_project: 2, max_daily: 10
+      )
+      assert snapshot.at_limit?(
+        project: "demo", task_slug: "task-2", date: NOW.to_date,
+        max_global: 2, max_per_project: 1, max_daily: 10
+      )
+      assert snapshot.at_limit?(
+        project: "demo", task_slug: "task-2", date: NOW.to_date,
+        max_global: 2, max_per_project: 2, max_daily: 1
+      )
     end
   end
 
   private
 
-  def create(store, attempt_id:, project:, task_slug:, generation: "g1")
-    store.create_launching(
-      attempt_id: attempt_id, request_id: "r-#{attempt_id}", predecessor_attempt_id: nil,
-      task_id: "42", project: project, task_slug: task_slug, intended_stage: "4-execute",
-      task_generation: generation, progress_token: "progress", provider: "codex",
+  def with_repository
+    with_tmp_dir do |root|
+      yield Hive::Attempts::Repository.new(root: root, migrate: true)
+    end
+  end
+
+  def create(repository, attempt_id:, task_slug:)
+    repository.create_launching(
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}",
+      predecessor_attempt_id: nil, task_id: task_slug, project: "demo",
+      task_slug: task_slug, intended_stage: "4-execute",
+      task_generation: "generation-#{attempt_id}", ownership_generation: "owner-1",
+      task_input_epoch: 1, progress_token: "progress-1", provider: "codex",
       worker_argv: [ "hive", "run", task_slug ],
-      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
       launch_timeout_sec: 30, now: NOW
     )
-  end
-
-  def owner
-    { "pid" => Process.pid, "start_fingerprint" => "start",
-      "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp }
   end
 end

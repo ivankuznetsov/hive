@@ -18,18 +18,20 @@ class AttemptsCommandSuperviseTest < Minitest::Test
 
     error = assert_raises(Hive::InvalidTaskPath) do
       Hive::Commands::AttemptSupervise.from_argv(
-        [ "attempt", "--store-root", "/tmp", "--heartbeat-sec", "not-a-number" ]
+        [ "attempt", "--store-root", "/tmp", "--database-path", "/tmp/runtime.db",
+          "--heartbeat-sec", "not-a-number" ]
       )
     end
     assert_includes error.message, "invalid attempt supervisor invocation"
 
     command = Hive::Commands::AttemptSupervise.from_argv(
-      [ "attempt", "--store-root", "/tmp", "--heartbeat-sec", "1" ]
+      [ "attempt", "--store-root", "/tmp", "--database-path", "/tmp/runtime.db",
+        "--heartbeat-sec", "1" ]
     )
     refute command.instance_variable_defined?(:@worker_argv)
 
     command = Hive::Commands::AttemptSupervise.new(
-      attempt_id: "attempt", store_root: "/tmp",
+      attempt_id: "attempt", store_root: "/tmp", database_path: "/tmp/runtime.db",
       heartbeat_sec: 1, stale_sec: 2, first_heartbeat_timeout_sec: 2,
       timeout_sec: nil, kill_grace_sec: 1
     )

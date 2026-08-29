@@ -113,7 +113,9 @@ class StagesBaseUsageTest < Minitest::Test
         ownership_generation: "owner-3", project: task.project_name,
         task_slug: task.slug, intended_stage: "2-brainstorm"
       )
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), migrate: true
+      )
       store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1",
         predecessor_attempt_id: nil, task_id: task.id,
@@ -145,7 +147,7 @@ class StagesBaseUsageTest < Minitest::Test
           result
         end
         with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
-          with_replaced_singleton_method(Hive::Attempts::Store, :new, ->(**) { store }) do
+          with_replaced_singleton_method(Hive::Attempts::Repository, :new, ->(**) { store }) do
             result = spawn(task, agent_custody: agent_custody)
             assert_equal :waiting, result[:status]
           end

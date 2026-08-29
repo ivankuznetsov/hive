@@ -492,7 +492,7 @@ class HiveCommandsApproveTest < Minitest::Test
   def test_revisited_approval_route_keeps_completed_receipt_and_starts_new_operation
     with_tmp_dir do |folder|
       now = Time.utc(2026, 8, 25, 10, 0, 0)
-      store = Hive::Attempts::Store.new(root: File.join(folder, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(folder, "attempts"), migrate: true)
       first = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task",

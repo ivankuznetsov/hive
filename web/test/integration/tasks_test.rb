@@ -487,9 +487,15 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   test "diagnostic log affordance reads only the receipt-correlated reference" do
     root = Dir.mktmpdir("hive-web-correlated-log")
-    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
-    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
-    store = Hive::Attempts::Store.new(root: root)
+    previous_home = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = root
+    store = Hive::Attempts::Repository.new(
+      root: Hive::Paths.runtime_payload_root(root),
+      database: Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ),
+      migrate: true
+    )
     writer = store.log_archive.open_writer("receipt-attempt")
     writer.append("stderr", "exact receipt failure\n")
     writer.close
@@ -563,7 +569,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   ensure
     writer&.close unless writer&.closed?
-    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
+    ENV["HIVE_HOME"] = previous_home
     FileUtils.rm_rf(root) if root
   end
 

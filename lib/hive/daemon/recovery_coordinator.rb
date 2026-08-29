@@ -5,7 +5,7 @@ require "time"
 require "hive/agent_limit"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/daemon/auto_retry_safety"
 require "hive/daemon/dispatch_request_queue"
 require "hive/lock"
@@ -147,7 +147,7 @@ module Hive
         @generation_resolver = generation_resolver || method(:resolve_generation)
         @attempt_store = attempt_store
         @attempt_store_factory = attempt_store_factory || lambda do
-          Hive::Attempts::Store.open_default(state_home: @state_home)
+          Hive::Attempts::Repository.open_default(state_home: @state_home)
         end
       end
 
@@ -1222,7 +1222,7 @@ module Hive
           "terminal_lease_version" => terminal["terminal_lease_version"]
         }
         source_receipt_matches?(record, identity) ? identity.freeze : nil
-      rescue Hive::Attempts::StoreError
+      rescue Hive::Attempts::RepositoryError
         nil
       end
 
@@ -1233,13 +1233,13 @@ module Hive
         if hot
           return false unless source_receipt_matches?(hot, source_receipt)
 
-          pending = attempts_store.pending_finalizations.fetch(hot.attempt_id)
+          pending = attempts_store.publication(hot.attempt_id)
           return pending&.dig("consumers", "provider_health") == true
         end
 
-        proof = attempts_store.permanent_proofs.fetch(source_receipt.fetch("attempt_id"))
+        proof = attempts_store.fetch(source_receipt.fetch("attempt_id"))
         source_receipt_matches?(proof, source_receipt)
-      rescue KeyError, Hive::Attempts::StoreError
+      rescue KeyError, Hive::Attempts::RepositoryError
         false
       end
 

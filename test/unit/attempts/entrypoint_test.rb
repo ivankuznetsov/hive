@@ -128,7 +128,7 @@ class AttemptsEntrypointTest < Minitest::Test
     )
     maintenance = Object.new
     maintenance.define_singleton_method(:run_if_due) do |now:|
-      raise Hive::Attempts::StoreError, "maintenance failed at #{now}"
+      raise Hive::Attempts::RepositoryError, "maintenance failed at #{now}"
     end
     dispatched = false
     dispatcher = Object.new
@@ -168,7 +168,7 @@ class AttemptsEntrypointTest < Minitest::Test
     end
     now = Time.utc(2026, 8, 10, 12, 0, 0)
 
-    with_replaced_singleton_method(Hive::Attempts::Store, :new, -> { store }) do
+    with_replaced_singleton_method(Hive::Attempts::Repository, :new, -> { store }) do
       with_replaced_singleton_method(
         Hive::Attempts::FinalizationMaintenance, :runtime,
         lambda { |store:|

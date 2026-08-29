@@ -20,6 +20,10 @@ module Hive
       File.join(root, "runtime-control-plane.sqlite3")
     end
 
+    def runtime_payload_root(root = state_home)
+      File.join(root, "runtime-payloads")
+    end
+
     def cache_home
       hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
     end

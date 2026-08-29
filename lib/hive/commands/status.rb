@@ -17,7 +17,7 @@ require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/patrol_fix/attempt_diagnostic"
 require "hive/task_projection/store"
 require "hive/task_closure"
@@ -1607,7 +1607,7 @@ module Hive
       def acquire_status_attempt_store
         return false if @status_attempt_store
 
-        @status_attempt_store = Hive::Attempts::Store.runtime(
+        @status_attempt_store = Hive::Attempts::Repository.runtime(
           create_directories: false
         ).projection_reader
         true

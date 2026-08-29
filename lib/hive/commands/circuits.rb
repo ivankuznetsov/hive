@@ -1,6 +1,6 @@
 require "etc"
 require "json"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/config"
 require "hive/provider_health"
 require "hive/provider_routing/operational_projection"
@@ -63,7 +63,7 @@ module Hive
         when Hive::ProviderHealth::StaleGeneration then "stale_generation"
         when Hive::ProviderHealth::InvalidMutation, Hive::ProviderHealth::InvalidScope
           "usage"
-        when Hive::ProviderHealth::Unavailable, Hive::Attempts::StoreError
+        when Hive::ProviderHealth::Unavailable, Hive::Attempts::RepositoryError
           "unavailable"
         when Hive::ConfigError then "config"
         else "internal"
@@ -393,7 +393,7 @@ module Hive
       end
 
       def attempt_store
-        @attempt_store ||= Hive::Attempts::Store.open_default
+        @attempt_store ||= Hive::Attempts::Repository.open_default
       end
 
       def now = @clock.call.utc

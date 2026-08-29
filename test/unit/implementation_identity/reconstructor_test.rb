@@ -367,7 +367,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       )
       File.write(task.state_file, "body")
       @explicit_execute = explicit_execute
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       current = running_attempt(store, "current-open-pr", "5-open-pr", "claude")
       yield task, store, current
     ensure

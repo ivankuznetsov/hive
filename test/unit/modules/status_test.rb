@@ -1,6 +1,6 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/inspector"
@@ -399,7 +399,7 @@ class ModulesStatusTest < Minitest::Test
   def inspector(store, root, available: {})
     Hive::Modules::Inspector.new(
       store: store, project_id: "project-1",
-      attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
+      attempt_store: Hive::Attempts::Repository.new(root: File.join(root, "attempts"), create_directories: false),
       secret_availability: ->(name) { available.fetch(name, false) }, clock: -> { NOW }
     )
   end

@@ -368,44 +368,14 @@ class AttemptsReconcilerTest < Minitest::Test
         scans += 1
         original_scan.call
       end
-      proof_reads = 0
-      proofs = store.permanent_proofs
-      original_fetch = proofs.method(:fetch)
-      proofs.define_singleton_method(:fetch) do |attempt_id|
-        proof_reads += 1
-        original_fetch.call(attempt_id)
-      end
-
       snapshot = reconciler(store, :matching).reconcile(now: NOW + 1)
 
       assert_equal 1, scans
-      assert_equal 0, proof_reads
       assert_equal [ "attempt-1" ], snapshot.hot_scan.records.map(&:attempt_id)
       assert_same snapshot.hot_scan, snapshot.admission_view.hot_scan
-      indexed_capacity = store.with_admission_lock do
-        records = snapshot.admission_view.refresh_for_admission
-        snapshot.admission_view.capacity(now: NOW + 1, records: records)
-      end
-      assert_equal snapshot.capacity, indexed_capacity
-    end
-  end
-
-  def test_zero_hot_reconciliation_is_independent_of_thirty_thousand_proofs
-    with_tmp_dir do |root|
-      empty = Hive::Attempts::Store.new(root: File.join(root, "empty"))
-      history = Hive::Attempts::Store.new(root: File.join(root, "history"))
-      proof_store = history.permanent_proofs
-      30_000.times do |index|
-        path = proof_store.path_for(format("history-%05d", index))
-        FileUtils.mkdir_p(File.dirname(path))
-        File.binwrite(path, "proof fixture must stay unopened\n")
-      end
-
-      empty_metrics = reconcile_access_metrics(empty)
-      history_metrics = reconcile_access_metrics(history)
-
-      assert_equal({ hot_scans: 1, cold_opens: 0, cold_scans: 0 }, empty_metrics)
-      assert_equal empty_metrics, history_metrics
+      records = snapshot.admission_view.refresh_for_admission
+      assert_equal snapshot.capacity,
+                   snapshot.admission_view.capacity(now: NOW + 1, records: records)
     end
   end
 
@@ -429,7 +399,9 @@ class AttemptsReconcilerTest < Minitest::Test
   private
 
   def with_store
-    with_tmp_dir { |root| yield Hive::Attempts::Store.new(root: root) }
+    with_tmp_dir do |root|
+      yield Hive::Attempts::Repository.new(root: root, migrate: true)
+    end
   end
 
   def reconciler(store, owner_status)
@@ -458,57 +430,5 @@ class AttemptsReconcilerTest < Minitest::Test
       first_heartbeat_timeout_sec: 30, now: NOW
     )
     store.first_heartbeat(claimed, stale_sec: stale_sec, now: NOW + 1)
-  end
-
-  def reconcile_access_metrics(store)
-    metrics = { hot_scans: 0, cold_opens: 0, cold_scans: 0 }
-    roots = [ store.proof_root, store.cold_logs_root ].map { |path| File.expand_path(path) }
-    original_scan = store.method(:scan)
-    store.define_singleton_method(:scan) do
-      metrics[:hot_scans] += 1
-      original_scan.call
-    end
-    originals = {
-      file_open: File.method(:open),
-      file_binread: File.method(:binread),
-      dir_glob: Dir.method(:glob),
-      dir_children: Dir.method(:children),
-      dir_each_child: Dir.method(:each_child)
-    }
-    cold_path = lambda do |value|
-      path = File.expand_path(value.to_s)
-      roots.any? { |root| path == root || path.start_with?("#{root}/") }
-    end
-    File.singleton_class.define_method(:open) do |path, *args, **kwargs, &block|
-      metrics[:cold_opens] += 1 if cold_path.call(path)
-      originals.fetch(:file_open).call(path, *args, **kwargs, &block)
-    end
-    File.singleton_class.define_method(:binread) do |path, *args|
-      metrics[:cold_opens] += 1 if cold_path.call(path)
-      originals.fetch(:file_binread).call(path, *args)
-    end
-    Dir.singleton_class.define_method(:glob) do |pattern, *args, **kwargs, &block|
-      metrics[:cold_scans] += 1 if cold_path.call(pattern)
-      originals.fetch(:dir_glob).call(pattern, *args, **kwargs, &block)
-    end
-    %i[children each_child].each do |method|
-      original = originals.fetch("dir_#{method}".to_sym)
-      Dir.singleton_class.define_method(method) do |path, *args, **kwargs, &block|
-        metrics[:cold_scans] += 1 if cold_path.call(path)
-        original.call(path, *args, **kwargs, &block)
-      end
-    end
-
-    reconciler(store, :matching).reconcile(now: NOW + 1)
-    metrics
-  ensure
-    store.define_singleton_method(:scan, original_scan) if original_scan
-    File.singleton_class.define_method(:open, originals.fetch(:file_open)) if originals
-    File.singleton_class.define_method(:binread, originals.fetch(:file_binread)) if originals
-    if originals
-      Dir.singleton_class.define_method(:glob, originals.fetch(:dir_glob))
-      Dir.singleton_class.define_method(:children, originals.fetch(:dir_children))
-      Dir.singleton_class.define_method(:each_child, originals.fetch(:dir_each_child))
-    end
   end
 end

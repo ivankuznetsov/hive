@@ -45,16 +45,15 @@ Sequel.migration do
     end
 
     create_table(:routing_policies) do
-      foreign_key :project_id, :projects, type: String, key: :project_id,
+      foreign_key :installation_id, :installations, type: String, key: :installation_id,
                   null: false, on_delete: :cascade, on_update: :cascade
       String :policy_key, null: false
       Integer :revision, null: false
       String :policy_digest, null: false
       String :policy_json, text: true, null: false
       String :updated_at, null: false
-      primary_key [ :project_id, :policy_key ]
+      primary_key [ :installation_id, :policy_key ]
       check Sequel.lit("revision >= 0")
-      unique [ :project_id, :policy_digest ], name: :routing_policies_digest_uidx
     end
 
     create_table(:dispatch_requests) do
@@ -65,20 +64,19 @@ Sequel.migration do
                   on_delete: :cascade, on_update: :cascade
       String :subject_kind, null: false
       String :subject_key, null: false
-      Integer :task_generation, null: false
+      String :task_generation, null: false
       String :intended_stage, null: false
       String :state, null: false
       Integer :priority, null: false, default: 0
       String :idempotency_key
       String :claim_owner
       String :claimed_at
-      String :source_fingerprint
+      String :source_fingerprint, null: false
       String :routing_policy_digest
       String :payload_json, text: true, null: false
       String :created_at, null: false
       String :updated_at, null: false
       String :retain_until
-      check Sequel.lit("task_generation >= 0")
       check Sequel.lit("priority >= 0")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
       check Sequel.lit("state IN ('queued', 'claimed', 'admitted', 'completed', 'cancelled')")
@@ -116,23 +114,28 @@ Sequel.migration do
                   null: false, on_delete: :cascade, on_update: :cascade
       String :subject_kind, null: false
       String :subject_key, null: false
-      Integer :task_generation, null: false
-      Integer :ownership_generation, null: false
+      String :task_generation, null: false
+      String :ownership_generation, null: false
       String :state, null: false
       String :outcome
       Integer :lease_version, null: false, default: 0
       String :owner_identity_json, text: true
       String :routing_json, text: true, null: false
-      String :source_fingerprint
+      String :source_fingerprint, null: false
       String :checkpoint_json, text: true
+      String :record_json, text: true, null: false
+      String :record_digest, null: false
+      String :subject_json, text: true, null: false
+      String :project_name, null: false
+      String :task_slug, null: false
+      String :accepted_date, null: false
+      String :terminal_receipt_digest
       String :created_at, null: false
-      String :accepted_at
+      String :accepted_at, null: false
       String :started_at
       String :heartbeat_at
       String :ended_at
       String :retain_until
-      check Sequel.lit("task_generation >= 0")
-      check Sequel.lit("ownership_generation >= 0")
       check Sequel.lit("lease_version >= 0")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
       check Sequel.lit("state IN ('launching', 'running', 'terminal', 'lost')")
@@ -145,6 +148,7 @@ Sequel.migration do
             name: :attempts_active_subject_generation_uidx
       index [ :state, :heartbeat_at ], name: :attempts_live_idx
       index [ :task_id, :task_generation, :ended_at ], name: :attempts_terminal_idx
+      index [ :project_name, :accepted_date ], name: :attempts_daily_idx
     end
 
     create_table(:attempt_relationships) do
@@ -157,6 +161,9 @@ Sequel.migration do
       primary_key [ :attempt_id, :related_attempt_id, :kind ]
       check Sequel.lit("attempt_id != related_attempt_id")
       check Sequel.lit("kind IN ('predecessor', 'successor', 'retry', 'supersedes')")
+      index [ :related_attempt_id, :kind ], unique: true,
+            where: Sequel.lit("kind = 'successor'"),
+            name: :attempt_relationships_successor_uidx
     end
 
     create_table(:attempt_accounting) do
@@ -164,10 +171,67 @@ Sequel.migration do
                   primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
       String :provider_account_id
       Integer :retry_charge, null: false, default: 0
+      Integer :refunded, null: false, default: 0
       String :reservation_json, text: true, null: false, default: "{}"
       String :billing_json, text: true, null: false, default: "{}"
       String :updated_at, null: false
       check Sequel.lit("retry_charge >= 0")
+      check Sequel.lit("refunded IN (0, 1)")
+    end
+
+    create_table(:attempt_lost_outcomes) do
+      foreign_key :attempt_id, :attempts, type: String, key: :attempt_id,
+                  primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
+      String :idempotency_key, null: false, unique: true
+      String :status, null: false
+      String :cleanup
+      foreign_key :successor_attempt_id, :attempts, type: String, key: :attempt_id,
+                  on_delete: :set_null, on_update: :cascade
+      String :value_json, text: true, null: false
+      Integer :revision, null: false, default: 0
+      String :updated_at, null: false
+      check Sequel.lit("status IN ('pending', 'ready', 'successor_dispatched')")
+      check Sequel.lit("cleanup IS NULL OR cleanup IN ('absent', 'terminated', 'no_worker', 'identity_mismatch', 'identity_changed', 'still_alive')")
+      check Sequel.lit("revision >= 0")
+    end
+
+    create_table(:attempt_routing_decisions) do
+      String :decision_key, primary_key: true, null: false
+      String :task_generation, null: false
+      String :subject_json, text: true, null: false
+      String :project_name, null: false
+      foreign_key :attempt_id, :attempts, type: String, key: :attempt_id,
+                  on_delete: :set_null, on_update: :cascade
+      String :decision_id, null: false
+      String :decision_json, text: true, null: false
+      String :decided_at, null: false
+      String :updated_at, null: false
+      index [ :decided_at, :decision_id ], name: :attempt_routing_decisions_order_idx
+    end
+
+    create_table(:attempt_failure_cohorts) do
+      String :utc_date, null: false
+      String :identity_digest, null: false
+      String :identity_json, text: true, null: false
+      Integer :failure_count, null: false, default: 0
+      String :retry_at
+      foreign_key :probe_attempt_id, :attempts, type: String, key: :attempt_id,
+                  on_delete: :set_null, on_update: :cascade
+      String :probe_expires_at
+      String :updated_at, null: false
+      primary_key [ :utc_date, :identity_digest ]
+      check Sequel.lit("failure_count >= 0")
+    end
+
+    create_table(:attempt_failure_events) do
+      String :utc_date, null: false
+      foreign_key :attempt_id, :attempts, type: String, key: :attempt_id,
+                  null: false, on_delete: :cascade, on_update: :cascade
+      String :identity_digest
+      String :outcome, null: false
+      String :occurred_at, null: false
+      primary_key [ :utc_date, :attempt_id ]
+      check Sequel.lit("outcome IN ('failed', 'succeeded')")
     end
 
     create_table(:capacity_reservations) do
@@ -193,6 +257,8 @@ Sequel.migration do
                   primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
       String :task_source_fingerprint, null: false
       String :receipt_json, text: true, null: false
+      String :expected_receipt_digest, null: false
+      String :publication_json, text: true
       String :state, null: false, default: "pending"
       String :created_at, null: false
       String :published_at
@@ -385,7 +451,7 @@ Sequel.migration do
         "(state != 'open' AND sha256 IS NOT NULL AND length(sha256) = 64 " \
         "AND bytes IS NOT NULL AND bytes >= 0)"
       )
-      unique [ :kind, :relative_path ], name: :payload_references_path_uidx
+      index [ :kind, :relative_path ], name: :payload_references_path_idx
       index [ :retain_until ], name: :payload_references_retention_idx
     end
 

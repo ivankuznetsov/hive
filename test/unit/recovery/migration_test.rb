@@ -2,7 +2,7 @@ require "test_helper"
 require "digest"
 require "json"
 require "hive/attempts/decision_index"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/recovery/migration"
@@ -15,7 +15,7 @@ class RecoveryMigrationTest < Minitest::Test
   def test_new_default_store_creates_v4_without_running_migration
     with_tmp_dir do |state_home|
       with_env("HIVE_HOME" => state_home) do
-        store = Hive::Attempts::Store.new
+        store = Hive::Attempts::Repository.new
         assert_equal File.join(state_home, "attempts", "v4"), store.root
         assert File.directory?(store.records_root)
         status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
@@ -35,7 +35,7 @@ class RecoveryMigrationTest < Minitest::Test
       before = File.binread(legacy_record)
 
       with_env("HIVE_HOME" => state_home) do
-        store = Hive::Attempts::Store.new(create_directories: false)
+        store = Hive::Attempts::Repository.new(create_directories: false)
         assert_equal File.join(state_home, "attempts", "v4"),
                      store.instance_variable_get(:@root)
       end
@@ -48,7 +48,7 @@ class RecoveryMigrationTest < Minitest::Test
 
   def test_completed_default_store_reopens_without_enumerating_cold_state
     with_tmp_dir do |state_home|
-      with_env("HIVE_HOME" => state_home) { Hive::Attempts::Store.new }
+      with_env("HIVE_HOME" => state_home) { Hive::Attempts::Repository.new }
       attempts_root = File.join(state_home, "attempts", "v4")
       original = Dir.method(:children)
       Dir.singleton_class.define_method(:children) do |path|
@@ -59,7 +59,7 @@ class RecoveryMigrationTest < Minitest::Test
 
       begin
         with_env("HIVE_HOME" => state_home) do
-          assert_equal attempts_root, Hive::Attempts::Store.new.root
+          assert_equal attempts_root, Hive::Attempts::Repository.new.root
         end
       ensure
         Dir.singleton_class.define_method(:children, original)
@@ -78,7 +78,7 @@ class RecoveryMigrationTest < Minitest::Test
       Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
 
       with_env("HIVE_HOME" => state_home) do
-        store = Hive::Attempts::Store.new
+        store = Hive::Attempts::Repository.new
         expected = Hive::Attempts::RecordMigration.convert_v3(legacy_v3(record))
         assert_equal expected, store.fetch("terminal").to_h
         assert_equal expected, store.fetch_hot("terminal").to_h
@@ -101,7 +101,7 @@ class RecoveryMigrationTest < Minitest::Test
 
       migrate(state_home)
 
-      store = Hive::Attempts::Store.new(
+      store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
       assert_equal "lost", store.fetch_hot("from-v2").state
@@ -115,7 +115,7 @@ class RecoveryMigrationTest < Minitest::Test
     with_tmp_dir do |state_home|
       custom = File.join(state_home, "custom-attempts")
       with_env("HIVE_HOME" => state_home) do
-        assert_equal custom, Hive::Attempts::Store.new(root: custom).root
+        assert_equal custom, Hive::Attempts::Repository.new(root: custom).root
       end
       refute_path_exists File.join(state_home, "attempts")
       refute_path_exists File.join(state_home, "recovery-migration-v6.json")
@@ -131,7 +131,7 @@ class RecoveryMigrationTest < Minitest::Test
         "HIVE_HOME" => state_home,
         "HIVE_ATTEMPT_STORE_ROOT" => custom
       ) do
-        store = Hive::Attempts::Store.runtime
+        store = Hive::Attempts::Repository.runtime
         assert_equal custom, store.root
       end
 
@@ -144,7 +144,7 @@ class RecoveryMigrationTest < Minitest::Test
   def test_open_default_uses_the_supplied_state_home
     with_tmp_dir do |root|
       state_home = File.join(root, "daemon-home")
-      store = Hive::Attempts::Store.open_default(state_home: state_home)
+      store = Hive::Attempts::Repository.open_default(state_home: state_home)
 
       assert_equal File.join(state_home, "attempts", "v4"), store.root
       refute_path_exists File.join(state_home, "attempts", "v3")
@@ -201,7 +201,7 @@ class RecoveryMigrationTest < Minitest::Test
       write_v3_record(state_home, crashed_running)
 
       result = migrate(state_home)
-      store = Hive::Attempts::Store.new(
+      store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4")
       )
 
@@ -565,7 +565,7 @@ class RecoveryMigrationTest < Minitest::Test
       ) do
         Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
       end
-      store = Hive::Attempts::Store.new(
+      store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
 
@@ -591,7 +591,7 @@ class RecoveryMigrationTest < Minitest::Test
       File.binwrite(invalid, "{")
 
       migrate(state_home)
-      store = Hive::Attempts::Store.new(
+      store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
 
@@ -612,7 +612,7 @@ class RecoveryMigrationTest < Minitest::Test
 
       migrate(state_home)
 
-      store = Hive::Attempts::Store.new(
+      store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
       expected = Hive::Attempts::RecordMigration.convert_v3(legacy_v3(record))
@@ -685,7 +685,7 @@ class RecoveryMigrationTest < Minitest::Test
       ).record_acceptance(current)
 
       result = migrate(state_home)
-      store = Hive::Attempts::Store.new(
+      store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
 
@@ -752,7 +752,7 @@ class RecoveryMigrationTest < Minitest::Test
 
   def test_daily_parity_rejects_an_unreadable_index
     store = daily_parity_store(
-      error: Hive::Attempts::StoreError.new("injected daily index failure")
+      error: Hive::Attempts::RepositoryError.new("injected daily index failure")
     )
 
     error = assert_raises(Hive::Recovery::Migration::Error) do
@@ -777,7 +777,7 @@ class RecoveryMigrationTest < Minitest::Test
 
       assert_path_exists File.join(state_home, "attempts", "v4", "records", "terminal.json")
       refute_path_exists File.join(state_home, "recovery-migration-v6.json")
-      failed_store = Hive::Attempts::Store.new(
+      failed_store = Hive::Attempts::Repository.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
       failed = failed_store.storage_health.snapshot(hot_count: 1, invalid_hot_count: 0)
@@ -799,7 +799,7 @@ class RecoveryMigrationTest < Minitest::Test
           assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
         end
         result = migrate(state_home)
-        store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts", "v4"))
+        store = Hive::Attempts::Repository.new(root: File.join(state_home, "attempts", "v4"))
         assert_equal 1, result.dig("attempts", "source_count"), boundary
         assert_equal 1, result.dig("attempts", "promoted"), boundary
         assert store.permanent_proofs.fetch("terminal"), boundary
@@ -1204,7 +1204,7 @@ class RecoveryMigrationTest < Minitest::Test
         result = original.bind_call(self, record)
         unless fired
           fired = true
-          raise Hive::Attempts::StoreError, "injected index crash"
+          raise Hive::Attempts::RepositoryError, "injected index crash"
         end
         result
       }, &block)
@@ -1213,7 +1213,7 @@ class RecoveryMigrationTest < Minitest::Test
     when :log
       inject_instance_after(Hive::Attempts::LogArchive, :archive, &block)
     when :hot_removal
-      inject_instance_after(Hive::Attempts::Store, :remove_hot_final, &block)
+      inject_instance_after(Hive::Attempts::Repository, :remove_hot_final, &block)
     end
   end
 
@@ -1224,7 +1224,7 @@ class RecoveryMigrationTest < Minitest::Test
       result = original.bind_call(self, *args, **kwargs)
       unless fired
         fired = true
-        raise Hive::Attempts::StoreError, "injected #{name} crash"
+        raise Hive::Attempts::RepositoryError, "injected #{name} crash"
       end
       result
     }) { yield }

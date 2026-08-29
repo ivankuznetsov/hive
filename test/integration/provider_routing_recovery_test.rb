@@ -36,7 +36,9 @@ class ProviderRoutingRecoveryTest < Minitest::Test
   def test_failed_a_health_acknowledges_before_one_recovery_successor_selects_b
     with_tmp_dir do |root|
       task = build_task(root)
-      attempts = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempts = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), migrate: true
+      )
       health = health_store(root, attempts)
       launcher = Launcher.new
       ids = %w[attempt-a attempt-b].each

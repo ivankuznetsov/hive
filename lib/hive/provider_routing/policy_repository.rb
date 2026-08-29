@@ -1,31 +1,24 @@
-require "json"
+require "digest"
 require "json_schemer"
 require "pathname"
-require "hive/point_storage"
+require "time"
 require "hive/provider_routing/policy"
+require "hive/runtime_control_plane"
 
 module Hive
   module ProviderRouting
-    # Immutable, point-addressed snapshots of the explicit routing policy that
-    # owned one durable subject generation. Admission supplies the surrounding
-    # lock order; this store supplies per-cell serialization and first-writer
-    # wins persistence. Legacy policies return before the schema or storage
-    # adapters are opened, so the no-pool path performs no policy I/O.
-    class PolicyStore
+    # First-writer-wins routing policy snapshots in the runtime control plane.
+    class PolicyRepository
       SCHEMA = "hive-routing-policy".freeze
       SCHEMA_VERSION = 1
       KIND = "routing-policy".freeze
       MAX_SNAPSHOT_BYTES = 1024 * 1024
 
-      class StoreError < Hive::PointStorageError; end
-      class InvalidSnapshot < StoreError; end
+      class Error < Hive::Error; end
+      class InvalidSnapshot < Error; end
 
-      attr_reader :root
-
-      def initialize(root:, create_directories: true)
-        @root = File.expand_path(root).freeze
-        @create_directories = create_directories
-        @storage_mutex = Mutex.new
+      def initialize(store:)
+        @database = store.database
       end
 
       # Returns the durable winner or nil. A Policy argument is required so a
@@ -36,8 +29,8 @@ module Hive
 
         key = storage_key(ownership_generation, subject)
         normalize_policy(policy, key: key)
-        bytes = storage.read(KIND, key, max_bytes: MAX_SNAPSHOT_BYTES)
-        bytes && parse(bytes, expected_key: key)
+        row = policy_row(key)
+        row && parse(row.fetch(:policy_json), expected_key: key)
       end
 
       # Point-read an already frozen explicit policy when the original
@@ -45,8 +38,8 @@ module Hive
       # provider-health acknowledgement).
       def fetch_snapshot(ownership_generation:, subject:)
         key = storage_key(ownership_generation, subject)
-        bytes = storage.read(KIND, key, max_bytes: MAX_SNAPSHOT_BYTES)
-        bytes && parse(bytes, expected_key: key)
+        row = policy_row(key)
+        row && parse(row.fetch(:policy_json), expected_key: key)
       end
 
       # Atomically installs the first explicit policy for this ownership point
@@ -57,36 +50,41 @@ module Hive
 
         key = storage_key(ownership_generation, subject)
         candidate = normalize_policy(policy, key: key)
-        storage.synchronize(KIND, key) do
-          current = storage.read(KIND, key, max_bytes: MAX_SNAPSHOT_BYTES)
-          next parse(current, expected_key: key) if current
+        @database.transaction do |db|
+          installation = db[:installations].first&.fetch(:installation_id)
+          invalid! unless installation
+          current = db[:routing_policies].where(
+            installation_id: installation, policy_key: key_digest(key)
+          ).first
+          next parse(current.fetch(:policy_json), expected_key: key) if current
 
-          bytes = dump(snapshot(key, candidate.to_h))
-          invalid! if bytes.bytesize > MAX_SNAPSHOT_BYTES
-          storage.write(
-            KIND,
-            key,
-            bytes,
-            expected_bytes: nil,
-            max_existing_bytes: MAX_SNAPSHOT_BYTES
+          payload = dump(snapshot(key, candidate.to_h))
+          invalid! if payload.bytesize > MAX_SNAPSHOT_BYTES
+          db[:routing_policies].insert(
+            installation_id: installation, policy_key: key_digest(key), revision: 0,
+            policy_digest: candidate.digest, policy_json: payload,
+            updated_at: Time.now.utc.iso8601(6)
           )
           candidate
         end
+      rescue Sequel::UniqueConstraintViolation
+        fetch_snapshot(ownership_generation: ownership_generation, subject: subject)
       end
 
       private
 
-      def storage
-        return @storage if defined?(@storage)
-
-        @storage_mutex.synchronize do
-          @storage ||= Hive::PointStorage.new(
-            root: root,
-            label: "provider routing policy store",
-            create_directories: @create_directories,
-            error_class: StoreError
-          )
+      def policy_row(key)
+        @database.read do |db|
+          installation = db[:installations].first&.fetch(:installation_id)
+          next nil unless installation
+          db[:routing_policies].where(
+            installation_id: installation, policy_key: key_digest(key)
+          ).first
         end
+      end
+
+      def key_digest(key)
+        Digest::SHA256.hexdigest(RuntimeControlPlane::Codec.dump_json(key))
       end
 
       def snapshot_schema
@@ -113,16 +111,10 @@ module Hive
           normalized[key] = value
         end
         {
-          "ownership_generation" => Hive::StorageKey.string(
-            ownership_generation,
-            error_class: StoreError
-          ),
-          "subject" => Hive::StorageKey.normalize(
-            normalized_subject,
-            error_class: StoreError
-          )
+          "ownership_generation" => identifier(ownership_generation),
+          "subject" => RuntimeControlPlane::Codec.normalize(normalized_subject)
         }.freeze
-      rescue StoreError
+      rescue Error, RuntimeControlPlane::Error, ArgumentError, TypeError
         invalid!
       end
 
@@ -136,14 +128,12 @@ module Hive
         }
       end
 
-      def dump(value)
-        "#{ProviderRouting.canonical_json(value)}\n"
-      end
+      def dump(value) = RuntimeControlPlane::Codec.dump_json(value)
 
       def parse(bytes, expected_key:)
         invalid! unless bytes.is_a?(String) && bytes.bytesize <= MAX_SNAPSHOT_BYTES
 
-        data = JSON.parse(bytes)
+        data = RuntimeControlPlane::Codec.load_json(bytes)
         validate_snapshot!(data)
         embedded_key = {
           "ownership_generation" => data.fetch("ownership_generation"),
@@ -154,8 +144,15 @@ module Hive
         rebuild_policy(data.fetch("policy"))
       rescue InvalidSnapshot
         raise
-      rescue JSON::ParserError, EncodingError, KeyError, TypeError, ArgumentError
+      rescue RuntimeControlPlane::Error, EncodingError, KeyError, TypeError, ArgumentError
         invalid!
+      end
+
+      def identifier(value)
+        string = value.to_s
+        invalid! unless string.bytesize.between?(1, 128) &&
+                        string.valid_encoding? && !string.match?(/[\u0000-\u001f\u007f]/)
+        string
       end
 
       def normalize_policy(policy, key:)

@@ -88,7 +88,7 @@ module Hive
           store: @store,
           scan: hot_scan,
           now: now,
-          daily_counts: @store.decision_index.daily_counts(date: now.utc.to_date)
+          daily_counts: @store.daily_counts(date: now.utc.to_date)
         )
 
         ReconciliationSnapshot.new(

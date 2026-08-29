@@ -132,7 +132,7 @@ module Hive
           next unless outcome["status"] == "ready"
 
           existing = if admission_view
-            successor_id = @attempt_store.decision_index.successor_attempt_id(
+            successor_id = @attempt_store.successor_attempt_id(
               predecessor_attempt_id: attempt.attempt_id
             )
             if successor_id

@@ -2,7 +2,7 @@ require "test_helper"
 require "hive/conditions/execute_boundary"
 require "hive/conditions/transition_guard"
 require "hive/attempts/generation"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/workflows/coding"
 
 class ConditionsExecuteBoundaryTest < Minitest::Test
@@ -373,7 +373,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     with_tmp_git_repo do |worktree|
       with_tmp_dir do |dir|
         task = build_task(dir, worktree)
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         context = Hive::Attempts::Context.send(
           :new, attempt_id: "deleted-attempt", task_generation: 1,
           ownership_generation: "owner-deleted"
@@ -436,7 +436,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       with_tmp_dir do |dir|
         task = build_task(dir, worktree, research: research)
         baseline = Hive::GitOps.new(worktree).head_sha
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         attempt = store.create_launching(
           **attempt_identity(task, baseline), launch_timeout_sec: 30, now: Time.now.utc
         )

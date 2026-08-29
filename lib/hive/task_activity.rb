@@ -3,7 +3,7 @@ require "digest"
 require "fileutils"
 require "time"
 require "hive/atomic_file"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/secret_patterns"
 require "hive/task_journal"
 require "hive/task_projection/store"
@@ -41,7 +41,7 @@ module Hive
     # Legacy tasks deliberately return nil rather than acquiring guessed
     # authority from timestamps, markers, or process state.
     def self.for_task(task, attempt_store: nil, clock: -> { Time.now.utc })
-      attempt_store ||= Hive::Attempts::Store.new
+      attempt_store ||= Hive::Attempts::Repository.open_default
       projection = Hive::TaskProjection::Store.new(
         task_folder: task.folder, attempt_store: attempt_store
       ).read.to_h
@@ -76,7 +76,7 @@ module Hive
       return nil unless context && !context.attempt_id.to_s.empty? &&
                         !context.task_generation.nil?
 
-      attempt_store ||= Hive::Attempts::Store.new
+      attempt_store ||= Hive::Attempts::Repository.open_default
       workflow = task.respond_to?(:workflow) ? task.workflow : nil
       workflow = workflow.id if workflow.respond_to?(:id)
       new(

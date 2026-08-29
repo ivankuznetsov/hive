@@ -4,7 +4,7 @@ require "openssl"
 require "time"
 require "uri"
 require "hive/atomic_file"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/config"
 require "hive/gh"
 require "hive/git_ops"
@@ -1438,7 +1438,7 @@ module Hive
     end
 
     def default_attempt_store
-      Hive::Attempts::Store.runtime(create_directories: false)
+      Hive::Attempts::Repository.runtime(create_directories: false)
     end
   end
 end

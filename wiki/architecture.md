@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-29
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Workflow and attempt state are filesystem records plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns attempt lifecycle, admission/accounting relationships, capacity, and routing-policy snapshots.
 
 ## Layer cake
 
@@ -46,7 +46,7 @@ or observes the durable attempt instead of owning agent lifetime.
 CLI ───────────────────────────────┐
 bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
 daemon auto-advance / recovery ────┘          │
-                                      generation lock + lease
+                                      SQL admission + lease CAS
                                                │
                                       detached supervisor
                                                │

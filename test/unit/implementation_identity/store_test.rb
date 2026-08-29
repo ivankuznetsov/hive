@@ -598,7 +598,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       )
       File.write(task.state_file, "body")
       File.write(File.join(folder, "plan.md"), "# plan\n")
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       attempt = attempt_store.create_launching(
         attempt_id: attempt_id, request_id: "request", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: task.slug, intended_stage: intended_stage,

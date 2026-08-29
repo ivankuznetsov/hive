@@ -44,7 +44,7 @@ module Hive
         return nil unless receipt.is_a?(Hash)
         return nil if receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
 
-        path = File.join("outputs", attempt_id, FILENAME)
+        path = File.join("open", attempt_id, FILENAME)
         reference = Array(receipt["output_references"]).find do |candidate|
           candidate.is_a?(Hash) && candidate["path"] == path
         end

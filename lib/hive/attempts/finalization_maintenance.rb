@@ -1,15 +1,15 @@
 require "hive/attempts/lost_outcome"
 require "hive/attempts/failure_cohort_reconciler"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "json"
 require "psych"
 require "time"
 
 module Hive
   module Attempts
-    # Two-phase publication of final attempt authority. Proof, decision
-    # indexes, and the bounded consumer ledger are durable before any
-    # downstream acknowledgement can permit removal from the hot scan.
+    # Two-phase publication of final attempt authority. The final row and
+    # bounded consumer ledger are durable before acknowledgements can publish
+    # content-addressed payloads and remove the attempt from the hot view.
     class FinalizationMaintenance
       TERMINAL_CONSUMERS = %w[accounting journal request_delivery].freeze
       LOST_CONSUMERS = (TERMINAL_CONSUMERS + [ "loss" ]).freeze
@@ -61,7 +61,7 @@ module Hive
           )
           policy&.account_policy&.dig(evidence.route.account_id, "cooldown_sec", evidence.failure_class) ||
             Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
-        rescue Hive::Attempts::StoreError
+        rescue Hive::Attempts::RepositoryError
           Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
         end
       end
@@ -83,23 +83,22 @@ module Hive
         return false unless record.is_a?(Record) && record.final?
         return false if record.state == "lost" && !resolved_loss?(record)
 
-        @store.permanent_proofs.publish(record)
         publish_indexes(record)
         consumers = record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
         consumers = consumers + [ "provider_health" ] if record.explicit_routing?
-        pending.create(
+        @store.prepare_publication(
           attempt_id: record.attempt_id,
           consumers: consumers
         )
-        pending.acknowledge(record.attempt_id, consumer: "accounting")
-        pending.acknowledge(record.attempt_id, consumer: "loss") if record.state == "lost"
+        @store.acknowledge_publication(record.attempt_id, consumer: "accounting")
+        @store.acknowledge_publication(record.attempt_id, consumer: "loss") if record.state == "lost"
         true
       end
 
       def acknowledge(record, consumer)
-        return false unless pending.fetch(record.attempt_id)
+        return false unless @store.publication(record.attempt_id)
 
-        pending.acknowledge(record.attempt_id, consumer: consumer.to_s)
+        @store.acknowledge_publication(record.attempt_id, consumer: consumer.to_s)
         true
       end
 
@@ -111,9 +110,9 @@ module Hive
         result = @provider_health_observer.observe(record)
         return false unless %i[acknowledged not_applicable].include?(result)
 
-        entry = pending.fetch(record.attempt_id)
+        entry = @store.publication(record.attempt_id)
         if entry&.fetch("consumers", {})&.key?("provider_health")
-          pending.acknowledge(record.attempt_id, consumer: "provider_health")
+          @store.acknowledge_publication(record.attempt_id, consumer: "provider_health")
         end
         true
       rescue Hive::ProviderHealth::Error, Hive::ManagedDirectory::UnsafeError
@@ -121,31 +120,28 @@ module Hive
       end
 
       def promote(record)
-        return false unless pending.complete?(record.attempt_id)
+        return false unless @store.publication_complete?(record.attempt_id)
 
-        proof = @store.permanent_proofs.fetch(record.attempt_id)
+        proof = @store.fetch(record.attempt_id)
         unless proof && proof.to_h == record.to_h
-          raise StoreError, "attempt proof does not match hot final record"
+          raise RepositoryError, "attempt proof does not match hot final record"
         end
 
         log_result = @store.log_archive.archive(record.attempt_id)
         return false if log_result == :busy
 
-        @store.with_admission_lock do
-          current = @store.fetch_hot(record.attempt_id)
-          return true unless current
-          unless current.final? && current.to_h == proof.to_h
-            raise StoreError, "hot attempt changed after final proof publication"
-          end
-
-          reservation = @store.decision_index.live_reservations[current.attempt_id]
-          @failure_cohort_reconciler.reconcile(
-            record: current, admission: reservation&.fetch("admission", nil)
-          )
-          pending.remove_complete(record.attempt_id)
-          @store.decision_index.release_live(attempt_id: record.attempt_id)
-          @store.remove_hot_final(current)
+        current = @store.fetch_hot(record.attempt_id)
+        return true unless current
+        unless current.final? && current.to_h == proof.to_h
+          raise RepositoryError, "hot attempt changed after final proof publication"
         end
+
+        reservation = @store.reservation_metadata(current.attempt_id)
+        @failure_cohort_reconciler.reconcile(
+          record: current, admission: reservation&.fetch("admission", nil)
+        )
+        @store.release_live(attempt_id: record.attempt_id)
+        @store.finish_publication(record.attempt_id)
         true
       end
 
@@ -237,7 +233,7 @@ module Hive
         return false unless hot
 
         !pending.complete?(record.attempt_id)
-      rescue StoreError
+      rescue RepositoryError
         true
       end
 
@@ -279,43 +275,33 @@ module Hive
         false
       end
 
-      def pending
-        @pending ||= @store.pending_finalizations
-      end
-
       def publish_indexes(record)
-        index = @store.decision_index
-        index.record_acceptance(record)
         if record.state == "terminal"
-          index.record_terminal(record)
           if record.receipt.fetch("exit_status") == Hive::ExitCodes::TEMPFAIL
-            index.refund_tempfail(record)
+            @store.refund_tempfail(record)
           end
         else
-          index.record_unresolved_loss(record)
           # A loss that never started spent nothing, so it must not spend a
           # daily slot either — otherwise failed launches exhaust the budget
           # that real runs need.
-          index.refund_unstarted(record) if record["started_at"].nil?
-          successor = resolved_loss_successor(record)
-          index.record_successor(successor)
+          @store.refund_unstarted(record) if record["started_at"].nil?
         end
       end
 
       def resolved_loss?(record)
         !resolved_loss_successor(record).nil?
-      rescue StoreError
+      rescue RepositoryError
         false
       end
 
       def resolved_loss_successor(record)
-        outcome = LostOutcomeStore.new(store: @store).fetch(record.attempt_id)
-        return nil unless LostOutcomeStore::FINAL_STATUSES.include?(outcome&.fetch("status", nil))
-        return nil unless LostOutcomeStore::SAFE_CLEANUPS.include?(outcome["cleanup"])
+        outcome = LostOutcomeTransition.new(store: @store).fetch(record.attempt_id)
+        return nil unless LostOutcomeTransition::FINAL_STATUSES.include?(outcome&.fetch("status", nil))
+        return nil unless LostOutcomeTransition::SAFE_CLEANUPS.include?(outcome["cleanup"])
 
         successor_id = outcome["successor_attempt_id"].to_s
         return nil if successor_id.empty? || successor_id == record.attempt_id
-        indexed_id = @store.decision_index.successor_attempt_id(
+        indexed_id = @store.successor_attempt_id(
           predecessor_attempt_id: record.attempt_id
         )
         return nil unless indexed_id == successor_id

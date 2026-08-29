@@ -3,7 +3,7 @@ require "json"
 require "hive/commands/init"
 require "hive/commands/run"
 require "hive/attempts/capability"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/stages/plan"
 require "hive/task"
 
@@ -53,7 +53,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
   end
 
   def test_fake_cli_completes_execute_with_native_state_policy_and_identity
-    with_tmp_global_config do
+    with_tmp_global_config do |home|
       with_tmp_git_repo do |project|
         capture_io { Hive::Commands::Init.new(project).call }
         config_path = File.join(project, ".hive-state", "config.yml")
@@ -78,18 +78,21 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         PLAN
 
         task = Hive::Task.new(folder)
-        attempts = Hive::Attempts::Store.new(
-          root: File.join(project, ".hive-state", "attempts")
+        attempts = Hive::Attempts::Repository.new(
+          root: Hive::Paths.runtime_payload_root(home),
+          database: Hive::RuntimeControlPlane::Database.new(
+            path: Hive::Paths.runtime_control_plane_path(home)
+          ),
+          migrate: true
         )
+        register_task_subject(attempts, task)
         attempt = create_attempt(task, attempts)
-        with_env("HIVE_ATTEMPT_STORE_ROOT" => attempts.root) do
-          with_attempt_context(
-            attempt_id: attempt.attempt_id,
-            task_generation: 1,
-            ownership_generation: attempt.ownership_generation
-          ) do
-            capture_io { Hive::Commands::Run.new(folder).call }
-          end
+        with_attempt_context(
+          attempt_id: attempt.attempt_id,
+          task_generation: 1,
+          ownership_generation: attempt.ownership_generation
+        ) do
+          capture_io { Hive::Commands::Run.new(folder).call }
         end
 
         pointer = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))
@@ -224,6 +227,25 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
       claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       now: Time.now.utc
     )
+  end
+
+  def register_task_subject(attempts, task)
+    now = Time.now.utc.iso8601(6)
+    attempts.database.transaction do |database|
+      installation_id = database[:installations].get(:installation_id)
+      database[:projects].insert(
+        project_id: "test-project", installation_id: installation_id,
+        registration_id: "test-registration", name: File.basename(task.project_root),
+        observed_path: task.project_root, state_root_path: File.join(task.project_root, ".hive-state"),
+        active: 1, registered_at: now, last_observed_at: now
+      )
+      database[:task_subjects].insert(
+        task_id: "test-task", project_id: "test-project", workflow_id: "coding",
+        task_slug: task.slug, observed_path: task.id.to_s,
+        source_fingerprint: "test-source", generation: 0,
+        created_at: now, last_observed_at: now
+      )
+    end
   end
 
   def calls

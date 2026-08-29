@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/attempts/output_reference"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class AttemptsOutputReferenceTest < Minitest::Test
   include HiveTestHelper
@@ -62,25 +62,25 @@ class AttemptsOutputReferenceTest < Minitest::Test
 
   def test_projection_reader_reads_only_verified_bounded_output_bytes
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       path = store.output_path("attempt-1", "diagnostic.json", create_directory: true)
       File.binwrite(path, "typed diagnostic")
       reference = Hive::Attempts::OutputReference.build(path, root: root)
       reader = store.projection_reader
 
       assert_equal "typed diagnostic", reader.read_output(reference, max_bytes: 64)
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference, max_bytes: 0)
       end
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference, max_bytes: 4)
       end
 
       File.binwrite(path, "tampered bytes")
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference, max_bytes: 64)
       end
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference.merge("path" => "../private.log"), max_bytes: 64)
       end
 
@@ -89,7 +89,7 @@ class AttemptsOutputReferenceTest < Minitest::Test
       File.binwrite(target, "typed diagnostic")
       File.unlink(path)
       File.symlink(target, path)
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference, max_bytes: 64)
       end
 
@@ -102,7 +102,7 @@ class AttemptsOutputReferenceTest < Minitest::Test
         "size" => 16,
         "sha256" => Digest::SHA256.hexdigest("typed diagnostic")
       }
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(redirected_reference, max_bytes: 64)
       end
 
@@ -111,7 +111,7 @@ class AttemptsOutputReferenceTest < Minitest::Test
       linked_path = store.output_path("attempt-real", "linked-diagnostic.json")
       File.link(linked_target, linked_path)
       linked_reference = Hive::Attempts::OutputReference.build(linked_path, root: root)
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(linked_reference, max_bytes: 64)
       end
     end

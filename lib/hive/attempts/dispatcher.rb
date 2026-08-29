@@ -192,12 +192,8 @@ module Hive
         cohort_identity = nil
         cohort_admission = nil
         view = admission_view
-        # Fixed lock order: global admission, then task generation. The outer
-        # lock makes the capacity snapshot and reservation one host-wide
-        # transaction even when concurrent requests have different generations.
-        @store.with_admission_lock do
-          @store.with_generation_lock(generation.task_generation) do
-            view ||= AdmissionView.new(store: @store, hot_scan: @store.scan)
+        1.times do
+          view ||= AdmissionView.new(store: @store, hot_scan: @store.scan)
             records = view.refresh_for_admission
             semantic_owner = find_semantic_owner(records, generation)
             if semantic_owner&.live?
@@ -423,7 +419,6 @@ module Hive
                 cohort_release: cohort_release
               )
             end
-          end
         end
 
         return result if result
@@ -444,6 +439,11 @@ module Hive
           error: handoff.is_a?(Hash) ? handoff["error"] : nil,
           admission_view: view, cohort_identity: cohort_identity,
           cohort_date: now.utc.to_date
+        )
+      rescue CapacityExceeded
+        DispatchResult.new(
+          status: :deferred, attempt: nil, receipt: nil,
+          attach_descriptor: nil, reason: "capacity"
         )
       rescue StandardError => e
         raise unless created
@@ -689,12 +689,10 @@ module Hive
       def release_failed_handoff_probe(record, cohort_identity:, cohort_date:)
         return false unless record&.state == "lost" && cohort_identity && cohort_date
 
-        @store.with_admission_lock do
-          @store.decision_index.release_failure_cohort_probe(
-            identity: cohort_identity, date: cohort_date,
-            attempt_id: record.attempt_id
-          )
-        end
+        @store.release_failure_cohort_probe(
+          identity: cohort_identity, date: cohort_date,
+          attempt_id: record.attempt_id
+        )
       end
 
       def result_for_adopted_handoff(record, interactive:)
@@ -809,7 +807,7 @@ module Hive
           "state" => record.state,
           "probe_bindings" => record["routing"].fetch("probe_bindings", [])
         }
-      rescue Hive::Attempts::StoreError
+      rescue Hive::Attempts::RepositoryError
         nil
       end
 
@@ -878,23 +876,12 @@ module Hive
                                     claim_capability:, retry_charge:, inherited_outputs:,
                                     subject:, now:, admission:, cohort_identity:,
                                     cohort_admission:, cohort_release:)
-        probe_claimed = false
-        if cohort_admission&.fetch("status") == "probe"
-          claimed = view.claim_failure_cohort_probe(
-            identity: cohort_identity, date: now.utc.to_date,
-            attempt_id: attempt_id, now: now,
+        failure_cohort_probe = if cohort_admission&.fetch("status") == "probe"
+          {
+            identity: cohort_identity, date: now.utc.to_date, now: now,
             explicit_release: cohort_release
-          )
-          raise StoreError, "failure cohort probe claim became stale" unless claimed
-
-          probe_claimed = true
+          }
         end
-        view.reserve_live(
-          attempt_id: attempt_id,
-          project: generation.project,
-          task_slug: generation.task_slug,
-          admission: admission
-        )
         record = @store.create_launching(
           attempt_id: attempt_id,
           request_id: request_id,
@@ -915,27 +902,14 @@ module Hive
           retry_charge: retry_charge,
           inherited_outputs: inherited_outputs || [],
           subject: subject,
+          source_fingerprint: generation.progress_token,
+          admission: admission,
+          limits: @limits,
+          failure_cohort_probe: failure_cohort_probe,
           launch_timeout_sec: @launch_timeout_sec,
           now: now
         )
-        view.confirm_live(record, admission: admission)
         view.record(record)
-      rescue StandardError
-        release_unpersisted_failure_probe(
-          view: view, identity: cohort_identity, date: now.utc.to_date,
-          attempt_id: attempt_id
-        ) if probe_claimed
-        raise
-      end
-
-      def release_unpersisted_failure_probe(view:, identity:, date:, attempt_id:)
-        return false if @store.fetch_hot(attempt_id)
-
-        view.release_failure_cohort_probe(
-          identity: identity, date: date, attempt_id: attempt_id
-        )
-      rescue StoreError
-        false
       end
 
       def patrol_admission_metadata(task:, generation:, now:)

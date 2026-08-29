@@ -24,7 +24,7 @@ require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/attempts/api"
 require "hive/attempts/process_identity"
 require "hive/attempts/reconciler"
@@ -269,7 +269,7 @@ module Hive
           logger: logger
         )
 
-        attempt_store = Hive::Attempts::Store.open_default(state_home: @hive_home)
+        attempt_store = Hive::Attempts::Repository.open_default(state_home: @hive_home)
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )
@@ -290,7 +290,7 @@ module Hive
           finalization_maintenance: finalization_maintenance,
           logger: logger
         )
-        lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)
+        lost_outcome_store = Hive::Attempts::LostOutcomeTransition.new(store: attempt_store)
         lost_outcome_processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: attempt_store,
           outcome_store: lost_outcome_store,

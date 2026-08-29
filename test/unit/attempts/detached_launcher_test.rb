@@ -10,7 +10,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     skip "POSIX fork/setsid unavailable" unless Hive::Attempts::DetachedLauncher.supported?
 
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
         attempt_id: "attempt-detached", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
@@ -46,7 +46,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
 
   def test_launch_timeout_leaves_an_expirable_launching_reservation
     launcher = Hive::Attempts::DetachedLauncher.new(
-      store: Struct.new(:root).new("/attempts"), ready_timeout_sec: 0
+      store: launcher_store, ready_timeout_sec: 0
     )
     record = Struct.new(:attempt_id).new("attempt-timeout")
     launcher.define_singleton_method(:fork) { 321 }
@@ -61,7 +61,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
   end
 
   def test_launcher_reports_setsid_failure_before_wrapper_fork
-    launcher = Hive::Attempts::DetachedLauncher.new(store: Struct.new(:root).new("/attempts"))
+    launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
     record = Struct.new(:attempt_id).new("attempt-failed")
     launcher.define_singleton_method(:fork) { |&block| block.call }
     launcher.define_singleton_method(:exit!) { |_status| throw :launcher_exited, :launcher_exited }
@@ -77,7 +77,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
   end
 
   def test_launcher_invokes_wrapper_after_session_creation
-    launcher = Hive::Attempts::DetachedLauncher.new(store: Struct.new(:root).new("/attempts"))
+    launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
     record = Struct.new(:attempt_id).new("attempt-child")
     invoked = nil
     launcher.define_singleton_method(:fork) { |&block| block.call }
@@ -96,7 +96,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
 
   def test_wrapper_exec_contains_timers_timeout_and_worker_command
     launcher = Hive::Attempts::DetachedLauncher.new(
-      store: Struct.new(:root).new("/attempts"), timeout_sec: 12
+      store: launcher_store, timeout_sec: 12
     )
     record = Struct.new(:attempt_id).new("attempt-command")
     executed = nil
@@ -123,6 +123,11 @@ class AttemptsDetachedLauncherTest < Minitest::Test
   end
 
   private
+
+  def launcher_store
+    database = Struct.new(:path).new("/state/runtime-control-plane.sqlite3")
+    Struct.new(:root, :database).new("/attempts", database)
+  end
 
   def wait_for_terminal(store, attempt_id)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5

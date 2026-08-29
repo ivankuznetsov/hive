@@ -1656,7 +1656,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         id: 817, slug: "demo-task", folder: folder, state_file: state_file,
         stage_index: 4, stage_name: "execute"
       )
-      attempts = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      attempts = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminal_provider_attempt(attempts)
       maintenance = Hive::Attempts::FinalizationMaintenance.new(store: attempts)
       assert maintenance.prepare(terminal)
@@ -1709,7 +1709,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       expected_state_home = state_home
       test_case = self
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :open_default,
+        Hive::Attempts::Repository, :open_default,
         lambda { |state_home:|
           test_case.assert_equal expected_state_home, state_home
           opened
@@ -1892,7 +1892,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def test_source_receipt_proof_fallback_and_storage_errors_are_fail_closed
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       terminal = terminal_provider_attempt(store)
       identity = {
         "attempt_id" => terminal.attempt_id,
@@ -1906,13 +1906,13 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       failing = Object.new
       failing.define_singleton_method(:fetch_hot) do |_id|
-        raise Hive::Attempts::StoreError, "unavailable"
+        raise Hive::Attempts::RepositoryError, "unavailable"
       end
       coordinator = Hive::Daemon::RecoveryCoordinator.new(attempt_store: failing)
       refute coordinator.send(:source_health_acknowledged?, identity)
 
       failing.define_singleton_method(:fetch) do |_id|
-        raise Hive::Attempts::StoreError, "unavailable"
+        raise Hive::Attempts::RepositoryError, "unavailable"
       end
       marker = Struct.new(:attrs).new({
         "reason" => "provider_route_failed", "attempt_id" => terminal.attempt_id

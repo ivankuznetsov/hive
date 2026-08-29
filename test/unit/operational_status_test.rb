@@ -484,7 +484,7 @@ class OperationalStatusTest < Minitest::Test
         "last_result" => nil
       },
       "last_error" => {
-        "operation" => "maintenance", "class" => "Hive::Attempts::StoreError",
+        "operation" => "maintenance", "class" => "Hive::Attempts::RepositoryError",
         "observed_at" => "2026-07-20T09:00:01.000000Z"
       },
       "degraded_reason" => "maintenance_failed"

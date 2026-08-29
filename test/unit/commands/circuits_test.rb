@@ -228,7 +228,7 @@ class CommandsCircuitsTest < Minitest::Test
       Hive::ProviderHealth::InvalidMutation.new("invalid") => "usage",
       Hive::ProviderHealth::InvalidScope.new("scope") => "usage",
       Hive::ProviderHealth::Unavailable.new("unavailable") => "unavailable",
-      Hive::Attempts::StoreError.new("store") => "unavailable",
+      Hive::Attempts::RepositoryError.new("store") => "unavailable",
       Hive::ConfigError.new("config") => "config",
       RuntimeError.new("bug") => "internal"
     }

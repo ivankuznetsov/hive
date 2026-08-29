@@ -1,6 +1,6 @@
-require "json"
+require "digest"
 require "time"
-require "hive/attempts/point_storage"
+require "hive/runtime_control_plane"
 
 module Hive
   module Attempts
@@ -15,7 +15,6 @@ module Hive
       MAX_BYTES = 16 * 1024
       RESULT_KEYS = %w[promoted deleted cold_examined].freeze
       MIGRATION_RESULT_KEYS = %w[source_count promoted hot invalid].freeze
-      COLD_SWEEP_SHARDS = 256
 
       def self.unknown_snapshot
         {
@@ -37,12 +36,8 @@ module Hive
         }
       end
 
-      def initialize(root:, create_directories: true)
-        @storage = PointStorage.new(
-          root: root,
-          label: "attempt storage health",
-          create_directories: create_directories
-        )
+      def initialize(store: nil, root: nil, create_directories: true)
+        @store = store || Repository.new(root: root, create_directories: create_directories)
       end
 
       def claim_maintenance(now:, interval_sec:)
@@ -125,11 +120,11 @@ module Hive
           "status", "layout", "hot", "maintenance",
           "last_error", "degraded_reason"
         )
-      rescue StoreError
+      rescue RepositoryError
         default_payload.merge(
           "status" => "degraded",
           "hot" => { "records" => nil, "invalid" => nil },
-          "last_error" => { "operation" => "status", "class" => "StoreError" },
+          "last_error" => { "operation" => "status", "class" => "RepositoryError" },
           "degraded_reason" => "health_metadata_unreadable"
         ).slice(
           "status", "layout", "hot", "maintenance",
@@ -164,41 +159,47 @@ module Hive
 
       def update
         replacement = nil
-        @storage.synchronize(KIND, KEY) do
-          bytes = @storage.read(KIND, KEY, max_bytes: MAX_BYTES)
-          current = bytes ? parse(bytes) : default_payload
+        @store.database.transaction do |db|
+          row = db[:projections].where(projection_key: projection_key).first
+          current = row ? parse(row.fetch(:value_json)) : default_payload
           replacement = yield(current)
           next current if replacement == current
 
-          serialized = StorageKey.dump(replacement)
-          raise StoreError, "attempt storage health is too large" if serialized.bytesize > MAX_BYTES
-
-          @storage.write(
-            KIND, KEY, serialized,
-            expected_bytes: bytes, max_existing_bytes: MAX_BYTES
-          )
+          serialized = RuntimeControlPlane::Codec.dump_json(replacement)
+          raise RepositoryError, "attempt storage health is too large" if serialized.bytesize > MAX_BYTES
+          values = {
+            projection_key: projection_key, source_kind: "attempts",
+            source_id: "storage-health", source_generation: 0,
+            source_fingerprint: Digest::SHA256.hexdigest(serialized),
+            value_json: serialized, created_at: Record.iso8601(Time.now.utc)
+          }
+          db[:projections].insert_conflict(
+            target: :projection_key, update: values.except(:projection_key)
+          ).insert(values)
         end
         replacement
       end
 
       def read
-        bytes = @storage.read(KIND, KEY, max_bytes: MAX_BYTES)
-        bytes ? parse(bytes) : default_payload
+        row = @store.database.read do |db|
+          db[:projections].where(projection_key: projection_key).first
+        end
+        row ? parse(row.fetch(:value_json)) : default_payload
       end
 
       def parse(bytes)
-        data = JSON.parse(bytes)
+        data = RuntimeControlPlane::Codec.load_json(bytes)
         valid = data.is_a?(Hash) && data["schema"] == SCHEMA &&
           data["schema_version"] == SCHEMA_VERSION &&
           data["scope"] == "attempt-storage" &&
           data["layout"].is_a?(Hash) && data["maintenance"].is_a?(Hash) &&
           normalize_cold_sweep_cursor(data["cold_sweep_cursor"]) &&
-          bytes == StorageKey.dump(data)
-        raise StoreError, "attempt storage health is corrupt" unless valid
+          bytes == RuntimeControlPlane::Codec.dump_json(data)
+        raise RepositoryError, "attempt storage health is corrupt" unless valid
 
         data
-      rescue JSON::ParserError, EncodingError, ArgumentError, TypeError
-        raise StoreError, "attempt storage health is corrupt"
+      rescue RuntimeControlPlane::Error, EncodingError, ArgumentError, TypeError
+        raise RepositoryError, "attempt storage health is corrupt"
       end
 
       def default_payload
@@ -206,7 +207,7 @@ module Hive
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
           "scope" => "attempt-storage",
-          "cold_sweep_cursor" => { "shard" => 0, "after" => nil }
+          "cold_sweep_cursor" => { "after" => nil }
         )
       end
 
@@ -221,7 +222,7 @@ module Hive
       def bounded_counts(values, allowed)
         normalized = values.to_h.transform_keys(&:to_s).slice(*allowed)
         unless normalized.values.all? { |value| value.is_a?(Integer) && value >= 0 }
-          raise StoreError, "attempt storage health counters are invalid"
+          raise RepositoryError, "attempt storage health counters are invalid"
         end
         normalized
       end
@@ -230,22 +231,22 @@ module Hive
         return nil if value.nil?
         return value if value.is_a?(Integer) && value >= 0
 
-        raise StoreError, "attempt storage health count is invalid"
+        raise RepositoryError, "attempt storage health count is invalid"
       end
 
       def normalize_cold_sweep_cursor(cursor)
         value = cursor.to_h
-        shard = value.fetch("shard")
         after = value["after"]
-        valid = value.keys.sort == %w[after shard] &&
-          shard.is_a?(Integer) && shard.between?(0, COLD_SWEEP_SHARDS - 1) &&
-          (after.nil? || StorageKey.string(after) == after)
-        raise StoreError, "attempt cold sweep cursor is invalid" unless valid
+        valid = value.keys == [ "after" ] &&
+          (after.nil? || (after.is_a?(String) && !after.empty? && after.bytesize <= 128))
+        raise RepositoryError, "attempt cold sweep cursor is invalid" unless valid
 
-        { "shard" => shard, "after" => after }
+        { "after" => after }
       rescue KeyError, NoMethodError
-        raise StoreError, "attempt cold sweep cursor is invalid"
+        raise RepositoryError, "attempt cold sweep cursor is invalid"
       end
+
+      def projection_key = "attempts:storage-health"
     end
   end
 end

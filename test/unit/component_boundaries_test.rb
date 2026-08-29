@@ -52,10 +52,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::ProviderRouting", provider_routing.dig("entrypoint", "constant")
     assert_includes provider_routing.dig("public_contract", "values"),
                     "Hive::ProviderRouting::Policy"
-    assert_empty provider_routing.fetch("component_dependencies")
+    assert_equal [ "runtime-control-plane" ],
+                 provider_routing.fetch("component_dependencies")
     assert_includes provider_routing.fetch("allowed_hive_dependencies"),
-                    "hive/point_storage"
-    assert_match(/routing-policy snapshots/, provider_routing.fetch("mutation_authority"))
+                    "hive/runtime_control_plane"
+    assert_match(/routing-policy rows/, provider_routing.fetch("mutation_authority"))
     assert_empty provider_routing.fetch("migration_exceptions")
 
     provider_operations = contract.component("provider-routing-operations")
@@ -70,7 +71,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "candidate", attempts.fetch("state")
     assert_equal "hive/attempts/api", attempts.dig("entrypoint", "require")
     assert_equal "Hive::Attempts::API", attempts.dig("entrypoint", "constant")
-    assert_equal %w[provider-health provider-routing-policy],
+    assert_equal %w[provider-health provider-routing-policy runtime-control-plane],
                  attempts.fetch("component_dependencies")
     assert_empty attempts.fetch("migration_exceptions")
     assert_equal %w[
@@ -82,21 +83,17 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::CapacitySnapshot
       Hive::Attempts::Client
       Hive::Attempts::ConfiguredDispatcher
-      Hive::Attempts::DecisionIndex
       Hive::Attempts::DetachedLauncher
       Hive::Attempts::Dispatcher
       Hive::Attempts::Entrypoint
       Hive::Attempts::FinalizationMaintenance
       Hive::Attempts::LogArchive
       Hive::Attempts::LostOutcomeProcessor
-      Hive::Attempts::LostOutcomeStore
-      Hive::Attempts::PendingFinalizationStore
-      Hive::Attempts::PermanentProofStore
-      Hive::Attempts::PointStorage
+      Hive::Attempts::LostOutcomeTransition
       Hive::Attempts::ProcessIdentity
       Hive::Attempts::Reconciler
+      Hive::Attempts::Repository
       Hive::Attempts::StorageHealth
-      Hive::Attempts::Store
       Hive::Attempts::Supervisor
     ]
     assert_equal expected_internal_collaborators,
@@ -111,14 +108,14 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/recovery/migration.rb"
         ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::LostOutcomeTransition" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::ProcessIdentity" => [
           "lib/hive/commands/daemon.rb",
           "lib/hive/recovery/migration.rb"
         ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],
-        "Hive::Attempts::Store" => [
+        "Hive::Attempts::Repository" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/circuits.rb",
           "lib/hive/commands/daemon.rb",
@@ -720,11 +717,14 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal(
       {
         "agent-abi" => [ "agent-support" ],
-        "attempts" => [ "provider-health", "provider-routing-policy" ],
+        "attempts" => [
+          "provider-health", "provider-routing-policy", "runtime-control-plane"
+        ],
         "patrol-fix" => [ "safe-agent-git-gate" ],
         "provider-routing-operations" => [
           "attempts", "provider-health", "provider-routing-policy"
         ],
+        "provider-routing-policy" => [ "runtime-control-plane" ],
         "skillpack" => [ "agent-abi", "agent-support" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
         "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],
@@ -1191,11 +1191,11 @@ class ComponentBoundariesTest < Minitest::Test
 
   def test_open_default_is_detected_as_a_construction_api
     syntax = ComponentBoundaryContract::RubySyntax.new(
-      "Hive::Attempts::Store.open_default(state_home: root)\n",
+      "Hive::Attempts::Repository.open_default(state_home: root)\n",
       "construction-form.rb"
     )
 
-    assert_includes syntax.constructions, "Hive::Attempts::Store"
+    assert_includes syntax.constructions, "Hive::Attempts::Repository"
   end
 
   def test_lexically_resolved_internal_construction_cannot_evade_boundary

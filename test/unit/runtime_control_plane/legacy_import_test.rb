@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "sequel"
 require "yaml"
+require "hive/attempts/repository"
 require "hive/runtime_control_plane/legacy_import"
 
 class RuntimeControlPlaneLegacyImportTest < Minitest::Test
@@ -32,6 +33,23 @@ class RuntimeControlPlaneLegacyImportTest < Minitest::Test
       assert_equal 1, first.records.fetch("pr_merge_reconciliations").length
       assert_equal 1, first.records.fetch("task_projections").length
       assert_equal 2, first.records.fetch("retained_payloads").length
+    end
+  end
+
+  def test_real_current_attempt_record_imports_and_invalid_current_record_fails_closed
+    with_fixture_home do |state_home, data_home, project_root|
+      record = current_lost_attempt(File.join(File.dirname(state_home), "record-source"))
+      path = File.join(state_home, "attempts", "v4", "records", "attempt-1.json")
+      File.binwrite(path, JSON.generate(record.to_h))
+
+      imported = importer(state_home, data_home, project_root).call
+      assert_equal [ record.to_h ], imported.records.fetch("attempts")
+
+      File.binwrite(path, JSON.generate(record.to_h.tap { |value| value.delete("task_slug") }))
+      error = assert_raises(Hive::RuntimeControlPlane::LegacyImport::ClassificationError) do
+        importer(state_home, data_home, project_root).call
+      end
+      assert_equal :malformed_attempt, error.code
     end
   end
 
@@ -292,5 +310,26 @@ class RuntimeControlPlaneLegacyImportTest < Minitest::Test
       state_home: state_home, data_home: data_home, project_roots: [ project_root ],
       **options
     )
+  end
+
+  def current_lost_attempt(root)
+    repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+    launching = repository.create_launching(
+      attempt_id: "attempt-current", request_id: "request-current",
+      predecessor_attempt_id: nil, task_id: "task-current", project: "alpha",
+      task_slug: "task-current", intended_stage: "4-execute",
+      task_generation: "task-generation:v7", ownership_generation: "owner:v3",
+      task_input_epoch: 7, progress_token: "source-fingerprint:v7",
+      provider: "codex", worker_argv: [ "hive", "run", "task-current" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+      starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
+      source_fingerprint: "source-fingerprint:v7",
+      launch_timeout_sec: 30, now: Time.utc(2026, 8, 29, 12)
+    )
+    repository.mark_lost(
+      launching, reason: "migration_fixture", now: Time.utc(2026, 8, 29, 12, 0, 1)
+    )
+  ensure
+    repository&.database&.disconnect
   end
 end

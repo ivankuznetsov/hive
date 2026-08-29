@@ -1,6 +1,6 @@
 require "time"
 require "hive/attempts/capacity_snapshot"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/provider_health"
 require "hive/provider_routing"
 
@@ -21,7 +21,7 @@ module Hive
         @health_store = health_store
         @health_store_factory = health_store_factory || -> { Hive::ProviderHealth.open }
         @attempt_store = attempt_store
-        @attempt_store_factory = attempt_store_factory || -> { Hive::Attempts::Store.open_default }
+        @attempt_store_factory = attempt_store_factory || -> { Hive::Attempts::Repository.open_default }
         @now = now.utc
       end
 
@@ -73,7 +73,7 @@ module Hive
         scan = attempt_store.scan
         issue = scan.invalid_records.empty? ? nil : "attempt_storage_invalid"
         [ scan, issue ]
-      rescue Hive::Attempts::StoreError, Hive::ConfigError, SystemCallError, IOError
+      rescue Hive::Attempts::RepositoryError, Hive::ConfigError, SystemCallError, IOError
         [ Hive::Attempts::Scan.new(records: [].freeze, invalid_records: [].freeze),
           "attempt_storage_unavailable" ]
       end
@@ -84,7 +84,7 @@ module Hive
             store: attempt_store, scan: scan, now: @now
           )
           snapshot.reserved_attempt_ids.to_h { |attempt_id| [ attempt_id, true ] }
-        rescue Hive::Attempts::StoreError
+        rescue Hive::Attempts::RepositoryError
           scan.records.select(&:live?).to_h { |record| [ record.attempt_id, true ] }
         end
         counts = @accounts.keys.to_h { |account_id| [ account_id, 0 ] }
@@ -109,10 +109,10 @@ module Hive
         route_ids = @accounts.values.flat_map do |account|
           account.models.map { |model| "#{account.id}/#{model}" }
         end
-        # DecisionIndex returns an immutable snapshot. Filtering belongs to
+        # The attempt repository returns an immutable snapshot. Filtering belongs to
         # this read-only projection, so never mutate the durable reader's
         # array in place.
-        entries = attempt_store.decision_index.routing_decisions(limit: DECISION_LIMIT).select do |entry|
+        entries = attempt_store.routing_decisions(limit: DECISION_LIMIT).select do |entry|
           decision = entry.fetch("decision")
           selected = decision["selected_route"]
           selected_id = selected.is_a?(Hash) ? selected["route_id"] : selected
@@ -134,7 +134,7 @@ module Hive
           }
         end
         [ rows, nil ]
-      rescue Hive::Attempts::StoreError, Hive::ConfigError, SystemCallError, IOError
+      rescue Hive::Attempts::RepositoryError, Hive::ConfigError, SystemCallError, IOError
         [ [], "routing_decisions_unavailable" ]
       end
 

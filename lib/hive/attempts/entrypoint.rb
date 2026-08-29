@@ -31,7 +31,7 @@ module Hive
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc)
         cfg = @config_loader.call(task.project_root)
-        store = @store || Store.new
+        store = @store || Repository.new
         maintenance = @maintenance
         maintenance ||= foreground_maintenance(store) unless @store
         run_opportunistic_maintenance(maintenance, now: now)

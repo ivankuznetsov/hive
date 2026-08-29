@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/task_journal"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class TaskJournalTest < Minitest::Test
   include HiveTestHelper
@@ -355,7 +355,7 @@ class TaskJournalTest < Minitest::Test
 
   def with_writer
     with_tmp_dir do |dir|
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task", intended_stage: "4-execute",

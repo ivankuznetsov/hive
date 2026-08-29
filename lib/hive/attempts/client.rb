@@ -1,4 +1,4 @@
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/attempts/stream_log"
 require "hive/attempts/contracts"
 
@@ -22,7 +22,7 @@ module Hive
           )
 
           record = @store.fetch(attempt_id)
-          raise StoreError, "unknown attempt #{attempt_id}" unless record
+          raise RepositoryError, "unknown attempt #{attempt_id}" unless record
           if record.state == "terminal"
             sequence, stdout_bytes, output_status = drain_frames(
               attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr

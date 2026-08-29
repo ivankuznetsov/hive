@@ -1,7 +1,7 @@
 require "json"
 require "rbconfig"
 require "hive/attempts/contracts"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 module Hive
   module Attempts
@@ -80,6 +80,7 @@ module Hive
           command = [
             RbConfig.ruby, @hive_executable, "__attempt-supervise", record.attempt_id,
             "--store-root", @store.root,
+            "--database-path", @store.database.path,
             "--heartbeat-sec", @heartbeat_sec.to_s,
             "--stale-sec", @stale_sec.to_s,
             "--first-heartbeat-timeout-sec", @first_heartbeat_timeout_sec.to_s,

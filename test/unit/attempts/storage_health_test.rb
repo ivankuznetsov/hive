@@ -7,9 +7,7 @@ class AttemptsStorageHealthTest < Minitest::Test
   NOW = Time.utc(2026, 8, 10, 12, 0, 0)
 
   def test_records_one_bounded_maintenance_result_and_current_hot_counts
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
-
+    with_health do |health, _store|
       assert health.claim_maintenance(now: NOW, interval_sec: 3_600)
       refute health.claim_maintenance(now: NOW + 60, interval_sec: 3_600)
       health.complete_maintenance(
@@ -35,8 +33,7 @@ class AttemptsStorageHealthTest < Minitest::Test
   end
 
   def test_failure_is_a_bounded_reason_code_without_raw_error_text
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
+    with_health do |health, _store|
       error = RuntimeError.new("secret output must not enter status")
 
       health.fail_maintenance(error: error, now: NOW)
@@ -56,8 +53,7 @@ class AttemptsStorageHealthTest < Minitest::Test
   end
 
   def test_success_clears_only_the_matching_operation_failure
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
+    with_health do |health, _store|
       health.fail_maintenance(error: RuntimeError.new("hidden"), now: NOW)
 
       health.complete_migration(
@@ -78,10 +74,8 @@ class AttemptsStorageHealthTest < Minitest::Test
   end
 
   def test_invalid_counters_and_cursors_fail_closed
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
-
-      error = assert_raises(Hive::Attempts::StoreError) do
+    with_health do |health, _store|
+      error = assert_raises(Hive::Attempts::RepositoryError) do
         health.complete_maintenance(
           now: NOW + 1,
           result: { promoted: -1, deleted: 0, cold_examined: 0 }
@@ -89,7 +83,7 @@ class AttemptsStorageHealthTest < Minitest::Test
       end
       assert_match(/counters are invalid/, error.message)
 
-      error = assert_raises(Hive::Attempts::StoreError) do
+      error = assert_raises(Hive::Attempts::RepositoryError) do
         health.advance_cold_sweep({})
       end
       assert_match(/cold sweep cursor is invalid/, error.message)
@@ -97,14 +91,13 @@ class AttemptsStorageHealthTest < Minitest::Test
   end
 
   def test_corrupt_health_metadata_returns_a_bounded_degraded_snapshot
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
+    with_health do |health, store|
       assert health.claim_maintenance(now: NOW, interval_sec: 3_600)
-      relative = Hive::Attempts::StorageKey.relative(
-        Hive::Attempts::StorageHealth::KIND,
-        Hive::Attempts::StorageHealth::KEY
-      )
-      File.write(File.join(root, relative), "{")
+      store.database.transaction do |db|
+        db[:projections].where(projection_key: "attempts:storage-health").update(
+          value_json: "{"
+        )
+      end
 
       status = health.snapshot(hot_count: 4, invalid_hot_count: 2)
 
@@ -112,16 +105,14 @@ class AttemptsStorageHealthTest < Minitest::Test
       assert_equal({ "records" => nil, "invalid" => nil }, status.fetch("hot"))
       assert_equal "health_metadata_unreadable", status.fetch("degraded_reason")
       assert_equal(
-        { "operation" => "status", "class" => "StoreError" },
+        { "operation" => "status", "class" => "RepositoryError" },
         status.fetch("last_error")
       )
     end
   end
 
   def test_fresh_health_is_unknown_until_migration_or_maintenance_completes
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
-
+    with_health do |health, _store|
       status = health.snapshot(hot_count: 0, invalid_hot_count: 0)
 
       assert_equal "unknown", status.fetch("status")
@@ -131,14 +122,21 @@ class AttemptsStorageHealthTest < Minitest::Test
   end
 
   def test_invalid_live_counts_degrade_without_exposing_the_bad_value
-    with_tmp_dir do |root|
-      health = Hive::Attempts::StorageHealth.new(root: root)
-
+    with_health do |health, _store|
       status = health.snapshot(hot_count: -1, invalid_hot_count: 0)
 
       assert_equal "degraded", status.fetch("status")
       assert_equal({ "records" => nil, "invalid" => nil }, status.fetch("hot"))
       assert_equal "health_metadata_unreadable", status.fetch("degraded_reason")
+    end
+  end
+
+  private
+
+  def with_health
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      yield store.storage_health, store
     end
   end
 end

@@ -512,7 +512,7 @@ class TaskClosureTest < Minitest::Test
       File.binwrite(File.join(task.folder, "closure.json"), JSON.generate(receipt))
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :new,
+        Hive::Attempts::Repository, :new,
         ->(**) { flunk "active closure projection rebuilt the attempt store" }
       ) do
         projection = Hive::TaskClosure.projection(

@@ -6,7 +6,11 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
 
   EXPECTED_TABLES = %i[
     attempt_accounting
+    attempt_failure_cohorts
+    attempt_failure_events
+    attempt_lost_outcomes
     attempt_relationships
+    attempt_routing_decisions
     attempts
     capacity_reservations
     daemon_runtime
@@ -59,8 +63,9 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
           connection[:dispatch_requests].insert(
             request_id: uuid("3"), project_id: project_id(database),
             task_id: nil, subject_kind: "task_stage", subject_key: "build",
-            task_generation: -1, intended_stage: "4-execute", state: "queued",
-            priority: 0, payload_json: "{}", created_at: timestamp, updated_at: timestamp
+            task_generation: "opaque", intended_stage: "4-execute", state: "queued",
+            priority: -1, source_fingerprint: "sha256:source", payload_json: "{}",
+            created_at: timestamp, updated_at: timestamp
           )
         end
       end
@@ -73,14 +78,30 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
       database.transaction do |connection|
         base = {
           task_id: ids.fetch(:task_id), subject_kind: "task_stage", subject_key: "4-execute",
-          task_generation: 1, ownership_generation: 1, state: "running", lease_version: 0,
-          routing_json: "{}", created_at: timestamp
+          task_generation: "task:v1", ownership_generation: "owner:v1",
+          state: "running", lease_version: 0, routing_json: "{}",
+          source_fingerprint: "sha256:source", record_json: "{}",
+          record_digest: "a" * 64, subject_json: "{}", project_name: "hive",
+          task_slug: "sqlite", accepted_date: "2026-08-29", created_at: timestamp,
+          accepted_at: timestamp
         }
         connection[:attempts].insert(base.merge(attempt_id: uuid("4")))
         assert_raises(Sequel::UniqueConstraintViolation) do
           connection[:attempts].insert(base.merge(attempt_id: uuid("5")))
         end
       end
+
+      foreign_keys = database.read do |connection|
+        %i[
+          attempt_routing_decisions attempt_failure_cohorts attempt_failure_events
+        ].to_h { |table| [ table, connection.foreign_key_list(table).first ] }
+      end
+      assert_equal :set_null,
+                   foreign_keys.dig(:attempt_routing_decisions, :on_delete)
+      assert_equal :set_null,
+                   foreign_keys.dig(:attempt_failure_cohorts, :on_delete)
+      assert_equal :cascade,
+                   foreign_keys.dig(:attempt_failure_events, :on_delete)
 
       database.transaction do |connection|
         circuit = {
@@ -102,8 +123,8 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
           project_id: ids.fetch(:project_id), task_id: ids.fetch(:task_id),
           subject_kind: "task_stage", subject_key: "4-execute", task_generation: 2,
           intended_stage: "4-execute", state: "queued", priority: 0,
-          idempotency_key: "same", payload_json: "{}", created_at: timestamp,
-          updated_at: timestamp
+          idempotency_key: "same", source_fingerprint: "sha256:request-source",
+          payload_json: "{}", created_at: timestamp, updated_at: timestamp
         }
         connection[:dispatch_requests].insert(request.merge(request_id: uuid("9")))
         assert_raises(Sequel::UniqueConstraintViolation) do

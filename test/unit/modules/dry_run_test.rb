@@ -1,6 +1,6 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/dry_run"
@@ -38,7 +38,7 @@ class ModulesDryRunTest < Minitest::Test
       before = tree_digest(root)
       dry_run = Hive::Modules::DryRun.new(
         store: store, project_id: "project-1", project: "demo",
-        attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
+        attempt_store: Hive::Attempts::Repository.new(root: File.join(root, "attempts"), create_directories: false),
         clock: -> { NOW }
       )
 
@@ -55,7 +55,7 @@ class ModulesDryRunTest < Minitest::Test
 
       capacity = Hive::Modules::DryRun.new(
         store: store, project_id: "project-1", project: "demo",
-        attempt_store: Hive::Attempts::Store.new(
+        attempt_store: Hive::Attempts::Repository.new(
           root: File.join(root, "attempts"), create_directories: false
         ),
         capacity_probe: ->(**) { true }, clock: -> { NOW }

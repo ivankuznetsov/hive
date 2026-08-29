@@ -1,7 +1,7 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/dispatcher"
@@ -491,7 +491,7 @@ class ModulesDispatcherTest < Minitest::Test
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       launcher = Launcher.new
       attempt_dispatcher ||= Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: launcher,

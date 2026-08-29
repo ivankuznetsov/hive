@@ -98,7 +98,7 @@ class HiveStagesExecuteTest < Minitest::Test
         task.define_singleton_method(:worktree_path) { worktree }
         write_plan(task)
         baseline = Hive::GitOps.new(worktree).head_sha
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         policy = Hive::Workflows::Coding::DESCRIPTOR.stage_named("execute").condition_policy.to_h
         attempt = store.create_launching(
           attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,

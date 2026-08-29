@@ -5,7 +5,7 @@ require "time"
 require "hive/attempts/contracts"
 require "hive/attempts/dispatcher"
 require "hive/attempts/evidence_channel"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/attempts/supervisor"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/recovery_coordinator"
@@ -342,7 +342,7 @@ module Hive
       end
 
       def restart_cell!
-        @store = Hive::Attempts::Store.new(root: File.join(@cell_root, "attempts"))
+        @store = Hive::Attempts::Repository.new(root: File.join(@cell_root, "attempts"))
         @health = Hive::ProviderHealth::Store.new(
           root: File.join(@cell_root, "health"), clock: -> { NOW },
           attempt_reader: method(:read_health_attempt)
@@ -484,7 +484,7 @@ module Hive
           "state" => record.state,
           "probe_bindings" => record["routing"].fetch("probe_bindings", [])
         }
-      rescue Hive::Attempts::StoreError
+      rescue Hive::Attempts::RepositoryError
         nil
       end
 

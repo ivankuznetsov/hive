@@ -4,6 +4,7 @@ require "json"
 require "sequel"
 require "yaml"
 require "hive/runtime_control_plane"
+require "hive/attempts/record"
 
 module Hive
   module RuntimeControlPlane
@@ -206,6 +207,7 @@ module Hive
         documents = parse_documents(path, bytes)
         documents.each_with_index do |document, index|
           validate_project!(document, project, path) if project
+          validate_attempt_contract!(document, path) if domain == "attempts"
           validate_quiescence!(domain, document, path)
           logical_identity = documents.one? ? logical : "#{logical}##{index + 1}"
           record_document(domain, logical_identity, document, path: path)
@@ -409,6 +411,18 @@ module Hive
             code: :active_capacity_reservation, path: path
           )
         end
+      end
+
+      def validate_attempt_contract!(document, path)
+        return unless document["schema"] == Hive::Attempts::Record::SCHEMA
+
+        Hive::Attempts::Record.new(document)
+      rescue Hive::Attempts::InvalidRecord => error
+        raise ClassificationError.new(
+          "legacy attempt is invalid at #{path}: #{error.message}",
+          code: :malformed_attempt, path: path,
+          details: { error_class: error.class.name }
+        )
       end
 
       def classify_probe(logical, document, path)

@@ -5,7 +5,7 @@ module Hive
   module Attempts
     autoload :ConfiguredDispatcher, "hive/attempts/configured_dispatcher"
     autoload :Entrypoint, "hive/attempts/entrypoint"
-    autoload :Store, "hive/attempts/store"
+    autoload :Repository, "hive/attempts/repository"
 
     # Stable consumer-facing boundary for durable attempt admission.
     #
@@ -60,6 +60,14 @@ module Hive
         )
       end
 
+      def correlated_log_reader
+        require "hive/task_workspace/correlated_log"
+        Hive::TaskWorkspace::CorrelatedLog.new(
+          root: store.root,
+          reference_resolver: ->(reference) { store.sealed_payload_reference(reference) }
+        )
+      end
+
       private
 
       def foreground
@@ -71,7 +79,7 @@ module Hive
       end
 
       def store
-        @store ||= Store.new
+        @store ||= Repository.open_default
       end
     end
   end

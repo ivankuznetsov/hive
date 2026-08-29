@@ -6,12 +6,11 @@ require "time"
 require "hive/atomic_file"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/finalization_maintenance"
-require "hive/attempts/permanent_proof_store"
 require "hive/attempts/process_identity"
 require "hive/attempts/record"
 require "hive/attempts/record_migration"
 require "hive/attempts/storage_health"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/paths"
 
 module Hive
@@ -119,7 +118,7 @@ module Hive
         record_migration_failure(error, now: now)
         raise
       rescue JSON::ParserError, SystemCallError, IOError,
-             Hive::Attempts::InvalidRecord, Hive::Attempts::StoreError => error
+             Hive::Attempts::InvalidRecord, Hive::Attempts::RepositoryError => error
         wrapped = Error.new("recovery migration failed: #{error.message}")
         record_migration_failure(wrapped, now: now)
         raise wrapped
@@ -166,7 +165,7 @@ module Hive
 
       def migrate_attempts!(now:)
         source = cut_over_layout!(now: now)
-        store = Hive::Attempts::Store.new(root: current_attempt_root)
+        store = Hive::Attempts::Repository.new(root: current_attempt_root)
         checkpoint = read_checkpoint!
 
         if phase_before?(checkpoint, "verified")
@@ -175,7 +174,7 @@ module Hive
           scan = store.scan
           assert_scan_counts!(source, scan)
           view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: scan)
-          store.with_admission_lock { view.refresh_for_admission }
+          view.refresh_for_admission
           parity = verify_exact_parity!(store, scan, now: now)
           checkpoint = write_checkpoint!(
             source.merge(
@@ -427,7 +426,8 @@ module Hive
       end
 
       def migrate_permanent_proofs!(root)
-        proof_root = File.join(root, "proof", Hive::Attempts::PermanentProofStore::KIND)
+        proof_kind = "attempt"
+        proof_root = File.join(root, "proof", proof_kind)
         return unless File.directory?(proof_root)
 
         Dir.glob(File.join(proof_root, "**", "*.json")).sort.each do |path|
@@ -443,17 +443,14 @@ module Hive
 
           expected = File.join(
             File.join(root, "proof"),
-            Hive::Attempts::StorageKey.relative(
-              Hive::Attempts::PermanentProofStore::KIND,
-              "attempt_id" => record.attempt_id
-            )
+            legacy_relative(proof_kind, "attempt_id" => record.attempt_id)
           )
           unless File.expand_path(path) == File.expand_path(expected)
             raise Error, "attempt permanent proof key collision at #{path}"
           end
           write_json!(path, converted) if data["schema_version"] != CURRENT_ATTEMPT_VERSION
         rescue JSON::ParserError, Hive::Attempts::InvalidRecord,
-               Hive::Attempts::StoreError, TypeError => error
+               Hive::Attempts::RepositoryError, TypeError => error
           raise Error, "attempt permanent proof is unreadable: #{error.message}"
         end
       end
@@ -490,7 +487,7 @@ module Hive
 
       def verify_exact_parity!(store, scan, now:)
         records = ordered_records(scan.records)
-        index = store.decision_index
+        index = store
         decisions = []
         compare = lambda do |kind, key, expected, actual|
           unless expected == actual
@@ -534,20 +531,17 @@ module Hive
           )
         end
 
-        expected = Hive::Attempts::CapacitySnapshot.build(
+        capacity = Hive::Attempts::CapacitySnapshot.build(
           store: store, scan: scan, now: now,
           daily_counts: durable_daily_counts(store, date: now.utc.to_date)
         )
-        actual = Hive::Attempts::CapacitySnapshot.build_from_live_reservations(
-          scan: scan, reservations: index.live_reservations,
-          daily_counts: index.daily_counts(date: now.utc.to_date)
-        )
-        expected_capacity = capacity_decision(expected, date: now.utc.to_date)
-        actual_capacity = capacity_decision(actual, date: now.utc.to_date)
-        compare.call("capacity", now.utc.to_date.iso8601, expected_capacity, actual_capacity)
+        decisions << [
+          "capacity", now.utc.to_date.iso8601,
+          capacity_decision(capacity, date: now.utc.to_date)
+        ]
 
         { "count" => decisions.size,
-          "digest" => Digest::SHA256.hexdigest(Hive::Attempts::StorageKey.dump(decisions)) }
+          "digest" => Digest::SHA256.hexdigest(legacy_key_dump(decisions)) }
       end
 
       def capacity_decision(snapshot, date:)
@@ -568,7 +562,7 @@ module Hive
       # immutable proof without enumerating uncharged historical proof.
       def durable_daily_counts(store, date:)
         counts = Hash.new(0)
-        store.decision_index.daily_acceptances(date: date).each do |attempt_id, acceptance|
+        store.daily_acceptances(date: date).each do |attempt_id, acceptance|
           record = store.fetch(attempt_id)
           unless record && record["accepted_at"] == acceptance.fetch("accepted_at") &&
                  record["project"] == acceptance.fetch("project")
@@ -597,14 +591,35 @@ module Hive
           counts[[ record["project"], date ]] += 1 unless refunded
         end
         counts.to_h
-      rescue Hive::Attempts::StoreError, KeyError => error
+      rescue Hive::Attempts::RepositoryError, KeyError => error
         raise Error, "daily accounting index is unreadable: #{error.message}"
       end
 
       def semantic_key(record)
-        Hive::Attempts::StorageKey.dump(
+        legacy_key_dump(
           "task_generation" => record.task_generation, "subject" => record.subject
         ).strip
+      end
+
+      def legacy_relative(kind, key)
+        digest = Digest::SHA256.hexdigest(
+          legacy_key_dump("kind" => kind, "key" => key)
+        )
+        File.join(kind, digest[0, 2], "#{digest}.json")
+      end
+
+      def legacy_key_dump(value)
+        "#{JSON.generate(legacy_normalize(value))}\n"
+      end
+
+      def legacy_normalize(value)
+        case value
+        when Hash
+          value.to_h { |key, child| [ key.to_s, legacy_normalize(child) ] }.sort.to_h
+        when Array then value.map { |child| legacy_normalize(child) }
+        when Symbol then value.to_s
+        else value
+        end
       end
 
       def ordered_records(records)

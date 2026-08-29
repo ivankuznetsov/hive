@@ -208,6 +208,53 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_resolved_max_pass_review_escalation_is_a_retryable_restart
+    with_tmp_dir do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      escalations = File.join(reviews, "escalations-02.md")
+      fix_success = File.join(reviews, "fix-success-02.md")
+      File.write(escalations, "# Resolved\n")
+      File.write(fix_success, "complete\n")
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "# Review task\n")
+      File.utime(Time.utc(2026, 7, 20, 8), Time.utc(2026, 7, 20, 8), escalations)
+      File.utime(Time.utc(2026, 7, 20, 9), Time.utc(2026, 7, 20, 9), fix_success)
+      row = {
+        "project" => "demo",
+        "slug" => "review-task",
+        "folder" => folder,
+        "state_file" => state_file,
+        "stage" => "6-review",
+        "marker" => "review_stale",
+        "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+        "mtime" => "2026-07-20T09:00:00.000000Z",
+        "action" => "recover_review",
+        "blocked" => false,
+        "held" => nil
+      }
+
+      action = Hive::OperationalAction.descriptor(project: "demo", row: row)
+
+      assert_equal "workflow.retry", action.fetch("action_id")
+    end
+  end
+
+  def test_review_intervention_check_fails_closed_when_receipt_mtime_is_unreadable
+    with_tmp_dir do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "escalations-02.md"), "# Resolved\n")
+      File.write(File.join(reviews, "fix-success-02.md"), "complete\n")
+
+      with_replaced_singleton_method(File, :mtime, ->(_path) { raise IOError, "unreadable" }) do
+        assert Hive::Recovery.intervention_required?(
+          marker: "review_stale", attrs: { "pass" => "2" }, folder: folder
+        )
+      end
+    end
+  end
+
   def test_task_recheck_reproduces_status_token_and_rejects_marker_rotation
     with_tmp_global_config do
       with_tmp_dir do |project_root|

@@ -220,13 +220,44 @@ module Hive
         end
 
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
-        pass = next_pass_for(task, marker, cfg)
+        on_disk_pass = max_review_pass(task.folder, cfg)
+        pass = next_pass_for(task, marker, cfg, max_pass: on_disk_pass)
         max_passes = cfg.dig("review", "max_passes") || 4
         # A task can be intentionally rewound into review after exhausting its
         # configured pass cap. If the entry CI gate repairs that previously
         # reviewed head, admit exactly the next on-disk pass so the repair is
         # reviewed instead of immediately returning REVIEW_STALE.
         max_passes = [ max_passes, pass ].max if entry_ci_repaired
+
+        # A CI-fix commit can land immediately before the runner is stopped
+        # (daemon restart, host reboot, process loss). On the next invocation
+        # entry_ci_repaired is false because the repaired HEAD already exists,
+        # while the completed on-disk pass still points at the older HEAD. Do
+        # not turn that restart boundary into a false max-pass escalation.
+        #
+        # New sentinels bind pass completion to HEAD. A matching HEAD means
+        # the pass had already reached the browser boundary, so resume there.
+        # A different HEAD authorizes one fresh pass. Legacy sentinels have no
+        # head binding; fail safe by reviewing the current HEAD once rather
+        # than requiring an operator to clear a synthetic stale marker.
+        resume_browser = false
+        if !entry_ci_repaired && pass > max_passes &&
+           on_disk_pass == pass - 1 && completed_pass_receipt?(task.folder, on_disk_pass)
+          completed_head = fix_success_head(task.folder, on_disk_pass)
+          if !completed_head.nil? && completed_head == git_head(worktree_path)
+            pass = on_disk_pass
+            resume_browser = true
+          else
+            max_passes = pass
+          end
+        elsif !entry_ci_repaired && pass > max_passes &&
+              on_disk_pass == pass &&
+              pass_completion_status(task.folder, pass) != :complete &&
+              completed_pass_receipt?(task.folder, pass - 1)
+          # The widened pass itself had already started before interruption.
+          # Resume its incomplete reviewer/triage/fix artifacts in place.
+          max_passes = pass
+        end
 
         # When the runner is re-entering a pass whose Phase 4 fix did
         # not finish (REVIEW_ERROR phase=fix, or interrupted
@@ -240,6 +271,8 @@ module Hive
         fix_retry_pass = pass_completion_status(task.folder, pass) == :fix_incomplete ? pass : nil
 
         loop do
+          break if resume_browser
+
           if wall_clock_exceeded?(started_at, max_wall_clock)
             return finalize_wall_clock_stale(task, started_at, pass: pass)
           end
@@ -1318,8 +1351,8 @@ module Hive
 
       # Pass to start at on a fresh hive run. Falls back to 1 when no
       # reviewer files exist yet.
-      def next_pass_for(task, marker, cfg = nil)
-        max = max_review_pass(task.folder, cfg)
+      def next_pass_for(task, marker, cfg = nil, max_pass: nil)
+        max = max_pass || max_review_pass(task.folder, cfg)
         case marker.name
         when :review_waiting
           # Prefer the marker-recorded pass over the disk-derived max.
@@ -1423,6 +1456,18 @@ module Hive
         File.mtime(fix_success_path) >= File.mtime(escalations_path)
       rescue SystemCallError, IOError
         true
+      end
+
+      def completed_pass_receipt?(task_folder, pass)
+        File.exist?(fix_success_path(task_folder, pass)) &&
+          pass_completion_status(task_folder, pass) == :complete
+      end
+
+      def fix_success_head(task_folder, pass)
+        first_line = File.open(fix_success_path(task_folder, pass), &:gets).to_s
+        first_line[/\bhead=([0-9a-f]{40,64})\b/, 1]
+      rescue SystemCallError, IOError
+        nil
       end
 
       # Back-compat shim: PR #56 named the narrower predicate this. Now
@@ -2469,8 +2514,10 @@ module Hive
       def write_fix_success(ctx)
         path = fix_success_path(ctx.task_folder, ctx.pass)
         FileUtils.mkdir_p(File.dirname(path))
+        head = git_head(ctx.worktree_path)
+        head_binding = head.to_s.match?(/\A[0-9a-f]{40,64}\z/) ? " head=#{head}" : ""
         body = +"<!-- HIVE: fix-success sentinel for pass " \
-               "#{format('%02d', ctx.pass)}; do not edit. " \
+               "#{format('%02d', ctx.pass)};#{head_binding} do not edit. " \
                "Removing this file makes the next markerless `hive run` " \
                "treat the pass as fix-incomplete and retry it. -->\n"
         body << "# Fix completed for pass #{format('%02d', ctx.pass)}\n\n"

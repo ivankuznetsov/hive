@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-08-29
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -32,13 +32,20 @@ hive approve <slug> --json                 # machine-readable result (success AN
 5. `resolve_destination`: `--to` (long or short stage name), or auto = the descriptor's next stage (`task.workflow.next_stage_after(task.stage_name)`). At the terminal stage (`9-done` for coding) this raises `FinalStageReached` (also exit 4).
 6. **Same-stage no-op**: if destination resolves to the current stage, emit a `noop: true` payload (or one-line `hive: noop —` text) and return success. No mv, no commit.
 7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. At `4-execute`, effective condition authority is checked first. `--to` (backward direction) bypasses; `--force` bypasses the marker/condition result only after an idempotent `operator_action` audit is durable. Audit failure prevents the move.
-8. **Locking**:
+8. For a backward move, rearm the destination and every traversed stage before
+   the folder move. Hive de-duplicates their descriptor-owned state-file names,
+   removes all recognized markers while preserving surrounding prose, and does
+   not touch state files owned only by stages outside the rewind interval. The
+   rewrite happens under the commit lock, task lock, and each file's marker
+   lock. Exact snapshots are restored if validation, the move, or the Hive
+   state commit fails.
+9. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
-9. For a forward move, build a fresh all-project dependency snapshot and enforce admission inside both locks, after the read-only destination collision check and immediately before `File.rename`. A benign dependency wait raises `DependencyWaitError` (exit 75); an admission error raises `DependencyAdmissionError` (exit 78). `--force` bypasses only step 7's marker check. Backward moves skip admission so corrupt metadata can be repaired by moving to an earlier stage.
-10. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
-11. Cleanup the moved `.lock`, record the slug-scoped commit, and roll the move back if commit fails.
-12. Report human prose or one `hive-approve` JSON document.
+10. For a forward move, build a fresh all-project dependency snapshot and enforce admission inside both locks, after the read-only destination collision check and immediately before `File.rename`. A benign dependency wait raises `DependencyWaitError` (exit 75); an admission error raises `DependencyAdmissionError` (exit 78). `--force` bypasses only step 7's marker check. Backward moves skip admission so corrupt metadata can be repaired by moving to an earlier stage.
+11. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
+12. Cleanup the moved `.lock`, record the slug-scoped commit, and roll the move back if commit fails.
+13. Report human prose or one `hive-approve` JSON document.
 
 ## JSON contract (`schema = "hive-approve"`, version 2)
 
@@ -132,7 +139,7 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schem
 | Backward via `--to`      | none                            | n/a      |
 | Same stage (no-op)       | none                            | n/a      |
 
-`:error`, `:waiting`, `:execute_waiting`, `:execute_stale`, `:review_waiting`, `:review_ci_stale`, `:review_stale`, `:review_error` are all non-terminal: they leave the task in place. The error message includes `marker is :<name>` so an agent can branch deterministically. Backward `--to` is the recovery lever for an intentional stage rewind. Recoverable error markers use the fresh `workflow.retry` action from `hive status --operational --json`; `EXECUTE_STALE` remains manual because findings must be inspected first. `hive markers clear` remains a low-level maintenance command, not the standard agent recovery recipe.
+`:error`, `:waiting`, `:execute_waiting`, `:execute_stale`, `:review_waiting`, `:review_ci_stale`, `:review_stale`, `:review_error` are all non-terminal: they leave the task in place. The error message includes `marker is :<name>` so an agent can branch deterministically. Backward `--to` is the recovery lever for an intentional stage rewind: it clears recognized markers from state files belonging to the destination-through-source interval, so the destination and its next forward visits actually run again instead of consuming terminal output from the previous visit. State files belonging only to earlier or later stages stay exact. Recoverable error markers that do not require a stage rewind use the fresh `workflow.retry` action from `hive status --operational --json`; `EXECUTE_STALE` remains manual because findings must be inspected first. `hive markers clear` remains a low-level maintenance command, not the standard agent recovery recipe.
 
 ## Idempotency: `--from`
 

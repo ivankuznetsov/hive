@@ -491,8 +491,26 @@ module Hive
         [
           @hive_executable,
           File.join(root, "lib"),
+          *ruby_runtime_paths,
           *Gem.path.select { |path| File.directory?(path) }
         ].map { |path| File.expand_path(path) }.uniq
+      end
+
+      # RbConfig.ruby is part of every controller-issued browser/terminal
+      # prefix, and a conventional project commonly reaches the same runtime
+      # through an env shebang. Codex's closed filesystem policy must therefore
+      # admit the selected Ruby executable, its sibling binstubs (for example
+      # bundle), and the runtime libraries needed to load it. Gem.path alone is
+      # insufficient: a hidden mise/asdf runtime makes env fall through to a
+      # different system Ruby whose dependency set does not match the project.
+      def ruby_runtime_paths
+        config = RbConfig::CONFIG
+        paths = [
+          RbConfig.ruby,
+          *%w[bindir libdir rubylibdir rubyarchdir sitelibdir sitearchdir
+              vendorlibdir vendorarchdir].filter_map { |key| config[key] }
+        ]
+        paths.select { |path| !path.to_s.empty? && File.exist?(path) }
       end
 
       def run_browser_command(environment, argv)

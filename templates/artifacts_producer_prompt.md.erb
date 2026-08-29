@@ -63,6 +63,11 @@ controller-owned proxy maps that
 one random browser origin to the exact `web.app_endpoint`. When `web.server.status`
 is `ready`, the controller has already started the app: do not install
 dependencies or start, restart, replace, or detach another application server.
+For a conventional project, use its already-installed locked dependencies and
+the runtime visible on the issued `PATH`; do not run a package installer or
+contact a package registry from the evidence producer. If a locked dependency
+is genuinely unavailable, report that exact capability failure rather than
+substituting source commentary for requested runtime proof.
 For Hive Web fixtures, seed only disposable product state with the frozen Hive
 CLI and `HIVE_HOME=$HIVE_EVIDENCE_WEB_HIVE_HOME`; keep all other disposable
 fixture/project state below the evidence-write root. Hive closes the named

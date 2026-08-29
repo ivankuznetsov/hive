@@ -157,6 +157,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
       route = first.record["routes"].last
       assert_equal "planner_revision", route.fetch("role")
       assert_equal "retryable_failure", route.fetch("outcome")
+      assert_equal "route failed", route.fetch("diagnostic")
       assert route.fetch("retry_at")
       assert first.record["artifacts"].fetch("planner_revision_result")
 
@@ -170,6 +171,40 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal 2, cleared.record["routes"].count { |entry|
         entry["role"] == "planner_revision"
       }
+    end
+  end
+
+  def test_legacy_cross_provider_planner_model_recovers_once_with_the_same_provider
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      revision = TransientRevision.new(revised)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      legacy = {
+        "provider" => "codex", "model" => "claude-opus-4-8",
+        "family" => "openai", "effort" => "default", "route" => "codex-cli/v1"
+      }
+      first = Hive::PlanReview::Orchestrator.new(
+        task:, cfg:, planner_identity: legacy, adapter:, planner_revision: revision,
+        route_resolver: method(:resolve_route), clock: -> { Time.utc(2026, 8, 12, 12) }
+      ).advance!
+
+      assert_equal "retry_scheduled", first.record.state
+
+      repaired = legacy.merge("model" => "default", "reconstructed" => true)
+      cleared = Hive::PlanReview::Orchestrator.new(
+        task:, cfg:, planner_identity: repaired, adapter:, planner_revision: revision,
+        route_resolver: method(:resolve_route), clock: -> { Time.utc(2026, 8, 12, 13) }
+      ).advance!
+
+      assert_equal "cleared", cleared.record.state
+      models = revision.calls.map { |call| call.fetch(:planner_identity).fetch("model") }
+      assert_equal %w[claude-opus-4-8 default], models
+      recovered = cleared.record["routes"].select do |route|
+        route["planner_identity_contract_recovery"] == true
+      end
+      assert_equal 2, recovered.length
+      assert_equal 1, recovered.count { |route| route["role"] == "planner" }
+      assert_equal 1, recovered.count { |route| route["role"] == "planner_revision" }
     end
   end
 

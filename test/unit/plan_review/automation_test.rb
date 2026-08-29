@@ -67,6 +67,28 @@ class PlanReviewAutomationTest < Minitest::Test
     end
   end
 
+  def test_legacy_codex_planner_identity_is_repaired_before_resume
+    current = {
+      "routes" => [
+        {
+          "role" => "planner",
+          "actual" => {
+            "provider" => "codex", "model" => "claude-opus-4-8",
+            "family" => "openai", "effort" => "default", "route" => "codex-cli/v1"
+          }
+        }
+      ]
+    }
+
+    identity = Hive::PlanReview::Automation.planner_identity_for(
+      current, Hive::Config::DEFAULTS
+    )
+
+    assert_equal "codex", identity.fetch("provider")
+    assert_equal "default", identity.fetch("model")
+    assert_equal true, identity.fetch("reconstructed")
+  end
+
   def test_holds_a_complete_plan_at_waiting_until_required_review_clears
     with_task do |task|
       File.write(task.state_file, "# Plan\n<!-- COMPLETE -->\n")

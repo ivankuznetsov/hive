@@ -155,6 +155,16 @@ reviewer, route configuration, and the effective `models.plan_review`,
 overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
 remain operational and do not invalidate an otherwise identical verdict.
 
+Planner authority capture is provider-scoped too. A Codex-authored plan never
+inherits `claude.model` or `claude.effort` when its own plan route is unpinned;
+the durable identity records provider-default sentinels instead. Legacy
+records carrying the impossible `provider: codex` plus `model: claude-*`
+combination receive one versioned recovery route. The same Codex authority is
+retained, the foreign model is replaced by Codex's default, any failed planner
+revision series is reset once, and both direct approvals and daemon resumes
+continue through the repaired identity. Blocked legacy rows are classified as
+runnable so the migration is reachable without an operator rewriting state.
+
 ## Findings, revision, and verification
 
 Findings have stable semantic fingerprints, anchored evidence, risk, and one

@@ -114,6 +114,19 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     end
   end
 
+  def test_default_planner_identity_uses_the_provider_default_without_a_foreign_model_flag
+    runner = Hive::PlanReview::PlannerRevision::HiveRunner.allocate
+    profile = Hive::AgentProfiles.lookup(:codex)
+    identity = {
+      "provider" => "codex", "model" => "default", "family" => "openai",
+      "effort" => "default", "route" => "codex-cli/v1"
+    }
+
+    arguments = runner.send(:launch_arguments, profile, identity)
+
+    assert_equal({ cli_flags: [] }, arguments)
+  end
+
   def test_production_runner_reports_tampering_missing_output_success_and_firewall_errors
     Dir.mktmpdir("hive-plan-revision-runner-branches") do |root|
       meta = File.join(root, "meta.yml")

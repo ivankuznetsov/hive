@@ -189,6 +189,24 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_review_blocked", blocked.key
     assert_nil blocked.command
 
+    stale_planner_identity = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair the planner route",
+        "routes" => [
+          {
+            "role" => "planner",
+            "actual" => {
+              "provider" => "codex", "model" => "claude-opus-4-8"
+            }
+          },
+          { "role" => "planner_revision", "outcome" => "retryable_failure" }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", stale_planner_identity.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", stale_planner_identity.command
+
     stale_revision = Hive::TaskAction.for(
       task, waiting,
       plan_review: {

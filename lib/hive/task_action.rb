@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
@@ -725,7 +726,9 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if stale_planner_revision_contract?
+        if recoverable_planner_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -941,6 +944,14 @@ module Hive
         Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
     rescue ArgumentError, TypeError
       true
+    end
+
+    def recoverable_planner_identity_review?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner"
+      end
+      identity = route&.fetch("actual", nil) || route&.fetch("requested", nil)
+      Hive::PlanReview::PlannerIdentity.recoverable?(identity)
     end
 
     # An awaiting-decision projection normally belongs to the operator. A

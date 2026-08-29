@@ -13,6 +13,7 @@ require "hive/plan_review/clearance"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/planner_identity"
 require "hive/plan_review/plan_signals"
 require "hive/plan_review/policy"
 require "hive/plan_review/projection"
@@ -128,6 +129,7 @@ module Hive
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
+        record = refresh_planner_identity_contract(record)
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
         record = refresh_adversarial_identity_contract(record)
@@ -379,6 +381,36 @@ module Hive
           record, state: "reviewing",
           required_action: "retry adversarial review under the current identity contract",
           routes: record["routes"] + [ reset ]
+        )
+      end
+
+      def refresh_planner_identity_contract(record)
+        route = latest_route(record, "planner")
+        captured = route&.fetch("actual", nil) || route&.fetch("requested", nil)
+        return record unless PlannerIdentity.recoverable?(captured)
+        return record if PlannerIdentity.recoverable?(@planner_identity)
+        return record unless captured["provider"].to_s == @planner_identity["provider"].to_s
+
+        recovered = planner_route(@planner_identity).merge(
+          "recovery_reset" => true,
+          "planner_identity_contract_recovery" => true,
+          "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
+          "diagnostic" => "recovered a legacy cross-provider planner model"
+        )
+        routes = record["routes"] + [ recovered ]
+        revision = latest_route(record, "planner_revision")
+        if revision && !SUCCESS_OUTCOMES.include?(revision["outcome"])
+          routes << Hive::PlanReview.recovery_reset_route(
+            revision,
+            "planner_identity_contract_recovery" => true,
+            "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
+            "diagnostic" => "retry planner revision with the recovered planner identity"
+          )
+        end
+        publish_transition(
+          record, state: "reviewing",
+          required_action: "retry plan review under the current planner identity contract",
+          routes:
         )
       end
 
@@ -1162,7 +1194,8 @@ module Hive
         {
           "role" => "planner", "requested" => identity, "actual" => identity,
           "capability_result" => "captured", "independence_verified" => false,
-          "independence_reason" => "authority_source"
+          "independence_reason" => "authority_source",
+          "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION
         }
       end
 
@@ -1174,6 +1207,7 @@ module Hive
           "independence_verified" => false, "independence_reason" => "same_plan_authority",
           "outcome" => revision.outcome, "attempt_id" => attempt_id,
           "retry_at" => retry_at,
+          "diagnostic" => revision.diagnostic,
           "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION
         }.compact
       end
@@ -1186,7 +1220,7 @@ module Hive
       end
 
       def planner_identity(record)
-        route = record["routes"].find { |entry| entry["role"] == "planner" }
+        route = latest_route(record, "planner")
         stringify(route&.fetch("actual", nil) || @planner_identity)
       end
 

@@ -207,6 +207,22 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_reviewing", stale_planner_identity.key
     assert_equal "hive plan-review-run demo-260426-aaaa", stale_planner_identity.command
 
+    stale_residual_evidence = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair initial review output",
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "terminal_failure",
+            "diagnostic" => "invalid plan review residual evidence entry",
+            "diagnostic_source" => "parser"
+          }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", stale_residual_evidence.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", stale_residual_evidence.command
+
     stale_revision = Hive::TaskAction.for(
       task, waiting,
       plan_review: {

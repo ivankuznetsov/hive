@@ -103,6 +103,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         assert_includes prompt, "Repository root: `#{cwd}`"
         assert_includes prompt,
                         "`selected_lenses` names may use lowercase letters, digits, hyphens, and underscores"
+        assert_includes prompt, "`residual_evidence` must be exactly an empty array"
         File.write(File.join(cwd, "review-notes.md"), "reviewer scratch work")
         File.write(output_path, JSON.generate(valid_result(request)))
         { "status" => "ok", "actual_route" => request.reviewer }

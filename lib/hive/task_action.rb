@@ -736,6 +736,8 @@ module Hive
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_selected_lenses_contract_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_residual_evidence_contract_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
@@ -1019,6 +1021,12 @@ module Hive
     # orchestrator records its one-time contract recovery reset.
     def recoverable_selected_lenses_contract_review?
       !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
+        plan_review["routes"]
+      ).empty?
+    end
+
+    def recoverable_residual_evidence_contract_review?
+      !Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
         plan_review["routes"]
       ).empty?
     end

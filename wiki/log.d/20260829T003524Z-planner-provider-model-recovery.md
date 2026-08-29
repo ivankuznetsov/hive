@@ -17,6 +17,12 @@ automation retry. Blocked legacy rows are scheduler-owned during this
 migration, and planner revision routes now expose their redacted diagnostic in
 status evidence.
 
+The same dogfood pass exposed an underspecified initial-review field: the
+prompt showed `residual_evidence: []` but did not state that only disposition
+verification may populate it. Initial prompts now require the empty array, and
+the exact historical parser rejection receives one versioned automatic retry
+for primary and adversarial roles without weakening verification attestations.
+
 **Verification:** Focused planner-identity, automation, orchestration,
 planner-revision, task-action, and plan-stage tests cover provider-scoped
 capture, one-time recovery, daemon reachability, provider-default launch

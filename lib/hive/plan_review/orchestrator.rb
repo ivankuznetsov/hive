@@ -134,6 +134,7 @@ module Hive
         return Projection.new(record) if capability_pending
         record = refresh_adversarial_identity_contract(record)
         record = refresh_selected_lenses_contract(record)
+        record = refresh_residual_evidence_contract(record)
 
         %w[primary adversarial].each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
@@ -421,19 +422,43 @@ module Hive
       # genuinely malformed result produced by the current parser.
       def refresh_selected_lenses_contract(record)
         routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
+        refresh_parser_contract(
+          record, routes:,
+          recovery_attributes: {
+            "selected_lenses_contract_recovery" => true,
+            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION
+          },
+          diagnostic: "retry reviewer under the current selected_lenses contract"
+        )
+      end
+
+      # Initial review prompts historically showed only an empty
+      # residual_evidence example without saying that the field is reserved
+      # for disposition verification. Natural-language notes were therefore
+      # rejected by the stricter machine contract. Re-run each affected
+      # initial role once under the explicit empty-array contract.
+      def refresh_residual_evidence_contract(record)
+        routes = ResultParser.recoverable_residual_evidence_routes(record["routes"])
+        refresh_parser_contract(
+          record, routes:,
+          recovery_attributes: {
+            "residual_evidence_contract_recovery" => true,
+            "residual_evidence_contract_version" => ResultParser::RESIDUAL_EVIDENCE_CONTRACT_VERSION
+          },
+          diagnostic: "retry initial reviewer under the residual_evidence contract"
+        )
+      end
+
+      def refresh_parser_contract(record, routes:, recovery_attributes:, diagnostic:)
         return record if routes.empty?
 
         resets = routes.map do |route|
           Hive::PlanReview.recovery_reset_route(
-            route,
-            "selected_lenses_contract_recovery" => true,
-            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION,
-            "diagnostic" => "retry reviewer under the current selected_lenses contract"
+            route, recovery_attributes.merge("diagnostic" => diagnostic)
           )
         end
         publish_transition(
-          record, state: "reviewing",
-          required_action: "retry plan review under the current selected_lenses contract",
+          record, state: "reviewing", required_action: diagnostic,
           routes: record["routes"] + resets
         )
       end

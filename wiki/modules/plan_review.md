@@ -115,6 +115,10 @@ old text. The reset is one-time, so a genuinely malformed current-contract
 result remains terminal instead of looping. Verification output uses the new
 grammar but is not eligible for the legacy reset, preserving the existing
 revision-round fence.
+Initial primary and adversarial prompts also require `residual_evidence` to be
+exactly empty; only disposition verification may emit verified fingerprint
+attestations there. A blocked initial leg with the exact historical parser
+diagnostic receives the same bounded, versioned, daemon-runnable recovery.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one

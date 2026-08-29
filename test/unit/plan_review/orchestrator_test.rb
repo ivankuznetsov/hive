@@ -622,6 +622,35 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_initial_residual_evidence_prompt_contract_recovers_once
+    with_task(mandatory_plan) do |task, cfg|
+      primary_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary" && (primary_calls += 1) <= 2
+          next Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure",
+            diagnostic: "invalid plan review residual evidence entry",
+            route_receipt: { "diagnostic_source" => "parser" }
+          )
+        end
+
+        successful_result(request)
+      end
+
+      assert_equal "blocked", orchestrator(task, cfg, adapter:).advance!.record.state
+      retried = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "blocked", retried.state
+      assert_equal 2, primary_calls
+      reset = retried["routes"].find { |route| route["residual_evidence_contract_recovery"] }
+      assert_equal true, reset.fetch("recovery_reset")
+      assert_equal 1, reset.fetch("residual_evidence_contract_version")
+
+      orchestrator(task, cfg, adapter:).advance!
+      assert_equal 2, primary_calls
+    end
+  end
+
   # Mandatory capability failures get cheap re-probes, then move to a paced
   # retry instead of growing current.json on every daemon tick or parking
   # forever after the provider becomes available.

@@ -1669,6 +1669,55 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_transient_projection_failure_clears_on_the_next_scan_without_a_marker
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "transient-projection-260829-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      source_before = File.binread(task.state_file)
+      projection = Hive::TaskProjection.project(records: [], marker: marker)
+      reads = [
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: nil, state: "repair_required", truncated: false,
+          journal_cursor: 0, journal_records: [],
+          diagnostics: [ {
+            "source" => "task_projection", "reason" => "bounded_projection_failed",
+            "message" => "proof temporarily unavailable", "details" => {}
+          } ]
+        ),
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: projection, state: "current", truncated: false,
+          journal_cursor: 0, journal_records: [], diagnostics: []
+        )
+      ]
+      store = Object.new
+      store.define_singleton_method(:read_routine) { |**| reads.shift }
+      command = Hive::Commands::Status.new
+      command.instance_variable_set(:@status_attempt_store, Object.new)
+
+      first = second = nil
+      capture_io do
+        with_replaced_singleton_method(
+          Hive::TaskProjection::Store, :new, ->(**) { store }
+        ) do
+          first, = command.send(:status_projection, task, marker, project: "demo")
+          second, = command.send(:status_projection, task, marker, project: "demo")
+        end
+      end
+
+      assert_equal :error, first.name
+      assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+                   first.attrs.fetch("reason")
+      assert_equal :execute_complete, second.name
+      assert_equal source_before, File.binread(task.state_file)
+      refute_includes File.binread(task.state_file), "<!-- ERROR"
+    end
+  end
+
   def test_status_projection_reuses_one_attempt_store_across_tasks
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

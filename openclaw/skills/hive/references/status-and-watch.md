@@ -23,6 +23,23 @@ maintenance fault; do not call the pipeline healthy merely because task rows
 are advancing. `unknown` means the bounded health cell has not yet established
 a successful migration or maintenance result.
 
+When a task is `needs_repair`, inspect `evidence.marker_attrs`. A reason of
+`condition_projection_repair_required` means routine status could not verify
+that task's checkpoint and bounded journal suffix. The row is synthetic,
+operator-owned, and non-retryable; it does not mean the project or fleet scan
+failed, and unrelated tasks may continue. Run the exact
+`evidence.marker_attrs.repair_command` when present:
+
+```bash
+hive repair-projection TASK-SLUG --project PROJECT --stage STAGE
+```
+
+Refresh operational status afterward. Do not use `workflow.retry`, restart the
+daemon, or create migration/watcher machinery. If no repair command is present
+and `projection_reason` is `checkpoint_oversized`,
+`attempt_ids_exhausted`, or `predecessor_fetches_exhausted`, report the named
+`projection_cap` and task-local retained-history compaction requirement.
+
 ## Report a useful snapshot
 
 Lead with the outcome:

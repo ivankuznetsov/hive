@@ -39,6 +39,10 @@ jobs:
         with:
           # Baseline-catalog tests verify reviewed dependency locks at release tags.
           fetch-depth: 0
+      - name: Install Patrol sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:

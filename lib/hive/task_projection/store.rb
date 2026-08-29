@@ -41,6 +41,8 @@ module Hive
         end
       end
 
+      RepairResult = Data.define(:projection, :bounded)
+
       # Counts exact predecessor point reads while the bounded journal suffix
       # is validated. Primary attempt IDs are collected from the checkpoint and
       # suffix before replay, so an attempt referenced by a journal event never
@@ -147,6 +149,27 @@ module Hive
         projection
       end
 
+      # Explicit exact-task repair owns the only routine-external full replay.
+      # The exclusive journal lock prevents a concurrent append from binding
+      # the new derived files to two different authoritative cursors.
+      def repair!(marker: nil, limits: Hive::TaskWorkspace::Limits.new)
+        with_journal_write_lock do
+          stat = File.lstat(journal_path)
+          unless stat.file? && !stat.symlink? && stat.size.positive?
+            raise Hive::TaskProjection::InvalidJournal,
+                  "authoritative task journal is missing, empty, or not a regular file"
+          end
+          projection = rebuild!(marker: marker)
+          bounded = read_bounded_unlocked(
+            marker: marker, limits: limits, require_checkpoint: true, pristine: false
+          )
+          RepairResult.new(projection: projection, bounded: bounded)
+        end
+      rescue Errno::ENOENT
+        raise Hive::TaskProjection::InvalidJournal,
+              "authoritative task journal is missing, empty, or not a regular file"
+      end
+
       # Workspace reads use a separately bounded checkpoint and only replay
       # the append-only suffix. The lifecycle-facing #read and #rebuild!
       # methods intentionally retain their historical behavior.
@@ -155,34 +178,13 @@ module Hive
                        journal_event_limit: nil, require_checkpoint: false,
                        pristine: false)
         snapshot_limit = snapshot_max_bytes || limits.fetch(:projection_snapshot_bytes)
-        suffix_limit = journal_suffix_max_bytes || limits.fetch(:journal_suffix_bytes)
-        event_limit = journal_event_limit || limits.fetch(:journal_events)
-        attempt_limit = limits.fetch(:attempt_ids)
-        predecessor_limit = limits.fetch(:predecessor_fetches)
-
         with_journal_read_lock do
-          checkpoint = read_checkpoint(snapshot_limit)
-          unless checkpoint.fetch("valid")
-            if require_checkpoint
-              return pristine_bounded_read(marker: marker) if
-                pristine && pristine_storage?(checkpoint.fetch("reason"))
-
-              return degraded_bounded_read(
-                reason: checkpoint.fetch("reason"), state: "repair_required",
-                snapshot_limit: snapshot_limit
-              )
-            end
-
-            return read_without_checkpoint(
-              marker: marker, suffix_limit: suffix_limit, event_limit: event_limit,
-              snapshot_limit: snapshot_limit, checkpoint_reason: checkpoint.fetch("reason")
-            )
-          end
-
-          read_from_checkpoint(
-            checkpoint.fetch("document"), marker: marker,
-            suffix_limit: suffix_limit, event_limit: event_limit,
-            attempt_limit: attempt_limit, predecessor_limit: predecessor_limit
+          read_bounded_unlocked(
+            marker: marker, limits: limits,
+            snapshot_max_bytes: snapshot_max_bytes,
+            journal_suffix_max_bytes: journal_suffix_max_bytes,
+            journal_event_limit: journal_event_limit,
+            require_checkpoint: require_checkpoint, pristine: pristine
           )
         end
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
@@ -190,7 +192,7 @@ module Hive
              SystemCallError, IOError => e
         degraded_bounded_read(
           reason: "bounded_projection_failed", state: "partial", error: e,
-          snapshot_limit: snapshot_limit || Hive::TaskWorkspace::Limits.new.fetch(:projection_snapshot_bytes)
+          snapshot_limit: snapshot_limit
         )
       end
 
@@ -214,6 +216,40 @@ module Hive
       end
 
       private
+
+      def read_bounded_unlocked(marker:, limits:, snapshot_max_bytes: nil,
+                                journal_suffix_max_bytes: nil,
+                                journal_event_limit: nil,
+                                require_checkpoint:, pristine:)
+        snapshot_limit = snapshot_max_bytes || limits.fetch(:projection_snapshot_bytes)
+        suffix_limit = journal_suffix_max_bytes || limits.fetch(:journal_suffix_bytes)
+        event_limit = journal_event_limit || limits.fetch(:journal_events)
+        attempt_limit = limits.fetch(:attempt_ids)
+        predecessor_limit = limits.fetch(:predecessor_fetches)
+        checkpoint = read_checkpoint(snapshot_limit)
+        unless checkpoint.fetch("valid")
+          if require_checkpoint
+            return pristine_bounded_read(marker: marker) if
+              pristine && pristine_storage?(checkpoint.fetch("reason"))
+
+            return degraded_bounded_read(
+              reason: checkpoint.fetch("reason"), state: "repair_required",
+              snapshot_limit: snapshot_limit
+            )
+          end
+
+          return read_without_checkpoint(
+            marker: marker, suffix_limit: suffix_limit, event_limit: event_limit,
+            snapshot_limit: snapshot_limit, checkpoint_reason: checkpoint.fetch("reason")
+          )
+        end
+
+        read_from_checkpoint(
+          checkpoint.fetch("document"), marker: marker,
+          suffix_limit: suffix_limit, event_limit: event_limit,
+          attempt_limit: attempt_limit, predecessor_limit: predecessor_limit
+        )
+      end
 
       def publish_checkpoint(binding:, bytes:, projection:)
         stat = File.stat(journal_path) if File.exist?(journal_path)
@@ -750,6 +786,18 @@ module Hive
         ensure
           lock&.flock(File::LOCK_UN)
           lock&.close
+        end
+      end
+
+      def with_journal_write_lock
+        lock_path = File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME)
+        flags = File::RDWR | File::CREAT
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(lock_path, flags, 0o644) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield
+        ensure
+          lock&.flock(File::LOCK_UN)
         end
       end
 

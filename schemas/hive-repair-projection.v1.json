@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-repair-projection.v1.json",
+  "title": "hive repair-projection output (v1)",
+  "description": "Bounded result for the explicit exact-task derived-projection repair command.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "RefreshAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command"],
+      "properties": {
+        "kind": { "const": "refresh_status" },
+        "command": { "const": "hive status --operational --json" }
+      }
+    },
+    "RetryAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command"],
+      "properties": {
+        "kind": { "const": "retry_exact_repair" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
+    "CompactionAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "instructions"],
+      "properties": {
+        "kind": { "const": "compact_projection_history" },
+        "instructions": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "outcome", "project", "slug",
+        "task_id", "stage", "task_folder", "checkpoint_state",
+        "journal_cursor", "terminal", "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-repair-projection" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "outcome": { "const": "repaired" },
+        "project": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "task_id": { "type": ["string", "null"], "maxLength": 128 },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "task_folder": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "checkpoint_state": { "enum": ["current", "pristine"] },
+        "journal_cursor": { "type": "integer", "minimum": 0 },
+        "terminal": { "const": false },
+        "next_action": { "$ref": "#/$defs/RefreshAction" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message", "outcome"
+      ],
+      "properties": {
+        "schema": { "const": "hive-repair-projection" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "error_kind": {
+          "enum": [
+            "invalid_arguments", "ambiguous_slug", "invalid_task_path",
+            "task_locked", "projection_repair_failed",
+            "invalid_projection_authority", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "enum": [1, 64, 70, 75] },
+        "message": { "type": "string", "maxLength": 8192 },
+        "outcome": { "const": "failed" },
+        "project": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "task_id": { "type": ["string", "null"], "maxLength": 128 },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "task_folder": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "checkpoint_state": { "type": "string", "maxLength": 128 },
+        "reason": { "type": "string", "maxLength": 256 },
+        "terminal": { "type": "boolean" },
+        "next_action": {
+          "oneOf": [
+            { "$ref": "#/$defs/RetryAction" },
+            { "$ref": "#/$defs/CompactionAction" }
+          ]
+        },
+        "candidates": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
+        "holder": { "type": "object" },
+        "lock_path": { "type": "string", "maxLength": 4096 }
+      }
+    }
+  }
+}

@@ -591,6 +591,110 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_explicit_repair_requires_authority_and_is_idempotent
+    with_tmp_dir do |dir|
+      store = projection_store(dir)
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+
+      File.write(store.journal_path, "")
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+
+      write_journal(dir, [ condition_event("event-1") ])
+      first = store.repair!
+      first_snapshot = File.binread(store.snapshot_path)
+      first_checkpoint = File.binread(store.checkpoint_path)
+      second = store.repair!
+
+      assert first.bounded.current?
+      assert second.bounded.current?
+      assert_equal first.projection.to_h, second.projection.to_h
+      assert_equal first_snapshot, File.binread(store.snapshot_path)
+      assert_equal first_checkpoint, File.binread(store.checkpoint_path)
+    end
+  end
+
+  def test_explicit_repair_serializes_a_concurrent_journal_append
+    release_projection = repair = append = nil
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      entered_projection = Queue.new
+      release_projection = Queue.new
+      projector = Object.new
+      projection_calls = 0
+      projector.define_singleton_method(:project) do |**attributes|
+        projection_calls += 1
+        if projection_calls == 1
+          entered_projection << true
+          release_projection.pop
+        end
+        Hive::TaskProjection.project(**attributes)
+      end
+      store = projection_store(dir, projector: projector)
+      repair_result = nil
+      repair = Thread.new { repair_result = store.repair! }
+      entered_projection.pop
+
+      append_waiting = Queue.new
+      append_done = Queue.new
+      append = Thread.new do
+        lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+        File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+          append_waiting << true
+          lock.flock(File::LOCK_EX)
+          File.open(store.journal_path, "a") do |journal|
+            journal.write("#{JSON.generate(condition_event('event-2', state: 'unsatisfied'))}\n")
+          end
+          append_done << true
+        end
+      end
+      append_waiting.pop
+      Thread.pass until append.status == "sleep"
+      assert append_done.empty?, "append must wait for the repair journal lock"
+
+      release_projection << true
+      repair.join
+      append.join
+
+      assert repair_result.bounded.current?
+      assert_equal "current", store.read_routine.state
+      assert_equal "unsatisfied",
+                   store.read_routine.projection.current_condition("AgentHealthy").fetch("state")
+    end
+  ensure
+    release_projection << true if defined?(release_projection) && release_projection&.empty?
+    repair&.join(1)
+    append&.join(1)
+  end
+
+  def test_interrupted_checkpoint_publication_releases_lock_and_stays_repair_required
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      journal_before = File.binread(store.journal_path)
+      original_write = Hive::AtomicFile.method(:write)
+      replacement = lambda do |path, *args, **kwargs|
+        raise Interrupt, "simulated interruption" if path == store.checkpoint_path
+
+        original_write.call(path, *args, **kwargs)
+      end
+
+      with_replaced_singleton_method(Hive::AtomicFile, :write, replacement) do
+        assert_raises(Interrupt) { store.repair! }
+      end
+
+      assert_equal journal_before, File.binread(store.journal_path)
+      assert File.exist?(store.snapshot_path), "the complete atomic snapshot may publish first"
+      refute File.exist?(store.checkpoint_path)
+      assert_equal "repair_required", store.read_routine.state
+      File.open(
+        File.join(dir, Hive::TaskJournal::LOCK_BASENAME), File::RDWR | File::CREAT, 0o644
+      ) do |lock|
+        assert lock.flock(File::LOCK_EX | File::LOCK_NB),
+               "repair interruption must release the journal lock"
+      end
+    end
+  end
+
   private
 
   def write_journal(dir, records)

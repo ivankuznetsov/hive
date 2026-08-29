@@ -1,4 +1,5 @@
 require "hive/version"
+require "hive/canonical_json"
 
 module Hive
   # Validated identity projection for the Hive runtime reached through the
@@ -13,12 +14,17 @@ module Hive
     DEPLOYMENT_ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\z/
     VERSION_PATTERN = /\A[0-9A-Za-z][0-9A-Za-z.+-]{0,127}\z/
     FIELDS = %w[channel release_version display_version build_sha deployment_id].freeze
+    SOURCE_FIELDS = %w[channel release_version build_sha].freeze
 
     def self.unknown(release_version: Hive::VERSION)
       new(
         environment: { CHANNEL_ENV => "unknown" },
         release_version: release_version
       ).to_h
+    end
+
+    def self.source_digest(identity = new.to_h)
+      Hive::CanonicalJSON.digest(identity.slice(*SOURCE_FIELDS))
     end
 
     # Accept an identity reported by another Hive process only when its closed

@@ -456,11 +456,7 @@ module Hive
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
         # ahead of newer earlier-stage work when slots are scarce.
-        dispatch_priority_order(result.rows).each do |row|
-          break unless admission_open?
-
-          handle_row(row, now: now)
-        end
+        dispatch_rows_in_priority_order(result.rows, now: now)
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -546,11 +542,7 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
-        dispatch_priority_order(result.rows).each do |row|
-          break unless admission_open?
-
-          handle_row(row, now: now)
-        end
+        dispatch_rows_in_priority_order(result.rows, now: now)
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
                                  in_flight: @controller.in_flight_count,
@@ -1396,7 +1388,7 @@ module Hive
         !current_stage.nil? && !prior_stage.to_s.empty? && current_stage != prior_stage.to_s
       end
 
-      def handle_row(row, now:)
+      def handle_row(row, now:, capacity_fence: nil)
         return unless admission_open?
 
         unless project_enabled?(row.project)
@@ -1505,8 +1497,14 @@ module Hive
           else
             "advance"
           end
-          outcome = dispatch_or_block(row, now: now, trigger: trigger)
+          outcome = if capacity_fence
+            log_priority_capacity_fence(row, capacity_fence)
+            capacity_fence
+          else
+            dispatch_or_block(row, now: now, trigger: trigger)
+          end
           observe_dispatch_outcome(row, outcome)
+          outcome
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,
                                      stage: row.stage, mtime: row.state_file_mtime&.utc&.iso8601)
@@ -2009,6 +2007,45 @@ module Hive
         rows.each_with_index
             .sort_by { |row, idx| [ -stage_rank(row.stage), idx ] }
             .map(&:first)
+      end
+
+      # Preserve the priority order for the entire status frame. Durable
+      # admission reads live capacity, so a higher-priority row can be
+      # deferred and a short-lived worker can finish before a later row is
+      # evaluated. Without a tick-local fence that later row steals the newly
+      # opened slot, while the deferred row is not reconsidered until the next
+      # tick. A global/durable capacity result fences every later dispatch;
+      # project/daily caps fence only that project. Non-dispatch policy rows
+      # still run so the operational snapshot remains complete.
+      def dispatch_rows_in_priority_order(rows, now:)
+        global_fence = nil
+        project_fences = {}
+
+        dispatch_priority_order(rows).each do |row|
+          break unless admission_open?
+
+          project_key = row.project.to_s
+          capacity_fence = global_fence || project_fences[project_key]
+          outcome = handle_row(row, now: now, capacity_fence: capacity_fence)
+          case outcome
+          when :global_cap, :attempt_capacity
+            global_fence ||= outcome
+          when :project_cap, :daily_cap
+            project_fences[project_key] ||= outcome
+          end
+        end
+      end
+
+      def log_priority_capacity_fence(row, outcome)
+        reason = outcome == :attempt_capacity ? "capacity" : outcome.to_s
+        @logger.event(
+          :blocked,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          reason: reason,
+          priority_fence: true
+        )
       end
 
       # Pipeline position of a stage dir (higher = closer to done); -1 for

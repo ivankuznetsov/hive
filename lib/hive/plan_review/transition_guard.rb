@@ -7,6 +7,7 @@ require "hive/config"
 require "hive/model_routing"
 require "hive/plan_review/identity"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/planner_identity"
 require "hive/plan_review/policy"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
@@ -212,21 +213,9 @@ module Hive
 
       def reconstructed_planner_identity(cfg)
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
-        routing = Hive::ModelRouting.resolve(
-          models: cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
-          stage: "plan", provider: profile.name,
-          current: Hive::Stages::Base.model_routing_current(cfg["plan"]),
-          legacy: Hive::Stages::Base.model_routing_current(cfg["claude"])
+        Hive::PlanReview::PlannerIdentity.capture(
+          profile:, cfg:, reconstructed: true
         )
-        {
-          "provider" => profile.name.to_s,
-          "model" => (routing.model || cfg.dig("plan", "model") || "unknown").to_s,
-          "family" => planner_family(profile.name),
-          "effort" => (routing.effort || cfg.dig("plan", "effort") ||
-            cfg.dig("claude", "effort") || "unknown").to_s,
-          "route" => profile.launcher_identity.to_s,
-          "reconstructed" => true
-        }.freeze
       end
 
       def write_legacy_adoption!(task, clock:)
@@ -297,15 +286,10 @@ module Hive
 
       def stage_dir(task) = "#{task.stage_index}-#{task.stage_name}"
 
-      def planner_family(name)
-        { claude: "anthropic", codex: "openai", grok: "grok", pi: "pi" }
-          .fetch(name.to_sym, "unknown")
-      end
-
       private_class_method :authorize!, :observation, :policy_configuration_matches?,
                            :current_plan_digest, :write_legacy_adoption!,
                            :persisted_run_level, :blocked_error,
-                           :stale, :coding?, :stage_dir, :planner_family
+                           :stale, :coding?, :stage_dir
     end
   end
 end

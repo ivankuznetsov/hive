@@ -13,6 +13,7 @@ require "hive/plan_review/clearance"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/planner_identity"
 require "hive/plan_review/plan_signals"
 require "hive/plan_review/policy"
 require "hive/plan_review/projection"
@@ -128,10 +129,12 @@ module Hive
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
+        record = refresh_planner_identity_contract(record)
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
         record = refresh_adversarial_identity_contract(record)
         record = refresh_selected_lenses_contract(record)
+        record = refresh_residual_evidence_contract(record)
 
         %w[primary adversarial].each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
@@ -382,6 +385,36 @@ module Hive
         )
       end
 
+      def refresh_planner_identity_contract(record)
+        route = latest_route(record, "planner")
+        captured = route&.fetch("actual", nil) || route&.fetch("requested", nil)
+        return record unless PlannerIdentity.recoverable?(captured)
+        return record if PlannerIdentity.recoverable?(@planner_identity)
+        return record unless captured["provider"].to_s == @planner_identity["provider"].to_s
+
+        recovered = planner_route(@planner_identity).merge(
+          "recovery_reset" => true,
+          "planner_identity_contract_recovery" => true,
+          "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
+          "diagnostic" => "recovered a legacy cross-provider planner model"
+        )
+        routes = record["routes"] + [ recovered ]
+        revision = latest_route(record, "planner_revision")
+        if revision && !SUCCESS_OUTCOMES.include?(revision["outcome"])
+          routes << Hive::PlanReview.recovery_reset_route(
+            revision,
+            "planner_identity_contract_recovery" => true,
+            "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
+            "diagnostic" => "retry planner revision with the recovered planner identity"
+          )
+        end
+        publish_transition(
+          record, state: "reviewing",
+          required_action: "retry plan review under the current planner identity contract",
+          routes:
+        )
+      end
+
       # Older parsers rejected lowercase specialist names such as
       # `product-lens` and persisted the otherwise valid reviewer response as a
       # terminal failure. Re-run that exact legacy diagnostic once under the
@@ -389,19 +422,43 @@ module Hive
       # genuinely malformed result produced by the current parser.
       def refresh_selected_lenses_contract(record)
         routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
+        refresh_parser_contract(
+          record, routes:,
+          recovery_attributes: {
+            "selected_lenses_contract_recovery" => true,
+            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION
+          },
+          diagnostic: "retry reviewer under the current selected_lenses contract"
+        )
+      end
+
+      # Initial review prompts historically showed only an empty
+      # residual_evidence example without saying that the field is reserved
+      # for disposition verification. Natural-language notes were therefore
+      # rejected by the stricter machine contract. Re-run each affected
+      # initial role once under the explicit empty-array contract.
+      def refresh_residual_evidence_contract(record)
+        routes = ResultParser.recoverable_residual_evidence_routes(record["routes"])
+        refresh_parser_contract(
+          record, routes:,
+          recovery_attributes: {
+            "residual_evidence_contract_recovery" => true,
+            "residual_evidence_contract_version" => ResultParser::RESIDUAL_EVIDENCE_CONTRACT_VERSION
+          },
+          diagnostic: "retry initial reviewer under the residual_evidence contract"
+        )
+      end
+
+      def refresh_parser_contract(record, routes:, recovery_attributes:, diagnostic:)
         return record if routes.empty?
 
         resets = routes.map do |route|
           Hive::PlanReview.recovery_reset_route(
-            route,
-            "selected_lenses_contract_recovery" => true,
-            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION,
-            "diagnostic" => "retry reviewer under the current selected_lenses contract"
+            route, recovery_attributes.merge("diagnostic" => diagnostic)
           )
         end
         publish_transition(
-          record, state: "reviewing",
-          required_action: "retry plan review under the current selected_lenses contract",
+          record, state: "reviewing", required_action: diagnostic,
           routes: record["routes"] + resets
         )
       end
@@ -1162,7 +1219,8 @@ module Hive
         {
           "role" => "planner", "requested" => identity, "actual" => identity,
           "capability_result" => "captured", "independence_verified" => false,
-          "independence_reason" => "authority_source"
+          "independence_reason" => "authority_source",
+          "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION
         }
       end
 
@@ -1174,6 +1232,7 @@ module Hive
           "independence_verified" => false, "independence_reason" => "same_plan_authority",
           "outcome" => revision.outcome, "attempt_id" => attempt_id,
           "retry_at" => retry_at,
+          "diagnostic" => revision.diagnostic,
           "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION
         }.compact
       end
@@ -1186,7 +1245,7 @@ module Hive
       end
 
       def planner_identity(record)
-        route = record["routes"].find { |entry| entry["role"] == "planner" }
+        route = latest_route(record, "planner")
         stringify(route&.fetch("actual", nil) || @planner_identity)
       end
 

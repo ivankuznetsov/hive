@@ -115,6 +115,10 @@ old text. The reset is one-time, so a genuinely malformed current-contract
 result remains terminal instead of looping. Verification output uses the new
 grammar but is not eligible for the legacy reset, preserving the existing
 revision-round fence.
+Initial primary and adversarial prompts also require `residual_evidence` to be
+exactly empty; only disposition verification may emit verified fingerprint
+attestations there. A blocked initial leg with the exact historical parser
+diagnostic receives the same bounded, versioned, daemon-runnable recovery.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one
@@ -154,6 +158,16 @@ reviewer, route configuration, and the effective `models.plan_review`,
 `models.plan_review_adversarial`, and `models.plan_review_verification`
 overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
 remain operational and do not invalidate an otherwise identical verdict.
+
+Planner authority capture is provider-scoped too. A Codex-authored plan never
+inherits `claude.model` or `claude.effort` when its own plan route is unpinned;
+the durable identity records provider-default sentinels instead. Legacy
+records carrying the impossible `provider: codex` plus `model: claude-*`
+combination receive one versioned recovery route. The same Codex authority is
+retained, the foreign model is replaced by Codex's default, any failed planner
+revision series is reset once, and both direct approvals and daemon resumes
+continue through the repaired identity. Blocked legacy rows are classified as
+runnable so the migration is reachable without an operator rewriting state.
 
 ## Findings, revision, and verification
 

@@ -15,6 +15,7 @@ require "hive/recovery"
 require "hive/recovery/retry_policy"
 require "hive/runtime_identity"
 require "hive/task"
+require "hive/task_projection"
 require "hive/task_resolver"
 
 module Hive
@@ -210,6 +211,14 @@ module Hive
                   now: Time.now.utc)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
+        if projection_repair_row?(row)
+          return receipt(
+            "blocked", failure_origin: failure_origin, owner: "operator",
+            reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+            remediation: marker_attrs(row)["repair_command"] ||
+              "repair the exact task projection before retrying"
+          )
+        end
         retry_count = durable_retry_count(row)
         assessment = assessment(row, now: now, retry_count: retry_count)
         operator_request = OPERATOR_REQUESTORS.include?(requestor.to_s)
@@ -776,6 +785,16 @@ module Hive
         request = rearm_changed_runtime(request, now:)
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
+        if projection_repair_row?(row)
+          return receipt(
+            "blocked", request_id: request.request_id,
+            phase: recovery["phase"], failure_origin: recovery["failure_origin"],
+            owner: "operator", reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+            remediation: marker_attrs(row)["repair_command"] ||
+              "repair the exact task projection before retrying",
+            retry_count: recovery["retry_count"]
+          )
+        end
         return receipt_for_request(request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
         return receipt_for_request(request, now: now) if
           INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
@@ -1354,6 +1373,10 @@ module Hive
         attrs = value(row, :marker_attrs)
         attrs = value(row, :attrs) unless attrs.is_a?(Hash)
         attrs.is_a?(Hash) ? attrs.to_h.transform_keys(&:to_s) : {}
+      end
+
+      def projection_repair_row?(row)
+        Hive::TaskProjection.repair_required_marker?(marker_attrs(row))
       end
 
       def observed_marker_generation(row)

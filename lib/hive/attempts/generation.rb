@@ -3,7 +3,7 @@ require "hive/dependency_snapshot"
 require "hive/attempts/store"
 require "hive/conditions/generation_tracker"
 require "hive/paths"
-require "hive/task_projection"
+require "hive/task_projection/store"
 
 module Hive
   module Attempts
@@ -88,21 +88,19 @@ module Hive
           File.dirname(task.state_file)
         end
         path = File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME)
-        begin
-          File.lstat(path)
-        rescue Errno::ENOENT
-          return 0
-        end
-        lines = File.readlines(path, chomp: true)
-        if lines.empty?
-          raise Hive::TaskProjection::InvalidJournal,
-                "authoritative task journal exists but is empty"
-        end
         store = attempt_store || default_attempt_store
-        Hive::TaskProjection.parse_journal(lines, attempt_store: store)
-                            .filter_map { |record| record["task_generation"] }
-                            .select { |value| value.is_a?(Integer) }
-                            .max || 0
+        bounded = Hive::TaskProjection::Store.new(
+          task_folder: folder, attempt_store: store
+        ).read_routine(pristine: !File.exist?(path))
+        unless bounded.current?
+          reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
+          raise Hive::TaskProjection::InvalidJournal,
+                "bounded task projection requires repair (#{reason})"
+        end
+
+        Integer(bounded.projection.to_h.dig("identity", "task_generation") || 0)
+      rescue ArgumentError, TypeError => e
+        raise Hive::TaskProjection::InvalidJournal, e.message
       end
 
       def self.default_attempt_store

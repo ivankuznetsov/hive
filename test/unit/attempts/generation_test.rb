@@ -127,11 +127,11 @@ class AttemptsGenerationTest < Minitest::Test
       File.write(state_file, "body")
       record = Hive::TaskJournal::Envelope.authoritative(
         {
-          event_type: "implementation_identity_captured",
+          event_type: "generation_advanced",
           task: { "id" => "42", "slug" => "task-one" }, workflow: "coding",
           stage: "4-execute", attempt_id: "attempt-1", task_generation: 7,
           ownership_generation: "owner-7", commit_generation: 0,
-          reason: "execute_identity_captured", evidence: [], provenance: {}, payload: {}
+          reason: "input_changed", evidence: [], provenance: {}, payload: {}
         }
       )
       File.write(
@@ -148,6 +148,9 @@ class AttemptsGenerationTest < Minitest::Test
       )
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
+      Hive::TaskProjection::Store.new(
+        task_folder: folder, attempt_store: store
+      ).rebuild!
 
       generation = Hive::Attempts::Generation.resolve(
         task: task, project: "demo", intended_stage: "5-open-pr", attempt_store: store
@@ -187,7 +190,7 @@ class AttemptsGenerationTest < Minitest::Test
     end
   end
 
-  def test_downstream_generation_propagates_journal_read_failure
+  def test_downstream_generation_never_falls_back_to_complete_journal_replay
     with_tmp_dir do |dir|
       state_file = File.join(dir, "pr.md")
       File.write(state_file, "body")
@@ -195,10 +198,12 @@ class AttemptsGenerationTest < Minitest::Test
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
 
-      with_replaced_singleton_method(File, :readlines, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
-        assert_raises(Errno::EACCES) do
+      replacement = ->(*) { raise "complete journal replay must not run" }
+      with_replaced_singleton_method(Hive::TaskProjection, :parse_journal, replacement) do
+        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
           Hive::Attempts::Generation.current_task_input_epoch(task)
         end
+        assert_match(/checkpoint_missing/, error.message)
       end
     end
   end
@@ -213,7 +218,7 @@ class AttemptsGenerationTest < Minitest::Test
         Hive::Attempts::Generation.current_task_input_epoch(task)
       end
 
-      assert_match(/exists but is empty/, error.message)
+      assert_match(/checkpoint_missing/, error.message)
     end
   end
 
@@ -238,6 +243,9 @@ class AttemptsGenerationTest < Minitest::Test
         }
       )
       File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "#{JSON.generate(record)}\n")
+      Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: store
+      ).rebuild!
 
       with_env("HIVE_ATTEMPT_STORE_ROOT" => attempt_root) do
         assert_equal 3, Hive::Attempts::Generation.current_task_input_epoch(task)

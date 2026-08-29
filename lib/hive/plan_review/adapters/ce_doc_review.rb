@@ -118,7 +118,10 @@ module Hive
             }
             unless served_model.empty?
               actual["model"] = served_model
-              actual.delete("family") unless same_model_identity?(request.reviewer, served_model)
+              actual.delete("family")
+              actual = RouteResolver.attest_observed_identity(
+                requested: request.reviewer, actual:
+              )
             end
             {
               "status" => status,
@@ -126,17 +129,6 @@ module Hive
               "retry_at" => retry_at,
               "actual_route" => actual
             }
-          end
-
-          def same_model_identity?(reviewer, served_model)
-            requested_model = reviewer["model"]
-            return true if served_model == requested_model
-
-            support = Hive::AgentSupport.for(reviewer["provider"])
-            support&.respond_to?(:model_identity_equivalent?) &&
-              support.model_identity_equivalent?(
-                requested_model:, served_model:, family: reviewer["family"]
-              )
           end
 
           # Hive journals the review attempt itself — stage entry, agent
@@ -198,12 +190,36 @@ module Hive
           @capability_resolver = capability_resolver
         end
 
+        # Cheap preflight used by the orchestrator while an unsupported route
+        # is parked. It deliberately avoids disposable-worktree construction,
+        # immutable snapshot copies, and reviewer launch.
+        def probe_capability(kind:, reviewer:, project_root:)
+          return { "status" => "present", "diagnostic" => nil } if
+            kind.to_s == "adversarial"
+
+          provider = reviewer.fetch("provider")
+          support = Hive::AgentSupport.for(provider)
+          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
+
+          contract = @capability_resolver.call(CAPABILITY, provider)
+          stringify(@capability_probe.call(
+            agent: provider,
+            invocation: contract.invocation,
+            project_root:
+          )).merge("invocation" => contract.invocation)
+        rescue KeyError, Hive::ConfigError => e
+          { "status" => "unsupported", "diagnostic" => e.message }
+        end
+
         def call(request)
           runner_result = nil
           disposable = nil
           disposable_worktree = nil
           validate_snapshot!(request)
-          capability = capability_for(request)
+          capability = probe_capability(
+            kind: request.kind, reviewer: request.reviewer,
+            project_root: request.project_root
+          )
           if capability.fetch("status") != "present"
             return result(
               "unsupported",
@@ -248,7 +264,10 @@ module Hive
               status,
               diagnostic: runner_result["diagnostic"],
               retry_at: runner_result["retry_at"],
-              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+              route_receipt: route_receipt(
+                request, actual: runner_result["actual_route"],
+                diagnostic_source: runner_result["diagnostic"] && "runner"
+              )
             )
           end
           validate_output!(output_path, disposable)
@@ -270,7 +289,10 @@ module Hive
             residual_evidence: parsed.residual_evidence,
             diagnostic: parsed.diagnostic,
             retry_at: parsed.retry_at,
-            route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+            route_receipt: route_receipt(
+              request, actual: runner_result["actual_route"],
+              diagnostic_source: parsed.diagnostic && "reviewer"
+            )
           )
         rescue Timeout::Error
           result(
@@ -282,11 +304,17 @@ module Hive
             "retryable_failure", diagnostic: e.message,
             route_receipt: route_receipt(request)
           )
-        rescue StaleObservation, InvalidRecord, Hive::ConfigError => e
+        rescue StaleObservation, InvalidRecord => e
           actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
           result(
             "terminal_failure", diagnostic: e.message,
-            route_receipt: route_receipt(request, actual:)
+            route_receipt: route_receipt(request, actual:, diagnostic_source: "parser")
+          )
+        rescue Hive::ConfigError => e
+          actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
+          result(
+            "terminal_failure", diagnostic: e.message,
+            route_receipt: route_receipt(request, actual:, diagnostic_source: "adapter")
           )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
@@ -295,22 +323,6 @@ module Hive
         end
 
         private
-
-        def capability_for(request)
-          return { "status" => "present", "diagnostic" => nil } if request.kind == "adversarial"
-          provider = request.reviewer.fetch("provider")
-          support = Hive::AgentSupport.for(provider)
-          return support.plan_review_capability if support&.respond_to?(:plan_review_capability)
-
-          contract = @capability_resolver.call(CAPABILITY, provider)
-          stringify(@capability_probe.call(
-            agent: provider,
-            invocation: contract.invocation,
-            project_root: request.project_root
-          )).merge("invocation" => contract.invocation)
-        rescue KeyError, Hive::ConfigError => e
-          { "status" => "unsupported", "diagnostic" => e.message }
-        end
 
         def default_capability_probe(agent:, invocation:, project_root:)
           profile = Hive::AgentProfiles.lookup(agent)
@@ -392,7 +404,7 @@ module Hive
           end
         end
 
-        def route_receipt(request, actual: nil, capability_result: "present")
+        def route_receipt(request, actual: nil, capability_result: "present", diagnostic_source: nil)
           actual = stringify(actual)
           independent, reason = RouteResolver.independence(request.planner_identity, actual)
           {
@@ -401,8 +413,9 @@ module Hive
             "actual" => actual,
             "capability_result" => capability_result,
             "independence_verified" => independent,
-            "independence_reason" => reason
-          }.freeze
+            "independence_reason" => reason,
+            "diagnostic_source" => diagnostic_source
+          }.compact.freeze
         end
 
         def result(outcome, **attributes)

@@ -181,7 +181,8 @@ class AgentCliRuntimeProbeTest < Minitest::Test
   def test_probe_all_uses_stable_provider_order
     results = AgentCliRuntime.probe_all
 
-    assert_equal %i[claude codex pi grok opencode], results.map(&:provider)
+    assert_equal AgentCliRuntime::Conformance::PROVIDER_NAMES,
+                 results.map(&:provider)
   end
 
   def test_opencode_version_check_has_cold_start_headroom

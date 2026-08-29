@@ -2,7 +2,8 @@ require_relative "test_helper"
 
 class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
   def test_builtin_profile_is_appended_without_changing_legacy_transports
-    assert_equal %i[claude codex pi grok opencode], AgentCliRuntime::Profiles.names
+    assert_equal AgentCliRuntime::Conformance::PROVIDER_NAMES,
+                 AgentCliRuntime::Profiles.names
 
     profile = AgentCliRuntime::Profiles.fetch(:opencode)
     assert_equal "1.18.16", profile.min_version
@@ -44,9 +45,9 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
       calls << [ arguments, timeout_sec, env ]
       output = case arguments
       when [ "run", "--help" ]
-        "--model --variant --format --dir --pure --auto"
+        AgentCliRuntime::Conformance.opencode_run_help
       when [ "export", "--help" ]
-        "--sanitize"
+        AgentCliRuntime::Conformance.opencode_export_help
       when [ "auth", "list" ]
         "openrouter\n"
       when [ "models", "openrouter", "--verbose" ]

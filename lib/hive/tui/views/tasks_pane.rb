@@ -19,7 +19,7 @@ module Hive
       # context now lives in the left pane (Views::ProjectsPane).
       #
       # Columns: icon · id · PR · display name · stage · status · age. Within each
-      # project, rows are sorted by `Hive::Commands::Status::ACTION_LABEL_ORDER`
+      # project, rows are sorted by `Hive::StatusProjection::ACTION_LABEL_ORDER`
       # at Snapshot construction time, so "Ready to plan" appears above
       # "Agent running" within the same project. At ★ All projects
       # scope, projects are interleaved in `Hive::Config.registered_projects`

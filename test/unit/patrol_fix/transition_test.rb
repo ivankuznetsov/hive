@@ -39,6 +39,8 @@ class PatrolFixTransitionTest < Minitest::Test
       ).apply_review!(decision)
       moved = Hive::Task.new(result.fetch(:task_folder))
       runner = lambda do |**values|
+        assert_includes values.fetch(:prompt), "Independent review decision."
+        assert_includes values.fetch(:prompt), "Validation is current."
         worktree = values.fetch(:owner).fetch("worktree")
         File.write(File.join(worktree, "app.rb"), "puts :reworked\n")
         PatrolFixStageFixture.git(worktree, "add", "app.rb")
@@ -60,6 +62,147 @@ class PatrolFixTransitionTest < Minitest::Test
       assert_equal "reworked", File.read(File.join(
         fixed.dig(:receipt, "payload", "worktree"), "app.rb"
       )).match(/:(\w+)/)[1]
+    end
+  end
+
+  def test_rework_rejects_an_unchanged_patch_and_validation_commands
+    with_review_task(route: "rework") do |task, worktree_root, decision|
+      result = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      ).apply_review!(decision)
+      moved = Hive::Task.new(result.fetch(:task_folder))
+      retained_owner = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: moved.folder, project_root: moved.project_root, slug: moved.slug,
+        worktree_root: worktree_root
+      ).read
+      runner = lambda do |**values|
+        File.write(values.fetch(:output_path), JSON.generate(
+          "schema" => "hive-patrol-fix-fix-report", "schema_version" => 1,
+          "status" => "fixed", "summary" => "Returned the existing patch.",
+          "validation_commands" => []
+        ))
+        { status: :ok, custody: :clean }
+      end
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Fix.run!(
+          moved, {}, agent_runner: runner, worktree_root: worktree_root
+        )
+      end
+
+      assert_includes error.message, "rework did not change the patch or validation commands"
+      current = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder).read_all.select do |row|
+        row["kind"] == "fix" && row.dig("task", "generation") == 2
+      end
+      assert_empty current
+      assert_equal retained_owner, Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: moved.folder, project_root: moved.project_root, slug: moved.slug,
+        worktree_root: worktree_root
+      ).read
+    end
+  end
+
+  def test_rework_rejects_a_review_reference_without_prior_fix_evidence
+    with_review_task(route: "rework") do |task, worktree_root, decision|
+      result = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      ).apply_review!(decision)
+      moved = Hive::Task.new(result.fetch(:task_folder))
+      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder)
+      File.write(
+        receipts.path,
+        File.read(receipts.path).sub(
+          '"fix_receipt_id":"fix-1"', '"fix_receipt_id":"missing-fix"'
+        )
+      )
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Fix.run!(
+          moved, {}, agent_runner: ->(**) { flunk "must not launch without prior Fix evidence" },
+          worktree_root: worktree_root
+        )
+      end
+
+      assert_includes error.message, "does not reference prior fix evidence"
+      current = receipts.read_all.select do |row|
+        row["kind"] == "fix" && row.dig("task", "generation") == 2
+      end
+      assert_empty current
+    end
+  end
+
+  def test_rework_rejects_authorization_from_a_nonadjacent_generation
+    with_review_task(route: "rework") do |task, worktree_root, decision|
+      result = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      ).apply_review!(decision)
+      moved = Hive::Task.new(result.fetch(:task_folder))
+      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder)
+      rows = File.readlines(receipts.path, chomp: true).map { |line| JSON.parse(line) }
+      stale = rows.find { |row| row["receipt_id"] == decision.fetch("receipt_id") }
+      stale.fetch("task")["generation"] = 2
+      stale.fetch("evidence_revision")["generation"] = 2
+      File.write(receipts.path, rows.map { |row| Hive::PatrolFix.canonical_json(row) }.join)
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Fix.run!(
+          moved, {}, agent_runner: ->(**) { flunk "must not launch against stale authorization" },
+          worktree_root: worktree_root
+        )
+      end
+
+      assert_includes error.message, "does not bind the prior generation"
+    end
+  end
+
+  def test_rework_rejects_a_foreign_prior_fix_before_agent_launch
+    with_review_task(route: "rework") do |task, worktree_root, decision|
+      result = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      ).apply_review!(decision)
+      moved = Hive::Task.new(result.fetch(:task_folder))
+      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder)
+      rows = File.readlines(receipts.path, chomp: true).map { |line| JSON.parse(line) }
+      foreign = rows.find { |row| row["receipt_id"] == "fix-1" }
+      foreign.fetch("task")["generation"] = 9
+      foreign.fetch("evidence_revision")["generation"] = 9
+      File.write(receipts.path, rows.map { |row| Hive::PatrolFix.canonical_json(row) }.join)
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Fix.run!(
+          moved, {}, agent_runner: ->(**) { flunk "must not launch against foreign evidence" },
+          worktree_root: worktree_root
+        )
+      end
+
+      assert_includes error.message, "does not reference prior fix evidence"
+    end
+  end
+
+  def test_rework_can_correct_validation_commands_without_changing_the_patch
+    with_review_task(route: "rework") do |task, worktree_root, decision|
+      result = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      ).apply_review!(decision)
+      moved = Hive::Task.new(result.fetch(:task_folder))
+      runner = lambda do |**values|
+        File.write(values.fetch(:output_path), JSON.generate(
+          "schema" => "hive-patrol-fix-fix-report", "schema_version" => 1,
+          "status" => "fixed", "summary" => "Corrected the validation command.",
+          "validation_commands" => [
+            { "identity" => "focused", "command" => "ruby -c app.rb" }
+          ]
+        ))
+        { status: :ok, custody: :clean }
+      end
+
+      fixed = Hive::Stages::PatrolFix::Fix.run!(
+        moved, {}, agent_runner: runner, worktree_root: worktree_root
+      )
+
+      assert_equal :complete, fixed.fetch(:status)
+      assert_equal "ruby -c app.rb",
+                   fixed.dig(:receipt, "payload", "validation_commands", 0, "command")
     end
   end
 

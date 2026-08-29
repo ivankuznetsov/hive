@@ -255,6 +255,18 @@ module Hive
         record
       end
 
+      def arm_launch_handoff(observed, launch_timeout_sec:, now:)
+        mutate(observed, allowed_states: [ "launching" ]) do |data|
+          data.merge(
+            "lease_version" => data.fetch("lease_version") + 1,
+            "claim_deadline" => Record.iso8601(now + launch_timeout_sec),
+            "diagnostics" => data.fetch("diagnostics").merge(
+              "handoff_armed_at" => Record.iso8601(now)
+            )
+          )
+        end
+      end
+
       def fetch(attempt_id)
         hot = fetch_hot(attempt_id)
         return hot if hot

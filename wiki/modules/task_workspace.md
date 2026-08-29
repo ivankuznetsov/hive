@@ -3,7 +3,7 @@ title: Task workspace projection
 type: module
 source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
-updated: 2026-08-16
+updated: 2026-08-25
 tags: [task, web, projection, semantic, result, usage, provenance, attempts, timeline, dependencies, publication]
 ---
 
@@ -14,8 +14,10 @@ applicability, primary/supporting artifacts, exactly attributed usage with an
 API-equivalent estimate, and an attempt-correlated diagnostic-log reference.
 Strict v1 remains the authenticated audit/mutation compatibility document with
 attempts, provenance, resources, and timeline panels. Neither version replaces
-`hive-status` v7, scans the fleet, performs provider/pricing network requests,
-or creates a new action protocol.
+`hive-status` v7, enters `Commands::Status`, scans the fleet or the global
+attempt store, contacts GitHub from any read path, performs provider/pricing
+network requests, or creates a new action protocol; the projection owns no
+mutation.
 
 ## Boundary and route
 

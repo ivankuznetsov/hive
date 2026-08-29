@@ -66,7 +66,8 @@ module Hive
       end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
-                     observation_guard: nil, commit_lock: true, clock: DEFAULT_CLOCK)
+                     observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
+                     clock: DEFAULT_CLOCK)
         @target = target
         @to = to
         @from = from
@@ -78,6 +79,7 @@ module Hive
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
         @observation_guard = observation_guard
+        @post_rearm_mutation = post_rearm_mutation
         @commit_lock = commit_lock
         @clock = clock
       end
@@ -245,8 +247,10 @@ module Hive
       # workflow is rejected at this early gate (see validate_stage_refs!).
       def known_stage_ref?(ref)
         !Hive::Workflows.resolve_stage_ref_across_workflows(ref).nil?
-      rescue Hive::InvalidTaskPath => e
-        e.message.start_with?("ambiguous stage")
+      rescue Hive::Workflows::AmbiguousStageRef
+        true
+      rescue Hive::InvalidTaskPath
+        false
       end
 
       # ── Destination resolution ──────────────────────────────────────────
@@ -367,6 +371,7 @@ module Hive
         new_folder = nil
         commit_action = nil
         human_state_snapshot = nil
+        rewind_state_snapshots = []
         completion_snapshot = nil
         begin
           with_optional_commit_lock(task.hive_state_path) do
@@ -384,6 +389,8 @@ module Hive
                 task:, destination: dest_stage, observation: @plan_review_observation,
                 config: @plan_review_config
               )
+              rearm_backward_stages!(task, dest_stage, snapshots: rewind_state_snapshots)
+              @post_rearm_mutation&.call(task)
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
@@ -400,6 +407,7 @@ module Hive
           end
         rescue StandardError, Interrupt
           restore_human_destination!(task, new_folder, human_state_snapshot)
+          restore_rearmed_stages!(task, new_folder, rewind_state_snapshots)
           raise
         end
         [ new_folder, commit_action ]
@@ -409,6 +417,62 @@ module Hive
         return block.call unless @commit_lock
 
         Hive::Lock.with_commit_lock(hive_state_path, &block)
+      end
+
+      # A backward move is a workflow rewind, not just a folder relocation.
+      # Rearm every stage being revisited so a terminal marker from the prior
+      # visit cannot make the destination (or a later stage on the next
+      # forward pass) short-circuit immediately. State-file names are
+      # de-duplicated because coding intentionally reuses task.md and pr.md.
+      # Files outside the rewound stage interval remain byte-for-byte intact.
+      def rearm_backward_stages!(task, dest_stage, snapshots:)
+        destination = stage_for_dest!(task, dest_stage)
+        return unless destination.index < task.stage_index
+
+        state_files = task.workflow.stages.filter_map do |stage|
+          stage.state_file if stage.index.between?(destination.index, task.stage_index)
+        end.uniq
+
+        state_files.each do |state_file|
+          path = File.join(task.folder, state_file)
+          Hive::Markers.with_markers_lock(path) do
+            snapshot = read_rewind_state_snapshot!(path, state_file)
+            snapshots << snapshot
+            next unless snapshot.fetch(:existed)
+
+            # Record before mutation so a later file validation/write failure
+            # can restore every earlier file from this same rewind attempt.
+            body = snapshot.fetch(:body)
+            rearmed = Hive::Markers.without_markers(body)
+            Hive::AtomicFile.write(path, rearmed) unless rearmed == body
+          end
+        end
+      end
+
+      def read_rewind_state_snapshot!(path, state_file)
+        read_regular_state_snapshot!(
+          path, state_file,
+          invalid: "rewind state file #{state_file.inspect} must be a regular file, not a symlink",
+          changed: "rewind state file #{state_file.inspect} changed while rearming stages"
+        )
+      end
+
+      def restore_rearmed_stages!(task, new_folder, snapshots)
+        return unless snapshots
+
+        folder = File.directory?(task.folder) ? task.folder : new_folder
+        return unless folder && File.directory?(folder)
+
+        snapshots.reverse_each do |snapshot|
+          path = File.join(folder, snapshot.fetch(:state_file))
+          Hive::Markers.with_markers_lock(path) do
+            if snapshot.fetch(:existed)
+              Hive::AtomicFile.write(path, snapshot.fetch(:body))
+            else
+              File.delete(path) if File.exist?(path) || File.symlink?(path)
+            end
+          end
+        end
       end
 
       def initialize_human_destination!(task, dest_stage)
@@ -433,10 +497,17 @@ module Hive
       end
 
       def read_human_state_snapshot!(path, state_file)
+        read_regular_state_snapshot!(
+          path, state_file,
+          invalid: "human stage state file #{state_file.inspect} must be a regular file, not a symlink",
+          changed: "human stage state file #{state_file.inspect} changed while entering the stage"
+        )
+      end
+
+      def read_regular_state_snapshot!(path, state_file, invalid:, changed:)
         stat = File.lstat(path)
         unless stat.file? && !stat.symlink?
-          raise Hive::InvalidTaskPath,
-                "human stage state file #{state_file.inspect} must be a regular file, not a symlink"
+          raise Hive::InvalidTaskPath, invalid
         end
 
         flags = File::RDONLY
@@ -444,8 +515,7 @@ module Hive
         body = File.open(path, flags) do |file|
           opened = file.stat
           unless opened.file? && opened.dev == stat.dev && opened.ino == stat.ino
-            raise Hive::InvalidTaskPath,
-                  "human stage state file #{state_file.inspect} changed while entering the stage"
+            raise Hive::InvalidTaskPath, changed
           end
           file.read
         end
@@ -453,8 +523,7 @@ module Hive
       rescue Errno::ENOENT
         { state_file: state_file, existed: false, body: nil }
       rescue Errno::ELOOP, Errno::EMLINK
-        raise Hive::InvalidTaskPath,
-              "human stage state file #{state_file.inspect} must be a regular file, not a symlink"
+        raise Hive::InvalidTaskPath, invalid
       end
 
       def restore_human_destination!(task, new_folder, snapshot)

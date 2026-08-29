@@ -4,6 +4,7 @@ require "json"
 require "securerandom"
 require "hive/artifact_firewall"
 require "hive/markers"
+require "hive/model_routing"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/plan_signals"
 require "hive/plan_review/workspace_scope"
@@ -58,7 +59,7 @@ module Hive
             max_budget_usd: @cfg.dig("budget_usd", "plan"),
             timeout_sec:, log_label: "plan-review-revision",
             profile:, expected_output: output_path, status_mode: :output_file_exists,
-            cfg: @cfg, model: planner_identity["model"], effort: planner_identity["effort"],
+            cfg: @cfg, **launch_arguments(profile, planner_identity),
             agent_custody: custody, **scope
           )
           report = custody.report
@@ -108,6 +109,37 @@ module Hive
             "status" => "retryable_failure", "diagnostic" => e.message,
             "actual_route" => planner_identity
           }
+        end
+
+        private
+
+        def launch_arguments(profile, identity)
+          model = normalized_control(identity["model"])
+          effort = normalized_control(identity["effort"])
+          provenance = {
+            model: routing_provenance(model), effort: routing_provenance(effort)
+          }
+          resolution = Hive::ModelRouting::Resolution.new(
+            stage: "plan", provider: profile.name,
+            model: model || "default", effort: effort || "default", provenance:
+          )
+          routing = profile.routing_arguments(
+            resolution, source: "captured plan-review planner identity"
+          )
+          routing ? { routing_arguments: routing } : { cli_flags: [] }
+        end
+
+        def normalized_control(value)
+          normalized = value.to_s.strip
+          return if normalized.empty? || %w[default inherit unknown].include?(normalized)
+
+          normalized
+        end
+
+        def routing_provenance(value)
+          Hive::ModelRouting::Provenance.new(
+            kind: value ? :exact : :legacy, key: value ? "plan" : nil
+          )
         end
       end
 

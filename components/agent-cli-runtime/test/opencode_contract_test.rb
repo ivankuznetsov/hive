@@ -15,11 +15,13 @@ class AgentCliRuntimeOpenCodeContractTest < Minitest::Test
     help = fixture("run-help.txt")
 
     assert_includes help, "opencode run [message..]"
-    %w[--pure --model --format --dir --variant --auto].each do |flag|
+    AgentCliRuntime::Conformance::OPENCODE_RUN_FLAGS.each do |flag|
       assert_includes help, flag
     end
     assert_includes help, "provider/model"
-    assert_includes fixture("export-help.txt"), "--sanitize"
+    AgentCliRuntime::Conformance::OPENCODE_EXPORT_FLAGS.each do |flag|
+      assert_includes fixture("export-help.txt"), flag
+    end
   end
 
   def test_local_inventory_fixtures_are_sanitized_and_exact

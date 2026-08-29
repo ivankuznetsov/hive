@@ -3,9 +3,9 @@ require "json"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
+require "hive/task_resolver"
 require "hive/lock"
 require "hive/git_ops"
-require "hive/stages"
 
 module Hive
   module Commands
@@ -110,9 +110,7 @@ module Hive
                 "use `hive approve` to advance the task or move the folder backward via `hive approve --to <stage>`."
         end
 
-        folder = resolve_target
-        task = Hive::Task.new(folder)
-        validate_project_path_match!(task)
+        task = resolve_task
 
         # Read+validate+rewrite must run under the same `.markers-lock`
         # that `Hive::Markers.set` uses. Otherwise a concurrent
@@ -182,72 +180,15 @@ module Hive
                         action: action)
       end
 
-      # ── Resolution (mirrors Hive::Commands::Approve) ─────────────────────
+      # ── Resolution ───────────────────────────────────────────────────────
 
-      def resolve_target
-        if path_target?
-          expanded = File.expand_path(@target)
-          return File.realpath(expanded) if File.directory?(expanded)
-        end
-
-        matches = find_slug_across_projects(@target)
-        case matches.size
-        when 0
-          raise Hive::InvalidTaskPath,
-                "no task folder for slug '#{@target}'#{project_hint}"
-        when 1
-          File.realpath(matches.first[:folder])
-        else
-          raise Hive::AmbiguousSlug.new(
-            ambiguity_message(matches),
-            slug: @target,
-            candidates: matches
-          )
-        end
-      end
-
-      def path_target?
-        @target.include?("/") || @target.start_with?("~", ".")
-      end
-
-      def project_hint
-        @project_filter ? " in project '#{@project_filter}'" : ""
-      end
-
-      def ambiguity_message(matches)
-        projects = matches.map { |m| m[:project] }.uniq
-        if projects.size > 1
-          "slug '#{@target}' is ambiguous (in #{projects.join(', ')}); pass --project <name>"
-        else
-          stages = matches.map { |m| m[:stage] }
-          "slug '#{@target}' is ambiguous (multiple stages in '#{projects.first}': #{stages.join(', ')}); " \
-            "pass an absolute folder path"
-        end
-      end
-
-      def find_slug_across_projects(slug)
-        projects = Hive::Config.registered_projects
-        projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-        projects.flat_map do |project|
-          Hive::Stages::DIRS.filter_map do |stage|
-            folder = File.join(project["hive_state_path"], "stages", stage, slug)
-            next nil unless File.directory?(folder)
-
-            { project: project["name"], stage: stage, folder: folder }
-          end
-        end
-      end
-
-      def validate_project_path_match!(task)
-        return unless @project_filter
-        return unless path_target?
-
-        matching = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
-        actual_name = matching ? matching["name"] : File.basename(task.project_root)
-        return if actual_name == @project_filter
-
-        raise Hive::InvalidTaskPath,
-              "FOLDER path is in project '#{actual_name}' but --project says '#{@project_filter}'"
+      # Delegates to the shared Hive::TaskResolver so path validation, slug/id
+      # lookup, ambiguity handling, and `--project` mismatch rules stay defined
+      # in one place — and so slug scans walk the project's registered workflow
+      # stage union (including runtime-registered descriptors) rather than the
+      # legacy coding-only `Hive::Stages::DIRS` list.
+      def resolve_task
+        Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
       end
 
       # ── Reporting ────────────────────────────────────────────────────────

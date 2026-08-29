@@ -1,19 +1,19 @@
 ---
 title: 6-review stage
 type: stage
-source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
+source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,remote_ci,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-08-24
+updated: 2026-08-29
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
-**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
+**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` proves local and hosted CI on entry, loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap), settles the exact final PR head, and only then finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
 
 - **State file**: `task.md` with frontmatter written by 4-execute, Patrol Fix routing, or ad-hoc PR review. The runner derives the current pass from `reviews/<reviewer-name>-<NN>.md` filenames.
 - **Worktree pointer**: `worktree.yml` carried from the owning workflow or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml".
-- **PR pointer**: `pr.md` carried from publication or written by ad-hoc review. Missing PR metadata only disables GitHub comment mirroring; local review still runs.
+- **PR pointer**: `pr.md` carried from publication or written by ad-hoc review. Missing PR metadata disables hosted-check settlement and GitHub comment mirroring; local review still runs.
 - **Reviews directory**: `reviews/`, carried over or created by the workflow/ad-hoc handoff.
 
 ## Pre-flight (`Review.run!`)
@@ -31,13 +31,15 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ## The pass loop
 
 ```
-Phase 1 (CI fix)         once on entry
+Phase 1 (CI gates)       local command + exact-head hosted checks on entry
 Phase 2 (reviewers)      sequential, one adapter per selected reviewer spec
 Phase 3 (triage)         courageous (default) | safetyist | review.triage.custom_prompt
 branch on triage:
   any [x]                → Phase 4 (fix) → loop to Phase 2 with pass++
   escalations only       → REVIEW_WAITING escalations=N pass=NN (terminal)
-  all clean              → Phase 5 (browser test) → REVIEW_COMPLETE
+  all clean              → settle CI on changed HEAD
+                           CI repair commit → fresh reviewer pass
+                           unchanged green HEAD → Phase 5 → REVIEW_COMPLETE
 ```
 
 Before spawning the Phase 4 fix agent, `prepare_worktree_for_fix` runs `Hive::Stages::CleanExit` with `reason: :pre_fix_dirty_worktree` when the worktree is already dirty. This pre-fix snapshot bypasses the normal `review.fix.auto_commit.scope_check` filename allowlist because its job is to preserve existing operator/agent changes before handing control to a new fix agent. It does not bypass the content safety boundary: staged symlinks, oversized staged blobs, and added lines matching the shared secret detectors still fail closed. A typed CleanExit rejection stops before agent launch and writes the canonical recoverable `ERROR reason=ensure_clean_on_exit_failed origin=review_pre_fix failure_kind=<kind>` marker. Rejected paths remain exact: small non-sensitive lists are encoded inline, while large or secret-shaped lists use an integrity-checked owner-private task-local sidecar so the marker stays redacted and inside its bounded scan window. Failures after dirty status is known, including signing-policy and Git failures, carry the exact recovery identity even when no diagnostic path exists. An initial Git-status read failure remains `REVIEW_ERROR reason=fix_status_check_failed`, because Hive has not established recoverable residue. The stricter filename scope check also applies to ordinary stage-exit residue and finalize-entry backstops.
@@ -65,9 +67,13 @@ Unsupported controls fail before the resolution event or subprocess.
 
 This inheritance is deliberately limited to repair work. Reviewer fan-out, triage, and browser-test profiles continue to use their independently configured identities, preserving independent review signals. The phrase “fix agent” below refers to this resolved identity, not a baked-in Claude default.
 
-## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)
+## Phase 1 and clean-boundary CI (`CiFix` + `RemoteCi`)
 
-Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is launched with `Process.spawn(pgroup: true)` and its combined stdout+stderr is **streamed** through a reader thread with a 256 KB byte-cap applied during read (so a runaway CI cannot OOM the host before the cap kicks in). A per-process timeout from `cfg.timeout_sec.review_ci` (default 3600s) bounds wall time, and an optional `cfg.timeout_sec.review_ci_idle` idle-output deadline kills a CI child that streams nothing (stdout+stderr combined, capped-and-dropped bytes included) for that long — the wall clock stays the runaway backstop while the idle window fails wedges fast. On expiry of either deadline the pgid is TERM'd, given a 3s grace, then KILL'd, and the resulting `CommandError` falls through the existing `:error` path (idle kills carry an `idle-output timeout` message). On red exit, the captured log is ANSI-stripped, tail-truncated to the configured line cap, and fed to a fix agent through the per-spawn `<user_supplied>` nonce wrapper. Re-runs CI. Up to `review.ci.max_attempts` (default 3); cap reached → `:stale` → runner writes `reviews/ci-blocked.md` and sets `REVIEW_CI_STALE`. Reviewers do NOT run on red CI.
+Runs `cfg.review.ci.command` (e.g., `bin/ci`) on entry. The subprocess is launched with `Process.spawn(pgroup: true)` and its combined stdout+stderr is **streamed** through a reader thread with a 256 KB byte-cap applied during read (so a runaway CI cannot OOM the host before the cap kicks in). A per-process timeout from `cfg.timeout_sec.review_ci` (default 3600s) bounds wall time, and an optional `cfg.timeout_sec.review_ci_idle` idle-output deadline kills a CI child that streams nothing (stdout+stderr combined, capped-and-dropped bytes included) for that long — the wall clock stays the runaway backstop while the idle window fails wedges fast. On expiry of either deadline the pgid is TERM'd, given a 3s grace, then KILL'd, and the resulting `CommandError` falls through the existing `:error` path (idle kills carry an `idle-output timeout` message). On red exit, the captured log is ANSI-stripped, tail-truncated to the configured line cap, and fed to a fix agent through the per-spawn `<user_supplied>` nonce wrapper. Re-runs CI. Up to `review.ci.max_attempts` (default 3); cap reached → `:stale` → runner writes `reviews/ci-blocked.md` and sets `REVIEW_CI_STALE`. Reviewers do NOT run on red CI.
+
+When the task owns `pr.md` and `review.github_checks.enabled` is not false, `Review::RemoteCi` applies the same bounded repair loop to GitHub checks. It validates the controller-owned worktree pointer, origin repository, exact open PR URL/number, same-repository head branch, and current remote head. Publication uses an exact expected-OID lease and never overwrites a concurrent branch update. The runner then waits for the PR rollup to name the exact local SHA, requires the previously observed named check suite to appear, and holds a stable green signature before accepting it; failed check logs are captured from their Actions job URLs, normalized from the binary subprocess transport to valid UTF-8, and fed to the normal `review.ci` fixer. The CI-fix cleaner repeats that text-boundary normalization for custom command runners before ANSI stripping, tailing, or ERB prompt rendering. After green settlement it atomically refreshes the controller-owned `pr.md` head binding, so later reviewer-comment identity checks use the repaired SHA rather than the original open-PR SHA.
+
+The combined gates run again at the all-clean boundary whenever HEAD changed since the prior proof. A CI fixer commit cannot silently trail review: Hive diff-guardrails it before publication, settles its hosted checks, completes the current pass, and opens one fresh reviewer pass. The same rule applies when an intentionally rewound task enters with completed on-disk passes already at the configured cap: an entry-gate repair widens that invocation only through the next on-disk pass, so the new commit is reviewed instead of immediately becoming `REVIEW_STALE`. Only an unchanged, reviewer-clean, exact SHA reaches browser test and `REVIEW_COMPLETE`. A guardrail hit uses the normal `REVIEW_WAITING reason=fix_guardrail source=ci` approval path. Set `review.github_checks.enabled: false` only when hosted PR checks are intentionally controlled outside Hive; GitHub comment publication is an independent setting.
 
 `review.ci.command` is project-specific by design — hive doesn't ship a Rubocop/Brakeman driver because that would couple the orchestrator to one ecosystem. The user owns the contract; hive shells out and parses exit code + last-N lines.
 
@@ -165,12 +171,12 @@ After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 
 
 - `shell_pipe_to_interpreter` — curl/wget pipe into sh/bash/python/ruby/node
 - `ci_workflow_edit` — `.github/workflows/`, gitlab-ci, circleci, Jenkinsfile, bitbucket-pipelines, azure-pipelines, travis
-- `secrets_pattern_match` — dispatches to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key). General password detection recognizes bare and conventionally prefixed names such as `DB_PASSWORD`, and requires an actual `:` or `=` assignment delimiter. An unquoted right-hand side is skipped only when it contains syntactic bracket/call lookup structure; a dot in a literal value is not a lookup, and any string literal on the same line keeps the finding. Test and production paths share this rule.
+- `secrets_pattern_match` — declares the non-regex detector strategy `detector: :secret_patterns`; scan dispatches on that descriptor key and hands each added line to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key). General password detection recognizes bare and conventionally prefixed names such as `DB_PASSWORD`, and requires an actual `:` or `=` assignment delimiter. An unquoted right-hand side is skipped only when it contains syntactic bracket/call lookup structure; a dot in a literal value is not a lookup, and any string literal on the same line keeps the finding. Test and production paths share this rule.
 - `dotenv_edit` — `.env`, `.env.<environment>` (e.g., `.env.local`, `.env.production`, `.env.test`, `.env.staging`), `secrets.yml`, `credentials.yml(.enc)`, `.npmrc`, `.pypirc`. Template suffixes are deliberately **excluded** so committed templates do not trip the guardrail: `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults`. Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` (custom `dotenv_template_edit` pattern).
 - `dependency_lockfile_change` — Gemfile.lock, package-lock.json, pnpm-lock, yarn.lock, Cargo.lock, go.sum, poetry.lock, Pipfile.lock, composer.lock, uv.lock
 - `permission_change` — `new mode 100755` raw-diff-header
 
-Per-project override via `review.fix.guardrail.patterns_override`: `false` to disable a default; Hash to add a custom (must include `regex`). Tripped → `REVIEW_WAITING reason=fix_guardrail matches=N head=<sha> pass=NN` and `reviews/fix-guardrail-NN.md` written. The `head=` attribute records the worktree HEAD at the moment the guardrail tripped; the approval-on-resume path enforces it.
+Per-project override via `review.fix.guardrail.patterns_override`: `false` to disable a default; Hash to add a custom (must include `regex`). Replacement is total: a Hash under any name — including `secrets_pattern_match` — installs a plain regex detector (`detector: :regex`) and never inherits the SecretPatterns dispatch. Scan raises on any descriptor whose `detector:` is neither `:regex` nor `:secret_patterns`. Tripped → `REVIEW_WAITING reason=fix_guardrail matches=N head=<sha> pass=NN` and `reviews/fix-guardrail-NN.md` written. The `head=` attribute records the worktree HEAD at the moment the guardrail tripped; the approval-on-resume path enforces it.
 
 **Approval-on-resume (U5).** A user who reviews the fix-guardrail trip and decides the changes are intentional approves them by ticking `[x]` on every line of `reviews/fix-guardrail-NN.md` and re-running. The runner calls `fix_guardrail_approved?(ctx, expected_matches: marker.attrs["matches"].to_i)` and gates approval on **all four** of:
 
@@ -250,8 +256,8 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 
 ## Tests
 
-- `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap including triage-retry handoff to `REVIEW_STALE`, reviewers all-limit markers, triage/fix limit vs non-limit failure classification, transient triage retry, ad-hoc fix-off/fix-opt-in branching, tmux Stop-hook fix fallback acceptance for commit and whole-pass no-change evidence, rejection when commit/no-change evidence or escalation clearance is missing, and `message=` surfacing on terminal phase-agent errors.
-- `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}_test.rb` — phase-level unit coverage, including no-fix fingerprint normalization, base-SHA reset, strip, and seed behavior.
+- `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, local/hosted CI hard-blocks, exact-head CI-repair re-review, wall-clock cap including triage-retry handoff to `REVIEW_STALE`, reviewers all-limit markers, triage/fix limit vs non-limit failure classification, transient triage retry, ad-hoc fix-off/fix-opt-in branching, tmux Stop-hook fix fallback acceptance for commit and whole-pass no-change evidence, rejection when commit/no-change evidence or escalation clearance is missing, and `message=` surfacing on terminal phase-agent errors.
+- `test/unit/stages/review/{ci_fix,ci_gates,remote_ci,triage,browser_test,fix_guardrail,suppression}_test.rb` — phase-level unit coverage, including exact PR identity, leased publication, delayed check settlement, failing-log capture, pre-publication guardrail, no-fix fingerprint normalization, base-SHA reset, strip, and seed behavior.
 - `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, patrol-task selection of `patrol.review.reviewers`, and ad-hoc reviewer selection/fix-gate helpers.
 - `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior including transcript trimming before triage.
 - `test/unit/metrics_test.rb`, `test/integration/metrics_command_test.rb` — `hive metrics rollback-rate` against trailered fixture commits.

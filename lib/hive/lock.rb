@@ -101,6 +101,32 @@ module Hive
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
 
+    # Drop a completed child only when the lock still names that exact process
+    # identity. A later child may already have replaced the recorded PID, so a
+    # plain nil update would let an older completion erase the new owner's
+    # liveness evidence.
+    def clear_task_lock_child(task_folder, pid:, process_start_time:)
+      lock_path = File.join(task_folder, ".lock")
+      tmp = nil
+      with_task_lock_guard(lock_path) do
+        return false unless File.exist?(lock_path)
+
+        data = read_task_lock(lock_path)
+        return false unless data
+        return false unless data["claude_pid"] == pid
+        return false unless data["claude_pid_start_time"].to_s == process_start_time.to_s
+
+        data.delete("claude_pid")
+        data.delete("claude_pid_start_time")
+        tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
+        File.write(tmp, data.to_yaml)
+        File.rename(tmp, lock_path)
+      end
+      true
+    ensure
+      File.delete(tmp) if tmp && File.exist?(tmp)
+    end
+
     # Serialize lock-path publication, stale replacement, updates, and
     # ownership-checked release on a stable sidecar inode. The guard is held
     # only for these short filesystem operations, never for the task run.

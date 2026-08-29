@@ -351,6 +351,36 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_clear_task_lock_child_is_scoped_to_the_recorded_process_identity
+    with_tmp_dir do |dir|
+      refute Hive::Lock.clear_task_lock_child(
+        dir, pid: 123, process_start_time: "first"
+      )
+
+      lock = Hive::Lock.acquire_task_lock(dir)
+      Hive::Lock.update_task_lock(
+        dir, "claude_pid" => 123, "claude_pid_start_time" => "first"
+      )
+
+      refute Hive::Lock.clear_task_lock_child(
+        dir, pid: 456, process_start_time: "first"
+      )
+      refute Hive::Lock.clear_task_lock_child(
+        dir, pid: 123, process_start_time: "replacement"
+      )
+      assert Hive::Lock.clear_task_lock_child(
+        dir, pid: 123, process_start_time: "first"
+      )
+
+      current = YAML.safe_load_file(File.join(dir, ".lock"))
+      assert_equal lock.fetch("lock_id"), current.fetch("lock_id")
+      refute current.key?("claude_pid")
+      refute current.key?("claude_pid_start_time")
+    ensure
+      Hive::Lock.release_task_lock(dir, lock_id: lock && lock["lock_id"])
+    end
+  end
+
   def test_commit_lock_times_out_when_existing_lock_never_releases
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(dir)

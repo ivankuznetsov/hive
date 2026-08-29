@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-08-29
 tags: [agent, claude, subprocess]
 ---
 
@@ -217,7 +217,12 @@ the strict JSONL run boundary becomes a typed `malformed_output` failure.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
+12. Once child completion is confirmed, compare-and-clear its PID/start-time
+    pair from the still-live task lock. Native OpenCode uses the same lifecycle
+    boundary after its recorded `run` child exits; post-agent parsing and
+    hosted-CI polling therefore retain the live runner lock without presenting
+    a dead child to daemon healing.
+13. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -235,7 +240,9 @@ failure.
 Claude/tmux launches record the managed pane PID in the same per-task lock.
 `Hive::ClaudeLauncher#record_claude_pid` waits for `pane_pid`, then writes both
 `claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the
-same PID-reuse identity guard as headless `Hive::Agent` spawns.
+same PID-reuse identity guard as headless `Hive::Agent` spawns. Shared-session
+teardown compare-and-clears that exact identity after shutdown, session kill,
+and orphan sweep; a concurrently re-established replacement remains recorded.
 
 Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers,
 triage/browser helpers) poll the expected artifact and managed tmux session

@@ -71,6 +71,20 @@ module Hive
         new(state_home: state_home).call(now: now)
       end
 
+      # The full runtime cutover calls this explicit, read-only inventory
+      # before it mutates either legacy state or the candidate database. Keep
+      # the frozen decoders lazy so ordinary runtime and existing v3-to-v4
+      # recovery do not load migration-only formats.
+      def self.inventory_runtime(state_home: Hive::Paths.state_home,
+                                 data_home: Hive::Paths.data_home,
+                                 project_roots: [], attempt_root: nil, usage_path: nil)
+        require "hive/runtime_control_plane/legacy_import"
+        Hive::RuntimeControlPlane::LegacyImport.new(
+          state_home: state_home, data_home: data_home, project_roots: project_roots,
+          attempt_root: attempt_root, usage_path: usage_path
+        ).call
+      end
+
       def initialize(state_home:, process_identity: Hive::Attempts::ProcessIdentity.new)
         @state_home = File.expand_path(state_home)
         @process_identity = process_identity

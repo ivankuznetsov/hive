@@ -73,6 +73,15 @@ stable identity adapters, and the complete target coordination schema. The
 boundary does not activate any legacy runtime consumer or move task/workflow
 authority out of project task folders.
 
+The clean cutover has three migration-only helpers that are deliberately not
+loaded by that entry point. `LegacyImport` is a total read-only decoder with a
+per-source disposition ledger for the last filesystem runtime layout;
+`PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
+addresses only at terminal publication; and `CutoverManifest` publishes a
+digest-bound, owner-private inventory outside both the legacy roots and the
+candidate database. Existing runtime consumers still use their legacy stores
+until the fleet-wide activation unit switches them together.
+
 ## Patrol Fix boundary
 
 `Patrol Fix Workflow Core` owns strict source snapshots, direct admission,

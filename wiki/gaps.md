@@ -1316,8 +1316,9 @@ markers.
 `Hive::Attempts::Dispatcher` currently returns the generic reason `capacity`
 when any global, per-project, or daily attempt limit closes between the
 daemon's controller precheck and durable admission. The daemon therefore
-conservatively treats that result as a global priority fence for the remainder
-of one status-row scan. This prevents lower-priority leapfrogging and is
-bounded to one tick, but a rare project-only race can leave an unrelated slot
-unused until the next frame. Keep this gap open until durable admission emits
-a typed capacity scope that the row scheduler can preserve directly.
+conservatively treats that result as a global priority fence through the next
+authoritative full scan, including intervening changed-task ticks. This
+prevents lower-priority leapfrogging, but a rare project-only race can leave an
+unrelated slot unused for the full-scan interval plus scan time. Keep this gap
+open until durable admission emits a typed capacity scope that the row
+scheduler can preserve directly.

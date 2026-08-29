@@ -3690,6 +3690,99 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, second_block.last.fetch(:priority_fence)
   end
 
+  def test_full_tick_capacity_fence_blocks_incremental_successor_until_next_full_scan
+    waiting = row(
+      slug: "waiting", stage: "6-review", action: "ready_to_plan",
+      command: "hive review waiting --from 6-review"
+    )
+    calls = []
+    capacity_blocked = true
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **_options|
+      calls << request.slug
+      deferred = request.slug == "waiting" && capacity_blocked
+      Hive::Attempts::DispatchResult.new(
+        status: deferred ? :deferred : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil,
+        reason: deferred ? "capacity" : nil
+      )
+    end
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [ waiting ], attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [ row(
+        slug: "successor", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan successor --from 3-plan"
+      ) ]
+    )
+
+    assert dispatcher.tick_changed(
+      task_keys: [ [ "p1", "successor" ] ], now: T0 + 1
+    )
+
+    assert_equal [ "waiting" ], calls,
+                 "an incremental successor must not bypass the older full-scan queue"
+    successor_block = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "successor"
+    end
+    assert_equal "capacity", successor_block.last.fetch(:reason)
+    assert_equal true, successor_block.last.fetch(:priority_fence)
+
+    capacity_blocked = false
+    dispatcher.tick(now: T0 + 30)
+    assert_equal [ "waiting", "waiting" ], calls,
+                 "the next full scan must reconsider the older fenced row"
+  end
+
+  def test_full_tick_project_fence_persists_across_incremental_ticks_only_for_that_project
+    waiting = row(
+      project: "p1", slug: "waiting", stage: "6-review", action: "ready_to_plan",
+      command: "hive review waiting --from 6-review"
+    )
+    dispatcher, supervisor, controller = make_dispatcher(rows: [ waiting ])
+    original_gate = controller.method(:can_dispatch?)
+    project_blocked = true
+    controller.define_singleton_method(:can_dispatch?) do |project:, **options|
+      if project == "p1" && project_blocked
+        :project_cap
+      else
+        original_gate.call(project: project, **options)
+      end
+    end
+
+    dispatcher.tick(now: T0)
+    project_blocked = false
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [ row(
+        project: "p2", slug: "other", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan other --from 3-plan"
+      ) ]
+    )
+    assert dispatcher.tick_changed(
+      task_keys: [ [ "p2", "other" ] ], now: T0 + 1
+    )
+
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [ row(
+        project: "p1", slug: "successor", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan successor --from 3-plan"
+      ) ]
+    )
+    assert dispatcher.tick_changed(
+      task_keys: [ [ "p1", "successor" ] ], now: T0 + 2
+    )
+
+    assert_equal [ "other" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+  end
+
   def test_status_active_agent_row_counts_toward_project_cap
     rows = [
       row(slug: "running", stage: "6-review", marker: "review_working",

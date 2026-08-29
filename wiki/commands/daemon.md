@@ -108,14 +108,16 @@ live recorded Claude PID and rows with `live_task_lock: true` (a verified
 daemon restart during auto-rebase or other pre-agent work from spawning
 extra tasks past `max_concurrent_runs` / `max_concurrent_per_project`.
 
-The status-row scan keeps its later-stage-first ordering for the whole tick,
-not only at each individual admission call. If a higher-priority row reaches a
-global or durable-attempt capacity boundary, later dispatchable rows are
-priority-fenced until the next status frame instead of taking a slot that a
-short-lived worker happens to release after the higher row was evaluated.
-Project and daily caps fence only later rows from that project, so unrelated
-projects can still use available global capacity. Non-dispatch policy rows are
-still classified and published in the operational snapshot.
+The status-row scan keeps its later-stage-first ordering until the next
+authoritative full scan, not only at each individual admission call. If a
+higher-priority row reaches a global or durable-attempt capacity boundary,
+later dispatchable rows in that frame and in intervening changed-task ticks are
+priority-fenced instead of taking a slot that happens to reopen after the
+higher row was evaluated. The next full scan starts with no inherited fence
+and reconsiders the whole queue. Project and daily caps fence only later rows
+from that project, so unrelated projects can still use available global
+capacity. Non-dispatch policy rows are still classified and published in the
+operational snapshot.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.

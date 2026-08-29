@@ -503,7 +503,10 @@ advances a workflow stage directly:
    task-lock generation, and rewrites the matching occurrence to
    `REVIEW_ERROR`. A replacement holder or failed claim leaves the marker
    untouched. If child inspection fails, or children still exist, it leaves
-   the row alone.
+   the row alone. Agent launchers remove a normally completed child's exact
+   PID/start-time pair while retaining the parent lock, so post-agent work such
+   as hosted-CI polling presents `claude_pid_alive: nil` and cannot enter this
+   dead-child recovery path.
 
    Every `ERROR` and `REVIEW_ERROR` is a durable retry state, never a permanent
    workflow terminal. The exact `terminal_outcome_blocked` and

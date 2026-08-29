@@ -2468,13 +2468,21 @@ class RunReviewTest < Minitest::Test
         folder = setup_review_task(dir, cfg_overrides: {
           "review" => { "max_wall_clock_sec" => 1 }
         })
-        calls = 0
+        entry_ci_finished = false
 
-        with_replaced_singleton_method(Hive::Stages::Review, :wall_clock_exceeded?, lambda { |_started_at, _max|
-          calls += 1
-          calls == 2
-        }) do
-          capture_io { Hive::Commands::Run.new(folder).call }
+        with_replaced_singleton_method(
+          Hive::Stages::Review, :run_ci_gates,
+          lambda { |_task, _cfg, _ctx, **_kwargs|
+            entry_ci_finished = true
+            nil
+          }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::Review, :wall_clock_exceeded?,
+            ->(_started_at, _max) { entry_ci_finished }
+          ) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
         end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))

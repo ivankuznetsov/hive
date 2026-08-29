@@ -45,8 +45,9 @@ module Hive
 
         module_function
 
-        def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil)
-          command = cfg.dig("review", "ci", "command")
+        def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
+                 command: nil, command_runner: nil)
+          command ||= cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
               status: :skipped,
@@ -91,10 +92,14 @@ module Hive
             end
 
             attempts += 1
-            run_result = run_ci_once(
-              command, ctx.worktree_path, max_bytes, timeout_sec,
-              idle_timeout_sec: idle_timeout_sec
-            )
+            run_result = if command_runner
+              command_runner.call(max_bytes: max_bytes, timeout_sec: timeout_sec)
+            else
+              run_ci_once(
+                command, ctx.worktree_path, max_bytes, timeout_sec,
+                idle_timeout_sec: idle_timeout_sec
+              )
+            end
             return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
 
             output = clean_output(run_result.combined, tail_lines)

@@ -1529,6 +1529,99 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_exact_head_ci_repair_gets_a_fresh_reviewer_pass_before_completion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => {
+            "reviewers" => [
+              {
+                "name" => "stub-reviewer", "kind" => "agent",
+                "agent" => "claude", "skill" => "ce-code-review",
+                "output_basename" => "stub-reviewer",
+                "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+                "timeout_sec" => 5
+              }
+            ]
+          }
+        })
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml"))).fetch("path")
+        review_fix = File.join(worktree, "test", "review-fix.txt")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          mkdir -p "$(dirname '#{review_fix}')"
+          printf 'review fix\n' > "#{review_fix}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        reviewer_passes = []
+        review_runner = lambda do |_cfg, ctx, _task, **_kwargs|
+          reviewer_passes << ctx.pass
+          path = File.join(
+            ctx.task_folder, "reviews",
+            "stub-reviewer-#{format('%02d', ctx.pass)}.md"
+          )
+          FileUtils.mkdir_p(File.dirname(path))
+          File.write(path, ctx.pass == 1 ? "## High\n- [x] repair it\n" : "")
+          :ok
+        end
+        triage_runner = lambda do |cfg:, ctx:|
+          path = File.join(
+            ctx.task_folder, "reviews",
+            "escalations-#{format('%02d', ctx.pass)}.md"
+          )
+          FileUtils.mkdir_p(File.dirname(path))
+          File.write(path, "# Escalations\n")
+          Hive::Stages::Review::Triage::Result.new(
+            status: :ok, escalations_path: path, error_message: nil,
+            tampered_files: [], limit_text: nil
+          )
+        end
+        remote_calls = 0
+        test_case = self
+        remote_runner = lambda do |**_kwargs|
+          remote_calls += 1
+          if remote_calls == 2
+            repair = File.join(worktree, "test", "hosted-ci-repair.txt")
+            File.write(repair, "hosted repair\n")
+            test_case.run!("git", "-C", worktree, "add", "test/hosted-ci-repair.txt")
+            test_case.run!("git", "-C", worktree, "commit", "-m", "fix hosted CI", "--quiet")
+          end
+          Hive::Stages::Review::CiFix::Result.new(
+            status: :green, attempts: 1, last_output: "green",
+            error_message: nil, limit_text: nil
+          )
+        end
+
+        with_replaced_singleton_method(
+          Hive::Stages::Review, :run_reviewers, review_runner
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::Review::Triage, :run!, triage_runner
+          ) do
+            with_replaced_singleton_method(
+              Hive::Stages::Review::RemoteCi, :run!, remote_runner
+            ) do
+              capture_io { Hive::Commands::Run.new(folder).call }
+            end
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal [ 1, 2, 3 ], reviewer_passes
+        assert_equal 2, remote_calls
+        assert File.file?(File.join(worktree, "test", "hosted-ci-repair.txt"))
+      end
+    end
+  end
+
   def test_adhoc_review_waits_instead_of_running_fix_by_default
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

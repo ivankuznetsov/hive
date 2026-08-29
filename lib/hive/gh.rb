@@ -617,8 +617,13 @@ module Hive
       # cap makes short jobs underspend while truncating the large failing
       # job more aggressively than the budget allows (plan IU-8).
       raw = jobs.map do |job|
-        job_id = job["databaseId"] || job["id"]
-        { "name" => job["name"].to_s, "job_id" => job_id, "log" => fetch_job_log(worktree_path, job_id, cfg: cfg) }
+        job_id = job["databaseId"] || job["id"] ||
+                 job["detailsUrl"].to_s[%r{/job/(\d+)(?:\z|[/?#])}, 1]
+        {
+          "name" => (job["name"] || job["context"]).to_s,
+          "job_id" => job_id,
+          "log" => fetch_job_log(worktree_path, job_id, cfg: cfg)
+        }
       end
 
       caps = allocate_log_budget(raw.map { |entry| entry["log"].bytesize }, byte_cap)
@@ -709,7 +714,9 @@ module Hive
 
         conclusion = entry["conclusion"].to_s.upcase
         status = entry["status"].to_s.upcase
-        conclusion == "FAILURE" || conclusion == "TIMED_OUT" || conclusion == "CANCELLED" || status == "FAILURE"
+        state = entry["state"].to_s.upcase
+        conclusion == "FAILURE" || conclusion == "TIMED_OUT" ||
+          conclusion == "CANCELLED" || status == "FAILURE" || state == "FAILURE"
       end
     end
 

@@ -87,6 +87,94 @@ class TaskProjectionStoreCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_routine_read_does_not_replay_a_small_journal_without_a_checkpoint
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.define_singleton_method(:journal_bytes) do
+        raise "complete journal read must not run"
+      end
+
+      result = store.read_routine
+
+      assert_equal "repair_required", result.state
+      assert_equal "checkpoint_missing", result.diagnostics.first.fetch("reason")
+      assert_empty result.journal_records
+    end
+  end
+
+  def test_routine_read_accepts_only_an_explicit_pristine_task
+    with_tmp_dir do |dir|
+      store = projection_store(dir)
+
+      broken = store.read_routine
+      pristine = store.read_routine(pristine: true)
+
+      assert_equal "repair_required", broken.state
+      assert_equal "pristine", pristine.state
+      assert_equal 0, pristine.journal_cursor
+      assert_empty pristine.diagnostics
+    end
+  end
+
+  def test_routine_read_enforces_attempt_and_predecessor_budgets
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      checkpoint = JSON.parse(File.read(store.checkpoint_path))
+      binding = checkpoint.dig("snapshot", "journal", "attempts").fetch(0)
+
+      checkpoint["snapshot"]["journal"]["attempts"] = [
+        binding,
+        binding.merge("attempt_id" => "attempt-2")
+      ]
+      write_checkpoint(store, checkpoint)
+      attempts = store.read_routine(
+        limits: Hive::TaskWorkspace::Limits.new(attempt_ids: 1)
+      )
+      assert_equal "repair_required", attempts.state
+      assert_equal "attempt_ids", attempts.diagnostics.first.dig("details", "cap")
+
+      attempts_by_id = {
+        "attempt-1" => durable_attempt,
+        "attempt-2" => durable_attempt.merge(
+          "attempt_id" => "attempt-2", "predecessor_attempt_id" => "predecessor-1"
+        ),
+        "predecessor-1" => durable_attempt.merge(
+          "attempt_id" => "predecessor-1", "predecessor_attempt_id" => "predecessor-2"
+        ),
+        "predecessor-2" => durable_attempt.merge(
+          "attempt_id" => "predecessor-2", "predecessor_attempt_id" => nil
+        )
+      }
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) { |attempt_id| attempts_by_id[attempt_id] }
+      store = Hive::TaskProjection::Store.new(task_folder: dir, attempt_store: attempt_store)
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      suffix_event = condition_event("event-2")
+      suffix_event["attempt_id"] = "attempt-2"
+      suffix_event.fetch("evidence").first["attempt_id"] = "attempt-2"
+      File.open(store.journal_path, "a") do |journal|
+        journal.write("#{JSON.generate(suffix_event)}\n")
+      end
+
+      suffix_attempts = store.read_routine(
+        limits: Hive::TaskWorkspace::Limits.new(attempt_ids: 1)
+      )
+      assert_equal "repair_required", suffix_attempts.state
+      assert_equal "attempt_ids", suffix_attempts.diagnostics.first.dig("details", "cap")
+
+      predecessors = store.read_routine(
+        limits: Hive::TaskWorkspace::Limits.new(predecessor_fetches: 1)
+      )
+      assert_equal "repair_required", predecessors.state
+      assert_equal "predecessor_fetches",
+                   predecessors.diagnostics.first.dig("details", "cap")
+    end
+  end
+
   def test_bounded_read_and_prefix_failures_degrade_without_raising
     with_tmp_dir do |dir|
       store = projection_store(dir)

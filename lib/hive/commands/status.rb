@@ -1,5 +1,6 @@
 require "json"
 require "digest"
+require "shellwords"
 require "time"
 require "hive/agent_limit"
 require "hive/config"
@@ -43,6 +44,12 @@ module Hive
       attr_reader :next_retention_boundary
 
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
+      PROJECTION_REPAIR_TERMINAL_REASONS = %w[
+        checkpoint_oversized attempt_ids_exhausted predecessor_fetches_exhausted
+      ].freeze
+      PRISTINE_FORBIDDEN_ENTRIES = %w[
+        .lock closure.json handoff.yml patrol-fix-worktree.json worktree.yml
+      ].freeze
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
@@ -1569,28 +1576,90 @@ module Hive
         end
 
         attempt_store = status_attempt_store
-        projection = Hive::TaskProjection::Store.new(
+        bounded = Hive::TaskProjection::Store.new(
           task_folder: task.folder, attempt_store: attempt_store
-        ).read_cached(marker: marker)
+        ).read_routine(marker: marker, pristine: pristine_projection_task?(task, marker))
         project ||= project_name_for(task)
+        unless bounded.current?
+          return projection_repair_status(task, bounded, project: project)
+        end
+
+        projection = bounded.projection
         closure = Hive::TaskClosure.projection(
-          task, project: project, attempt_store: attempt_store
+          task, project: project, attempt_store: attempt_store,
+          task_projection: projection
         )
         projection = projection.with_closure(closure) if closure
         [ marker, projection ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e
-        warn "hive: status: #{task.folder} condition projection failed " \
-             "(#{e.class}: #{e.message}); surfaced as an Error row"
-        error_marker = Hive::Markers::State.new(
-          name: :error,
-          attrs: {
-            "reason" => "condition_projection_invalid",
-            "message" => e.message.to_s[0, 500]
-          },
-          raw: nil
+        project ||= project_name_for(task)
+        bounded = Hive::TaskProjection::Store::BoundedRead.new(
+          projection: nil, state: "repair_required", truncated: false,
+          journal_cursor: 0, journal_records: [],
+          diagnostics: [ {
+            "source" => "task_projection", "reason" => "bounded_projection_failed",
+            "message" => "bounded task projection failed",
+            "details" => { "error_class" => e.class.name }
+          } ]
         )
-        [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
+        projection_repair_status(task, bounded, project: project)
+      end
+
+      def pristine_projection_task?(task, marker)
+        first_stage = task.workflow.stages.first
+        return false unless first_stage && first_stage.dir == "#{task.stage_index}-#{task.stage_name}"
+
+        expected_marker = first_stage.kind == :human ? :waiting : :none
+        return false unless marker.name == expected_marker
+        return false if PRISTINE_FORBIDDEN_ENTRIES.any? do |basename|
+          File.exist?(File.join(task.folder, basename))
+        end
+
+        !File.directory?(task.log_dir) || Dir.empty?(task.log_dir)
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def projection_repair_status(task, bounded, project:)
+        diagnostic = bounded.diagnostics.first || {
+          "reason" => "bounded_projection_unavailable",
+          "message" => "bounded task projection is unavailable",
+          "details" => {}
+        }
+        reason = diagnostic.fetch("reason", "bounded_projection_unavailable").to_s
+        repairable = !PROJECTION_REPAIR_TERMINAL_REASONS.include?(reason)
+        command = if repairable
+          Shellwords.shelljoin([
+            "hive", "repair-projection", task.slug,
+            "--project", project.to_s,
+            "--stage", "#{task.stage_index}-#{task.stage_name}"
+          ])
+        end
+        message = if repairable
+          "#{diagnostic.fetch('message', 'bounded task projection is unavailable')}; " \
+            "run the exact-task projection repair"
+        else
+          "#{diagnostic.fetch('message', 'bounded task projection exceeded its cap')}; " \
+            "compact this task's retained projection history before repair"
+        end
+        attrs = {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+          "owner" => "operator",
+          "projection_reason" => reason[0, 128],
+          "projection_state" => bounded.state.to_s[0, 64],
+          "message" => message.to_s[0, 500]
+        }
+        attrs["repair_command"] = command if command
+        details = diagnostic["details"]
+        attrs["projection_cap"] = details["cap"].to_s[0, 128] if details.is_a?(Hash) && details["cap"]
+        error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+        warn "hive: status: #{task.folder} condition projection requires repair " \
+             "(#{reason}); surfaced as a task-local Error row"
+        [
+          error_marker,
+          Hive::TaskProjection.project(records: [], marker: error_marker)
+        ]
       end
 
       def status_attempt_store
@@ -1970,7 +2039,7 @@ module Hive
             agent_marker_grace_sec: grace_sec,
             live_task_lock: row[:live_task_lock]
           )
-          row.merge(
+          annotation = row.merge(
             action_key: action.key,
             action_label: action.label,
             suggested_command: action.command,
@@ -1984,7 +2053,35 @@ module Hive
             patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
+          projection_repair_annotation(annotation) || annotation
         end
+      end
+
+      def projection_repair_annotation(row)
+        return nil unless Hive::TaskProjection.repair_required_marker?(row[:marker_attrs])
+
+        command = row.dig(:marker_attrs, "repair_command")
+        marker = marker_from_row(row)
+        row.merge(
+          action_key: Hive::Schemas::TaskActionKind::ERROR,
+          action_label: "Projection repair required",
+          suggested_command: command,
+          outcomes: [],
+          next_action: nil,
+          diagnostic: {
+            "summary" => "Task projection needs exact-task repair",
+            "detail" => row.dig(:marker_attrs, "message").to_s[0, 4_000],
+            "source" => "marker",
+            "source_path" => nil,
+            "artifact_paths" => [],
+            "generated_by" => "local",
+            "marker_signature" => Hive::TaskClosure.marker_generation(marker),
+            "suggested_next_action" => command ? {
+              "kind" => "manual_fix", "command" => command
+            } : nil,
+            "updated_at" => Time.now.utc.iso8601
+          }
+        )
       end
 
       def attempt_diagnostic_for(row)

@@ -264,6 +264,9 @@ class OperationalActionTest < Minitest::Test
         File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.to_yaml)
         state_file = File.join(folder, "brainstorm.md")
         File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
+        Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+          marker: Hive::Markers.current(state_file)
+        )
         Hive::Config.register_project(name: "demo", path: project_root, repository_identity: nil)
         project = Hive::Config.registered_projects.fetch(0)
         status_action = Hive::Commands::Status.new(
@@ -489,6 +492,9 @@ class OperationalActionTest < Minitest::Test
             assert_equal [ "intake" ], ran
             assert_equal "ready_to_advance", run_result.fetch("task_state")
 
+            Hive::TaskProjection::Store.new(task_folder: intake).rebuild!(
+              marker: Hive::Markers.current(Hive::Task.new(intake).state_file)
+            )
             second = operational_action_for(project, slug)
             approve_result = nil
             capture_io do

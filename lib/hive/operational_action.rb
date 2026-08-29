@@ -1,6 +1,7 @@
 require "digest"
 require "time"
 require "hive/recovery/api"
+require "hive/task_projection"
 require "hive/workflow_package/canonical_json"
 require "hive/task_closure"
 
@@ -91,6 +92,7 @@ module Hive
 
       def recoverable?(row)
         Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+          !Hive::TaskProjection.repair_required_marker?(row["attrs"]) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
           !Hive::Recovery.intervention_required?(
             marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]

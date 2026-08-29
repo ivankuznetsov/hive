@@ -346,6 +346,30 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
+  def test_projection_repair_is_operator_owned_even_when_daemon_is_enabled
+    repair = task(
+      action: "error",
+      slug: "projection-repair",
+      stage: "4-execute",
+      marker: "error",
+      attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "owner" => "operator",
+        "message" => "bounded task projection needs exact-task repair"
+      }
+    )
+
+    projected = project(
+      status_payload(repair),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "task_repair", projected.dig("reasons", 0, "code")
+    assert_nil projected.fetch("action")
+  end
+
   def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid

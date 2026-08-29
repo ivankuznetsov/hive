@@ -218,7 +218,11 @@ module Hive
       def candidate_for(row, identity, now:)
         task = @task_factory.call(row.folder)
         marker = Hive::Markers.current(task.state_file)
-        task_generation = Hive::TaskClosure.task_generation(task, marker: marker)
+        task_generation = Hive::TaskClosure.task_generation(
+          task, marker: marker,
+          condition_task_generation: row.condition_task_generation,
+          commit_generation: row.commit_generation
+        )
         pull_request = parse_pr_url(row.pr_url.to_s.empty? ? read_pr_url(task) : row.pr_url)
         unless pull_request
           issue = {
@@ -628,7 +632,14 @@ module Hive
 
       def generation_current?(task, candidate)
         marker = Hive::Markers.current(task.state_file)
-        Hive::TaskClosure.task_generation(task, marker: marker) ==
+        bounded = Hive::TaskProjection::Store.new(
+          task_folder: task.folder
+        ).read_routine(marker: marker)
+        return false unless bounded.current?
+
+        Hive::TaskClosure.task_generation(
+          task, marker: marker, projection: bounded.projection
+        ) ==
           candidate.dig("observation", "task_generation") &&
           Hive::TaskClosure.marker_generation(marker) ==
             candidate.dig("observation", "marker_generation")
@@ -675,7 +686,8 @@ module Hive
 
       def tracked_row?(row)
         SUPPORTED_STAGES.include?(row.stage.to_s) &&
-          row.workflow.to_s == "coding"
+          row.workflow.to_s == "coding" &&
+          !Hive::TaskProjection.repair_required_marker?(row.marker_attrs)
       end
 
       def backlog_outcome(row, task_generation, status:, reason:,

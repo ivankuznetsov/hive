@@ -4,6 +4,7 @@ require "hive/operational_action"
 require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
+require "hive/task_projection"
 require "hive/terminal_outcome"
 
 module Hive
@@ -910,12 +911,12 @@ module Hive
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
 
-    # Every error marker is retried; there is no exempt reason and no switch
-    # to disable it. This predicate exists to predict the daemon, so it must
-    # not carry conditions the daemon no longer applies.
+    # Durable workflow errors remain retryable. A synthetic projection-repair
+    # row is operator-owned because another agent run cannot rebuild its proof.
     def automatic_error_retry?(project, row)
       daemon_enabled?(project["name"]) &&
-        %w[error review_error].include?(row["marker"].to_s)
+        %w[error review_error].include?(row["marker"].to_s) &&
+        !Hive::TaskProjection.repair_required_marker?(row["attrs"])
     end
 
     def reasons_for(project, row)

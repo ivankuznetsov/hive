@@ -13,9 +13,15 @@ module Hive
     SCHEMA = "hive-task-projection".freeze
     SCHEMA_VERSION = 1
     OPERATOR_ACTIONS_MAX = 20
+    REPAIR_REQUIRED_REASON = "condition_projection_repair_required".freeze
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
+
+    def self.repair_required_marker?(marker_or_attrs)
+      attrs = marker_or_attrs.respond_to?(:attrs) ? marker_or_attrs.attrs : marker_or_attrs
+      attrs.is_a?(Hash) && attrs["reason"].to_s == REPAIR_REQUIRED_REASON
+    end
 
     INTERNAL_FACT_KEYS = %w[
       journal_index attempt_accepted_at durable_attempt_state

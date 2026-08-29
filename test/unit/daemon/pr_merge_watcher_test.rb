@@ -95,8 +95,9 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
   end
 
   Row = Struct.new(
-    :project, :slug, :id, :stage, :workflow, :marker, :folder,
+    :project, :slug, :id, :stage, :workflow, :marker, :marker_attrs, :folder,
     :state_file_mtime, :pr_url, :blocked, :admission_error,
+    :condition_task_generation, :commit_generation,
     keyword_init: true
   )
 
@@ -114,6 +115,22 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert state.dig("backlog", "outcomes").values.all? do |outcome|
         outcome.fetch("status") == "candidate" &&
           outcome.fetch("candidate_key")
+      end
+    end
+  end
+
+  def test_observe_derives_generation_from_the_status_row_without_projection_io
+    with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
+      watcher, = build_watcher
+      row = row_for(tasks.first)
+
+      with_replaced_singleton_method(
+        Hive::TaskProjection::Store, :new,
+        ->(**) { flunk "PR observation rebuilt the status projection" }
+      ) do
+        result = watcher.observe([ row ], now: T0)
+        assert_equal :observed, result.first.fetch(:status)
+        assert_equal 1, result.first.fetch(:candidates)
       end
     end
   end
@@ -1155,6 +1172,8 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
   def row_for(task)
     marker = Hive::Markers.current(task.state_file)
+    projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+    projection_data = projection.to_h
     Row.new(
       project: "app",
       slug: task.slug,
@@ -1162,9 +1181,12 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       stage: stage_dir(task),
       workflow: task.workflow.id.to_s,
       marker: marker.name.to_s,
+      marker_attrs: marker.attrs,
       folder: task.folder,
       state_file_mtime: File.mtime(task.state_file),
       pr_url: Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"],
+      condition_task_generation: projection_data.dig("identity", "task_generation"),
+      commit_generation: projection_data.dig("identity", "commit_generation"),
       blocked: false,
       admission_error: nil
     )
@@ -1241,6 +1263,9 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         )
         Hive::Markers.set(task.state_file, index.odd? ? :error : :complete,
                           "reason" => "dogfood")
+        Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+          marker: Hive::Markers.current(task.state_file)
+        )
         task
       end
       run!("git", "-C", hive_state, "add", ".")

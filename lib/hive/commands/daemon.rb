@@ -145,7 +145,7 @@ module Hive
         # Stale PID file from a prior crash → safe to remove.
         File.delete(pid_file) if File.exist?(pid_file)
         if @detach
-          Process.daemon(true, true)
+          Hive::RuntimeControlPlane::ProcessGuard.daemonize(true, true)
         end
 
         # A manually-started daemon must keep using the exact Hive CLI that
@@ -385,7 +385,7 @@ module Hive
       def reexec_with_fresh_code!
         reexec_argv = [ "daemon", "start" ]
         reexec_argv << "--dry-run" if @dry_run
-        Kernel.method(:exec).call(Process.argv0, *reexec_argv)
+        Hive::RuntimeControlPlane::ProcessGuard.exec(Process.argv0, *reexec_argv)
       end
 
       def stop_daemon

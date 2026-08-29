@@ -2921,7 +2921,7 @@ module Hive
       # that orphan exits (or its claim ages out and a later sweep removes
       # it), the per-row auto-advance path — gated only by the controller's
       # now-empty `running_task?` — could dispatch an advance for the same
-      # slug. The task `.lock` is the backstop that still prevents two live
+      # slug. The task lease is the backstop that still prevents two live
       # runs of the same task; it is a narrower guarantee than an in-flight
       # controller slot but holds across the daemon restart. Re-registering
       # the orphan in the controller was deliberately rejected: without a
@@ -3537,9 +3537,9 @@ module Hive
 
       # A row counts as externally running when `Hive::TaskAction` has
       # classified it as `agent_running` AND we have positive evidence
-      # that the run is in flight — either the .lock recorded a live
-      # claude_pid, OR `Hive::Commands::Status` verified the .lock
-      # holder PID + process_start_time still match (`live_task_lock`).
+      # that the run is in flight — either the task lease recorded a live
+      # claude_pid, OR `Hive::Commands::Status` verified the lease holder
+      # PID + process_start_time still match (`live_task_lock`).
       # Both the dispatcher's global concurrency counter
       # (`@external_active_agent_total`) and the controller's per-project
       # counter (`set_external_running_counts`) use this predicate so

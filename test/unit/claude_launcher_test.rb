@@ -1373,14 +1373,17 @@ class ClaudeLauncherTest < Minitest::Test
       # work_started off the live pid and must NOT report turn_ended on that
       # pre-work prompt — it drains to the deadline instead of sealing an
       # untouched run done.
-      File.write(File.join(task.folder, ".lock"), { "claude_pid" => Process.pid }.to_yaml)
       idle = "Claude Code v2.1.128\n\n/home/project  ❯"
       runner = Struct.new(:tail) do
         def session_exists? = true
         def capture_pane_tail(bytes:) = tail
       end.new(idle)
 
-      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+      result = with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { { "claude_pid" => Process.pid } }
+      ) do
+        Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+      end
 
       assert_equal :timeout, result.fetch(:status)
       evidence = result.fetch(:completion_evidence)
@@ -1390,13 +1393,16 @@ class ClaudeLauncherTest < Minitest::Test
 
   def test_wait_for_done_signal_returns_timeout_evidence_when_recorded_pid_exited
     with_tmp_task do |task|
-      File.write(File.join(task.folder, ".lock"), { "claude_pid" => 99_999_999 }.to_yaml)
       runner = Struct.new(:tail) do
         def session_exists? = true
         def capture_pane_tail(bytes:) = tail
       end.new("Claude Code v2.1.128\nworking\n")
 
-      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
+      result = with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { { "claude_pid" => 99_999_999 } }
+      ) do
+        Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
+      end
 
       assert_equal :timeout, result.fetch(:status)
       evidence = result.fetch(:completion_evidence)
@@ -1452,8 +1458,14 @@ class ClaudeLauncherTest < Minitest::Test
         assert_nil Hive::ClaudeLauncher.completion_pane_idle?("Claude Code")
       end
 
-      File.write(File.join(task.folder, ".lock"), "[")
-      assert_nil Hive::ClaudeLauncher.recorded_claude_pid(task)
+      error = Hive::RuntimeControlPlane::CodecError.new(
+        "invalid task lease JSON", code: :json_invalid
+      )
+      with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { raise error }
+      ) do
+        assert_nil Hive::ClaudeLauncher.recorded_claude_pid(task)
+      end
 
       with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
         assert_equal true, Hive::ClaudeLauncher.process_alive?(12_345)

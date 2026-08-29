@@ -45,42 +45,37 @@ module Hive
         @owner_pid = Process.pid
         @connection = nil
         @validated = false
+        ProcessGuard.register(self)
       end
 
       def open!
-        ensure_process_owner!
-        validate_migration_set!
-        verify_runtime_capabilities!
-        diagnosis = diagnostics
-        raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
-
-        connect!
-        validate_connected_schema!
-        @validated = true
+        ProcessGuard.checkout { open_uncoordinated! }
         self
       end
 
       def migrate!
-        ensure_process_owner!
-        validate_migration_set!
-        verify_runtime_capabilities!
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          validate_migration_set!
+          verify_runtime_capabilities!
 
-        if File.exist?(path)
-          diagnosis = diagnostics
-          if %i[unrelated_database corrupt newer_schema].include?(diagnosis.status)
-            raise_for_diagnosis!(diagnosis)
+          if File.exist?(path)
+            diagnosis = diagnostics_uncoordinated
+            if %i[unrelated_database corrupt newer_schema].include?(diagnosis.status)
+              raise_for_diagnosis!(diagnosis)
+            end
           end
-        end
 
-        FileUtils.mkdir_p(File.dirname(path))
-        connect!
-        Sequel::IntegerMigrator.new(
-          @connection, @migrations_dir,
-          table: :schema_info, column: :version, use_transactions: true
-        ).run
-        ensure_installation_identity!
-        validate_connected_schema!
-        @validated = true
+          FileUtils.mkdir_p(File.dirname(path))
+          connect!
+          Sequel::IntegerMigrator.new(
+            @connection, @migrations_dir,
+            table: :schema_info, column: :version, use_transactions: true
+          ).run
+          ensure_installation_identity!
+          validate_connected_schema!
+          @validated = true
+        end
         self
       rescue Error
         raise
@@ -95,14 +90,18 @@ module Hive
       end
 
       def read
-        ensure_open!
-        yield @connection
+        ProcessGuard.checkout do
+          ensure_open!
+          yield @connection
+        end
       end
 
       def transaction(mode: :immediate)
-        ensure_open!
-        @connection.transaction(mode: mode, rollback: :reraise) do
-          yield @connection
+        ProcessGuard.checkout(transaction: true) do
+          ensure_open!
+          @connection.transaction(mode: mode, rollback: :reraise) do
+            yield @connection
+          end
         end
       end
 
@@ -131,6 +130,23 @@ module Hive
       end
 
       def diagnostics
+        ProcessGuard.checkout { diagnostics_uncoordinated }
+      end
+
+      def disconnect
+        @connection&.disconnect
+        @connection = nil
+        @validated = false
+        true
+      end
+
+      def disconnected?
+        @connection.nil?
+      end
+
+      private
+
+      def diagnostics_uncoordinated
         ensure_process_owner!
         return diagnosis(:missing) unless File.file?(path)
 
@@ -192,22 +208,21 @@ module Hive
         diagnosis(:corrupt, error: failure)
       end
 
-      def disconnect
-        @connection&.disconnect
-        @connection = nil
-        @validated = false
-        true
-      end
-
-      def disconnected?
-        @connection.nil?
-      end
-
-      private
-
       def ensure_open!
         ensure_process_owner!
-        open! unless @connection && @validated
+        open_uncoordinated! unless @connection && @validated
+      end
+
+      def open_uncoordinated!
+        ensure_process_owner!
+        validate_migration_set!
+        verify_runtime_capabilities!
+        diagnosis = diagnostics_uncoordinated
+        raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
+
+        connect!
+        validate_connected_schema!
+        @validated = true
       end
 
       def ensure_process_owner!
@@ -339,7 +354,7 @@ module Hive
         application = integer_pragma(@connection, "application_id")
         version = schema_version_for(@connection)
         unless application == APPLICATION_ID && version == SCHEMA_VERSION && exact_schema?(@connection)
-          diagnosis = diagnostics
+          diagnosis = diagnostics_uncoordinated
           raise_for_diagnosis!(diagnosis)
         end
         true

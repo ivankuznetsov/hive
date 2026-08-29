@@ -10,7 +10,8 @@ tags: [state, filesystem, model, architecture, review, task-id, display-name, ar
 **TLDR**: Authored task/project documents remain in `.hive-state` and feature
 worktrees. A Sequel/SQLite runtime control plane owns coordination state:
 attempt lifecycle, dispatch requests/outbox, capacity, provider circuits and
-audit, routing decisions, and PR merge reconciliation. Evidence-bound
+audit, routing decisions, task leases and ids, Patrol discovery allowances,
+and PR merge reconciliation. Evidence-bound
 delivered/superseded closure remains a task-local authority retained with an
 archived task; it is never fabricated attempt success.
 
@@ -225,13 +226,15 @@ integer values mean full 24-hour periods and hide only when
 visible. `never` always remains visible in ordinary views. The dedicated
 archive source bypasses this projection and retains every archived task.
 
-Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
-
-```yaml
-next_id: 2
-```
-
-`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for explicit migration. `hive migrate` uses strict `next!` allocation and seeds the counter above existing sidecar ids before assigning new ones.
+Task ids are allocated from the installation-scoped `task_counters` row
+`namespace=tasks` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
+The immediate SQLite transaction makes read-plus-increment atomic across
+processes; there is no counter YAML or counter lock file. `peek` returns the
+stored next value (or `1` before the first allocation), and `seed_at_least!`
+advances without moving backwards. Capture paths use `next_or_nil` so a typed
+runtime-control-plane outage can preserve an already-created task with a nil id
+for explicit migration. `hive migrate` strictly seeds above existing metadata
+ids before assigning missing ones.
 
 ## Slug grammar
 
@@ -316,7 +319,19 @@ repair attempt for that task generation across request IDs; after that repair
 terminalizes, its newest receipt replays so missing output can be repaired
 without creating an infinite loop.
 
-- **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
+- **Per-task lease**: installation SQLite `task_leases`, keyed through stable
+  `task_subjects.task_id`. Typed holder PID/start identity, holder nonce,
+  generation, lease version, and bounded JSON operation/agent detail provide
+  liveness plus compare-and-swap fencing. Dead or PID-reused holders are
+  reclaimable; an old nonce cannot release or update its replacement. Subject
+  lookup is metadata-id-first, validates the registered project/state root,
+  and updates the observed folder for legitimate stage moves. No ordinary task
+  `.lock` file or compatibility reader remains. See [[modules/lock]].
+- **Task-source admission fence**: dispatch computes the artifact/dependency
+  fingerprint and input epoch outside SQLite, observes that exact identity in
+  a short `task_subjects` transaction, then rechecks both fields inside final
+  admission. A concurrent newer observation makes the older admission fail
+  closed; a lease-created placeholder is never treated as an admitted source.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
 ## Task condition journal and projection
@@ -659,7 +674,9 @@ operational snapshot. The TUI and bot consume those standard rows.
 The read-only web Patrol page uses bounded native `FindingQuery` and `JobQuery`
 reads so it remains available without a daemon. Those two sections fail
 independently and confer no mutation authority. Cohort, latency, token,
-publication-summary, and discovery-allowance projections are not persisted.
+and publication-summary projections are not persisted. Patrol discovery
+allowance and provider-lane holds are typed `patrol_allowances` rows; they are
+admission authority rather than a web projection.
 
 ## Patrol Fix finding import
 

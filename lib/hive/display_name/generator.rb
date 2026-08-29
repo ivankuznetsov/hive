@@ -33,7 +33,11 @@ module Hive
         # mkdir_p's the path) can't resurrect a stale, idea.md-less stub.
         return nil unless File.directory?(@task.folder)
 
-        Hive::TaskMeta.update_display_name(@task.folder, name)
+        Hive::Lock.with_task_lock(
+          @task.folder, slug: @task.slug, op: "display-name"
+        ) do
+          Hive::TaskMeta.update_display_name(@task.folder, name)
+        end
         commit_name if @commit
         name
       rescue StandardError

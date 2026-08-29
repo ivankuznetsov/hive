@@ -261,6 +261,47 @@ module Hive
         @ctx.slug_default!(slug)
       end
 
+      def hold_task_lease(task_folder)
+        require "hive/runtime_control_plane/task_lease_repository"
+        root, separator, = File.expand_path(task_folder).partition("/.hive-state/stages/")
+        raise "task lease fixture is outside a Hive state root" if separator.empty?
+
+        config = YAML.safe_load(File.read(File.join(@ctx.run_home, "config.yml"))) || {}
+        project = Array(config["registered_projects"]).find do |entry|
+          File.expand_path(entry.fetch("path")) == root
+        end
+        raise "task lease fixture project is not registered" unless project
+
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@ctx.run_home)
+        ).migrate!
+        timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+        database.transaction do |db|
+          installation_id = db[:installations].first.fetch(:installation_id)
+          db[:projects].insert_conflict.insert(
+            project_id: project.fetch("project_id"),
+            installation_id: installation_id,
+            registration_id: project.fetch("registration_id"),
+            name: project.fetch("name"), observed_path: root,
+            state_root_path: File.join(root, ".hive-state"), active: 1,
+            registered_at: timestamp, last_observed_at: timestamp
+          )
+        end
+        repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+          database: database,
+          process_start_time: Hive::Lock.method(:process_start_time),
+          process_alive: lambda { |pid, recorded_start_time:|
+            Hive::Lock.send(
+              :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+            )
+          }
+        )
+        held = repository.acquire(
+          task_folder, { "op" => "e2e-contention" }, create: false
+        )
+        [ database, repository, held.fetch("lock_id") ]
+      end
+
       def step_tui_expect(step)
         tmux = @tmux_lifecycle.start_session
         # require_stable forces tmux_driver to take a second confirming capture

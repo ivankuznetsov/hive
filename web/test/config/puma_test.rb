@@ -5,6 +5,15 @@ require "puma/server"
 require "socket"
 
 class PumaTest < ActiveSupport::TestCase
+  test "every cluster worker fork is wrapped by the runtime database barrier" do
+    options = puma_configuration.options
+
+    assert_nil options[:before_fork], "the once-per-cluster hook cannot guard respawned workers"
+    assert_equal 1, options.fetch(:before_worker_fork).size
+    assert_equal 1, options.fetch(:after_worker_fork).size
+    assert_equal 1, options.fetch(:before_worker_boot).size
+  end
+
   test "oversized bodies receive 413 before the Rack app runs" do
     config = puma_configuration
     limit = Hive::Web::RequestLimits::MAX_BODY_BYTES

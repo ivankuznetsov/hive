@@ -20,12 +20,13 @@ class HiveCommandsApproveTest < Minitest::Test
       source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
       FileUtils.mkdir_p(source)
       File.write(File.join(source, "brainstorm.md"), "# state\n<!-- COMPLETE -->\n")
+      prepare_test_task_lease_repository(source)
       current = task(folder: source, hive_state_path: state, project_root: root)
       guarded = command(
         observation_guard: lambda do |observed|
           assert_same current, observed
           assert File.exist?(File.join(state, ".commit-lock"))
-          assert File.exist?(File.join(source, ".lock"))
+          assert Hive::Lock.task_lock_held?(source)
           raise Hive::StaleOperationalObservation, "rotated"
         end
       )
@@ -34,7 +35,8 @@ class HiveCommandsApproveTest < Minitest::Test
         guarded.send(:perform_move_and_commit, current, "3-plan")
       end
       assert File.directory?(source), "guard failure must leave the source task in place"
-      refute File.exist?(File.join(source, ".lock")), "guard failure must release the task lock"
+      refute Hive::Lock.task_lock_held?(source), "guard failure must release the task lease"
+      assert_nil Hive::Lock.read_task_lock(source)
       refute File.exist?(File.join(state, "stages", "3-plan", current.slug))
     end
   end
@@ -45,6 +47,7 @@ class HiveCommandsApproveTest < Minitest::Test
       source = File.join(state, "stages", "3-plan", "slug-260522-abcd")
       FileUtils.mkdir_p(source)
       File.write(File.join(source, "plan.md"), "# plan\n<!-- COMPLETE -->\n")
+      prepare_test_task_lease_repository(source)
       current = task(
         folder: source, hive_state_path: state, project_root: root,
         stage_index: 3, stage_name: "plan"
@@ -61,7 +64,7 @@ class HiveCommandsApproveTest < Minitest::Test
         testcase.assert_same expected_observation, observation
         testcase.assert_equal({}, config)
         testcase.assert File.exist?(File.join(state, ".commit-lock"))
-        testcase.assert File.exist?(File.join(source, ".lock"))
+        testcase.assert Hive::Lock.task_lock_held?(source)
         raise Hive::PlanReview::TransitionBlocked, "blocked under lock"
       end
 
@@ -196,6 +199,7 @@ class HiveCommandsApproveTest < Minitest::Test
       File.write(File.join(source, "draft.md"), "# Draft\n")
       original = "# Approval instructions\n"
       File.write(File.join(source, "approval.md"), original)
+      prepare_test_task_lease_repository(source)
       current = task(
         folder: source, hive_state_path: state, project_root: root,
         stage_index: 1, stage_name: "draft", workflow: human_workflow
@@ -224,6 +228,7 @@ class HiveCommandsApproveTest < Minitest::Test
       source = File.join(state, "stages", "1-work", "slug-260522-abcd")
       FileUtils.mkdir_p(source)
       Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      prepare_test_task_lease_repository(source)
       File.write(File.join(source, "work.md"), "ready\n")
       workflow = terminal_workflow
       current = task(
@@ -252,6 +257,7 @@ class HiveCommandsApproveTest < Minitest::Test
         source, id: 1, slug: "slug-260522-abcd", display_name: nil,
         completed_at: first_completion
       )
+      prepare_test_task_lease_repository(source)
       current = task(
         folder: source, hive_state_path: state, project_root: root,
         stage_index: 1, stage_name: "work", workflow: terminal_workflow
@@ -271,6 +277,7 @@ class HiveCommandsApproveTest < Minitest::Test
       source = File.join(state, "stages", "1-work", "slug-260522-abcd")
       FileUtils.mkdir_p(source)
       Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      prepare_test_task_lease_repository(source)
       current = task(
         folder: source, hive_state_path: state, project_root: root,
         stage_index: 1, stage_name: "work", workflow: terminal_workflow
@@ -299,10 +306,7 @@ class HiveCommandsApproveTest < Minitest::Test
       destination = File.join(state, "stages", "2-done", "slug-260522-abcd")
       FileUtils.mkdir_p(source)
       Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
-      File.write(
-        File.join(state, ".gitignore"),
-        "stages/*/*/.lock\nstages/*/*/.lock.tmp.*\n"
-      )
+      File.write(File.join(state, ".gitignore"), Hive::GitOps::HIVE_STATE_GITIGNORE)
       run!("git", "-C", state, "init", "-b", "hive/state", "--quiet")
       run!("git", "-C", state, "config", "user.email", "test@example.com")
       run!("git", "-C", state, "config", "user.name", "Test")

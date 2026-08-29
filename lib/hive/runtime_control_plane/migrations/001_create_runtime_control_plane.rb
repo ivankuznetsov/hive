@@ -377,15 +377,21 @@ Sequel.migration do
     create_table(:task_leases) do
       foreign_key :task_id, :task_subjects, type: String, key: :task_id,
                   primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
-      String :holder_kind, null: false
-      String :holder_id, null: false
+      String :holder_kind
+      String :holder_id
+      Integer :holder_pid
+      String :holder_process_identity
+      String :payload_json, text: true, null: false, default: "{}"
       Integer :generation, null: false
       Integer :lease_version, null: false
       String :source_fingerprint, null: false
-      String :acquired_at, null: false
-      String :expires_at, null: false
+      String :acquired_at
+      String :expires_at
+      String :released_at
       check Sequel.lit("generation >= 0")
       check Sequel.lit("lease_version >= 0")
+      check Sequel.lit("holder_pid IS NULL OR holder_pid > 0")
+      check Sequel.lit("(holder_id IS NULL AND holder_pid IS NULL) OR (holder_id IS NOT NULL AND holder_pid IS NOT NULL)")
       index [ :expires_at ], name: :task_leases_expiry_idx
     end
 
@@ -407,12 +413,21 @@ Sequel.migration do
       Integer :used, null: false, default: 0
       Integer :limit_value, null: false
       Integer :revision, null: false, default: 0
+      String :reservation_ids_json, text: true, null: false, default: "[]"
+      String :seed_state, null: false, default: "complete"
+      Integer :seeded_launches, null: false, default: 0
+      Integer :ambiguous_rows, null: false, default: 0
+      String :retry_not_before
+      String :hold_reason
       String :updated_at, null: false
       primary_key [ :project_id, :kind, :window_key ]
       check Sequel.lit("used >= 0")
       check Sequel.lit("limit_value >= 0")
       check Sequel.lit("used <= limit_value")
       check Sequel.lit("revision >= 0")
+      check Sequel.lit("seed_state IN ('complete', 'parked')")
+      check Sequel.lit("seeded_launches >= 0")
+      check Sequel.lit("ambiguous_rows >= 0")
     end
 
     create_table(:token_usage) do

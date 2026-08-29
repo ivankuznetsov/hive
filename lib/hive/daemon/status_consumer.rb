@@ -10,7 +10,7 @@ module Hive
     # as a structured `{ok: false}` rather than raising, so a transient
     # status hiccup doesn't crash the daemon.
     class StatusConsumer
-      # `live_task_lock` is the per-task `.lock`-holder-alive signal
+      # `live_task_lock` is the per-task lease-holder-alive signal
       # `Hive::Commands::Status` derives from a PID + process_start_time
       # match. It is true while a `hive run` invocation is actively inside
       # the task — including pre-stage work like auto-rebase — even before

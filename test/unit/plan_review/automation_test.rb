@@ -20,7 +20,7 @@ class PlanReviewAutomationTest < Minitest::Test
       observed = nil
       orchestrator = lambda do |task:, cfg:, planner_identity:|
         observed = { task:, cfg:, planner_identity: }
-        assert File.exist?(File.join(task.folder, ".lock"))
+        assert Hive::Lock.task_lock_held?(task.folder)
         expected
       end
 
@@ -31,7 +31,8 @@ class PlanReviewAutomationTest < Minitest::Test
       assert_same expected, result
       assert_same task, observed.fetch(:task)
       assert_equal "claude", observed.dig(:planner_identity, "provider")
-      refute File.exist?(File.join(task.folder, ".lock"))
+      refute Hive::Lock.task_lock_held?(task.folder)
+      assert_nil Hive::Lock.read_task_lock(task.folder)
     end
   end
 
@@ -134,6 +135,7 @@ class PlanReviewAutomationTest < Minitest::Test
         workflow: Workflow.new(id: workflow), meta_yml_path: meta,
         stage_index: 3, stage_name: "plan", state_file: File.join(folder, "plan.md")
       )
+      prepare_test_task_lease_repository(folder)
       yield task
     end
   end

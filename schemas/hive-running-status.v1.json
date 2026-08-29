@@ -109,7 +109,10 @@
         "max_metadata_bytes": { "const": 65536 },
         "max_daemon_pid_bytes": { "const": 4096 },
         "max_projects_scanned": { "const": 256 },
-        "max_filesystem_entries_scanned": { "const": 10000 }
+        "max_filesystem_entries_scanned": {
+          "const": 10000,
+          "description": "Maximum runtime-control-plane lease rows inspected as source entries."
+        }
       }
     },
     "Source": {
@@ -125,14 +128,18 @@
         "projects_scanned": { "type": "integer", "minimum": 0 },
         "projects_omitted": { "type": "integer", "minimum": 0 },
         "projects_unavailable": { "type": "integer", "minimum": 0 },
-        "filesystem_entries_scanned": { "type": "integer", "minimum": 0 },
+        "filesystem_entries_scanned": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Runtime-control-plane lease rows inspected as source entries."
+        },
         "tasks_scanned": { "type": "integer", "minimum": 0 },
         "malformed_locks": { "type": "integer", "minimum": 0 },
         "stale_locks": { "type": "integer", "minimum": 0 },
         "transition_skips": { "type": "integer", "minimum": 0 },
         "scan_truncated": {
           "type": "boolean",
-          "description": "True when a project or filesystem-entry scan budget stopped observation before all registered task entries were inspected."
+          "description": "True when a project or active-lease query budget stopped observation before all registered lease rows were inspected."
         }
       }
     },

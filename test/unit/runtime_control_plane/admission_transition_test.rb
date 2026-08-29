@@ -74,6 +74,35 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_task_source_observation_replaces_lease_placeholder_before_admission
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, health|
+      state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }
+      task_folder = File.join(state_root, "stages", "4-execute", "task-1")
+      FileUtils.mkdir_p(task_folder)
+      task = Struct.new(:folder, :workflow).new(task_folder, nil)
+      generation = Struct.new(
+        :task_id, :project, :task_slug, :progress_token, :task_input_epoch
+      ).new("task-1", "demo", "task-1", "source-1", 1)
+      attempts.database.transaction do |db|
+        db[:task_subjects].where(task_id: "task-1").update(
+          observed_path: task_folder, source_fingerprint: "", generation: 0
+        )
+      end
+
+      assert attempts.observe_task_source(task: task, generation: generation, observed_at: NOW)
+      observed = attempts.database.read do |db|
+        db[:task_subjects].where(task_id: "task-1").first
+      end
+      assert_equal "source-1", observed.fetch(:source_fingerprint)
+      assert_equal 1, observed.fetch(:generation)
+
+      policy = explicit_policy(max_concurrent: 1)
+      route_decision = decision(policy, health, "generation-1")
+      accepted = create_routed_attempt(attempts, health, policy, route_decision, suffix: 1)
+      assert_equal "attempt-1", accepted.attempt_id
+    end
+  end
+
   def test_provider_capacity_is_revalidated_inside_the_admission_transaction
     with_control_plane(task_ids: %w[task-1 task-2]) do |attempts, dispatch, health|
       policy = explicit_policy(max_concurrent: 1)

@@ -165,15 +165,14 @@ The codebase leans heavily on stdlib (no extra gems for these):
 | `Open3.capture3` | All git/gh/claude version subprocess invocations | `git_ops.rb`, `worktree.rb`, `pr.rb`, `init.rb`, `agent.rb` |
 | `Process.spawn` (with `pgroup: true`) | Long-running claude subprocess + signal forwarding | `agent.rb` |
 | `IO.pipe` | Streaming claude stdout/stderr to the log file in real time | `agent.rb` |
-| `File#flock(LOCK_EX)` | `Markers.set` (per-state-file lock), `Lock.with_commit_lock` (per-project commit lock), and global config registry writes | `markers.rb`, `lock.rb`, `config.rb` |
-| `File.open(... LOCK_EX \| EXCL)` | Per-task lock acquisition | `lock.rb` |
-| `YAML.safe_load` | All config / lock / pointer files | `config.rb`, `lock.rb`, `task.rb`, `worktree.rb` |
+| `File#flock(LOCK_EX)` | Marker writer mutexes, `Lock.with_commit_lock`, and other machine-local file/config domains | `markers.rb`, `lock.rb`, `config.rb` |
+| `YAML.safe_load` | Authored config, metadata, marker, and pointer files | `config.rb`, `task_meta.rb`, `task.rb`, `worktree.rb` |
 | `ERB` (`trim_mode: "-"`) | Prompt and config templates | `commands/init.rb`, `commands/new.rb`, `stages/base.rb` |
 | `Net::HTTP` | Screenote OAuth discovery/registration/token/revoke, MCP project listing, and live-test signed upload PUTs without adding a gem dependency | `screenote/oauth_client.rb`, `screenote/mcp_client.rb`, `commands/connect.rb`, `commands/disconnect.rb` |
 | `SecureRandom.hex` | 4-char slug suffix and unique global-config tempfile names | `commands/new.rb`, `config.rb` |
 | `Digest::SHA256` | Reviewer-tamper detection on `plan.md` / `worktree.yml` | `stages/execute.rb` |
-| `Time.now.utc.iso8601` | Lock timestamps, marker `started=`, `worktree.yml#created_at` | `lock.rb`, `agent.rb`, `worktree.rb` |
-| `/proc/<pid>/stat` / `ps -o lstart=` | PID-reuse defence in stale-lock detection | `lock.rb#process_start_time` |
+| `Time.now.utc.iso8601` | Lease timestamps, marker `started=`, `worktree.yml#created_at` | `lock.rb`, `agent.rb`, `worktree.rb` |
+| `/proc/<pid>/stat` / `ps -o lstart=` | PID-reuse defence for typed task leases and process cleanup | `lock.rb#process_start_time` |
 
 PID start-time capture uses `/proc/<pid>/stat` field 22 on Linux and falls
 back to `ps -o lstart= -p <pid>` on macOS/BSD-style hosts or containers without

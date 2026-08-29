@@ -34,33 +34,34 @@ fleet-wide v7 transport after those consumers migrate.
 
 ## Bounded running-task contract
 
-`Hive::RunningStatus` scans at most 256 registered projects and 10,000 stage/task
-directory entries without materializing complete directory listings. It
-performs only small task-local reads: at most 16 KiB from a candidate `.lock`,
-then at most 64 KiB of `meta.yml` only after a live process is established.
+`Hive::RunningStatus` validates at most 256 registered projects, then performs
+one bounded SQL query for up to 10,000 active task-lease rows joined to their
+task subjects and projects. It does not walk every task folder or perform one
+lease lookup per task. Only those observed live-lease paths are validated, and
+at most 64 KiB of `meta.yml` is read after a live process is established.
 Task and daemon PID files are opened nonblocking and no-follow; daemon health
 reads at most 4 KiB through `Hive::Daemon::StatusReport#running_state`. The
 producer does not instantiate `Task`, open the attempts store, read conditions
 or history, project actions, inspect git, build `hive-status.v7`, or run daemon
 service/binary-drift subprocess probes.
-Bounded YAML parsing treats parser recursion and allocation failures as
-malformed input, so deeply nested lock, metadata, or daemon PID documents
+Bounded JSON/YAML parsing treats parser recursion and allocation failures as
+malformed input, so corrupt leases, metadata, or daemon PID documents
 degrade the snapshot instead of crashing the command.
 
 A row is running when either:
 
-- the task lock's runner PID is alive and its recorded process start time still
+- the task lease's runner PID is alive and its recorded process start time still
   matches, or
-- the lock's recorded agent child PID is alive and its child process start time
+- the lease's recorded agent child PID is alive and its child process start time
   still matches. This keeps an orphaned live agent visible for recovery even
   when its runner died.
 
-A live lock without a child PID is therefore a valid running row. A stale lock
-with no live child is counted under `source.stale_locks` and omitted. A lock
+A live lease without a child PID is therefore a valid running row. A stale lease
+with no live child is counted under `source.stale_locks` and omitted. A lease
 without the recorded start identity required by this compact contract also
 fails closed as stale; the temporary internal graph retains its existing
 PID-only compatibility. Malformed
-locks and task folders that move during observation do not abort the fleet
+leases and task folders that move during observation do not abort the fleet
 response: they are counted under `source.malformed_locks` or
 `source.transition_skips`, and `complete` becomes false because liveness could
 not be proven. Malformed, absent, unreadable, or oversized metadata does not
@@ -448,10 +449,14 @@ The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` 
 | `·` | `:none` (no marker yet, e.g. fresh `1-inbox` capture before WAITING was added) |
 | `⏸` | `:waiting`, `:execute_waiting`, `:review_waiting` |
 | `✓` | `:complete`, `:execute_complete`, `:review_complete` |
-| `🤖` | `:agent_working` with a live PID, `:review_working`, or a live per-task `.lock` holder before a Claude PID is recorded |
+| `🤖` | `:agent_working` with a live PID, `:review_working`, or a live task-lease holder before a Claude PID is recorded |
 | `⚠` | `:execute_stale`, `:review_ci_stale`, `:review_stale`, `:review_error`, `:error`, or `:agent_working` with a dead PID |
 
-`decorate` special-cases `:agent_working`: reads `claude_pid` from the per-task `.lock` (or fallback marker `pid`) and runs `Process.kill(0, pid)` to decide between 🤖 and ⚠ "stale lock". If the task lock is live but the Claude PID is not attached yet, status renders `🤖 run_lock pid=<pid>` instead of a stale warning. This is internal display state, not an added JSON field.
+`decorate` special-cases `:agent_working`: reads `claude_pid` from the typed
+task lease (or fallback marker `pid`) and checks the recorded process identity
+to decide between 🤖 and ⚠ "stale lock". If the task lease is live but the
+Claude PID is not attached yet, status renders `🤖 run_lock pid=<pid>` instead
+of a stale warning. This is internal display state, not an added JSON field.
 
 ## Rendering rules
 
@@ -519,7 +524,15 @@ by every task.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps the internal graph and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 
-Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. `collect_rows` also reads each task `.lock`, verifies the holder PID and recorded process start time through `Hive::Lock`, and passes `live_task_lock: true` to `TaskAction` while `hive run` is active even if the stage has not written an `AGENT_WORKING` or `REVIEW_WORKING` marker yet. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
+Rows are then classified by `Hive::TaskAction`, which emits an action key,
+label, suggested command, and optional row-local `next_action` such as
+`kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for
+`missing_research_output`. `collect_rows` reads the typed task lease, verifies
+the holder PID and recorded process start time through `Hive::Lock`, and passes
+`live_task_lock: true` to `TaskAction` while `hive run` is active even if the
+stage has not written an `AGENT_WORKING` or `REVIEW_WORKING` marker yet. If one
+project has the same slug in multiple stages, workflow commands include
+`--from <stage>` and generic findings commands include `--stage <stage>`.
 
 ## Red-row diagnostics
 

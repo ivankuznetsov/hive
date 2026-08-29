@@ -186,6 +186,58 @@ module Hive
         translate_store_error(error, "attempt could not be created")
       end
 
+      # Bind the filesystem observation used to derive a task generation before
+      # the final admission transaction rechecks it. This is deliberately a
+      # separate, short transaction: task/file inspection stays outside the
+      # admission lock, while a concurrent newer observation still fences this
+      # caller at admission_validate_subject_in.
+      def observe_task_source(task:, generation:, observed_at:)
+        return true if @isolated_identity
+
+        task_id = generation.task_id.to_s
+        fingerprint = generation.progress_token.to_s
+        input_epoch = Integer(generation.task_input_epoch)
+        folder = observed_task_path(task)
+        workflow_id = observed_workflow_id(task)
+        timestamp = Record.iso8601(observed_at)
+        database.transaction do |db|
+          project = observed_project!(db, generation, folder)
+          alias_row = db[:task_subjects].where(
+            project_id: project.fetch(:project_id), workflow_id: workflow_id,
+            task_slug: generation.task_slug.to_s
+          ).first
+          if alias_row && alias_row.fetch(:task_id) != task_id
+            raise StaleTaskSource, "attempt task alias belongs to a different task identity"
+          end
+
+          row = db[:task_subjects].where(task_id: task_id).first
+          if row
+            unless row.fetch(:project_id) == project.fetch(:project_id) &&
+                   row.fetch(:workflow_id) == workflow_id &&
+                   row.fetch(:task_slug) == generation.task_slug.to_s
+              raise StaleTaskSource, "attempt task identity disagrees with its registered subject"
+            end
+            db[:task_subjects].where(task_id: task_id).update(
+              observed_path: folder, source_fingerprint: fingerprint,
+              generation: input_epoch, last_observed_at: timestamp
+            )
+          else
+            db[:task_subjects].insert(
+              task_id: task_id, project_id: project.fetch(:project_id),
+              workflow_id: workflow_id, task_slug: generation.task_slug.to_s,
+              observed_path: folder, source_fingerprint: fingerprint,
+              generation: input_epoch, created_at: timestamp,
+              last_observed_at: timestamp
+            )
+          end
+        end
+        true
+      rescue ArgumentError, TypeError
+        raise StaleTaskSource, "attempt task source generation is invalid"
+      rescue Sequel::Error, RuntimeControlPlane::Error => error
+        translate_store_error(error, "attempt task source could not be observed")
+      end
+
       def arm_launch_handoff(observed, launch_timeout_sec:, now:)
         mutate(observed, allowed_states: [ "launching" ]) do |data|
           data.merge(
@@ -595,6 +647,39 @@ module Hive
           created_at: now, last_observed_at: now
         )
         [ task_id, project_id ]
+      end
+
+      def observed_task_path(task)
+        folder = task.respond_to?(:folder) ? task.folder.to_s : ""
+        if folder.empty? && task.respond_to?(:state_file)
+          folder = File.dirname(task.state_file.to_s)
+        end
+        raise StaleTaskSource, "attempt task path is unavailable" if folder.empty?
+
+        File.expand_path(folder)
+      end
+
+      def observed_workflow_id(task)
+        workflow = task.respond_to?(:workflow) ? task.workflow : nil
+        workflow = workflow.id if workflow.respond_to?(:id)
+        value = workflow.to_s
+        value.empty? ? "coding" : value
+      end
+
+      def observed_project!(db, generation, folder)
+        stage_directory = File.dirname(folder)
+        stages_directory = File.dirname(stage_directory)
+        unless File.basename(stages_directory) == "stages" &&
+               File.basename(folder) == generation.task_slug.to_s
+          raise StaleTaskSource, "attempt task path is outside a workflow stage"
+        end
+
+        state_root = File.dirname(stages_directory)
+        project = db[:projects].where(state_root_path: state_root).first
+        unless project && project.fetch(:name) == generation.project.to_s
+          raise StaleTaskSource, "attempt project identity is not registered for the task path"
+        end
+        project
       end
 
       def subject_key(subject)

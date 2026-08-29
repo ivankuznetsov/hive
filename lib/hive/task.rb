@@ -209,10 +209,6 @@ module Hive
       File.join(File.expand_path(template), @slug)
     end
 
-    def lock_file
-      File.join(@folder, ".lock")
-    end
-
     def log_dir
       File.join(@hive_state_path, "logs", @slug)
     end

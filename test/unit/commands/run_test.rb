@@ -22,14 +22,20 @@ class CommandsRunTest < Minitest::Test
 
   def test_observation_guard_runs_after_the_task_lock_is_acquired
     with_tmp_dir do |dir|
-      state_file = File.join(dir, "brainstorm.md")
+      hive_state = File.join(dir, ".hive-state")
+      folder = File.join(hive_state, "stages", "2-brainstorm", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "brainstorm.md")
       File.write(state_file, "# state\n<!-- MANUAL_STEERING -->\n")
-      current = task(folder: dir, state_file: state_file)
+      prepare_test_task_lease_repository(folder)
+      current = task(
+        folder: folder, state_file: state_file, hive_state_path: hive_state
+      )
       guarded = command(
         quiet: true,
         observation_guard: lambda do |observed|
           assert_same current, observed
-          assert File.exist?(File.join(dir, ".lock")), "guard must run under the task lock"
+          assert Hive::Lock.task_lock_held?(folder), "guard must run under the task lease"
           raise Hive::StaleOperationalObservation, "rotated"
         end
       )
@@ -38,7 +44,8 @@ class CommandsRunTest < Minitest::Test
       with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { }) do
         assert_raises(Hive::StaleOperationalObservation) { guarded.call }
       end
-      refute File.exist?(File.join(dir, ".lock")), "failed guard must release the task lock"
+      refute Hive::Lock.task_lock_held?(folder), "failed guard must release the task lease"
+      assert_nil Hive::Lock.read_task_lock(folder)
     end
   end
 
@@ -91,6 +98,7 @@ class CommandsRunTest < Minitest::Test
   end
 
   def with_terminal_run(task, runner:, git_ops:)
+    prepare_test_task_lease_repository(task.folder)
     run = command
     completed_rebase = rebase_result
     reported = []
@@ -188,6 +196,7 @@ class CommandsRunTest < Minitest::Test
       state_file = File.join(folder, "report.md")
       File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
       Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      prepare_test_task_lease_repository(folder)
       t = task(
         folder: folder, state_file: state_file,
         hive_state_path: File.join(dir, ".hive-state"),
@@ -347,6 +356,7 @@ class CommandsRunTest < Minitest::Test
       state_file = File.join(folder, "report.md")
       File.write(state_file, "# Before\n")
       Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      prepare_test_task_lease_repository(folder)
       workflow = active_terminal_workflow
       current = task(
         folder: folder, state_file: state_file,

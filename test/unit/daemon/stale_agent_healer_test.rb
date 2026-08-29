@@ -116,6 +116,22 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     @controller = FakeController.new
     @coordinator = FakeRecoveryCoordinator.new
     @healer = build_healer
+    @task_lease_payloads = {}
+    task_lease_payloads = @task_lease_payloads
+    @healer.define_singleton_method(:task_lock_holder) do |row|
+      task_lease_payloads[row.folder.to_s]
+    end
+    @healer.define_singleton_method(:with_heal_lock) do |row, create: true, **, &block|
+      next false if !create && !File.directory?(row.folder.to_s)
+
+      holder = task_lease_payloads[row.folder.to_s]
+      if holder && holder["pid"] == Process.pid
+        next false
+      elsif holder
+        task_lease_payloads.delete(row.folder.to_s)
+      end
+      block.call
+    end
   end
 
   def test_error_and_review_error_delegate_to_one_coordinator_without_mutation
@@ -683,7 +699,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def test_wedged_review_working_becomes_review_error
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         phase: "reviewers",
         pass: "1",
@@ -698,14 +714,16 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         state_file,
         pid_alive: false,
         live_task_lock: true,
-        **lock_identity(lock_path)
+        **lock_identity(holder)
       )
 
       with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+        task_lease_payloads = @task_lease_payloads
+        task_folder = File.dirname(state_file)
         with_replaced_singleton_method(
           @healer,
           :terminate_lock_holder,
-          ->(_holder) { File.delete(lock_path) }
+          ->(_holder) { task_lease_payloads.delete(task_folder) }
         ) do
           heal([ row ])
         end
@@ -723,7 +741,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def test_wedged_review_with_live_children_or_replacement_generation_is_left_alone
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         holder: {
           "pid" => Process.pid,
@@ -736,7 +754,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         state_file,
         pid_alive: false,
         live_task_lock: true,
-        **lock_identity(lock_path)
+        **lock_identity(holder)
       )
       with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [ 123 ] }) do
         heal([ row ])
@@ -745,7 +763,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
 
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         marker_id: "current",
         holder: {
@@ -771,13 +789,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         heal([ row ])
       end
       assert_equal :review_working, Hive::Markers.current(state_file).name
-      assert File.exist?(lock_path)
+      assert_same holder, @task_lease_payloads.fetch(File.dirname(state_file))
     end
   end
 
   def test_wedged_review_marker_generation_race_and_lock_claim_race_fail_closed
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         marker_id: "newer",
         holder: {
@@ -792,7 +810,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         pid_alive: false,
         live_task_lock: true,
         marker_id: "older",
-        **lock_identity(lock_path)
+        **lock_identity(holder)
       )
       with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
         heal([ row ])
@@ -801,7 +819,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
 
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         marker_id: "observed",
         holder: {
@@ -816,7 +834,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         pid_alive: false,
         live_task_lock: true,
         marker_id: "observed",
-        **lock_identity(lock_path)
+        **lock_identity(holder)
       )
       with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
         with_replaced_singleton_method(
@@ -828,13 +846,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         end
       end
       assert_equal :review_working, Hive::Markers.current(state_file).name
-      assert File.exist?(lock_path)
+      assert_same holder, @task_lease_payloads.fetch(File.dirname(state_file))
     end
   end
 
   def test_orphaned_review_working_becomes_review_error_after_grace
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         phase: "triage",
         pass: "2",
@@ -854,7 +872,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       marker = Hive::Markers.current(state_file)
       assert_equal :review_error, marker.name
       assert_equal "review_orphaned", marker.attrs.fetch("reason")
-      refute File.exist?(lock_path)
+      refute @task_lease_payloads.key?(File.dirname(state_file))
     end
   end
 
@@ -888,7 +906,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def test_orphaned_review_generation_and_new_lock_races_fail_closed
     with_marker_file do |state_file|
-      lock_path = prepare_review_working(
+      holder = prepare_review_working(
         state_file,
         marker_id: "newer",
         holder: {
@@ -907,7 +925,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       assert_equal :review_working, Hive::Markers.current(state_file).name
-      assert_equal "new-runner", YAML.safe_load_file(lock_path).fetch("owner")
+      assert_equal "new-runner", holder.fetch("owner")
+      assert_same holder, @task_lease_payloads.fetch(File.dirname(state_file))
     end
   end
 
@@ -951,11 +970,35 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_task_lock_and_marker_attribute_helpers_fail_closed
     with_marker_file do |state_file|
       row = make_row(state_file, pid_alive: nil)
-      File.write(File.join(row.folder, ".lock"), "---\n: invalid: [")
+      implementation = Hive::Daemon::StaleAgentHealer.instance_method(:task_lock_holder)
 
-      assert_nil @healer.send(:task_lock_holder, row)
+      with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { raise Hive::RuntimeControlPlane::CodecError.new(
+          "invalid lease JSON", code: :json_invalid
+        ) }
+      ) do
+        assert_nil implementation.bind_call(@healer, row)
+      end
       assert_equal({}, @healer.send(:marker_attrs_for, Object.new))
     end
+  end
+
+  def test_with_heal_lock_treats_task_lease_contention_as_a_lost_race
+    row = make_row("/tmp/missing-task/task.md", pid_alive: nil)
+    implementation = Hive::Daemon::StaleAgentHealer.instance_method(:with_heal_lock)
+    attempted = false
+    replacement = lambda do |*_args, **_kwargs|
+      raise Hive::ConcurrentRunError.new(
+        "another runner won", lock_path: "runtime-control-plane:task:42"
+      )
+    end
+
+    result = with_replaced_singleton_method(Hive::Lock, :with_task_lock, replacement) do
+      implementation.bind_call(@healer, row, reason: "test") { attempted = true }
+    end
+
+    assert_equal false, result
+    assert_equal false, attempted
   end
 
   def test_child_process_lookup_handles_each_pgrep_outcome
@@ -1134,9 +1177,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     Hive::Markers.set(state_file, :review_working, attrs)
     return nil unless holder
 
-    lock_path = File.join(File.dirname(state_file), ".lock")
-    File.write(lock_path, holder.to_yaml)
-    lock_path
+    @task_lease_payloads[File.dirname(state_file)] = holder
+    holder
   end
 
   def review_working_row(state_file, pid_alive:, live_task_lock:,
@@ -1159,8 +1201,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     )
   end
 
-  def lock_identity(lock_path)
-    holder = YAML.safe_load_file(lock_path)
+  def lock_identity(holder)
     {
       task_lock_pid: holder["pid"],
       task_lock_process_start_time: holder["process_start_time"],

@@ -313,10 +313,19 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 **Status:** Active
 **Context:** Original design used one `.hive/.lock` per project, but execute pass takes ~45 minutes — that would block all other tasks. Need finer locking.
 **Decision:**
-- **Per-task lock** `<task folder>/.lock` — held for the entire `hive run`, allowing parallel runs on *different* tasks.
+- **Per-task lease** in the SQLite runtime control plane — keyed by stable task
+  id and held logically for the entire `hive run`, allowing parallel runs on
+  *different* tasks. Typed process identity, holder nonce, and lease-version
+  CAS replace the former task-folder `.lock` and its guard/temp files.
 - **Per-project commit lock** `<.hive-state>/.commit-lock` — short-lived flock around `git add && git commit` in the hive-state worktree.
-- PID-reuse defence: the lock payload includes `process_start_time` from `/proc/<pid>/stat` field 22; stale-check compares.
-**Consequences:** Multiple long-running stage agents on the same project can run concurrently; only the brief commit window is serialised.
+- PID-reuse defence: typed holder identity includes `process_start_time` from
+  `/proc/<pid>/stat` field 22; stale-check compares.
+- Every Sequel checkout participates in one process-wide fork/exec barrier, so
+  a fork cannot copy active SQLite descriptors or transactions.
+**Consequences:** Multiple long-running stage agents on the same project can
+run concurrently; only the brief commit window is serialised. Ordinary task
+lock files are retired in one cutover, while `.commit-lock` remains the Git
+index mutex.
 
 ## ADR-008: Default Claude bypassPermissions secured by other means
 

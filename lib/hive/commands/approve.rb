@@ -360,11 +360,9 @@ module Hive
       #   - commit_lock OUTERMOST: serialises hive/state writes and surfaces
       #     contention (e.g. a 30s commit-lock-held timeout) BEFORE we touch
       #     the filesystem. A failed acquire never leaves a half-applied move.
-      #   - task_lock INNER: blocks a concurrent `hive run` on the same task
-      #     during the mv. The .lock file moves with the folder; the standard
-      #     release no-ops on the gone source path. We delete the orphan at
-      #     the new path before committing so the per-process lock metadata
-      #     isn't tracked in hive/state.
+      #   - task lease INNER: blocks a concurrent `hive run` on the same task
+      #     during the mv. Its stable task id survives the folder move and its
+      #     holder nonce keeps release fenced from a replacement owner.
       def perform_move_and_commit(task, dest_stage, enforce_admission: false)
         new_folder = nil
         commit_action = nil
@@ -392,7 +390,6 @@ module Hive
               end
               new_folder = move_task!(task, dest_stage)
             end
-            cleanup_orphan_task_lock(new_folder)
             verb = stage_for_dest!(task, dest_stage).index < task.stage_index ? "reject" : "approve"
             commit_action = "#{verb} #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
             record_commit_or_rollback!(
@@ -530,17 +527,6 @@ module Hive
           "destination already exists: #{path} (slug collision; archive or rename the existing folder)",
           path: path
         )
-      end
-
-      # Only swallow ENOENT (lock already gone — concurrent process raced
-      # us to delete it, or the lock module's release path beat us to it).
-      # Other errors (EACCES on a read-only mount, IOError) need to surface
-      # so the caller sees a typed exception and the rollback path runs.
-      def cleanup_orphan_task_lock(new_folder)
-        lock_path = File.join(new_folder, ".lock")
-        File.delete(lock_path) if File.exist?(lock_path)
-      rescue Errno::ENOENT
-        # Already gone — nothing to do.
       end
 
       # Slug-scoped commit. Adding the parent stage dir would sweep unrelated

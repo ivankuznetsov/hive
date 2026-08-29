@@ -135,7 +135,9 @@ module Hive
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
 
-        pid = Process.spawn(*argv, pgroup: true, out: log_io, err: log_io)
+        pid = Process.spawn(
+          *argv, pgroup: true, out: log_io, err: log_io, close_others: true
+        )
         log_io.close
 
         @running[pid] = {

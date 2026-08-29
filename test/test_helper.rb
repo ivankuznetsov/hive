@@ -140,6 +140,7 @@ module HiveTestStdinIsolation
       teardown_error = e
     ensure
       begin
+        cleanup_test_task_leases if respond_to?(:cleanup_test_task_leases, true)
         HiveTestTmpCleanup.remove_all!(@hive_tracked_tmp_dirs)
       rescue StandardError => e
         teardown_error ||= e
@@ -204,6 +205,111 @@ module HiveTestHelper
       )
     end
     database
+  end
+
+  # Publish a typed task lease for tests that exercise task liveness. The
+  # production cutover deliberately has no filesystem-lock compatibility, so
+  # fixtures must use the same SQLite repository as runtime code.
+  def publish_test_task_lease(task_folder, payload = nil, state_home: nil, **payload_keywords)
+    payload = (payload || {}).merge(payload_keywords.transform_keys(&:to_s))
+    repository = prepare_test_task_lease_repository(task_folder, state_home: state_home)
+    held = repository.acquire(task_folder, { "op" => "test" }, create: false)
+    repository.update(task_folder, payload, lock_id: held.fetch("lock_id"))
+    held
+  end
+
+  def prepare_test_task_lease_repository(task_folder, state_home: nil)
+    require "digest"
+    require "hive/task_meta"
+    expanded = File.expand_path(task_folder)
+    project_root, separator, relative_task = expanded.partition("/.hive-state/stages/")
+    if separator.empty? || project_root.empty? || relative_task.empty?
+      raise ArgumentError, "task folder is outside .hive-state/stages"
+    end
+
+    repository = prepare_test_runtime_project(project_root, state_home: state_home)
+    Hive::Lock.task_lease_repository = repository
+    ensure_test_task_identity(task_folder)
+    repository
+  end
+
+  def prepare_test_runtime_project(project_root, state_home: nil)
+    require "digest"
+    require "hive/task_counter"
+    state_home ||= (@hive_test_runtime_state_home ||= tracked_tmp_dir("hive-test-runtime"))
+    project_name = "test-#{Digest::SHA256.hexdigest(project_root)[0, 16]}"
+    database = prepare_runtime_project(
+      state_home: state_home, name: project_name, path: project_root,
+      state_root_path: File.join(project_root, ".hive-state")
+    )
+    (@hive_test_runtime_databases ||= []) << database
+    unless instance_variable_defined?(:@hive_test_runtime_prior_globals_captured)
+      @hive_test_prior_task_lease_repository_defined =
+        Hive::Lock.instance_variable_defined?(:@task_lease_repository)
+      @hive_test_prior_task_lease_repository =
+        Hive::Lock.instance_variable_get(:@task_lease_repository)
+      @hive_test_prior_task_counter_database_defined =
+        Hive::TaskCounter.instance_variable_defined?(:@database)
+      @hive_test_prior_task_counter_database =
+        Hive::TaskCounter.instance_variable_get(:@database)
+      @hive_test_runtime_prior_globals_captured = true
+    end
+    repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+      database: database,
+      process_start_time: Hive::Lock.method(:process_start_time),
+      process_alive: lambda { |pid, recorded_start_time:|
+        Hive::Lock.send(
+          :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+        )
+      }
+    )
+    Hive::Lock.task_lease_repository = repository
+    Hive::TaskCounter.database = database
+    repository
+  end
+
+  def cleanup_test_task_leases
+    if instance_variable_defined?(:@hive_test_runtime_prior_globals_captured)
+      if @hive_test_prior_task_lease_repository_defined
+        Hive::Lock.task_lease_repository = @hive_test_prior_task_lease_repository
+      elsif Hive::Lock.instance_variable_defined?(:@task_lease_repository)
+        Hive::Lock.remove_instance_variable(:@task_lease_repository)
+      end
+      if @hive_test_prior_task_counter_database_defined
+        Hive::TaskCounter.database = @hive_test_prior_task_counter_database
+      elsif Hive::TaskCounter.instance_variable_defined?(:@database)
+        Hive::TaskCounter.remove_instance_variable(:@database)
+      end
+    end
+    Array(@hive_test_runtime_databases).each(&:disconnect)
+    %i[
+      @hive_test_prior_task_lease_repository_defined
+      @hive_test_prior_task_lease_repository
+      @hive_test_prior_task_counter_database_defined
+      @hive_test_prior_task_counter_database
+      @hive_test_runtime_prior_globals_captured
+      @hive_test_runtime_databases
+      @hive_test_runtime_state_home
+    ].each do |name|
+      remove_instance_variable(name) if instance_variable_defined?(name)
+    end
+  end
+
+  def ensure_test_task_identity(task_folder)
+    path = Hive::TaskMeta.path(task_folder)
+    raw = YAML.safe_load(File.read(path)) || {}
+    raw = {} unless raw.is_a?(Hash)
+    unless Hive::TaskMeta.read(task_folder)[:id]
+      raw["id"] = Digest::SHA256.hexdigest(File.expand_path(task_folder))[0, 12].to_i(16)
+    end
+    raw["slug"] ||= File.basename(task_folder)
+    raw["display_name"] = nil unless raw.key?("display_name")
+    File.write(path, raw.to_yaml)
+  rescue Errno::ENOENT
+    File.write(path, {
+      "id" => Digest::SHA256.hexdigest(File.expand_path(task_folder))[0, 12].to_i(16),
+      "slug" => File.basename(task_folder), "display_name" => nil
+    }.to_yaml)
   end
 
   def with_runtime_dispatch_repository(state_home)

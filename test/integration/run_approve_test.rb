@@ -855,7 +855,7 @@ class RunApproveTest < Minitest::Test
     end
   end
 
-  def test_orphan_task_lock_at_destination_is_not_committed
+  def test_runtime_task_lease_is_released_after_stage_move
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -863,18 +863,12 @@ class RunApproveTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(brainstorm))
         FileUtils.mv(inbox, brainstorm)
         write_marker(brainstorm, :complete)
+        prepare_test_task_lease_repository(brainstorm)
 
         capture_io { Hive::Commands::Approve.new(slug).call }
         plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
-        files_in_commit = `git -C #{File.join(dir, ".hive-state")} show --pretty= --name-only HEAD`.lines.map(&:strip)
-        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock",
-                        "the per-process .lock file must not be committed"
-        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock.tmp.guard",
-                        "the stable task-lock guard must remain ignored"
-        refute File.exist?(File.join(plan, ".lock")),
-               "orphan .lock from with_task_lock must be cleaned at destination"
-        assert File.exist?(File.join(plan, ".lock.tmp.guard")),
-               "the regression must exercise the persistent guard artifact"
+        assert_nil Hive::Lock.read_task_lock(plan),
+                   "approve must release the task lease after the stage move"
       end
     end
   end

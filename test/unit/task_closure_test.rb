@@ -12,7 +12,7 @@ class TaskClosureTest < Minitest::Test
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         closure = Hive::TaskClosure.new
-        assert_equal File.join(root, "attempts", "v4"),
+        assert_equal File.join(root, "runtime-payloads"),
                      closure.instance_variable_get(:@attempt_store)
                             .instance_variable_get(:@root)
       end
@@ -959,12 +959,15 @@ class TaskClosureTest < Minitest::Test
         entry.fetch("code") == "ownership_unverifiable"
       end
 
-      File.write(
-        task.lock_file,
+      repository = Hive::Lock.task_lease_repository
+      held = repository.acquire(task.folder, { "op" => "closure-test" }, create: false)
+      repository.update(
+        task.folder,
         {
           "pid" => 2_000_000_000,
           "process_start_time" => "missing"
-        }.to_yaml
+        },
+        lock_id: held.fetch("lock_id")
       )
       refute service_for.send(:live_task_lock?, task)
 
@@ -974,7 +977,7 @@ class TaskClosureTest < Minitest::Test
         assert service_for.send(:live_task_lock?, task)
       end
 
-      FileUtils.rm_f(task.lock_file)
+      repository.release(task.folder, lock_id: held.fetch("lock_id"))
       File.write(File.join(task.folder, "worktree.yml"), "---\npath: [\n")
       blockers = service_for.send(:worktree_blockers, task)
       assert_equal "worktree_unverifiable", blockers.first.fetch("code")
@@ -1383,10 +1386,26 @@ class TaskClosureTest < Minitest::Test
           ]
         }.to_yaml
       )
+      database = prepare_runtime_project(
+        state_home: home, name: "app", path: project, state_root_path: hive_state
+      )
+      prior_repository = Hive::Lock.task_lease_repository
+      Hive::Lock.task_lease_repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: database,
+        process_start_time: Hive::Lock.method(:process_start_time),
+        process_alive: lambda { |pid, recorded_start_time:|
+          Hive::Lock.send(
+            :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+          )
+        }
+      )
       attempts = File.join(home, "attempts")
       with_env("HIVE_ATTEMPT_STORE_ROOT" => attempts) do
         yield Hive::Task.new(folder), "app"
       end
+    ensure
+      Hive::Lock.task_lease_repository = prior_repository if prior_repository
+      database&.disconnect
     end
   end
 end

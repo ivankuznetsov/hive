@@ -2,6 +2,7 @@ require "json"
 require "rbconfig"
 require "hive/attempts/contracts"
 require "hive/attempts/repository"
+require "hive/runtime_control_plane"
 
 module Hive
   module Attempts
@@ -69,6 +70,14 @@ module Hive
       end
 
       private
+
+      def fork(&block)
+        Hive::RuntimeControlPlane::ProcessGuard.fork(&block)
+      end
+
+      def exec(*arguments, **options)
+        Hive::RuntimeControlPlane::ProcessGuard.exec(*arguments, **options)
+      end
 
       def fork_wrapper(record, claim_capability, writer)
         claim_reader, claim_writer = IO.pipe

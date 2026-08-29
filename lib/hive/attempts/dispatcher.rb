@@ -193,6 +193,7 @@ module Hive
         cohort_admission = nil
         view = admission_view
         begin
+          @store.observe_task_source(task: task, generation: generation, observed_at: now) if task
           view ||= AdmissionView.new(store: @store, hot_scan: @store.scan)
             records = view.refresh_for_admission
             semantic_owner = find_semantic_owner(records, generation)

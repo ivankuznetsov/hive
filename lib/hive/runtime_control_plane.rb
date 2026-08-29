@@ -33,6 +33,18 @@ module Hive
       def exit_code = Hive::ExitCodes::SOFTWARE
     end
 
+    class ForkUnsafe < Error
+      def initialize(message)
+        super(
+          message,
+          code: :fork_during_transaction,
+          action: "finish or roll back the transaction before creating a process"
+        )
+      end
+
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
+
     class CodecError < Error
       def exit_code = Hive::ExitCodes::CONFIG
     end
@@ -82,6 +94,7 @@ module Hive
   end
 end
 
+require "hive/runtime_control_plane/process_guard"
 require "hive/runtime_control_plane/codec"
 require "hive/runtime_control_plane/identity"
 require "hive/runtime_control_plane/diagnostics"

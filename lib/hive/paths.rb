@@ -28,14 +28,6 @@ module Hive
       hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
     end
 
-    def task_counter_path
-      File.join(state_home, "task-counter.yml")
-    end
-
-    def task_counter_lock_path
-      File.join(state_home, ".task-counter.lock")
-    end
-
     # Owner-private daemon-to-CLI operational observation. Callers running
     # against an injected daemon home may pass that state root explicitly.
     def operational_snapshot_path(root = state_home)

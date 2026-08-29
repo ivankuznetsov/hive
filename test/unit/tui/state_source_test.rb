@@ -28,6 +28,12 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def publish_tui_task_lease(folder, payload = {})
+    publish_test_task_lease(
+      folder, payload, state_home: Hive::Paths.state_home
+    )
+  end
+
   def with_seeded_project
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -593,7 +599,7 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  def test_refresh_once_reparses_when_task_lock_appears
+  def test_refresh_once_reparses_when_task_lease_appears
     with_seeded_project do |_project, _dir|
       calls = 0
       patch = Module.new do
@@ -610,17 +616,17 @@ class TuiStateSourceTest < Minitest::Test
       row = first.rows.first
       assert_equal "ready_to_brainstorm", row.action_key
 
-      File.write(File.join(row.folder, ".lock"), Hive::Lock.base_payload.to_yaml)
+      publish_tui_task_lease(row.folder)
       source.send(:refresh_once)
 
       refute_same first, source.current
-      assert_equal 3, calls, "task .lock changes must invalidate the cached snapshot"
+      assert_equal 3, calls, "task lease changes must invalidate the cached snapshot"
       assert_equal "agent_running", source.current.rows.first.action_key
       assert_equal true, source.current.rows.first.live_task_lock
     end
   end
 
-  def test_refresh_once_reparses_when_task_lock_disappears
+  def test_refresh_once_reparses_when_task_lease_disappears
     with_seeded_project do |_project, _dir|
       calls = 0
       patch = Module.new do
@@ -633,23 +639,25 @@ class TuiStateSourceTest < Minitest::Test
 
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
-      lock_path = File.join(source.current.rows.first.folder, ".lock")
-      File.write(lock_path, Hive::Lock.base_payload.to_yaml)
+      folder = source.current.rows.first.folder
+      held = publish_tui_task_lease(folder)
       source.send(:refresh_once)
       locked = source.current
       assert_equal "agent_running", locked.rows.first.action_key
 
-      File.delete(lock_path)
+      calls_before_release = calls
+      Hive::Lock.task_lease_repository.release(folder, lock_id: held.fetch("lock_id"))
       source.send(:refresh_once)
 
       refute_same locked, source.current
-      assert_equal 4, calls, "task .lock removal must invalidate the cached snapshot"
+      assert_operator calls, :>, calls_before_release,
+                      "task lease release must invalidate the cached snapshot"
       assert_equal "ready_to_brainstorm", source.current.rows.first.action_key
       assert_equal false, source.current.rows.first.live_task_lock
     end
   end
 
-  def test_refresh_once_reparses_when_task_lock_mtime_changes
+  def test_refresh_once_reparses_when_task_lease_payload_changes
     with_seeded_project do |_project, _dir|
       calls = 0
       patch = Module.new do
@@ -663,17 +671,19 @@ class TuiStateSourceTest < Minitest::Test
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
       row = source.current.rows.first
-      lock_path = File.join(row.folder, ".lock")
-      File.write(lock_path, Hive::Lock.base_payload.to_yaml)
+      held = publish_tui_task_lease(row.folder)
       source.send(:refresh_once)
       locked = source.current
 
-      updated_at = Time.now + 5
-      File.utime(updated_at, updated_at, lock_path)
+      calls_before_update = calls
+      Hive::Lock.task_lease_repository.update(
+        row.folder, { "phase" => "updated" }, lock_id: held.fetch("lock_id")
+      )
       source.send(:refresh_once)
 
       refute_same locked, source.current
-      assert_equal 4, calls, "task .lock mtime changes must invalidate the cached snapshot"
+      assert_operator calls, :>, calls_before_update,
+                      "task lease payload changes must invalidate the cached snapshot"
       assert_equal "agent_running", source.current.rows.first.action_key
       assert_equal true, source.current.rows.first.live_task_lock
     end
@@ -694,7 +704,8 @@ class TuiStateSourceTest < Minitest::Test
       assert_includes fingerprint_paths, File.join(active_folder, "task.md")
       refute_includes fingerprint_paths, archived_folder
       refute_includes fingerprint_paths, File.join(archived_folder, "task.md")
-      refute_includes fingerprint_paths, File.join(archived_folder, ".lock")
+      assert_includes fingerprint_paths, Hive::Paths.runtime_control_plane_path
+      assert_includes fingerprint_paths, "#{Hive::Paths.runtime_control_plane_path}-wal"
       assert_includes source.instance_variable_get(:@archive_dir_mtimes).keys,
                       File.join(hive_state, "stages", "9-done")
     end
@@ -899,11 +910,11 @@ class TuiStateSourceTest < Minitest::Test
     with_direct_project do |_project, hive_state|
       folder = write_state_task(hive_state, "4-execute", "live-task-260626-abcd",
                                 marker: "AGENT_WORKING pid=#{Process.pid}", id: 1)
-      File.write(File.join(folder, ".lock"), YAML.dump(
+      publish_tui_task_lease(folder,
         "claude_pid" => Process.pid,
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid)
-      ))
+      )
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
       assert_equal "agent_running", source.current.rows.first.action_key

@@ -112,6 +112,17 @@ discovery have separate per-project, per-engine daily launch allowances.
 `UsageDb` is telemetry, not admission authority. Provider resource exhaustion
 parks only the affected lane.
 
+Allowance reservations and provider holds are typed `patrol_allowances` rows
+keyed by stable registered `project_id`, engine/kind, and window. The project id
+is injected by discovery callers or resolved from `projects.observed_path` /
+`state_root_path`; basename is never an identity fallback. An immediate Sequel
+transaction makes reservation-id idempotency, used-count increment, and lane
+limit enforcement atomic across daemon processes. Reservation ids, legacy
+seed counts, and seed arrays are bounded to 10,000 entries. Legacy UsageDb
+seeding happens before the SQL transaction; an unavailable or ambiguous seed
+fails closed without a compatibility file. Telemetry reservation/finalization
+also stays outside SQL transactions.
+
 The Patrol arbiter alternates ready ordinary and architecture candidates under
 `daemon.max_concurrent_patrol_scans`. Candidate discovery is read-only;
 reservation revalidates current project registration/configuration and acquires

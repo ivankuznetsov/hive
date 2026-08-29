@@ -28,10 +28,6 @@ module Hive
     INPUT_SCHEMA = "hive-task-closure-input".freeze
     INPUT_SCHEMA_VERSION = Hive::Schemas::SCHEMA_VERSIONS.fetch(INPUT_SCHEMA)
     RECEIPT_BASENAME = "closure.json".freeze
-    # Reuse the existing task-lock temporary namespace so both freshly
-    # initialized and older hive/state worktrees already ignore this private
-    # sidecar during StageAction's slug-scoped git add.
-    LOCK_BASENAME = ".lock.tmp.closure".freeze
     QUARANTINE_DIR = "closure-quarantine".freeze
     REASONS = Hive::TaskClosureContract::REASONS
     AUTHORITIES = %w[remote_merge operator_attestation].freeze
@@ -820,9 +816,10 @@ module Hive
     end
 
     def live_task_lock?(task)
-      return false unless File.file?(task.lock_file)
+      return false if Hive::Lock.task_lock_held?(task.folder)
 
-      holder = Hive::Lock.read_task_lock(task.lock_file)
+      holder = Hive::Lock.read_task_lock(task.folder)
+      return false unless holder
       return true unless holder.is_a?(Hash) && holder["pid"].is_a?(Integer)
 
       Process.kill(0, holder.fetch("pid"))
@@ -1303,16 +1300,16 @@ module Hive
     end
 
     def with_closure_lock(task)
-      path = File.join(task.folder, LOCK_BASENAME)
-      File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
-        lock.chmod(0o600)
-        lock.flock(File::LOCK_EX)
-        yield
-      ensure
-        lock&.flock(File::LOCK_UN)
+      Hive::Lock.with_commit_lock(task.hive_state_path) do
+        Hive::Lock.with_task_lock(
+          task.folder, slug: task.slug, op: "task-closure", create: false
+        ) do
+          yield
+        end
       end
-    rescue SystemCallError, IOError => e
-      raise Error, "closure lock is unavailable: #{e.message}"
+    rescue Hive::ConcurrentRunError, Hive::RuntimeControlPlane::Error,
+           SystemCallError, IOError => error
+      raise Error, "task closure lease is unavailable: #{error.message}"
     end
 
     def resolve_current_task(task, project)

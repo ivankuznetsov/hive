@@ -461,7 +461,7 @@ The daemon adds NO new forward-advance approval logic. Workflow-verb
 safety is delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
 (`%i[complete execute_complete review_complete]`). The daemon is a
 subprocess caller; it never `File.rename`s task folders or touches
-per-task `.lock` files directly. Any misclassification at the `Policy`
+task-lease rows directly. Any misclassification at the `Policy`
 level surfaces as `Hive::WrongStage` (exit 4) at the workflow-verb
 level, not as a silent advance past a human gate. Spawned workflow verbs also
 revalidate dependency admission under their task/commit locks, closing the
@@ -483,12 +483,12 @@ advances a workflow stage directly:
    project has a half-migrated layout (`legacy_stage_dirs`) and rows
    for which the `ConcurrencyController` has a live in-flight slot, or
    rows where `StatusConsumer` reports `live_task_lock: true` because an
-   external `hive run` still holds a verified task lock. The exception is
+   external `hive run` still holds a verified task lease. The exception is
    `REVIEW_WORKING`: if the row's `claude_pid_alive` is false, the current
    lock PID/start-time/lock-id still match the identity captured by status,
    and `pgrep -P <holder>` proves the holder has no children, the healer treats
    the parent as wedged. It terminates only that process identity, claims a new
-   task-lock generation, and rewrites the matching occurrence to
+   task-lease generation, and rewrites the matching occurrence to
    `REVIEW_ERROR`. A replacement holder or failed claim leaves the marker
    untouched. If child inspection fails, or children still exist, it leaves
    the row alone.
@@ -607,8 +607,8 @@ advances a workflow stage directly:
 
 ## External liveness and capacity
 
-`Hive::Commands::Status` emits `tasks[].live_task_lock` when a task
-`.lock` holder PID is alive and its recorded process start time still
+`Hive::Commands::Status` emits `tasks[].live_task_lock` when a typed task
+lease holder PID is alive and its recorded process start time still
 matches. `StatusConsumer` carries that boolean into each row. The
 dispatcher then treats `agent_running` rows as externally active only
 when there is positive liveness evidence: either `claude_pid_alive ==
@@ -618,7 +618,7 @@ That predicate feeds both the global external-active count and the
 per-project active count used by `ConcurrencyController`. A row whose
 only liveness signal is `live_task_lock` consumes daemon capacity, so a
 daemon restart during auto-rebase cannot dispatch extra work past the
-configured caps. Rows with no live Claude PID and no live task lock do
+configured caps. Rows with no live Claude PID and no live task lease do
 not consume capacity; if they are stale `AGENT_WORKING` rows, the healer
 will rewrite them on the same tick or a later retry.
 
@@ -650,7 +650,7 @@ writes** — `Hive::Bot::DispatchRequestWriter`/the answer writer appends
 each answer to `brainstorm.md` one at a time, bumping the mtime each
 time. Without a guard, the daemon's edit-resume would fire ~`edit_debounce_sec`
 after the **first** answer and re-run `hive brainstorm` with a partially
-answered file (and grab the task `.lock`, bouncing the operator's next
+answered file (and grab the task lease, bouncing the operator's next
 answer with "Try again — another run holds the lock").
 
 The fix gates the resume on whether any questions are still unanswered:
@@ -730,7 +730,7 @@ consumes the current mtime immediately (matching a local child dispatch), and
 terminal replay covers a daemon that missed the acceptance; an unchanged
 current mtime is then braked as `markerless_stalled`, atomically rewritten to
 the ordinary recoverable `ERROR` lifecycle, and submitted by the healer on the
-next tick. A live task lock, running controller entry, moved folder, or newer
+next tick. A live task lease, running controller entry, moved folder, or newer
 marker wins the race and remains untouched.
 Mtimes are stored at microsecond resolution and
 the internal task graph emits task `mtime` / `folder_mtime` with matching
@@ -808,7 +808,7 @@ bot's `hive run` child was reaped by the bot's `ChildSupervisor`,
 so the daemon never saw the post-completion mtime bump from the
 agent's own write. On the next tick the row's mtime exceeded the
 stale baseline; Policy returned `:dispatch`; the daemon spawned a
-redundant runner that held the per-task lock for 1-2 min, during
+redundant runner that held the per-task lease for 1-2 min, during
 which the bot rejected legitimate user answers with "Try again —
 another run holds the lock".
 
@@ -1014,7 +1014,7 @@ can't reap a process it didn't spawn), it does **not** re-register that
 `(project, slug)` in the fresh `ConcurrencyController`. For the interval
 until the orphan exits (or its claim ages out), the per-row auto-advance
 path — gated only by the now-empty `running_task?` — could dispatch an
-advance for the same slug. The task `.lock` is the backstop that still
+advance for the same slug. The typed task lease is the backstop that still
 prevents two live runs of the same task; it is a narrower guarantee than
 an in-flight controller slot but holds across the restart. Re-registering
 the orphan was deliberately rejected: with no supervised child to reap,

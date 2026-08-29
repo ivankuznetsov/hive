@@ -1442,7 +1442,7 @@ class SchemaFilesTest < Minitest::Test
     error = Hive::ConcurrentRunError.new(
       "lock held",
       holder: { "pid" => 123, "slug" => "task", "stage" => "4-execute" },
-      lock_path: "/tmp/task.lock"
+      lock_path: "runtime-control-plane:task:task-1"
     )
     {
       "hive-stage-action" => { "verb" => "develop" },

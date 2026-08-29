@@ -1,6 +1,8 @@
 require "test_helper"
 require "hive/task_closure"
 require "hive/task_meta"
+require "hive/patrol_fix/task_manifest"
+require "hive/patrol_fix/projection"
 require "json_schemer"
 
 class TaskClosureTest < Minitest::Test
@@ -106,6 +108,74 @@ class TaskClosureTest < Minitest::Test
         operator: "tester", channel: "cli", authorized: true
       )
       assert_equal receipt.fetch("receipt_digest"), replay.fetch("receipt_digest")
+    end
+  end
+
+  def test_verified_merge_closes_into_the_task_workflow_terminal_stage
+    with_closure_project(
+      workflow: "content", stage: "4-draft", state_file: "draft.md"
+    ) do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+
+      assert preview.valid?, preview.to_h.inspect
+
+      receipt = with_deterministic_content_agent do
+        service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+      end
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+
+      assert_equal "6-done", "#{archived.stage_index}-#{archived.stage_name}"
+      assert_equal :complete, Hive::Markers.current(archived.state_file).name
+      assert_equal receipt.fetch("receipt_digest"),
+                   JSON.parse(File.read(File.join(archived.folder, "closure.json")))
+                       .fetch("receipt_digest")
+    end
+  end
+
+  def test_verified_merge_closes_patrol_fix_without_a_publication_receipt_or_terminal_runner
+    with_closure_project(
+      workflow: "patrol-fix", stage: "3-validate",
+      state_file: Hive::PatrolFix::TaskManifest::FILENAME
+    ) do |task, project|
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+
+      assert preview.valid?, preview.to_h.inspect
+
+      receipt = service.confirm!(
+        task: task, project: project, input: input,
+        preview_digest: preview.preview_digest,
+        operator: "tester", channel: "cli", authorized: true
+      )
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      projection = Hive::PatrolFix::Projection.new(
+        task_folder: archived.folder, stage: "6-done"
+      ).to_h
+      journal = File.join(
+        archived.hive_state_path, "patrol-fix", "transitions", archived.slug,
+        "journal.jsonl"
+      )
+
+      assert_equal "6-done", "#{archived.stage_index}-#{archived.stage_name}"
+      refute_equal :complete, Hive::Markers.current(archived.state_file).name
+      assert_equal "current", projection.fetch("state")
+      assert projection.fetch("archived")
+      assert_equal "done", projection.dig("action", "kind")
+      assert_nil projection.fetch("publication")
+      assert_equal Hive::Schemas::TaskActionKind::ARCHIVED,
+                   Hive::TaskAction.new(archived).key
+      assert_equal %w[intent committed],
+                   File.readlines(journal).map { |line| JSON.parse(line).fetch("event") }
+      assert_equal receipt.fetch("receipt_digest"),
+                   JSON.parse(File.read(File.join(archived.folder, "closure.json")))
+                       .fetch("receipt_digest")
     end
   end
 
@@ -1244,7 +1314,8 @@ class TaskClosureTest < Minitest::Test
     Hive::TaskClosure.new(gh: gh, attempt_store: attempt_store)
   end
 
-  def with_closure_project(successor: false)
+  def with_closure_project(successor: false, workflow: "coding",
+                           stage: "4-execute", state_file: "task.md")
     with_tmp_global_config do |home|
       project = File.join(home, "app")
       FileUtils.mkdir_p(project)
@@ -1261,14 +1332,34 @@ class TaskClosureTest < Minitest::Test
         File.join(hive_state, "config.yml"),
         {
           "default_branch" => "main",
-          "default_workflow" => "coding",
+          "default_workflow" => workflow,
           "worktree_root" => File.join(home, "worktrees")
         }.to_yaml
       )
-      folder = File.join(hive_state, "stages", "4-execute", "closure-task")
+      folder = File.join(hive_state, "stages", stage, "closure-task")
       FileUtils.mkdir_p(folder)
       Hive::TaskMeta.write(folder, id: 1, slug: "closure-task", display_name: "Closure Task")
-      File.write(File.join(folder, "task.md"), "# Closure task\n")
+      if workflow == "patrol-fix"
+        revision = Hive::GitOps.new(project).head_sha
+        Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(
+          "schema" => "hive-patrol-fix-task-manifest",
+          "schema_version" => 1,
+          "task" => { "slug" => "closure-task", "generation" => 1 },
+          "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 },
+          "target_revision" => revision,
+          "sources" => [ {
+            "engine" => "ordinary_patrol", "identity" => "finding-1",
+            "target_revision" => revision, "evidence" => [ "reachable" ],
+            "affected_code" => [ "README.md" ],
+            "reproduction_guidance" => "Run the focused test.",
+            "discovery_run" => "run-1", "semantic_lineage" => [ "root-1" ]
+          } ],
+          "aliases" => [],
+          "relations" => { "successor" => nil, "issues" => [] }
+        )
+      else
+        File.write(File.join(folder, state_file), "# Closure task\n")
+      end
       if successor
         successor_folder = File.join(hive_state, "stages", "1-inbox", "successor-task")
         FileUtils.mkdir_p(successor_folder)

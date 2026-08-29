@@ -3,6 +3,7 @@ require "securerandom"
 require "fileutils"
 require "hive/agent_profiles"
 require "hive/agent_support"
+require "hive/atomic_file"
 
 module Hive
   module Web
@@ -186,9 +187,14 @@ module Hive
         support = Hive::AgentSupport.for(:pi)
         content = support.parse_token(raw_json)
         path = support.credential_path
-        FileUtils.mkdir_p(File.dirname(path))
-        File.write(path, content, mode: "w", perm: 0o600)
-        path
+
+        # AtomicFile replaces the target through a same-directory tempfile
+        # created at 0600 and renames it over the destination, so the
+        # owner-private invariant holds across the credential file's whole
+        # lifetime — File.write's perm: only applies through O_CREAT on first
+        # creation and would silently keep looser modes on an existing auth.json
+        # while persisting fresh secrets into it.
+        Hive::AtomicFile.write(path, content, mode: 0o600)
       end
 
       private

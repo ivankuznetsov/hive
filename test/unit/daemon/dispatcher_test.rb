@@ -1457,6 +1457,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
       [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
+      [ :deferred, "failure_cohort_cooldown", :attempt_failure_cohort, "scheduler" ],
+      [ :deferred, "transient_retry", :attempt_transient_retry, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
       [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
       [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
@@ -1796,6 +1798,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, = make_dispatcher(operational_snapshot: snapshot)
     observed = row
     expected = {
+      attempt_transient_retry: [ "scheduler", "transient contention is waiting for its retry backoff" ],
       attempt_deferred: [ "hive", "durable attempt admission was deferred" ],
       daily_cap: [ "scheduler", "project daily dispatch budget is exhausted" ],
       cooldown: [ "scheduler", "task is inside its scheduler cooldown" ],
@@ -6900,21 +6903,27 @@ end
   def test_durable_auto_dispatch_logs_all_admission_outcomes_and_charges_only_new_starts
     attempt = Struct.new(:attempt_id, :task_generation, :state)
                     .new("attempt-1", "generation-1", "launching")
-    statuses = [ :accepted, :existing_live, :terminal_replay, :deferred ]
+    outcomes = [
+      [ :accepted, nil ],
+      [ :existing_live, nil ],
+      [ :terminal_replay, nil ],
+      [ :deferred, "capacity" ],
+      [ :deferred, "failure_cohort_cooldown" ]
+    ]
     calls = []
     attempt_dispatcher = Object.new
     attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
-      status = statuses.shift
+      status, reason = outcomes.shift
       calls << [ request, options ]
       Hive::Attempts::DispatchResult.new(
         status: status, attempt: (status == :deferred ? nil : attempt), receipt: nil,
-        attach_descriptor: nil, reason: (status == :deferred ? "capacity" : nil)
+        attach_descriptor: nil, reason: reason
       )
     end
     dispatcher, supervisor, _controller, logger = make_dispatcher(
       rows: [], attempt_dispatcher: attempt_dispatcher
     )
-    results = 4.times.map do |index|
+    results = 5.times.map do |index|
       dispatcher.send(
         :dispatch_command, "hive run demo-task", project: "p1", slug: "demo-task",
         stage: "4-execute", state_file_mtime: nil, state_file_path: nil,
@@ -6922,11 +6931,15 @@ end
       )
     end
 
-    assert_equal %i[accepted existing_live terminal_replay deferred], results.map(&:status)
-    assert_equal 4, calls.size
+    assert_equal %i[accepted existing_live terminal_replay deferred deferred],
+                 results.map(&:status)
+    assert_equal 5, calls.size
     assert_empty supervisor.spawned
     assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
-    assert_equal %i[attempt_accepted attempt_duplicate attempt_terminal_replay attempt_capacity_deferred],
+    assert_equal %i[
+      attempt_accepted attempt_duplicate attempt_terminal_replay
+      attempt_capacity_deferred attempt_failure_cohort_deferred
+    ],
                  logger.events.map(&:first).grep(/attempt_/)
     dispatched = logger.events.select { |name, _attrs| name == :dispatched }
     assert_equal 1, dispatched.size

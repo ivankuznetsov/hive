@@ -319,7 +319,7 @@ module Hive
             state_home: @state_home
           )
           if existing
-            existing = unpark_deterministic_failure(existing, now:) if operator_request
+            existing = expedite_operator_recovery(existing, now:) if operator_request
             return receipt_for_request(
               existing,
               replay: existing.recovery&.fetch("phase", nil) == "terminal",
@@ -360,7 +360,8 @@ module Hive
           end
           attrs = Hive::Recovery.canonical_marker_attrs(current.attrs)
           marker_id = marker_identity(current)
-          next_eligible_at = assessment[:retry_at].utc.iso8601(6)
+          next_eligible_at =
+            (operator_request ? now : assessment[:retry_at].utc).iso8601(6)
           failure_evidence = failure_evidence_for(
             row, retry_count: retry_count, marker_attrs: attrs
           )
@@ -1668,23 +1669,27 @@ module Hive
         request
       end
 
-      # Evidence parking is inert under daemon replay. Only an explicit,
-      # freshness-bound operator retry releases the same guarded request back
-      # into its admitted -> cleared -> dispatched transition.
-      def unpark_deterministic_failure(request, now:)
+      # Automatic cooldown and evidence parking are inert under daemon replay.
+      # Only an explicit, freshness-bound operator retry makes the same guarded
+      # request immediately due and releases deterministic evidence parking.
+      def expedite_operator_recovery(request, now:)
         recovery = request.recovery || {}
         return request unless recovery["phase"] == "admitted"
-        return request unless recovery["blocked_reason"] == "deterministic_failure"
+        blocked_reason = recovery["blocked_reason"]
+        return request unless blocked_reason.nil? || blocked_reason == "deterministic_failure"
 
-        transitioned = @request_queue.update_recovery!(
-          request.request_id,
-          expected_phase: "admitted",
-          changes: {
-            "next_eligible_at" => now.utc.iso8601(6),
+        changes = { "next_eligible_at" => now.utc.iso8601(6) }
+        if blocked_reason == "deterministic_failure"
+          changes.merge!(
             "blocked_reason" => nil,
             "blocked_remediation" => nil,
             "owner" => "scheduler"
-          },
+          )
+        end
+        transitioned = @request_queue.update_recovery!(
+          request.request_id,
+          expected_phase: "admitted",
+          changes: changes,
           state_home: @state_home
         )
         refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)

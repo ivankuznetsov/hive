@@ -20,26 +20,34 @@ module Hive
         #       targets: code            # `code` (any added line) or `file_path` (any path match)
         module Patterns
           # Each pattern descriptor:
+          #   :detector    — which scan engine owns this pattern:
+          #                    :regex           — spec[:regex] matched against the target text
+          #                    :secret_patterns — dispatched to Hive::SecretPatterns.scan;
+          #                                       no spec[:regex] participates in matching
           #   :regex       — Regexp matched against either added lines (code) or file paths (file_path)
           #   :severity    — :high | :medium | :nit (used to group findings in fix-guardrail-NN.md)
           #   :targets     — :code | :file_path (which side of the diff to scan)
           #   :description — single-line explanation surfaced in the finding
           DEFAULTS = {
             shell_pipe_to_interpreter: {
+              detector: :regex,
               regex: /(?:\bcurl\b|\bwget\b)[^|\n]*\|\s*(?:sh|bash|zsh|fish|python\d?|ruby|node|perl)\b/,
               severity: :high,
               targets: :code,
               description: "shell-pipe-to-interpreter: a curl/wget pipe into sh/bash/python/ruby/node executes attacker-controlled code if the URL ever serves something else."
             },
             ci_workflow_edit: {
+              detector: :regex,
               regex: %r{\A(?:\.github/workflows/|\.gitlab-ci\.ya?ml\z|\.circleci/config\.ya?ml\z|Jenkinsfile\z|bitbucket-pipelines\.ya?ml\z|\.azure-pipelines\.ya?ml\z|\.travis\.ya?ml\z)},
               severity: :high,
               targets: :file_path,
               description: "CI workflow edit: changes to CI/CD config files affect every future deploy. Auto-fixing them is a privilege escalation in the deploy pipeline."
             },
             secrets_pattern_match: {
-              # Special-cased: this dispatches to Hive::SecretPatterns.
-              # FixGuardrail.scan handles it as a separate path.
+              # Explicit non-regex strategy: scan dispatches on this
+              # detector key and hands each added line to
+              # Hive::SecretPatterns.scan instead of spec[:regex].
+              detector: :secret_patterns,
               regex: nil,
               severity: :high,
               targets: :code,
@@ -60,6 +68,7 @@ module Hive
               # .env.staging, .env.development) still trip. Projects
               # that genuinely keep secrets in .env.example can re-add
               # strict matching via review.fix.guardrail.patterns_override.
+              detector: :regex,
               regex: %r{
                 (?:\A|/)(?:
                   \.env\z
@@ -75,6 +84,7 @@ module Hive
               description: ".env / secrets file edit: env/secret files often contain credentials and per-environment overrides; auto-fix shouldn't touch them."
             },
             dependency_lockfile_change: {
+              detector: :regex,
               # `(?:\A|/)` so monorepo lockfiles match too —
               # packages/y/package-lock.json, services/api/Gemfile.lock,
               # apps/web/yarn.lock — not just repo-root.
@@ -84,6 +94,7 @@ module Hive
               description: "lockfile churn during a fix pass: verify the change is an intended bump, not an accidental downgrade or arbitrary version drift."
             },
             permission_change: {
+              detector: :regex,
               # Catch any executable / setuid / setgid / world-writable bit
               # in the trailing octal triple (1, 3, 5, or 7 → exec bit set):
               # 100755, 100777, 104755 (setuid), 102755 (setgid), …

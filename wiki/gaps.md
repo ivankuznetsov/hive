@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-27
+updated: 2026-08-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Main-wiki QMD freshness
+
+LLM-wiki bootstrap now resolves the live `hive-wiki` collection from QMD's
+local `index.yml` before legacy filesystem conventions, so stale deleted
+`main_wiki_path` values can migrate to the collection's current directory.
+This validates directory presence, not index freshness: QMD indexing remains
+owned by the bounded refresh runner, and an old collection index can still
+return stale search results until its next successful update.
 
 ## Unified Patrol Fix live execution
 
@@ -66,18 +75,22 @@ and reach one focused hosted PR.
 The sanitized 600-charge incident replay pins the Patrol/coding, outcome,
 generation-stage repeat, stage, and failure-class aggregates without retaining
 task identities, provider output, secret material, credentials, or host paths.
-It also characterizes the current undifferentiated daily pool: once Patrol has
+It also characterizes the former undifferentiated daily pool: once Patrol had
 used all 600 charges, later-stage Patrol progress, first-attempt Patrol work,
-and non-Patrol work are all starved even though later-stage ordering remains
-stable. This is expected-failure evidence for the later containment units, not
-a scheduling-policy change.
+and non-Patrol work were all starved even though later-stage ordering remained
+stable. Source and focused tests now pace three matching receipt-bound typed
+Patrol failures with one durable probe across restart while leaving task
+capacity as the shared safety boundary. The remaining gap is installed-daemon load
+and UTC-rollover proof over a live representative backlog; the sanitized replay
+is deterministic local evidence, not that operational soak.
 
 The preceding seven complete UTC days cannot be reconstructed into a
 defensible non-Patrol demand series from the retained Attempts v4 records.
 Historical `1-inbox` attempts do not all carry an unambiguous durable workflow
-identity, so classifying them as Patrol or coding would invent evidence. Until
-workflow-attributed history exists, reserve calibration must use the documented
-10% fail-safe rather than a fabricated p95.
+identity, so classifying them as Patrol or coding would invent evidence. No
+task-capacity partition is inferred from that missing history: Patrol discovery
+already has separate scan concurrency and per-engine daily allowances, while
+Attempts capacity remains a shared safety boundary.
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
@@ -1133,7 +1146,8 @@ normal merge gate.
 
 Deterministic policy, adapter, lineage, decision, transition-bypass, status/TUI,
 and Rails Web tests pin the conditional plan-review contract, including
-requested native Grok Build / `grok-4.6` and different-family independence.
+requested native Grok Build / `grok-4.6`, its `grok-4.6-build` served identity,
+and different-family independence.
 `test/smoke/plan_review_smoke_test.rb` now provides the credential-preserving
 real route proof, but it deliberately requires `HIVE_LIVE_PLAN_REVIEW=1` and is
 excluded from normal CI. Until an operator runs that opt-in smoke on the exact

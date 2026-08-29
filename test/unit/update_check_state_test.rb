@@ -195,21 +195,105 @@ class UpdateCheckStateTest < Minitest::Test
     assert(logger.events.any? { |name, _| name == :update_check_state_write_error })
   end
 
-  def test_unreadable_file_is_treated_as_corrupt
+  def test_unreadable_file_degrades_without_raising_and_without_clobbering
     logger = RecordingLogger.new
-    File.write(@path, JSON.generate({ "schema_version" => 1, "last_notified_version" => "9.9.9" }))
+    state.record_notified!("9.9.9")
     File.chmod(0o000, @path)
     s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
-    assert s.should_notify?("0.1.7"), "an unreadable file degrades to empty (corrupt), never raises"
-    assert(logger.events.any? { |name, _| name == :update_check_state_corrupt })
+    # Fresh instance has no last-known state, so it behaves as empty — but a
+    # mutation must NOT persist that emptied view over the unreadable file.
+    assert s.should_notify?("0.1.7"), "an unreadable file degrades to last-known (here: empty), never raises"
+    s.record_check!(@now)
+    File.chmod(0o644, @path)
+    on_disk = JSON.parse(File.read(@path))
+    assert_equal "9.9.9", on_disk["last_notified_version"], "read error must not reset shared state on disk"
+    assert_nil on_disk["last_check_at"], "write must be suspended while the file is unreadable"
+    assert(logger.events.any? { |name, _| name == :update_check_state_read_error })
   ensure
     File.chmod(0o644, @path) if @path && File.exist?(@path)
+  end
+
+  def test_transient_read_error_does_not_reset_shared_state
+    # Patrol regression: a good file {last_check_at:T, last_notified_version:
+    # "1.2.4", nudge:N}; File.read raises Errno::EIO during record_check!'s
+    # load!. handle_corrupt! used to empty @data and the subsequent
+    # persist_locked! renamed that emptied state over the intact file,
+    # permanently losing the bot's de-dupe key and the daemon's nudge.
+    logger = RecordingLogger.new
+    s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
+    s.record_notified!("1.2.4")
+    s.set_nudge(latest: "1.2.4", channel: "brew", command: "brew upgrade x")
+
+    with_replaced_singleton_method(File, :read, ->(*_a, **_k) { raise Errno::EIO }) do
+      s.record_check!(@now) # read fails mid-read-modify-write; write must be suspended
+    end
+
+    on_disk = JSON.parse(File.read(@path))
+    assert_equal "1.2.4", on_disk["last_notified_version"], "transient EIO must not erase the de-dupe key"
+    assert on_disk["nudge"], "transient EIO must not erase the nudge payload"
+    assert_nil on_disk["last_check_at"], "the tick's timestamp is dropped rather than persisted from reset state"
+    assert(logger.events.any? { |name, _| name == :update_check_state_read_error })
+    refute(logger.events.any? { |name, _| name == :update_check_state_write_error })
+
+    # Next successful load! clears the suspend flag; normal operation resumes.
+    s.record_check!(@now + 3600)
+    on_disk = JSON.parse(File.read(@path))
+    assert_equal (@now + 3600).utc.iso8601, on_disk["last_check_at"]
+    assert_equal "1.2.4", on_disk["last_notified_version"]
+    assert on_disk["nudge"], "recovered writes must preserve earlier keys"
   end
 
   def test_release_lock_swallows_errors
     bad = Object.new
     def bad.flock(_mode) = raise(IOError, "boom")
     state.send(:release_lock, bad) # must not raise
+  end
+
+  def test_flock_failure_closes_the_already_open_lock_fd
+    opened = nil
+    original_open = File.method(:open)
+    failing_open = lambda do |*args, **kwargs, &blk|
+      handle = original_open.call(*args, **kwargs, &blk)
+      if args.first.to_s.end_with?(".lock")
+        opened = handle
+        def handle.flock(_mode)
+          raise Errno::ENOLCK # open succeeded; acquiring the lock failed
+        end
+      end
+      handle
+    end
+    logger = RecordingLogger.new
+    s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
+    with_replaced_singleton_method(File, :open, failing_open) do
+      s.record_check!(@now) # must degrade to best-effort, not raise
+    end
+    assert opened, "the lock file was opened before flock raised"
+    assert_predicate opened, :closed?,
+                     "a failed flock must close the fd it already opened — no leak per op"
+    assert(logger.events.any? { |name, _| name == :update_check_state_lock_error })
+  end
+
+  def test_flock_failure_swallows_a_secondary_close_error
+    handle = Object.new
+    def handle.flock(_mode) = raise(Errno::ENOLCK)
+    def handle.close = raise(IOError, "synthetic close failure")
+
+    original_open = File.method(:open)
+    failing_open = lambda do |*args, **kwargs, &block|
+      if args.first.to_s.end_with?(".lock")
+        handle
+      else
+        original_open.call(*args, **kwargs, &block)
+      end
+    end
+    logger = RecordingLogger.new
+    s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
+
+    with_replaced_singleton_method(File, :open, failing_open) do
+      s.record_check!(@now)
+    end
+
+    assert(logger.events.any? { |name, _| name == :update_check_state_lock_error })
   end
 
   def test_fsync_dir_swallows_errors

@@ -185,6 +185,95 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  # --- explicit detector strategy -------------------------------------
+
+  def test_every_default_pattern_declares_an_explicit_detector
+    Hive::Stages::Review::FixGuardrail::Patterns::DEFAULTS.each do |name, spec|
+      assert_includes %i[regex secret_patterns], spec[:detector],
+                      "#{name} must declare an explicit :detector strategy"
+    end
+  end
+
+  def test_scan_diff_rejects_an_unknown_detector
+    patterns = {
+      custom: {
+        detector: :unknown,
+        severity: :high,
+        targets: :code
+      }
+    }
+
+    error = assert_raises(Hive::AgentError) do
+      Hive::Stages::Review::FixGuardrail.scan_diff("+danger\n", patterns)
+    end
+
+    assert_match(/custom.*unknown detector.*:unknown/, error.message)
+  end
+
+  # Regression: dispatch previously branched on the pattern *name*
+  # (`if name == :secrets_pattern_match`), so a Hash override of that
+  # name still routed to Hive::SecretPatterns even though the override
+  # supplied its own regex. Replacement semantics are now total — the
+  # Hash override installs a plain regex detector and the special
+  # SecretPatterns dispatch never survives it.
+  def test_hash_override_of_secrets_pattern_match_replaces_the_special_detector
+    access_key = [ "AKIA", "IOSFODNN7EXAMPLE" ].join
+    with_two_commits(file: "config/aws.rb",
+                     content: %(ACCESS = "#{access_key}"\n)) do |dir, base, head|
+      cfg_override = cfg(
+        "review" => {
+          "fix" => {
+            "guardrail" => {
+              "patterns_override" => {
+                "secrets_pattern_match" => {
+                  "regex" => "forbidden_marker",
+                  "severity" => "high",
+                  "targets" => "code"
+                }
+              }
+            }
+          }
+        }
+      )
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg_override, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :clean, result.status,
+                   "overridden secrets_pattern_match must not keep the SecretPatterns dispatch; " \
+                   "an AWS key alone must not trip the replaced regex detector"
+    end
+  end
+
+  def test_hash_override_of_secrets_pattern_match_matches_via_its_own_regex
+    with_two_commits(file: "lib/x.rb",
+                     content: "use forbidden_marker here\n") do |dir, base, head|
+      cfg_override = cfg(
+        "review" => {
+          "fix" => {
+            "guardrail" => {
+              "patterns_override" => {
+                "secrets_pattern_match" => {
+                  "regex" => "forbidden_marker",
+                  "severity" => "high",
+                  "targets" => "code"
+                }
+              }
+            }
+          }
+        }
+      )
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg_override, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status
+      match = result.matches.find { |m| m.pattern_name == "secrets_pattern_match" }
+      refute_nil match
+      assert_equal :high, match.severity
+    end
+  end
+
   # --- secrets_pattern_match -----------------------------------------
 
   def test_trips_on_aws_access_key_in_diff

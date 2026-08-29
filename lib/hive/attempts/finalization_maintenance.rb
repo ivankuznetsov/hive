@@ -1,4 +1,5 @@
 require "hive/attempts/lost_outcome"
+require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/store"
 require "json"
 require "psych"
@@ -75,6 +76,7 @@ module Hive
         @logger = logger
         @provider_health_observer_factory = provider_health_observer_factory
         @storage_health = store.storage_health
+        @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
       end
 
       def prepare(record)
@@ -136,6 +138,10 @@ module Hive
             raise StoreError, "hot attempt changed after final proof publication"
           end
 
+          reservation = @store.decision_index.live_reservations[current.attempt_id]
+          @failure_cohort_reconciler.reconcile(
+            record: current, admission: reservation&.fetch("admission", nil)
+          )
           pending.remove_complete(record.attempt_id)
           @store.decision_index.release_live(attempt_id: record.attempt_id)
           @store.remove_hot_final(current)

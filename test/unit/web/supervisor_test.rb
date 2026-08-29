@@ -54,23 +54,30 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
-  def test_should_restart_skips_only_clean_exit_and_shutdown
+  def test_should_restart_skips_only_clean_exit_shutdown_and_undesired_children
     with_tmp_global_config do
       sup = build
       crashed = run_status([ "sh", "-c", "exit 1" ])
       clean = run_status([ "true" ])
       signaled = run_status([ "sh", "-c", "kill -TERM $$" ])
+      wanted = Child.new(name: "bot", argv: %w[x], pid: nil, started_at: Time.now, desired: true)
+      undesired = Child.new(name: "bot", argv: %w[x], pid: nil, started_at: Time.now, desired: false)
+      legacy = Child.new(name: "web", argv: %w[x], pid: nil, started_at: Time.now)
 
-      assert sup.send(:should_restart?, crashed), "a non-zero crash must restart"
-      refute sup.send(:should_restart?, clean), "a clean (success) exit must NOT restart"
-      assert sup.send(:should_restart?, signaled),
+      assert sup.send(:should_restart?, wanted, crashed), "a non-zero crash must restart"
+      assert sup.send(:should_restart?, legacy, crashed),
+             "a child with no desired flag (nil) counts as desired — legacy construction"
+      refute sup.send(:should_restart?, wanted, clean), "a clean (success) exit must NOT restart"
+      assert sup.send(:should_restart?, wanted, signaled),
              "a signal death OUTSIDE shutdown (e.g. the OOM killer) must respawn — " \
              "@stopping already excludes the terminate_all race"
+      refute sup.send(:should_restart?, undesired, signaled),
+             "the supervisor's own intentional TERM (desired: false) must not respawn"
 
       sup.instance_variable_set(:@stopping, true)
-      refute sup.send(:should_restart?, crashed),
+      refute sup.send(:should_restart?, wanted, crashed),
              "nothing is restarted once the supervisor is stopping"
-      refute sup.send(:should_restart?, signaled),
+      refute sup.send(:should_restart?, wanted, signaled),
              "shutdown TERMs must not respawn-then-re-kill"
     end
   end
@@ -154,6 +161,90 @@ class WebSupervisorTest < Minitest::Test
       _, status = Process.waitpid2(bot_pid)
       assert status.signaled?, "reload with bot disabled must stop the running bot"
       refute restart_at(sup).key?("bot"), "a disabled bot must not be rescheduled"
+    end
+  end
+
+  # Patrol regression: disabling the bot via SIGHUP reload TERMs it; the reap
+  # of that signal death used to look like a crash (not @stopping, not a
+  # success exit), re-adding the @restart_at entry handle_reload had just
+  # deleted and respawning a bot the operator had disabled. The child's
+  # desired-running state must survive until the reap so the stop sticks.
+  def test_handle_reload_disabled_bot_stays_stopped_through_reap_and_restart_scan
+    with_tmp_global_config do
+      sup = build
+      bot_pid = Process.spawn("sleep", "30", pgroup: true)
+      bot = Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: bot_pid,
+                      started_at: Time.now - 3600)
+      sup.instance_variable_get(:@children) << bot
+
+      sup.send(:handle_reload)
+
+      assert_equal false, bot.desired,
+                   "reload must flip desired-running to false BEFORE the TERM"
+      reap_until_drained(sup)
+      refute restart_at(sup).key?("bot"),
+             "reaping an intentionally stopped bot must not schedule a respawn"
+
+      started = stub_start_child(sup)
+      sup.send(:start_due_restarts)
+      assert_empty started,
+                   "a disabled bot must never come back via start_due_restarts"
+    end
+  end
+
+  # Patrol rework regression: the live-PID disable path was fixed first, but a
+  # bot that had ALREADY crashed and was awaiting its scheduled respawn (pid
+  # nil, @restart_at entry queued) slipped through — the disable reload only
+  # acted when a pid was present, so start_due_restarts later fired the queued
+  # entry and respawned a bot the config no longer enables. Disable intent
+  # must be authoritative regardless of how the bot is currently down.
+  def test_handle_reload_disabled_bot_cancels_a_pending_crash_restart
+    with_tmp_global_config do
+      sup = build
+      bot = Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: nil,
+                      started_at: Time.now - 3600, desired: true)
+      sup.instance_variable_get(:@children) << bot
+      restart_at(sup)["bot"] = Time.now + 3600   # queued crash restart, not yet due
+
+      sup.send(:handle_reload)
+
+      assert_equal false, bot.desired,
+                   "disable intent must flip desired-running even without a live pid"
+      refute restart_at(sup).key?("bot"),
+             "the queued crash restart must be cancelled, not left to fire"
+
+      started = stub_start_child(sup)
+      restart_at(sup)["bot"] = Time.now - 1 unless restart_at(sup).empty?
+      sup.send(:start_due_restarts)
+      assert_empty started,
+                   "a config-disabled bot must never come back via its queued restart"
+    end
+  end
+
+  # Re-enable transition: a bot previously stopped by a disable reload (pid
+  # nil, desired false) must come back — desired re-armed — when a later
+  # reload sees it enabled again.
+  def test_handle_reload_re_enabling_respawns_a_previously_disabled_bot
+    with_tmp_global_config do
+      sup = build
+      bot = Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: nil,
+                      started_at: Time.now, desired: false)
+      sup.instance_variable_get(:@children) << bot
+
+      Hive::Config.update_global_config! do |data|
+        data["bot"] = { "enabled" => true, "chat_id_allowlist" => [ 1 ] }
+      end
+      sup.send(:handle_reload)
+
+      assert bot.pid, "re-enabling must start the stopped bot again"
+      assert_equal true, bot.desired,
+                   "the restarted bot must be desired again so later crashes respawn it"
+    ensure
+      bot = sup.instance_variable_get(:@children).find { |c| c.name == "bot" }
+      if bot&.pid
+        Process.kill("KILL", -bot.pid) rescue nil
+        Process.waitpid(bot.pid) rescue nil
+      end
     end
   end
 
@@ -272,11 +363,14 @@ class WebSupervisorTest < Minitest::Test
       sup = build
       sup.send(:start_child, "web", [ "sleep", "30" ])
       first = sup.instance_variable_get(:@children).first.pid
+      sup.instance_variable_get(:@children).first.desired = false
       sup.send(:start_child, "web", [ "sleep", "30" ])
       children = sup.instance_variable_get(:@children)
 
       assert_equal 1, children.size, "a restart must rebind the existing child, not append"
       refute_equal first, children.first.pid, "the rebind must record the new pid"
+      assert_equal true, children.first.desired,
+                   "(re)starting a child must re-arm desired-running so later crashes respawn it"
     ensure
       children = sup.instance_variable_get(:@children)
       children.each { |c| Process.kill("KILL", -c.pid) rescue nil; Process.waitpid(c.pid) rescue nil }

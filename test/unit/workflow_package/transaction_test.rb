@@ -26,6 +26,98 @@ class WorkflowPackageTransactionTest < Minitest::Test
     end
   end
 
+  def test_post_commit_journal_failure_keeps_new_pointer_and_surviving_journal
+    with_transaction_repo do |root, workflows, lock|
+      old = "{\"old\":true}\n"
+      new_bytes = "{\"new\":true}\n"
+      journal_class = Hive::WorkflowPackage::TransactionJournal
+      original_write = journal_class.instance_method(:write)
+      journal_class.define_method(:write) do |data|
+        raise "injected journal failure" if data["phase"] == "commit_completed"
+
+        original_write.bind_call(self, data)
+      end
+
+      begin
+        Hive::WorkflowPackage::Transaction.activate(
+          lock_path: lock, workflows_dir: workflows, new_lock: { "new" => true },
+          commit: lambda {
+            File.write(lock, new_bytes)
+            run!("git", "-C", root, "add", "workflows/demo/honeycomb.lock.json")
+            run!("git", "-C", root, "commit", "-m", "activate", "--quiet")
+          }
+        )
+        flunk "expected the injected journal failure to propagate"
+      rescue RuntimeError => e
+        assert_equal "injected journal failure", e.message
+      ensure
+        journal_class.class_eval { remove_method :write }
+        journal_class.class_eval { define_method(:write) { |data| original_write.bind_call(self, data) } }
+      end
+
+      # The commit is irreversible, so the working pointer must match HEAD
+      # and the commit_started journal must survive for reconciliation.
+      assert_equal new_bytes, File.read(lock)
+      journal = Hive::WorkflowPackage::TransactionJournal.new(workflows)
+      data = journal.read
+      assert_equal "commit_started", data.fetch("phase")
+      assert_equal old, data.fetch("old_lock")
+
+      assert Hive::WorkflowPackage::Transaction.new(lock_path: lock, workflows_dir: workflows).reconcile!
+      assert_equal new_bytes, File.read(lock)
+      refute File.exist?(journal.path)
+    end
+  end
+
+  def test_activate_journals_and_restores_non_ascii_lock_bytes
+    with_tmp_dir do |dir|
+      lock = File.join(dir, "demo", "honeycomb.lock.json")
+      FileUtils.mkdir_p(File.dirname(lock))
+      old = %Q({"author":"Jos\u00e9"}\n)
+      File.binwrite(lock, old)
+
+      assert_raises(Hive::GitError) do
+        Hive::WorkflowPackage::Transaction.activate(
+          lock_path: lock, workflows_dir: dir, new_lock: { "new" => true },
+          commit: -> { raise Hive::GitError, "commit failed" }
+        )
+      end
+
+      assert_equal old.b, File.binread(lock)
+      refute File.exist?(File.join(dir, ".transaction.json"))
+    end
+  end
+
+  def test_activate_commits_over_non_ascii_lock_bytes
+    with_tmp_dir do |dir|
+      lock = File.join(dir, "demo", "honeycomb.lock.json")
+      FileUtils.mkdir_p(File.dirname(lock))
+      File.binwrite(lock, %Q({"author":"Jos\u00e9"}\n))
+
+      Hive::WorkflowPackage::Transaction.activate(
+        lock_path: lock, workflows_dir: dir, new_lock: { "packages" => {} }
+      )
+
+      assert_equal "{\"packages\":{}}\n", File.read(lock)
+    end
+  end
+
+  def test_reconcile_restores_opaque_binary_old_pointer
+    with_tmp_dir do |dir|
+      lock = File.join(dir, "demo", "honeycomb.lock.json")
+      FileUtils.mkdir_p(File.dirname(lock))
+      old = "{\"author\":\"Jos\u00e9\"}\n\xFF\xFE".b
+      File.binwrite(lock, "{\"new\":true}\n")
+      Hive::WorkflowPackage::TransactionJournal.new(dir).write(
+        "schema_version" => 1, "phase" => "prepared", "lock_path" => lock,
+        "old_lock" => old, "new_lock" => "{\"new\":true}\n"
+      )
+
+      assert Hive::WorkflowPackage::Transaction.new(lock_path: lock, workflows_dir: dir).reconcile!
+      assert_equal old.b, File.binread(lock)
+    end
+  end
+
   def test_reconcile_restores_old_pointer_after_interrupted_activation
     with_tmp_dir do |dir|
       lock = File.join(dir, "demo", "honeycomb.lock.json")
@@ -144,6 +236,45 @@ class WorkflowPackageTransactionTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         Hive::WorkflowPackage::TransactionJournal.new(dir).read
       end
+    end
+  end
+
+  def test_invalid_binary_envelope_fails_closed
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, ".transaction.json"),
+        JSON.generate("old_lock" => { "__binary__" => "not base64!" })
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::TransactionJournal.new(dir).read
+      end
+      assert_equal "managed workflow transaction journal is malformed", error.message
+    end
+  end
+
+  def test_non_string_binary_envelope_fails_closed
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, ".transaction.json"),
+        JSON.generate("old_lock" => { "__binary__" => 123 })
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::TransactionJournal.new(dir).read
+      end
+      assert_equal "managed workflow transaction journal is malformed", error.message
+    end
+  end
+
+  def test_journal_round_trips_binary_values_nested_in_arrays
+    with_tmp_dir do |dir|
+      journal = Hive::WorkflowPackage::TransactionJournal.new(dir)
+      data = { "entries" => [ "text", [ "\xFF\xFE".b ] ] }
+
+      journal.write(data)
+
+      assert_equal data, journal.read
     end
   end
 

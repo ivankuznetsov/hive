@@ -90,10 +90,74 @@ class AgentCliRuntimeOpenCodeOfflineSmokeTest < Minitest::Test
     end
   end
 
+  def test_installed_binary_prefers_a_native_executable_over_an_earlier_shim
+    Dir.mktmpdir("agent-cli-runtime-opencode-path") do |dir|
+      shim_dir = File.join(dir, "shim")
+      native_dir = File.join(dir, "native")
+      FileUtils.mkdir_p([ shim_dir, native_dir ])
+      shim = File.join(shim_dir, "opencode")
+      native = File.join(native_dir, "opencode")
+      write_executable(shim, "#!/bin/sh\nexit 0\n")
+      write_executable(native, "\x7FELF")
+
+      assert_equal native, installed_binary(
+        env: { "PATH" => [ shim_dir, native_dir ].join(File::PATH_SEPARATOR) }
+      )
+    end
+  end
+
+  def test_installed_binary_skips_an_earlier_binary_mise_shim
+    Dir.mktmpdir("agent-cli-runtime-opencode-path") do |dir|
+      shim_dir = File.join(dir, "shim")
+      native_dir = File.join(dir, "native")
+      FileUtils.mkdir_p([ shim_dir, native_dir ])
+      mise = File.join(dir, "mise")
+      shim = File.join(shim_dir, "opencode")
+      native = File.join(native_dir, "opencode")
+      write_executable(mise, "\x7FELF")
+      File.symlink(mise, shim)
+      write_executable(native, "\x7FELF")
+
+      assert_equal native, installed_binary(
+        env: { "PATH" => [ shim_dir, native_dir ].join(File::PATH_SEPARATOR) }
+      )
+    end
+  end
+
+  def test_installed_binary_keeps_the_explicit_override_authoritative
+    Dir.mktmpdir("agent-cli-runtime-opencode-path") do |dir|
+      override = File.join(dir, "explicit-opencode")
+      write_executable(override, "#!/bin/sh\nexit 0\n")
+
+      assert_equal override, installed_binary(
+        env: {
+          "AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN" => override,
+          "PATH" => ""
+        }
+      )
+    end
+  end
+
+  def test_installed_binary_does_not_auto_select_a_package_manager_shim
+    Dir.mktmpdir("agent-cli-runtime-opencode-path") do |dir|
+      script_dir = File.join(dir, "script")
+      binary_dir = File.join(dir, "binary")
+      FileUtils.mkdir_p([ script_dir, binary_dir ])
+      write_executable(File.join(script_dir, "opencode"), "#!/bin/sh\nexit 0\n")
+      mise = File.join(dir, "mise")
+      write_executable(mise, "\x7FELF")
+      File.symlink(mise, File.join(binary_dir, "opencode"))
+
+      assert_nil installed_binary(
+        env: { "PATH" => [ script_dir, binary_dir ].join(File::PATH_SEPARATOR) }
+      )
+    end
+  end
+
   private
 
-  def installed_binary
-    explicit = ENV["AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN"].to_s
+  def installed_binary(env: ENV)
+    explicit = env["AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN"].to_s
     unless explicit.empty?
       path = File.expand_path(explicit)
       return path if File.file?(path) && File.executable?(path)
@@ -101,18 +165,28 @@ class AgentCliRuntimeOpenCodeOfflineSmokeTest < Minitest::Test
       flunk "AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN is not executable"
     end
 
-    executable = AgentCliRuntime::Profiles.fetch(:opencode).bin(env: ENV)
+    executable = AgentCliRuntime::Profiles.fetch(:opencode).bin(env: env)
     if executable.include?(File::SEPARATOR)
       return File.expand_path(executable) if File.file?(executable) && File.executable?(executable)
 
       return nil
     end
 
-    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
+    env.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
       candidate = File.join(directory, executable)
-      return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
+      next unless File.file?(candidate) && File.executable?(candidate)
+
+      resolved = File.realpath(candidate)
+      return resolved unless launcher?(candidate, resolved)
     end
     nil
+  end
+
+  def launcher?(candidate, resolved)
+    File.binread(resolved, 2) == "#!" ||
+      File.basename(resolved) != File.basename(candidate)
+  rescue SystemCallError
+    true
   end
 
   def write_guarded_wrapper(path, binary, calls, provider)

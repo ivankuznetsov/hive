@@ -80,6 +80,8 @@ module Hive
         attempt_lost
         attempt_duplicate
         attempt_terminal_replay
+        attempt_transient_retry
+        attempt_failure_cohort_deferred
         attempt_capacity_deferred
         attempt_route_unavailable
         attempt_legacy_backfilled

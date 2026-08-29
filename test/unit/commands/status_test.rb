@@ -26,6 +26,7 @@ class CommandsStatusTest < Minitest::Test
       "size" => JSON.generate(diagnostic).bytesize, "sha256" => "b" * 64
     }
     receipt = {
+      "exit_status" => 7,
       "output_references" => [ reference ], "log_reference" => log_reference
     }
     binding = {
@@ -92,6 +93,12 @@ class CommandsStatusTest < Minitest::Test
     reader.fetches = 0
     assert_nil command.send(:attempt_diagnostic_for, running)
     assert_equal 0, reader.fetches
+
+    reader.binding = binding.merge(
+      "receipt" => receipt.merge("exit_status" => Hive::ExitCodes::TEMPFAIL)
+    )
+    assert_nil command.send(:attempt_diagnostic_for, row)
+    assert_equal 1, reader.fetches
   end
 
   def test_default_json_call_uses_compact_producer_without_building_full_graph
@@ -1649,6 +1656,33 @@ class CommandsStatusTest < Minitest::Test
 
       assert_equal 1, stores.length,
                    "one status scan must not rebuild the global Attempts store per task"
+    end
+  end
+
+  def test_direct_project_payload_owns_attempt_store_through_action_annotation
+    with_tmp_global_config do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        write_status_task(
+          hive_state, "1-inbox", "direct-project-260828-abcd",
+          state_file: "idea.md", marker: "WAITING"
+        )
+        command = Hive::Commands::Status.new(json: true)
+        observed_stores = []
+        command.define_singleton_method(:attempt_diagnostic_for) do |_row|
+          observed_stores << status_attempt_store
+          nil
+        end
+
+        payload = command.project_payload(
+          status_project(project_root, hive_state), project_count: 1
+        )
+
+        assert_equal [ "direct-project-260828-abcd" ],
+                     payload.fetch("tasks").map { |row| row.fetch("slug") }
+        assert_equal 1, observed_stores.uniq.length
+        assert_nil command.instance_variable_get(:@status_attempt_store)
+      end
     end
   end
 

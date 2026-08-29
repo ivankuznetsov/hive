@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-12
+updated: 2026-08-25
 tags: [architecture, overview]
 ---
 
@@ -33,27 +33,31 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 
 ## Process model
 
-Public task commands, bot-local delivery, and daemon queue/recovery delivery
-admit through `Hive::Attempts::API`. The API keeps foreground and daemon
-adapters behind one in-monorepo boundary and delegates semantic admission to
-the internal dispatcher. Admission creates one `launching` lease for the task
-generation, then a short launcher creates a detached POSIX session. Its
-supervisor claims the lease, wins first heartbeat, and only then starts the
-existing Hive command in a worker group. That internal command still takes the
-task lock, runs auto-rebase/stage/provider logic, commits state under the
-project lock, and writes normal markers.
+Every accepted task-stage launch resolves through one durable admission
+protocol: a generation-scoped lease claimed by a detached supervisor wrapper
+that starts the ordinary Hive command as its worker. CLI calls admit locally
+and attach; bot/web requests remain file-backed deliveries consumed by the
+daemon when present; daemon auto-advance and coordinator-owned recovery call
+the same dispatcher; attempt-loss healing is a separate ledger successor
+admission. A daemon is optional after acceptance. Every surface attaches to
+or observes the durable attempt instead of owning agent lifetime.
 
-The wrapper owns heartbeat, checkpoints, ordered output frames, timeout,
-worker identity, exit capture, and terminal receipt. The foreground CLI is a
-read-only client: Ctrl-C/caller death detaches without signalling the attempt.
-Bot, web, daemon auto-advance, and recovery share generation admission. The
-daemon adopts wrappers by PID/start fingerprint without `wait2`;
-`ChildSupervisor` remains for non-task ancillary work. See
-[[modules/attempts]].
+```text
+CLI ───────────────────────────────┐
+bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
+daemon auto-advance / recovery ────┘          │
+                                      generation lock + lease
+                                               │
+                                      detached supervisor
+                                               │
+                                      internal Hive worker
+                                               │
+                                      provider agent group
+```
 
-Concurrency is reconstructed from live/reserved leases after restart. The
-project commit lock still serialises brief state commits, and a generation
-lock prevents duplicate task-stage ownership.
+Attempt custody, wrapper ownership, successor healing, and lease durability
+are owned by [[modules/attempts]]; delivery scheduling, reconciliation
+policy, and non-task ancillary children are owned by [[modules/daemon]].
 
 ## Scheduled architecture-patrol boundary
 
@@ -239,8 +243,8 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 - **`Hive::Tui::KeyMap`** (`lib/hive/tui/key_map.rb`) — pure `(mode, key, row, pane_focus) → Message`. Centralises every keystroke binding so curses/Bubbletea backends share one contract.
 - **`Hive::Tui::BubbleModel`** (`lib/hive/tui/bubble_model.rb`) — `Bubbletea::Model` adapter. Translates framework messages (`KeyMessage`, `WindowSizeMessage`, `RawTextInput`) into Hive Messages, then either delegates to `Update.apply` (pure path) or runs them through `#handle_side_effect` (impure path) for messages that need a runner reference (`DispatchCommand`) or perform synchronous I/O (`OpenLogTail`, `OpenInputEditor`, `NewIdeaSubmitted`, …). I/O lives here so Update stays pure.
 - **`Hive::Tui::PasteAwareRunner`** (`lib/hive/tui/paste_aware_runner.rb`) — `Bubbletea::Runner` subclass overriding `run_loop` / `process_input` to drain every raw read through `InputDecoder`. Pinned to bubbletea 0.1.4 (boot-time `VERSION` check) because the override touches private superclass instance variables.
-- **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
-- **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns.
+- **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, swallows unmapped-but-well-formed escape sequences atomically via generic grammars (ECMA-48 CSI, SS3, Alt-chords) so they cannot leak as KEY_ESC + literal bytes, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
+- **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns. Truncation is ANSI-aware: escape sequences carry zero visible width, survive cuts intact (a stranded SGR opener is closed with a trailing reset), and the cut is a strict prefix cut — once a visible grapheme does not fit, no later text token leaks through, even when mid-line escapes split the line into several visible runs. This lets views style a line before the final truncation pass (e.g. the new-idea project picker's reverse-video cursor row).
 - **`Hive::Tui::StateSource`** (`lib/hive/tui/state_source.rb`) — shared bounded projection cache. TUI mode keeps the complete archive for its in-process Archive pane; web mode keeps only visible terminal rows because `/archive` reads the unfiltered producer on demand. Idle ticks use fingerprints, liveness ticks parse active stages only, and policy/terminal/retention signals run one authoritative ordinary projection. Immutable cache replacement plus a generation-fenced writer prevents a stale background scan from winning a race. A refresh installs its mtime/policy fingerprints and cache pointers before publishing the lock-free `current` snapshot pointer, so observing a snapshot also guarantees its change-detection baseline is complete.
 
 ### Key seams
@@ -476,47 +480,12 @@ removed.
 
 Task detail also has one Rails-independent read model:
 `Hive::TaskWorkspace::Builder` accepts that already-resolved task and composes
-the separate `hive-task-workspace` v1 contract. Its provenance, attempt,
-resource, timeline, dependency, publication, and artifact panels fail
-independently and share strict byte/count/deadline budgets. HTML and
-authenticated JSON on the existing task route consume the same normalized
-snapshot. This projection does not enter `Commands::Status`, alter strict
-`hive-status` v7, scan the attempt store or project fleet, contact GitHub, or
-own a mutation. `TaskActivity` and attempt-bound context/session receipts add
-forward evidence at lifecycle seams; Web remains an observer. Remote
-publication is an explicit CSRF-protected cached read, while questions and
-every lifecycle action still delegate to the canonical command/recovery
-boundaries. See [[modules/task_workspace]].
-
-## Dispatch flow (durable generation ownership)
-
-Every task-stage producer resolves through one semantic admission protocol.
-CLI calls admit locally and attach. Bot/web requests remain file-backed
-deliveries, consumed by the daemon when present. Daemon auto-advance and
-coordinator-owned recovery call the same dispatcher. Attempt-loss healing is a
-separate ledger successor admission and never projects a recovery marker. A
-daemon is optional after acceptance.
-
-```text
-CLI ───────────────────────────────┐
-bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
-daemon auto-advance / recovery ────┘          │
-                                      generation lock + lease
-                                               │
-                                      detached supervisor
-                                               │
-                                      internal Hive worker
-                                               │
-                                      provider agent group
-```
-
-Queue claims are delivery metadata and store the resolved attempt reference.
-The daemon reconciles leases before healing or admission, reconstructs
-capacity, and completes a delivery from the wrapper receipt. It never reaps an
-adopted wrapper. Read-only/ancillary bot commands may still use the bot child
-supervisor, but task ownership never does. Filesystem locks, atomic rename,
-and fsync keep the protocol host-local without adding an event bus. See
-[[modules/attempts]] and [[modules/daemon]].
+the workspace projection that HTML and authenticated JSON on the existing task
+route both consume; Web remains an observer, and questions plus every
+lifecycle action still delegate to the canonical command/recovery boundaries.
+The projection's document versions, fail-soft panel boundaries, evidence
+precedence, budgets, and negative guarantees are owned by
+[[modules/task_workspace]].
 
 ## Code conventions
 

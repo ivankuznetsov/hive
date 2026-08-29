@@ -1,4 +1,5 @@
 require "date"
+require "digest"
 require "json"
 require "time"
 require "hive/attempts/point_storage"
@@ -18,13 +19,19 @@ module Hive
       MAX_DAILY_ATTEMPTS = 10_000
       MAX_LIVE_RESERVATIONS = 1_024
       MAX_ROUTING_PROJECTIONS = 4_096
+      MAX_FAILURE_COHORTS = 512
+      FAILURE_COHORT_THRESHOLD = 3
+      FAILURE_COHORT_COOLDOWN_SEC = 60 * 60
+      FAILURE_COHORT_PROBE_TTL_SEC = 24 * 60 * 60
       TERMINAL_REQUEST = "terminal-request".freeze
+      LATEST_TERMINAL = "latest-terminal".freeze
       SUCCESSFUL_OWNER = "successful-owner".freeze
       UNRESOLVED_LOSS = "unresolved-loss".freeze
       SUCCESSOR = "successor".freeze
       DAILY_ACCOUNTING = "daily-accounting".freeze
       LIVE_CAPACITY = "live-capacity".freeze
       ROUTING_DECISION = "routing-decision".freeze
+      FAILURE_COHORTS = "failure-cohorts".freeze
       ENTRY_KEYS = %w[kind key schema schema_version value].freeze
 
       attr_reader :root
@@ -45,6 +52,11 @@ module Hive
           request_key(record["request_id"]),
           ordered_value(record).merge("outcome" => record.outcome)
         )
+        update_ordered(
+          LATEST_TERMINAL,
+          semantic_key(record.task_generation, record.subject),
+          ordered_value(record)
+        )
         return record unless record.outcome == "succeeded"
 
         update_ordered(
@@ -57,6 +69,14 @@ module Hive
 
       def terminal_attempt_id(request_id:)
         value = read_value(TERMINAL_REQUEST, request_key(request_id))
+        value && value.fetch("attempt_id")
+      end
+
+      def latest_terminal_attempt_id(task_generation:, subject:)
+        value = read_value(
+          LATEST_TERMINAL,
+          semantic_key(task_generation, subject)
+        )
         value && value.fetch("attempt_id")
       end
 
@@ -230,11 +250,12 @@ module Hive
       # it is not attempt history. Pending-before-create makes a crash
       # conservative, and the next lock holder can remove a pending entry only
       # after observing that no hot record was created.
-      def reserve_live(attempt_id:, project:, task_slug:)
+      def reserve_live(attempt_id:, project:, task_slug:, admission: nil)
         update_live_reservations do |reservations|
           id = StorageKey.string(attempt_id)
           candidate = live_reservation(
-            project: project, task_slug: task_slug, phase: "pending"
+            project: project, task_slug: task_slug, phase: "pending",
+            admission: admission
           )
           existing = reservations[id]
           if existing && existing.except("phase") != candidate.except("phase")
@@ -245,11 +266,12 @@ module Hive
         end
       end
 
-      def confirm_live(attempt_id:, project:, task_slug:)
+      def confirm_live(attempt_id:, project:, task_slug:, admission: nil)
         update_live_reservations do |reservations|
           id = StorageKey.string(attempt_id)
           candidate = live_reservation(
-            project: project, task_slug: task_slug, phase: "active"
+            project: project, task_slug: task_slug, phase: "active",
+            admission: admission
           )
           existing = reservations[id]
           if existing && existing.except("phase") != candidate.except("phase")
@@ -275,12 +297,123 @@ module Hive
         end.freeze
       end
 
+      def record_failure_cohort(attempt_id:, identity:, occurred_at:)
+        normalized_identity = failure_cohort_identity(identity)
+        attempt = StorageKey.string(attempt_id)
+        occurred = time_value(occurred_at)
+        date = occurred.utc.to_date
+        digest = failure_cohort_digest(normalized_identity)
+        update_failure_cohorts(date) do |value|
+          next value if value.fetch("processed_attempts").key?(attempt)
+
+          cohorts = value.fetch("cohorts")
+          cohorts.each do |key, candidate|
+            next unless candidate.fetch("probe_attempt_id") == attempt &&
+                        candidate.fetch("identity") != normalized_identity
+
+            cohorts[key] = refresh_failure_cohort(
+              candidate, occurred: occurred, clear_probe: true
+            )
+          end
+          entry = cohorts[digest] || empty_failure_cohort(normalized_identity)
+          count = entry.fetch("failure_count") + 1
+          probe_finished = entry.fetch("probe_attempt_id") == attempt
+          refreshed = refresh_failure_cohort(
+            entry, occurred: occurred, clear_probe: probe_finished,
+            failure_count: count
+          )
+          cohorts[digest] = refreshed.merge(
+            "failure_count" => count,
+            "retry_at" => count >= FAILURE_COHORT_THRESHOLD ?
+              refreshed.fetch("retry_at") : nil
+          )
+          value.fetch("processed_attempts")[attempt] = digest
+          value
+        end
+      end
+
+      def record_failure_cohort_success(attempt_id:, date:)
+        attempt = StorageKey.string(attempt_id)
+        found = false
+        update_failure_cohorts(date, create: false) do |value|
+          value.fetch("cohorts").delete_if do |_digest, entry|
+            matched = entry.fetch("probe_attempt_id") == attempt
+            found ||= matched
+            matched
+          end
+          value.fetch("processed_attempts")[attempt] = "succeeded" if found
+          value
+        end
+        found
+      end
+
+      def failure_cohort_admission(identity:, date:, now:, explicit_release: false)
+        normalized_identity = failure_cohort_identity(identity)
+        value = read_value(FAILURE_COHORTS, failure_cohorts_key(date))
+        entry = value&.fetch("cohorts", {})&.fetch(
+          failure_cohort_digest(normalized_identity), nil
+        )
+        return open_failure_cohort unless entry
+        return open_failure_cohort if entry.fetch("failure_count") < FAILURE_COHORT_THRESHOLD
+
+        current = expire_failure_cohort_probe(entry, now: time_value(now))
+        return blocked_failure_cohort if current.fetch("probe_attempt_id")
+        retry_at = Time.iso8601(current.fetch("retry_at"))
+        return probe_failure_cohort if explicit_release || time_value(now) >= retry_at
+
+        blocked_failure_cohort(retry_at: current.fetch("retry_at"))
+      end
+
+      def claim_failure_cohort_probe(identity:, date:, attempt_id:, now:,
+                                     explicit_release: false)
+        normalized_identity = failure_cohort_identity(identity)
+        digest = failure_cohort_digest(normalized_identity)
+        claimed = false
+        update_failure_cohorts(date) do |value|
+          entry = value.fetch("cohorts")[digest]
+          next value unless entry && entry.fetch("failure_count") >= FAILURE_COHORT_THRESHOLD
+
+          current = expire_failure_cohort_probe(entry, now: time_value(now))
+          next value if current.fetch("probe_attempt_id")
+          retry_at = Time.iso8601(current.fetch("retry_at"))
+          next value unless explicit_release || time_value(now) >= retry_at
+
+          value.fetch("cohorts")[digest] = current.merge(
+            "probe_attempt_id" => StorageKey.string(attempt_id),
+            "probe_expires_at" =>
+              (time_value(now) + FAILURE_COHORT_PROBE_TTL_SEC).utc.iso8601(6)
+          )
+          claimed = true
+          value
+        end
+        claimed
+      end
+
+      def release_failure_cohort_probe(identity:, date:, attempt_id:)
+        normalized_identity = failure_cohort_identity(identity)
+        digest = failure_cohort_digest(normalized_identity)
+        attempt = StorageKey.string(attempt_id)
+        released = false
+        update_failure_cohorts(date, create: false) do |value|
+          entry = value.fetch("cohorts")[digest]
+          next value unless entry&.fetch("probe_attempt_id") == attempt
+
+          value.fetch("cohorts")[digest] = entry.merge(
+            "probe_attempt_id" => nil, "probe_expires_at" => nil
+          )
+          released = true
+          value
+        end
+        released
+      end
+
       def replace_live_reservations(reservations)
         replacements = reservations.to_h do |attempt_id, reservation|
           value = live_reservation(
             project: reservation.fetch("project"),
             task_slug: reservation.fetch("task_slug"),
-            phase: reservation.fetch("phase")
+            phase: reservation.fetch("phase"),
+            admission: reservation["admission"]
           )
           [ StorageKey.string(attempt_id), value ]
         end
@@ -448,7 +581,7 @@ module Hive
         when TERMINAL_REQUEST
           ordered_value_shape!(value, extra_keys: [ "outcome" ])
           raise StoreError unless Record::TERMINAL_OUTCOMES.include?(value["outcome"])
-        when SUCCESSFUL_OWNER, SUCCESSOR
+        when LATEST_TERMINAL, SUCCESSFUL_OWNER, SUCCESSOR
           ordered_value_shape!(value)
         when UNRESOLVED_LOSS
           ordered_value_shape!(value, extra_keys: [ "resolved_by" ])
@@ -476,16 +609,20 @@ module Hive
 
           reservations.each do |attempt_id, reservation|
             StorageKey.string(attempt_id)
+            valid_keys = [ %w[phase project task_slug], %w[admission phase project task_slug] ]
             valid = reservation.is_a?(Hash) &&
-              reservation.keys.sort == %w[phase project task_slug] &&
+              valid_keys.include?(reservation.keys.sort) &&
               %w[pending active].include?(reservation["phase"])
             raise StoreError unless valid
 
             StorageKey.string(reservation.fetch("project"))
             StorageKey.string(reservation.fetch("task_slug"))
+            live_admission(reservation["admission"]) if reservation.key?("admission")
           end
         when ROUTING_DECISION
           validate_routing_decision_value!(value, key: key)
+        when FAILURE_COHORTS
+          validate_failure_cohorts_value!(value, key: key)
         end
         true
       rescue StoreError
@@ -609,15 +746,164 @@ module Hive
 
       def live_capacity_key = { "scope" => "host" }
 
-      def live_reservation(project:, task_slug:, phase:)
+      def failure_cohorts_key(date) = { "utc_date" => date_value(date).iso8601 }
+
+      def update_failure_cohorts(date, create: true)
+        update_entry(FAILURE_COHORTS, failure_cohorts_key(date)) do |current|
+          next nil if current.nil? && !create
+
+          existing = current&.fetch("value")
+          value = if existing
+            {
+              "cohorts" => existing.fetch("cohorts").dup,
+              "processed_attempts" => existing.fetch("processed_attempts").dup
+            }
+          else
+            { "cohorts" => {}, "processed_attempts" => {} }
+          end
+          result = yield(value)
+          if result.fetch("cohorts").size > MAX_FAILURE_COHORTS ||
+             result.fetch("processed_attempts").size > MAX_DAILY_ATTEMPTS
+            raise StoreError, "failure cohort index exceeds its bounded UTC shard"
+          end
+          result
+        end
+      end
+
+      def failure_cohort_identity(identity)
+        value = StorageKey.normalize(identity)
+        unless value.keys.sort == %w[code project runtime_digest stage workflow]
+          raise StoreError, "failure cohort identity is invalid"
+        end
+        %w[code project stage workflow].each { |key| StorageKey.string(value.fetch(key)) }
+        digest = value.fetch("runtime_digest")
+        unless digest.is_a?(String) && digest.match?(Record::SHA256_PATTERN)
+          raise StoreError, "failure cohort runtime digest is invalid"
+        end
+        value
+      rescue ArgumentError, TypeError, KeyError
+        raise StoreError, "failure cohort identity is invalid"
+      end
+
+      def failure_cohort_digest(identity)
+        Digest::SHA256.hexdigest(StorageKey.dump(identity))
+      end
+
+      def empty_failure_cohort(identity)
+        {
+          "identity" => identity,
+          "failure_count" => 0,
+          "retry_at" => nil,
+          "probe_attempt_id" => nil,
+          "probe_expires_at" => nil
+        }
+      end
+
+      def expire_failure_cohort_probe(entry, now:)
+        expiry = entry.fetch("probe_expires_at")
+        return entry unless expiry && Time.iso8601(expiry) <= now
+
+        entry.merge("probe_attempt_id" => nil, "probe_expires_at" => nil)
+      end
+
+      def refresh_failure_cohort(entry, occurred:, clear_probe:, failure_count: nil)
+        count = failure_count || entry.fetch("failure_count")
+        retry_at = entry.fetch("retry_at")
+        if count >= FAILURE_COHORT_THRESHOLD
+          candidate = occurred + FAILURE_COHORT_COOLDOWN_SEC
+          retry_at = [ retry_at && Time.iso8601(retry_at), candidate ].compact.max
+            .utc.iso8601(6)
+        end
+        entry.merge(
+          "retry_at" => retry_at,
+          "probe_attempt_id" => clear_probe ? nil : entry.fetch("probe_attempt_id"),
+          "probe_expires_at" => clear_probe ? nil : entry.fetch("probe_expires_at")
+        )
+      end
+
+      def open_failure_cohort = { "status" => "open", "reason" => nil }.freeze
+      def probe_failure_cohort = { "status" => "probe", "reason" => nil }.freeze
+
+      def blocked_failure_cohort(retry_at: nil)
+        {
+          "status" => "blocked",
+          "reason" => "failure_cohort_cooldown",
+          "retry_at" => retry_at
+        }.freeze
+      end
+
+      def validate_failure_cohorts_value!(value, key:)
+        unless value.keys.sort == %w[cohorts processed_attempts] &&
+               value.fetch("cohorts").is_a?(Hash) &&
+               value.fetch("processed_attempts").is_a?(Hash) &&
+               value.fetch("cohorts").size <= MAX_FAILURE_COHORTS &&
+               value.fetch("processed_attempts").size <= MAX_DAILY_ATTEMPTS
+          raise StoreError
+        end
+        date_value(key.fetch("utc_date"))
+        value.fetch("processed_attempts").each do |attempt_id, digest|
+          StorageKey.string(attempt_id)
+          unless digest == "succeeded" ||
+                 (digest.is_a?(String) && digest.match?(Record::SHA256_PATTERN))
+            raise StoreError
+          end
+        end
+        value.fetch("cohorts").each do |digest, entry|
+          raise StoreError unless digest.match?(Record::SHA256_PATTERN)
+          unless entry.is_a?(Hash) && entry.keys.sort == %w[
+            failure_count identity probe_attempt_id probe_expires_at retry_at
+          ]
+            raise StoreError
+          end
+          identity = failure_cohort_identity(entry.fetch("identity"))
+          raise StoreError unless failure_cohort_digest(identity) == digest
+          count = entry.fetch("failure_count")
+          raise StoreError unless count.is_a?(Integer) && count.positive?
+          retry_at = entry.fetch("retry_at")
+          Time.iso8601(retry_at) if retry_at
+          probe = entry.fetch("probe_attempt_id")
+          expiry = entry.fetch("probe_expires_at")
+          unless probe.nil? == expiry.nil?
+            raise StoreError
+          end
+          StorageKey.string(probe) if probe
+          Time.iso8601(expiry) if expiry
+        end
+      end
+
+      def time_value(value)
+        return value if value.is_a?(Time)
+
+        Time.iso8601(value.to_s)
+      rescue ArgumentError, TypeError
+        raise StoreError, "failure cohort time is invalid"
+      end
+
+      def live_reservation(project:, task_slug:, phase:, admission: nil)
         unless %w[pending active].include?(phase)
           raise StoreError, "live capacity reservation phase is invalid"
         end
-        {
+        value = {
           "project" => StorageKey.string(project),
           "task_slug" => StorageKey.string(task_slug),
           "phase" => phase
         }
+        value["admission"] = live_admission(admission) if admission
+        value
+      end
+
+      def live_admission(admission)
+        value = StorageKey.normalize(admission)
+        unless value.keys.sort == %w[runtime_digest stage utc_date workflow] &&
+               value.fetch("workflow") == "patrol_fix" &&
+               value.fetch("runtime_digest").match?(Record::SHA256_PATTERN)
+          raise StoreError, "live capacity admission metadata is invalid"
+        end
+        StorageKey.string(value.fetch("stage"))
+        date_value(value.fetch("utc_date"))
+        value
+      rescue ArgumentError, TypeError, KeyError
+        raise StoreError, "live capacity admission metadata is invalid"
       end
 
       def update_live_reservations

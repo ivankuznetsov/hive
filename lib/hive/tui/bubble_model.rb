@@ -20,6 +20,7 @@ require "hive/stages"
 require "hive/task"
 require "hive/usage_db"
 require "hive/tui/debug"
+require "hive/tui/io_capture"
 require "hive/tui/model"
 require "hive/tui/messages"
 require "hive/tui/key_map"
@@ -2643,16 +2644,13 @@ module Hive
       # Wraps `Hive::Commands::New#call!`'s `puts` lines so they don't
       # corrupt the alt-screen render. Falls back to `$stdout`/`$stderr`
       # redirection — `capture_io` from minitest is not available in
-      # production.
-      def capture_command_io
-        orig_out = $stdout
-        orig_err = $stderr
-        $stdout = StringIO.new
-        $stderr = StringIO.new
-        yield
-      ensure
-        $stdout = orig_out
-        $stderr = orig_err
+      # production. Delegates to the shared, mutex-coordinated `IoCapture`
+      # registry: this runs on the TUI update thread and must not race
+      # `StateSource#capture_status_io`'s identical capture on the archive
+      # refresher thread into restoring a discarded StringIO as the
+      # process-global `$stdout`.
+      def capture_command_io(&block)
+        Hive::Tui::IoCapture.capture(&block)
       end
 
       def rich_new_idea_validation_error(buffer)

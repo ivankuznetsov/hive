@@ -165,6 +165,13 @@ instead of replaying the stage run forever. The worker mutation fence and
 recovery coordinator resolve that same receipt-aware identity before accepting
 side effects or retrying the task.
 
+Ordinary Patrol Fix completion requires the current publication receipt. The
+separate evidence-closure protocol may instead retire a task whose change was
+already delivered through verified external evidence. Its `closure.json`
+authorizes only the workflow-terminal move, remains the terminal projection's
+completion authority, and does not fabricate a publication receipt or dispatch
+a runner for the controller-owned inert `6-done` stage.
+
 The Fix stage alone owns the authoritative patch checkout. Validate proves that
 checkout is clean and at the fix receipt's exact HEAD both before and after the
 run, but executes operator commands in a separate root-confined detached
@@ -184,6 +191,15 @@ agent-selected structured commands must therefore include any bootstrap they
 need inline, such as `npm ci && npm test`. The Fix prompt states this constraint
 before the agent selects commands, so validation cannot silently inherit a warm
 or secret-bearing development checkout.
+
+Review rework resolves the exact prior Review decision referenced by the
+current-generation reopen receipt and supplies that rationale and evidence to
+Fix inside the same untrusted prompt boundary as the finding. Before appending
+the new Fix receipt, Hive compares its diff digest and structured validation
+commands with the prior Fix receipt referenced by Review. If both are unchanged,
+the run fails without a new receipt and preserves the owned worktree for another
+attempt. A validation-plan-only correction remains valid even when the patch is
+unchanged.
 
 Inbox and review use the independent `patrol.agent` identity and the
 `models.patrol_review` route. Only the fix stage uses `patrol.fix.agent` and the

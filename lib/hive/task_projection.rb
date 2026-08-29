@@ -19,7 +19,8 @@ module Hive
 
     INTERNAL_FACT_KEYS = %w[
       journal_index attempt_accepted_at durable_attempt_state
-      durable_attempt_outcome durable_attempt_lease_version predecessor_attempt_id
+      durable_attempt_outcome durable_attempt_exit_status durable_attempt_lease_version
+      predecessor_attempt_id
     ].freeze
 
     attr_reader :data
@@ -92,6 +93,7 @@ module Hive
         attempt["ownership_generation"]
       end
       lease_version = attempt.respond_to?(:lease_version) ? attempt.lease_version : attempt["lease_version"]
+      receipt = attempt.respond_to?(:receipt) ? attempt.receipt : attempt["receipt"]
 
       {
         "attempt_id" => attempt["attempt_id"],
@@ -103,6 +105,7 @@ module Hive
         "predecessor_attempt_id" => attempt["predecessor_attempt_id"],
         "state" => attempt.respond_to?(:state) ? attempt.state : attempt["state"],
         "outcome" => attempt.respond_to?(:outcome) ? attempt.outcome : attempt["outcome"],
+        "exit_status" => receipt.is_a?(Hash) ? receipt["exit_status"] : nil,
         "lease_version" => lease_version
       }
     end
@@ -273,6 +276,7 @@ module Hive
             record.dig("provenance", "predecessor_attempt_id"),
           "durable_attempt_state" => record.dig("__attempt", "state"),
           "durable_attempt_outcome" => record.dig("__attempt", "outcome"),
+          "durable_attempt_exit_status" => record.dig("__attempt", "exit_status"),
           "durable_attempt_lease_version" => record.dig("__attempt", "lease_version")
         }
         reconcile_durable_agent_health(fact)
@@ -396,6 +400,8 @@ module Hive
         [ "unsatisfied", "attempt_lost" ]
       elsif durable_outcome == "succeeded"
         [ "satisfied", "attempt_terminal_succeeded" ]
+      elsif fact["durable_attempt_exit_status"] == Hive::ExitCodes::TEMPFAIL
+        [ "pending", "attempt_terminal_retryable" ]
       else
         [ "unsatisfied", "attempt_terminal_#{durable_outcome || 'unknown'}" ]
       end

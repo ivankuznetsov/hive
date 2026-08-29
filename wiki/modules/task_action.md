@@ -158,6 +158,7 @@ a complete plan is `ready_to_develop`, never a misleading
 | absent/uninitialized/reviewing/revising/verifying | `plan_reviewing` | `hive plan-review-run ...`; agent/scheduler |
 | future transient retry | `plan_review_retry` | no command until `retry_at` |
 | due transient retry | `plan_review_retry` | `hive plan-review-run ...` |
+| legacy blocked mandatory coverage with an attempted transient primary/adversarial leg | `plan_reviewing` | `hive plan-review-run ...`; orchestrator restores the paced retry series |
 | open gated/manual decision | `plan_review_decision` | no synthesized authority command; operator |
 | `degraded_cleared` | `plan_review_degraded` | guarded `hive develop ...` with degradation retained |
 | unsupported/configuration block | `plan_review_unsupported` | operator/configuration |

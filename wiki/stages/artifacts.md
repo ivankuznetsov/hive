@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-25
+updated: 2026-08-29
 tags: [stage, artifacts, evidence, review]
 ---
 
@@ -57,18 +57,26 @@ completion authority.
    terminal proof receives Hive's native PTY command; visual proof also requires
    `ffmpeg`, `ffprobe`, and Tesseract. The browser gets one random `.invalid`
    origin mapped through a controller-owned proxy to one issued loopback app
-   port, rather than access to every localhost service. Hive opens and verifies
-   that exact session before production. The producer receives only a bounded
+   port, rather than access to every localhost service. Hive launches and
+   verifies the exact browser session before production. A controller-managed
+   Hive Web runtime is opened immediately; for any other project, Hive verifies
+   the browser on `about:blank`, then the producer starts the changed app on the
+   issued port before opening the private origin. The producer receives only a bounded
    filesystem mailbox used by `hive evidence`; the raw browser socket,
    controller-private browser state, and media staging stay outside its sandbox.
    Codex's managed network proxy runs in limited mode with no admitted domains
    and local binding enabled, so a producer may start the issued application
-   port but cannot connect directly to arbitrary loopback services. The
+   port but cannot connect directly to arbitrary loopback services. The closed
+   filesystem policy admits the controller's exact Ruby executable, sibling
+   binstubs, runtime libraries, and active gem paths; an env shebang therefore
+   cannot silently fall through to a different system Ruby. Producers use
+   already-installed locked dependencies and cannot contact package registries. The
    controller executes admitted browser/terminal operations, records exact
    file receipts, and exclusively publishes basename-only PNG/WebM media into
    the evidence root.
-   Missing capabilities
-   publish a semantic blocker before the producer starts.
+   Missing capabilities publish a durable blocker before the producer starts.
+   A paced daemon retry rechecks that blocker against the same immutable
+   requirement; it does not replay a stale capability verdict.
 6. Launch a distinct **producer** context with one writable root under the active
    evidence attempt. Source and controller metadata remain read-only. Every proof
    names one retained original, one bounded reviewer representation, and the
@@ -117,6 +125,9 @@ configuration may reduce recaptures to zero or one, but cannot exceed two.
   under Linux subreaper custody, without asciinema, VHS, a shell, or terminal-GIF
   conversion. Success, nonzero exit, timeout, and output overflow all reap the
   complete descendant tree; a detached child invalidates the capture.
+  Source checkouts that load `agent-cli-runtime` directly from the monorepo
+  component remain supported: the custody worker carries the exact loaded
+  feature path even when no RubyGems specification was activated.
 - Use `document` for invisible/refactoring outcomes, using safe text, Markdown,
   JSON, or static image material that explains the resulting contract, schema,
   or architecture. Active HTML, SVG, and PDF are not admitted. Static images
@@ -182,9 +193,11 @@ revalidates that selected file's exact size and digest before streaming it.
 Write admission and publication remain responsible for complete media decoding,
 OCR, retained-proof validation, and independent review.
 
-A semantic blocker suppresses ordinary daemon retry. The task page, status
-diagnostic, and run output expose an exact command containing the blocked
-generation and recovery digest:
+Reviewer and recapture-exhaustion blockers suppress ordinary daemon retry.
+Capability blockers preserve the same audit package but are re-probed on a
+paced ordinary retry, so restored controller tools do not require an operator
+acknowledgement. The task page, status diagnostic, and run output still expose
+an exact command containing the blocked generation and recovery digest:
 
 ```sh
 hive evidence recover PROJECT:SLUG \
@@ -216,9 +229,10 @@ and reviewer capability. Legacy media follows in a visibly labelled
 
 - A valid accepted pointer is projected as `COMPLETE` and surfaces
   `ready_to_finalize`.
-- Capability, review, and recapture-exhaustion blockers are semantic `ERROR`
-  rows with the exact `hive evidence recover` command. Automated recovery does
-  not clear them.
+- Capability, review, and recapture-exhaustion blockers are durable `ERROR`
+  rows with the exact `hive evidence recover` command. Paced automated recovery
+  re-probes capability blockers in the same generation. It does not clear an
+  independent review block or exhausted recapture decision.
 - Integrity, role-launch, source-drift, or malformed-output failures use
   `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
   they remain ordinary recoverable stage errors.

@@ -53,6 +53,32 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
+  def test_tempfail_terminal_attempt_remains_a_scheduler_owned_pending_retry
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      terminal = terminalize(
+        store, create_attempt(store), outcome: "failed",
+        exit_status: Hive::ExitCodes::TEMPFAIL
+      )
+      status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: terminal, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+      observer = Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      )
+
+      assert_equal :delivered, observer.observe(status, now: NOW + 3)
+      health = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: store
+      ).read.current_condition("AgentHealthy")
+      assert_equal "pending", health.fetch("state")
+      assert_equal "attempt_terminal_retryable", health.fetch("reason")
+      assert_equal false, health.dig("payload", "informational_after_terminal")
+    end
+  end
+
   def test_non_execute_live_and_unlocatable_attempts_are_ignored
     with_tmp_dir do |dir|
       store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
@@ -303,14 +329,15 @@ class ConditionsAttemptObserverTest < Minitest::Test
     )
   end
 
-  def terminalize(store, launching, outcome:, now: NOW)
+  def terminalize(store, launching, outcome:, exit_status: nil, now: NOW)
     claimed = store.claim(
       launching, owner: { "pid" => Process.pid },
       claim_capability: CAPABILITY, first_heartbeat_timeout_sec: 30, now: now + 1
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: now + 2)
     store.terminalize(
-      running, outcome: outcome, exit_status: outcome == "succeeded" ? 0 : 1,
+      running, outcome: outcome,
+      exit_status: exit_status || (outcome == "succeeded" ? 0 : 1),
       final_checkpoint: running.checkpoint,
       output_references: [],
       log_reference: {

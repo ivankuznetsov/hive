@@ -28,6 +28,7 @@ require "hive/gh"
 require "hive/pr"
 require "hive/process_kill"
 require "hive/pid_file"
+require "hive/status_projection"
 require "hive/operational_action"
 require "hive/operational_status"
 require "hive/daemon/operational_snapshot"
@@ -637,6 +638,22 @@ module Hive
                           admission_context: nil, now: Time.now.utc,
                           workflow_generation: nil,
                           include_archive_index: false, task_slugs: nil)
+        unless @status_attempt_store
+          return with_status_attempt_store do
+            project_payload(
+              project,
+              project_count: project_count,
+              stages: stages,
+              exclude_archived: exclude_archived,
+              admission_context: admission_context,
+              now: now,
+              workflow_generation: workflow_generation,
+              include_archive_index: include_archive_index,
+              task_slugs: task_slugs
+            )
+          end
+        end
+
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -1854,53 +1871,11 @@ module Hive
         end
       end
 
-      ACTION_LABEL_ORDER = [
-        "Admission error",
-        "Ready to brainstorm",
-        # Generic-workflow actions (non-coding descriptors). Sorted high with
-        # the other actionable "ready"/"needs" rows so generic status rows
-        # don't fall to the bottom (below "Error") as unknown labels would.
-        "Ready to run",
-        "Ready to advance",
-        # Per-stage "needs input" labels (the differentiated NEEDS_INPUT rows
-        # plus the shared generic "Needs your input"). Deliberately ordered
-        # between "Ready to advance" and "Ready to plan" so these actionable
-        # rows sort high alongside the other "ready"/"needs" rows.
-        "Answer questions",
-        "Review plan draft",
-        "Needs your input",
-        "Awaiting human decision",
-        "Needs review decision",
-        "Confirm finalize",
-        "Ready to plan",
-        "Plan review in progress",
-        "Plan review retry ready",
-        "Plan review retry scheduled",
-        "Plan review needs an operator decision",
-        "Plan review cleared with degraded coverage",
-        "Plan reviewer configuration required",
-        "Plan review blocks execution",
-        "Ready to develop",
-        "Needs recovery",
-        "Retry draft PR handoff manually",
-        "Agent running",
-        "Ready to open PR",
-        "Ready for review",
-        "Ready to collect artifacts",
-        # Clean ad-hoc PR review parked at 6-review (REVIEW_PARKED): complete and
-        # non-advancing, so it sorts with the other review-complete rows rather
-        # than falling below "Error" as an unknown label.
-        "Ad-hoc review complete (parked)",
-        "Rejected (parked)",
-        "Blocked (parked)",
-        "Escalated (parked)",
-        "Ready to finalize",
-        "Ready to archive",
-        "Archived",
-        "Manually steered",
-        "Blocked",
-        "Error"
-      ].freeze
+      # Presentation ordering is owned by the internal status projection
+      # boundary (`Hive::StatusProjection`); the command re-exports the
+      # frozen constant so existing label-grouping call sites and tests
+      # keep one shared value.
+      ACTION_LABEL_ORDER = Hive::StatusProjection::ACTION_LABEL_ORDER
 
       # Synthetic Error row for a task folder that exists but won't load — e.g.
       # a typo'd `meta.yml workflow:` / project `default_workflow:` that resolves
@@ -2028,30 +2003,12 @@ module Hive
         binding = status_attempt_store.fetch_terminal_diagnostic_binding(attempt_id)
         return nil unless binding.is_a?(Hash) && binding["attempt_id"] == attempt_id
 
-        receipt = binding["receipt"]
-        return nil unless receipt.is_a?(Hash)
-
-        diagnostic_path = File.join(
-          "outputs", attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME
+        bound = Hive::PatrolFix::AttemptDiagnostic.read_bound(
+          store: status_attempt_store, binding: binding
         )
-        reference = Array(receipt["output_references"]).find do |candidate|
-          candidate.is_a?(Hash) && candidate["path"] == diagnostic_path
-        end
-        return nil unless reference
+        return nil unless bound
 
-        document = JSON.parse(status_attempt_store.read_output(
-          reference, max_bytes: Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
-        ))
-        Hive::PatrolFix::AttemptDiagnostic.validate!(document)
-        return nil unless document["attempt_id"] == attempt_id &&
-                          document["correlation_id"] == attempt_id &&
-                          document["stage"] == binding["stage"].to_s &&
-                          document["task_generation"] == binding["task_generation"].to_s &&
-                          document["log_reference"] == receipt["log_reference"]
-
-        diagnostic_projection(document, reference)
-      rescue JSON::ParserError, Hive::Error, SystemCallError, IOError
-        nil
+        diagnostic_projection(bound.fetch("document"), bound.fetch("reference"))
       end
 
       def diagnostic_projection(document, reference)

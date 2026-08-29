@@ -32,13 +32,16 @@ write_waiting() {
 }
 
 write_limits_reached() {
-  retry_after="$(ruby -rhive/agent_limit -e 'puts Hive::AgentLimit.retry_after')"
+  # Stage agents intentionally run with RubyGems environment scrubbed. Load the
+  # cooldown and marker implementations from the campaign's immutable source
+  # runtime instead of whichever released hive-cli gem is installed on the host.
+  retry_after="$(ruby -I"$SOURCE/lib" -rhive/agent_limit -e 'puts Hive::AgentLimit.retry_after')"
   {
     printf '\n## Status\n\n'
     printf '%s\n\n' "$1"
     printf 'Hive will retry this stage after the provider cooldown at %s.\n\n' "$retry_after"
   } >>"$STATE_FILE"
-  ruby -rhive/markers -e '
+  ruby -I"$SOURCE/lib" -rhive/markers -e '
     Hive::Markers.set(
       ARGV.fetch(0),
       :error,

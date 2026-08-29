@@ -1435,7 +1435,10 @@ class StagesArtifactsTest < Minitest::Test
         resolver = Struct.new(:value) { def resolve = value }.new(identity)
         requirement = outcome_requirement(identity)
         pointer = if scenario == :blocked_identity || scenario == :capability
-          blocked_pointer(requirement.fetch("generation"))
+          blocked_pointer(
+            requirement.fetch("generation"),
+            reason: scenario == :blocked_identity ? "review_blocked" : "capability_blocked"
+          )
         else
           accepted_pointer(requirement.fetch("generation"))
         end
@@ -1637,6 +1640,44 @@ class StagesArtifactsTest < Minitest::Test
       assert_equal "capability_blocked", published.first.fetch(:reason)
       assert_equal [ "claim-flow" ], published.first.fetch(:failed_targets)
       assert_equal :error, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_existing_capability_block_is_reprobed_without_operator_recovery
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = outcome_identity
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      requirement = outcome_requirement(identity)
+      published = []
+      pointer = blocked_pointer(requirement.fetch("generation"))
+      store = terminal_store(requirement, [], published)
+      store.define_singleton_method(:blocked_for_identity?) { |_value| true }
+      store.define_singleton_method(:current) { pointer }
+      toolkit = Object.new
+      probes = 0
+      toolkit.define_singleton_method(:prepare!) do |**|
+        probes += 1
+        raise Hive::ConfigError, "capture is still unavailable"
+      end
+      producer = Struct.new(:name).new(:codex)
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Artifacts, :preflight_reviewer!, ->(*) { true }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Artifacts, :preflight_producer!, ->(*) { producer }
+        ) do
+          Hive::Stages::Artifacts.run_outcome_evidence!(
+            task, {}, identity_resolver: resolver, store: store, capture_toolkit: toolkit
+          )
+        end
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal 1, probes
+      assert_equal "capture is still unavailable",
+                   published.first.fetch(:reviewer_reasons).first
     end
   end
 
@@ -2113,9 +2154,9 @@ class StagesArtifactsTest < Minitest::Test
     { "generation" => generation, "attempt_id" => "attempt-accepted" }
   end
 
-  def blocked_pointer(generation)
+  def blocked_pointer(generation, reason: "capability_blocked")
     {
-      "generation" => generation, "reason" => "capability_blocked",
+      "generation" => generation, "reason" => reason,
       "recovery_digest" => "d" * 64, "attempt_count" => 0,
       "failed_targets" => [ "claim-flow" ]
     }

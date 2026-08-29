@@ -3,7 +3,7 @@ title: Generation-scoped task conditions
 type: module
 source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb
 created: 2026-07-17
-updated: 2026-07-18
+updated: 2026-08-27
 tags: [conditions, projection, journal, execute, migration]
 ---
 
@@ -45,6 +45,15 @@ types. At an execute boundary the order is
 reconciliation, durable batch, snapshot publication, gate evaluation,
 compatibility marker.
 
+Execute-observation deduplication in the reconciler compares each fresh
+observation only against the most recent journal record of the same event
+stream (`event_type` + `attempt_id` + condition name), never against the whole
+history. Journal consumers apply last-event-wins semantics, so a re-transition
+back to a previously observed state (for example a worktree becoming dirty
+again at an unchanged HEAD) must append a new record even though an identical
+older one exists; only an unchanged re-observation of the latest stream state
+is skipped.
+
 Journal envelopes, idempotent journal appends, condition evidence, policy
 descriptors/options, execute-observation deduplication, and task-projection
 copies all normalize nested hash keys through `Hive::StringifyKeys`. The
@@ -79,6 +88,10 @@ Predecessor lineage outranks wall-clock timestamps, so a clock step backward
 cannot let an older lost attempt supersede its successful successor. Current
 `AgentHealthy` also reconciles directly from terminal/lost durable attempt
 state, closing the window before the daemon observer appends its lifecycle fact.
+Successful terminal attempts are satisfied and ordinary failed/cancelled/lost
+attempts fail closed. A terminal exit `75 (TEMPFAIL)` is instead pending with
+reason `attempt_terminal_retryable`: the scheduler owns that transient retry,
+so lock contention cannot be projected as an agent-health failure.
 Displaced facts stay in history. Required conditions pass only when satisfied.
 `AwaitingHuman=satisfied` blocks its named transition; an answered or
 superseding observation removes it from current gates.

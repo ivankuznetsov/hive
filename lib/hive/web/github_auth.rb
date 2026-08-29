@@ -26,6 +26,10 @@ module Hive
       OPEN_TIMEOUT_SEC = 5
       READ_TIMEOUT_SEC = 10
 
+      # RFC 8628 §3.5: how many seconds a `slow_down` response adds to the
+      # client's current polling interval.
+      SLOW_DOWN_PENALTY = 5
+
       # Transport failures GitHub being slow/unreachable can produce. Mapped
       # to Hive::Error so the operator sees the friendly 422 error page
       # ("could not reach GitHub") instead of a blank 500 — the same policy
@@ -71,8 +75,9 @@ module Hive
 
       # Poll the token endpoint once for the device grant. Returns:
       #   { state: :ok, login: "alice", token: "gho_..." } — authorized
-      #   { state: :pending }                  — operator hasn't approved yet
-      #   { state: :slow_down, interval: 10 }  — back off to the new interval
+      #   { state: :pending }                       — operator hasn't approved yet
+      #   { state: :slow_down, increase_by: 5 }     — add this many seconds
+      #                                               to the current interval
       #   { state: :denied }                   — operator cancelled the grant
       #   { state: :expired }                  — device code expired; restart
       # Anything else raises Hive::Error. GitHub reports all of these as HTTP
@@ -90,7 +95,12 @@ module Hive
 
           { state: :ok, login: login_for_token(token), token: token }
         when "authorization_pending" then { state: :pending }
-        when "slow_down" then { state: :slow_down, interval: body.fetch("interval", 5).to_i }
+        # RFC 8628 §3.5: `slow_down` is an ADDITIVE signal — the client must
+        # raise its polling interval by SLOW_DOWN_PENALTY seconds. GitHub's
+        # response carries no usable absolute interval (typically no `interval`
+        # member at all), so the caller — which knows its current interval —
+        # applies the penalty itself.
+        when "slow_down" then { state: :slow_down, increase_by: SLOW_DOWN_PENALTY }
         when "access_denied" then { state: :denied }
         when "expired_token" then { state: :expired }
         else

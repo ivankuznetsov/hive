@@ -49,6 +49,45 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     end
   end
 
+  def test_publish_and_quarantine_survive_filesystems_that_refuse_directory_fsync
+    with_tmp_dir do |dir|
+      resolver = resolver_for(dir, FakeGh.new(details))
+      original_open = File.method(:open)
+      refuse_directory_fsync = lambda do |path, *args, **kwargs, &block|
+        unless args.first == File::RDONLY && File.directory?(path)
+          next original_open.call(path, *args, **kwargs, &block)
+        end
+        original_open.call(path, *args, **kwargs) do |handle|
+          handle.define_singleton_method(:fsync) { raise Errno::EINVAL, path }
+          block.call(handle)
+        end
+      end
+
+      manifest = with_replaced_singleton_method(File, :open, refuse_directory_fsync) do
+        resolver.resolve("7")
+      end
+
+      path = resolver.manifest_path(manifest.fetch("job_id"))
+      assert_equal manifest, JSON.parse(File.read(path)),
+                   "manifest publication must survive an unsupported directory fsync"
+
+      gh = FakeGh.new(
+        details.merge(
+          "files" => [ { "path" => "lib/other.rb", "status" => "modified" } ],
+          "changed_files" => 1
+        )
+      )
+      with_replaced_singleton_method(File, :open, refuse_directory_fsync) do
+        assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+          resolver_for(dir, gh).resolve("7")
+        end
+      end
+      quarantines = Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "quarantine", "manifests", "*.json"))
+      assert_equal 1, quarantines.size,
+                   "conflict quarantine must survive an unsupported directory fsync"
+    end
+  end
+
   def test_dry_run_validates_without_creating_v2_state
     with_tmp_dir do |dir|
       resolver = resolver_for(dir, FakeGh.new(details), dry_run: true)

@@ -74,6 +74,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_includes result.fetch("diagnostic"), "/ce-doc-review is available"
   end
 
+  def test_public_capability_probe_does_not_invoke_the_reviewer
+    runner_calls = 0
+    adapter = Hive::PlanReview::Adapters::CeDocReview.new(
+      runner: ->(**) { runner_calls += 1 },
+      capability_probe: ->(**) do
+        { "status" => "unsupported", "diagnostic" => "missing skill" }
+      end
+    )
+
+    result = adapter.probe_capability(
+      kind: "primary", reviewer: { "provider" => "codex" },
+      project_root: Dir.pwd
+    )
+
+    assert_equal "unsupported", result.fetch("status")
+    assert_equal "missing skill", result.fetch("diagnostic")
+    assert_equal 0, runner_calls
+  end
+
   def test_success_uses_disposable_plan_and_validates_machine_output
     with_request do |request, plan_path|
       original = File.binread(plan_path)
@@ -82,6 +101,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         assert File.directory?(File.join(cwd, ".git")) || File.file?(File.join(cwd, ".git"))
         assert_includes prompt, "ce-doc-review"
         assert_includes prompt, "Repository root: `#{cwd}`"
+        assert_includes prompt,
+                        "`selected_lenses` names may use lowercase letters, digits, hyphens, and underscores"
+        assert_includes prompt, "`residual_evidence` must be exactly an empty array"
         File.write(File.join(cwd, "review-notes.md"), "reviewer scratch work")
         File.write(output_path, JSON.generate(valid_result(request)))
         { "status" => "ok", "actual_route" => request.reviewer }
@@ -96,6 +118,24 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "success", result.outcome
       assert_equal original, File.binread(plan_path)
       assert_equal 1, result.findings.length
+    end
+  end
+
+  def test_success_preserves_findings_when_selected_lenses_are_hyphenated
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        payload = valid_result(request).merge(
+          "selected_lenses" => [ "product-lens", "security-lens", "scope-guardian" ]
+        )
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "success", result.outcome
+      assert_equal 1, result.findings.length
+      assert_equal %w[product-lens security-lens scope-guardian], result.selected_lenses
     end
   end
 
@@ -165,6 +205,45 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "terminal_failure", result.outcome
       assert_equal request.reviewer, result.route_receipt.fetch("actual")
       assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
+      assert_equal "parser", result.route_receipt.fetch("diagnostic_source")
+    end
+  end
+
+  def test_reviewer_authored_diagnostic_is_distinct_from_a_parser_failure
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        payload = valid_result(request).merge(
+          "outcome" => "terminal_failure",
+          "diagnostic" => "plan review selected_lenses must contain lowercase names"
+        )
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal "reviewer", result.route_receipt.fetch("diagnostic_source")
+    end
+  end
+
+  def test_adapter_config_error_preserves_the_actual_route_and_diagnostic_source
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        File.write(output_path, JSON.generate(valid_result(request)))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::PlanReview::ResultParser, :parse,
+        ->(*, **) { raise Hive::ConfigError, "invalid adapter configuration" }
+      ) do
+        adapter_for(runner).call(request)
+      end
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal request.reviewer, result.route_receipt.fetch("actual")
+      assert_equal "adapter", result.route_receipt.fetch("diagnostic_source")
     end
   end
 
@@ -443,6 +522,48 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       assert_equal "unexpected-model", overridden.dig("actual_route", "model")
       refute overridden.fetch("actual_route").key?("family")
+    end
+  end
+
+  def test_production_runner_attests_only_the_exact_grok_46_build_served_name
+    with_runner do |runner, request, output_path|
+      cases = [
+        [ "grok", "grok-4.6", "grok-4.6-build", "grok", true ],
+        [ "grok", "grok-4.6", "grok-4.6-build", " GROK ", true ],
+        [ "grok", "grok-4.5", "grok-4.6-build", "grok", false ],
+        [ "grok", "grok-4.6", "grok-4.7-build", "grok", false ],
+        [ "grok", "grok-4.6", "grok-4.6-build", "openai", false ],
+        [ "codex", "grok-4.6", "grok-4.6-build", "grok", false ],
+        [ "grok", nil, "unknown-model", "grok", false ]
+      ]
+
+      cases.each do |provider, requested_model, served_model, family, attested|
+        grok_request = request.with(
+          reviewer: {
+            "provider" => provider, "model" => requested_model, "family" => family,
+            "effort" => "high", "route" => "native_grok_build"
+          },
+          kind: "adversarial"
+        )
+        payload = valid_result(grok_request)
+        replacement = lambda do |_task, expected_output:, **|
+          File.write(expected_output, JSON.generate(payload))
+          { status: :ok, usage: { model: served_model } }
+        end
+
+        observed = nil
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+          observed = runner.call(
+            prompt: "review", cwd: grok_request.output_directory,
+            output_path:, request: grok_request
+          )
+        end
+
+        assert_equal served_model, observed.dig("actual_route", "model")
+        assert_equal attested, observed.fetch("actual_route").key?("family"),
+                     "provider=#{provider.inspect} requested=#{requested_model.inspect} " \
+                     "served=#{served_model.inspect} family=#{family.inspect}"
+      end
     end
   end
 

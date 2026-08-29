@@ -102,6 +102,36 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  # Failures before the fetch owns the destination (source parsing and the
+  # emptiness guard) must never destroy caller-owned directory contents.
+  def test_fetch_preserves_pre_existing_destination_on_pre_ownership_failures
+    client = Hive::WorkflowPackage::RegistryClient.new(repository: "https://example.invalid/registry.git")
+
+    with_tmp_dir do |destination|
+      keeper = File.join(destination, "precious.txt")
+      File.write(keeper, "caller-owned")
+
+      assert_raises(Hive::WorkflowPackage::RegistryError) do
+        client.fetch("not-a-valid-source", destination: destination)
+      end
+
+      assert_equal [ "precious.txt" ], Dir.children(destination)
+      assert_equal "caller-owned", File.read(keeper)
+    end
+
+    with_tmp_dir do |destination|
+      keeper = File.join(destination, "precious.txt")
+      File.write(keeper, "caller-owned")
+
+      error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+        client.fetch("honeycomb/demo", destination: destination)
+      end
+      assert_match(/registry destination must be empty/, error.message)
+      assert_equal [ "precious.txt" ], Dir.children(destination)
+      assert_equal "caller-owned", File.read(keeper)
+    end
+  end
+
   def test_rejects_noncanonical_invalid_and_malformed_catalogs
     client = Hive::WorkflowPackage::RegistryClient.new
     valid = { "schema" => "honeycomb-catalog/v2", "entries" => [] }

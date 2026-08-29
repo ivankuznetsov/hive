@@ -594,7 +594,11 @@ manifest and those exact bytes immediately before appending the decision.
 manifest/evidence generation and appends a new-generation transition receipt
 before any fresh decision. Rework moves the same folder from Review to Fix,
 rotates the current worktree ownership file, retains the prior generation's
-owned bytes, and carries no validation receipt. A completed route intent remains
+owned bytes, and carries no validation receipt. The reopen receipt points to the
+prior Review decision; Fix resolves that decision as untrusted feedback and uses
+its referenced Fix receipt as the progress baseline. An unchanged diff and
+unchanged validation-command plan cannot produce a new Fix receipt, while a
+patch change or validation-plan correction can. A completed route intent remains
 replayable so a crash after the folder move is reconciled from either the old
 caller path or the new location. Parked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.
@@ -762,14 +766,15 @@ repository, or branch change are quarantined and block intake rather than
 silently replacing the baseline.
 
 The authoritative checkpoint schema remains v2. Incremental catch-up uses a
-separate `hive-refactor-patrol-reconciler-progress` v1 sidecar rather than
+separate `hive-refactor-patrol-reconciler-progress` v2 sidecar rather than
 putting transient cursors into `reconciler.json`. The sidecar repeats the exact
 registration/host/repository/default-branch identity and binds itself to the
 SHA-256 fingerprint of the v2 checkpoint it started from. It persists two
 restart-safe phases: paginated scan state (fixed overlap start, next/seen
 cursors, accumulated merged-PR identities, fixed upper time bound, and frozen
-result count), followed by manifest intake state (next item index and
-already-enqueued PR numbers). Search traversal is creation-ordered inside that
+result count), followed by manifest intake state (next item index, the exact
+processed PR prefix, and its ordered subset of already-enqueued PR numbers).
+Search traversal is creation-ordered inside that
 fixed merge window. Count or terminal-size drift restarts page traversal while
 retaining the upper bound. Origin identity discovery and each remote page or
 intake item consume one shared project-step deadline within the reconciler's
@@ -790,6 +795,8 @@ progress only in memory. The sidecar is continuation evidence, never high-water
 or job-completion authority. Its timestamps, protocol scalars, merge OIDs, and
 cursors are strictly typed; a persisted current cursor already present in the
 consumed set is impossible state and is quarantined before any GitHub call.
+Runtime ticks accept only the current continuation schema; unsupported shapes
+are quarantined and block intake.
 
 The job aggregate remains the only completion authority. It stores the
 enqueue-time discovery snapshot, one pinned `analysis_sha`, feature-level
@@ -985,7 +992,7 @@ update:                          # update-check knobs (plan 2026-05-27-002, U4)
 
 Managed by `Hive::Config.register_project`; deregistered by `unregister_project` (one row, by name) and `prune_missing_projects!` (every row whose `path` is missing, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid). Registry writers serialize on the sticky sibling `config.yml.lock` and replace `config.yml` via tempfile + `fsync` + atomic rename. `HIVE_HOME` overrides the XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated when no XDG config exists.
 
-Loader tolerance (`Config.registered_projects` / `load_global_config`): a non-Hash row, a row missing `name`, or a row whose `path` isn't a String is *skipped silently* instead of raising — a single hand-edit accident can no longer brick `status`/`forget`/`prune`/TUI. `Psych::Exception` (any malformed YAML — syntax, disallowed-class, alias-not-enabled) plus `Errno::EACCES`/`EISDIR` are rewrapped as `ConfigError` (exit 78); `chmod 000 ~/.config/hive/config.yml` no longer leaks as exit-70 InternalError. `prune` is the cleanup verb for invalid rows surfaced this way (predicate `Config.droppable_registry_entry?` covers missing paths, stored valid-realpath mismatches, and invalid shape; `valid_registry_entry?` is the shared shape gate). Read-modify-write paths go through `update_global_config!` so concurrent `hive init` / `hive forget` / `hive prune` calls cannot lose updates; direct writes go through `write_global_config!` and take the same lock. See [[commands/forget]] · [[commands/prune]] · [[modules/config]]. Writer filesystem failures (`Errno::EACCES`/`EPERM`/`EISDIR`/`ENOTDIR`/`ELOOP`/`EROFS`/`ENOSPC`/rename-class errors) are rewrapped as `Hive::ConfigError` (exit 78). The reader (`load_global_config`) likewise rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` to `ConfigError` so a `chmod 000` on `~/.config/hive/config.yml` surfaces as exit 78, not exit 70. Name matching in `unregister_project` is `to_s`-symmetric so a hand-edited Integer `name:` in YAML still resolves. `forget`/`prune` `--json` envelopes use `Hive::Schemas::EnvelopeEmitter` (`lib/hive.rb`) and `File.expand_path` raw `path` / `hive_state_path` to honor the schemas' "Absolute path" contract regardless of how the registry row was hand-edited.
+Loader tolerance (`Config.registered_projects` / `load_global_config`): a non-Hash row, a row missing `name`, or a row whose `path` isn't a String is *skipped silently* instead of raising — a single hand-edit accident can no longer brick `status`/`forget`/`prune`/TUI. `Psych::Exception` (any malformed YAML — syntax, disallowed-class, alias-not-enabled) plus `Errno::EACCES`/`EISDIR` are rewrapped as `ConfigError` (exit 78); `chmod 000 ~/.config/hive/config.yml` no longer leaks as exit-70 InternalError. `prune` is the cleanup verb for invalid rows surfaced this way (predicate `Config.droppable_registry_entry?` covers missing paths, stored valid-realpath mismatches, and invalid shape; `valid_registry_entry?` is the shared shape gate). Read-modify-write paths go through `update_global_config!` so concurrent `hive init` / `hive forget` / `hive prune` calls cannot lose updates; direct writes go through `write_global_config!` and take the same lock. See [[commands/forget]] · [[commands/prune]] · [[modules/config]]. Writer filesystem failures (`Errno::EACCES`/`EPERM`/`EISDIR`/`ENOTDIR`/`ELOOP`/`EROFS`/`ENOSPC`/rename-class errors) are rewrapped as `Hive::ConfigError` (exit 78). The reader (`load_global_config`) likewise rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` to `ConfigError` so a `chmod 000` on `~/.config/hive/config.yml` surfaces as exit 78, not exit 70. Name matching in `unregister_project` is `to_s`-symmetric so a hand-edited Integer `name:` in YAML still resolves. `forget`/`prune` `--json` envelopes use `Hive::Schemas::EnvelopeEmitter` (`lib/hive/schemas.rb`) and `File.expand_path` raw `path` / `hive_state_path` to honor the schemas' "Absolute path" contract regardless of how the registry row was hand-edited.
 
 `bot:` is a global operator-surface block, not a per-project enrollment knob. `Config.load_global_bot(require_runtime: true)` merges it over `Config.global_bot_defaults`, validates integer chat IDs, poll bounds, booleans including `pairing_enabled`, and path strings, then requires `HIVE_TELEGRAM_BOT_TOKEN` plus either a non-empty allowlist or `pairing_enabled: true` before `hive bot start` can run. Runtime files are global under `~/.local/state/hive/`: `.bot.pid` for the single-instance lock, `logs/bot.log` for structured JSON lines, `.bot.last_seen_update_id` for Telegram reconnect summaries, `.bot.alert_state.json` for persisted notification fingerprints, row snapshots, first-seen timestamps, and reminder timestamps, `.bot.pairings.json` for pending Telegram pairing codes, and `pairing_approvals/` for owner-authored approval notices drained by the running bot.
 

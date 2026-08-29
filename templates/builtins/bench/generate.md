@@ -48,7 +48,10 @@ write_limits_reached() {
     printf '%s\n\n' "$1"
     printf 'Hive will retry this stage after the provider cooldown at %s.\n\n' "$retry_after"
   } >>"$STATE_FILE"
-  ruby -rhive/markers -e '
+  # Stage agents intentionally run with RubyGems environment scrubbed. Load the
+  # marker implementation from the campaign's immutable source runtime instead
+  # of whichever released hive-cli gem happens to be installed on the host.
+  ruby -I"$SOURCE/lib" -rhive/markers -e '
     Hive::Markers.set(
       ARGV.fetch(0),
       :error,
@@ -114,7 +117,7 @@ ruby -ryaml -rjson -e '
   # with published campaign dirs.
   abort("campaign_id must be a slug matching /\\A[a-z0-9][a-z0-9-]{0,63}\\z/; got #{id.inspect}") unless id.match?(/\A[a-z0-9][a-z0-9-]{0,63}\z/)
   abort("campaign_id v3-example is the unedited example id; pick a real campaign id") if id == "v3-example"
-  # source/corpus_version feed three-line `read` extractions here and in the
+  # source/corpus_version feed fixed-line `read` extractions here and in the
   # judge/publish stages: a multi-line value would silently misalign them.
   source = data["source"]
   abort("source must be a non-empty single-line string; got #{source.inspect}") unless source.is_a?(String) && !source.include?("\n") && !source.strip.empty?
@@ -184,6 +187,7 @@ ruby -ryaml -e '
   runtime = ARGV.fetch(0)
   data = YAML.safe_load_file("campaign.yml")
   puts data.fetch("campaign_id")
+  puts data.fetch("source")
   puts data.fetch("corpus_version")
   require File.join(runtime, "harness/profiles/candidates")
   needs_openrouter = data.dig("judges", "openrouter").is_a?(Hash) ||
@@ -193,7 +197,7 @@ ruby -ryaml -e '
   write_waiting "$(cat .generate-campaign.err .generate-campaign.out)"
   exit 0
 }
-{ read -r CAMPAIGN_ID; read -r CORPUS_VERSION; read -r NEEDS_OPENROUTER; } <.generate-campaign.out
+{ read -r CAMPAIGN_ID; read -r SOURCE; read -r CORPUS_VERSION; read -r NEEDS_OPENROUTER; } <.generate-campaign.out
 
 ruby -ryaml -rshellwords -rjson -e '
   repo = ARGV.fetch(0)

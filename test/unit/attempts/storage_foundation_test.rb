@@ -249,7 +249,7 @@ class AttemptsStorageFoundationTest < Minitest::Test
         attempt_id: "attempt-a",
         request_id: "same-request",
         outcome: "failed",
-        exit_status: 1,
+        exit_status: Hive::ExitCodes::TEMPFAIL,
         now: NOW
       )
       successful = terminal_record(
@@ -272,9 +272,15 @@ class AttemptsStorageFoundationTest < Minitest::Test
       [ successful, older, newest_failure, successful ].each do |record|
         index.record_terminal(record)
       end
+      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
 
       assert_equal newest_failure.attempt_id,
                    index.terminal_attempt_id(request_id: "same-request")
+      assert_equal newest_failure.attempt_id,
+                   index.latest_terminal_attempt_id(
+                     task_generation: newest_failure.task_generation,
+                     subject: newest_failure.subject
+                   )
       assert_equal successful.attempt_id, index.successful_attempt_id(
         task_generation: successful.task_generation,
         subject: successful.subject

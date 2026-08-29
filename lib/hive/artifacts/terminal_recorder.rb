@@ -75,7 +75,7 @@ module Hive
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_seconds + 1
         load_paths = [
           File.expand_path("../..", __dir__),
-          *Gem.loaded_specs.fetch("agent-cli-runtime").full_require_paths
+          *agent_runtime_require_paths
         ].uniq
         worker_environment = {
           "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -105,6 +105,27 @@ module Hive
         end
 
         JSON.parse(result.fetch("stdout"))
+      end
+
+      # Source checkouts load agent-cli-runtime by placing the component on
+      # $LOAD_PATH before requiring Hive; that valid launch does not activate a
+      # RubyGems specification. The terminal custody worker still needs the
+      # exact already-loaded runtime path after its environment is scrubbed, so
+      # prefer the activated spec and fall back to the loaded feature itself.
+      def agent_runtime_require_paths
+        paths = Gem.loaded_specs["agent-cli-runtime"]&.full_require_paths.to_a
+        if paths.empty?
+          feature = $LOADED_FEATURES.find do |path|
+            File.basename(path) == "agent_cli_runtime.rb"
+          end
+          paths << File.dirname(File.realpath(feature)) if feature
+        end
+        paths.select! { |path| File.directory?(path) }
+        return paths.uniq unless paths.empty?
+
+        raise CaptureError, "terminal capture runtime is unavailable"
+      rescue Errno::ENOENT, Errno::EACCES
+        raise CaptureError, "terminal capture runtime is unavailable"
       end
 
       def worker_request

@@ -335,7 +335,34 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         refute_equal "cooldown", receipt.status,
                      "#{requestor} must not be held by the automatic cooldown"
         refute_empty Q.pending(state_home: state_home), requestor
+        persisted = Q.pending(state_home: state_home).fetch(0)
+        assert_equal NOW.iso8601(6), persisted.recovery.fetch("next_eligible_at"),
+                     "#{requestor} retry must be immediately due after persistence"
+        assert_equal "queued", coordinator.receipt_for_request(persisted, now: NOW).status,
+                     "#{requestor} retry must remain due when the daemon reloads it"
       end
+    end
+  end
+
+  def test_an_operator_retry_makes_an_existing_admitted_recovery_due
+    with_fixture(mtime: NOW - 6) do |coordinator, row, state_home|
+      admitted = coordinator.request(
+        row: row, requestor: "healer", request_id: "automatic", now: NOW
+      )
+      Q.update_recovery!(
+        admitted.request_id, expected_phase: "admitted",
+        changes: { "next_eligible_at" => (NOW + 60).iso8601(6) },
+        state_home: state_home
+      )
+
+      retried = coordinator.request(
+        row: row, requestor: "action", request_id: "manual", now: NOW
+      )
+
+      assert_equal admitted.request_id, retried.request_id
+      assert_equal "queued", retried.status
+      persisted = Q.fetch(admitted.request_id, state_home: state_home)
+      assert_equal NOW.iso8601(6), persisted.recovery.fetch("next_eligible_at")
     end
   end
 

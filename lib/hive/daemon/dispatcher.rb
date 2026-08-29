@@ -2455,8 +2455,19 @@ module Hive
         # `running_task?` reflects spawns recorded in
         # `record_dispatch`, so this is naturally exclusive across
         # iterations of this loop too.
+        project_capacity_fences = {}
         pending.each do |req|
           break unless admission_open?
+
+          if (capacity_fence = project_capacity_fences[req.project.to_s])
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: capacity_fence.to_s,
+              priority_fence: true
+            )
+            next
+          end
 
           log_dispatch_request_once(
             :dispatch_request_observed,
@@ -2471,11 +2482,22 @@ module Hive
           # the next tick to retry; the failure is logged for
           # operator visibility. Per R-01 from PR #241 ce-code-review.
           begin
-            process_dispatch_request_iteration(
+            result = process_dispatch_request_iteration(
               req, now: now, rows: rows,
               row_index: rows_by_task, project_lookup: project_lookup,
               admission_context_loader: admission_context_loader
             )
+            outcome = if result.is_a?(Hive::Attempts::DispatchResult)
+              dispatch_outcome(result)
+            else
+              result
+            end
+            case outcome
+            when :global_cap, :attempt_capacity
+              break
+            when :project_cap, :daily_cap
+              project_capacity_fences[req.project.to_s] ||= outcome
+            end
           rescue StandardError => e
             recovery_receipt = defer_recovery_after_dispatch_failure(req, now: now)
             @logger.event(:dispatch_request_rejected,
@@ -2681,7 +2703,7 @@ module Hive
             request_id: req.request_id, project: req.project,
             slug: req.slug, reason: gate.to_s
           )
-          return
+          return gate
         end
 
         dispatch_request!(req, now: now)

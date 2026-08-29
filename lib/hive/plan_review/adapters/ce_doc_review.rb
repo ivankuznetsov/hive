@@ -264,7 +264,10 @@ module Hive
               status,
               diagnostic: runner_result["diagnostic"],
               retry_at: runner_result["retry_at"],
-              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+              route_receipt: route_receipt(
+                request, actual: runner_result["actual_route"],
+                diagnostic_source: runner_result["diagnostic"] && "runner"
+              )
             )
           end
           validate_output!(output_path, disposable)
@@ -286,7 +289,10 @@ module Hive
             residual_evidence: parsed.residual_evidence,
             diagnostic: parsed.diagnostic,
             retry_at: parsed.retry_at,
-            route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+            route_receipt: route_receipt(
+              request, actual: runner_result["actual_route"],
+              diagnostic_source: parsed.diagnostic && "reviewer"
+            )
           )
         rescue Timeout::Error
           result(
@@ -298,11 +304,17 @@ module Hive
             "retryable_failure", diagnostic: e.message,
             route_receipt: route_receipt(request)
           )
-        rescue StaleObservation, InvalidRecord, Hive::ConfigError => e
+        rescue StaleObservation, InvalidRecord => e
           actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
           result(
             "terminal_failure", diagnostic: e.message,
-            route_receipt: route_receipt(request, actual:)
+            route_receipt: route_receipt(request, actual:, diagnostic_source: "parser")
+          )
+        rescue Hive::ConfigError => e
+          actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
+          result(
+            "terminal_failure", diagnostic: e.message,
+            route_receipt: route_receipt(request, actual:, diagnostic_source: "adapter")
           )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
@@ -392,7 +404,7 @@ module Hive
           end
         end
 
-        def route_receipt(request, actual: nil, capability_result: "present")
+        def route_receipt(request, actual: nil, capability_result: "present", diagnostic_source: nil)
           actual = stringify(actual)
           independent, reason = RouteResolver.independence(request.planner_identity, actual)
           {
@@ -401,8 +413,9 @@ module Hive
             "actual" => actual,
             "capability_result" => capability_result,
             "independence_verified" => independent,
-            "independence_reason" => reason
-          }.freeze
+            "independence_reason" => reason,
+            "diagnostic_source" => diagnostic_source
+          }.compact.freeze
         end
 
         def result(outcome, **attributes)

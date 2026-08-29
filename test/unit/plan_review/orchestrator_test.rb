@@ -467,6 +467,126 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_legacy_selected_lenses_parser_failure_retries_once_under_the_current_contract
+    with_task(mandatory_plan) do |task, cfg|
+      primary_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary" && (primary_calls += 1) == 1
+          next Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure",
+            diagnostic: "plan review selected_lenses must contain lowercase names"
+          )
+        end
+
+        successful_result(request)
+      end
+
+      blocked = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "blocked", blocked.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
+
+      cleared = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 2, adapter.calls.count { |request| request.kind == "primary" }
+      reset = cleared["routes"].find { |route| route["selected_lenses_contract_recovery"] }
+      assert_equal true, reset.fetch("recovery_reset")
+      assert_equal 2, reset.fetch("selected_lenses_contract_version")
+
+      orchestrator(task, cfg, adapter:).advance!
+      assert_equal 2, adapter.calls.count { |request| request.kind == "primary" }
+    end
+  end
+
+  def test_legacy_selected_lenses_parser_failure_recovers_every_affected_role_once
+    with_task(mandatory_plan) do |task, cfg|
+      calls = Hash.new(0)
+      adapter = FakeAdapter.new do |request|
+        calls[request.kind] += 1
+        if %w[primary adversarial].include?(request.kind) && calls.fetch(request.kind) == 1
+          next Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure",
+            diagnostic: "plan review selected_lenses must contain lowercase names"
+          )
+        end
+
+        successful_result(request)
+      end
+
+      blocked = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "blocked", blocked.state
+      assert_equal({ "primary" => 1, "adversarial" => 1 }, calls)
+
+      cleared = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+      resets = cleared["routes"].select { |route| route["selected_lenses_contract_recovery"] }
+      assert_equal %w[adversarial primary], resets.map { |route| route.fetch("role") }.sort
+
+      orchestrator(task, cfg, adapter:).advance!
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+    end
+  end
+
+  def test_current_selected_lenses_failure_after_recovery_remains_terminal
+    with_task(mandatory_plan) do |task, cfg|
+      primary_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          primary_calls += 1
+          diagnostic = if primary_calls == 1
+            "plan review selected_lenses must contain lowercase names"
+          else
+            "plan review selected_lenses must contain lowercase names of 1-64 characters that " \
+              "start with a letter and use only lowercase letters, digits, hyphens, or underscores"
+          end
+          next Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure", diagnostic:,
+            route_receipt: { "diagnostic_source" => "parser" }
+          )
+        end
+
+        successful_result(request)
+      end
+
+      assert_equal "blocked", orchestrator(task, cfg, adapter:).advance!.record.state
+      assert_equal "blocked", orchestrator(task, cfg, adapter:).advance!.record.state
+      assert_equal 2, primary_calls
+
+      orchestrator(task, cfg, adapter:).advance!
+      assert_equal 2, primary_calls
+    end
+  end
+
+  def test_reviewer_authored_legacy_diagnostic_does_not_trigger_contract_recovery
+    with_task(mandatory_plan) do |task, cfg|
+      primary_calls = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          primary_calls += 1
+          next Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure",
+            diagnostic: "plan review selected_lenses must contain lowercase names",
+            route_receipt: { "diagnostic_source" => "reviewer" }
+          )
+        end
+
+        successful_result(request)
+      end
+
+      blocked = orchestrator(task, cfg, adapter:).advance!.record
+      replay = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "blocked", blocked.state
+      assert_equal "blocked", replay.state
+      assert_equal 1, primary_calls
+      refute replay["routes"].any? { |route| route["selected_lenses_contract_recovery"] }
+    end
+  end
+
   # Mandatory capability failures get cheap re-probes, then move to a paced
   # retry instead of growing current.json on every daemon tick or parking
   # forever after the provider becomes available.

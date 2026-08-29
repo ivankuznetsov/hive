@@ -195,15 +195,18 @@ module Hive
         # the review is still produced). This mirrors the Phase 4
         # `adhoc_fix_enabled?` gate below — both must agree or an ad-hoc
         # review would still write fix commits here.
+        entry_ci_repaired = false
         if marker.name != :review_waiting && adhoc_fix_enabled?(cfg, task)
           @current_phase = :ci
           mark_working(task, phase: :ci, pass: 1)
+          before_entry_ci_head = git_head(worktree_path)
           terminal = run_ci_gates(
             task, cfg, ctx,
             started_at: started_at, max_wall_clock_sec: max_wall_clock,
             pass: 1
           )
           return terminal if terminal
+          entry_ci_repaired = git_head(worktree_path) != before_entry_ci_head
         end
 
         # HEAD proven by the entry gate. Normal REVIEW_WAITING resumes
@@ -219,6 +222,11 @@ module Hive
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
         pass = next_pass_for(task, marker, cfg)
         max_passes = cfg.dig("review", "max_passes") || 4
+        # A task can be intentionally rewound into review after exhausting its
+        # configured pass cap. If the entry CI gate repairs that previously
+        # reviewed head, admit exactly the next on-disk pass so the repair is
+        # reviewed instead of immediately returning REVIEW_STALE.
+        max_passes = [ max_passes, pass ].max if entry_ci_repaired
 
         # When the runner is re-entering a pass whose Phase 4 fix did
         # not finish (REVIEW_ERROR phase=fix, or interrupted

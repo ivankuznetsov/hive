@@ -198,7 +198,8 @@ module Hive
         # last `tail_lines` lines. Most agent prompts have a token
         # budget; sending megabytes of CI log fails the spawn.
         def clean_output(raw, tail_lines)
-          stripped = raw.to_s.gsub(ANSI_RE, "")
+          text = raw.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
+          stripped = text.gsub(ANSI_RE, "")
           lines = stripped.lines
           return stripped if lines.size <= tail_lines
 

@@ -620,7 +620,7 @@ module Hive
         job_id = job["databaseId"] || job["id"] ||
                  job["detailsUrl"].to_s[%r{/job/(\d+)(?:\z|[/?#])}, 1]
         {
-          "name" => (job["name"] || job["context"]).to_s,
+          "name" => utf8_text(job["name"] || job["context"]),
           "job_id" => job_id,
           "log" => fetch_job_log(worktree_path, job_id, cfg: cfg)
         }
@@ -636,9 +636,10 @@ module Hive
       return "[hive-babysitter: no job id available, cannot fetch log]" unless job_id
 
       fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
-      return fetch_result[:log] if fetch_result[:success]
+      return utf8_text(fetch_result[:log]) if fetch_result[:success]
 
-      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
+      error = utf8_text(fetch_result[:error])
+      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{error}]"
     end
 
     # Max-min fair allocation: repeatedly hand out an even share of the
@@ -743,6 +744,10 @@ module Hive
       tail = text.byteslice(-byte_cap, byte_cap).to_s
       tail.scrub!("")
       "\n...[truncated, #{elided} bytes elided]\n#{tail}"
+    end
+
+    def utf8_text(value)
+      value.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
     end
 
     def lookup_merged_pr(worktree_path, branch, cfg: nil, head_oid: nil)

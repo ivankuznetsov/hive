@@ -346,6 +346,38 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_binary_command_runner_output_is_normalized_before_the_fix_prompt
+    with_ci_dir do |dir, task_folder|
+      calls = 0
+      runner = lambda do |**|
+        calls += 1
+        if calls == 1
+          Hive::Stages::Review::CiFix::Run.new(
+            "hosted \xE2\x80\x94 failure \xFF\n".b, 1
+          )
+        else
+          Hive::Stages::Review::CiFix::Run.new("hosted checks green\n", 0)
+        end
+      end
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+        command: "hosted checks", command_runner: runner
+      )
+
+      assert_equal :green, result.status
+      assert_equal 2, result.attempts
+      prompt = File.binread(File.join(log_dir, "fake-claude-argv.log"))
+        .force_encoding(Encoding::UTF_8)
+      assert_predicate prompt, :valid_encoding?
+      assert_includes prompt, "hosted — failure ?"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   def test_long_output_is_tail_truncated
     with_ci_dir do |dir, task_folder|
       # Emit 1000 lines of output, fail.

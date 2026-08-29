@@ -430,6 +430,10 @@ module Hive
 
         record_attempt_admission(task, created, now)
         capture_launch_context(task, created, generation, now)
+        handoff_now = [ now.utc, @clock.call.utc ].max
+        created = @store.arm_launch_handoff(
+          created, launch_timeout_sec: @launch_timeout_sec, now: handoff_now
+        )
         handoff = @launcher.launch(created, claim_capability: claim_capability)
         if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
           return accepted_result(created, interactive: interactive, decision: route_decision)

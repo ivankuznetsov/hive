@@ -47,8 +47,11 @@ namespace, executable, domain, proxy, raw socket, media publication, and capture
 receipts; do not search for or connect to their private implementation paths.
 Do not search for or invoke Firefox, Playwright, Puppeteer, Chromium, QML,
 ImageMagick, VHS, or another browser/terminal recorder. The controller has
-already opened `web.origin` and proved `web.status` is `ready`; begin with
-`snapshot -i`. Use `open web.origin` only to restore that issued page, then use
+launched the managed browser and proved the browser session itself is ready.
+When `web.server.status` is `ready`, the issued page is open; begin with
+`snapshot -i`. When `web.server` is null, first start the changed project's application
+on the exact `web.app_endpoint` port without detaching it, then `open web.origin`
+and begin with `snapshot -i`. After that, use
 interaction commands, `screenshot NAME.png [--full|--annotate]`, and
 `record start NAME.webm`/`record stop`. Use safe basename-only media names;
 Hive returns the published task-relative attempt path.
@@ -62,9 +65,8 @@ is `ready`, the controller has already started the app: do not install
 dependencies or start, restart, replace, or detach another application server.
 For Hive Web fixtures, seed only disposable product state with the frozen Hive
 CLI and `HIVE_HOME=$HIVE_EVIDENCE_WEB_HIVE_HOME`; keep all other disposable
-fixture/project state below the evidence-write root. When `web.server` is null,
-start the changed project's application on the exact `app_endpoint` port
-without detaching it. Hive closes the named browser session, then cleans the
+fixture/project state below the evidence-write root. Hive closes the named
+browser session, then cleans the
 producer process group, managed Web runtime, proxy, and evidence workspace.
 
 For terminal proof, call the controller-supplied `evidence_terminal` tool with

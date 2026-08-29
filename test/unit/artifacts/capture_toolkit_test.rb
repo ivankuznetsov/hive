@@ -163,8 +163,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
                  toolkit.launch_environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")
     refute toolkit.launch_environment.key?("HOME")
     refute toolkit.launch_environment.key?("AGENT_BROWSER_EXECUTABLE_PATH")
-    assert_equal "open", browser_commands.first.last[-2]
-    assert_equal receipt.dig("web", "origin"), browser_commands.first.last.last
+    assert_equal %w[snapshot -i], browser_commands.first.last.last(2)
     toolkit.close
     refute File.exist?(socket_root)
     refute File.exist?(mailbox_root)

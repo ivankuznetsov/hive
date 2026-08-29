@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-27
+updated: 2026-08-29
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -549,8 +549,12 @@ advances a workflow stage directly:
    marker fails with `recovery_migration_required` and must be upgraded once
    with `hive migrate`; there is no mtime/reason identity fallback. Workflow
    retry argv are derived centrally, including `3-plan`, so clearing can never
-   become an alternate scheduling mechanism. Queue admission, capacity,
-   cooldown, and quarantine gates still apply. A post-clear launch failure
+   become an alternate scheduling mechanism. A freshness-bound operator
+   `workflow.retry` bypasses automatic pacing by persisting the action time as
+   `next_eligible_at`; if the same marker generation already has an admitted
+   automatic request, the action makes that request due instead of creating a
+   competing delivery. Safety, queue admission, capacity, and quarantine gates
+   still apply. A post-clear launch failure
    returns the durable request to scheduler ownership with the same shared
    cooldown instead of creating a per-tick loop.
 

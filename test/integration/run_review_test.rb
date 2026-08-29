@@ -2582,12 +2582,14 @@ class RunReviewTest < Minitest::Test
         folder = setup_review_task(dir, cfg_overrides: {
           "review" => { "max_wall_clock_sec" => 1 }
         })
-        calls = 0
+        reviewers_finished = false
 
-        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(_cfg, _ctx, _task, **_kwargs) { :ok }) do
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, _ctx, _task, **_kwargs|
+          reviewers_finished = true
+          :ok
+        }) do
           with_replaced_singleton_method(Hive::Stages::Review, :wall_clock_exceeded?, lambda { |_started_at, _max|
-            calls += 1
-            calls == 3
+            reviewers_finished
           }) do
             capture_io { Hive::Commands::Run.new(folder).call }
           end

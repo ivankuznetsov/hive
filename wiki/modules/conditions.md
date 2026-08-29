@@ -1,10 +1,10 @@
 ---
 title: Generation-scoped task conditions
 type: module
-source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb
+source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/task_projection/store.rb
 created: 2026-07-17
-updated: 2026-08-27
-tags: [conditions, projection, journal, execute, migration]
+updated: 2026-08-29
+tags: [conditions, projection, journal, execute, migration, bounded-storage, repair]
 ---
 
 **TLDR**: Execute completion can be evaluated from versioned, generation-
@@ -73,14 +73,22 @@ on read and rebuild, and rebuild cannot overwrite the last snapshot. Markers
 from non-execute stages do not claim this execute-journal handoff. Only
 mutating reconciliation republishes it.
 
-Full status scans have an exact-cache path over the separately bounded
-`task-projection.checkpoint.json`. It verifies the checkpoint against the
-current journal, refreshes mutable durable attempt fields, and reprojects from
-checkpoint seed facts when an attempt changed. It can avoid old-history replay
-only while the journal has not grown and the bounded source checks remain
-current. Otherwise status delegates to the ordinary authoritative read above;
-the bounded workspace API may report partial diagnostics, but status cannot
-turn those into a condition projection.
+Routine task-graph scans use the separately bounded
+`task-projection.checkpoint.json` as a strict read model. One scan-wide attempt
+projection reader is reused; each task may validate a 512 KiB checkpoint, a
+1 MiB / 2,000-event append-only suffix, 100 attempt IDs, and 32 predecessor
+point fetches. The reader refreshes referenced mutable attempt bindings and
+reprojects only the bounded suffix. It never falls back to the complete
+journal, invokes `rebuild!`, or enumerates permanent proof storage.
+
+A task with durable history and a missing, invalid, stale, torn, oversized, or
+otherwise unverifiable bounded projection becomes a synthetic
+`condition_projection_repair_required` row. The row is operator-owned and
+recomputed rather than persisted; unrelated tasks continue. Only the complete
+initial-stage zero-state may project as pristine without a checkpoint. The
+explicit [[commands/repair-projection]] command owns full replay for one exact
+task. It changes derived snapshot/checkpoint files only; it is neither a
+workflow retry nor a migration or watcher.
 
 Selection proceeds by current task generation, then latest compatible attempt
 within each registry family, then exact commit generation/HEAD for branch facts.

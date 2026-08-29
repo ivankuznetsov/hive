@@ -201,10 +201,15 @@ tick from double-spawning.
 The timestamp captured at tick start is an observation timestamp, not a
 durable-attempt launch timestamp. A full tick can exceed
 `attempt_launch_timeout_sec` while draining recovery work. Immediately before
-durable admission, the production dispatcher reads a fresh wall clock for the
-request creation time and attempt claim deadline; otherwise later rows could
-be born with already-expired claim windows and fail every detached handoff as
-`launch_handoff_failed`.
+durable admission, the production daemon dispatcher reads a fresh wall clock
+for the request creation time. Attempt admission can itself spend longer than
+the launch window recording task activity and advisory context, so the attempt
+store separately re-arms the exact launching record's claim deadline from a
+fresh wall clock immediately before the detached wrapper handoff. The guarded
+compare-and-swap refuses to revive a record that another owner already claimed
+or reconciled. Without both boundaries, later or slow-context rows can be born
+with, or reach handoff with, already-expired claim windows and fail every
+detached handoff as `launch_handoff_failed`.
 
 Scheduler decisions are captured in memory as each row is evaluated from the
 tick's one authoritative status frame. The dispatcher publishes that frame at

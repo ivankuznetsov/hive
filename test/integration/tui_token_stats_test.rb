@@ -47,7 +47,10 @@ class TuiTokenStatsTest < Minitest::Test
 
   def test_opens_task_scoped_matrix_and_closes_back_to_grid
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime-control-plane.sqlite3")
+      ).migrate!
+      Hive::UsageDb.database = database
       Hive::UsageDb.record!(
         agent: "claude",
         model: "model",
@@ -92,6 +95,8 @@ class TuiTokenStatsTest < Minitest::Test
 
       assert_equal :grid, bubble.hive_model.mode
       assert_nil bubble.hive_model.token_stats_state
+    ensure
+      database&.disconnect
     end
   end
 end

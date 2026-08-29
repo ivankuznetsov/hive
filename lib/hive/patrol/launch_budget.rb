@@ -384,7 +384,10 @@ module Hive
 
       def telemetry_identity
         id = "patrol-launch-#{SecureRandom.uuid}"
-        { attempt_id: id, session_id: id }
+        # A standalone Patrol launch is a telemetry session, not an Attempts
+        # lifecycle row. Keep it unattributed so the control-plane foreign key
+        # cannot manufacture an attempt identity that does not exist.
+        { attempt_id: nil, session_id: id }
       end
 
       def profile_name(profile, stage)

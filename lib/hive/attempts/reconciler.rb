@@ -56,12 +56,10 @@ module Hive
         scan.records.each do |record|
           reconciled = reconcile_record(record, now: now)
           prepared = @finalization_maintenance&.prepare(reconciled.attempt)
-          if @finalization_maintenance&.respond_to?(:acknowledge_provider_health)
-            @finalization_maintenance.acknowledge_provider_health(reconciled.attempt)
-          end
           observation = observe_condition(reconciled, now: now)
           if prepared && %i[delivered acknowledged not_applicable].include?(observation)
             @finalization_maintenance.acknowledge(reconciled.attempt, :journal)
+            @finalization_maintenance.publish_after_journal(reconciled.attempt)
           end
           statuses << reconciled
           newly_lost << reconciled.attempt if reconciled.classification == :lost

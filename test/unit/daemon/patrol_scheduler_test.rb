@@ -7,6 +7,14 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
   T0 = Time.utc(2026, 5, 28, 12, 0, 0)
 
+  def setup
+    @previous_usage_path = Hive::UsageDb.path
+  end
+
+  def teardown
+    Hive::UsageDb.path = @previous_usage_path
+  end
+
   class FakeGit
     attr_accessor :sha
 
@@ -51,8 +59,24 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     Hive::Daemon::PatrolScheduler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) { cfg },
-      git: git
+      git: git,
+      database: runtime_database(entry)
     )
+  end
+
+  def runtime_database(entry)
+    @runtime_databases ||= {}
+    @runtime_databases[entry.fetch("path")] ||= begin
+      database = prepare_runtime_project(
+        state_home: tracked_tmp_dir("hive-test-patrol-runtime"),
+        name: entry.fetch("name"), path: entry.fetch("path"),
+        state_root_path: entry.fetch("hive_state_path"),
+        project_id: entry.fetch("project_id")
+      )
+      (@hive_test_runtime_databases ||= []) << database
+      Hive::UsageDb.database = database
+      database
+    end
   end
 
   def enabled_cfg(overrides = {})
@@ -117,7 +141,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { cfg },
-        git: FakeGit.new
+        git: FakeGit.new,
+        database: runtime_database(entry)
       )
       candidate = sched.candidates(now: T0).fetch(0)
       cfg = enabled_cfg("default_workflow" => "content")
@@ -301,7 +326,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
   def test_daily_launch_limit_skips_a_due_command_until_the_next_utc_day
     old_path = Hive::UsageDb.path
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
+      entry = project_entry(dir)
+      Hive::UsageDb.database = runtime_database(entry)
       8.times do
         Hive::UsageDb.record!(
           agent: "codex", model: nil, project_slug: "p1",
@@ -310,7 +336,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
         )
       end
       write_state(dir, "last_scanned_sha" => "old")
-      sched = scheduler(project_entry(dir), enabled_cfg)
+      sched = scheduler(entry, enabled_cfg)
 
       assert_empty sched.tick(now: T0)
       assert_equal T0 + 43_200,
@@ -324,8 +350,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
   def test_provider_retry_hold_survives_scheduler_restart_without_parking_architecture
     old_path = Hive::UsageDb.path
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
       entry = project_entry(dir)
+      Hive::UsageDb.database = runtime_database(entry)
       cfg = enabled_cfg
       write_state(dir, "last_scanned_sha" => "old")
       first = scheduler(entry, cfg)
@@ -347,6 +373,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       architecture = Hive::Patrol::LaunchBudget.new(
         dir, cfg: cfg, project_id: entry.fetch("project_id"),
         project_name: entry.fetch("name"), engine: :architecture,
+        database: runtime_database(entry),
         clock: -> { T0 + 20 }
       )
       assert_equal 4, architecture.remaining_launches
@@ -438,7 +465,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       write_state(repo, "last_scanned_sha" => "old")
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ project_entry(repo) ] },
-        git: FakeGit.new(sha: "new")
+        git: FakeGit.new(sha: "new"),
+        database: runtime_database(project_entry(repo))
       )
 
       assert_equal 1, sched.tick(now: T0).size

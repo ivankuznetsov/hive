@@ -35,10 +35,12 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     git: GitHelper.new, state_store_factory: nil)
+                     git: GitHelper.new, state_store_factory: nil,
+                     database: Hive::RuntimeControlPlane.database)
         @registry = registry
         @config_loader = config_loader
         @git = git
+        @database = database
         @state_store_factory = state_store_factory || lambda do |entry|
           Hive::Patrol::StateStore.new(
             entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path")
@@ -213,6 +215,7 @@ module Hive
           entry.fetch("path"), cfg: cfg || @config_loader.call(entry.fetch("path")),
           project_id: entry.fetch("project_id"),
           project_name: entry.fetch("name"), engine: :ordinary,
+          database: @database,
           clock: -> { now }
         )
       end

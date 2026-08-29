@@ -1,122 +1,48 @@
-require "fileutils"
 require "date"
 require "securerandom"
 require "time"
 require "hive/billing_evidence"
-require "hive/paths"
+require "hive/runtime_control_plane"
 
 module Hive
-  # Small SQLite store for hive-driven agent token usage.
-  #
-  # Rows are intentionally written at the stage-spawn boundary, not by scanning
-  # agent log directories. Project slug is the configured project name / folder
-  # basename, by design, so multiple checkouts of the same project collapse into
-  # the same aggregate bucket.
+  # Token telemetry facade backed by the shared runtime control plane. The
+  # public hashes intentionally retain their historical shape; only the
+  # storage authority changed.
   module UsageDb
     AGENTS = %i[claude codex pi grok opencode].freeze
     BUCKETS = %i[today 7d 30d all].freeze
-    SCHEMA_VERSION = 4
     BILLING_ROUTES = Hive::BillingEvidence::ROUTES
     BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
-    BUSY_TIMEOUT_MS = 5_000
-    LEGACY_SCHEMA_SQL = <<~SQL.freeze
-      CREATE TABLE IF NOT EXISTS token_usage (
-        id           TEXT PRIMARY KEY,
-        agent        TEXT NOT NULL,
-        model        TEXT,
-        project_slug TEXT,
-        task_slug    TEXT,
-        stage        TEXT,
-        started_at   TEXT NOT NULL,
-        ended_at     TEXT,
-        input        INTEGER NOT NULL DEFAULT 0,
-        output       INTEGER NOT NULL DEFAULT 0,
-        cached       INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS idx_token_usage_started_at ON token_usage(started_at);
-      CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_slug, started_at);
-      CREATE INDEX IF NOT EXISTS idx_token_usage_task ON token_usage(task_slug, started_at);
-    SQL
-    SCHEMA_SQL = <<~SQL.freeze
-      CREATE TABLE IF NOT EXISTS token_usage (
-        id              TEXT PRIMARY KEY,
-        agent           TEXT NOT NULL,
-        model           TEXT,
-        requested_backend TEXT,
-        requested_model   TEXT,
-        actual_backend    TEXT,
-        actual_model      TEXT,
-        project_slug    TEXT,
-        task_slug       TEXT,
-        stage           TEXT,
-        started_at      TEXT NOT NULL,
-        ended_at        TEXT,
-        input           INTEGER NOT NULL DEFAULT 0,
-        output          INTEGER NOT NULL DEFAULT 0,
-        cached          INTEGER NOT NULL DEFAULT 0,
-        cache_read      INTEGER,
-        cache_write     INTEGER,
-        reasoning       INTEGER,
-        cost            REAL,
-        input_available       INTEGER NOT NULL DEFAULT 1,
-        output_available      INTEGER NOT NULL DEFAULT 1,
-        cached_available      INTEGER NOT NULL DEFAULT 1,
-        cache_read_available  INTEGER NOT NULL DEFAULT 0,
-        cache_write_available INTEGER NOT NULL DEFAULT 0,
-        reasoning_available   INTEGER NOT NULL DEFAULT 0,
-        cost_available        INTEGER NOT NULL DEFAULT 0,
-        attempt_id      TEXT,
-        session_id      TEXT,
-        task_generation INTEGER,
-        source          TEXT,
-        billing_route   TEXT,
-        billing_evidence_source TEXT,
-        input_includes_cache_read INTEGER,
-        input_includes_cache_write INTEGER,
-        output_includes_reasoning INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS idx_token_usage_started_at ON token_usage(started_at);
-      CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_slug, started_at);
-      CREATE INDEX IF NOT EXISTS idx_token_usage_task ON token_usage(task_slug, started_at);
-      CREATE INDEX IF NOT EXISTS idx_token_usage_attempt ON token_usage(attempt_id, task_generation);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_session_unique
-        ON token_usage(session_id) WHERE session_id IS NOT NULL;
-    SQL
-    ADDITIVE_COLUMNS = {
-      "requested_backend" => "TEXT",
-      "requested_model" => "TEXT",
-      "actual_backend" => "TEXT",
-      "actual_model" => "TEXT",
-      "cache_read" => "INTEGER",
-      "cache_write" => "INTEGER",
-      "reasoning" => "INTEGER",
-      "cost" => "REAL",
-      "input_available" => "INTEGER NOT NULL DEFAULT 1",
-      "output_available" => "INTEGER NOT NULL DEFAULT 1",
-      "cached_available" => "INTEGER NOT NULL DEFAULT 1",
-      "cache_read_available" => "INTEGER NOT NULL DEFAULT 0",
-      "cache_write_available" => "INTEGER NOT NULL DEFAULT 0",
-      "reasoning_available" => "INTEGER NOT NULL DEFAULT 0",
-      "cost_available" => "INTEGER NOT NULL DEFAULT 0",
-      "attempt_id" => "TEXT",
-      "session_id" => "TEXT",
-      "task_generation" => "INTEGER",
-      "source" => "TEXT",
-      "billing_route" => "TEXT",
-      "billing_evidence_source" => "TEXT",
-      "input_includes_cache_read" => "INTEGER",
-      "input_includes_cache_write" => "INTEGER",
-      "output_includes_reasoning" => "INTEGER"
-    }.freeze
+    EXACT_COLUMNS = %i[
+      session_id agent model project_slug task_slug stage started_at ended_at
+      input output cached attempt_id task_generation source requested_backend
+      requested_model actual_backend actual_model cache_read cache_write reasoning
+      cost input_available output_available cached_available cache_read_available
+      cache_write_available reasoning_available cost_available billing_route
+      billing_evidence_source input_includes_cache_read input_includes_cache_write
+      output_includes_reasoning
+    ].freeze
 
     module_function
 
+    # Kept as a narrow test/diagnostic seam. Production always resolves to the
+    # one state-home control-plane database; there is no HIVE_USAGE_DB_PATH.
     def path
-      @path || env_path || File.join(Hive::Paths.data_home, "usage.db")
+      @path || Hive::Paths.runtime_control_plane_path
     end
 
     def path=(value)
-      @path = value
+      @database&.disconnect if @owns_database
+      @database = nil
+      @owns_database = false
+      @path = value && File.expand_path(value)
+    end
+
+    def database=(value)
+      @database&.disconnect if @owns_database && !@database.equal?(value)
+      @database = value
+      @owns_database = false
+      @path = value&.path
     end
 
     def record!(agent:, model:, project_slug:, task_slug:, stage:, started_at:, ended_at:,
@@ -132,134 +58,70 @@ module Hive
       actual_backend, routed_actual_model = split_route(actual_route)
       actual_backend ||= blank_to_nil(actual_provider)
       actual_model = routed_actual_model || blank_to_nil(actual_model)
-      normalized_billing_route = billing_value(
-        billing_route, BILLING_ROUTES, "billing route"
-      )
+      normalized_billing_route = billing_value(billing_route, BILLING_ROUTES, "billing route")
       normalized_billing_source = billing_value(
-        billing_evidence_source, BILLING_EVIDENCE_SOURCES,
-        "billing evidence source"
+        billing_evidence_source, BILLING_EVIDENCE_SOURCES, "billing evidence source"
       )
-      reported_cost = provider_reported_cost.nil? ? cost : provider_reported_cost
-      if !harness.nil? && harness.to_s != agent.to_s
-        raise ArgumentError, "harness must match the usage agent"
-      end
-      with_database(create: true) do |db|
-        ensure_schema!(db)
-        normalized_session_id = blank_to_nil(session_id)
-        attributes = [
-          SecureRandom.uuid, agent.to_s, blank_to_nil(model),
-          requested_backend, requested_model, actual_backend, actual_model,
-          blank_to_nil(project_slug), blank_to_nil(task_slug), blank_to_nil(stage),
-          iso8601(started_at), ended_at.nil? ? nil : iso8601(ended_at),
-          integer(input), integer(output), integer(cached),
-          nullable_number(cache_read), nullable_number(cache_write),
-          nullable_number(reasoning), nullable_number(reported_cost),
-          availability(input), availability(output), availability(cached),
-          availability(cache_read), availability(cache_write),
-          availability(reasoning), availability(reported_cost),
-          blank_to_nil(attempt_id), normalized_session_id,
-          task_generation.nil? ? nil : Integer(task_generation), blank_to_nil(source),
-          normalized_billing_route, normalized_billing_source,
-          nullable_boolean(input_includes_cache_read),
-          nullable_boolean(input_includes_cache_write),
-          nullable_boolean(output_includes_reasoning)
-        ]
-        if normalized_session_id
-          db.execute(SESSION_UPSERT_SQL, attributes)
-          raise "session usage identity conflict" if db.changes.zero?
+      raise ArgumentError, "harness must match the usage agent" if
+        !harness.nil? && harness.to_s != agent.to_s
+
+      attributes = {
+        id: SecureRandom.uuid,
+        agent: agent.to_s,
+        model: blank_to_nil(model),
+        requested_backend: requested_backend,
+        requested_model: requested_model,
+        actual_backend: actual_backend,
+        actual_model: actual_model,
+        project_slug: blank_to_nil(project_slug),
+        task_slug: blank_to_nil(task_slug),
+        stage: blank_to_nil(stage),
+        started_at: iso8601(started_at),
+        ended_at: ended_at.nil? ? nil : iso8601(ended_at),
+        input: integer(input), output: integer(output), cached: integer(cached),
+        cache_read: nullable_number(cache_read),
+        cache_write: nullable_number(cache_write),
+        reasoning: nullable_number(reasoning),
+        cost: nullable_number(provider_reported_cost.nil? ? cost : provider_reported_cost),
+        input_available: availability(input),
+        output_available: availability(output),
+        cached_available: availability(cached),
+        cache_read_available: availability(cache_read),
+        cache_write_available: availability(cache_write),
+        reasoning_available: availability(reasoning),
+        cost_available: availability(provider_reported_cost.nil? ? cost : provider_reported_cost),
+        attempt_id: blank_to_nil(attempt_id),
+        session_id: blank_to_nil(session_id),
+        task_generation: task_generation.nil? ? nil : Integer(task_generation),
+        source: blank_to_nil(source),
+        billing_route: normalized_billing_route,
+        billing_evidence_source: normalized_billing_source,
+        input_includes_cache_read: nullable_boolean(input_includes_cache_read),
+        input_includes_cache_write: nullable_boolean(input_includes_cache_write),
+        output_includes_reasoning: nullable_boolean(output_includes_reasoning)
+      }
+
+      database.transaction do |db|
+        usage = db[:token_usage]
+        existing = attributes[:session_id] && usage.where(session_id: attributes[:session_id]).first
+        if existing
+          validate_session_identity!(existing, attributes)
+          usage.where(id: existing.fetch(:id)).update(merge_session(existing, attributes))
         else
-          db.execute(INSERT_SQL, attributes)
+          usage.insert(attributes)
         end
       end
       true
-    rescue StandardError => e
-      warn "[hive] usage record failed: #{e.class}: #{e.message}"
-      false
+    rescue ArgumentError, TypeError, Hive::RuntimeControlPlane::IntegrityError
+      raise
+    rescue StandardError => error
+      raise Hive::RuntimeControlPlane::Unavailable.new(
+        "usage persistence failed: #{error.message}",
+        code: :usage_persistence_failed,
+        action: "repair the runtime control plane before acknowledging terminal accounting",
+        details: { error_class: error.class.name }
+      )
     end
-
-    INSERT_SQL = <<~SQL.freeze
-      INSERT INTO token_usage (
-        id, agent, model,
-        requested_backend, requested_model, actual_backend, actual_model,
-        project_slug, task_slug, stage, started_at, ended_at,
-        input, output, cached, cache_read, cache_write, reasoning, cost,
-        input_available, output_available, cached_available,
-        cache_read_available, cache_write_available, reasoning_available, cost_available,
-        attempt_id, session_id, task_generation, source,
-        billing_route, billing_evidence_source,
-        input_includes_cache_read, input_includes_cache_write, output_includes_reasoning
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    SQL
-    SESSION_UPSERT_SQL = <<~SQL.freeze
-      #{INSERT_SQL.strip}
-      ON CONFLICT(session_id) WHERE session_id IS NOT NULL DO UPDATE SET
-        agent = excluded.agent,
-        model = COALESCE(excluded.model, token_usage.model),
-        requested_backend = COALESCE(excluded.requested_backend, token_usage.requested_backend),
-        requested_model = COALESCE(excluded.requested_model, token_usage.requested_model),
-        actual_backend = COALESCE(excluded.actual_backend, token_usage.actual_backend),
-        actual_model = COALESCE(excluded.actual_model, token_usage.actual_model),
-        project_slug = COALESCE(excluded.project_slug, token_usage.project_slug),
-        task_slug = COALESCE(excluded.task_slug, token_usage.task_slug),
-        stage = COALESCE(excluded.stage, token_usage.stage),
-        started_at = MIN(token_usage.started_at, excluded.started_at),
-        ended_at = COALESCE(excluded.ended_at, token_usage.ended_at),
-        input = MAX(token_usage.input, excluded.input),
-        output = MAX(token_usage.output, excluded.output),
-        cached = MAX(token_usage.cached, excluded.cached),
-        cache_read = CASE
-          WHEN excluded.cache_read_available > token_usage.cache_read_available OR
-               (excluded.cache_read_available = 1 AND excluded.cache_read > token_usage.cache_read)
-          THEN excluded.cache_read ELSE token_usage.cache_read END,
-        cache_write = CASE
-          WHEN excluded.cache_write_available > token_usage.cache_write_available OR
-               (excluded.cache_write_available = 1 AND excluded.cache_write > token_usage.cache_write)
-          THEN excluded.cache_write ELSE token_usage.cache_write END,
-        reasoning = CASE
-          WHEN excluded.reasoning_available > token_usage.reasoning_available OR
-               (excluded.reasoning_available = 1 AND excluded.reasoning > token_usage.reasoning)
-          THEN excluded.reasoning ELSE token_usage.reasoning END,
-        cost = CASE
-          WHEN excluded.cost_available > token_usage.cost_available OR
-               (excluded.cost_available = 1 AND excluded.cost > token_usage.cost)
-          THEN excluded.cost ELSE token_usage.cost END,
-        input_available = MAX(token_usage.input_available, excluded.input_available),
-        output_available = MAX(token_usage.output_available, excluded.output_available),
-        cached_available = MAX(token_usage.cached_available, excluded.cached_available),
-        cache_read_available = MAX(token_usage.cache_read_available, excluded.cache_read_available),
-        cache_write_available = MAX(token_usage.cache_write_available, excluded.cache_write_available),
-        reasoning_available = MAX(token_usage.reasoning_available, excluded.reasoning_available),
-        cost_available = MAX(token_usage.cost_available, excluded.cost_available),
-        billing_route = CASE
-          WHEN token_usage.billing_route IS NULL OR token_usage.billing_route = 'unknown'
-          THEN excluded.billing_route ELSE token_usage.billing_route END,
-        billing_evidence_source = CASE
-          WHEN token_usage.billing_route IS NULL OR token_usage.billing_route = 'unknown'
-          THEN excluded.billing_evidence_source ELSE token_usage.billing_evidence_source END,
-        input_includes_cache_read = COALESCE(
-          token_usage.input_includes_cache_read, excluded.input_includes_cache_read
-        ),
-        input_includes_cache_write = COALESCE(
-          token_usage.input_includes_cache_write, excluded.input_includes_cache_write
-        ),
-        output_includes_reasoning = COALESCE(
-          token_usage.output_includes_reasoning, excluded.output_includes_reasoning
-        ),
-        source = COALESCE(excluded.source, token_usage.source)
-      WHERE token_usage.attempt_id = excluded.attempt_id
-        AND token_usage.task_generation = excluded.task_generation
-        AND (token_usage.billing_route IS NULL OR token_usage.billing_route = 'unknown' OR
-             excluded.billing_route = 'unknown' OR token_usage.billing_route = excluded.billing_route)
-        AND (token_usage.input_includes_cache_read IS NULL OR
-             excluded.input_includes_cache_read IS NULL OR
-             token_usage.input_includes_cache_read = excluded.input_includes_cache_read)
-        AND (token_usage.input_includes_cache_write IS NULL OR
-             excluded.input_includes_cache_write IS NULL OR
-             token_usage.input_includes_cache_write = excluded.input_includes_cache_write)
-        AND (token_usage.output_includes_reasoning IS NULL OR
-             excluded.output_includes_reasoning IS NULL OR
-             token_usage.output_includes_reasoning = excluded.output_includes_reasoning)
-    SQL
 
     def exact_attempt(attempt_id:, task_generation: nil, project_slug: nil,
                       task_slug: nil, legacy_limit: 100, session_limit: 100,
@@ -267,216 +129,156 @@ module Hive
                       monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
       session_limit = positive_limit(session_limit, "session_limit")
       legacy_limit = positive_limit(legacy_limit, "legacy_limit")
-      return unavailable_exact("deadline_exhausted") if
-        deadline_exhausted?(deadline, monotonic_clock)
+      return unavailable_exact("deadline_exhausted") if deadline_exhausted?(deadline, monotonic_clock)
+      return unavailable_exact("store_missing") unless File.file?(path)
 
-      db_path = path
-      return unavailable_exact("store_missing") unless File.file?(db_path)
+      database.read do |db|
+        raise IOError, "usage read deadline exhausted" if deadline_exhausted?(deadline, monotonic_clock)
 
-      with_database(
-        create: false,
-        busy_timeout_ms: deadline_busy_timeout(deadline, monotonic_clock)
-      ) do |db|
-        ensure_schema!(db)
-        raise IOError, "usage read deadline exhausted" if
-          deadline_exhausted?(deadline, monotonic_clock)
-
-        clauses = [ "attempt_id = ?" ]
-        binds = [ attempt_id.to_s ]
-        unless task_generation.nil?
-          clauses << "task_generation = ?"
-          binds << Integer(task_generation)
-        end
-        rows = db.execute(
-          "SELECT session_id, agent, model, project_slug, task_slug, stage, " \
-          "started_at, ended_at, input, output, cached, attempt_id, task_generation, source, " \
-          "requested_backend, requested_model, actual_backend, actual_model, " \
-          "cache_read, cache_write, reasoning, cost, input_available, output_available, " \
-          "cached_available, cache_read_available, cache_write_available, " \
-          "reasoning_available, cost_available, billing_route, billing_evidence_source, " \
-          "input_includes_cache_read, input_includes_cache_write, output_includes_reasoning " \
-          "FROM token_usage WHERE #{clauses.join(' AND ')} " \
-          "ORDER BY session_id, started_at LIMIT ?",
-          binds + [ session_limit + 1 ]
-        )
-        sessions_truncated = rows.length > session_limit
+        usage = db[:token_usage]
+        exact = usage.where(attempt_id: attempt_id.to_s)
+        exact = exact.where(task_generation: Integer(task_generation)) unless task_generation.nil?
+        rows = exact.select(*EXACT_COLUMNS).order(:session_id, :started_at).limit(session_limit + 1).all
         sessions = rows.first(session_limit).map { |row| exact_row(row) }
-        legacy_clauses = [ "attempt_id IS NULL" ]
-        legacy_binds = []
-        unless blank?(project_slug)
-          legacy_clauses << "project_slug = ?"
-          legacy_binds << project_slug.to_s
-        end
-        unless blank?(task_slug)
-          legacy_clauses << "task_slug = ?"
-          legacy_binds << task_slug.to_s
-        end
-        unattributed_rows = db.execute(
-          "SELECT session_id, agent, model, project_slug, task_slug, stage, " \
-          "started_at, ended_at, input, output, cached, attempt_id, task_generation, source, " \
-          "requested_backend, requested_model, actual_backend, actual_model, " \
-          "cache_read, cache_write, reasoning, cost, input_available, output_available, " \
-          "cached_available, cache_read_available, cache_write_available, " \
-          "reasoning_available, cost_available, billing_route, billing_evidence_source, " \
-          "input_includes_cache_read, input_includes_cache_write, output_includes_reasoning " \
-          "FROM token_usage WHERE #{legacy_clauses.join(' AND ')} " \
-          "ORDER BY started_at DESC LIMIT ?",
-          legacy_binds + [ legacy_limit ]
-        ).map { |row| exact_row(row) }
-        unattributed_count = db.get_first_value(
-          "SELECT COUNT(*) FROM (SELECT 1 FROM token_usage " \
-          "WHERE #{legacy_clauses.join(' AND ')} LIMIT ?)",
-          legacy_binds + [ legacy_limit + 1 ]
-        ).to_i
+
+        unattributed = usage.where(attempt_id: nil)
+        unattributed = unattributed.where(project_slug: project_slug.to_s) unless blank?(project_slug)
+        unattributed = unattributed.where(task_slug: task_slug.to_s) unless blank?(task_slug)
+        legacy_rows = unattributed.select(*EXACT_COLUMNS).reverse_order(:started_at)
+                                  .limit(legacy_limit + 1).all
         {
           available: true,
           sessions: sessions,
           totals: sum_usage(sessions),
-          unattributed: unattributed_rows,
-          unattributed_count: [ unattributed_count, legacy_limit ].min,
-          unattributed_truncated: unattributed_count > legacy_limit,
-          truncated: sessions_truncated
+          unattributed: legacy_rows.first(legacy_limit).map { |row| exact_row(row) },
+          unattributed_count: [ legacy_rows.length, legacy_limit ].min,
+          unattributed_truncated: legacy_rows.length > legacy_limit,
+          truncated: rows.length > session_limit
         }
       end
-    rescue StandardError => e
-      return unavailable_exact("deadline_exhausted") if
-        deadline_exhausted?(deadline, monotonic_clock)
+    rescue StandardError => error
+      return unavailable_exact("deadline_exhausted") if deadline_exhausted?(deadline, monotonic_clock)
 
-      warn "[hive] exact attempt usage failed: #{e.class}: #{e.message}"
+      warn "[hive] exact attempt usage failed: #{error.class}: #{error.message}"
       unavailable_exact("read_failed")
     end
 
     def aggregate(scope:, now: Time.now.utc)
-      db_path = path
-      return zero_aggregate unless File.exist?(db_path)
+      return zero_aggregate unless File.file?(path)
 
-      result = zero_aggregate
-      with_database(create: false) do |db|
-        ensure_schema!(db)
+      database.read do |db|
+        result = zero_aggregate
         bucket_starts(now).each do |bucket, since|
-          rows = aggregate_rows(db, scope || {}, since)
-          rows.each do |agent, input, output, cached, input_available, output_available, cached_available|
-            key = agent.to_s.to_sym
-            result[:agents][key] ||= zero_buckets
-            values = result[:agents][key][bucket]
-            values[:input] = integer(input)
-            values[:output] = integer(output)
-            values[:cached] = integer(cached)
-            mark_unavailable!(values, :input, input_available)
-            mark_unavailable!(values, :output, output_available)
-            mark_unavailable!(values, :cached, cached_available)
+          rows = scoped_usage(db[:token_usage], scope || {}, since)
+                 .select_group(:agent)
+                 .select_append {
+                   [ sum(input).as(:input), sum(output).as(:output), sum(cached).as(:cached),
+                    min(input_available).as(:input_available),
+                    min(output_available).as(:output_available),
+                    min(cached_available).as(:cached_available) ]
+                 }.all
+          rows.each do |row|
+            values = (result[:agents][row[:agent].to_s.to_sym] ||= zero_buckets).fetch(bucket)
+            apply_aggregate!(values, row)
           end
           result[:agents].each_value do |buckets|
-            result[:total][bucket][:input] += buckets[bucket][:input]
-            result[:total][bucket][:output] += buckets[bucket][:output]
-            result[:total][bucket][:cached] += buckets[bucket][:cached]
-            propagate_unavailable!(result[:total][bucket], buckets[bucket])
+            values = buckets.fetch(bucket)
+            %i[input output cached].each { |metric| result[:total][bucket][metric] += values[metric] }
+            propagate_unavailable!(result[:total][bucket], values)
           end
-          input, output, cached, count, input_available, output_available, cached_available =
-            aggregate_patrol_row(db, scope || {}, since)
-          result[:patrol][bucket][:input] = integer(input)
-          result[:patrol][bucket][:output] = integer(output)
-          result[:patrol][bucket][:cached] = integer(cached)
-          if integer(count).positive?
-            mark_unavailable!(result[:patrol][bucket], :input, input_available)
-            mark_unavailable!(result[:patrol][bucket], :output, output_available)
-            mark_unavailable!(result[:patrol][bucket], :cached, cached_available)
-          end
-        end
-      end
-      result
-    rescue StandardError => e
-      warn "[hive] usage aggregate failed: #{e.class}: #{e.message}"
-      zero_aggregate
-    end
 
-    # Current-day Patrol activity used by the launch gate and usage surfaces.
-    # Ordinary and Architecture Patrol share the aggregate launch count while
-    # retaining separate attribution fields. An
-    # "-unmetered" row represents a real agent launch whose CLI returned no
-    # trustworthy positive token totals.
-    def patrol_activity(scope:, now: Time.now.utc)
-      # Unlike the read-only TUI aggregate, launch admission deliberately creates
-      # the empty store before the first spawn. That distinguishes a genuine
-      # zero-usage day from an unavailable store, which must fail closed.
-      with_database(create: true) do |db|
-        ensure_schema!(db)
-        since = bucket_starts(now).fetch(:today)
-        sql = +"SELECT SUM(input), SUM(output), SUM(cached), COUNT(*), " \
-               "SUM(CASE WHEN stage LIKE '%-unmetered' THEN 1 ELSE 0 END), " \
-               "SUM(CASE WHEN stage LIKE 'patrol%' THEN 1 ELSE 0 END), " \
-               "SUM(CASE WHEN stage LIKE 'refactor-patrol%' THEN 1 ELSE 0 END), " \
-               "SUM(CASE WHEN stage LIKE 'refactor-patrol-review%' THEN 1 ELSE 0 END), " \
-               "SUM(CASE WHEN stage LIKE 'patrol%-unmetered' THEN 1 ELSE 0 END), " \
-               "SUM(CASE WHEN stage LIKE 'refactor-patrol%-unmetered' THEN 1 ELSE 0 END) " \
-               "FROM token_usage"
-        clauses, binds = aggregate_clauses(scope || {}, since)
-        append_patrol_clause!(clauses, binds)
-        sql << " WHERE #{clauses.join(' AND ')}"
-        input, output, cached, spawns, unmetered, ordinary_spawns, architecture_spawns,
-          architecture_review_spawns,
-          ordinary_unmetered, architecture_unmetered = db.execute(sql, binds).first
-        usage = { input: integer(input), output: integer(output), cached: integer(cached) }
-        usage.merge(
-          available: true,
-          tokens: usage.values_at(:input, :output).sum,
-          agent_spawns: integer(spawns),
-          unmetered_spawns: integer(unmetered),
-          ordinary_agent_spawns: integer(ordinary_spawns),
-          architecture_agent_spawns: integer(architecture_spawns),
-          architecture_review_spawns: integer(architecture_review_spawns),
-          ordinary_unmetered_spawns: integer(ordinary_unmetered),
-          architecture_unmetered_spawns: integer(architecture_unmetered)
-        )
-      end
-    rescue StandardError => e
-      warn "[hive] patrol usage aggregate failed: #{e.class}: #{e.message}"
-      zero_patrol_activity(available: false)
-    end
-
-    # Upgrade-only seed for the discovery allowance ledger. Exact historical
-    # review stages are attributable; fix/action rows are deliberately ignored.
-    # Patrol-like rows that cannot be assigned to one discovery engine park the
-    # corresponding lane until the next UTC day rather than guessing capacity.
-    def patrol_discovery_seed(scope:, date:)
-      day = Date.iso8601(date.to_s)
-      since = Time.utc(day.year, day.month, day.day).iso8601
-      before = (Time.utc(day.year, day.month, day.day) + 86_400).iso8601
-      with_database(create: true) do |db|
-        ensure_schema!(db)
-        sql = +"SELECT stage, source FROM token_usage WHERE started_at >= ? AND started_at < ?"
-        binds = [ since, before ]
-        unless blank?(scope && scope[:project_slug])
-          sql << " AND project_slug = ?"
-          binds << scope[:project_slug].to_s
-        end
-        rows = db.execute(sql, binds)
-        result = {
-          available: true,
-          ordinary: { count: 0, ambiguous: 0 },
-          architecture: { count: 0, ambiguous: 0 }
-        }
-        rows.each do |stage, source|
-          next if source.to_s == "patrol_non_discovery_launch"
-
-          value = stage.to_s
-          case value
-          when /\Apatrol-review(?:-unmetered)?\z/
-            result.fetch(:ordinary)[:count] += 1
-          when /\Arefactor-patrol-review(?:-unmetered)?\z/
-            result.fetch(:architecture)[:count] += 1
-          when /\Apatrol-fix(?:-|\z)/, /\Arefactor-patrol-fix(?:-|\z)/
-            next
-          when /\Arefactor-patrol/
-            result.fetch(:architecture)[:ambiguous] += 1
-          when /\Apatrol/
-            result.fetch(:ordinary)[:ambiguous] += 1
-          end
+          patrol = patrol_dataset(scoped_usage(db[:token_usage], scope || {}, since))
+                   .select {
+                     [ sum(input).as(:input), sum(output).as(:output), sum(cached).as(:cached),
+                      count(:id).as(:count), min(input_available).as(:input_available),
+                      min(output_available).as(:output_available),
+                      min(cached_available).as(:cached_available) ]
+                   }.first || {}
+          apply_aggregate!(result[:patrol][bucket], patrol) if integer(patrol[:count]).positive?
         end
         result
       end
-    rescue StandardError => e
-      warn "[hive] patrol discovery seed failed: #{e.class}: #{e.message}"
+    rescue StandardError => error
+      warn "[hive] usage aggregate failed: #{error.class}: #{error.message}"
+      zero_aggregate
+    end
+
+    def patrol_activity(scope:, now: Time.now.utc)
+      database.read do |db|
+        dataset = patrol_dataset(scoped_usage(
+          db[:token_usage], scope || {}, bucket_starts(now).fetch(:today)
+        ))
+        unmetered = Sequel.like(:stage, "%-unmetered")
+        ordinary = Sequel.like(:stage, "patrol%")
+        architecture = Sequel.like(:stage, "refactor-patrol%")
+        architecture_review = Sequel.like(:stage, "refactor-patrol-review%")
+        row = dataset.select do
+          [ sum(input).as(:input), sum(output).as(:output), sum(cached).as(:cached),
+           count(id).as(:agent_spawns),
+           sum(Sequel.case({ unmetered => 1 }, 0)).as(:unmetered_spawns),
+           sum(Sequel.case({ ordinary => 1 }, 0)).as(:ordinary_agent_spawns),
+           sum(Sequel.case({ architecture => 1 }, 0)).as(:architecture_agent_spawns),
+           sum(Sequel.case({ architecture_review => 1 }, 0)).as(:architecture_review_spawns),
+           sum(Sequel.case({ ordinary & unmetered => 1 }, 0)).as(:ordinary_unmetered_spawns),
+           sum(Sequel.case({ architecture & unmetered => 1 }, 0)).as(:architecture_unmetered_spawns) ]
+        end.first || {}
+        usage = %i[input output cached].to_h { |metric| [ metric, integer(row[metric]) ] }
+        usage.merge(
+          available: true, tokens: usage.values_at(:input, :output).sum,
+          agent_spawns: integer(row[:agent_spawns]),
+          unmetered_spawns: integer(row[:unmetered_spawns]),
+          ordinary_agent_spawns: integer(row[:ordinary_agent_spawns]),
+          architecture_agent_spawns: integer(row[:architecture_agent_spawns]),
+          architecture_review_spawns: integer(row[:architecture_review_spawns]),
+          ordinary_unmetered_spawns: integer(row[:ordinary_unmetered_spawns]),
+          architecture_unmetered_spawns: integer(row[:architecture_unmetered_spawns])
+        )
+      end
+    rescue StandardError => error
+      warn "[hive] patrol usage aggregate failed: #{error.class}: #{error.message}"
+      zero_patrol_activity(available: false)
+    end
+
+    def patrol_discovery_seed(scope:, date:)
+      day = Date.iso8601(date.to_s)
+      since = Time.utc(day.year, day.month, day.day)
+      before = since + 86_400
+      database.read do |db|
+        dataset = db[:token_usage].where(started_at: since.iso8601...before.iso8601)
+        dataset = dataset.where(project_slug: scope[:project_slug].to_s) unless
+          blank?(scope && scope[:project_slug])
+        eligible = Sequel.expr(source: nil) | Sequel.~(source: "patrol_non_discovery_launch")
+        ordinary_review = Sequel.expr(stage: %w[patrol-review patrol-review-unmetered])
+        architecture_review = Sequel.expr(
+          stage: %w[refactor-patrol-review refactor-patrol-review-unmetered]
+        )
+        ordinary_fix = Sequel.expr(stage: "patrol-fix") |
+          Sequel.like(:stage, "patrol-fix-%")
+        architecture_fix = Sequel.expr(stage: "refactor-patrol-fix") |
+          Sequel.like(:stage, "refactor-patrol-fix-%")
+        ordinary = Sequel.like(:stage, "patrol%") & ~ordinary_review & ~ordinary_fix
+        architecture = Sequel.like(:stage, "refactor-patrol%") &
+          ~architecture_review & ~architecture_fix
+        row = dataset.select do
+          [ sum(Sequel.case({ eligible & ordinary_review => 1 }, 0)).as(:ordinary_count),
+           sum(Sequel.case({ eligible & ordinary => 1 }, 0)).as(:ordinary_ambiguous),
+           sum(Sequel.case({ eligible & architecture_review => 1 }, 0)).as(:architecture_count),
+           sum(Sequel.case({ eligible & architecture => 1 }, 0)).as(:architecture_ambiguous) ]
+        end.first || {}
+        {
+          available: true,
+          ordinary: {
+            count: integer(row[:ordinary_count]),
+            ambiguous: integer(row[:ordinary_ambiguous])
+          },
+          architecture: {
+            count: integer(row[:architecture_count]),
+            ambiguous: integer(row[:architecture_ambiguous])
+          }
+        }
+      end
+    rescue StandardError => error
+      warn "[hive] patrol discovery seed failed: #{error.class}: #{error.message}"
       {
         available: false,
         ordinary: { count: 0, ambiguous: 0 },
@@ -484,24 +286,96 @@ module Hive
       }
     end
 
-    def ensure_schema!(db)
-      version = db.get_first_value("PRAGMA user_version").to_i
-      raise "usage database schema #{version} is newer than supported #{SCHEMA_VERSION}" if
-        version > SCHEMA_VERSION
-      columns = schema_columns(db)
-      return if version == SCHEMA_VERSION &&
-        columns.include?("session_id") && columns.include?("input_available") &&
-        columns.include?("billing_route")
+    def database
+      return Hive::RuntimeControlPlane.database unless @path
 
-      db.transaction(:immediate) do
-        db.execute_batch(LEGACY_SCHEMA_SQL)
-        columns = schema_columns(db)
-        ADDITIVE_COLUMNS.each do |name, type|
-          db.execute("ALTER TABLE token_usage ADD COLUMN #{name} #{type}") unless columns.include?(name)
-        end
-        db.execute_batch(SCHEMA_SQL)
-        db.execute("PRAGMA user_version = #{SCHEMA_VERSION}")
+      @database ||= begin
+        @owns_database = true
+        Hive::RuntimeControlPlane::Database.new(path: @path).open!
       end
+    end
+
+    def validate_session_identity!(existing, incoming)
+      identity = %i[attempt_id task_generation]
+      compatible = identity.all? { |key| existing[key] == incoming[key] }
+      compatible &&= billing_compatible?(existing[:billing_route], incoming[:billing_route])
+      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |key|
+        compatible &&= existing[key].nil? || incoming[key].nil? || existing[key] == incoming[key]
+      end
+      raise Hive::RuntimeControlPlane::IntegrityError.new(
+        "session usage identity conflict", code: :usage_session_conflict
+      ) unless compatible
+    end
+
+    def billing_compatible?(left, right)
+      left.nil? || left == "unknown" || right == "unknown" || left == right
+    end
+
+    def merge_session(existing, incoming)
+      merged = incoming.dup
+      merged.delete(:id)
+      %i[model requested_backend requested_model actual_backend actual_model project_slug task_slug stage].each do |key|
+        merged[key] ||= existing[key]
+      end
+      merged[:started_at] = [ existing[:started_at], incoming[:started_at] ].compact.min
+      merged[:ended_at] ||= existing[:ended_at]
+      %i[input output cached].each { |key| merged[key] = [ existing[key], incoming[key] ].compact.max }
+      %i[cache_read cache_write reasoning cost].each do |key|
+        availability_key = :"#{key}_available"
+        use_incoming = incoming[availability_key] > existing[availability_key] ||
+          (incoming[availability_key] == 1 && incoming[key].to_f > existing[key].to_f)
+        merged[key] = use_incoming ? incoming[key] : existing[key]
+        merged[availability_key] = [ existing[availability_key], incoming[availability_key] ].max
+      end
+      %i[input_available output_available cached_available].each do |key|
+        merged[key] = [ existing[key], incoming[key] ].max
+      end
+      if existing[:billing_route] && existing[:billing_route] != "unknown"
+        merged[:billing_route] = existing[:billing_route]
+        merged[:billing_evidence_source] = existing[:billing_evidence_source]
+      end
+      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |key|
+        merged[key] = existing[key] unless existing[key].nil?
+      end
+      merged[:source] ||= existing[:source]
+      merged
+    end
+
+    def scoped_usage(dataset, scope, since)
+      dataset = dataset.where(project_slug: scope[:project_slug].to_s) unless blank?(scope[:project_slug])
+      dataset = dataset.where(task_slug: scope[:task_slug].to_s) unless blank?(scope[:task_slug])
+      dataset = dataset.where { started_at >= since } if since
+      dataset
+    end
+
+    def patrol_dataset(dataset)
+      dataset.where(Sequel.like(:stage, "patrol%") | Sequel.like(:stage, "refactor-patrol%"))
+    end
+
+    def apply_aggregate!(target, row)
+      %i[input output cached].each do |metric|
+        target[metric] = integer(row[metric])
+        mark_unavailable!(target, metric, row[:"#{metric}_available"])
+      end
+    end
+
+    def exact_row(row)
+      result = row.slice(*EXACT_COLUMNS).transform_keys(&:to_sym)
+      availability = %i[input output cached cache_read cache_write reasoning cost].to_h do |metric|
+        [ metric, result.delete(:"#{metric}_available") ]
+      end
+      result[:provider_reported_cost] = result[:cost]
+      result[:harness] = result[:agent]
+      result[:billing_route] ||= "unknown"
+      result[:billing_evidence_source] ||= "unavailable"
+      %i[input output cached cache_read cache_write reasoning].each { |key| result[key] = integer(result[key]) }
+      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |key|
+        result[key] = nullable_boolean_value(result[key])
+      end
+      %i[input output cached cache_read cache_write reasoning cost].each do |metric|
+        mark_unavailable!(result, metric, availability.fetch(metric))
+      end
+      result
     end
 
     def zero_aggregate
@@ -512,62 +386,23 @@ module Hive
       }
     end
 
-    def zero_buckets
-      BUCKETS.to_h { |bucket| [ bucket, zero_usage ] }
-    end
-
-    def zero_usage
-      { input: 0, output: 0, cached: 0 }
-    end
+    def zero_buckets = BUCKETS.to_h { |bucket| [ bucket, zero_usage ] }
+    def zero_usage = { input: 0, output: 0, cached: 0 }
 
     def zero_patrol_activity(available: true)
       zero_usage.merge(
         available: available, tokens: 0, agent_spawns: 0, unmetered_spawns: 0,
         ordinary_agent_spawns: 0, architecture_agent_spawns: 0,
-        architecture_review_spawns: 0,
-        ordinary_unmetered_spawns: 0, architecture_unmetered_spawns: 0
+        architecture_review_spawns: 0, ordinary_unmetered_spawns: 0,
+        architecture_unmetered_spawns: 0
       )
     end
 
-    def aggregate_rows(db, scope, since)
-      sql = +"SELECT agent, SUM(input), SUM(output), SUM(cached), " \
-             "MIN(input_available), MIN(output_available), MIN(cached_available) FROM token_usage"
-      clauses, binds = aggregate_clauses(scope, since)
-      sql << " WHERE #{clauses.join(' AND ')}" unless clauses.empty?
-      sql << " GROUP BY agent"
-      db.execute(sql, binds)
-    end
-
-    def aggregate_patrol_row(db, scope, since)
-      sql = +"SELECT SUM(input), SUM(output), SUM(cached), COUNT(*), " \
-             "MIN(input_available), MIN(output_available), MIN(cached_available) FROM token_usage"
-      clauses, binds = aggregate_clauses(scope, since)
-      append_patrol_clause!(clauses, binds)
-      sql << " WHERE #{clauses.join(' AND ')}"
-      db.execute(sql, binds).first || [ 0, 0, 0, 0, nil, nil, nil ]
-    end
-
-    def append_patrol_clause!(clauses, binds)
-      clauses << "(stage LIKE ? OR stage LIKE ?)"
-      binds.concat([ "patrol%", "refactor-patrol%" ])
-    end
-
-    def aggregate_clauses(scope, since)
-      clauses = []
-      binds = []
-      unless blank?(scope[:project_slug])
-        clauses << "project_slug = ?"
-        binds << scope[:project_slug].to_s
+    def sum_usage(rows)
+      rows.each_with_object(zero_usage) do |row, total|
+        %i[input output cached].each { |key| total[key] += integer(row[key]) }
+        propagate_unavailable!(total, row)
       end
-      unless blank?(scope[:task_slug])
-        clauses << "task_slug = ?"
-        binds << scope[:task_slug].to_s
-      end
-      unless since.nil?
-        clauses << "started_at >= ?"
-        binds << since
-      end
-      [ clauses, binds ]
     end
 
     def bucket_starts(now)
@@ -575,22 +410,10 @@ module Hive
       today = Time.utc(utc_now.year, utc_now.month, utc_now.day)
       {
         today: today.iso8601,
-        "7d": (utc_now - (7 * 24 * 60 * 60)).iso8601,
-        "30d": (utc_now - (30 * 24 * 60 * 60)).iso8601,
+        "7d": (utc_now - (7 * 86_400)).iso8601,
+        "30d": (utc_now - (30 * 86_400)).iso8601,
         all: nil
       }
-    end
-
-    def with_database(create:, busy_timeout_ms: BUSY_TIMEOUT_MS)
-      require "sqlite3"
-
-      db_path = path
-      FileUtils.mkdir_p(File.dirname(db_path)) if create
-      db = SQLite3::Database.new(db_path)
-      db.busy_timeout(Integer(busy_timeout_ms))
-      yield db
-    ensure
-      db&.close
     end
 
     def positive_limit(value, name)
@@ -604,52 +427,6 @@ module Hive
       !deadline.nil? && monotonic_clock.call >= Float(deadline)
     rescue ArgumentError, TypeError
       true
-    end
-
-    def deadline_busy_timeout(deadline, monotonic_clock)
-      return BUSY_TIMEOUT_MS if deadline.nil?
-
-      remaining_ms = ((Float(deadline) - monotonic_clock.call) * 1000).ceil
-      [ [ remaining_ms, 1 ].max, BUSY_TIMEOUT_MS ].min
-    rescue ArgumentError, TypeError
-      1
-    end
-
-    def schema_columns(db)
-      db.table_info("token_usage").map { |row| (row["name"] || row[1]).to_s }
-    end
-
-    def exact_row(row)
-      result = {
-        session_id: row[0], agent: row[1], model: row[2], project_slug: row[3],
-        task_slug: row[4], stage: row[5], started_at: row[6], ended_at: row[7],
-        input: integer(row[8]), output: integer(row[9]), cached: integer(row[10]),
-        attempt_id: row[11], task_generation: row[12], source: row[13],
-        requested_backend: row[14], requested_model: row[15],
-        actual_backend: row[16], actual_model: row[17],
-        cache_read: row[18], cache_write: row[19], reasoning: row[20], cost: row[21],
-        provider_reported_cost: row[21], harness: row[1],
-        billing_route: row[29] || "unknown",
-        billing_evidence_source: row[30] || "unavailable",
-        input_includes_cache_read: nullable_boolean_value(row[31]),
-        input_includes_cache_write: nullable_boolean_value(row[32]),
-        output_includes_reasoning: nullable_boolean_value(row[33])
-      }
-      mark_unavailable!(result, :input, row[22])
-      mark_unavailable!(result, :output, row[23])
-      mark_unavailable!(result, :cached, row[24])
-      mark_unavailable!(result, :cache_read, row[25])
-      mark_unavailable!(result, :cache_write, row[26])
-      mark_unavailable!(result, :reasoning, row[27])
-      mark_unavailable!(result, :cost, row[28])
-      result
-    end
-
-    def sum_usage(rows)
-      rows.each_with_object({ input: 0, output: 0, cached: 0 }) do |row, total|
-        %i[input output cached].each { |key| total[key] += integer(row[key]) }
-        propagate_unavailable!(total, row)
-      end
     end
 
     def mark_unavailable!(usage, metric, available)
@@ -669,13 +446,6 @@ module Hive
       }
     end
 
-    def env_path
-      value = ENV["HIVE_USAGE_DB_PATH"]
-      return nil if value.nil? || value.empty?
-
-      File.expand_path(value)
-    end
-
     def iso8601(value)
       return value.utc.iso8601 if value.respond_to?(:utc)
 
@@ -684,19 +454,9 @@ module Hive
       value.to_s
     end
 
-    def integer(value)
-      value.to_i
-    end
-
-    def nullable_number(value)
-      return nil if value.nil?
-
-      value
-    end
-
-    def availability(value)
-      value.nil? ? 0 : 1
-    end
+    def integer(value) = value.to_i
+    def nullable_number(value) = value
+    def availability(value) = value.nil? ? 0 : 1
 
     def nullable_boolean(value)
       return nil if value.nil?
@@ -706,9 +466,7 @@ module Hive
     end
 
     def nullable_boolean_value(value)
-      return nil if value.nil?
-
-      integer(value) == 1
+      value.nil? ? nil : integer(value) == 1
     end
 
     def billing_value(value, allowed, label)
@@ -734,8 +492,6 @@ module Hive
       blank?(value) ? nil : value
     end
 
-    def blank?(value)
-      value.nil? || value.to_s.empty?
-    end
+    def blank?(value) = value.nil? || value.to_s.empty?
   end
 end

@@ -126,7 +126,7 @@ diagnostic instead of degrading to a generic missing-evidence message. The
 strict six-task OpenCode campaign subsequently completed generation, dual
 three-sample judging, deliberation, validation, and publication. Its original
 token gap is an extraction issue rather than missing provider evidence: Hive
-records OpenCode usage in `.hb/hive-home/usage.db` while redacting raw stream
+records OpenCode usage in `.hb/hive-home/runtime-control-plane.sqlite3` while redacting raw stream
 events. The packaged harness now reads those normalized rows when stream tokens
 are absent. The first OpenRouter-backed Sol
 deliberation also exposed that the pinned npm Codex entrypoint could see a mise

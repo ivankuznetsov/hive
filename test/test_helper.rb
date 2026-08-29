@@ -187,19 +187,30 @@ module HiveTestHelper
   UNSET_ENV = Object.new.freeze
 
   def prepare_runtime_project(state_home:, name:, path: state_home,
-                              state_root_path: File.join(path, ".hive-state"))
+                              state_root_path: File.join(path, ".hive-state"),
+                              project_id: nil)
     require "digest"
     require "time"
     require "hive/runtime_control_plane"
     database = Hive::RuntimeControlPlane::Database.new(
       path: Hive::Paths.runtime_control_plane_path(state_home)
     ).migrate!
+    register_runtime_project(
+      database: database, name: name, path: path,
+      state_root_path: state_root_path, project_id: project_id
+    )
+    database
+  end
+
+  def register_runtime_project(database:, name:, path:,
+                               state_root_path: File.join(path, ".hive-state"),
+                               project_id: nil, registration_id: name)
     timestamp = Time.now.utc.iso8601(6)
     database.transaction do |db|
       installation = db[:installations].first.fetch(:installation_id)
       db[:projects].insert_conflict.insert(
-        project_id: "test-project-#{Digest::SHA256.hexdigest(name)[0, 16]}",
-        installation_id: installation, registration_id: name, name: name,
+        project_id: project_id || "test-project-#{Digest::SHA256.hexdigest(name)[0, 16]}",
+        installation_id: installation, registration_id: registration_id, name: name,
         observed_path: path, state_root_path: state_root_path, active: 1,
         registered_at: timestamp, last_observed_at: timestamp
       )

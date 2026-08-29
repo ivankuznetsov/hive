@@ -296,19 +296,19 @@ gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
-## Concurrency files
+## Runtime coordination
 
-Durable leases under `$HIVE_HOME/attempts/v4/records/` are the authoritative
-execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
-wrapper/worker PID start fingerprints and session/group IDs make adoption and
-cleanup PID-reuse safe. Each record also immutably stores the
-exact admitted worker argv and only the digest of a random claim capability.
-The secret crosses exec through inherited descriptors, claims once, and gates
-worker context installation until the exact worker identity is durable.
-The worker cannot select an alternate record-store path, and no production
-thread-local/public constructor can synthesize the authenticated context.
-Per-generation flocks plus guarded lease version/deadline comparisons serialize
-claim, heartbeat, terminal, and loss transitions. See [[modules/attempts]].
+SQLite `attempts` rows are the authoritative execution owners. Records are
+`launching`, `running`, `terminal`, or `lost`; wrapper/worker PID start
+fingerprints and session/group IDs make adoption and cleanup PID-reuse safe.
+Each row also immutably stores the exact admitted worker argv and only the
+digest of a random claim capability. The secret crosses exec through inherited
+descriptors, claims once, and gates worker context installation until the exact
+worker identity is durable. The worker cannot select an alternate control
+plane, and no production thread-local/public constructor can synthesize the
+authenticated context. Immediate transactions plus guarded lease-version and
+deadline comparisons serialize claim, heartbeat, terminal, and loss
+transitions; no per-generation attempt flock remains. See [[modules/attempts]].
 The generation progress token includes the task's current dependency-admission
 verdict as well as its stage artifact, so terminal replay is stable while an
 admission wait is unchanged but cannot mask a later prerequisite advance.
@@ -421,20 +421,21 @@ journal.
 
 ## Attempt storage lifecycle
 
-`$HIVE_HOME/attempts/v4/records/` is the bounded hot authority for live,
-lost-without-a-safe-successor, and finalization-pending attempts. Reconciliation
-and admission scan this directory once per cycle. A terminal or safely resolved
-lost attempt leaves it only after its immutable proof, decision-index entries,
-and the accounting, journal, request-delivery, and (for loss) loss-consumer
-acknowledgements are durable. `Store#fetch(attempt_id)` preserves point access
-to that permanent proof after promotion; historical identity reconstruction
-uses the successful semantic decision index and never enumerates proof.
+The runtime control plane's `attempts` rows are the bounded authority for live,
+lost-without-a-safe-successor, finalization-pending, and terminal attempts.
+Reconciliation and admission use indexed queries rather than scanning a record
+directory. Finalization first observes the terminal attempt into the
+task-authoritative journal and durably acknowledges that receipt. Only then may
+loss/accounting indexes, refunds, provider-health observation, or request
+delivery advance. Promotion removes the live reservation after every required
+consumer acknowledgement while `Repository#fetch(attempt_id)` preserves point
+access to the canonical terminal row.
 
-Raw frames move from `logs/` to digest-sharded `cold-logs/` during promotion.
-Maintenance advances a durable round-robin cursor through at most 512 entries
-per hourly pass and deletes them when the owning task is archived or three days
+Raw frames are sealed into the content-addressed runtime payload store during
+promotion. Maintenance advances a SQL keyset cursor through at most 512 entries
+per hourly pass and expires them when the owning task is archived or three days
 after `ended_at`, whichever is earlier, unless recovery remains pinned. This
-retention does not delete permanent proof or referenced output artifacts.
+retention does not delete the terminal attempt row or still-referenced payloads.
 
 The physical v3-to-v4 migration is forward-only and can consume a remaining
 supported v2 source. It quiesces the validated source tree, rejects live

@@ -329,6 +329,9 @@ class AttemptsReconcilerTest < Minitest::Test
       finalization.define_singleton_method(:acknowledge) do |record, consumer|
         events << [ :acknowledge, record.attempt_id, consumer ]
       end
+      finalization.define_singleton_method(:publish_after_journal) do |record|
+        events << [ :publish_after_journal, record.attempt_id ]
+      end
       observer = Object.new
       observer.define_singleton_method(:observe) do |status, now:|
         events << [ :observe, status.attempt.attempt_id, now ]
@@ -343,7 +346,8 @@ class AttemptsReconcilerTest < Minitest::Test
       assert_equal [
         [ :prepare, terminal.attempt_id ],
         [ :observe, terminal.attempt_id, NOW + 3 ],
-        [ :acknowledge, terminal.attempt_id, :journal ]
+        [ :acknowledge, terminal.attempt_id, :journal ],
+        [ :publish_after_journal, terminal.attempt_id ]
       ], events
 
       events.clear

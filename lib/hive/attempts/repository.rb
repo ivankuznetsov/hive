@@ -65,18 +65,22 @@ module Hive
       attr_reader :database
 
       def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
-        new(
-          root: Hive::Paths.runtime_payload_root(state_home),
-          database: RuntimeControlPlane::Database.new(
-            path: Hive::Paths.runtime_control_plane_path(state_home)
-          ),
-          create_directories: create_directories,
-          migrate: false
-        )
+        runtime(state_home: state_home, create_directories: create_directories)
       end
 
       def self.runtime(create_directories: true, state_home: Hive::Paths.state_home)
-        open_default(state_home: state_home, create_directories: create_directories)
+        default_home = File.expand_path(Hive::Paths.state_home)
+        requested_home = File.expand_path(state_home)
+        database = if requested_home == default_home
+          RuntimeControlPlane.database
+        else
+          RuntimeControlPlane::Database.new(
+            path: Hive::Paths.runtime_control_plane_path(requested_home)
+          )
+        end
+        options = { database: database, create_directories: create_directories, migrate: false }
+        options[:root] = Hive::Paths.runtime_payload_root(requested_home) unless requested_home == default_home
+        new(**options)
       end
 
       def initialize(root: DEFAULT_ROOT, database: nil, create_directories: true, migrate: false)

@@ -63,28 +63,24 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   end
 
   def build(path)
-    store = Hive::Daemon::OperationalSnapshot::Store.new(path: path)
-    cache_path = "#{path}.status-cache"
+    database = database_for(path)
+    repository = Hive::RuntimeControlPlane::OperationalRepository.new(database: database)
     assembler = Hive::Daemon::OperationalSnapshot::Assembler.new(
-      store: store,
-      status_cache_store: Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
-        path: cache_path
-      ),
+      repository: repository,
       daemon_identity: IDENTITY, poll_interval_sec: 30
     )
     reader = Hive::Daemon::OperationalSnapshot::Reader.new(
-      path: path, expected_daemon: IDENTITY
+      repository: repository, expected_daemon: IDENTITY
     )
     cache_reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(
-      path: cache_path
+      repository: repository
     )
-    [ store, assembler, reader, cache_reader ]
+    [ repository, assembler, reader, cache_reader ]
   end
 
-  def cache_store(path)
-    Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
-      path: "#{path}.status-cache"
-    )
+  def database_for(path)
+    @operational_databases ||= {}
+    @operational_databases[path] ||= Hive::RuntimeControlPlane::Database.new(path: path).migrate!
   end
 
   def test_complete_record_is_private_atomic_and_current
@@ -136,9 +132,9 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
       assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")
-      assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
-      assert_equal 0o600, File.stat(path).mode & 0o777
-      assert_empty Dir.glob(File.join(File.dirname(path), ".*tmp*"))
+      assert File.file?(path)
+      refute File.exist?(File.join(dir, "operational", "daemon-snapshot.json"))
+      refute File.exist?(File.join(dir, "operational", "daemon-status-cache.json"))
     end
   end
 
@@ -206,12 +202,12 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         rows: [ observed ], controller: { "in_flight" => 1 },
         queue: { "pending" => 2 }, recoveries: {}, now: T0 + 1
       )
-      completed_bytes = File.binread(path)
+      completed_record = _store.snapshot
 
       assembler.begin_tick(now: T0 + 31)
       assembler.fail(reason: "status_failure", now: T0 + 32)
 
-      assert_equal completed_bytes, File.binread(path)
+      assert_equal completed_record, _store.snapshot
       retained = reader.read(now: T0 + 33)
       assert_equal "current", retained.fetch("status")
       assert_equal 1, retained.fetch("tick_sequence")
@@ -237,7 +233,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       _store, assembler, reader, cache_reader = build(path)
       assembler.begin_tick(now: T0)
       assembler.complete(rows: [], controller: {}, queue: {}, recoveries: {}, now: T0 + 1)
-      cache_store(path).write(
+      _store.publish(_store.snapshot, status_projection: {
         "schema" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA,
         "schema_version" => 1,
         "daemon" => IDENTITY,
@@ -245,7 +241,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         "published_at" => (T0 + 1).iso8601(6),
         "valid_until" => (T0 + 90).iso8601(6),
         "payload" => { "schema" => "wrong", "ok" => true }
-      )
+      })
 
       snapshot = reader.read(now: T0 + 1)
 
@@ -254,29 +250,57 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_reader_rejects_a_status_cache_from_a_future_tick
+  def test_repository_rejects_a_status_projection_from_a_future_tick
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader, cache_reader = build(path)
       assembler.begin_tick(now: T0)
       assembler.complete(rows: [], controller: {}, queue: {}, recoveries: {}, now: T0 + 1)
-      cache_store(path).write(
-        "schema" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA,
-        "schema_version" => 1,
-        "daemon" => IDENTITY,
-        "tick_sequence" => 2,
-        "published_at" => (T0 + 1).iso8601(6),
-        "valid_until" => (T0 + 90).iso8601(6),
-        "payload" => {
-          "schema" => "hive-status", "schema_version" => 7, "ok" => true,
-          "generated_at" => T0.iso8601(6), "projects" => []
-        }
-      )
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        _store.publish(_store.snapshot, status_projection: {
+          "schema" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA,
+          "schema_version" => 1,
+          "daemon" => IDENTITY,
+          "tick_sequence" => 2,
+          "published_at" => (T0 + 1).iso8601(6),
+          "valid_until" => (T0 + 90).iso8601(6),
+          "payload" => {
+            "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+            "generated_at" => T0.iso8601(6), "projects" => []
+          }
+        })
+      end
 
       snapshot = reader.read(now: T0 + 1)
 
       assert_equal "current", snapshot.fetch("status")
       assert_nil cache_reader.read(snapshot: snapshot, now: T0 + 1)
+    end
+  end
+
+  def test_status_cache_reader_rejects_a_projection_with_a_stale_source_fingerprint
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      payload = {
+        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => []
+      }
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [], controller: {}, queue: {}, recoveries: {},
+        status_payload: payload, now: T0 + 1
+      )
+      database_for(path).transaction do |db|
+        db[:projections].where(
+          projection_key: Hive::RuntimeControlPlane::OperationalRepository::STATUS_PROJECTION_KEY
+        ).update(source_fingerprint: "0" * 64)
+      end
+
+      snapshot = reader.read(now: T0 + 2)
+
+      assert_equal "current", snapshot.fetch("status")
+      assert_nil cache_reader.read(snapshot: snapshot, now: T0 + 2)
     end
   end
 
@@ -301,18 +325,17 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_status_cache_write_failure_does_not_prevent_the_scheduler_snapshot
+  def test_status_projection_failure_rolls_back_the_complete_scheduler_generation
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
-      store = Hive::Daemon::OperationalSnapshot::Store.new(path: path)
-      failing_cache_store = Object.new
-      failing_cache_store.define_singleton_method(:write) { |_record| raise Errno::EIO, "full" }
+      database = database_for(path)
+      repository = Hive::RuntimeControlPlane::OperationalRepository.new(database: database)
       assembler = Hive::Daemon::OperationalSnapshot::Assembler.new(
-        store: store, status_cache_store: failing_cache_store,
+        repository: repository,
         daemon_identity: IDENTITY, poll_interval_sec: 30
       )
       reader = Hive::Daemon::OperationalSnapshot::Reader.new(
-        path: path, expected_daemon: IDENTITY
+        repository: repository, expected_daemon: IDENTITY
       )
       payload = {
         "schema" => "hive-status", "schema_version" => 7, "ok" => true,
@@ -320,19 +343,31 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       }
 
       assembler.begin_tick(now: T0)
-      assembler.complete(
-        rows: [], controller: {}, queue: {}, recoveries: {},
-        status_payload: payload, now: T0 + 1
-      )
+      database.read do |db|
+        db.run <<~SQL
+          CREATE TRIGGER reject_status_projection
+          BEFORE INSERT ON projections
+          BEGIN
+            SELECT RAISE(ABORT, 'projection unavailable');
+          END
+        SQL
+      end
 
-      assert_equal "current", reader.read(now: T0 + 2).fetch("status")
+      assert_raises(Sequel::DatabaseError) do
+        assembler.complete(
+          rows: [], controller: {}, queue: {}, recoveries: {},
+          status_payload: payload, now: T0 + 1
+        )
+      end
+      assert_equal "started", repository.snapshot.fetch("phase")
+      assert_nil repository.status_projection
     end
   end
 
   def test_status_cache_reader_rejects_malformed_snapshot_deadline
     with_tmp_dir do |dir|
       cache_reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(
-        path: File.join(dir, "missing-cache.json")
+        repository: Struct.new(:status_projection).new(nil)
       )
       snapshot = {
         "status" => "current", "tick_sequence" => 1, "daemon" => IDENTITY,
@@ -376,13 +411,13 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         child_inventory: [ { pid: 77, pgid: 77, start_time: "child-start" } ],
         now: T0 + 1
       )
-      before = File.binread(path)
+      before = _store.snapshot
 
       acknowledgement = reader.shutdown_acknowledgement(
         expected_daemon: IDENTITY, now: T0 + 2
       )
 
-      assert_equal before, File.binread(path)
+      assert_equal before, _store.snapshot
       assert_equal true, acknowledgement.fetch("admission_closed")
       assert_equal [ 77 ], acknowledgement.fetch("child_inventory").map { |entry| entry.fetch("pid") }
       assert_nil reader.shutdown_acknowledgement(
@@ -394,7 +429,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   def test_shutdown_acknowledgement_degrades_unavailable_storage_to_nil
     with_tmp_dir do |dir|
       reader = Hive::Daemon::OperationalSnapshot::Reader.new(
-        path: File.join(dir, "missing", "snapshot.json"),
+        repository: Struct.new(:snapshot).new(nil),
         expected_daemon: IDENTITY
       )
 
@@ -411,12 +446,12 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       _store, assembler, _reader = build(path)
 
       assembler.runtime_ready(now: T0)
-      ready = JSON.parse(File.binread(path))
+      ready = _store.snapshot
       assert_equal true, ready.fetch("runtime_ready")
       assert_equal "complete", ready.fetch("phase")
 
       assembler.begin_tick(now: T0 + 1)
-      started = JSON.parse(File.binread(path))
+      started = _store.snapshot
       assert_equal true, started.fetch("runtime_ready")
       assert_equal "started", started.fetch("phase")
 
@@ -424,7 +459,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         admission_closed: true, drained: true,
         child_inventory: [], now: T0 + 2
       )
-      shutdown = JSON.parse(File.binread(path))
+      shutdown = _store.snapshot
       assert_equal true, shutdown.fetch("runtime_ready")
       assert shutdown.key?("shutdown")
     end
@@ -762,13 +797,14 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "stale", reader.read(now: T0 + 91).fetch("status")
 
       other = reader.class.new(
-        path: path,
+        repository: _store,
         expected_daemon: IDENTITY.merge("generation" => "daemon-generation-2")
       )
       assert_equal "invalid", other.read(now: T0 + 1).fetch("status")
 
-      File.write(path, "not json")
-      assert_equal "invalid", reader.read(now: T0 + 1).fetch("status")
+      corrupt = Struct.new(:snapshot).new({ "schema" => "wrong" })
+      corrupt_reader = reader.class.new(repository: corrupt, expected_daemon: IDENTITY)
+      assert_equal "invalid", corrupt_reader.read(now: T0 + 1).fetch("status")
     end
   end
 
@@ -780,35 +816,28 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.complete(
         rows: [ row ], controller: {}, queue: {}, recoveries: {}, now: T0 + 1
       )
-      record = JSON.parse(File.read(path))
+      record = _store.snapshot
       record.delete("source_window")
-      File.write(path, JSON.generate(record))
-
-      snapshot = reader.read(now: T0 + 2)
+      snapshot = reader.class.new(
+        repository: Struct.new(:snapshot).new(record), expected_daemon: IDENTITY
+      ).read(now: T0 + 2)
 
       assert_equal "invalid", snapshot.fetch("status")
       assert_equal "snapshot_invalid", snapshot.fetch("reason")
     end
   end
 
-  def test_store_and_reader_reject_symlink_redirection
+  def test_repository_has_no_snapshot_or_cache_file_store
     with_tmp_dir do |dir|
-      target_dir = File.join(dir, "target")
-      FileUtils.mkdir_p(target_dir)
-      redirected = File.join(dir, "snapshot")
-      File.symlink(target_dir, redirected)
-      path = File.join(redirected, "state.json")
-      store = Hive::Daemon::OperationalSnapshot::Store.new(path: path)
+      path = File.join(dir, "runtime-control-plane.sqlite3")
+      repository, assembler, reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.complete(rows: [], controller: {}, queue: {}, recoveries: {}, now: T0 + 1)
 
-      assert_raises(Hive::Daemon::OperationalSnapshot::SecurityError) do
-        store.write({ "schema" => "anything" })
-      end
-
-      File.write(File.join(target_dir, "state.json"), "{}")
-      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
-        path: path, expected_daemon: IDENTITY
-      )
-      assert_equal "invalid", reader.read(now: T0).fetch("status")
+      assert_equal "current", reader.read(now: T0 + 2).fetch("status")
+      refute File.exist?(File.join(dir, "operational", "daemon-snapshot.json"))
+      refute File.exist?(File.join(dir, "operational", "daemon-status-cache.json"))
+      assert repository.snapshot
     end
   end
 
@@ -830,29 +859,20 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   def test_reader_distinguishes_missing_and_unreadable_snapshots
     with_tmp_dir do |dir|
       missing = Hive::Daemon::OperationalSnapshot::Reader.new(
-        path: File.join(dir, "missing", "state.json"), expected_daemon: IDENTITY
+        repository: Struct.new(:snapshot).new(nil), expected_daemon: IDENTITY
       ).read(now: T0)
       assert_equal "unavailable", missing.fetch("status")
       assert_equal "snapshot_missing", missing.fetch("reason")
 
-      parent = File.join(dir, "snapshot")
-      FileUtils.mkdir_p(parent, mode: 0o700)
-      path = File.join(parent, "state.json")
-      File.write(path, "{}", mode: "w", perm: 0o600)
-      original_read = File.method(:read)
-      unreadable = with_replaced_singleton_method(File, :read, lambda { |candidate, *args|
-        raise Errno::EIO, "forced read failure" if candidate == path
-
-        original_read.call(candidate, *args)
-      }) do
-        Hive::Daemon::OperationalSnapshot::Reader.new(
-          path: path, expected_daemon: IDENTITY
-        ).read(now: T0)
-      end
+      unavailable_repository = Object.new
+      unavailable_repository.define_singleton_method(:snapshot) { raise IOError, "forced read failure" }
+      unreadable = Hive::Daemon::OperationalSnapshot::Reader.new(
+        repository: unavailable_repository, expected_daemon: IDENTITY
+      ).read(now: T0)
 
       assert_equal "unavailable", unreadable.fetch("status")
       assert_equal "snapshot_unreadable", unreadable.fetch("reason")
-      assert_match(/Errno::EIO/, unreadable.fetch("detail"))
+      assert_match(/IOError/, unreadable.fetch("detail"))
     end
   end
 
@@ -860,7 +880,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     with_tmp_dir do |dir|
       pid_path = File.join(dir, ".daemon.pid")
       reader = Hive::Daemon::OperationalSnapshot::Reader.new(
-        path: File.join(dir, "state.json"), pid_path: pid_path
+        repository: Struct.new(:snapshot).new(nil), pid_path: pid_path
       )
 
       File.write(pid_path, YAML.dump([]))

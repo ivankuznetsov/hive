@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-26
+updated: 2026-08-29
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
@@ -91,17 +91,17 @@ entry cap.
 
 Operational status does not rescan every task when the live daemon already has an
 authoritative full graph. Each completed full daemon tick publishes that exact
-`hive-status` payload once in a dedicated owner-private atomic cache, separate
-from the small operational scheduler snapshot. Only `--operational` opts into
-the large cache. It accepts it only when
-its daemon generation, tick, deadline, schema, and registered project identities
-match the live scheduler observation and registry. An absent, invalid, expired,
-or mismatched cache falls back to the ordinary fresh graph scan. Default
-status never reads this cache. Archive, diagnosis, and the hidden internal
-task-graph surfaces keep their existing fresh-read contracts; the daemon's
-own graph producer cannot consume its cache recursively.
+`hive-status` payload and its scheduler observation atomically in the shared
+runtime control plane. Only `--operational` opts into the larger projection.
+It accepts it only when its daemon generation, tick, deadline, schema,
+source fingerprint, and registered project identities match the paired live
+scheduler observation and registry. An absent, invalid, expired, or mismatched
+projection falls back to the ordinary fresh graph scan. Default status never
+reads this projection. Archive, diagnosis, and the hidden internal task-graph
+surfaces keep their existing fresh-read contracts; the daemon's own graph
+producer cannot consume its projection recursively.
 
-The cache is a bounded freshness optimization, not a second source of truth.
+The single-row projection is a bounded freshness optimization, not a second source of truth.
 When it belongs to the same completed tick as the scheduler record, the shared
 tick sequence proves that it is the graph on which those scheduler decisions
 were made. The daemon preserves that coherent completed pair while a later tick
@@ -116,7 +116,7 @@ only that unavailable timestamp as unknown because the shared tick sequence
 already binds the graph to the decision. Fresh scans and ordinary legacy rows
 keep the mtime comparison, and current snapshots always compare the explicit
 payload timestamp.
-The operational human heading reports the cached graph's age. The operational
+The operational human heading reports the projected graph's age. The operational
 JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
 `age_seconds` separately from the projection timestamp.
 

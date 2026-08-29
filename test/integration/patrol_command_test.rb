@@ -415,7 +415,6 @@ class PatrolCommandTest < Minitest::Test
   def with_patrol_project
     previous_usage_path = Hive::UsageDb.instance_variable_get(:@path)
     with_tmp_global_config do |global_home|
-      Hive::UsageDb.path = File.join(global_home, "usage.db")
       with_tmp_git_repo do |repo|
         FileUtils.mkdir_p(File.join(repo, ".hive-state"))
         config = Hive::Config.deep_merge(
@@ -431,11 +430,21 @@ class PatrolCommandTest < Minitest::Test
         )
         File.write(File.join(repo, ".hive-state", "config.yml"), config.to_yaml)
         Hive::Config.register_project(name: "demo", path: repo)
+        entry = Hive::Config.find_project("demo")
+        database = Hive::RuntimeControlPlane.database.migrate!
+        register_runtime_project(
+          database: database, name: entry.fetch("name"), path: entry.fetch("path"),
+          state_root_path: entry.fetch("hive_state_path"),
+          project_id: entry.fetch("project_id"),
+          registration_id: entry.fetch("registration_id")
+        )
+        Hive::UsageDb.database = database
         yield repo
+      ensure
+        Hive::UsageDb.path = previous_usage_path
+        Hive::RuntimeControlPlane.disconnect
       end
     end
-  ensure
-    Hive::UsageDb.path = previous_usage_path
   end
 
   def command_for(dry_run: false, mapper: FakeMapper.new([]), reviewer: FakeReviewer.new([]))

@@ -44,11 +44,13 @@ module Hive
         return nil unless receipt.is_a?(Hash)
         return nil if receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
 
-        path = File.join("open", attempt_id, FILENAME)
-        reference = Array(receipt["output_references"]).find do |candidate|
-          candidate.is_a?(Hash) && candidate["path"] == path
+        references = Array(receipt["output_references"]).select do |candidate|
+          candidate.is_a?(Hash) && File.basename(candidate["path"].to_s) == FILENAME
         end
-        return nil unless reference
+        return nil unless references.one?
+
+        reference = references.first
+        Hive::OutputReference.validate_shape!(reference)
 
         document = JSON.parse(store.read_output(reference, max_bytes: MAX_BYTES))
         validate!(document)

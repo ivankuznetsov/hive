@@ -472,9 +472,17 @@ Explicit terminal and resolved-loss records add `provider_health` to the
 pending-finalization consumer ledger. The receipt remains hot and cannot be
 archived until `ProviderHealth::AttemptObserver` has idempotently applied or
 rejected the observation and the acknowledgement is durable. Reconciliation
-performs that observation before downstream condition/recovery publication;
-lost probe ownership is therefore reopened before a successor can use the
-route.
+first durably acknowledges the task journal and then performs provider-health
+observation before successor admission; lost probe ownership is therefore
+reopened before a successor can use the route.
+
+Finalization itself is task-first. It prepares the durable consumer ledger,
+asks `Conditions::AttemptObserver` to publish or confirm the exact task-journal
+receipt, and acknowledges `journal` only for delivered, already acknowledged,
+or not-applicable outcomes. Accounting/refund indexes, resolved-loss
+acknowledgement, provider-health publication, request delivery, and promotion
+do not begin before that durable task receipt. A crash at any boundary retries
+the same idempotent consumers without creating a second terminal fact.
 
 ## Reconciliation and capacity
 

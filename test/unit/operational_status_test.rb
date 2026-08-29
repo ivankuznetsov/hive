@@ -8,6 +8,10 @@ class OperationalStatusTest < Minitest::Test
     waiting_on_provider_or_scheduler completion_ready idle
   ].freeze
 
+  def setup
+    Hive::RuntimeControlPlane.database.migrate!
+  end
+
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts
     payload = status_payload(
       task(action: "agent_running", slug: "running", live_task_lock: true, task_lock_pid: 42),

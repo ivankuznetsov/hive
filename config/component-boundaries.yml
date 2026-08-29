@@ -17,6 +17,7 @@ components:
         - Hive::RuntimeControlPlane::Diagnosis
         - Hive::RuntimeControlPlane::Identity::Project
         - Hive::RuntimeControlPlane::Identity::TaskSubject
+        - Hive::RuntimeControlPlane::OperationalRepository
         - Hive::RuntimeControlPlane::ProcessGuard
       errors:
         - Hive::RuntimeControlPlane::CodecError
@@ -32,6 +33,7 @@ components:
       - lib/hive/runtime_control_plane/diagnostics.rb
       - lib/hive/runtime_control_plane/identity.rb
       - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
+      - lib/hive/runtime_control_plane/operational_repository.rb
       - lib/hive/runtime_control_plane/process_guard.rb
       - lib/hive/runtime_control_plane/task_lease_repository.rb
     state_contracts:
@@ -39,6 +41,7 @@ components:
       - "Task folders remain workflow authority while the database schema declares only machine-local runtime coordination domains"
       - "Installation, registered-project, and task-subject identities are stable observations rather than path-derived aliases"
       - "Stable-id task leases, task counters, and bounded coordination rows have no filesystem compatibility authority"
+      - "Usage telemetry and complete daemon/status generations share this database; operational projections are atomically paired and source-bound"
     schema_contracts:
       - "A fixed application ID, exact consecutive IntegerMigrator version, complete table inventory, foreign keys, checks, and partial unique indexes fail closed"
       - "Bounded JSON is canonical UTF-8 text and timestamps are canonical UTC strings with six fractional digits"
@@ -64,11 +67,13 @@ components:
       - lib/hive/commands/migrate.rb
       - lib/hive/commands/web.rb
       - lib/hive/daemon/dispatcher.rb
+      - lib/hive/daemon/operational_snapshot.rb
       - lib/hive/lock.rb
       - lib/hive/patrol/launch_budget.rb
       - lib/hive/task_counter.rb
+      - lib/hive/usage_db.rb
       - web/config/puma.rb
-    mutation_authority: "The one runtime SQLite file, its exact schema, installation/project/task identity, task leases and counters, and connection/process lifecycle only; no task artifact or legacy runtime store is read or mutated."
+    mutation_authority: "The one runtime SQLite file, its exact schema, installation/project/task identity, task leases, counters, usage telemetry, complete operational projections, and connection/process lifecycle only; no task artifact or legacy runtime store is read or mutated."
     recovery_surface: "Missing, older, newer, partial, unrelated, corrupt, unsupported-feature, and integrity failures remain typed and fail closed with offline migration or restore guidance."
     wiki_page: wiki/component-boundaries.md
     focused_tests:

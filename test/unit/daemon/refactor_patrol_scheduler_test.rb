@@ -709,7 +709,14 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def test_scheduled_discovery_exhaustion_does_not_block_post_merge_candidates
     old_path = Hive::UsageDb.path
     with_project do |dir, entry, store|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
+      database = prepare_runtime_project(
+        state_home: tracked_tmp_dir("hive-test-refactor-patrol-runtime"),
+        name: entry.fetch("name"), path: entry.fetch("path"),
+        state_root_path: entry.fetch("hive_state_path"),
+        project_id: entry.fetch("project_id")
+      )
+      (@hive_test_runtime_databases ||= []) << database
+      Hive::UsageDb.database = database
       8.times do |index|
         stage = index.even? ? "patrol-review" : "refactor-patrol-review"
         Hive::UsageDb.record!(

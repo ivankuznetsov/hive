@@ -28,18 +28,6 @@ module Hive
       hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
     end
 
-    # Owner-private daemon-to-CLI operational observation. Callers running
-    # against an injected daemon home may pass that state root explicitly.
-    def operational_snapshot_path(root = state_home)
-      File.join(root, "operational", "daemon-snapshot.json")
-    end
-
-    # The daemon's last validated full status graph. Kept separate from the
-    # small scheduler snapshot so unrelated readers never parse the fleet.
-    def operational_status_cache_path(root = state_home)
-      File.join(root, "operational", "daemon-status-cache.json")
-    end
-
     def workflow_publish_root
       File.join(state_home, "workflow-publish", "v1")
     end

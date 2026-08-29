@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/finalization_maintenance"
+require "hive/attempts/reconciler"
 
 class AttemptsFinalizationMaintenanceTest < Minitest::Test
   include HiveTestHelper
@@ -18,6 +19,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert store.fetch_hot(terminal.attempt_id)
 
       subject.acknowledge(terminal, :request_delivery)
+      subject.acknowledge(terminal, :accounting)
       assert subject.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
       assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
@@ -86,10 +88,70 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       subject = maintenance(store)
 
       2.times { assert subject.prepare(terminal) }
+      assert subject.finalize(terminal, now: NOW + 4)
       accounting = store.database.read do |db|
         db[:attempt_accounting].where(attempt_id: terminal.attempt_id).first
       end
       assert_equal 1, accounting.fetch(:refunded)
+    end
+  end
+
+  def test_downstream_delivery_starts_only_after_task_journal_acknowledgement
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      order = []
+      results = [ :unavailable, :delivered ]
+      observer = Object.new
+      observer.define_singleton_method(:observe) do |*|
+        order << :journal
+        results.shift
+      end
+      subject = Hive::Attempts::FinalizationMaintenance.new(
+        store: store, condition_observer: observer,
+        delivery_pending: lambda do |_record|
+          order << :delivery
+          false
+        end,
+        task_archived: ->(_record) { false }
+      )
+
+      refute subject.finalize(terminal, now: NOW + 4)
+      assert_equal [ :journal ], order
+      assert_equal({
+        "accounting" => false, "journal" => false, "request_delivery" => false
+      }, store.publication(terminal.attempt_id).fetch("consumers"))
+
+      assert subject.finalize(terminal, now: NOW + 5)
+      assert_equal [ :journal, :journal, :delivery ], order
+      assert_nil store.fetch_hot(terminal.attempt_id)
+    end
+  end
+
+  def test_daemon_reconciliation_makes_terminal_publication_promotable_without_another_dispatch
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      observer = Struct.new(:result) do
+        def observe(*) = result
+      end.new(:delivered)
+      finalization = Hive::Attempts::FinalizationMaintenance.new(
+        store: store, condition_observer: observer,
+        delivery_pending: ->(_record) { false },
+        task_archived: ->(_record) { false }
+      )
+      reconciler = Hive::Attempts::Reconciler.new(
+        store: store, condition_observer: observer,
+        finalization_maintenance: finalization
+      )
+
+      reconciler.reconcile(now: NOW + 4)
+      pending = store.publication(terminal.attempt_id)
+      assert_equal true, pending.dig("consumers", "journal")
+      assert_equal true, pending.dig("consumers", "accounting")
+      assert_equal false, pending.dig("consumers", "request_delivery")
+
+      assert reconciler.acknowledge_finalization(terminal, :request_delivery)
+      assert reconciler.promote_finalization(terminal)
+      assert_nil store.fetch_hot(terminal.attempt_id)
     end
   end
 
@@ -118,8 +180,12 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   end
 
   def maintenance(store, **options)
+    observer = Struct.new(:result) do
+      def observe(*) = result
+    end.new(:delivered)
     Hive::Attempts::FinalizationMaintenance.new(
       store: store,
+      condition_observer: observer,
       delivery_pending: ->(_record) { false },
       task_archived: ->(_record) { false },
       **options
@@ -129,6 +195,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   def prepare_all(subject, record)
     assert subject.prepare(record)
     assert subject.acknowledge(record, :journal)
+    assert subject.acknowledge(record, :accounting)
     assert subject.acknowledge(record, :request_delivery)
   end
 

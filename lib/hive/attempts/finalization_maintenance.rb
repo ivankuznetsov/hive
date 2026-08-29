@@ -61,15 +61,12 @@ module Hive
         return false unless record.is_a?(Record) && record.final?
         return false if record.state == "lost" && !resolved_loss?(record)
 
-        publish_indexes(record)
         consumers = record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
         consumers = consumers + [ "provider_health" ] if record.explicit_routing?
         @store.prepare_publication(
           attempt_id: record.attempt_id,
           consumers: consumers
         )
-        @store.acknowledge_publication(record.attempt_id, consumer: "accounting")
-        @store.acknowledge_publication(record.attempt_id, consumer: "loss") if record.state == "lost"
         true
       end
 
@@ -95,6 +92,19 @@ module Hive
         true
       rescue Hive::ProviderHealth::Error, Hive::ManagedDirectory::UnsafeError
         false
+      end
+
+      # Advances only consumers that are downstream of the task-authoritative
+      # terminal receipt. Every operation is idempotent so daemon
+      # reconciliation can retry this boundary without another agent dispatch.
+      def publish_after_journal(record)
+        entry = @store.publication(record.attempt_id)
+        return false unless entry&.dig("consumers", "journal") == true
+
+        acknowledge(record, :loss) if record.state == "lost"
+        publish_indexes(record)
+        acknowledge(record, :accounting)
+        acknowledge_provider_health(record)
       end
 
       def promote(record)
@@ -125,9 +135,9 @@ module Hive
 
       def finalize(record, now: Time.now.utc)
         return false unless prepare(record)
+        return false unless acknowledge_journal(record, now: now)
+        return false unless publish_after_journal(record)
 
-        acknowledge_provider_health(record)
-        acknowledge_journal(record, now: now)
         acknowledge(record, :request_delivery) unless delivery_pending?(record)
         promote(record)
       end
@@ -179,7 +189,7 @@ module Hive
       private
 
       def acknowledge_journal(record, now:)
-        return unless @condition_observer&.respond_to?(:observe)
+        return false unless @condition_observer&.respond_to?(:observe)
 
         status = MaintenanceStatus.new(
           attempt: record,
@@ -188,7 +198,9 @@ module Hive
           evidence: {}
         )
         result = @condition_observer.observe(status, now: now)
-        acknowledge(record, :journal) if %i[delivered acknowledged not_applicable].include?(result)
+        return false unless %i[delivered acknowledged not_applicable].include?(result)
+
+        acknowledge(record, :journal)
       end
 
       def delivery_pending?(record)

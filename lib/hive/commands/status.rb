@@ -1610,7 +1610,13 @@ module Hive
         first_stage = task.workflow.stages.first
         return false unless first_stage && first_stage.dir == "#{task.stage_index}-#{task.stage_name}"
 
-        expected_marker = first_stage.kind == :human ? :waiting : :none
+        workflow_id = task.workflow.id if task.workflow.respond_to?(:id)
+        expected_marker = if Hive::Workflows.coding_id?(workflow_id) ||
+                             first_stage.kind == :human
+          :waiting
+        else
+          :none
+        end
         return false unless marker.name == expected_marker
         return false if PRISTINE_FORBIDDEN_ENTRIES.any? do |basename|
           File.exist?(File.join(task.folder, basename))

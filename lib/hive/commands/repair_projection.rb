@@ -103,10 +103,9 @@ module Hive
 
           marker = Hive::Markers.current(locked_task.state_file)
           result = begin
-            Hive::TaskProjection::Store.new(
-              task_folder: locked_task.folder,
-              attempt_store: attempt_store
-            ).repair!(marker: marker)
+            options = { task_folder: locked_task.folder }
+            options[:attempt_store] = @attempt_store if @attempt_store
+            Hive::TaskProjection::Store.new(**options).repair!(marker: marker)
           rescue Hive::TaskProjection::InvalidJournal => e
             raise Hive::TaskProjection::InvalidJournal,
                   "projection repair for #{identity_label} failed: #{e.message}"
@@ -164,12 +163,6 @@ module Hive
 
         raise Hive::InvalidTaskPath,
               "projection repair requires a task in a registered project"
-      end
-
-      def attempt_store
-        @attempt_store ||= Hive::Attempts::Store.runtime(
-          create_directories: false
-        ).projection_reader
       end
 
       def success_payload(bounded)

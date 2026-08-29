@@ -27,7 +27,9 @@ When a task is `needs_repair`, inspect `evidence.marker_attrs`. A reason of
 `condition_projection_repair_required` means routine status could not verify
 that task's checkpoint and bounded journal suffix. The row is synthetic,
 operator-owned, and non-retryable; it does not mean the project or fleet scan
-failed, and unrelated tasks may continue. Run the exact
+failed, and unrelated tasks may continue. Canonical task creation publishes a
+zero-history checkpoint before exposing new work; status never backfills an
+older missing checkpoint. Run the exact
 `evidence.marker_attrs.repair_command` when present:
 
 ```bash

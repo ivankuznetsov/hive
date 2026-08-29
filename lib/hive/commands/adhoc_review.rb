@@ -5,9 +5,11 @@ require "time"
 require "yaml"
 require "hive/config"
 require "hive/gh"
+require "hive/markers"
 require "hive/pr"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/task_projection/store"
 require "hive/workflows"
 require "hive/worktree"
 
@@ -257,6 +259,11 @@ module Hive
         materialized = materialize(project_root, slug, pr_number)
         verify_head!(pr_number, metadata, materialized)
         write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
+        Hive::TaskProjection::Store.new(
+          task_folder: task_folder
+        ).initialize_pristine!(
+          marker: Hive::Markers.current(File.join(task_folder, "task.md"))
+        )
         task_folder
       rescue StandardError
         cleanup_failed_task!(project_root, slug, pr_number, task_folder)

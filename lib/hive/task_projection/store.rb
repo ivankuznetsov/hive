@@ -149,6 +149,40 @@ module Hive
         projection
       end
 
+      # Canonical task creators publish a zero-history checkpoint before the
+      # task becomes visible. This is not a repair path: any pre-existing
+      # journal or derived projection is refused, leaving historical tasks to
+      # the explicit exact-task repair command.
+      def initialize_pristine!(marker: nil,
+                               limits: Hive::TaskWorkspace::Limits.new)
+        with_journal_write_lock do
+          existing = [ journal_path, snapshot_path, checkpoint_path ].select do |path|
+            path_entry?(path)
+          end
+          unless existing.empty?
+            raise Hive::TaskProjection::InvalidJournal,
+                  "pristine projection initialization requires empty task projection storage"
+          end
+
+          binding = journal_binding("")
+          projection = replay(binding, marker: marker)
+          publish(projection)
+          publish_checkpoint(binding: binding, bytes: "", projection: projection)
+          bounded = read_bounded_unlocked(
+            marker: marker, limits: limits, require_checkpoint: true,
+            pristine: false
+          )
+          unless bounded.current?
+            reason = bounded.diagnostics.first&.fetch("reason", bounded.state) ||
+                     bounded.state
+            raise Hive::TaskProjection::InvalidJournal,
+                  "pristine projection initialization did not produce a current checkpoint (#{reason})"
+          end
+
+          projection
+        end
+      end
+
       # Explicit exact-task repair owns the only routine-external full replay.
       # The exclusive journal lock prevents a concurrent append from binding
       # the new derived files to two different authoritative cursors.

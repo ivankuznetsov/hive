@@ -6,6 +6,7 @@ require "hive/lock"
 require "hive/markers"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/task_projection/store"
 require "hive/workflows"
 require "hive/workflow_package/managed_store"
 
@@ -186,6 +187,7 @@ module Hive
       @candidate_writer&.call(task_dir)
       validate_stable_authored_workflow!
       write_task_meta!(task_dir, stable_selection: stable_selection)
+      initialize_task_projection!(task_dir, state_path)
     rescue StandardError, Interrupt
       FileUtils.rm_rf(task_dir) if created
       raise
@@ -234,6 +236,13 @@ module Hive
         idempotency_key: @idempotency_key,
         input_fingerprint: @input_fingerprint,
         plan_review_required: Hive::Workflows.coding_id?(@workflow.id) ? true : nil
+      )
+    end
+
+    def initialize_task_projection!(task_dir, state_path)
+      marker = Hive::Markers.current(state_path)
+      Hive::TaskProjection::Store.new(task_folder: task_dir).initialize_pristine!(
+        marker: marker
       )
     end
 

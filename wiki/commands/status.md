@@ -145,6 +145,11 @@ to the complete journal, rebuilds a projection, or enumerates permanent proof
 storage. Bytes before a valid checkpoint and unrelated proof count therefore
 do not increase routine work.
 
+New canonical tasks start with a zero-history derived checkpoint, published by
+task creation before the task becomes visible. No empty authoritative journal
+is created. Older tasks without a valid checkpoint still follow the explicit
+repair flow below; status never backfills them.
+
 If those bounded facts cannot prove one task's current state, status emits a
 synthetic `ERROR` row with reason
 `condition_projection_repair_required`, `owner: operator`, and the underlying

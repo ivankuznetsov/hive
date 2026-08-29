@@ -13,3 +13,8 @@ bounded postcondition. Workflow retry, storage migration, daemon restart, and
 periodic repair watchers are not substitutes. Checkpoint size, attempt-ID, and
 predecessor-fetch cap exhaustion instead require task-local retained-history
 compaction before another repair.
+
+Canonical CLI, idempotent/controller, Patrol Fix, and ad-hoc review task
+creation now publish a zero-history derived checkpoint before exposing the
+task. The initializer refuses pre-existing projection authority, so it closes
+the new-task gap without becoming an implicit repair or migration path.

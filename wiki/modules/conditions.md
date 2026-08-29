@@ -81,6 +81,13 @@ point fetches. The reader refreshes referenced mutable attempt bindings and
 reprojects only the bounded suffix. It never falls back to the complete
 journal, invokes `rebuild!`, or enumerates permanent proof storage.
 
+Canonical task creation publishes a zero-history snapshot and checkpoint before
+the task is committed or admitted. The checkpoint is valid without creating an
+empty authoritative journal, then moves with the task and accepts bounded
+journal suffixes when execution starts. This keeps newly created tasks on the
+strict path from their first scan. It is creation-time derived-state
+initialization, not migration or repair of an existing task.
+
 A task with durable history and a missing, invalid, stale, torn, oversized, or
 otherwise unverifiable bounded projection becomes a synthetic
 `condition_projection_repair_required` row. The row is operator-owned and

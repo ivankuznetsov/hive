@@ -215,6 +215,10 @@ class RepairProjectionCommandTest < Minitest::Test
           end
         end
         folders = Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "*")].sort
+        folders.each do |folder|
+          FileUtils.rm_f(File.join(folder, Hive::TaskProjection::Store::SNAPSHOT_BASENAME))
+          FileUtils.rm_f(File.join(folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME))
+        end
         yield project, folders.map { |folder| Hive::Task.new(folder) }
       end
     end

@@ -147,6 +147,9 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     assert_includes filesystem_policy, "/managed/codex-runtime"
     assert_includes filesystem_policy, "/opt/hive/bin/hive"
     assert_includes filesystem_policy, "/opt/hive/lib"
+    assert_includes filesystem_policy, RbConfig.ruby
+    assert_includes filesystem_policy, RbConfig::CONFIG.fetch("bindir")
+    assert_includes filesystem_policy, RbConfig::CONFIG.fetch("libdir")
     domain = URI.parse(receipt.dig("web", "origin")).host
     browser_environment, browser_argv = browser_commands.first
     assert_includes browser_argv, domain

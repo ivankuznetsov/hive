@@ -169,19 +169,25 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
         result
       end
 
+      source_runtime = $LOADED_FEATURES.find do |path|
+        File.basename(path) == "agent_cli_runtime.rb"
+      end
+      refute_nil source_runtime
       with_env("HIVE_COVERAGE" => nil, "RUBYOPT" => "-r/untrusted") do
-        with_replaced_singleton_method(
-          Hive::Web::ProjectCaptureProvider, :capture_command_with_custody, fake
-        ) do
-          Hive::Artifacts::TerminalRecorder.new(
-            argv: [ RbConfig.ruby, "-e", "exit" ], cwd: root,
-            cast_path: File.join(root, "proof.cast"),
-            review_path: File.join(root, "proof.txt")
-          ).record!
+        with_replaced_singleton_method(Gem, :loaded_specs, -> { {} }) do
+          with_replaced_singleton_method(
+            Hive::Web::ProjectCaptureProvider, :capture_command_with_custody, fake
+          ) do
+            Hive::Artifacts::TerminalRecorder.new(
+              argv: [ RbConfig.ruby, "-e", "exit" ], cwd: root,
+              cast_path: File.join(root, "proof.cast"),
+              review_path: File.join(root, "proof.txt")
+            ).record!
+          end
         end
       end
 
-      runtime_path = Gem.loaded_specs.fetch("agent-cli-runtime").full_require_paths.first
+      runtime_path = File.dirname(File.realpath(source_runtime))
       assert_includes captured.fetch(:argv), runtime_path
       assert_equal [ "PATH" ], captured.fetch(:environment).keys
     end

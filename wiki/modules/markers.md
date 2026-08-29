@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-29
 tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
@@ -58,6 +58,15 @@ operator repair primitive and performs the same history purge after its
 current-name and optional attribute guards pass. Both paths remove every
 recognized marker comment while preserving surrounding prose, so a successful
 retry cannot expose an older shadowed marker.
+
+An intentional workflow rewind is a separate controller-owned transition.
+`hive approve --to <earlier-stage>` resolves the closed destination-through-
+source stage interval, de-duplicates those stages' descriptor-owned state
+files, and applies the same all-marker removal while holding the commit, task,
+and marker locks. Exact file snapshots are restored if the rewind cannot be
+committed. A file referenced only by a stage outside that interval is not
+rewritten; for example, coding's `7-artifacts` to `6-review` rewind rearms
+`task.md` and `artifact.md` but preserves `pr.md` exactly.
 
 Marker scans retain their binary encoding so malformed surrounding artifact
 bytes remain readable. `Hive::Recovery` is the shared compatibility boundary

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-28
+updated: 2026-08-29
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -1299,3 +1299,14 @@ not stored in this repository, so this remains unproven as an end-to-end
 installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
+
+## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
+
+Backward `hive approve --to` now rearms descriptor-owned state files across the
+destination-through-source interval and has focused coding-workflow integration
+coverage, including exact rollback and shared-file scoping. The algorithm is
+descriptor-driven and therefore also applies to project-authored and managed
+workflows, but no live managed-workflow task has yet been rewound through a
+deployed daemon. Keep this gap open until such a workflow proves that its
+destination reruns and later revisited stages do not consume prior terminal
+markers.

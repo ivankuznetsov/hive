@@ -579,6 +579,43 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
     end
   end
 
+  def test_provider_state_realpath_failures_are_rejected
+    with_isolated_repository do |repo, task_folder, home|
+      provider_state = File.join(home, ".provider-state")
+      FileUtils.mkdir_p(provider_state)
+      isolation = Hive::PatrolFix::AgentGitIsolation.new(
+        worktree_path: repo, task_folder: task_folder,
+        writable_worktree: false, profile: nil, sandbox_path: "/usr/bin/bwrap"
+      )
+      original = File.method(:realpath)
+
+      with_replaced_singleton_method(File, :realpath, ->(path) {
+        raise Errno::EACCES, path if path == provider_state
+
+        original.call(path)
+      }) do
+        error = assert_raises(Hive::StageError) do
+          isolation.send(:canonical_provider_state_path!, "provider state", provider_state, home)
+        end
+        assert_includes error.message, "provider state is unavailable"
+      end
+    end
+  end
+
+  def test_missing_protected_path_below_writable_root_is_rejected
+    with_isolated_repository do |repo, task_folder, _home|
+      isolation = Hive::PatrolFix::AgentGitIsolation.new(
+        worktree_path: repo, task_folder: task_folder,
+        writable_worktree: false, profile: nil, sandbox_path: "/usr/bin/bwrap"
+      )
+
+      error = assert_raises(Hive::StageError) do
+        isolation.send(:protected_mounts, [ File.join(task_folder, "missing-config") ], [ task_folder ])
+      end
+      assert_includes error.message, "missing below a writable root"
+    end
+  end
+
   private
 
   def with_isolated_repository(worktree_under_home: false)

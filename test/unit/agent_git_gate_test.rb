@@ -949,6 +949,45 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_isolated_adoption_reports_a_failed_branch_rollback
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        isolated_commit(metadata, "changed.txt", "changed\n")
+        original_read = Hive::AgentGitGate.method(:read)
+        original_command = Hive::AgentGitGate.method(:command!)
+        update_ref_calls = 0
+        read_replacement = lambda do |repository, operation, **kwargs|
+          if repository == repo && operation == :status
+            Hive::AgentGitGate::ReadResult.new(
+              operation: :status, stdout: "dirty", stderr: "", exitstatus: 0, overflow: false
+            )
+          else
+            original_read.call(repository, operation, **kwargs)
+          end
+        end
+        command_replacement = lambda do |repository, *args, **kwargs|
+          if args.first == "update-ref"
+            update_ref_calls += 1
+            raise Hive::AgentGitGate::IsolationFailed, "branch rollback refused" if update_ref_calls == 2
+          end
+
+          original_command.call(repository, *args, **kwargs)
+        end
+
+        with_replaced_singleton_method(Hive::AgentGitGate, :read, read_replacement) do
+          with_replaced_singleton_method(Hive::AgentGitGate, :command!, command_replacement) do
+            error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+              Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+            end
+            assert_includes error.message, "does not match"
+            assert_includes error.message, "branch rollback refused"
+          end
+        end
+      end
+    end
+  end
+
   def test_isolated_adoption_imports_the_exact_head_without_writing_fetch_head
     with_tmp_git_repo do |repo|
       Dir.mktmpdir("agent-git-isolated") do |root|

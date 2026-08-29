@@ -94,6 +94,14 @@ root-Minitest-owning job in `ci.yml` retains that file: coverage shards,
 expensive proof gates, e2e harness library tests, the advisory TUI latency job,
 and the macOS launchd proof.
 
+The six Ubuntu coverage-shard workers provision `bubblewrap` before loading
+the bundle. On Ubuntu 24.04 runners they also disable the host's AppArmor
+restriction on unprivileged user namespaces for the job: Bubblewrap otherwise
+cannot create its UID map. Patrol managed-agent tests use the real Linux mount
+namespace and the production path fails closed when that dependency is
+unavailable, so the hosted test environment must provide `/usr/bin/bwrap`
+rather than bypassing the preflight.
+
 During implementation, run the smallest relevant test files directly:
 
 ```bash

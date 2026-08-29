@@ -193,6 +193,35 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
     end
   end
 
+  def test_worker_rejects_missing_or_unreadable_runtime_paths
+    Dir.mktmpdir("hive-terminal-recorder-runtime-errors") do |root|
+      build = lambda do
+        Hive::Artifacts::TerminalRecorder.new(
+          argv: [ RbConfig.ruby, "-e", "exit" ], cwd: root,
+          cast_path: File.join(root, "proof.cast"),
+          review_path: File.join(root, "proof.txt")
+        )
+      end
+
+      missing_runtime = Struct.new(:full_require_paths).new([ File.join(root, "missing") ])
+      with_replaced_singleton_method(
+        Gem, :loaded_specs, -> { { "agent-cli-runtime" => missing_runtime } }
+      ) do
+        error = assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) { build.call.record! }
+        assert_equal "terminal capture runtime is unavailable", error.message
+      end
+
+      unreadable_runtime = Object.new
+      unreadable_runtime.define_singleton_method(:full_require_paths) { raise Errno::EACCES }
+      with_replaced_singleton_method(
+        Gem, :loaded_specs, -> { { "agent-cli-runtime" => unreadable_runtime } }
+      ) do
+        error = assert_raises(Hive::Artifacts::TerminalRecorder::CaptureError) { build.call.record! }
+        assert_equal "terminal capture runtime is unavailable", error.message
+      end
+    end
+  end
+
   def test_record_normalizes_empty_worker_provider_json_and_configuration_failures
     Dir.mktmpdir("hive-terminal-recorder-normalize") do |root|
       build = lambda do

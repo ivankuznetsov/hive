@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/artifacts/capture_toolkit"
+require "hive/agent_support/pi"
 
 class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
   include HiveTestHelper
@@ -480,6 +481,30 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
 
     refute_path_exists root
     assert_nil toolkit.instance_variable_get(:@project_runtime_root)
+  end
+
+  def test_visual_pi_producer_prepares_a_project_runtime_root_without_a_managed_server
+    Dir.mktmpdir("hive-pi-project-runtime") do |root|
+      toolkit = prepared_toolkit
+      policy = Object.new
+      policy.define_singleton_method(:cleanup!) { true }
+      runtime_root = nil
+
+      with_replaced_singleton_method(
+        Hive::AgentSupport::Pi::Runtime, :compile_evidence_actor, ->(**) { policy }
+      ) do
+        toolkit.prepare!(
+          kinds: [ "screenshot" ], task_root: root, source_root: root,
+          source_sha: "a" * 40, writable_root: File.join(root, "work"),
+          producer_profile: Hive::AgentProfiles.lookup(:pi)
+        )
+        runtime_root = toolkit.instance_variable_get(:@project_runtime_root)
+        assert_path_exists runtime_root
+      end
+
+      toolkit.close
+      refute_path_exists runtime_root
+    end
   end
 
   def test_project_runtime_root_teardown_refuses_a_substituted_root

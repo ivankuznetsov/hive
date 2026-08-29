@@ -29,6 +29,7 @@ class AttemptsGenerationTest < Minitest::Test
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
       File.write(state_file, "body\n<!-- WAITING -->\n")
+      seed_task_projection(dir, state_file: state_file)
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 3, stage_name: "plan")
 
@@ -62,6 +63,7 @@ class AttemptsGenerationTest < Minitest::Test
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
       File.write(state_file, "one")
+      seed_task_projection(dir, state_file: state_file)
       task = FakeTask.new(id: nil, slug: "legacy-task", state_file: state_file,
                           stage_index: 1, stage_name: "inbox")
       one = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "1-inbox")

@@ -9,6 +9,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/task"
 require "hive/task_closure"
+require "hive/task_projection/store"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -32,7 +33,8 @@ module Hive
                      gh: Hive::Gh, config_lookup: Hive::Config.method(:find_project),
                      config_loader: Hive::Config.method(:load),
                      task_factory: Hive::Task.method(:new),
-                     task_closure: Hive::TaskClosure, dry_run: false)
+                     task_closure: Hive::TaskClosure,
+                     attempt_store_factory:, dry_run: false)
         @poll_interval_sec = positive_number(poll_interval_sec, "poll interval", allow_zero: true)
         @poll_timeout_sec = positive_number(poll_timeout_sec, "poll timeout")
         @merge_intake = merge_intake
@@ -42,6 +44,7 @@ module Hive
         @config_loader = config_loader
         @task_factory = task_factory
         @task_closure = task_closure
+        @attempt_store_factory = attempt_store_factory
         @dry_run = dry_run
         @contexts = {}
         @last_observation_results = []
@@ -108,6 +111,10 @@ module Hive
       # consume every opportunity or permanently evict another task.
       def tick(now: Time.now.utc, projects: nil)
         selected = projects ? @contexts.keys & Array(projects).map(&:to_s) : @contexts.keys
+        attempt_store = nil
+        projection_reader = lambda do
+          attempt_store ||= @attempt_store_factory.call
+        end
         selected.sort.filter_map do |project|
           identity = @contexts.fetch(project)
           state = @store.load(identity)
@@ -116,7 +123,9 @@ module Hive
           candidate = @store.next_candidate(state, now: now)
           next unless candidate
 
-          process_and_record(identity, candidate, now: now)
+          process_and_record(
+            identity, candidate, now: now, projection_reader: projection_reader
+          )
         rescue StandardError => e
           {
             status: :blocked, project: project,
@@ -303,8 +312,10 @@ module Hive
         ]
       end
 
-      def process_and_record(identity, candidate, now:)
-        result = process_candidate(identity, candidate, now: now)
+      def process_and_record(identity, candidate, now:, projection_reader:)
+        result = process_candidate(
+          identity, candidate, now: now, projection_reader: projection_reader
+        )
         @store.transaction(identity, now: now) do |state|
           current = state.fetch("candidates")[candidate.fetch("key")]
           next unless current
@@ -336,10 +347,12 @@ module Hive
         }
       end
 
-      def process_candidate(identity, candidate, now:)
+      def process_candidate(identity, candidate, now:, projection_reader:)
         task = resolve_candidate_task(candidate)
         return terminal_result(task, identity, now: now) if Hive::TaskClosure.terminal_task?(task)
-        unless generation_current?(task, candidate)
+        unless generation_current?(
+          task, candidate, attempt_store: projection_reader.call
+        )
           return {
             status: :superseded,
             archive: { "status" => "superseded",
@@ -630,10 +643,10 @@ module Hive
         nil
       end
 
-      def generation_current?(task, candidate)
+      def generation_current?(task, candidate, attempt_store:)
         marker = Hive::Markers.current(task.state_file)
         bounded = Hive::TaskProjection::Store.new(
-          task_folder: task.folder
+          task_folder: task.folder, attempt_store: attempt_store
         ).read_routine(marker: marker)
         return false unless bounded.current?
 

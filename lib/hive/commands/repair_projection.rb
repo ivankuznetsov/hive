@@ -1,5 +1,4 @@
 require "json"
-require "shellwords"
 require "hive"
 require "hive/config"
 require "hive/lock"
@@ -13,10 +12,6 @@ module Hive
     # direct operator verb, not a daemon recovery path or migration framework.
     class RepairProjection
       include Hive::Schemas::EnvelopeEmitter
-
-      TERMINAL_REASONS = %w[
-        checkpoint_oversized attempt_ids_exhausted predecessor_fetches_exhausted
-      ].freeze
 
       class RepairFailed < Hive::Error
         attr_reader :reason, :checkpoint_state, :terminal
@@ -114,7 +109,7 @@ module Hive
           unless bounded.current?
             diagnostic = bounded.diagnostics.first || {}
             reason = diagnostic.fetch("reason", bounded.state).to_s
-            terminal = TERMINAL_REASONS.include?(reason)
+            terminal = Hive::TaskProjection.terminal_repair_reason?(reason)
             raise RepairFailed.new(
               failure_message(reason, bounded.state, terminal: terminal),
               reason: reason, checkpoint_state: bounded.state, terminal: terminal
@@ -201,11 +196,10 @@ module Hive
       end
 
       def exact_repair_command
-        Shellwords.shelljoin([
-          "hive", "repair-projection", @identity.fetch("slug"),
-          "--project", @identity.fetch("project"),
-          "--stage", @identity.fetch("stage")
-        ])
+        Hive::TaskProjection.repair_command(
+          project: @identity.fetch("project"), slug: @identity.fetch("slug"),
+          stage: @identity.fetch("stage")
+        )
       end
 
       def failure_message(reason, checkpoint_state, terminal:)

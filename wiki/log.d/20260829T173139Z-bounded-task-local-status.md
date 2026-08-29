@@ -18,3 +18,8 @@ Canonical CLI, idempotent/controller, Patrol Fix, and ad-hoc review task
 creation now publish a zero-history derived checkpoint before exposing the
 task. The initializer refuses pre-existing projection authority, so it closes
 the new-task gap without becoming an implicit repair or migration path.
+
+Operational-action freshness checks and downstream generation reads now use
+the strict projection path too. Bounded suffix preflight parses attempt IDs and
+event counts once, while PR merge reconciliation reuses one attempt projection
+reader across all selected projects in a tick.

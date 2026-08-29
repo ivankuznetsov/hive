@@ -1,4 +1,5 @@
 require "json"
+require "shellwords"
 require "hive/conditions/registry"
 require "hive/conditions/value"
 require "hive/conditions/policy"
@@ -14,6 +15,9 @@ module Hive
     SCHEMA_VERSION = 1
     OPERATOR_ACTIONS_MAX = 20
     REPAIR_REQUIRED_REASON = "condition_projection_repair_required".freeze
+    TERMINAL_REPAIR_REASONS = %w[
+      checkpoint_oversized attempt_ids_exhausted predecessor_fetches_exhausted
+    ].freeze
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
@@ -21,6 +25,51 @@ module Hive
     def self.repair_required_marker?(marker_or_attrs)
       attrs = marker_or_attrs.respond_to?(:attrs) ? marker_or_attrs.attrs : marker_or_attrs
       attrs.is_a?(Hash) && attrs["reason"].to_s == REPAIR_REQUIRED_REASON
+    end
+
+    def self.terminal_repair_reason?(reason)
+      TERMINAL_REPAIR_REASONS.include?(reason.to_s)
+    end
+
+    def self.repair_command(project:, slug:, stage:)
+      Shellwords.shelljoin([
+        "hive", "repair-projection", slug.to_s,
+        "--project", project.to_s, "--stage", stage.to_s
+      ])
+    end
+
+    def self.repair_marker_attrs(bounded:, project:, slug:, stage:)
+      diagnostic = bounded.diagnostics.first || {
+        "reason" => "bounded_projection_unavailable",
+        "message" => "bounded task projection is unavailable",
+        "details" => {}
+      }
+      reason = diagnostic.fetch("reason", "bounded_projection_unavailable").to_s
+      terminal = terminal_repair_reason?(reason)
+      message = if terminal
+        "#{diagnostic.fetch('message', 'bounded task projection exceeded its cap')}; " \
+          "compact this task's retained projection history before repair"
+      else
+        "#{diagnostic.fetch('message', 'bounded task projection is unavailable')}; " \
+          "run the exact-task projection repair"
+      end
+      attrs = {
+        "reason" => REPAIR_REQUIRED_REASON,
+        "owner" => "operator",
+        "projection_reason" => reason[0, 128],
+        "projection_state" => bounded.state.to_s[0, 64],
+        "message" => message.to_s[0, 500]
+      }
+      unless terminal
+        attrs["repair_command"] = repair_command(
+          project: project, slug: slug, stage: stage
+        )
+      end
+      details = diagnostic["details"]
+      if details.is_a?(Hash) && details["cap"]
+        attrs["projection_cap"] = details["cap"].to_s[0, 128]
+      end
+      attrs
     end
 
     INTERNAL_FACT_KEYS = %w[

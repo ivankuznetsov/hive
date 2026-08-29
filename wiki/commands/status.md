@@ -150,6 +150,11 @@ task creation before the task becomes visible. No empty authoritative journal
 is created. Older tasks without a valid checkpoint still follow the explicit
 repair flow below; status never backfills them.
 
+Confirmation-free operational actions revalidate their observation tokens
+through this same bounded contract. If projection evidence degrades between
+status and `hive act`, the recheck becomes operator-owned projection repair and
+the stale action is rejected without complete-journal replay.
+
 If those bounded facts cannot prove one task's current state, status emits a
 synthetic `ERROR` row with reason
 `condition_projection_repair_required`, `owner: operator`, and the underlying

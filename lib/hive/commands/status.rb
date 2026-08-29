@@ -1,6 +1,5 @@
 require "json"
 require "digest"
-require "shellwords"
 require "time"
 require "hive/agent_limit"
 require "hive/config"
@@ -44,9 +43,6 @@ module Hive
       attr_reader :next_retention_boundary
 
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
-      PROJECTION_REPAIR_TERMINAL_REASONS = %w[
-        checkpoint_oversized attempt_ids_exhausted predecessor_fetches_exhausted
-      ].freeze
       PRISTINE_FORBIDDEN_ENTRIES = %w[
         .lock closure.json handoff.yml patrol-fix-worktree.json worktree.yml
       ].freeze
@@ -1628,40 +1624,13 @@ module Hive
       end
 
       def projection_repair_status(task, bounded, project:)
-        diagnostic = bounded.diagnostics.first || {
-          "reason" => "bounded_projection_unavailable",
-          "message" => "bounded task projection is unavailable",
-          "details" => {}
-        }
-        reason = diagnostic.fetch("reason", "bounded_projection_unavailable").to_s
-        repairable = !PROJECTION_REPAIR_TERMINAL_REASONS.include?(reason)
-        command = if repairable
-          Shellwords.shelljoin([
-            "hive", "repair-projection", task.slug,
-            "--project", project.to_s,
-            "--stage", "#{task.stage_index}-#{task.stage_name}"
-          ])
-        end
-        message = if repairable
-          "#{diagnostic.fetch('message', 'bounded task projection is unavailable')}; " \
-            "run the exact-task projection repair"
-        else
-          "#{diagnostic.fetch('message', 'bounded task projection exceeded its cap')}; " \
-            "compact this task's retained projection history before repair"
-        end
-        attrs = {
-          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-          "owner" => "operator",
-          "projection_reason" => reason[0, 128],
-          "projection_state" => bounded.state.to_s[0, 64],
-          "message" => message.to_s[0, 500]
-        }
-        attrs["repair_command"] = command if command
-        details = diagnostic["details"]
-        attrs["projection_cap"] = details["cap"].to_s[0, 128] if details.is_a?(Hash) && details["cap"]
+        attrs = Hive::TaskProjection.repair_marker_attrs(
+          bounded: bounded, project: project, slug: task.slug,
+          stage: "#{task.stage_index}-#{task.stage_name}"
+        )
         error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
         warn "hive: status: #{task.folder} condition projection requires repair " \
-             "(#{reason}); surfaced as a task-local Error row"
+             "(#{attrs.fetch('projection_reason')}); surfaced as a task-local Error row"
         [
           error_marker,
           Hive::TaskProjection.project(records: [], marker: error_marker)

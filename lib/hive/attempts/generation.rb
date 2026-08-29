@@ -87,11 +87,10 @@ module Hive
         else
           File.dirname(task.state_file)
         end
-        path = File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME)
         store = attempt_store || default_attempt_store
         bounded = Hive::TaskProjection::Store.new(
           task_folder: folder, attempt_store: store
-        ).read_routine(pristine: !File.exist?(path))
+        ).read_routine
         unless bounded.current?
           reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
           raise Hive::TaskProjection::InvalidJournal,

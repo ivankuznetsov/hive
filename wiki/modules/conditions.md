@@ -80,6 +80,9 @@ projection reader is reused; each task may validate a 512 KiB checkpoint, a
 point fetches. The reader refreshes referenced mutable attempt bindings and
 reprojects only the bounded suffix. It never falls back to the complete
 journal, invokes `rebuild!`, or enumerates permanent proof storage.
+Operational-action token revalidation and downstream attempt-generation reads
+use the same strict reader; they surface repair-required state instead of
+guessing that an absent journal means a pristine task.
 
 Canonical task creation publishes a zero-history snapshot and checkpoint before
 the task is committed or admitted. The checkpoint is valid without creating an

@@ -149,6 +149,40 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_tick_opens_one_attempt_projection_reader_for_all_selected_projects
+    store = Object.new
+    store.define_singleton_method(:load) { |_identity| {} }
+    store.define_singleton_method(:next_candidate) do |_state, now:|
+      { "key" => now.iso8601(6), "task" => { "slug" => "candidate" } }
+    end
+    readers = []
+    reader = Object.new
+    watcher = Hive::Daemon::PrMergeWatcher.new(
+      store: store,
+      attempt_store_factory: lambda {
+        readers << reader
+        reader
+      }
+    )
+    watcher.instance_variable_set(
+      :@contexts,
+      {
+        "app-a" => { "registration" => "app-a" },
+        "app-b" => { "registration" => "app-b" }
+      }
+    )
+    observed_readers = []
+    watcher.define_singleton_method(:process_and_record) do |_identity, _candidate,
+                                                               now:, projection_reader:|
+      observed_readers << projection_reader.call
+      { status: :observed, now: now }
+    end
+
+    assert_equal 2, watcher.tick(now: T0).length
+    assert_equal [ reader ], readers
+    assert_equal [ reader, reader ], observed_readers
+  end
+
   def test_observe_retains_held_and_cross_repository_rows_but_excludes_non_coding_rows
     with_merge_project(stages: [ "5-open-pr", "6-review" ]) do |tasks, _home|
       watcher, store = build_watcher
@@ -1153,7 +1187,8 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
   def build_watcher(gh: FakeGh.new, task_closure: FakeClosure.new,
                     merge_intake: nil, store: nil, poll_interval_sec: 0,
-                    poll_timeout_sec: 7, config_lookup: nil, dry_run: false)
+                    poll_timeout_sec: 7, config_lookup: nil,
+                    attempt_store_factory: nil, dry_run: false)
     store ||= Hive::Daemon::PrMergeReconciliationStore.new(
       dry_run: dry_run, backoff_base_sec: 1, backoff_max_sec: 3600
     )
@@ -1165,6 +1200,9 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       gh: gh,
       config_lookup: config_lookup || Hive::Config.method(:find_project),
       task_closure: task_closure,
+      attempt_store_factory: attempt_store_factory || lambda {
+        Hive::Attempts::Store.runtime(create_directories: false).projection_reader
+      },
       dry_run: dry_run
     )
     [ watcher, store ]

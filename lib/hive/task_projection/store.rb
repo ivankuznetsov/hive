@@ -376,9 +376,10 @@ module Hive
             cursor: cursor
           )
         end
-        suffix_attempt_ids = journal_attempt_ids(suffix)
+        suffix_attempt_ids, event_count = journal_summary(suffix)
+        attempt_ids = (checkpoint_attempt_ids(snapshot) + suffix_attempt_ids).uniq
         budget_failure = attempt_budget_failure(
-          snapshot, suffix_attempt_ids: suffix_attempt_ids, attempt_limit: attempt_limit
+          attempt_ids, attempt_limit: attempt_limit
         )
         if budget_failure
           return degraded_from_projection(
@@ -395,7 +396,6 @@ module Hive
             truncated: false, journal_cursor: current_size, journal_records: []
           )
         end
-        event_count = suffix.lines.count { |line| !line.strip.empty? }
         if event_count > event_limit
           return degraded_from_projection(
             base_projection, reason: "suffix_event_limit_exceeded", state: "partial",
@@ -409,7 +409,7 @@ module Hive
 
         bounded_attempt_store = BoundedAttemptStore.new(
           store: @attempt_store,
-          primary_attempt_ids: checkpoint_attempt_ids(snapshot) + suffix_attempt_ids,
+          primary_attempt_ids: attempt_ids,
           predecessor_limit: predecessor_limit
         )
         replayed_records = if suffix.empty?
@@ -715,10 +715,9 @@ module Hive
         false
       end
 
-      def attempt_budget_failure(snapshot, suffix_attempt_ids:, attempt_limit:)
-        attempt_ids = (checkpoint_attempt_ids(snapshot) + suffix_attempt_ids).uniq
+      def attempt_budget_failure(attempt_ids, attempt_limit:)
         if attempt_ids.length > attempt_limit
-          return {
+          {
             "reason" => "attempt_ids_exhausted",
             "details" => {
               "cap" => "attempt_ids", "observed_count" => attempt_ids.length,
@@ -737,16 +736,20 @@ module Hive
         end
       end
 
-      def journal_attempt_ids(bytes)
-        bytes.each_line.filter_map do |line|
+      def journal_summary(bytes)
+        attempt_ids = {}
+        event_count = 0
+        bytes.each_line do |line|
           next if line.strip.empty?
 
+          event_count += 1
           record = JSON.parse(line)
           next unless record.is_a?(Hash)
 
           attempt_id = record["attempt_id"].to_s
-          attempt_id unless attempt_id.empty?
-        end.uniq
+          attempt_ids[attempt_id] = true unless attempt_id.empty?
+        end
+        [ attempt_ids.keys, event_count ]
       end
 
       def degraded_bounded_read(reason:, state:, snapshot_limit:, error: nil,

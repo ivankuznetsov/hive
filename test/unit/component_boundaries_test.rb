@@ -23,6 +23,7 @@ class ComponentBoundariesTest < Minitest::Test
       provider-health
       provider-routing-operations
       provider-routing-policy
+      runtime-control-plane
       safe-agent-git-gate
       skillpack
       user-service
@@ -189,6 +190,18 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty patrol_fix.fetch("migration_exceptions")
 
     ready_components = [ user_service, patrol_fix ]
+
+    runtime_control_plane = contract.component("runtime-control-plane")
+    assert_equal "boundary-ready", runtime_control_plane.fetch("state")
+    assert_equal "hive/runtime_control_plane",
+                 runtime_control_plane.dig("entrypoint", "require")
+    assert_equal "Hive::RuntimeControlPlane",
+                 runtime_control_plane.dig("entrypoint", "constant")
+    assert_includes runtime_control_plane.dig("public_contract", "values"),
+                    "Hive::RuntimeControlPlane::Database"
+    assert_empty runtime_control_plane.fetch("component_dependencies")
+    assert_empty runtime_control_plane.fetch("migration_exceptions")
+    ready_components << runtime_control_plane
 
     clean_load = contract.validate_clean_load!("attempts")
     assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
@@ -474,6 +487,7 @@ class ComponentBoundariesTest < Minitest::Test
       agent-artifact-firewall
       agent-support
       patrol-fix
+      runtime-control-plane
       safe-agent-git-gate
       skillpack
       user-service

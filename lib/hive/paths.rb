@@ -16,6 +16,10 @@ module Hive
       hive_home_override || File.join(base_home("XDG_STATE_HOME", ".local/state"), "hive")
     end
 
+    def runtime_control_plane_path(root = state_home)
+      File.join(root, "runtime-control-plane.sqlite3")
+    end
+
     def cache_home
       hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
     end

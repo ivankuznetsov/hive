@@ -4,6 +4,63 @@ schema_version: 1
 # its test-only contract enforce declared source boundaries; they are not a
 # runtime security sandbox and cannot prevent reflection or monkeypatching.
 components:
+  - id: runtime-control-plane
+    name: Runtime Control Plane
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/runtime_control_plane.rb
+      require: hive/runtime_control_plane
+      constant: Hive::RuntimeControlPlane
+    public_contract:
+      values:
+        - Hive::RuntimeControlPlane::Database
+        - Hive::RuntimeControlPlane::Diagnosis
+        - Hive::RuntimeControlPlane::Identity::Project
+        - Hive::RuntimeControlPlane::Identity::TaskSubject
+      errors:
+        - Hive::RuntimeControlPlane::CodecError
+        - Hive::RuntimeControlPlane::IdentityError
+        - Hive::RuntimeControlPlane::IntegrityError
+        - Hive::RuntimeControlPlane::MigrationRequired
+        - Hive::RuntimeControlPlane::Unavailable
+    owned_paths:
+      - lib/hive/runtime_control_plane.rb
+      - lib/hive/runtime_control_plane/codec.rb
+      - lib/hive/runtime_control_plane/database.rb
+      - lib/hive/runtime_control_plane/diagnostics.rb
+      - lib/hive/runtime_control_plane/identity.rb
+      - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
+    state_contracts:
+      - "One process-local lazy Sequel owner opens the installation-wide SQLite database; validation-only calls never create it"
+      - "Task folders remain workflow authority while the database schema declares only machine-local runtime coordination domains"
+      - "Installation, registered-project, and task-subject identities are stable observations rather than path-derived aliases"
+    schema_contracts:
+      - "A fixed application ID, exact consecutive IntegerMigrator version, complete table inventory, foreign keys, checks, and partial unique indexes fail closed"
+      - "Bounded JSON is canonical UTF-8 text and timestamps are canonical UTC strings with six fractional digits"
+      - "SQLite must support partial indexes and RETURNING; live connections use WAL, foreign keys, FULL synchronous mode, trusted_schema off, DQS disabled, and the five-second busy timeout"
+    lock_contracts:
+      - "The Sequel pool has one connection per process and a PID change disconnects the inherited handle before the child may connect"
+      - "Only bounded immediate transactions are exposed; process/fork maintenance gating remains above this lifecycle boundary"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/config
+      - hive/errors
+      - hive/paths
+    internal_collaborators:
+      - Sequel::Database
+      - Sequel::IntegerMigrator
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/migrate.rb
+    mutation_authority: "The one runtime SQLite file, its exact schema, installation identity row, and connection lifecycle only; no task artifact or legacy runtime store is read or mutated."
+    recovery_surface: "Missing, older, newer, partial, unrelated, corrupt, unsupported-feature, and integrity failures remain typed and fail closed with offline migration or restore guidance."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/runtime_control_plane/database_test.rb
+      - test/unit/runtime_control_plane/schema_test.rb
+    migration_exceptions: []
+
   - id: provider-health
     name: Provider Health
     state: candidate

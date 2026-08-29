@@ -100,6 +100,7 @@ Gem::Specification.new do |spec|
   # REXML::Document; without this declaration `hive daemon install/status`
   # and `hive setup` raise LoadError on a stock 3.4 install.
   spec.add_dependency "rexml", "~> 3.2"
+  spec.add_dependency "sequel", "~> 5.107"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"

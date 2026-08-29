@@ -141,8 +141,9 @@ adversarial route with the exact old selected-lens diagnostic is classified as
 runnable and receives one versioned recovery reset; the daemon can therefore
 rerun each affected initial reviewer leg automatically after upgrade. Missing
 diagnostic provenance is accepted only for historical records. Current adapter
-receipts distinguish parser failures from reviewer- or runner-authored
-diagnostics, so a reviewer cannot request this migration retry by copying the
+receipts distinguish parser failures, including retryable malformed reviewer
+output, from reviewer- or runner-authored diagnostics, so a reviewer cannot
+request this migration retry by copying the
 old text. The reset is one-time, so a genuinely malformed current-contract
 result remains terminal instead of looping. Verification output uses the new
 grammar but is not eligible for the legacy reset, preserving the existing

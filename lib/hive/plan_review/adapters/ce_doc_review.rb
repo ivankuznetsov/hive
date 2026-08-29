@@ -287,7 +287,9 @@ module Hive
             # orchestrator's max_transient bound prevents a retry loop.
             return result(
               "retryable_failure", diagnostic: e.message,
-              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+              route_receipt: route_receipt(
+                request, actual: runner_result["actual_route"], diagnostic_source: "parser"
+              )
             )
           end
           result(

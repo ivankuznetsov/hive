@@ -179,6 +179,47 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_planner_revision_falls_back_after_a_transient_failure_without_rekeying
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["routes"]["planner_revision_fallback"] = {
+        "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+        "effort" => "high", "route" => "native_codex"
+      }
+      revision = TransientRevision.new(revised, failures: 2)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record
+      second = orchestrator(
+        task, cfg, adapter:, planner_revision: revision,
+        clock: -> { Time.utc(2026, 8, 12, 13) }
+      ).advance!.record
+      cleared = orchestrator(
+        task, cfg, adapter:, planner_revision: revision,
+        clock: -> { Time.utc(2026, 8, 12, 14) }
+      ).advance!.record
+
+      assert_equal first.review_id, second.review_id
+      assert_equal first.review_id, cleared.review_id
+      providers = revision.calls.map do |call|
+        call.fetch(:planner_identity).fetch("provider")
+      end
+      assert_equal %w[claude codex codex], providers
+      assert revision.calls.all? do |call|
+        call.fetch(:planner_authority).fetch("provider") == "claude"
+      end
+      fallback_routes = cleared["routes"].select do |route|
+        route["role"] == "planner_revision" && route["planner_revision_fallback"] == true
+      end
+      assert_equal 2, fallback_routes.length
+      assert fallback_routes.all? do |route|
+        route.dig("planner_authority", "provider") == "claude" &&
+          route.fetch("fallback_reason") == "captured_planner_transient_failure"
+      end
+      assert_equal "cleared", cleared.state
+    end
+  end
+
   def test_planner_revision_opens_cooled_retry_series_until_provider_recovers
     revised = standard_plan.sub("# Plan", "# Revised plan")
     with_task(standard_plan) do |task, cfg|

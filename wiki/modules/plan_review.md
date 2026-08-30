@@ -94,6 +94,14 @@ validated output path, and the live plan-review records remain under
 ArtifactFirewall detection and restore. One manifest captures the entire
 authority history; its default bound is 128 and this explicit consumer widens
 it only to the exact inventory, subject to the hard 4096-entry ceiling.
+Hive's review-session journal, derived projection, and bounded projection
+checkpoint are excluded only from this review-time manifest because the
+controller updates all three while the provider is running. Canonical
+`plan.md`, task metadata, and every existing plan-review record remain anchored.
+Reviews blocked by the former checkpoint false positive are re-entered once per
+affected initial-review role when their immutable route carries the exact
+runner diagnostic. A versioned recovery reset prevents repeated retries and
+reviewer-authored or unrelated custody failures remain operator-owned.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,

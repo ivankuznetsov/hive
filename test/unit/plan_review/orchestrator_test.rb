@@ -834,6 +834,40 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_checkpoint_custody_false_positive_recovers_every_affected_role_once
+    with_task(mandatory_plan) do |task, cfg|
+      calls = Hash.new(0)
+      adapter = FakeAdapter.new do |request|
+        calls[request.kind] += 1
+        if %w[primary adversarial].include?(request.kind) && calls.fetch(request.kind) == 1
+          next Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "terminal_failure",
+            diagnostic: "reviewer modified protected artifacts: task-projection.checkpoint.json",
+            route_receipt: { "diagnostic_source" => "runner" }
+          )
+        end
+
+        successful_result(request)
+      end
+
+      blocked = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "blocked", blocked.state
+      assert_equal({ "primary" => 1, "adversarial" => 1 }, calls)
+
+      cleared = orchestrator(task, cfg, adapter:).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+      resets = cleared["routes"].select { |route| route["checkpoint_custody_recovery"] }
+      assert_equal %w[adversarial primary], resets.map { |route| route.fetch("role") }.sort
+      assert resets.all? { |route| route.fetch("checkpoint_custody_contract_version") == 1 }
+
+      orchestrator(task, cfg, adapter:).advance!
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+    end
+  end
+
   # Mandatory capability failures get cheap re-probes, then move to a paced
   # retry instead of growing current.json on every daemon tick or parking
   # forever after the provider becomes available.

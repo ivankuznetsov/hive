@@ -185,8 +185,6 @@ module Hive
           end
           raise
         end
-        append_implementation_output(task, impl_result)
-
         custody_report = agent_custody.report
         if custody_report&.tampered?
           return record_tamper(
@@ -195,6 +193,12 @@ module Hive
             restore_error: custody_report.restore_diagnostic
           )
         end
+
+        # task.md is protected from the implementation agent. Persist the
+        # controller-owned final-message transcript only after that custody
+        # window has closed, otherwise our own write is indistinguishable
+        # from agent tampering and a successful run is rejected.
+        append_implementation_output(task, impl_result)
 
         Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "execute", impl_result

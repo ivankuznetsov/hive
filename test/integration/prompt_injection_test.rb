@@ -167,6 +167,10 @@ class PromptInjectionTest < Minitest::Test
       assert_includes prompt, "<#{tag} content_type=\"plan_md\">"
       assert_includes prompt, "</#{tag}>"
       assert_equal 1, prompt.scan("<#{tag} ").count, "execute prompt has exactly one wrapped block (plan_md)"
+      assert_includes prompt, "The task folder (`#{task.folder}`) is read-only except"
+      assert_includes prompt, "Do NOT edit** `task.md`, `plan.md`, `worktree.yml`"
+      assert_includes prompt, "only that exact new `.json.next` path is writable"
+      refute_includes prompt, "optional `task.md` log section"
     end
   end
 

@@ -133,11 +133,12 @@ module Hive
           require "hive/task_resolver"
           require "hive/workflows"
           verb = argv[1].to_s
-          target = argv[2].to_s
+          evidence_rework = verb == "evidence" && argv[2].to_s == "rework"
+          target = argv[evidence_rework ? 3 : 2].to_s
           raise StoreError, "attempt worker command has no task target" if verb.empty? || target.empty?
 
           task = Hive::TaskResolver.new(target, project_filter: record["project"]).resolve
-          intended_stage = if %w[run approve plan-review-run].include?(verb)
+          intended_stage = if evidence_rework || %w[run approve plan-review-run].include?(verb)
             "#{task.stage_index}-#{task.stage_name}"
           else
             Hive::Workflows.for_verb(verb).fetch(:target)

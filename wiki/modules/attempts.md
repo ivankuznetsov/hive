@@ -498,6 +498,10 @@ Supervisor gives an authenticated explicit Hive worker one additional
 write-only descriptor. `Attempts::Context` installs it only after the ordinary
 claim capability, worker argv, task binding, process identity, and released
 gate all match, then marks it close-on-exec before any provider child starts.
+Task binding understands both ordinary `hive VERB TARGET` workers and the
+controller-only nested `hive evidence rework TARGET` worker; the latter resolves
+the fourth argument and authenticates the current artifacts stage instead of
+mistaking `rework` for a task slug.
 The channel accepts at most one bounded strict safe signal. Empty, malformed,
 oversized, duplicate, broken-pipe, and wrong-route values become no signal;
 stdout and stderr are never parsed by Supervisor as provider evidence.

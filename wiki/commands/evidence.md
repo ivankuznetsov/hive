@@ -81,7 +81,9 @@ and the daemon dispatches it as the next ready action. Its queue grammar accepts
 only the explicit target, `7-artifacts`, both 64-hex bindings, an optional safe
 project, and optional `--json`. Because the command launches no model, durable
 attempt admission uses the controller-only route and does not wait for provider
-health or capacity.
+health or capacity. The durable worker authenticates the task from the fourth
+argument in this nested command shape (`hive evidence rework TARGET`), while
+binding the attempt to the task's current `7-artifacts` stage.
 
 ## Guards and effects
 

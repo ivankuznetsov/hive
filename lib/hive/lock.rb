@@ -1,6 +1,5 @@
 require "fileutils"
 require "time"
-require "hive/attempts/context"
 require "hive/runtime_control_plane/task_lease_repository"
 
 module Hive
@@ -46,6 +45,8 @@ module Hive
     end
 
     def acquire_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
+      require "hive/attempts/context"
+
       payload = (payload || {}).merge(payload_keywords)
       data = base_payload
              .merge(payload.transform_keys(&:to_s))

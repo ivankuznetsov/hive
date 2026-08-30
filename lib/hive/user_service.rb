@@ -15,21 +15,30 @@ module Hive
       running: false,
       diagnostics: []
     ).freeze
+    APPLY_PHASE_ORDER = %w[
+      prepared backup_stored unit_published manager_reloaded takeover_completed
+      activated verified committed
+    ].freeze
+    REMOVE_PHASE_ORDER = %w[
+      removal_prepared manager_disabled unit_removed removal_reloaded removal_verified
+    ].freeze
+    LIFECYCLE_PHASE_ORDER = %w[
+      lifecycle_prepared lifecycle_acted lifecycle_verified lifecycle_committed
+    ].freeze
 
     def initialize(definition:, runner: nil, query_available: false, manager_available: false,
                    status_reader: nil, launchd_running_via_list: false,
-                   writer: Hive::AtomicFile, clock: -> { Time.now.utc },
+                   writer: nil, clock: -> { Time.now.utc },
                    event_handler: nil, home: nil,
                    lock_wait: Transaction::LOCK_WAIT_SEC, legacy_takeover: nil)
       @definition = definition
-      @runner = runner || ->(argv) { system(*argv, out: File::NULL) }
       @writer = writer
       @clock = clock
       @event_handler = event_handler
       @legacy_takeover = legacy_takeover
       @manager = Manager.new(
         definition: definition,
-        runner: @runner,
+        runner: runner,
         query_available: query_available,
         manager_available: manager_available,
         status_reader: status_reader,
@@ -50,7 +59,7 @@ module Hive
       inspect_status(manager: true)
     end
 
-    def plan(autostart:, force: false)
+    def plan(autostart:, force: false, restart_if_running: false)
       if @definition.platform != :unsupported && !@definition.content
         raise ArgumentError, "service content is required to plan an apply"
       end
@@ -70,13 +79,15 @@ module Hive
         status: status,
         manager_observed: manager_observed,
         autostart: autostart,
-        force: force
+        force: force,
+        restart_if_running: restart_if_running
       )
     end
 
-    def plan_remove
+    def plan_remove(inspect_absent_manager: true)
       status = inspect_status(manager: false)
-      manager_observed = !%i[absent unsafe unreadable].include?(status.content_state)
+      manager_observed = @definition.platform != :unsupported &&
+        (inspect_absent_manager || status.content_state != :absent)
       status = inspect_status(manager: true) if manager_observed
       Plan.new(
         operation: :remove,
@@ -131,13 +142,17 @@ module Hive
 
     def remove(plan)
       validate_plan!(plan, :remove)
+      return result(:absent, operation: :remove, final_status: inspect_status(manager: false)) unless @transaction
 
       @transaction.with_lock do |transaction|
+        receipt = transaction.receipt.read
         if (recovery = reconcile_pending(transaction))
           return recovery unless recovery.success?
+          return recovery if recovery.operation == :remove
           plan = plan_remove
+          receipt = transaction.receipt.read
         end
-        remove_current(plan, transaction)
+        remove_current(plan, transaction, receipt: receipt)
       end
     rescue ArgumentError
       raise
@@ -192,6 +207,7 @@ module Hive
     def inspect_recovery
       return { "state" => "unsupported" } unless @transaction
 
+      @transaction.receipt.read
       {
         "state" => @transaction.journal.read ? "pending" : "stable",
         "lock_path" => @transaction.lock_path,
@@ -220,14 +236,40 @@ module Hive
         manager_availability: manager_inspection.availability,
         enabled: manager_inspection.enabled,
         running: manager_inspection.running,
+        load_state: manager_inspection.respond_to?(:load_state) ? manager_inspection.load_state : nil,
+        fragment_path: manager_inspection.respond_to?(:fragment_path) ? manager_inspection.fragment_path : nil,
+        need_daemon_reload: manager_inspection.respond_to?(:need_daemon_reload) ? manager_inspection.need_daemon_reload : nil,
+        main_pid: manager_inspection.respond_to?(:main_pid) ? manager_inspection.main_pid : nil,
+        process_start: manager_inspection.respond_to?(:process_start) ? manager_inspection.process_start : nil,
+        manager_evidence_source: manager_inspection.respond_to?(:evidence_source) ? manager_inspection.evidence_source : :observed,
         diagnostics: manager_inspection.diagnostics + file.fetch(:diagnostics)
       )
     end
 
-    def remove_current(plan, transaction)
-      current = inspect_status(manager: plan.manager_observed)
-      return stale_result(:remove, current) unless current.observation_key == plan.expected_observation
-      if current.content_state == :absent
+    def remove_current(plan, transaction, receipt: nil)
+      planned = inspect_status(manager: plan.manager_observed)
+      return stale_result(:remove, planned) unless planned.observation_key == plan.expected_observation
+
+      current = if receipt && !plan.manager_observed
+        inspected = inspect_status(manager: true)
+        same_file = inspected.content_state == planned.content_state &&
+          inspected.file_identity == planned.file_identity
+        return stale_result(:remove, inspected) unless same_file
+
+        inspected
+      else
+        planned
+      end
+      if current.manager_availability == :indeterminate
+        return result(
+          :failed,
+          operation: :remove,
+          final_status: current,
+          diagnostics: current.diagnostics + [ :manager_probe_indeterminate ]
+        )
+      end
+      if current.content_state == :absent &&
+         (!current.manager_available? || (!current.enabled? && !current.running? && manager_removed?(current)))
         transaction.clear_after_verified_removal
         return result(:absent, operation: :remove, final_status: current)
       end
@@ -240,8 +282,14 @@ module Hive
         )
       end
 
-      prior_content = bound_file_content(current.file_identity)
-      return stale_result(:remove, inspect_status(manager: plan.manager_observed)) unless prior_content
+      prior_content = if current.content_state == :absent
+        nil
+      else
+        bound_file_content(current.file_identity)
+      end
+      if current.content_state != :absent && !prior_content
+        return stale_result(:remove, inspect_status(manager: plan.manager_observed))
+      end
 
       document = transaction.journal.prepare(
         operation: :remove,
@@ -251,74 +299,31 @@ module Hive
         prior_running: current.running?,
         desired_digest: nil,
         backup_path: nil,
-        manager_intent: :disable,
-        result_kind: :removed,
-        autostart: true
+        manager_intent: current.manager_available? ? :disable : nil,
+        result_kind: current.content_state == :absent ? :absent : :removed,
+        autostart: true,
+        prior_main_pid: current.main_pid,
+        prior_process_start: current.process_start
       )
       transition_event(:after_removal_prepared)
-      disabled = @manager.disable
-      after_disable = inspect_status(manager: true)
-      unless disabled.ok || (after_disable.manager_available? && !after_disable.enabled? && !after_disable.running?)
-        return result(
-          :failed,
-          operation: :remove,
-          final_status: after_disable,
-          diagnostics: disabled.diagnostics + [ :recovery_pending ]
-        )
-      end
-      document = transaction.journal.advance(document, phase: :manager_disabled)
-      transition_event(:after_manager_disabled)
-
-      after_disable = inspect_file
-      unless after_disable[:identity] == current.file_identity
-        return result(
-          :failed,
-          operation: :remove,
-          final_status: inspect_status(manager: true),
-          diagnostics: %i[stale_after_manager_change recovery_pending]
-        )
-      end
-
-      if (error = unlink_target)
-        return Result.new(
-          :failed,
-          operation: :remove,
-          final_status: safe_inspect(manager: true),
-          diagnostics: %i[remove_failed recovery_pending],
-          error: error
-        )
-      end
-      document = transaction.journal.advance(document, phase: :unit_removed)
-      transition_event(:after_unit_removed)
-
-      reload = @manager.reload_after_remove
-      final_status = inspect_status(manager: true)
-      verified = reload.ok && final_status.content_state == :absent &&
-                 (!final_status.manager_available? || (!final_status.enabled? && !final_status.running?))
-      unless verified
-        return result(
-          :failed,
-          operation: :remove,
-          final_status: final_status,
-          diagnostics: reload.diagnostics + [ :recovery_pending ]
-        )
-      end
-
-      transaction.journal.advance(document, phase: :removal_verified)
-      transition_event(:after_removal_verified)
-      transaction.clear_after_verified_removal
-      result(:removed, operation: :remove, final_status: final_status, diagnostics: reload.diagnostics)
+      complete_removal(document, transaction, replay: false)
     end
 
-    def unlink_target
-      File.unlink(@definition.target_path)
+    def unlink_target(expected_identity:)
+      current = inspect_file
+      return nil if current[:state] == :absent
+      unless current[:identity] == expected_identity
+        raise TransactionJournal::Invalid, "user-service target changed before unlink"
+      end
+
+      @transaction.unlink_target(
+        expected_snapshot: expected_identity.fetch(:mutation_snapshot),
+        expected_digest: expected_identity.fetch(:digest)
+      )
       nil
-    rescue Errno::ENOENT
-      # The desired end state was reached concurrently. The manager still
-      # needs its post-remove reload.
-      nil
-    rescue StandardError => error
-      error
+    rescue Transaction::Unsafe => error
+      raise TransactionJournal::Invalid,
+            "user-service target changed before unlink: #{error.message}"
     end
 
     def apply_current(plan, current, transaction = @transaction)
@@ -336,7 +341,8 @@ module Hive
 
       receipt = transaction.receipt.read
       desired_digest = Digest::SHA256.hexdigest(@definition.content)
-      if receipt_satisfies?(receipt, desired_digest: desired_digest, plan: plan, status: current)
+      if receipt_satisfies?(receipt, desired_digest: desired_digest, plan: plan, status: current) &&
+         !(plan.restart_if_running && current.running?)
         kind = receipt.fetch("mode") == "unsupported_autostart" ? :autostart_unavailable : :unchanged
         diagnostics = kind == :autostart_unavailable ? [ :autostart_unavailable ] : []
         return result(kind, final_status: current, diagnostics: diagnostics)
@@ -382,7 +388,10 @@ module Hive
         if takeover_pending && !current.running?
           :takeover
         else
-          plan.action == :replace || legacy_match ? :restart : :enable
+          restart_required = plan.action == :replace || legacy_match ||
+            (current.running? &&
+             (plan.restart_if_running || !manager_definition_current?(current)))
+          restart_required ? :restart : :enable
         end
       end
       document = transaction.journal.prepare(
@@ -395,7 +404,9 @@ module Hive
         backup_path: backup_path,
         manager_intent: manager_intent,
         result_kind: kind,
-        autostart: plan.autostart
+        autostart: plan.autostart,
+        prior_main_pid: current.main_pid,
+        prior_process_start: current.process_start
       )
       transition_event(:after_journal_prepared)
 
@@ -403,10 +414,23 @@ module Hive
         document = ensure_recorded_backup(document, transaction, backup_content)
         transition_event(:after_backup_stored)
       end
+      unless apply_phase_at_least?(document, :backup_stored)
+        document = transaction.journal.advance(document, phase: :backup_stored)
+        transition_event(:after_backup_stored)
+      end
+      verify_recorded_backup!(document) if backup_path
 
       if plan.action != :noop
         begin
-          write(@definition.target_path, @definition.content)
+          publish_desired(expected_identity: current.file_identity)
+        rescue TransactionJournal::Invalid => error
+          return Result.new(
+            :failed,
+            backup_path: backup_path,
+            final_status: safe_inspect(manager: plan.manager_observed),
+            diagnostics: (backup_path ? %i[backup_written invalid_recovery_state recovery_pending] : %i[invalid_recovery_state recovery_pending]),
+            error: error
+          )
         rescue StandardError => error
           return Result.new(
             :failed,
@@ -424,11 +448,15 @@ module Hive
     end
 
     def reconcile_pending(transaction)
+      transaction.receipt.read
       document = transaction.journal.read
       return nil unless document
 
       if document.fetch("operation") == "remove"
         return recover_removal(document, transaction)
+      end
+      if document.fetch("operation") == "lifecycle"
+        return recover_lifecycle(document, transaction)
       end
 
       desired_digest = Digest::SHA256.hexdigest(@definition.content.to_s)
@@ -442,28 +470,24 @@ module Hive
       return rollback_apply(document, transaction, diagnostics: [ :recovery_resumed ]) if document.fetch("direction") == "rollback"
 
       file = inspect_file
-      if file[:state] == :matching
-        unless transaction.journal.activation_recorded?(document) ||
-               transaction.journal.phase?(document, :unit_published)
-          document = transaction.journal.advance(document, phase: :unit_published)
-        end
-      else
-        prior_matches = if document.fetch("prior_digest")
-          file.dig(:identity, :digest) == document.fetch("prior_digest")
-        else
-          file[:state] == :absent
-        end
-        unless prior_matches
-          return result(
-            :failed,
-            final_status: safe_inspect(manager: true),
-            diagnostics: %i[invalid_recovery_state recovery_pending]
-          )
-        end
+      desired_matches = file.dig(:identity, :digest) == document.fetch("desired_digest")
+      prior_matches = recorded_prior_file?(file, document)
+      unless desired_matches || prior_matches
+        return invalid_recovery_result(operation: :apply)
+      end
 
-        prior_content = transaction.journal.prior_content(document)
-        document = ensure_recorded_backup(document, transaction, prior_content)
-        write(@definition.target_path, @definition.content)
+      prior_content = transaction.journal.prior_content(document)
+      document = ensure_recorded_backup(document, transaction, prior_content)
+      unless apply_phase_at_least?(document, :backup_stored)
+        document = transaction.journal.advance(document, phase: :backup_stored)
+      end
+      unless desired_matches
+        if apply_phase_at_least?(document, :manager_reloaded)
+          return invalid_recovery_result(operation: :apply, document: document)
+        end
+        publish_desired(expected_identity: file[:identity])
+      end
+      unless apply_phase_at_least?(document, :unit_published)
         document = transaction.journal.advance(document, phase: :unit_published)
       end
 
@@ -477,12 +501,12 @@ module Hive
       diagnostics << :recovery_resumed if replay
       final_without_manager = lambda do |mode, kind, extra_diagnostics|
         final_status = inspect_status(manager: false)
-        unless final_status.content_state == :matching
-          return result(
-            :failed,
-            backup_path: backup_path,
-            final_status: final_status,
-            diagnostics: diagnostics + %i[verification_failed recovery_pending]
+        unless desired_file?(final_status, document)
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: final_status,
+            diagnostics: diagnostics + [ :verification_failed ]
           )
         end
         finalize_apply(
@@ -507,26 +531,72 @@ module Hive
           :unsupported_autostart, :autostart_unavailable, [ :autostart_unavailable ]
         )
       end
+      if intent.nil?
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + status.diagnostics + [ :recorded_manager_intent_unavailable ]
+        ) unless status.manager_available?
+
+        return rollback_apply(document, transaction, diagnostics: diagnostics + [ :recorded_manager_intent_unavailable ])
+      end
       unless status.manager_available?
-        return result(
-          :failed,
-          backup_path: backup_path,
-          restarted: intent == "restart",
-          final_status: status,
-          diagnostics: diagnostics + status.diagnostics + [ :recovery_pending ]
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + status.diagnostics
         )
       end
 
       action = nil
-      phase_proves_activation = transaction.journal.activation_recorded?(document)
-      unless replay && phase_proves_activation && desired_endpoint?(status)
-        if intent == "takeover" && !status.running?
+      if !apply_phase_at_least?(document, :manager_reloaded)
+        reload = @manager.reload
+        diagnostics.concat(reload.diagnostics)
+        status = inspect_status(manager: true)
+        reload_verified = manager_definition_current?(status) &&
+          (reload.ok || status.manager_evidence_source != :injected)
+        reload_verified ||= reload.ok && status.manager_evidence_source == :injected
+        unless reload_verified
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics
+          ) unless status.manager_available?
+
+          return rollback_apply(document, transaction, diagnostics: diagnostics)
+        end
+        diagnostics << :manager_effect_verified unless reload.ok
+        document = transaction.journal.advance(document, phase: :manager_reloaded)
+        transition_event(:after_manager_reloaded)
+        status = inspect_status(manager: true)
+      elsif !manager_definition_current?(status)
+        reload = @manager.reload
+        diagnostics.concat(reload.diagnostics)
+        status = inspect_status(manager: true)
+        reload_verified = manager_definition_current?(status) &&
+          (reload.ok || status.manager_evidence_source != :injected)
+        reload_verified ||= reload.ok && status.manager_evidence_source == :injected
+        unless reload_verified
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics
+          )
+        end
+      end
+
+      if intent == "takeover" && !apply_phase_at_least?(document, :takeover_completed)
+        unless status.running?
           unless @legacy_takeover
-            return result(
-              :failed,
-              backup_path: backup_path,
-              final_status: status,
-              diagnostics: diagnostics + %i[legacy_takeover_failed recovery_pending]
+            return pending_result(
+              operation: :apply,
+              document: document,
+              status: status,
+              diagnostics: diagnostics + [ :legacy_takeover_failed ]
             )
           end
 
@@ -542,24 +612,61 @@ module Hive
             )
           end
           unless stopped
-            return result(
-              :failed,
-              backup_path: backup_path,
-              final_status: safe_inspect(manager: true),
-              diagnostics: diagnostics + %i[legacy_takeover_failed recovery_pending]
+            return pending_result(
+              operation: :apply,
+              document: document,
+              status: safe_inspect(manager: true),
+              diagnostics: diagnostics + [ :legacy_takeover_failed ]
             )
           end
         end
+        document = transaction.journal.advance(document, phase: :takeover_completed)
+        transition_event(:after_takeover_completed)
+        status = inspect_status(manager: true)
+      end
 
-        action = @manager.apply_intent(intent || :enable)
+      unless apply_phase_at_least?(document, :activated)
+        # A clean invocation must perform the exact action recorded before
+        # publication even when a boolean-only injected inspector happens to
+        # report an already-active unit. Replay may finalize from rich endpoint
+        # evidence because the prior process could have completed the action
+        # before it was interrupted.
+        effect = replay ? activation_effect(status, document) : :incomplete
+        if effect == :ambiguous
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_effect_ambiguous ]
+          )
+        end
+        unless effect == :complete
+          action = @manager.activate(intent.to_sym)
+          diagnostics.concat(action.diagnostics)
+          status = inspect_status(manager: true)
+          effect = if !action.ok && status.manager_evidence_source == :injected
+            :incomplete
+          else
+            activation_effect(status, document, trusted_action: action.ok)
+          end
+        end
+        unless effect == :complete
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + (effect == :ambiguous ? [ :manager_effect_ambiguous ] : [])
+          ) unless status.manager_available?
+
+          return rollback_apply(document, transaction, diagnostics: diagnostics)
+        end
+        diagnostics << :manager_effect_verified if action && !action.ok
         document = transaction.journal.advance(document, phase: :activated)
         transition_event(:after_activated)
         status = inspect_status(manager: true)
-        diagnostics.concat(action.diagnostics)
       end
 
       if desired_endpoint?(status)
-        diagnostics << :manager_effect_verified if action && !action.ok
         return finalize_apply(
           document, transaction,
           mode: :managed,
@@ -570,33 +677,93 @@ module Hive
         )
       end
 
-      if status.manager_availability != :available
-        return result(
-          :failed,
-          backup_path: backup_path,
-          restarted: intent == "restart",
-          final_status: status,
-          diagnostics: diagnostics + [ :recovery_pending ]
+      unless status.manager_available?
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics
         )
       end
 
-      rollback_apply(document, transaction, diagnostics: diagnostics)
+      # A durable activation phase is authoritative. If the service regresses
+      # before commit, resume its recorded action without moving the journal
+      # backwards.
+      action = @manager.activate(intent.to_sym)
+      diagnostics.concat(action.diagnostics)
+      status = inspect_status(manager: true)
+      if desired_endpoint?(status)
+        diagnostics << :manager_effect_verified unless action.ok
+        return finalize_apply(
+          document, transaction,
+          mode: :managed,
+          kind: document.fetch("result_kind").to_sym,
+          status: status,
+          diagnostics: diagnostics,
+          restarted: intent == "restart"
+        )
+      end
+
+      pending_result(
+        operation: :apply,
+        document: document,
+        status: status,
+        diagnostics: diagnostics
+      )
     end
 
     def finalize_apply(document, transaction, mode:, kind:, status:, diagnostics:, restarted: false)
-      unless transaction.journal.phase?(document, :committed)
-        unless transaction.journal.phase?(document, :verified)
-          document = transaction.journal.advance(document, phase: :verified)
-          transition_event(:after_verified)
+      inspect_manager = mode.to_sym == :managed
+      status = inspect_status(manager: inspect_manager)
+      unless apply_endpoint_for_mode?(status, document, mode)
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :verification_failed ]
+        )
+      end
+
+      unless apply_phase_at_least?(document, :verified)
+        document = transaction.journal.advance(document, phase: :verified)
+        transition_event(:after_verified)
+        status = inspect_status(manager: inspect_manager)
+        unless apply_endpoint_for_mode?(status, document, mode)
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :verification_failed ]
+          )
         end
+      end
+      unless apply_phase_at_least?(document, :committed)
+        verify_recorded_backup!(document) if document.fetch("backup_path")
         document = transaction.journal.advance(document, phase: :committed)
         transition_event(:after_committed)
       end
-      transaction.receipt.write(
-        digest: document.fetch("desired_digest"),
-        mode: mode,
-        manager_intent: document.fetch("manager_intent")
-      )
+
+      status = inspect_status(manager: inspect_manager)
+      unless apply_endpoint_for_mode?(status, document, mode)
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :verification_failed ]
+        )
+      end
+      verify_recorded_backup!(document) if document.fetch("backup_path")
+      receipt = transaction.receipt.read
+      unless receipt &&
+             receipt.fetch("desired_digest") == document.fetch("desired_digest") &&
+             receipt.fetch("mode") == mode.to_s &&
+             receipt.fetch("manager_intent") == document.fetch("manager_intent")
+        transaction.receipt.write(
+          digest: document.fetch("desired_digest"),
+          mode: mode,
+          manager_intent: document.fetch("manager_intent")
+        )
+      end
       transaction.journal.delete
       result(
         kind,
@@ -613,118 +780,274 @@ module Hive
       ) unless document.fetch("direction") == "rollback"
       if transaction.journal.phase?(document, :rollback_selected)
         transition_event(:after_rollback_selected)
-        prior_content = transaction.journal.prior_content(document)
-        if prior_content
-          write(@definition.target_path, prior_content)
-        else
-          File.unlink(@definition.target_path) unless inspect_file[:state] == :absent
-        end
+      end
+
+      file = inspect_file
+      unless recorded_prior_file?(file, document) || desired_file_observation?(file, document)
+        return invalid_recovery_result(operation: :apply, document: document)
+      end
+      unless recorded_prior_file?(file, document)
+        restore_prior_file(document, transaction, expected_identity: file[:identity])
+        file = inspect_file
+      end
+      unless recorded_prior_file?(file, document)
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: safe_inspect(manager: document.fetch("autostart")),
+          diagnostics: diagnostics + [ :rollback_file_unverified ]
+        )
+      end
+      if rollback_phase_index(document) < rollback_phase_index("prior_file_restored")
         document = transaction.journal.advance(document, phase: :prior_file_restored)
         transition_event(:after_prior_file_restored)
       end
 
+      inspect_manager = document.fetch("autostart") && !document.fetch("manager_intent").nil?
       manager = Manager::Action.new(ok: true, restarted: false, diagnostics: [])
-      if transaction.journal.phase?(document, :prior_file_restored)
-        manager = if document.fetch("autostart") && document.fetch("manager_intent")
-          @manager.restore(
-            prior_enabled: document.fetch("prior_enabled"),
-            prior_running: document.fetch("prior_running")
+      status = inspect_status(manager: inspect_manager)
+      unless prior_manager_endpoint?(status, document)
+        if inspect_manager && !status.manager_available?
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + status.diagnostics
           )
-        else
-          manager
         end
+        manager = @manager.restore(
+          prior_enabled: document.fetch("prior_enabled"),
+          prior_running: document.fetch("prior_running")
+        ) if inspect_manager
+        diagnostics.concat(manager.diagnostics)
+        status = inspect_status(manager: inspect_manager)
+      end
+      unless prior_manager_endpoint?(status, document)
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :rollback_manager_unverified ]
+        )
+      end
+      diagnostics << :manager_effect_verified if inspect_manager && !manager.ok
+      if rollback_phase_index(document) < rollback_phase_index("prior_manager_restored")
         document = transaction.journal.advance(document, phase: :prior_manager_restored)
         transition_event(:after_prior_manager_restored)
       end
-      status = inspect_status(manager: document.fetch("autostart"))
-      prior_file_verified = if document.fetch("prior_digest")
-        status.file_identity&.fetch(:digest) == document.fetch("prior_digest")
-      else
-        status.content_state == :absent
-      end
-      prior_manager_verified = !document.fetch("autostart") ||
-        (status.manager_available? &&
-         status.enabled? == document.fetch("prior_enabled") &&
-         status.running? == document.fetch("prior_running"))
-      unless manager.ok && prior_file_verified && prior_manager_verified
-        return result(
-          :failed,
-          backup_path: document.fetch("backup_path"),
-          restarted: document.fetch("manager_intent") == "restart",
-          final_status: status,
-          diagnostics: diagnostics + manager.diagnostics + [ :recovery_pending ]
+
+      status = inspect_status(manager: inspect_manager)
+      unless prior_endpoint?(status, document)
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :rollback_verification_failed ]
         )
       end
-
       unless transaction.journal.phase?(document, :prior_verified)
         document = transaction.journal.advance(document, phase: :prior_verified)
         transition_event(:after_prior_verified)
+      end
+      status = inspect_status(manager: inspect_manager)
+      unless prior_endpoint?(status, document)
+        return pending_result(
+          operation: :apply,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :rollback_verification_failed ]
+        )
       end
       transaction.receipt.delete
       transaction.journal.delete
       result(
         :failed,
         backup_path: document.fetch("backup_path"),
-        restarted: document.fetch("manager_intent") == "restart",
+        restarted: false,
         final_status: status,
-        diagnostics: diagnostics + manager.diagnostics + [ :prior_state_restored ]
+        diagnostics: diagnostics + [ :prior_state_restored ]
       )
     end
 
     def recover_removal(document, transaction)
+      complete_removal(document, transaction, replay: true)
+    end
+
+    def complete_removal(document, transaction, replay:)
+      diagnostics = replay ? [ :recovery_resumed ] : []
       file = inspect_file
-      prior_matches = file[:state] == :absent ||
-                      file.dig(:identity, :digest) == document.fetch("prior_digest")
-      unless prior_matches
-        return result(
-          :failed,
-          operation: :remove,
-          final_status: safe_inspect(manager: true),
-          diagnostics: %i[invalid_recovery_state recovery_pending]
-        )
+      prior_matches = recorded_prior_file?(file, document)
+      unless prior_matches || file[:state] == :absent
+        return invalid_recovery_result(operation: :remove, document: document)
+      end
+      if remove_phase_at_least?(document, :unit_removed) && file[:state] != :absent
+        return invalid_recovery_result(operation: :remove, document: document)
+      end
+      if document.fetch("prior_digest") &&
+         transaction.journal.phase?(document, :removal_prepared) &&
+         file[:state] == :absent
+        return invalid_recovery_result(operation: :remove, document: document)
       end
 
-      unless file[:state] == :absent
-        disabled = @manager.disable
-        status = inspect_status(manager: true)
-        unless disabled.ok || (status.manager_available? && !status.enabled? && !status.running?)
-          return result(
-            :failed,
+      status = inspect_status(manager: true)
+      intent = document.fetch("manager_intent")
+      if intent
+        unless status.manager_available?
+          return pending_result(
             operation: :remove,
-            final_status: status,
-            diagnostics: disabled.diagnostics + [ :recovery_pending ]
+            document: document,
+            status: status,
+            diagnostics: diagnostics + status.diagnostics
           )
         end
+        unless manager_disabled?(status)
+          disabled = @manager.disable
+          diagnostics.concat(disabled.diagnostics)
+          status = inspect_status(manager: true)
+          unless manager_disabled?(status)
+            return pending_result(
+              operation: :remove,
+              document: document,
+              status: status,
+              diagnostics: diagnostics
+            )
+          end
+          diagnostics << :manager_effect_verified unless disabled.ok
+        end
+      end
+      unless remove_phase_at_least?(document, :manager_disabled)
         document = transaction.journal.advance(document, phase: :manager_disabled)
-        File.unlink(@definition.target_path)
-        document = transaction.journal.advance(document, phase: :unit_removed)
+        transition_event(:after_manager_disabled)
       end
 
-      reload = @manager.reload_after_remove
-      status = inspect_status(manager: true)
-      unless reload.ok && status.content_state == :absent &&
-             (!status.manager_available? || (!status.enabled? && !status.running?))
-        return result(
-          :failed,
+      file = inspect_file
+      unless recorded_prior_file?(file, document) || file[:state] == :absent
+        return pending_result(
           operation: :remove,
-          final_status: status,
-          diagnostics: reload.diagnostics + [ :recovery_pending ]
+          document: document,
+          status: safe_inspect(manager: true),
+          diagnostics: diagnostics + [ :stale_after_manager_change ]
         )
       end
+      if file[:state] != :absent
+        begin
+          unlink_target(expected_identity: file[:identity])
+        rescue StandardError => error
+          return Result.new(
+            :failed,
+            operation: :remove,
+            final_status: safe_inspect(manager: true),
+            diagnostics: (diagnostics + %i[remove_failed recovery_pending]).uniq,
+            error: error
+          )
+        end
+      end
+      unless inspect_file[:state] == :absent
+        return pending_result(
+          operation: :remove,
+          document: document,
+          status: safe_inspect(manager: true),
+          diagnostics: diagnostics + [ :remove_failed ]
+        )
+      end
+      unless remove_phase_at_least?(document, :unit_removed)
+        document = transaction.journal.advance(document, phase: :unit_removed)
+        transition_event(:after_unit_removed)
+      end
 
-      transaction.journal.advance(document, phase: :removal_verified)
+      status = inspect_status(manager: true)
+      if !remove_phase_at_least?(document, :removal_reloaded)
+        unless intent
+          document = transaction.journal.advance(document, phase: :removal_reloaded)
+          transition_event(:after_removal_reloaded)
+          status = inspect_status(manager: true)
+        else
+          if !status.manager_available?
+            return pending_result(
+              operation: :remove,
+              document: document,
+              status: status,
+              diagnostics: diagnostics + status.diagnostics
+            )
+          end
+          reload = @manager.reload_after_remove
+          diagnostics.concat(reload.diagnostics)
+          status = inspect_status(manager: true)
+          reload_verified = removal_manager_endpoint?(status, document) &&
+            (reload.ok || status.manager_evidence_source != :injected)
+          unless reload_verified
+            return pending_result(
+              operation: :remove,
+              document: document,
+              status: status,
+              diagnostics: diagnostics
+            )
+          end
+          diagnostics << :manager_effect_verified unless reload.ok
+          document = transaction.journal.advance(document, phase: :removal_reloaded)
+          transition_event(:after_removal_reloaded)
+        end
+      elsif !removal_manager_endpoint?(status, document)
+        if intent && !status.manager_available?
+          return pending_result(
+            operation: :remove,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + status.diagnostics
+          )
+        end
+        reload = @manager.reload_after_remove
+        diagnostics.concat(reload.diagnostics)
+        status = inspect_status(manager: true)
+        unless removal_manager_endpoint?(status, document)
+          return pending_result(
+            operation: :remove,
+            document: document,
+            status: status,
+            diagnostics: diagnostics
+          )
+        end
+      end
+
+      status = inspect_status(manager: true)
+      unless removal_endpoint?(status, document)
+        return pending_result(
+          operation: :remove,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :verification_failed ]
+        )
+      end
+      unless remove_phase_at_least?(document, :removal_verified)
+        document = transaction.journal.advance(document, phase: :removal_verified)
+        transition_event(:after_removal_verified)
+      end
+      status = inspect_status(manager: true)
+      unless removal_endpoint?(status, document)
+        return pending_result(
+          operation: :remove,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :verification_failed ]
+        )
+      end
       transaction.clear_after_verified_removal
-      result(:removed, operation: :remove, final_status: status, diagnostics: [ :recovery_resumed ])
+      result(
+        document.fetch("result_kind").to_sym,
+        operation: :remove,
+        final_status: status,
+        diagnostics: diagnostics
+      )
     end
 
     def receipt_satisfies?(receipt, desired_digest:, plan:, status:)
       return false unless receipt && receipt.fetch("desired_digest") == desired_digest
       return false unless status.content_state == :matching
-      return true unless plan.autostart
+      return receipt.fetch("mode") == "no_autostart" unless plan.autostart
 
       case receipt.fetch("mode")
       when "managed"
-        status.manager_available? && status.enabled? && status.running?
+        desired_endpoint?(status)
       when "unsupported_autostart"
         status.manager_availability == :conclusively_absent
       else
@@ -734,15 +1057,150 @@ module Hive
 
     def desired_endpoint?(status)
       status.content_state == :matching && status.manager_available? &&
-        status.enabled? && status.running?
+        status.enabled? && status.running? && manager_definition_current?(status) &&
+        (@definition.platform != :linux || !status.process_identity.nil?)
+    end
+
+    def desired_file?(status, document)
+      status.file_identity&.fetch(:digest) == document.fetch("desired_digest")
+    end
+
+    def desired_file_observation?(file, document)
+      file.dig(:identity, :digest) == document.fetch("desired_digest")
+    end
+
+    def recorded_prior_file?(file, document)
+      digest = document.fetch("prior_digest")
+      digest ? file.dig(:identity, :digest) == digest : file[:state] == :absent
+    end
+
+    def manager_definition_current?(status)
+      return true unless @definition.platform == :linux
+
+      status.loaded_definition_current?
+    end
+
+    def manager_removed?(status)
+      return true unless @definition.platform == :linux
+
+      %w[not-found not_found].include?(status.load_state) && !status.need_daemon_reload
+    end
+
+    def manager_disabled?(status)
+      status.manager_available? && !status.enabled? && !status.running?
+    end
+
+    def removal_manager_endpoint?(status, document)
+      if document.fetch("manager_intent")
+        manager_disabled?(status) && manager_removed?(status)
+      else
+        status.manager_availability == :conclusively_absent
+      end
+    end
+
+    def removal_endpoint?(status, document)
+      status.content_state == :absent && removal_manager_endpoint?(status, document)
+    end
+
+    def recorded_process_identity(document)
+      pid = document.fetch("prior_main_pid")
+      started = document.fetch("prior_process_start")
+      return nil unless pid.to_i.positive? && started && !started.empty?
+
+      { main_pid: pid.to_i, process_start: started }
+    end
+
+    def activation_effect(status, document, trusted_action: false)
+      return :incomplete unless desired_endpoint?(status)
+      return :complete if document.fetch("manager_intent") == "enable"
+      return :complete unless document.fetch("prior_running")
+      return trusted_action ? :complete : :incomplete unless @definition.platform == :linux
+
+      prior = recorded_process_identity(document)
+      current = status.process_identity
+      return :complete if prior && current && current != prior
+      return :complete if trusted_action && current && current.fetch(:process_start) == "injected"
+      return :incomplete if prior && current == prior
+
+      :ambiguous
+    end
+
+    def apply_endpoint_for_mode?(status, document, mode)
+      return false unless desired_file?(status, document)
+
+      case mode.to_sym
+      when :managed
+        desired_endpoint?(status)
+      when :no_autostart
+        true
+      when :unsupported_autostart
+        status.manager_availability == :conclusively_absent
+      else
+        false
+      end
+    end
+
+    def prior_manager_endpoint?(status, document)
+      return true unless document.fetch("autostart") && document.fetch("manager_intent")
+      return false unless status.manager_available? &&
+                          status.enabled? == document.fetch("prior_enabled") &&
+                          status.running? == document.fetch("prior_running")
+
+      if document.fetch("prior_digest")
+        manager_definition_current?(status) &&
+          (!status.running? || @definition.platform != :linux || !status.process_identity.nil?)
+      else
+        manager_removed?(status)
+      end
+    end
+
+    def prior_endpoint?(status, document)
+      file = {
+        state: status.content_state,
+        identity: status.file_identity
+      }
+      recorded_prior_file?(file, document) && prior_manager_endpoint?(status, document)
+    end
+
+    def lifecycle_effect(status, document, trusted_action: false)
+      operation = document.fetch("manager_intent")
+      case operation
+      when "start"
+        status.running? ? :complete : :incomplete
+      when "stop"
+        status.running? ? :incomplete : :complete
+      when "restart", "takeover"
+        return :incomplete unless status.running?
+        return trusted_action ? :complete : :incomplete unless @definition.platform == :linux
+
+        prior = recorded_process_identity(document)
+        current = status.process_identity
+        return :complete if prior && current && current != prior
+        return :complete if trusted_action && current && current.fetch(:process_start) == "injected"
+        return :incomplete if prior && current == prior
+
+        :ambiguous
+      else
+        :ambiguous
+      end
+    end
+
+    def lifecycle_endpoint?(status, document)
+      operation = document.fetch("manager_intent")
+      return !status.running? if operation == "stop"
+      return false unless status.running?
+
+      %w[start restart takeover].include?(operation)
     end
 
     def lifecycle(operation)
       return result(:unsupported, operation: operation, final_status: inspect) unless @transaction
 
       @transaction.with_lock do |transaction|
+        transaction.receipt.read
         if (recovery = reconcile_pending(transaction))
           return recovery unless recovery.success?
+          return recovery if recovery.operation == operation
         end
         before = inspect_status(manager: true)
         unless before.manager_available?
@@ -753,17 +1211,34 @@ module Hive
             diagnostics: before.diagnostics + [ :manager_action_unavailable ]
           )
         end
-        action = @manager.public_send(operation)
-        after = inspect_status(manager: true)
-        expected_running = operation != :stop
-        verified = action.ok && after.running? == expected_running
-        result(
-          verified ? :unchanged : :failed,
-          operation: operation,
-          restarted: operation == :restart || operation == :takeover,
-          final_status: after,
-          diagnostics: action.diagnostics + (verified ? [] : [ :manager_action_unverified ])
+        if (operation == :start && before.running?) || (operation == :stop && !before.running?)
+          return result(:unchanged, operation: operation, final_status: before)
+        end
+        unless before.file_identity
+          return result(
+            :failed,
+            operation: operation,
+            final_status: before,
+            diagnostics: [ :manager_action_unverified ]
+          )
+        end
+
+        document = transaction.journal.prepare(
+          operation: :lifecycle,
+          prior_content: nil,
+          prior_digest: before.file_identity.fetch(:digest),
+          prior_enabled: before.enabled?,
+          prior_running: before.running?,
+          desired_digest: before.file_identity.fetch(:digest),
+          backup_path: nil,
+          manager_intent: operation,
+          result_kind: :unchanged,
+          autostart: true,
+          prior_main_pid: before.main_pid,
+          prior_process_start: before.process_start
         )
+        transition_event(:after_lifecycle_prepared)
+        complete_lifecycle(document, transaction, replay: false)
       end
     rescue Transaction::Busy => error
       Result.new(
@@ -781,6 +1256,166 @@ module Hive
         diagnostics: [ :invalid_recovery_state ],
         error: error
       )
+    end
+
+    def recover_lifecycle(document, transaction)
+      complete_lifecycle(document, transaction, replay: true)
+    end
+
+    def complete_lifecycle(document, transaction, replay:)
+      operation = document.fetch("manager_intent").to_sym
+      diagnostics = replay ? [ :recovery_resumed ] : []
+      file = inspect_file
+      unless file.dig(:identity, :digest) == document.fetch("desired_digest")
+        return invalid_recovery_result(operation: operation, document: document)
+      end
+
+      status = inspect_status(manager: true)
+      unless status.manager_available?
+        return pending_result(
+          operation: operation,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + status.diagnostics + [ :manager_action_unavailable ]
+        )
+      end
+
+      unless lifecycle_phase_at_least?(document, :lifecycle_acted)
+        effect = lifecycle_effect(status, document)
+        if effect == :ambiguous
+          return pending_result(
+            operation: operation,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_effect_ambiguous ]
+          )
+        end
+        action = nil
+        unless effect == :complete
+          action = @manager.public_send(operation)
+          diagnostics.concat(action.diagnostics)
+          status = inspect_status(manager: true)
+          effect = lifecycle_effect(status, document, trusted_action: action.ok)
+        end
+        unless effect == :complete
+          return pending_result(
+            operation: operation,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_action_unverified ]
+          )
+        end
+        diagnostics << :manager_effect_verified if action && !action.ok
+        document = transaction.journal.advance(document, phase: :lifecycle_acted)
+        transition_event(:after_lifecycle_acted)
+      end
+
+      status = inspect_status(manager: true)
+      unless lifecycle_endpoint?(status, document)
+        action = @manager.public_send(operation)
+        diagnostics.concat(action.diagnostics)
+        status = inspect_status(manager: true)
+        unless lifecycle_endpoint?(status, document)
+          return pending_result(
+            operation: operation,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_action_unverified ]
+          )
+        end
+        diagnostics << :manager_effect_verified unless action.ok
+      end
+
+      unless lifecycle_phase_at_least?(document, :lifecycle_verified)
+        document = transaction.journal.advance(document, phase: :lifecycle_verified)
+        transition_event(:after_lifecycle_verified)
+        status = inspect_status(manager: true)
+        unless lifecycle_endpoint?(status, document)
+          return pending_result(
+            operation: operation,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_action_unverified ]
+          )
+        end
+      end
+      unless lifecycle_phase_at_least?(document, :lifecycle_committed)
+        document = transaction.journal.advance(document, phase: :lifecycle_committed)
+        transition_event(:after_lifecycle_committed)
+      end
+      status = inspect_status(manager: true)
+      unless lifecycle_endpoint?(status, document)
+        return pending_result(
+          operation: operation,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + [ :manager_action_unverified ]
+        )
+      end
+      transaction.journal.delete
+      result(
+        :unchanged,
+        operation: operation,
+        restarted: %i[restart takeover].include?(operation),
+        final_status: status,
+        diagnostics: diagnostics
+      )
+    end
+
+    def apply_phase_at_least?(document, phase)
+      phase_index(APPLY_PHASE_ORDER, document.fetch("phase")) >=
+        phase_index(APPLY_PHASE_ORDER, phase)
+    end
+
+    def remove_phase_at_least?(document, phase)
+      phase_index(REMOVE_PHASE_ORDER, document.fetch("phase")) >=
+        phase_index(REMOVE_PHASE_ORDER, phase)
+    end
+
+    def lifecycle_phase_at_least?(document, phase)
+      phase_index(LIFECYCLE_PHASE_ORDER, document.fetch("phase")) >=
+        phase_index(LIFECYCLE_PHASE_ORDER, phase)
+    end
+
+    def rollback_phase_index(document_or_phase)
+      phase = document_or_phase.is_a?(Hash) ? document_or_phase.fetch("phase") : document_or_phase
+      phase_index(TransactionJournal::APPLY_ROLLBACK_PHASES, phase)
+    end
+
+    def phase_index(order, phase)
+      order.index(phase.to_s) || raise(
+        TransactionJournal::Invalid,
+        "unrecognized user-service transition phase #{phase.inspect}"
+      )
+    end
+
+    def pending_result(operation:, document:, status:, diagnostics:)
+      result(
+        :failed,
+        operation: operation,
+        backup_path: document && document["backup_path"],
+        restarted: false,
+        final_status: status,
+        diagnostics: (Array(diagnostics) + [ :recovery_pending ]).uniq
+      )
+    end
+
+    def invalid_recovery_result(operation:, document: nil)
+      pending_result(
+        operation: operation,
+        document: document,
+        status: safe_inspect(manager: true),
+        diagnostics: [ :invalid_recovery_state ]
+      )
+    end
+
+    def restore_prior_file(document, transaction, expected_identity:)
+      prior_content = transaction.journal.prior_content(document)
+      if prior_content
+        publish_content(prior_content, expected_identity: expected_identity)
+      else
+        unlink_target(expected_identity: expected_identity)
+      end
     end
 
     def transition_event(event)
@@ -820,12 +1455,18 @@ module Hive
           plan.manager_observed == (plan.autostart && manager_action?(expected_action))
       else
         expected_action = plan.status.content_state == :absent ? :none : :remove
-        expected_manager_observed =
-          !%i[absent unsafe unreadable].include?(plan.status.content_state)
+        manager_observation_valid = if @definition.platform == :unsupported
+          !plan.manager_observed
+        elsif plan.status.content_state == :absent
+          true
+        else
+          plan.manager_observed
+        end
         plan.action == expected_action &&
-          plan.manager_observed == expected_manager_observed &&
+          manager_observation_valid &&
           !plan.autostart &&
-          !plan.force
+          !plan.force &&
+          !plan.restart_if_running
       end
     end
 
@@ -901,28 +1542,87 @@ module Hive
         mode: stat.mode,
         size: stat.size,
         mtime_nsec: (stat.mtime.to_i * 1_000_000_000) + stat.mtime.nsec,
+        mutation_snapshot: [
+          stat.dev,
+          stat.ino,
+          stat.mode,
+          stat.size,
+          (stat.mtime.to_i * 1_000_000_000) + stat.mtime.nsec,
+          (stat.ctime.to_i * 1_000_000_000) + stat.ctime.nsec,
+          stat.nlink
+        ].freeze,
         digest: digest
       }
     end
 
-    def write(path, content)
-      @writer.write(path, content, mode: 0o644)
+    def publish_desired(expected_identity:)
+      publish_content(@definition.content, expected_identity: expected_identity)
+    end
+
+    def publish_content(content, expected_identity:)
+      current = inspect_file
+      identity_matches = if expected_identity
+        current[:identity] == expected_identity
+      else
+        current[:state] == :absent
+      end
+      unless identity_matches
+        raise TransactionJournal::Invalid, "user-service target changed before publication"
+      end
+
+      if @writer
+        @writer.write(@definition.target_path, content, mode: 0o644)
+        Hive::AtomicFile.fsync_directory(File.dirname(@definition.target_path))
+      else
+        @transaction.publish_target(
+          content,
+          expected_snapshot: expected_identity&.fetch(:mutation_snapshot),
+          expected_digest: expected_identity&.fetch(:digest),
+          expected_missing: expected_identity.nil?
+        )
+      end
+      published = inspect_file
+      unless published.dig(:identity, :digest) == Digest::SHA256.hexdigest(content)
+        raise TransactionJournal::Invalid, "user-service target publication could not be verified"
+      end
+      published[:identity]
+    rescue Transaction::Unsafe => error
+      raise TransactionJournal::Invalid,
+            "user-service target changed before publication: #{error.message}"
     end
 
     def ensure_recorded_backup(document, transaction, content)
       path = document.fetch("backup_path")
       return document unless path
-      return document if transaction.journal.phase?(document, :backup_stored)
+      unless content && Digest::SHA256.hexdigest(content) == document.fetch("prior_digest")
+        raise TransactionJournal::Invalid, "recorded user-service prior content does not match its digest"
+      end
+      if apply_phase_at_least?(document, :backup_stored)
+        verify_recorded_backup!(document)
+        return document
+      end
+
+      file = inspect_file
+      unless recorded_prior_file?(file, document) || desired_file_observation?(file, document)
+        raise TransactionJournal::Invalid, "user-service target changed before backup"
+      end
 
       write_backup_exclusive(path, content)
       transaction.journal.advance(document, phase: :backup_stored)
     rescue Errno::EEXIST
-      existing = read_backup(path)
+      verify_recorded_backup!(document)
+      transaction.journal.advance(document, phase: :backup_stored)
+    end
+
+    def verify_recorded_backup!(document)
+      existing = read_backup(document.fetch("backup_path"))
       expected = document.fetch("prior_digest")
       unless existing && Digest::SHA256.hexdigest(existing) == expected
-        raise TransactionJournal::Invalid, "recorded user-service backup does not match prior state"
+        raise TransactionJournal::Invalid,
+              "recorded user-service backup does not match prior state"
       end
-      transaction.journal.advance(document, phase: :backup_stored)
+
+      true
     end
 
     def write_backup_exclusive(path, content)

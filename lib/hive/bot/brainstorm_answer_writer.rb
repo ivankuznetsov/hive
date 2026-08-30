@@ -1,4 +1,6 @@
 require "base64"
+require "hive/brainstorm_suggestions/envelope"
+require "hive/brainstorm_suggestions/store"
 require "hive/lock"
 require "hive/markers"
 require "hive/bot/brainstorm_parser"
@@ -128,6 +130,7 @@ module Hive
             )
           end
           Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+          cleanup_suggestion_record(brainstorm_path, ordinal)
           :written
         end
       end
@@ -170,6 +173,8 @@ module Hive
             end
 
             Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+            target_ordinal = parsed.find_index { |question| question.n == question_n && question.answer.nil? }
+            cleanup_suggestion_record(brainstorm_path, target_ordinal + 1) if target_ordinal
             :written
           end
         end
@@ -308,7 +313,8 @@ module Hive
           body << lines[body_end]
           body_end += 1
         end
-        return nil unless body.join.strip.empty?
+        advisory_free = Hive::BrainstormSuggestions::Envelope.strip(body.join).text
+        return nil unless advisory_free.strip.empty?
 
         match = ANSWER_RE.match(lines[idx].chomp)
         {
@@ -362,6 +368,16 @@ module Hive
         content.to_s.gsub(/\r(?!\n)/, "\n")
       end
       private_class_method :normalize_lone_cr
+
+      def cleanup_suggestion_record(brainstorm_path, ordinal)
+        Hive::BrainstormSuggestions::Store.new(File.dirname(brainstorm_path)).delete_question!(ordinal: ordinal)
+      rescue Hive::BrainstormSuggestions::Error, SystemCallError, IOError
+        # The answer is already authoritative once its atomic write lands. A
+        # corrupt sidecar cannot expose text through Store#read; reconciliation
+        # removes it on the next daemon tick.
+        nil
+      end
+      private_class_method :cleanup_suggestion_record
     end
   end
 end

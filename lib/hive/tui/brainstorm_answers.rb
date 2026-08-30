@@ -1,4 +1,5 @@
 require "hive"
+require "hive/brainstorm_suggestions/envelope"
 require "hive/tui/debug"
 
 module Hive
@@ -70,7 +71,8 @@ module Hive
       # garbled input. Returns nil on file-level failure so the caller
       # can short-circuit without a parser-body rescue.
       def read_lines(path)
-        File.readlines(path, chomp: true).map(&:scrub)
+        source = File.read(path, encoding: "UTF-8").scrub
+        Hive::BrainstormSuggestions::Envelope.strip(source).text.lines(chomp: true)
       rescue SystemCallError, EncodingError, IOError => e
         Hive::Tui::Debug.log("brainstorm_answers", "read failed: #{e.class}: #{e.message}")
         nil

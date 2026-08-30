@@ -2,6 +2,7 @@
 
 require "base64"
 require "digest"
+require "hive/brainstorm_suggestions/envelope"
 
 module Hive
   # Pure parser for the brainstorm Q&A file format (`brainstorm.md`):
@@ -51,6 +52,7 @@ module Hive
     end
 
     def parse_text(text)
+      text = Hive::BrainstormSuggestions::Envelope.strip(text).text
       questions = []
       current_round = nil
       current = nil

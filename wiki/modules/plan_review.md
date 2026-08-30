@@ -40,10 +40,12 @@ rollback/reversibility text, file count/locality, protected-path matches, and
 bounded risk text. It never executes project code and rejects symlinks,
 traversal, invalid UTF-8, oversized input, and malformed evidence.
 Declared-file and test evidence may use repeated Markdown headings or repeated
-bold labels such as `**Files:**` and `**Test scenarios:**`. Oversized YAML
-frontmatter remains explicit uncertainty rather than disappearing, and a
-recognized literal credential pattern always selects mandatory review even
-when nearby prose never says "secret" or "credential".
+bold labels such as `**Files:**` and `**Test scenarios:**`. Bold labels may be
+list-prefixed or carry their first value inline, and test scenarios may use
+ordered or unordered Markdown lists. An unquoted YAML date is valid
+frontmatter. Oversized YAML frontmatter remains explicit uncertainty rather
+than disappearing, and a recognized literal credential pattern always selects
+mandatory review even when nearby prose never says "secret" or "credential".
 
 | Level | Rule | Availability behavior |
 |---|---|---|

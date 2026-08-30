@@ -15,6 +15,7 @@ module Hive
       class NotClosed < DailyDigest::Error; end
       class DestinationError < Hive::ConfigError; end
       class DeliveryFailed < Hive::UnavailableError; end
+      class InFlight < Hive::UnavailableError; end
 
       Result = Data.define(
         :local_date, :record_id, :amendment_frontier, :payload_hash,
@@ -65,6 +66,9 @@ module Hive
           now: now,
           retry_requested: retry_requested
         )
+        if preparation.action == :in_flight
+          raise InFlight, "digest #{record.fetch('local_date')} delivery is already in flight"
+        end
         return prior_result(record, rendered, preparation, retry_requested:) unless
           preparation.action == :send
 

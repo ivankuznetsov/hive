@@ -445,6 +445,11 @@ module Hive
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
         "child_verb_timeouts" => { "answer-digest" => 3600, "digest" => 3600 },
+        "child_stage_timeouts" => {
+          "daily_digest_refresh" => 900,
+          "daily_digest_close" => 3600,
+          "daily_digest_delivery" => 300
+        },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -3555,6 +3560,7 @@ module Hive
       end
 
       validate_daemon_verb_timeouts!(daemon, source_path)
+      validate_daemon_stage_timeouts!(daemon, source_path)
     end
 
     def validate_web_config!(cfg, source_path)
@@ -3655,6 +3661,34 @@ module Hive
                 "daemon.child_verb_timeouts[#{verb.inspect}] in #{describe_source(source_path)} " \
                 "must be an integer >= 0; got #{secs.inspect} (#{secs.class})"
         end
+      end
+    end
+
+    DAILY_DIGEST_TIMEOUT_STAGES = %w[
+      daily_digest_refresh daily_digest_close daily_digest_delivery
+    ].freeze
+
+    def validate_daemon_stage_timeouts!(daemon, source_path)
+      overrides = daemon["child_stage_timeouts"]
+      unless overrides.is_a?(Hash)
+        raise ConfigError,
+              "daemon.child_stage_timeouts in #{describe_source(source_path)} must be a Hash " \
+              "of stage => seconds; got #{overrides.class}"
+      end
+
+      overrides.each do |stage, seconds|
+        unless seconds.is_a?(Integer) && seconds >= 0
+          raise ConfigError,
+                "daemon.child_stage_timeouts[#{stage.inspect}] in #{describe_source(source_path)} " \
+                "must be an integer >= 0; got #{seconds.inspect} (#{seconds.class})"
+        end
+      end
+      DAILY_DIGEST_TIMEOUT_STAGES.each do |stage|
+        next if overrides[stage].is_a?(Integer) && overrides[stage].positive?
+
+        raise ConfigError,
+              "daemon.child_stage_timeouts[#{stage.inspect}] in #{describe_source(source_path)} " \
+              "must be a positive integer for daemon-owned digest work"
       end
     end
 

@@ -62,6 +62,9 @@ class DailyDigestDeliveryIntegrationTest < Minitest::Test
       assert_equal "sending", ledger.read(DATE).fetch("outcome")
 
       token_calls = 0
+      ledger = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "deliveries"), process_alive: ->(_pid, _start) { false }
+      )
       restarted = delivery(
         store:, ledger:, telegram: FakeTelegram.new,
         token_loader: -> { token_calls += 1; raise "must not load a token for unknown" }
@@ -114,10 +117,12 @@ class DailyDigestDeliveryIntegrationTest < Minitest::Test
   def record
     {
       "schema" => "hive-digest-record", "schema_version" => 1,
+      "interval_id" => "a" * 64,
       "local_date" => DATE, "sequence" => 1, "time_zone" => "UTC",
       "starts_at" => "2026-08-30T00:00:00.000000Z",
       "ends_at" => "2026-08-31T00:00:00.000000Z",
-      "boundary_kind" => "calendar_day", "lifecycle" => "closed",
+      "duration_seconds" => 86_400, "boundary_kind" => "calendar_day", "cutover" => nil,
+      "lifecycle" => "closed",
       "closed_at" => "2026-08-31T00:00:01.000000Z",
       "completeness" => "complete", "content" => "non_empty",
       "last_materialized_at" => "2026-08-31T00:00:01.000000Z",

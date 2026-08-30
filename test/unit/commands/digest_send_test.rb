@@ -102,6 +102,7 @@ class DigestSendCommandTest < Minitest::Test
       Hive::DailyDigest::MissingRecord.new("missing") => "missing",
       Hive::DailyDigest::PrunedRecord.new("pruned") => "pruned",
       Hive::DailyDigest::Delivery::DeliveryFailed.new("failed") => "delivery_failed",
+      Hive::DailyDigest::Delivery::InFlight.new("live") => "delivery_in_flight",
       Hive::ConfigError.new("config") => "config",
       Hive::DailyDigest::Error.new("digest") => "digest_error",
       RuntimeError.new("other") => "internal"

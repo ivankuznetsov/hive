@@ -64,7 +64,7 @@ module Hive
         super
       end
 
-      def complete(date:, exit_code:, envelope: nil, now: @clock.call)
+      def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
         local_date = digest_date(date)
         record_id = @pending_records.delete(local_date) || record_id_for(local_date)
         @pending.delete(local_date)

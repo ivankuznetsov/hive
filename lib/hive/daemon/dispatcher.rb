@@ -1003,7 +1003,8 @@ module Hive
           date: entry.slug,
           exit_code: entry.exit_code,
           envelope: entry.json_envelope,
-          now: now
+          now: now,
+          stage: entry.stage
         )
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
@@ -1021,7 +1022,7 @@ module Hive
 
         scheduler.tick(now: now)&.each do |digest_dispatch|
           unless admission_open?
-            scheduler.cancel(date: digest_dispatch[:slug])
+            scheduler.cancel(date: digest_dispatch[:slug], stage: digest_dispatch[:stage])
             next
           end
 
@@ -2371,7 +2372,7 @@ module Hive
         action = global_digest_action(stage)
         scheduler = global_digest_scheduler(stage)
         unless admission_open?
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return :shutdown
         end
 
@@ -2389,11 +2390,11 @@ module Hive
           @logger.event(:blocked, project: project, slug: date,
                                   stage: stage,
                                   action: action, reason: gate.to_s)
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return
         end
         unless admission_open?
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return :shutdown
         end
 
@@ -2409,7 +2410,7 @@ module Hive
           trigger: action,
           kind: capacity_identity
         )
-        scheduler&.cancel(date: date) if result == :shutdown
+        scheduler&.cancel(date: date, stage: stage) if result == :shutdown
         result
       rescue StandardError => e
         # If dispatch_command already spawned + recorded the child before
@@ -2417,16 +2418,17 @@ module Hive
         # `complete` here too would record a SECOND failure for one logical
         # dispatch, double-incrementing the backoff count. Only complete when
         # no child is in flight for this date (spawn failed before recording).
-        if date && !@controller.running_task?(project: project, slug: date)
-          scheduler&.complete(date: date, exit_code: 1, envelope: nil, now: now)
+        identity = stage && digest_capacity_identity(stage)
+        if date && (!identity || @controller.can_dispatch_digest?(identity: identity, now: now) == :ok)
+          scheduler&.complete(
+            date: date, exit_code: 1, envelope: nil, now: now, stage: stage
+          )
         end
         @logger.event(:fatal, message: "#{action} dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)
       end
 
       def digest_dispatch_gate(project:, date:, stage:, now:)
-        return :in_flight if @controller.running_task?(project: project, slug: date)
-
         @controller.can_dispatch_digest?(identity: digest_capacity_identity(stage), now: now)
       end
 
@@ -4089,6 +4091,7 @@ module Hive
             "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
           ),
           verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
+          stage_timeouts: @daemon_cfg.fetch("child_stage_timeouts", {}),
           kill_grace_sec: @daemon_cfg.fetch(
             "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC
           )

@@ -4427,6 +4427,14 @@ class ConfigTest < Minitest::Test
       # pin the single global digest slot forever.
       assert_equal({ "answer-digest" => 3600, "digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
+      assert_equal(
+        {
+          "daily_digest_refresh" => 900,
+          "daily_digest_close" => 3600,
+          "daily_digest_delivery" => 300
+        },
+        cfg.dig("daemon", "child_stage_timeouts")
+      )
     end
   end
 
@@ -4482,6 +4490,26 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/daemon.child_verb_timeouts.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_daily_digest_stage_timeouts_are_positive_and_closed_by_identity
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts:
+            daily_digest_refresh: 0
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daily_digest_refresh.*positive integer/, error.message)
+
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts: disabled
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/child_stage_timeouts.*must be a Hash/, error.message)
     end
   end
 

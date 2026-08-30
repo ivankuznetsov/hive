@@ -240,6 +240,7 @@ module Hive
             "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
           ),
           verb_timeouts: daemon_cfg.fetch("child_verb_timeouts", {}),
+          stage_timeouts: daemon_cfg.fetch("child_stage_timeouts", {}),
           kill_grace_sec: daemon_cfg.fetch(
             "child_kill_grace_sec", Hive::Daemon::ChildSupervisor::DEFAULT_KILL_GRACE_SEC
           )

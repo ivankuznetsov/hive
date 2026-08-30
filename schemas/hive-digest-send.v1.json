@@ -39,7 +39,7 @@
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": {
-          "enum": ["usage", "missing", "pruned", "not_closed", "delivery_failed", "config", "digest_error", "internal"]
+          "enum": ["usage", "missing", "pruned", "not_closed", "delivery_failed", "delivery_in_flight", "config", "digest_error", "internal"]
         },
         "exit_code": { "type": "integer" },
         "message": { "type": "string" }

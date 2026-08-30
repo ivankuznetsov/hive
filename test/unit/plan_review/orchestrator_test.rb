@@ -76,18 +76,22 @@ class PlanReviewOrchestratorTest < Minitest::Test
   class TransientRevision
     attr_reader :calls
 
-    def initialize(candidate, failures: 1)
+    def initialize(candidate, failures: 1, after_failure: nil)
       @candidate = candidate
       @failures = failures
+      @after_failure = after_failure
       @calls = []
     end
 
     def call(**arguments)
       @calls << arguments
-      return Hive::PlanReview::PlannerRevision::Result.new(
-        outcome: "retryable_failure", candidate_bytes: nil, candidate_digest: nil,
-        route_receipt: arguments.fetch(:planner_identity), diagnostic: "route failed"
-      ) if @calls.length <= @failures
+      if @calls.length <= @failures
+        @after_failure&.call
+        return Hive::PlanReview::PlannerRevision::Result.new(
+          outcome: "retryable_failure", candidate_bytes: nil, candidate_digest: nil,
+          route_receipt: arguments.fetch(:planner_identity), diagnostic: "route failed"
+        )
+      end
 
       Hive::PlanReview::PlannerRevision::Result.new(
         outcome: "success", candidate_bytes: @candidate,
@@ -205,6 +209,66 @@ class PlanReviewOrchestratorTest < Minitest::Test
         route["role"] == "planner_revision" && route["transient_series_recovery"]
       end
       assert_equal [ 1, 2 ], recoveries.map { |route| route.fetch("transient_series") }
+    end
+  end
+
+  def test_newly_exhausted_past_due_planner_revision_retries_in_the_same_advance
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      base = Time.utc(2026, 8, 12, 12)
+      failed = false
+      anchored = false
+      clock = lambda do
+        next base unless failed
+        next base + (24 * 60 * 60) if anchored
+
+        anchored = true
+        base
+      end
+      revision = TransientRevision.new(
+        revised, after_failure: -> { failed = true }
+      )
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+
+      cleared = orchestrator(
+        task, cfg, adapter:, planner_revision: revision, clock:
+      ).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 2, revision.calls.length
+      assert cleared["routes"].any? { |route| route["transient_series_recovery"] }
+    end
+  end
+
+  def test_legacy_exhausted_past_due_planner_revision_retries_in_the_same_advance
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      revision = TransientRevision.new(revised)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+      scheduled = runner.advance!.record
+      routes = scheduled["routes"].reject { |route| route["transient_series_recovery"] }
+      legacy = Hive::PlanReview::Record.new(
+        scheduled.to_h.merge(
+          "version" => scheduled.version + 1,
+          "routes" => routes,
+          "retry_at" => routes.last.fetch("retry_at"),
+          "updated_at" => "2026-08-12T12:01:00.000000Z"
+        )
+      )
+      store = runner.instance_variable_get(:@store)
+      store.publish_current!(legacy, expected_version: scheduled.version)
+
+      cleared = orchestrator(
+        task, cfg, adapter:, planner_revision: revision,
+        clock: -> { Time.utc(2026, 8, 13, 12) }
+      ).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 2, revision.calls.length
+      assert cleared["routes"].any? { |route| route["transient_series_recovery"] }
     end
   end
 

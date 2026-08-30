@@ -2,9 +2,9 @@
 title: Identity-fenced teardown for dedicated retry resources
 date: 2026-08-30
 category: architecture-patterns
-module: hive-web
+module: hive
 problem_type: architecture_pattern
-component: web
+component: architecture
 severity: high
 applies_when:
   - "an asynchronous setup attempt owns a socket, subscription, timer, or other retryable resource"
@@ -85,6 +85,9 @@ Exercise more than isolated counters. The focused browser suite should cover:
 - callbacks arriving after timeout or retirement;
 - retry restoring both the external listener and same-URL recovery latch;
 - repeated supersession never exceeding two owned transports;
+- immediate detach/reattach while consumer setup is pending;
+- persistent synchronous retry failure remaining armed until recovery;
+- real catch-up after client-side setup and partial-registration failure;
 - cross-URL navigation replacing one transport and detach returning to zero.
 
 This pattern applies beyond Action Cable wherever an attempt owns a dedicated

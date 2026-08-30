@@ -400,7 +400,10 @@ subscription's disposition. Confirmation still releases only after server
 registration; if none of those callbacks arrives within five seconds, timeout
 cleanup closes the dedicated transport before locally unsubscribing or
 forgetting the handle. This preserves server subscribe/unsubscribe order
-without a shared-registry scan. The channel also fences Action Cable's deferred
+without a shared-registry scan. The element records that bounded custodian on
+plain DOM detach as well as attribute supersession, so a later detach/attach
+cycle force-retires the older predecessor before allocating beyond the two-
+transport overlap bound. The channel also fences Action Cable's deferred
 adapter subscribe both before registration and at its completion; if teardown
 wins either race, no handler remains. A raising deferred adapter releases the
 broadcaster lease and reconnects the same transport, so it cannot strand an

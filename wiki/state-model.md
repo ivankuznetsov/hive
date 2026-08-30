@@ -607,6 +607,9 @@ disposition until confirmation, rejection, or disconnect. If no disposition
 arrives within five seconds, the owner closes the dedicated transport before
 local unsubscribe/forgetting, making server connection cleanup authoritative
 without consulting turbo-rails' shared consumer or subscription registry.
+The element retains that bounded custodian across ordinary detach/attach as
+well as attribute supersession, force-retiring an older predecessor before a
+third transport can be allocated.
 `StatusChannel` separately fences deferred adapter registration before it
 begins and at completion; a late handler removes itself, while a deferred
 adapter exception releases its lease and reconnects the same transport.

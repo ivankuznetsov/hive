@@ -351,6 +351,96 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     end
   end
 
+  test "a pending consumer setup is fenced across immediate detach and reattach" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const pendingConsumers = []
+        let factoryCalls = 0
+        let creates = 0
+        let unsubscribes = 0
+        let firstDisconnects = 0
+        let secondDisconnects = 0
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "pending-reattach"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-pending-reattach")
+        source.createConsumer = () => {
+          factoryCalls += 1
+          return new Promise((resolve) => pendingConsumers.push(resolve))
+        }
+        host.appendChild(source)
+
+        try {
+          document.body.appendChild(host)
+          const firstOwner = source.statusOwner
+          const firstAttempt = firstOwner.currentAttempt
+          host.remove()
+          document.body.appendChild(host)
+          const secondOwner = source.statusOwner
+
+          pendingConsumers[0]({
+            disconnect() { firstDisconnects += 1 },
+            subscriptions: { create() { throw new Error("stale consumer registered") } }
+          })
+          pendingConsumers[1]({
+            disconnect() { secondDisconnects += 1 },
+            subscriptions: {
+              create(_channel, callbacks) {
+                creates += 1
+                const subscription = {
+                  perform() { return true },
+                  unsubscribe() { unsubscribes += 1 }
+                }
+                queueMicrotask(() => callbacks.connected({ reconnected: false }))
+                return subscription
+              }
+            }
+          })
+
+          const deadline = performance.now() + 1_000
+          while (!source.hasAttribute("connected") && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const afterReconnect = {
+            connected: source.hasAttribute("connected"),
+            factoryCalls,
+            creates,
+            unsubscribes,
+            firstDisconnects,
+            ownersDiffer: firstOwner !== secondOwner,
+            firstRetired: firstAttempt.retired
+          }
+          host.remove()
+          return {
+            afterReconnect,
+            afterDisconnect: { unsubscribes, firstDisconnects, secondDisconnects }
+          }
+        } finally {
+          host.remove()
+        }
+      })()
+    JS
+
+    assert_equal({
+      "connected" => true,
+      "factoryCalls" => 2,
+      "creates" => 1,
+      "unsubscribes" => 0,
+      "firstDisconnects" => 1,
+      "ownersDiffer" => true,
+      "firstRetired" => true
+    }, result.fetch("afterReconnect"))
+    assert_equal({
+      "unsubscribes" => 1,
+      "firstDisconnects" => 1,
+      "secondDisconnects" => 1
+    }, result.fetch("afterDisconnect"))
+  end
+
   test "each setup attempt owns a dedicated consumer without changing Turbo's shared consumer" do
     sign_in!
     visit repos_path
@@ -913,9 +1003,14 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         const sourceClass = customElements.get("hive-status-stream-source")
         const originalDelay = sourceClass.retryDelay
         const originalWarn = console.warn
+        const pageErrors = []
+        const unhandled = []
+        const onError = (event) => { pageErrors.push(event.error || event.message); event.preventDefault() }
+        const onUnhandled = (event) => { unhandled.push(event.reason); event.preventDefault() }
         let connectCalls = 0
         let disconnectCalls = 0
         let factoryCalls = 0
+        let failConnect = true
         const host = document.createElement("div")
         host.dataset.statusVersion = "turbo-registration-retry"
         const target = document.createElement("div")
@@ -928,7 +1023,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         const originalDisconnect = source.disconnectTurboStreamSource.bind(source)
         source.connectTurboStreamSource = () => {
           connectCalls += 1
-          if (connectCalls === 1) throw new Error("Turbo registration failed")
+          if (failConnect) throw new Error("Turbo registration failed")
           return originalConnect()
         }
         source.disconnectTurboStreamSource = () => {
@@ -953,7 +1048,21 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         try {
           sourceClass.retryDelay = 50
           console.warn = () => {}
+          addEventListener("error", onError)
+          addEventListener("unhandledrejection", onUnhandled)
           document.body.appendChild(host)
+          const lifecycle = source.statusOwner
+          const retryDeadline = performance.now() + 1_000
+          while (connectCalls < 3 && performance.now() < retryDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const persistentRetry = {
+            state: lifecycle.state,
+            timerOwned: Boolean(lifecycle.retryTimer),
+            currentAttempt: Boolean(lifecycle.currentAttempt),
+            connectCalls
+          }
+          failConnect = false
           const deadline = performance.now() + 1_000
           while (!source.hasAttribute("connected") && performance.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 0))
@@ -965,29 +1074,39 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           while (target.textContent !== "fresh" && performance.now() < renderDeadline) {
             await new Promise((resolve) => setTimeout(resolve, 0))
           }
+          const connected = source.hasAttribute("connected")
           host.remove()
           return {
-            connected: source.hasAttribute("connected"),
+            persistentRetry,
+            connected,
             connectCalls,
             disconnectCalls,
             factoryCalls,
-            rendered: target.textContent
+            rendered: target.textContent,
+            pageErrors: pageErrors.length,
+            unhandled: unhandled.length
           }
         } finally {
           host.remove()
+          removeEventListener("error", onError)
+          removeEventListener("unhandledrejection", onUnhandled)
           sourceClass.retryDelay = originalDelay
           console.warn = originalWarn
         }
       })()
     JS
 
-    assert_equal({
-      "connected" => false,
-      "connectCalls" => 2,
-      "disconnectCalls" => 1,
-      "factoryCalls" => 1,
-      "rendered" => "fresh"
-    }, result)
+    assert_equal "retry_wait", result.dig("persistentRetry", "state")
+    assert result.dig("persistentRetry", "timerOwned")
+    refute result.dig("persistentRetry", "currentAttempt")
+    assert_operator result.dig("persistentRetry", "connectCalls"), :>=, 3
+    assert result.fetch("connected")
+    assert_operator result.fetch("connectCalls"), :>=, 4
+    assert_equal 1, result.fetch("disconnectCalls")
+    assert_equal 1, result.fetch("factoryCalls")
+    assert_equal "fresh", result.fetch("rendered")
+    assert_equal 0, result.fetch("pageErrors")
+    assert_equal 0, result.fetch("unhandled")
   end
 
   test "attribute supersession installs a failed successor before reporting old teardown" do
@@ -1117,7 +1236,10 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           document.body.appendChild(host)
           oldOwner = source.statusOwner
           source.statusOwner = null
-          source.connectedCallback = () => { throw setupFailure }
+          source.connectedCallback = () => {
+            source.statusOwner = { state: "retry_wait", disconnect() {} }
+            throw setupFailure
+          }
           source.reportStatusFailure = () => { throw reportingFailure }
           try {
             source.attributeChangedCallback("signed-stream-name", "test-old", "test-successor")
@@ -1235,6 +1357,66 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       "retired" => true,
       "released" => true,
       "detached" => true
+    }, result)
+  end
+
+  test "an unconfirmed attempt failure closes transport before local release" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalDelay = sourceClass.retryDelay
+        const originalWarn = console.warn
+        const events = []
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "unconfirmed-failure-order"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-unconfirmed-failure-order")
+        source.dispatchMessageEvent = () => { throw new Error("message failed before confirmation") }
+        source.createConsumer = async () => ({
+          disconnect() { events.push("transport") },
+          subscriptions: {
+            create(_channel, callbacks) {
+              const subscription = {
+                perform() { return true },
+                unsubscribe() { events.push("unsubscribe") }
+              }
+              queueMicrotask(() => callbacks.received("failing payload"))
+              return subscription
+            }
+          }
+        })
+        host.appendChild(source)
+
+        try {
+          sourceClass.retryDelay = 10_000
+          console.warn = () => {}
+          document.body.appendChild(host)
+          const owner = source.statusOwner
+          const deadline = performance.now() + 1_000
+          while (owner.state !== "retry_wait" && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return {
+            state: owner.state,
+            retryOwned: Boolean(owner.retryTimer),
+            events
+          }
+        } finally {
+          host.remove()
+          sourceClass.retryDelay = originalDelay
+          console.warn = originalWarn
+        }
+      })()
+    JS
+
+    assert_equal({
+      "state" => "retry_wait",
+      "retryOwned" => true,
+      "events" => [ "transport", "unsubscribe" ]
     }, result)
   end
 
@@ -1481,6 +1663,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           source.setAttribute("channel", "StatusChannel")
           source.setAttribute("signed-stream-name", `test-${kind}`)
           source.catchUpRefresh = { token: kind, location: source.statusLocation }
+          if (kind === "received") source.dispatchMessageEvent = () => { throw primary }
           host.appendChild(source)
           source.createConsumer = async () => {
             factoryCalls += 1
@@ -1520,7 +1703,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
                       if (kind === "false-disconnect") throw cleanup
                     }
                   }
-                  if (kind === "false-disconnect") {
+                  if ([ "false-disconnect", "received" ].includes(kind)) {
                     queueMicrotask(() => failedCallbacks.connected({ reconnected: false }))
                   }
                   return subscription
@@ -1539,8 +1722,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
               await new Promise((resolve) => setTimeout(resolve, 0))
             }
           }
-          if ([ "rejection", "false-disconnect" ].includes(kind)) {
-            if (kind === "false-disconnect") {
+          if ([ "rejection", "false-disconnect", "received" ].includes(kind)) {
+            if ([ "false-disconnect", "received" ].includes(kind)) {
               const confirmedDeadline = performance.now() + 1_000
               while (!source.hasAttribute("connected") && performance.now() < confirmedDeadline) {
                 await new Promise((resolve) => setTimeout(resolve, 0))
@@ -1548,6 +1731,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             }
             try {
               if (kind === "rejection") callbacks.rejected()
+              else if (kind === "received") callbacks.received("failing payload")
               else callbacks.disconnected({ willAttemptReconnect: false })
             } catch (_error) {
               callbackThrew = true
@@ -1602,6 +1786,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             registration: await runCase("registration"),
             rejection: await runCase("rejection"),
             falseDisconnect: await runCase("false-disconnect"),
+            received: await runCase("received"),
             pageErrors: pageErrors.length,
             unhandled: unhandled.length
           }
@@ -1614,7 +1799,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       })()
     JS
 
-    %w[consumerRejection registration rejection falseDisconnect].each do |kind|
+    %w[consumerRejection registration rejection falseDisconnect received].each do |kind|
       attempt = result.fetch(kind)
       expected_disconnects = kind == "consumerRejection" ? 0 : 1
       assert_equal({
@@ -1635,7 +1820,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         "freshAttempt" => true,
         "staleCallbacksInert" => true,
         "warnings" => 1,
-        "recoveredRefreshAttempts" => kind == "falseDisconnect" ? [ false ] : [ true ]
+        "recoveredRefreshAttempts" => %w[falseDisconnect received].include?(kind) ? [ false ] : [ true ]
       }, attempt.fetch("recovered"))
     end
     assert_equal 0, result.fetch("pageErrors")
@@ -2238,6 +2423,82 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     }, result.except("repeatedOverlap"))
   end
 
+  test "repeated detach and reattach keeps unconfirmed transport overlap bounded" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalCreate = sourceClass.prototype.createConsumer
+        const originalPendingDelay = sourceClass.pendingReleaseDelay
+        const active = new Set()
+        const samples = []
+        let allocations = 0
+        let peak = 0
+        let subscriptions = 0
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "detach-reattach-bound"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-detach-reattach-bound")
+        host.appendChild(source)
+
+        sourceClass.pendingReleaseDelay = 30
+        sourceClass.prototype.createConsumer = async function () {
+          const id = ++allocations
+          active.add(id)
+          peak = Math.max(peak, active.size)
+          return {
+            disconnect() { active.delete(id) },
+            subscriptions: {
+              create() {
+                subscriptions += 1
+                return { perform() { return true }, unsubscribe() {} }
+              }
+            }
+          }
+        }
+
+        const waitForSubscriptions = async (expected) => {
+          const deadline = performance.now() + 1_000
+          while (subscriptions < expected && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+        }
+
+        try {
+          document.body.appendChild(host)
+          await waitForSubscriptions(1)
+          for (let cycle = 1; cycle <= 3; cycle += 1) {
+            host.remove()
+            document.body.appendChild(host)
+            await waitForSubscriptions(cycle + 1)
+            samples.push(active.size)
+          }
+          const activeAfterCycles = active.size
+          host.remove()
+          const settleDeadline = performance.now() + 1_000
+          while (active.size > 0 && performance.now() < settleDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return { allocations, subscriptions, samples, activeAfterCycles, peak, settled: active.size }
+        } finally {
+          host.remove()
+          sourceClass.prototype.createConsumer = originalCreate
+          sourceClass.pendingReleaseDelay = originalPendingDelay
+        }
+      })()
+    JS
+
+    assert_equal 4, result.fetch("allocations")
+    assert_equal 4, result.fetch("subscriptions")
+    assert_equal [ 2, 2, 2 ], result.fetch("samples")
+    assert_equal 2, result.fetch("activeAfterCycles")
+    assert_operator result.fetch("peak"), :<=, 2
+    assert_equal 0, result.fetch("settled")
+  end
+
   test "Turbo navigation replaces one dedicated transport without overlap" do
     project = create_hive_project!("status-transport-navigation-app")
     slug = create_task!(project, "Navigate with one status transport")
@@ -2325,6 +2586,130 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           delete window.statusNavigationTransportProbe
         }
       JS
+    end
+  end
+
+  test "an asynchronous consumer setup rejection recovers through a real catch-up" do
+    sign_in!
+    assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+
+    with_status_catch_up_observer do |catch_ups|
+      result = evaluate_script(<<~JS)
+        (async () => {
+          const sourceClass = customElements.get("hive-status-stream-source")
+          const originalDelay = sourceClass.retryDelay
+          const liveSource = document.querySelector("#status-stream-source")
+          const host = document.createElement("div")
+          host.dataset.statusVersion = `consumer-rejection-${crypto.randomUUID()}`
+          const source = document.createElement("hive-status-stream-source")
+          source.setAttribute("channel", liveSource.getAttribute("channel"))
+          source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
+          const createConsumer = source.createConsumer.bind(source)
+          let factoryCalls = 0
+          source.createConsumer = async () => {
+            factoryCalls += 1
+            if (factoryCalls === 1) throw new Error("consumer setup failed")
+            return createConsumer()
+          }
+          host.appendChild(source)
+
+          try {
+            sourceClass.retryDelay = 50
+            document.body.appendChild(host)
+            const deadline = performance.now() + 5_000
+            while (!source.hasAttribute("connected") && performance.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 0))
+            }
+            return {
+              connected: source.hasAttribute("connected"),
+              factoryCalls,
+              pageToken: host.dataset.statusVersion
+            }
+          } finally {
+            host.remove()
+            sourceClass.retryDelay = originalDelay
+          }
+        })()
+      JS
+
+      assert result.fetch("connected")
+      assert_equal 2, result.fetch("factoryCalls")
+      catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
+      assert_equal result.fetch("pageToken"), catch_up.fetch("status_version")
+    end
+  end
+
+  test "a partial Action Cable registration retires and recovers through a real catch-up" do
+    sign_in!
+    assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+
+    with_status_catch_up_observer do |catch_ups|
+      result = evaluate_script(<<~JS)
+        (async () => {
+          const sourceClass = customElements.get("hive-status-stream-source")
+          const originalDelay = sourceClass.retryDelay
+          const liveSource = document.querySelector("#status-stream-source")
+          const host = document.createElement("div")
+          host.dataset.statusVersion = `partial-registration-${crypto.randomUUID()}`
+          const source = document.createElement("hive-status-stream-source")
+          source.setAttribute("channel", liveSource.getAttribute("channel"))
+          source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
+          const createConsumer = source.createConsumer.bind(source)
+          let factoryCalls = 0
+          let failedConsumer
+          let failedDisconnects = 0
+          source.createConsumer = async () => {
+            factoryCalls += 1
+            const consumer = await createConsumer()
+            if (factoryCalls !== 1) return consumer
+
+            failedConsumer = consumer
+            const disconnect = consumer.disconnect.bind(consumer)
+            consumer.disconnect = (...args) => {
+              failedDisconnects += 1
+              return disconnect(...args)
+            }
+            const open = consumer.connection.open.bind(consumer.connection)
+            consumer.connection.open = (...args) => {
+              const result = open(...args)
+              throw new Error("connection open failed after partial registration")
+            }
+            return consumer
+          }
+          host.appendChild(source)
+
+          try {
+            sourceClass.retryDelay = 50
+            document.body.appendChild(host)
+            const deadline = performance.now() + 5_000
+            while (!source.hasAttribute("connected") && performance.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 0))
+            }
+            const recoveredConsumer = source.statusOwner?.currentAttempt?.consumer
+            return {
+              connected: source.hasAttribute("connected"),
+              factoryCalls,
+              failedDisconnects,
+              failedTransportInactive: failedConsumer ? !failedConsumer.connection.isActive() : false,
+              failedMonitorStopped: failedConsumer ? !failedConsumer.connection.monitor.isRunning() : false,
+              consumerReplaced: Boolean(recoveredConsumer) && recoveredConsumer !== failedConsumer,
+              pageToken: host.dataset.statusVersion
+            }
+          } finally {
+            host.remove()
+            sourceClass.retryDelay = originalDelay
+          }
+        })()
+      JS
+
+      assert result.fetch("connected")
+      assert_equal 2, result.fetch("factoryCalls")
+      assert_equal 1, result.fetch("failedDisconnects")
+      assert result.fetch("failedTransportInactive")
+      assert result.fetch("failedMonitorStopped")
+      assert result.fetch("consumerReplaced")
+      catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
+      assert_equal result.fetch("pageToken"), catch_up.fetch("status_version")
     end
   end
 

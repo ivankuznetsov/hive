@@ -135,7 +135,10 @@ class StatusStreamOwner {
 
     try {
       const subscription = consumer.subscriptions.create(this.source.channel, {
-        received: (data) => this.received(attempt, data),
+        received: (data) => this.runAttemptCallback(
+          attempt,
+          () => this.received(attempt, data)
+        ),
         connected: (details) => this.runAttemptCallback(
           attempt,
           () => this.subscriptionConnected(attempt, details)
@@ -274,7 +277,7 @@ class StatusStreamOwner {
     cleanup.capture(error)
     this.state = "retry_wait"
     this.catchUpAttempt = null
-    this.retireAttempt(attempt, cleanup)
+    this.retireAttempt(attempt, cleanup, { transportFirst: !attempt.confirmed })
     cleanup.run(() => this.source.removeAttribute("connected"))
     this.scheduleRetry(cleanup)
     this.warnCleanup("hive status subscription failed; retrying", cleanup)
@@ -300,7 +303,7 @@ class StatusStreamOwner {
   retireStaleAttempt(attempt, error) {
     const cleanup = new CleanupCollector()
     if (arguments.length > 1) cleanup.capture(error)
-    this.retireAttempt(attempt, cleanup)
+    this.retireAttempt(attempt, cleanup, { transportFirst: !attempt.confirmed })
     this.warnCleanup("hive status subscription cleanup failed", cleanup)
   }
 
@@ -327,7 +330,11 @@ class StatusStreamOwner {
         this.retryTimer = null
         if (!this.isRetryable()) return
 
-        this.startAttempt()
+        try {
+          this.startAttempt()
+        } catch (error) {
+          this.failOwnerSetup(error)
+        }
       }, this.source.constructor.retryDelay)
       this.retryTimer = timer
     })
@@ -541,6 +548,7 @@ class HiveStatusStreamSourceElement extends HTMLElement {
     if (retiringOwner && retiringOwner !== owner) retiringOwner.forcePendingRelease(cleanup)
     cleanup.run(() => this.disconnectTurboStreamSource())
     if (owner) cleanup.run(() => owner.disconnect())
+    if (owner?.pendingReleaseDisposition) this.statusRetiringOwner = owner
     cleanup.run(() => this.removeAttribute("connected"))
     if (cleanup.failed) {
       this.reportStatusFailure("hive status subscription disconnect failed", cleanup.error)
@@ -569,10 +577,17 @@ class HiveStatusStreamSourceElement extends HTMLElement {
       if (!this.statusOwner) {
         const successorSetup = new CleanupCollector()
         successorSetup.run(() => this.connectedCallback())
-        if (successorSetup.failed && !this.statusOwner) {
-          const successor = new StatusStreamOwner(this)
-          this.statusOwner = successor
-          successor.failOwnerSetup(successorSetup.error)
+        if (successorSetup.failed) {
+          if (!this.statusOwner) {
+            const successor = new StatusStreamOwner(this)
+            this.statusOwner = successor
+            successor.failOwnerSetup(successorSetup.error)
+          } else {
+            this.reportStatusFailure(
+              "hive status subscription failed; retrying",
+              successorSetup.error
+            )
+          }
         }
       }
     } finally {

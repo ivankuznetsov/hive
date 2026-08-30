@@ -834,8 +834,11 @@ failure-complete and idempotent cleanup, exact-once normal socket close, guarded
 `OPEN`/`CONNECTING` fallbacks, DOM warning/recovery, supersession error order,
 pending-release failures, failed setup and terminal-disconnect retry, stale
 consumer/callback/timer and queued `open`/`reopen` fencing, same-attempt
-transport reconnect, fresh-attempt `retry_wait`, and one/two/zero transport
-bounds across source connection, supersession, multiple sources, and detach.
+transport reconnect, persistent synchronous retry failure, immediate
+detach/reattach during pending consumer setup, real client-side setup and
+partial-registration recovery through `StatusChannel#catch_up`, fresh-attempt
+`retry_wait`, and one/two/zero transport bounds across source connection,
+supersession, repeated unconfirmed detach/attach, multiple sources, and detach.
 It keeps server startup rejection, deferred adapter failure, and detach-before-
 retry coverage alongside those owner/attempt cases.
 

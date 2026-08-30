@@ -653,11 +653,7 @@ class ReleaseContractTest < Minitest::Test
   def run_release_selector(command, *paths, include_identity: true)
     argv = [ RbConfig.ruby, RELEASE_SELECTOR, command ]
     argv.concat([ CANDIDATE_SHA, "ivankuznetsov/hive" ]) if include_identity
-    Open3.capture3(
-      { "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR) },
-      *argv,
-      *paths
-    )
+    Open3.capture3(*argv, *paths)
   end
 
   def with_release_selector_fixture(mutate: nil)

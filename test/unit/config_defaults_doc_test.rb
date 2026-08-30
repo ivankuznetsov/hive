@@ -175,6 +175,19 @@ class ConfigDefaultsDocTest < Minitest::Test
     end
   end
 
+  def test_committed_wiki_page_matches_runtime_defaults_owner
+    path = File.join(ROOT, Hive::ConfigDefaultsDoc::WIKI_PAGE)
+    committed = File.binread(path)
+    forbid_write = ->(*) { flunk "committed-page drift verification must not write" }
+
+    expected = with_replaced_singleton_method(File, :binwrite, forbid_write) do
+      Hive::ConfigDefaultsDoc.render(committed)
+    end
+
+    assert_equal expected, committed
+    assert_equal committed, File.binread(path)
+  end
+
   def test_maintainer_script_delegates_without_rendering_or_writing_policy
     script_path = File.join(ROOT, "script", "generate-config-defaults-doc")
     script = File.binread(script_path)

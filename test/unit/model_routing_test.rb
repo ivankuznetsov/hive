@@ -6,6 +6,7 @@ class ModelRoutingTest < Minitest::Test
 
   PUBLIC_KEYS = %w[
     brainstorm
+    brainstorm_suggestion
     plan
     plan_review
     plan_review_adversarial
@@ -30,6 +31,7 @@ class ModelRoutingTest < Minitest::Test
   ].freeze
 
   FAMILY_PARENTS = {
+    "brainstorm_suggestion" => "brainstorm",
     "plan_review_adversarial" => "plan_review",
     "plan_review_verification" => "plan_review",
     "execute_implementation" => "execute",

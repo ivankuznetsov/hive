@@ -31,3 +31,6 @@ end
 require "hive/brainstorm_suggestions/binding"
 require "hive/brainstorm_suggestions/envelope"
 require "hive/brainstorm_suggestions/store"
+require "hive/brainstorm_suggestions/context_bundle"
+require "hive/brainstorm_suggestions/validator"
+require "hive/brainstorm_suggestions/runner"

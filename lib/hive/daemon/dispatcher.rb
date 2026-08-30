@@ -56,6 +56,7 @@ module Hive
 
       OperationalQueueState = Data.define(:pending, :claimed, :malformed, :error)
       FastProbe = Data.define(:task_keys, :full_tick)
+      DISPATCH_AGING_STEP_SEC = 30 * 60
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
       STATE_FILE_PROBE_BATCH_SIZE = 64
 
@@ -458,9 +459,9 @@ module Hive
           dispatch_patrol_with_gates(patrol_dispatch, now: now)
         end
 
-        # 4. Per-row dispatch, later pipeline stages first (see
-        # dispatch_priority_order) so work nearest completion drains
-        # ahead of newer earlier-stage work when slots are scarce.
+        # 4. Per-row dispatch, later pipeline stages first for fresh rows
+        # (see dispatch_priority_order), with aging so old earlier-stage
+        # work cannot starve behind a continuous later-stage stream.
         @priority_capacity_fences = dispatch_rows_in_priority_order(
           result.rows, now: now
         )
@@ -2024,16 +2025,15 @@ module Hive
         []
       end
 
-      # Order rows so tasks closer to the end of the pipeline dispatch
-      # first: a 7-artifacts row before a 6-review row, an 8-finalize
-      # before both. When concurrency slots are scarce this drains work
-      # nearest completion ahead of newer earlier-stage work (a WIP-limit
-      # — don't start a fresh review while finalizes wait on a slot).
-      # Stable within a stage (original status order preserved), and
-      # unranked/unknown stages sort last.
-      def dispatch_priority_order(rows)
+      # Order fresh rows so tasks closer to the end of the pipeline dispatch
+      # first: a 7-artifacts row before a 6-review row, an 8-finalize before
+      # both. Each half-hour waited adds one stage of priority, preventing
+      # old earlier-stage work from starving behind a continuous stream of
+      # newer later-stage work. Equal effective priorities preserve source
+      # order, and unranked/unknown stages start below recognized stages.
+      def dispatch_priority_order(rows, now: Time.now)
         rows.each_with_index
-            .sort_by { |row, idx| [ -stage_rank(row.stage), idx ] }
+            .sort_by { |row, idx| [ -dispatch_priority(row, now: now), idx ] }
             .map(&:first)
       end
 
@@ -2050,7 +2050,7 @@ module Hive
         global_fence = capacity_fences&.fetch(:global, nil)
         project_fences = capacity_fences ? capacity_fences.fetch(:projects, {}).dup : {}
 
-        dispatch_priority_order(rows).each do |row|
+        dispatch_priority_order(rows, now: now).each do |row|
           break unless admission_open?
 
           project_key = row.project.to_s
@@ -2086,6 +2086,17 @@ module Hive
       # coding row under slot scarcity (consistent with the sibling gates).
       def stage_rank(stage)
         Hive::Workflows.all_stage_dirs.index(stage.to_s) || -1
+      end
+
+      def dispatch_priority(row, now:)
+        stage_rank(row.stage) + dispatch_age_steps(row, now: now)
+      end
+
+      def dispatch_age_steps(row, now:)
+        mtime = row.state_file_mtime
+        return 0 unless mtime.is_a?(Time)
+
+        [ (now - mtime).to_i, 0 ].max / DISPATCH_AGING_STEP_SEC
       end
 
       def apply_external_running_counts

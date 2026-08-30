@@ -240,27 +240,35 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
-  def test_macos_install_is_idempotent_when_unchanged_job_is_already_loaded
+  def test_macos_matching_legacy_job_reconciles_once_then_receipt_is_idempotent
     with_tmp_dir do |dir|
       calls = []
       installer = TestInstaller.new(
         host_os: "darwin", home: dir, launchctl_available: true,
         runner: lambda do |argv|
           calls << argv
-          argv == %w[launchctl list local.hive-test]
+          true
         end
       )
       FileUtils.mkdir_p(File.dirname(installer.target_path))
       File.write(installer.target_path, TestInstaller::UNIT_BODY)
 
-      outcome = installer.install!(autostart: true)
+      first = installer.install!(autostart: true)
+      mutations_after_first = calls.select { |argv| %w[load unload].include?(argv[1]) }
+      second = installer.install!(autostart: true)
 
-      assert_equal :unchanged, outcome.kind
+      assert_equal :unchanged, first.kind
+      assert first.restarted
+      assert_equal :unchanged, second.kind
+      refute second.restarted
       assert calls.any?, "planning, revalidation, and final observation must query launchd"
-      assert calls.all? { |argv| argv == %w[launchctl list local.hive-test] },
-             "an unchanged loaded plist may be observed repeatedly but must remain read-only"
-      refute calls.any? { |argv| argv[0, 2] == %w[launchctl load] },
-             "an unchanged loaded plist must not be loaded a second time"
+      assert_equal [
+        [ "launchctl", "unload", installer.target_path ],
+        [ "launchctl", "load", installer.target_path ]
+      ], mutations_after_first
+      assert_equal mutations_after_first,
+                   calls.select { |argv| %w[load unload].include?(argv[1]) },
+                   "an applied receipt must suppress a second launchd reconciliation"
     end
   end
 

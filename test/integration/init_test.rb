@@ -129,8 +129,10 @@ class InitTest < Minitest::Test
         assert File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox"))
         assert File.exist?(File.join(dir, ".hive-state", "config.yml"))
         refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:"
-        assert_equal 60, Hive::Config.load(dir).dig("gh", "network_timeout_sec"),
+        config = Hive::Config.load(dir)
+        assert_equal 60, config.dig("gh", "network_timeout_sec"),
                      "fresh generated config, including its no-default gh section, must load immediately"
+        assert_equal 1800, config.dig("plan_review", "attempts", "timeout_sec")
 
         log = `git -C #{dir} log --format=%s hive/state`.strip
         assert_includes log, "hive: bootstrap"

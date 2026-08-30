@@ -1728,6 +1728,23 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_fix_success_head_reads_binding_and_fails_closed_on_io_error
+    Dir.mktmpdir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      head = "a" * 40
+      File.write(
+        File.join(reviews, "fix-success-04.md"),
+        "<!-- HIVE: fix-success sentinel; head=#{head} -->\n"
+      )
+
+      assert_equal head, Hive::Stages::Review.fix_success_head(dir, 4)
+      with_replaced_singleton_method(File, :open, ->(*) { raise IOError, "unreadable" }) do
+        assert_nil Hive::Stages::Review.fix_success_head(dir, 4)
+      end
+    end
+  end
+
   def test_next_pass_for_retries_when_escalations_newer_than_fix_success
     # If an operator edits escalations after the sentinel was written,
     # the prior fix pass no longer covers the accepted set. Retry pass 4

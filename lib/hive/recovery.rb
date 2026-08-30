@@ -52,20 +52,35 @@ module Hive
       end
     end
 
-    # A max-pass REVIEW_STALE with a concrete escalation artifact represents
-    # unresolved reviewer input, not a failed agent launch. Ordinary retry
-    # surfaces must not bypass that edit step. The TUI's explicit post-edit
-    # `r` gesture may still submit the same coordinator request.
+    # A max-pass REVIEW_STALE with unresolved reviewer input needs an operator
+    # edit. A newer fix-success receipt proves the escalations were already
+    # handled; that shape is restart recovery, not a human decision, and may
+    # use the ordinary automatic retry path.
     def intervention_required?(marker:, attrs:, folder:)
-      return false unless marker.to_s.downcase == "review_stale"
+      review_stale_recovery_state(marker:, attrs:, folder:) == :operator
+    end
+
+    def completed_review_stale?(marker:, attrs:, folder:)
+      review_stale_recovery_state(marker:, attrs:, folder:) == :automatic
+    end
+
+    def review_stale_recovery_state(marker:, attrs:, folder:)
+      return :not_applicable unless marker.to_s.downcase == "review_stale"
 
       normalized = attrs.to_h.transform_keys(&:to_s)
       pass = normalized["pass"].to_s
-      return false unless pass.match?(/\A[1-9]\d*\z/)
+      return :not_applicable unless pass.match?(/\A[1-9]\d*\z/)
 
-      File.exist?(
-        File.join(folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md")
-      )
+      suffix = format("%02d", pass.to_i)
+      escalations = File.join(folder.to_s, "reviews", "escalations-#{suffix}.md")
+      return :not_applicable unless File.exist?(escalations)
+
+      fix_success = File.join(folder.to_s, "reviews", "fix-success-#{suffix}.md")
+      return :operator unless File.exist?(fix_success)
+
+      File.mtime(fix_success) < File.mtime(escalations) ? :operator : :automatic
+    rescue SystemCallError, IOError
+      :operator
     end
   end
 end

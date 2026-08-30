@@ -12,6 +12,7 @@ steps:
       path = File.join(sandbox, ".hive-state", "config.yml")
       config = YAML.safe_load(File.read(path))
       config.fetch("claude")["mode"] = "headless"
+      config.fetch("review")["github_checks"] = { "enabled" => false }
       File.write(path, config.to_yaml)
   - kind: cli
     args: [brainstorm, "{slug}", --from, 1-inbox]

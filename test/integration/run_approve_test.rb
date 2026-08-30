@@ -178,6 +178,38 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_backward_move_rearms_destination_and_traversed_stages_only
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
+        review = File.join(dir, ".hive-state", "stages", "6-review", slug)
+        FileUtils.mkdir_p(File.dirname(artifacts))
+        FileUtils.mv(inbox, artifacts)
+
+        task_body = "# implementation\n<!-- REVIEW_COMPLETE pass=2 -->\n"
+        artifact_body = "# evidence\n<!-- ERROR reason=ci_red -->\n"
+        pr_body = "# pull request\n<!-- COMPLETE pr_url=https://example.test/pr/1 -->\n"
+        File.write(File.join(artifacts, "task.md"), task_body)
+        File.write(File.join(artifacts, "artifact.md"), artifact_body)
+        File.write(File.join(artifacts, "pr.md"), pr_body)
+
+        capture_io do
+          Hive::Commands::Approve.new(slug, from: "7-artifacts", to: "6-review").call
+        end
+
+        assert File.directory?(review)
+        assert_equal :none, Hive::Markers.current(File.join(review, "task.md")).name
+        assert_equal :none, Hive::Markers.current(File.join(review, "artifact.md")).name
+        assert_equal :complete, Hive::Markers.current(File.join(review, "pr.md")).name
+        assert_includes File.read(File.join(review, "task.md")), "# implementation"
+        assert_includes File.read(File.join(review, "artifact.md")), "# evidence"
+        assert_equal pr_body, File.read(File.join(review, "pr.md")),
+                     "state owned by a stage outside the rewind interval must stay exact"
+      end
+    end
+  end
+
   def test_to_accepts_short_stage_name
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

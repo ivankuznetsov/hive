@@ -59,7 +59,9 @@ current attempt layout and contains no legacy migration preflight or watcher.
 dispatch, recovery, capacity, dependency admission, and PR reconciliation. It
 does not copy condition histories, evidence arrays, diagnostics, plan-review
 payloads, terminal rows, or hidden-archive counts into daemon memory. Completed
-dependencies are resolved pointwise by the producer. The daemon defines no
+dependencies are resolved pointwise by the producer. The producer derives its
+admission snapshot from the same action-classified rows it serializes, rather
+than running a second terminal-row classification pass. The daemon defines no
 condition family, supersession, archive-retention, or gate rule of its own.
 Valid snapshots keep polling cheap. See [[modules/conditions]].
 

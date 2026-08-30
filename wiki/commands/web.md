@@ -328,9 +328,13 @@ Honeycomb projections.
   The ordinary feed uses `Hive::Tui::StateSource` as a shared active-projection
   cache, serialized behind `CachedStatusCommand` for concurrent Puma callers.
   Cold construction and every five-second refresh scan only stages that can
-  contain active work; they do not build, retain, or merge archived task rows.
-  The cadence is therefore proportional to active work rather than total
-  archive size.
+  contain active work. A terminal-capable stage may contain resolved archive
+  members; the producer classifies those candidates once to omit them, then
+  reuses the selected folders for dependency admission. It does not publish,
+  retain, or merge archived task rows. The cadence is therefore proportional
+  to active work rather than total archive size. A project-local preparation or
+  serialization failure remains an isolated error project; admission falls
+  back to the prior disk scan only for a project that could not be prepared.
   During the same daemon generation's brief `started` phase,
   `CachedStatusCommand` retains the prior completed scheduler observation only
   while that observation remains valid. This prevents cooldown/recovery rows

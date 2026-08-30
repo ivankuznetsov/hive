@@ -256,10 +256,18 @@ status-issued tokens.
 
 Status captures every registered project's workflow/config generation before
 scanning any project's rows, captures one UTC `now`, and then publishes either
-the active or dedicated archive projection. Routine dependency admission scans
-active metadata plus only the exact terminal prerequisites those active tasks
-reference, recursively. Unrelated Patrol history is not parsed, while a
-completed dependency still satisfies its dependants. When concise operational status builds that graph, it
+the active or dedicated archive projection. The active producer collects and
+action-classifies each candidate row once, then derives routine dependency
+admission from those already-selected folders. Admission still exact-loads the
+terminal prerequisites those active tasks reference, recursively. Unrelated
+Patrol history is not parsed, a completed dependency still satisfies its
+dependants, and terminal-capable stages do not incur a second action pass. When
+one project cannot prepare status rows, only that project falls back to the
+prior active admission scan; failure of that fallback still blocks admission.
+Synthetic invalid rows carry archive membership from the captured project
+generation, so archive filtering does not reread the process-global workflow
+overlay after the project lock is released. When concise operational status
+builds that graph, it
 also derives each project's `daemon.enabled` context from the captured
 generation instead of parsing the project config a second time. Callers that
 provide an existing status payload retain the context-only config read and do

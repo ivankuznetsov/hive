@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-digest-refresh.v1.json",
+  "title": "Hive daily activity digest refresh envelope (v1)",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "results"],
+      "properties": {
+        "schema": { "const": "hive-digest-refresh" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["local_date", "status"],
+            "properties": {
+              "local_date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+              "status": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-digest-refresh" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["disabled", "not_initialized", "future_date", "missing", "invalid_date", "config", "digest_error", "internal"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

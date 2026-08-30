@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-digest.v1.json",
+  "title": "Hive daily activity digest read envelope (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/Success" },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "reader_status", "record_id",
+        "interval_id", "local_date", "sequence", "time_zone", "starts_at",
+        "ends_at", "duration_seconds", "boundary_kind", "cutover", "lifecycle",
+        "closed_at", "completeness", "content", "last_materialized_at", "stale",
+        "selected_project", "projects", "attention", "items", "gaps",
+        "amendments", "previous_date", "next_date", "coverage_started_at",
+        "precoverage", "pruned_at", "web_url"
+      ],
+      "properties": {
+        "schema": { "const": "hive-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "reader_status": { "enum": ["ok", "missing", "pruned"] },
+        "record_id": { "type": ["string", "null"] },
+        "interval_id": { "type": ["string", "null"] },
+        "local_date": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "sequence": { "type": ["integer", "null"], "minimum": 1 },
+        "time_zone": { "type": ["string", "null"] },
+        "starts_at": { "type": ["string", "null"], "format": "date-time" },
+        "ends_at": { "type": ["string", "null"], "format": "date-time" },
+        "duration_seconds": { "type": ["integer", "null"], "minimum": 1 },
+        "boundary_kind": { "enum": ["calendar_day", "zone_cutover", null] },
+        "cutover": { "type": ["object", "null"] },
+        "lifecycle": { "enum": ["open", "closed", "missing", "pruned"] },
+        "closed_at": { "type": ["string", "null"], "format": "date-time" },
+        "completeness": { "enum": ["complete", "partial", "unknown"] },
+        "content": { "enum": ["empty", "non_empty", "unknown"] },
+        "last_materialized_at": { "type": ["string", "null"], "format": "date-time" },
+        "stale": { "type": "boolean" },
+        "selected_project": { "type": ["string", "null"] },
+        "projects": { "type": "array", "items": { "type": "object" } },
+        "attention": { "type": "array", "items": { "type": "object" } },
+        "items": { "type": "array", "items": { "type": "object" } },
+        "gaps": { "type": "array", "items": { "type": "object" } },
+        "amendments": { "type": "array", "items": { "type": "object" } },
+        "previous_date": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "next_date": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "coverage_started_at": { "type": ["string", "null"], "format": "date-time" },
+        "precoverage": { "type": "boolean" },
+        "pruned_at": { "type": ["string", "null"], "format": "date-time" },
+        "web_url": { "type": "string", "format": "uri", "pattern": "^https?://" }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "usage", "config", "unknown_project", "invalid_date",
+            "browser_unavailable", "digest_error", "internal"
+          ]
+        },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

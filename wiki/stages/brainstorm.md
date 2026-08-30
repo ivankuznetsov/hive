@@ -114,8 +114,9 @@ actionable text.
 
 ### Regeneration and authority
 
-The default `brainstorm.suggestions` block enables one configured worker,
-allows three automatic attempts per input epoch, uses a five-second task-wide
+The default `brainstorm.suggestions` block keeps generation disabled until an
+operator explicitly sets `enabled: true`. Once enabled, it uses one configured
+worker, allows three automatic attempts per input epoch, uses a five-second task-wide
 coalescing window, waits at least 300 seconds between automatic retries, and
 caps capture/provider work at 5/120 seconds. Backoff is jittered. There is one
 active request per question/input binding and only one launch per task window;

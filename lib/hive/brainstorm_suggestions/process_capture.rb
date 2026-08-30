@@ -39,8 +39,9 @@ module Hive
         raise SpawnFailed, error.message
       ensure
         writer&.close unless writer&.closed?
-        reader&.close unless reader&.closed?
         reading&.kill if reading&.alive?
+        reading&.join
+        reader&.close unless reader&.closed?
       end
 
       def wait(pid, deadline:, poll_interval:)

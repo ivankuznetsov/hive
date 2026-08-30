@@ -32,6 +32,21 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
+  def test_disabled_projection_emits_no_advisory_slots
+    with_task do |root|
+      FileUtils.mkdir_p(File.join(root, ".hive-state"))
+      File.write(
+        File.join(root, ".hive-state", "config.yml"),
+        { "brainstorm" => { "suggestions" => { "enabled" => false } } }.to_yaml
+      )
+      projection = build_projection(
+        root, enabled: nil, observer: ->(**) { flunk "disabled projection must not observe" }
+      )
+
+      assert_empty projection.call
+    end
+  end
+
   def test_two_current_records_share_one_observation_and_expose_only_fresh_text
     with_task do |root|
       records = [ fresh_record(1), failed_record(2) ]
@@ -401,6 +416,7 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
       project_root: root,
       questions: questions.first(1),
       task_generation: "a" * 64,
+      enabled: true,
       cache: cache
     ).tap do |projection|
       projection.define_singleton_method(:document_current?) { |_document| true }
@@ -408,12 +424,14 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
   end
 
   def build_projection(root, questions: self.questions, observer: nil, identity_factory: nil,
+                       enabled: true,
                        cache: Hive::BrainstormSuggestions::Projection::Cache.new)
     Hive::BrainstormSuggestions::Projection.new(
       task_root: root,
       project_root: root,
       questions: questions,
       task_generation: "a" * 64,
+      enabled: enabled,
       observer: observer,
       cache: cache,
       identity_factory: identity_factory || ->(*) { "identity" }

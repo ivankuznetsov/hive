@@ -99,6 +99,16 @@ if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE:-}" ]]; then
   sleep "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE}"
 fi
 
+if [[ -n "${HIVE_FAKE_CLAUDE_REPUBLISH_WAITING_FILE:-}" ]]; then
+  ruby -e '
+    path = ENV.fetch("HIVE_FAKE_CLAUDE_REPUBLISH_WAITING_FILE")
+    content = File.binread(path)
+    updated = content.sub(/<!--\s*AGENT_WORKING\b[^\r\n]*-->/, "<!-- WAITING -->")
+    abort "fake-claude: AGENT_WORKING marker missing" if updated == content
+    File.binwrite(path, updated)
+  '
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_WRITE_FILE:-}" && -n "${HIVE_FAKE_CLAUDE_WRITE_CONTENT:-}" ]]; then
   printf '%s' "${HIVE_FAKE_CLAUDE_WRITE_CONTENT}" > "${HIVE_FAKE_CLAUDE_WRITE_FILE}"
 fi

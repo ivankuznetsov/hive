@@ -90,7 +90,8 @@ module Hive
             task_root: task.folder,
             project_root: task.project_root,
             questions: questions,
-            task_generation: generation
+            task_generation: generation,
+            enabled: true
           )
         else
           {}

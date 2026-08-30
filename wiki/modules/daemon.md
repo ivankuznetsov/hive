@@ -841,7 +841,10 @@ For one eligible task, reconciliation follows this order:
    Drift discards/hides the candidate and schedules bounded regeneration.
 
 The scheduler maintains one active job for each task/question and one
-task-wide next-launch timestamp. The current input binding is also its input
+task-wide next-launch timestamp. Pending slots are interleaved across tasks,
+and both task and question starting points rotate between ticks so a task with
+many not-yet-due slots cannot monopolize the bounded worker pool. The current
+input binding is also its input
 epoch: a new selected manifest or settled-answer generation resets the
 automatic attempt budget; same-epoch failures use minimum-delay plus bounded
 exponential jitter. Restarted `loading` records are reconciled rather than

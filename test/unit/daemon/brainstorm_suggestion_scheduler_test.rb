@@ -209,6 +209,24 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     end
   end
 
+  def test_pending_queue_rotates_tasks_before_consuming_worker_capacity
+    scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new(max_workers: 1)
+    first = Struct.new(:folder).new("/tmp/first-task")
+    second = Struct.new(:folder).new("/tmp/second-task")
+    pending = [
+      [ first, {}, %i[first_one first_two] ],
+      [ second, {}, %i[second_one second_two] ]
+    ]
+
+    first_tick = scheduler.send(:fair_schedule_queue, pending)
+    second_tick = scheduler.send(:fair_schedule_queue, pending)
+
+    assert_equal [ first, second ], first_tick.first(2).map(&:first)
+    assert_equal [ second, first ], second_tick.first(2).map(&:first)
+  ensure
+    scheduler&.shutdown
+  end
+
   def test_slow_capture_does_not_hold_the_task_lock_and_an_answer_cancels_the_worker
     with_project do |_project, folder|
       started = Queue.new

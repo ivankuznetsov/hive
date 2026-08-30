@@ -19,6 +19,7 @@ class RunBrainstormTest < Minitest::Test
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
     %w[HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
+       HIVE_FAKE_CLAUDE_REPUBLISH_WAITING_FILE
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_LOG_DIR].each { |k| ENV.delete(k) }
   end
 
@@ -105,9 +106,10 @@ class RunBrainstormTest < Minitest::Test
           <!-- WAITING -->
         MARKDOWN
         File.write(brainstorm_md, content)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = brainstorm_md
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = content
-
+        # The provider fixture only turns Hive's transient AGENT_WORKING marker
+        # back into WAITING. It is not given the expected document bytes, so
+        # preservation of the advisory region is exercised rather than echoed.
+        ENV["HIVE_FAKE_CLAUDE_REPUBLISH_WAITING_FILE"] = brainstorm_md
         capture_io { Hive::Commands::Run.new(folder).call }
 
         actual = File.read(brainstorm_md)

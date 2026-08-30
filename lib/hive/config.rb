@@ -108,7 +108,7 @@ module Hive
         "skill" => "/ce-brainstorm",
         "runtime" => "headless",
         "suggestions" => {
-          "enabled" => true,
+          "enabled" => false,
           "agent" => "claude",
           "capture_timeout_sec" => 5,
           "timeout_sec" => 120,

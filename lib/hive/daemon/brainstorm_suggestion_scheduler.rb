@@ -46,6 +46,7 @@ module Hive
         @next_launch_at = {}
         @task_next_launch_at = {}
         @fair_offsets = {}
+        @fair_row_offset = 0
         @mutex = Mutex.new
       end
 
@@ -57,6 +58,7 @@ module Hive
 
       def tick(rows:, now: @clock.call, complete: true)
         active = []
+        pending = []
         inventory = Array(rows)
         inventory.each do |row|
           begin
@@ -64,7 +66,8 @@ module Hive
               cfg = config_for(row)
               if cfg&.dig("brainstorm", "suggestions", "enabled") == true
                 active << [ row, cfg ]
-                reconcile_row(row, cfg, now: now)
+                slots = reconcile_row(row, cfg, now: now)
+                pending << [ row, cfg, slots ] if slots&.any?
                 next
               end
             end
@@ -76,6 +79,9 @@ module Hive
           rescue StandardError => error
             log(:brainstorm_suggestion_scheduler_error, error: bounded_error(error))
           end
+        end
+        fair_schedule_queue(pending).each do |row, cfg, slot|
+          schedule(row, cfg, slot, now: now)
         end
         cancel_missing(active.map { |row, _cfg| File.expand_path(row.folder.to_s) }) if complete
         active.length
@@ -100,6 +106,7 @@ module Hive
           @next_launch_at.clear
           @task_next_launch_at.clear
           @fair_offsets.clear
+          @fair_row_offset = 0
         end
       end
 
@@ -140,12 +147,12 @@ module Hive
         prune_removed_questions(row.folder, slots)
         unless slots.any?
           cleanup_task(row.folder)
-          return
+          return []
         end
 
         seed_records(row, slots, now: now)
         hide_fresh_when_route_unavailable(row, cfg, now: now)
-        fair_slots(row.folder, slots).each { |slot| schedule(row, cfg, slot, now: now) }
+        slots
       rescue Hive::ConcurrentRunError
         log(:brainstorm_suggestion_deferred, project: row.project, slug: row.slug, reason: "task_lock_busy")
       rescue Hive::Error, SystemCallError, IOError => error
@@ -690,6 +697,32 @@ module Hive
           @fair_offsets[root] = (offset + @max_workers) % slots.length
           slots.rotate(offset)
         end
+      end
+
+      def fair_schedule_queue(pending)
+        return [] if pending.empty?
+
+        ordered = @mutex.synchronize do
+          offset = @fair_row_offset % pending.length
+          @fair_row_offset = (offset + 1) % pending.length
+          pending.rotate(offset)
+        end
+        queues = ordered.map do |row, cfg, slots|
+          [ row, cfg, fair_slots(row.folder, slots).dup ]
+        end
+        result = []
+        loop do
+          added = false
+          queues.each do |row, cfg, slots|
+            slot = slots.shift
+            next unless slot
+
+            result << [ row, cfg, slot ]
+            added = true
+          end
+          break unless added
+        end
+        result
       end
 
       def invalidate_published_result(row, slot, attempt, input_binding)

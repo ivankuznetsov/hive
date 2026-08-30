@@ -13,11 +13,11 @@ class HiveBrainstormSuggestionsConfigTest < Minitest::Test
     end
   end
 
-  def test_defaults_enable_bounded_claude_route
+  def test_defaults_keep_bounded_claude_route_opted_out
     with_project do |root, _state|
       cfg = Hive::Config.load(root)
 
-      assert_equal true, cfg.dig("brainstorm", "suggestions", "enabled")
+      assert_equal false, cfg.dig("brainstorm", "suggestions", "enabled")
       assert_equal "claude", cfg.dig("brainstorm", "suggestions", "agent")
       assert_equal 3, cfg.dig("brainstorm", "suggestions", "max_automatic_attempts")
       assert Hive::ModelRouting.known?("brainstorm_suggestion")

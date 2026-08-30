@@ -33,7 +33,10 @@ class HiveCommandsAnswerTest < Minitest::Test
         hive_state = File.join(project, ".hive-state")
         folder = File.join(hive_state, "stages", "2-brainstorm", SLUG)
         FileUtils.mkdir_p(folder)
-        File.write(File.join(hive_state, "config.yml"), {}.to_yaml)
+        File.write(
+          File.join(hive_state, "config.yml"),
+          { "brainstorm" => { "suggestions" => { "enabled" => true } } }.to_yaml
+        )
         Hive::TaskMeta.write(
           folder,
           id: Digest::SHA256.hexdigest(File.expand_path(folder))[0, 12].to_i(16),

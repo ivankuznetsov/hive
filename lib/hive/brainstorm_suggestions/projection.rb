@@ -8,6 +8,7 @@ require "hive/brainstorm_suggestions/binding"
 require "hive/brainstorm_suggestions/context_bundle"
 require "hive/brainstorm_suggestions/process_capture"
 require "hive/brainstorm_suggestions/store"
+require "hive/config"
 require "hive/task"
 
 module Hive
@@ -138,7 +139,7 @@ module Hive
 
       def initialize(task_root:, project_root:, questions:, task_generation:,
                      observer: nil, cache: nil, identity_factory: nil,
-                     deadline: nil)
+                     deadline: nil, enabled: nil)
         @task_root = File.expand_path(task_root)
         @project_root = File.expand_path(project_root)
         @questions = Array(questions)
@@ -147,9 +148,12 @@ module Hive
         @cache = cache || self.class.cache
         @identity_factory = identity_factory || method(:observation_identity)
         @deadline = deadline || monotonic_now + MAX_OBSERVATION_SECONDS
+        @enabled = enabled
       end
 
       def call
+        return {}.freeze unless feature_enabled?
+
         document = Hive::BrainstormSuggestions::Store.new(@task_root).read
         return all_unavailable if document["corrupt"]
 
@@ -184,6 +188,14 @@ module Hive
       end
 
       private
+
+      def feature_enabled?
+        return @enabled unless @enabled.nil?
+
+        Hive::Config.load(@project_root).dig("brainstorm", "suggestions", "enabled") == true
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError
+        false
+      end
 
       def relevant_records(document)
         records = document.fetch("records", [])

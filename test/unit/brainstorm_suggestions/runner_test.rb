@@ -60,7 +60,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     executor = lambda do |launch|
       runtime = launch.runtime_root
       assert File.directory?(runtime)
-      assert_equal "/usr/bin/bwrap", launch.argv.first
+      assert_equal "/bin/true", launch.argv.first
       tools_index = launch.argv.index("--tools")
       assert_equal "", launch.argv.fetch(tools_index + 1)
       assert_equal "", launch.argv.fetch(launch.argv.index("--allowedTools") + 1)
@@ -87,7 +87,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     end
     runner = Hive::BrainstormSuggestions::Runner.new(
       profile: Hive::AgentProfiles.lookup(:claude), executor: executor,
-      bwrap_path: "/usr/bin/bwrap", executable_resolver: ->(*) { "/bin/true" }
+      bwrap_path: "/bin/true", executable_resolver: ->(*) { "/bin/true" }
     )
 
     result = runner.call(bundle: bundle)
@@ -100,7 +100,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     executed = false
     runner = Hive::BrainstormSuggestions::Runner.new(
       profile: Hive::AgentProfiles.lookup(:codex), executor: ->(*) { executed = true },
-      bwrap_path: "/usr/bin/bwrap"
+      bwrap_path: "/bin/true"
     )
 
     result = runner.call(bundle: bundle)
@@ -130,7 +130,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       end
       runner = Hive::BrainstormSuggestions::Runner.new(
         profile: Hive::AgentProfiles.lookup(:claude), executor: executor,
-        bwrap_path: "/usr/bin/bwrap", executable_resolver: ->(*) { "/bin/true" }
+        bwrap_path: "/bin/true", executable_resolver: ->(*) { "/bin/true" }
       )
 
       result = runner.call(bundle: bundle)
@@ -169,7 +169,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     end
     runner = Hive::BrainstormSuggestions::Runner.new(
       profile: Hive::AgentProfiles.lookup(:claude), executor: executor,
-      bwrap_path: "/usr/bin/bwrap", executable_resolver: ->(*) { "/bin/true" }
+      bwrap_path: "/bin/true", executable_resolver: ->(*) { "/bin/true" }
     )
 
     result = runner.call(bundle: bundle, cancellation: token)

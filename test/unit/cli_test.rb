@@ -39,6 +39,7 @@ require "hive/commands/setup_agents"
 require "hive/commands/evidence"
 require "hive/commands/digest"
 require "hive/commands/digest_refresh"
+require "hive/commands/digest_send"
 require "hive/commands/digest_prune"
 
 class HiveCliTest < Minitest::Test
@@ -79,7 +80,7 @@ class HiveCliTest < Minitest::Test
     refute defined?(Hive::Prdigest)
   end
 
-  def test_digest_routes_reads_refresh_and_prune_as_separate_actions
+  def test_digest_routes_reads_refresh_send_and_prune_as_separate_actions
     with_command_new_stub(Hive::Commands::Digest) do |calls|
       Hive::CLI.start([ "digest", "--date", "2026-08-30", "--project", "alpha", "--json" ])
       assert_equal [], calls.first.fetch(:args)
@@ -92,6 +93,14 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::DigestRefresh) do |calls|
       Hive::CLI.start([ "digest", "refresh", "--date", "2026-08-30", "--json" ])
       assert_equal({ date: "2026-08-30", json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestSend) do |calls|
+      Hive::CLI.start([ "digest", "send", "--date", "2026-08-30", "--retry", "--json" ])
+      assert_equal({
+        date: "2026-08-30", retry: true, json: true
+      }, calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
 

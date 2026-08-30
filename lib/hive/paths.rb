@@ -46,6 +46,10 @@ module Hive
       File.join(state_home, "daily-digest", "v1")
     end
 
+    def daily_digest_delivery_root
+      File.join(daily_digest_root, "deliveries")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

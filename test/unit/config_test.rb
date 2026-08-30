@@ -4425,7 +4425,7 @@ class ConfigTest < Minitest::Test
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
       # Answer-digest ships a non-zero default cap so a wedged child cannot
       # pin the single global digest slot forever.
-      assert_equal({ "answer-digest" => 3600 },
+      assert_equal({ "answer-digest" => 3600, "digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
@@ -4456,6 +4456,7 @@ class ConfigTest < Minitest::Test
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
       # A user override deep-merges with the seeded default.
       assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "answer-digest")
+      assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "digest")
     end
   end
 

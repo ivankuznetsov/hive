@@ -11,6 +11,7 @@ module Hive
     # close, and gap recovery. Telegram delivery has a separate U6 scheduler.
     class DailyDigestCloseScheduler < DigestSchedulerBase
       STAGE = "daily_digest_close".freeze
+      REFRESH_STAGE = "daily_digest_refresh".freeze
       PROJECT = "daily_digest".freeze
       SCHEDULER_CONTRACT = {
         project: PROJECT,
@@ -49,7 +50,7 @@ module Hive
 
         date = digest_date(@date_resolver.call(now))
         @pending[date] = true
-        [ dispatch_for(date) ]
+        [ dispatch_for(date, stage: stage_for(date, now: now)) ]
       end
 
       def complete(date:, exit_code:, envelope: nil, now: @clock.call)
@@ -73,12 +74,22 @@ module Hive
 
       private
 
-      def dispatch_for(date)
+      def dispatch_for(date, stage: STAGE)
         {
-          project: PROJECT, slug: date.to_s, stage: STAGE,
+          project: PROJECT, slug: date.to_s, stage: stage,
           command: "hive digest refresh --json",
           state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
         }
+      end
+
+      def stage_for(date, now:)
+        record = @store.read(date)
+        return REFRESH_STAGE if record.fetch("lifecycle") == "open" &&
+                                now.utc < Time.iso8601(record.fetch("ends_at"))
+
+        STAGE
+      rescue Hive::DailyDigest::Error
+        STAGE
       end
 
       def resolve_date(now)

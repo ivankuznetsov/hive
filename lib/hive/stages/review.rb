@@ -1855,6 +1855,11 @@ module Hive
         end
 
         adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
+        failure_output_path = if adapter.respond_to?(:failure_output_path)
+          adapter.failure_output_path
+        else
+          adapter.output_path
+        end
         # Wrap adapter.run! so a single reviewer raising (spawn-time
         # SystemCallError, network timeout in a custom adapter, …)
         # doesn't abort the whole reviewers phase. Treat as :error,
@@ -1896,7 +1901,7 @@ module Hive
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
-              output_path: adapter.output_path,
+              output_path: failure_output_path,
               status: :error,
               error_message: "#{e.class}: #{e.message}"
             )
@@ -1915,7 +1920,7 @@ module Hive
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
-              output_path: adapter.output_path,
+              output_path: failure_output_path,
               status: :error,
               error_message: "#{e.class}: #{e.message}"
             )

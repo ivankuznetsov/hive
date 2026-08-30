@@ -740,6 +740,8 @@ module Hive
       when "blocked"
         if recoverable_planner_identity_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_planner_revision?
+          ACTIONS.fetch(:plan_reviewing)
         elsif stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
@@ -979,6 +981,25 @@ module Hive
         Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
     rescue ArgumentError, TypeError
       true
+    end
+
+    # Older builds terminalized an exhausted transient planner-revision series.
+    # The orchestrator now owns opening cooled attempt series until that route
+    # recovers, so expose only the exact old planner-owned transient block as
+    # runnable. Invalid candidates and other terminal planner verdicts stay
+    # operator-owned.
+    def recoverable_transient_planner_revision?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner_revision"
+      end
+      return false unless route
+      return false if route["attempt_id"].to_s.empty?
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+
+      expected_reason = "planner_revision_#{route.fetch('outcome')}"
+      Array(plan_review["blockers"]).any? do |blocker|
+        blocker["owner"] == "planner" && blocker["reason"] == expected_reason
+      end
     end
 
     def recoverable_planner_identity_review?

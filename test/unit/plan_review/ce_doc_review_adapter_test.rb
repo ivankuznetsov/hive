@@ -778,6 +778,24 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
           /Every newly emitted finding must use\s+`"lifecycle": "open"`/,
           observed
         )
+        unless kind == "verification"
+          rubric_patterns = [
+            /`safe_auto`: one concrete, low-risk, reversible technical correction follows\s+from the plan, product contract, or established repository patterns/,
+            /`gated_auto`: the preferred technical correction is clear, but applying it\s+materially changes architecture, external behavior, compatibility/,
+            /`manual`: a human must supply a choice because the existing contract and\s+repository patterns do not determine a safe answer/,
+            /`fyi`: useful information that requires no plan change/
+          ]
+          rubric_patterns.each { |pattern| assert_match pattern, observed }
+          assert_match(
+            /For the final JSON written to Hive, this rubric is authoritative and overrides\s+any classification, autofix, or routing rubric from an invoked skill/,
+            observed
+          )
+          assert_includes observed, "Classification is about decision authority, not severity."
+          assert_match(
+            /Do not use `manual`\s+merely because the plan must choose/,
+            observed
+          )
+        end
       end
     end
   end

@@ -29,6 +29,30 @@ Use only typed findings and named coverage. Free-form stdout is diagnostic,
 not clearance authority. Every newly emitted finding must use
 `"lifecycle": "open"`; Hive alone owns later lifecycle transitions, so never
 emit `closed` or another inferred disposition.
+
+Classify findings by decision authority:
+
+For the final JSON written to Hive, this rubric is authoritative and overrides
+any classification, autofix, or routing rubric from an invoked skill.
+
+- `safe_auto`: one concrete, low-risk, reversible technical correction follows
+  from the plan, product contract, or established repository patterns.
+- `gated_auto`: the preferred technical correction is clear, but applying it
+  materially changes architecture, external behavior, compatibility,
+  security/privacy posture, or operational risk and therefore needs approval.
+- `manual`: a human must supply a choice because the existing contract and
+  repository patterns do not determine a safe answer, and the alternatives
+  materially change product scope, authority/trust, privacy/compliance, risk
+  acceptance, irreversible external effects, or an architectural direction.
+- `fyi`: useful information that requires no plan change.
+
+Classification is about decision authority, not severity. Prefer `safe_auto`
+for routine technical corrections, and use `gated_auto` only when the
+correction itself crosses a material approval boundary. Do not use `manual`
+merely because the plan must choose, decide, specify, or add details. If you can
+state a concrete correction grounded in the plan or repository, classify it as
+`safe_auto` or `gated_auto` and include that disposition.
+
 This is an initial review, not disposition verification, so
 `residual_evidence` must be exactly an empty array.
 `selected_lenses` names may use lowercase letters, digits, hyphens, and underscores;

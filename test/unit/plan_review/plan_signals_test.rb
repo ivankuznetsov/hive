@@ -181,6 +181,48 @@ class PlanReviewPlanSignalsTest < Minitest::Test
     end
   end
 
+  def test_unquoted_frontmatter_date_and_list_prefixed_evidence_are_parsed
+    with_plan(<<~PLAN) do |path, task_folder|
+      ---
+      date: 2026-08-30
+      ---
+      # Local parser guard
+
+      - **Files:**
+        - `lib/hive/parser.rb`
+        - `test/unit/parser_test.rb`
+      - **Test scenarios:**
+        1. accepts a valid input
+      - **Rollback:** Revert the commit.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_equal %w[lib/hive/parser.rb test/unit/parser_test.rb], result.declared_files
+      assert_equal [ "accepts a valid input" ], result.test_scenarios
+      assert result.rollback_explicit
+      assert result.skip_eligible?
+      refute_includes result.uncertainties, "malformed_frontmatter"
+    end
+  end
+
+  def test_inline_bold_files_label_is_parsed
+    with_plan(<<~PLAN) do |path, task_folder|
+      # Local parser guard
+
+      **Files:** `lib/hive/parser.rb`, `test/unit/parser_test.rb`
+
+      **Test scenarios:**
+      - accepts a valid input
+
+      **Rollback:** Revert the commit.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_equal %w[lib/hive/parser.rb test/unit/parser_test.rb], result.declared_files
+      assert result.skip_eligible?
+    end
+  end
+
   def test_oversized_frontmatter_is_uncertain_even_with_complete_markdown_evidence
     oversized = "note: #{'x' * (64 * 1024)}"
     with_plan(<<~PLAN) do |path, task_folder|

@@ -2198,6 +2198,31 @@ class TaskActionTest < Minitest::Test
     assert_nil standard.command
   end
 
+  def test_plan_review_recovers_a_blocked_transient_planner_revision
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    exhausted = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "outcome" => "blocked",
+        "required_action" => "repair the planner route and start a linked plan generation",
+        "blockers" => [
+          { "owner" => "planner", "reason" => "planner_revision_retryable_failure" }
+        ],
+        "routes" => [
+          {
+            "role" => "planner_revision", "outcome" => "retryable_failure",
+            "attempt_id" => "pra-legacy",
+            "planner_revision_contract_version" =>
+              Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", exhausted.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", exhausted.command
+  end
+
   def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
     task = fake_task(stage_name: "plan", stage_index: 3)
     routes = [

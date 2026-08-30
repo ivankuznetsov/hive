@@ -138,7 +138,7 @@ module Hive
           return {}
         end
 
-        value = YAML.safe_load(raw, permitted_classes: [], permitted_symbols: [], aliases: false) || {}
+        value = YAML.safe_load(raw, permitted_classes: [ Date ], permitted_symbols: [], aliases: false) || {}
         unless value.is_a?(Hash)
           uncertainties << "malformed_frontmatter"
           return {}
@@ -170,7 +170,7 @@ module Hive
 
       def test_scenarios(text, metadata)
         values = Array(metadata["test_scenarios"]).map(&:to_s)
-        values.concat(section(text, "test scenarios").scan(/^\s*[-*]\s+(.+)$/).flatten)
+        values.concat(section(text, "test scenarios").scan(/^\s*(?:[-*]|\d+[.)])\s+(.+)$/).flatten)
         values.map(&:strip).reject(&:empty?).uniq
       end
 
@@ -183,8 +183,8 @@ module Hive
 
       def section(text, name)
         label = Regexp.escape(name)
-        boundary = '(?=^#{1,6}\s+|^\*\*[^*\n]+:?\*\*\s*$|\z)'
-        pattern = /(?:^\#{1,6}\s+#{label}\s*$|^\*\*#{label}:?\*\*\s*$)\n(.*?)#{boundary}/im
+        boundary = '(?=^#{1,6}[ \t]+|^[ \t]*(?:[-*][ \t]+)?\*\*[^*\n]+:?\*\*(?=[ \t]|\r?$)|\z)'
+        pattern = /(?:^\#{1,6}[ \t]+#{label}[ \t]*\r?$\n|^[ \t]*(?:[-*][ \t]+)?\*\*#{label}:?\*\*[ \t]*)(.*?)#{boundary}/im
         text.scan(pattern).flatten.join("\n")
       end
 

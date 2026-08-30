@@ -1663,7 +1663,15 @@ module Hive
         FileUtils.mkdir_p(archived_root)
         target = manual_archive_target(archived_root, task.slug)
         collision = File.basename(target) != task.slug
-        File.rename(message.folder, target)
+        Hive::Lock.with_task_lock(
+          message.folder,
+          { op: "manual_steering_archive", slug: task.slug },
+          create: false
+        ) do
+          Hive::BrainstormSuggestions::TransitionCleanup.call_under_lock(message.folder)
+          File.rename(message.folder, target)
+        end
+        File.delete(File.join(target, ".lock")) if File.exist?(File.join(target, ".lock"))
 
         flash = manual_archive_flash(task.slug, target, message.exit_code, collision)
         [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]

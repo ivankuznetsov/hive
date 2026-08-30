@@ -349,7 +349,11 @@ solid_cable. `StatusFeed` serializes concurrent Puma callers through
 `CachedStatusCommand`, which reuses a visible-only `StateSource`: its
 five-second hot path is active-task proportional, its missed-signal backstop is
 five minutes, and the complete archive producer runs only for an explicit
-archive request. Each accepted channel acquires one poller lease and releases it
+archive request. The status producer fulfills the authoritative
+`Hive::Web::StatusCommand` contract (`json_payload`, plus optional
+dependency-context and recovery-overlay members with explicit nil defaults);
+`StatusFeed` invokes the contract directly instead of probing collaborator
+shape with `respond_to?`. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
 release without serializing unrelated browser connections. A failed first

@@ -1843,7 +1843,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, scope: 1, new_idea_buffer: "an idea"
+        mode: :new_idea, snapshot: snap, scope: 1,
+        new_idea_project_name: "demo", new_idea_buffer: "an idea"
       ),
       dispatch: @dispatch
     )
@@ -1938,7 +1939,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # new_idea_project_name points to a name no longer in the snapshot
   # (project was removed between picker selection and submit). Submission
-  # must flash "is not available — choose another".
+  # must report disappearance and require another explicit choice.
   def test_new_idea_submission_with_chosen_project_missing_from_snapshot_flashes_unavailable
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-06",
@@ -1958,8 +1959,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
     end
     assert_equal 0, spawn_count, "must NOT dispatch when the chosen project disappeared from snapshot"
-    assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s,
-                 "flash must say the chosen name is not available and steer to a new pick")
+    assert_match(/"ghost".*disappeared.*choose another project/i, @model.hive_model.flash.to_s,
+                 "flash must name the disappeared identity and steer to a new pick")
     assert_equal :new_idea_project, @model.hive_model.mode,
                  "must bounce back to the picker so operator can re-pick without retyping"
     assert_nil @model.hive_model.new_idea_project_name,
@@ -2131,7 +2132,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal "see [image1]", @model.hive_model.new_idea_buffer
       assert_equal [ attachment ], @model.hive_model.new_idea_attachments
       assert File.exist?(staging_path), "staged image must survive the project re-pick bounce"
-      assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s)
+      assert_match(/"ghost".*disappeared.*choose another project/i, @model.hive_model.flash.to_s)
     end
   end
 
@@ -2146,6 +2147,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
           mode: :new_idea,
           snapshot: snap,
           scope: 1,
+          new_idea_project_name: "broken",
           new_idea_buffer: "see [image1]",
           new_idea_cursor: 12,
           new_idea_attachments: [ attachment ],

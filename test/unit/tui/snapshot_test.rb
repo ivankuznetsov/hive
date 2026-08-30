@@ -652,6 +652,8 @@ class TuiSnapshotTest < Minitest::Test
 
     assert_equal :unhealthy, unhealthy.state
     assert_empty unhealthy.projects
+    assert_equal %w[missing_project_path not_initialised], unhealthy.unhealthy_errors
+    assert_predicate unhealthy.unhealthy_errors, :frozen?
     assert_equal :ambiguous, both_healthy.state
     assert_equal [ "duplicate" ], both_healthy.ambiguous_names
     assert_equal :ambiguous, mixed_health.state,

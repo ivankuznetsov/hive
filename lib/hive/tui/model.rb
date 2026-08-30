@@ -28,7 +28,7 @@ module Hive
       :scope,            # Integer — 0 means all projects; 1..N selects Nth
       :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
       :new_idea_project_name, # String or nil — explicit target chosen from ★ All
-      :new_idea_project_cursor, # Integer — selection cursor in :new_idea_project mode
+      :new_idea_project_cursor, # Integer or nil — nil means explicitly no highlighted project
       :new_idea_buffer,  # String — typed text in :new_idea mode
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
       :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea

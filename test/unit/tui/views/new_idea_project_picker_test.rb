@@ -39,6 +39,23 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
       Hive::Tui::Views::NewIdeaProjectPicker.choices(model).map(&:name)
   end
 
+  def test_choices_exclude_duplicate_names_regardless_of_health
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => [
+        { "name" => "both-healthy", "tasks" => [] },
+        { "name" => "both-healthy", "tasks" => [] },
+        { "name" => "mixed", "tasks" => [] },
+        { "name" => "mixed", "error" => "not_initialised", "tasks" => [] },
+        { "name" => "alpha", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(snapshot: snap)
+
+    assert_equal [ "alpha" ],
+      Hive::Tui::Views::NewIdeaProjectPicker.choices(model).map(&:name)
+  end
+
   def test_empty_choices_render_clear_message
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-17T00:00:00Z",
@@ -47,6 +64,51 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     model = Hive::Tui::Model.initial.with(mode: :new_idea_project, snapshot: snap)
 
     assert_includes Hive::Tui::Views::NewIdeaProjectPicker.render(model), "No healthy projects"
+  end
+
+  def test_ambiguity_only_picker_names_duplicate_and_recovery_action
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => [
+        { "name" => "duplicate", "tasks" => [] },
+        { "name" => "duplicate", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(mode: :new_idea_project, snapshot: snap)
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model)
+
+    assert_match(/duplicate project name.*"duplicate"/i, out)
+    assert_match(/hive forget|disambiguate/i, out)
+    refute_match(/no healthy projects/i, out)
+  end
+
+  def test_empty_registry_is_distinct_from_unhealthy_projects
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => []
+    )
+    model = Hive::Tui::Model.initial.with(mode: :new_idea_project, snapshot: snap)
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model)
+
+    assert_match(/no projects registered/i, out)
+    refute_match(/no healthy projects/i, out)
+  end
+
+  def test_nil_cursor_renders_admissible_rows_without_a_highlight
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea_project,
+      snapshot: snapshot,
+      new_idea_project_cursor: nil
+    )
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model, width: 80)
+
+    assert_includes out, "  hive"
+    assert_includes out, "  writero"
+    refute_match(/^> /, out)
+    assert_match(/j\/k select/i, out)
   end
 
   def test_nil_snapshot_renders_loading_message

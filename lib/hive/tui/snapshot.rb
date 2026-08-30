@@ -23,8 +23,9 @@ module Hive
       # needed to explain an empty collection without re-reading raw project
       # errors in a view. Duplicate exact names never enter `projects`, even
       # when one or all of their rows are healthy.
-      NewIdeaAdmission = Data.define(:state, :projects, :ambiguous_names) do
-        def initialize(state:, projects:, ambiguous_names: [].freeze)
+      NewIdeaAdmission = Data.define(:state, :projects, :ambiguous_names, :unhealthy_errors) do
+        def initialize(state:, projects:, ambiguous_names: [].freeze,
+                       unhealthy_errors: [].freeze)
           unless Hive::Tui::Snapshot::NEW_IDEA_ADMISSION_STATES.include?(state)
             raise ArgumentError, "unknown new-idea admission state: #{state.inspect}"
           end
@@ -32,7 +33,8 @@ module Hive
           super(
             state: state,
             projects: Array(projects).freeze,
-            ambiguous_names: Array(ambiguous_names).freeze
+            ambiguous_names: Array(ambiguous_names).freeze,
+            unhealthy_errors: Array(unhealthy_errors).freeze
           )
         end
       end
@@ -494,6 +496,10 @@ module Hive
           value = name.to_s
           value.dup.freeze unless value.empty?
         end.first(NEW_IDEA_AMBIGUOUS_NAME_LIMIT).freeze
+        unhealthy_errors = @projects.filter_map do |project|
+          error = project.error.to_s
+          error.dup.freeze unless error.empty?
+        end.uniq.first(NEW_IDEA_AMBIGUOUS_NAME_LIMIT).freeze
 
         state =
           if projects.any?
@@ -509,7 +515,8 @@ module Hive
         NewIdeaAdmission.new(
           state: state,
           projects: projects,
-          ambiguous_names: ambiguous_names
+          ambiguous_names: ambiguous_names,
+          unhealthy_errors: unhealthy_errors
         )
       end
 

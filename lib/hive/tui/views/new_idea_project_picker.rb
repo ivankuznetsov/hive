@@ -20,10 +20,10 @@ module Hive
           else
             projects = choices(model)
             if projects.empty?
-              rows << Styles::FLASH.render("No healthy projects available")
+              rows << Styles::FLASH.render(empty_message(model.snapshot.new_idea_admission))
             else
-              cursor = model.new_idea_project_cursor.to_i.clamp(0, projects.size - 1)
-              visible, first_idx = visible_projects(projects, cursor)
+              cursor = highlighted_cursor(model, projects)
+              visible, first_idx = visible_projects(projects, cursor || 0)
               visible.each_with_index do |project, idx|
                 absolute_idx = first_idx + idx
                 prefix = absolute_idx == cursor ? "> " : "  "
@@ -35,14 +35,39 @@ module Hive
           # Always anchor the operator with at least an Esc-cancel hint —
           # loading + no-healthy-projects states used to render with no
           # exit affordance, making the mode look frozen.
-          hint = projects && !projects.empty? ? "Enter choose  Esc cancel" : "Esc cancel"
+          hint = if projects && !projects.empty?
+            cursor.nil? ? "j/k select  Esc cancel" : "Enter choose  Esc cancel"
+          else
+            "Esc cancel"
+          end
           rows << Styles::HINT.render(hint)
 
           rows.map { |line| truncate(line, width) }.join("\n")
         end
 
         def choices(model)
-          Array(model.snapshot&.projects).select { |project| project.error.nil? }
+          model.snapshot&.new_idea_admission&.projects || []
+        end
+
+        def highlighted_cursor(model, projects)
+          cursor = model.new_idea_project_cursor
+          return nil unless cursor.is_a?(Integer) && cursor.between?(0, projects.size - 1)
+
+          cursor
+        end
+
+        def empty_message(admission)
+          case admission.state
+          when :ambiguous
+            names = admission.ambiguous_names.map(&:inspect).join(", ")
+            "Duplicate project name #{names} — disambiguate registry or run `hive forget <name>`"
+          when :unhealthy
+            "No healthy projects available"
+          when :no_projects
+            "No projects registered — run `hive init <path>`"
+          else
+            "No selectable projects available"
+          end
         end
 
         def visible_projects(projects, cursor)

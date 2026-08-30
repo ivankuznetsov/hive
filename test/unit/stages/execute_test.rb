@@ -945,6 +945,50 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_appends_controller_output_after_implementer_custody
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      File.write(task.state_file, "# Task\n\n## Implementation\n")
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task,
+        "path" => worktree,
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      trailer = Hive::Stages::Execute.completion_trailer(
+        File.binread(File.join(task.folder, "plan.md"))
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false,
+        ancestor_result: true, message: "done\n\n#{trailer}\n"
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              {
+                status: :ok,
+                final_message: "implementation summary",
+                final_message_source: :structured
+              }
+            end
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, worktree)
+
+          assert_equal({ commit: "execute_complete", status: :execute_complete }, result)
+        end
+      end
+
+      assert_includes File.read(task.state_file), "## Execute Output\n\nimplementation summary"
+      assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
   def test_run_pass_keeps_controller_journal_writes_outside_implementer_custody
     with_tmp_dir do |dir|
       task = build_task(dir)

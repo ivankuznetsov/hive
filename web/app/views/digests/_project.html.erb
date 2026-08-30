@@ -1,0 +1,28 @@
+<section class="digest-project-group" data-project="<%= project.fetch("name") %>"
+         aria-labelledby="<%= stable_dom_id("digest-project", project.fetch("project_id")) %>">
+  <div class="digest-project-heading">
+    <h3 id="<%= stable_dom_id("digest-project", project.fetch("project_id")) %>"><%= project.fetch("name") %></h3>
+    <% if digest.historical_project?(project) %>
+      <span class="digest-historical">Historical project</span>
+    <% end %>
+  </div>
+  <ol class="digest-item-list">
+    <% items.sort_by { |item| [item["occurred_at"].to_s, item["fact_id"].to_s] }.each do |item| %>
+      <li class="digest-item">
+        <time datetime="<%= item["occurred_at"] %>"><%= item["occurred_at"]&.to_time&.strftime("%H:%M") || "Time unavailable" %></time>
+        <div>
+          <strong><%= item["summary"].presence || item["kind"].to_s.humanize %></strong>
+          <% if item["task_slug"] %><span class="digest-meta"><%= item["task_slug"] %> · <%= item["stage"] %></span><% end %>
+        </div>
+        <div class="digest-item-links">
+          <% if (destination = digest.task_destination(item)) %>
+            <%= link_to "Task", digest_task_path(destination) %>
+          <% end %>
+          <% if (pr_url = digest.pr_url(item)) %>
+            <%= link_to "PR ##{digest.pr_number(item)}", pr_url, target: "_blank", rel: "noopener noreferrer" %>
+          <% end %>
+        </div>
+      </li>
+    <% end %>
+  </ol>
+</section>

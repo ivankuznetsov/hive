@@ -1,0 +1,25 @@
+<% if digest.amendments.any? %>
+  <section class="digest-amendments" aria-labelledby="digest-amendments-heading">
+    <div class="digest-section-heading">
+      <div>
+        <p class="digest-kicker">Observed after close</p>
+        <h2 id="digest-amendments-heading">Late amendments</h2>
+      </div>
+      <span class="digest-count"><%= digest.amendments.length %></span>
+    </div>
+    <ol class="digest-amendment-list">
+      <% digest.amendments.each do |amendment| %>
+        <li>
+          <div class="digest-card-heading">
+            <strong><%= amendment["kind"].to_s.humanize %></strong>
+            <%= digest_time_tag(amendment["amended_at"]) if amendment["amended_at"] %>
+          </div>
+          <p>
+            <%= pluralize(Array(amendment["items"]).length, "late item") %> ·
+            <%= pluralize(Array(amendment["resolved_gap_ids"]).length, "resolved gap") %>
+          </p>
+        </li>
+      <% end %>
+    </ol>
+  </section>
+<% end %>

@@ -27,7 +27,10 @@ module Hive
 
         record = @store.read(selected_date)
         if record.fetch("lifecycle") == "pruned"
-          return record.merge("reader_status" => "pruned", "stale" => false)
+          return record.merge(
+            "reader_status" => "pruned", "stale" => false,
+            "selected_project" => project, **navigation_for(selected_date)
+          )
         end
 
         view = project ? filter_project(record, project) : deep_copy(record)
@@ -130,8 +133,22 @@ module Hive
         {
           "reader_status" => "missing", "local_date" => date,
           "coverage_started_at" => coverage,
-          "precoverage" => precoverage, "stale" => false
+          "precoverage" => precoverage, "stale" => false,
+          **missing_navigation(date)
         }
+      end
+
+      def missing_navigation(date)
+        return { "previous_date" => nil, "next_date" => nil } unless date
+
+        target = Date.iso8601(date.to_s)
+        labels = @store.intervals.map { |interval| Date.iso8601(interval.fetch("local_date")) }
+        {
+          "previous_date" => labels.select { |label| label < target }.max&.iso8601,
+          "next_date" => labels.select { |label| label > target }.min&.iso8601
+        }
+      rescue Date::Error, TypeError
+        { "previous_date" => nil, "next_date" => nil }
       end
 
       def normalize_date(value)

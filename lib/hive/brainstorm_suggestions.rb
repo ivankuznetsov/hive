@@ -28,6 +28,7 @@ module Hive
   end
 end
 
+require "hive/brainstorm_suggestions/safety"
 require "hive/brainstorm_suggestions/binding"
 require "hive/brainstorm_suggestions/envelope"
 require "hive/brainstorm_suggestions/store"

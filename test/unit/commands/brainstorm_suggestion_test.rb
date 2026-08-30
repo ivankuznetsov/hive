@@ -3,6 +3,7 @@ require "json"
 require "hive/commands/brainstorm_suggestion"
 require "hive/brainstorm_suggestions/envelope"
 require "hive/brainstorm_suggestions/store"
+require_relative "../../fixtures/brainstorm_suggestions/pre_feature_parser"
 
 class HiveCommandsBrainstormSuggestionTest < Minitest::Test
   def test_cleanup_is_idempotent_and_preserves_parser_visible_answers
@@ -57,6 +58,42 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
       assert_equal false, receipt.fetch("safe_to_disable")
       assert_equal "lock_busy", receipt.fetch("tasks").first.fetch("status")
+    end
+  end
+
+  def test_cleanup_restores_the_exact_pre_feature_parser_view
+    Dir.mktmpdir do |root|
+      task = File.join(root, "2-brainstorm", "task-1")
+      FileUtils.mkdir_p(task)
+      baseline = <<~MARKDOWN
+        ## Round 1
+        ### Q1. Unanswered?
+        ### A1.
+        ### Q2. Answered?
+        ### A2.
+        Operator answer
+        <!-- WAITING -->
+      MARKDOWN
+      envelope = Hive::BrainstormSuggestions::Envelope.render(
+        binding: "d" * 64, text: "Advisory candidate"
+      )
+      polluted = baseline.sub("### A1.\n", "### A1.\n#{envelope}")
+      path = File.join(task, "brainstorm.md")
+      File.write(path, polluted)
+      Hive::BrainstormSuggestions::Store.new(task).write("records" => [])
+
+      expected = PreFeatureBrainstormParser.parse_text(baseline)
+      before_cleanup = PreFeatureBrainstormParser.parse_text(polluted)
+      refute_equal expected.map(&:answer), before_cleanup.map(&:answer)
+
+      receipt = Hive::Commands::BrainstormSuggestion.new(
+        "cleanup", task_roots: [ task ], json: true, output: StringIO.new
+      ).call
+      actual = PreFeatureBrainstormParser.parse_text(File.read(path))
+
+      assert receipt.fetch("safe_to_disable")
+      assert_equal expected.map(&:answer), actual.map(&:answer)
+      assert_equal expected.all?(&:answered?), actual.all?(&:answered?)
     end
   end
 

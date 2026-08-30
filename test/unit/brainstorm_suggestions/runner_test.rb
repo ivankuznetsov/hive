@@ -35,6 +35,19 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       assert_equal "/usr/bin/bwrap", launch.argv.first
       tools_index = launch.argv.index("--tools")
       assert_equal "", launch.argv.fetch(tools_index + 1)
+      assert_equal "", launch.argv.fetch(launch.argv.index("--allowedTools") + 1)
+      assert_equal "default", launch.argv.fetch(launch.argv.index("--disallowedTools") + 1)
+      assert_equal "", launch.argv.fetch(launch.argv.index("--setting-sources") + 1)
+      assert_equal "{}", launch.argv.fetch(launch.argv.index("--settings") + 1)
+      assert_equal "{}", launch.argv.fetch(launch.argv.index("--mcp-config") + 1)
+      assert_includes launch.argv, "--strict-mcp-config"
+      assert_includes launch.argv, "--disable-slash-commands"
+      assert_includes launch.argv, "--no-session-persistence"
+      assert_equal "dontAsk", launch.argv.fetch(launch.argv.index("--permission-mode") + 1)
+      assert_equal "/bundle", launch.argv.fetch(launch.argv.index("--chdir") + 1)
+      refute_includes launch.argv, "--bind"
+      refute launch.environment.key?("HOME")
+      refute launch.environment.key?("PATH")
       refute launch.argv.any? { |value| value.include?(Dir.pwd) }
       Hive::BrainstormSuggestions::Runner::Execution.new(
         stdout: JSON.generate("structured_output" => {

@@ -91,6 +91,32 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
     end
   end
 
+  def test_unrelated_tracked_change_does_not_change_selected_identity
+    with_repository do |root|
+      with_task(root) do |task|
+        before = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        ).selected_identity
+
+        FileUtils.mkdir_p(File.join(root, "notes"))
+        File.write(File.join(root, "notes", "unrelated.txt"), "zebra inventory\n")
+        git(root, "add", "notes/unrelated.txt")
+        git(root, "commit", "-qm", "unrelated tracked note")
+        unrelated = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        ).selected_identity
+
+        File.write(File.join(root, "lib", "adapter.rb"), "ADAPTER = :selected_change\n")
+        selected = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        ).selected_identity
+
+        assert_equal before, unrelated
+        refute_equal unrelated, selected
+      end
+    end
+  end
+
   def test_materialized_bundle_is_private_and_worker_immutable
     with_repository do |root|
       with_task(root) do |task|

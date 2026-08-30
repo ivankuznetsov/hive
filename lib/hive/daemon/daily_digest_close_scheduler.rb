@@ -33,6 +33,8 @@ module Hive
         @store = store
         @config_loader = config_loader
         @date_resolver = date_resolver || method(:resolve_date)
+        @pending = { REFRESH_STAGE => {}, STAGE => {} }
+        @failures = {}
       end
 
       def reconfigure(enabled:, interval_sec:)
@@ -42,41 +44,61 @@ module Hive
 
       def tick(now: @clock.call)
         return [] unless @enabled
-        return [] if @pending.any? || backed_off?(now)
-
-        state = read_state
-        last = parse_time(state["last_completed_at"])
-        return [] if last && now.utc - last < @interval_sec
 
         date = digest_date(@date_resolver.call(now))
-        @pending[date] = true
-        [ dispatch_for(date, stage: stage_for(date, now: now)) ]
+        stage = stage_for(date, now: now)
+        return [] if pending_for(stage).any? || stage_backed_off?(stage, now)
+
+        state = read_state
+        last = parse_time(state[state_time_key(stage)] || state["last_completed_at"])
+        return [] if last && now.utc - last < @interval_sec
+
+        pending_for(stage)[date] = true
+        [ dispatch_for(date, stage: stage) ]
       end
 
-      def complete(date:, exit_code:, envelope: nil, now: @clock.call)
+      def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
         local_date = digest_date(date)
-        @pending.delete(local_date)
+        stage = completion_stage(local_date, stage, now: now)
+        pending_for(stage).delete(local_date)
         unless exit_code && exit_code.to_i.zero?
-          record_failure(now)
+          record_stage_failure(stage, now)
           return
         end
 
-        write_state(
-          "last_completed_at" => now.utc.iso8601(6),
-          "last_record_date" => local_date,
+        state = read_state.merge(
+          state_time_key(stage) => now.utc.iso8601(6),
+          state_date_key(stage) => local_date,
           "updated_at" => now.utc.iso8601(6)
         )
-        @failure = nil
+        write_state(state)
+        @failures.delete(stage)
       rescue StandardError
-        record_failure(now)
+        record_stage_failure(stage || STAGE, now)
         raise
+      end
+
+      def cancel(date:, stage: nil)
+        local_date = digest_date(date)
+        if stage
+          pending_for(stage).delete(local_date)
+        else
+          @pending.each_value { |dates| dates.delete(local_date) }
+        end
+      end
+
+      def pending?(date, stage: nil)
+        local_date = digest_date(date)
+        return pending_for(stage).key?(local_date) if stage
+
+        @pending.any? { |_identity, dates| dates.key?(local_date) }
       end
 
       private
 
       def dispatch_for(date, stage: STAGE)
         {
-          project: PROJECT, slug: date.to_s, stage: stage,
+          project: stage, slug: date.to_s, stage: stage,
           command: "hive digest refresh --json",
           state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
         }
@@ -110,6 +132,52 @@ module Hive
       rescue ArgumentError, TypeError => error
         log_state_unreadable("malformed last_completed_at #{value.inspect}: #{error.message}")
         nil
+      end
+
+      def pending_for(stage)
+        @pending.fetch(normalize_stage(stage))
+      end
+
+      def normalize_stage(stage)
+        value = stage.to_s
+        return value if [ REFRESH_STAGE, STAGE ].include?(value)
+
+        raise ArgumentError, "unknown daily digest scheduler stage #{stage.inspect}"
+      end
+
+      def completion_stage(date, explicit, now:)
+        return normalize_stage(explicit) if explicit
+
+        matches = @pending.filter_map { |identity, dates| identity if dates.key?(date) }
+        return matches.first if matches.one?
+        return stage_for(date, now: now) if matches.empty?
+
+        raise ArgumentError, "daily digest completion stage is ambiguous for #{date}"
+      end
+
+      def state_time_key(stage)
+        stage == REFRESH_STAGE ? "last_refresh_completed_at" : "last_close_completed_at"
+      end
+
+      def state_date_key(stage)
+        stage == REFRESH_STAGE ? "last_refresh_record_date" : "last_close_record_date"
+      end
+
+      def stage_backed_off?(stage, now)
+        failure = @failures[stage]
+        failure && now < failure.fetch(:next_eligible_at)
+      end
+
+      def record_stage_failure(stage, now)
+        stage = normalize_stage(stage)
+        count = @failures.dig(stage, :count).to_i + 1
+        intervals = DigestSchedulerBase::FAILURE_BACKOFF_SCHEDULE
+        delay = intervals[[ count - 1, intervals.length - 1 ].min]
+        @failures[stage] = { count: count, next_eligible_at: now + delay }
+        @logger&.event(
+          :daily_digest_scheduler_failure_backoff, stage: stage, failures: count,
+          retry_after_sec: delay, next_eligible_at: (now + delay).utc.iso8601
+        )
       end
 
       def positive_interval(value)

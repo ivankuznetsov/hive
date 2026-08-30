@@ -189,6 +189,57 @@ class DailyDigestDeliveryTest < Minitest::Test
     end
   end
 
+  def test_live_delivery_owner_is_reported_without_loading_credentials
+    with_tmp_dir do |dir|
+      ledger = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "deliveries"),
+        process_identity: -> { [ 321, "start-321" ] },
+        process_alive: ->(_pid, _start) { true }
+      )
+      rendered = Hive::DailyDigest::TelegramRenderer.new(
+        web_origin: "https://hive.example"
+      ).render(record)
+      ledger.prepare(
+        local_date: DATE, record_id: "a" * 64,
+        amendment_frontier: rendered.amendment_frontier,
+        payload_hash: rendered.payload_hash,
+        destination_chat_id: 12_345, now: NOW
+      )
+      ledger.mark_sending(DATE, attempt: 1, now: NOW)
+      token_calls = 0
+      delivery, = build_delivery(
+        dir, telegram: FakeTelegram.new, ledger: ledger,
+        token_loader: -> { token_calls += 1; "test-token" }
+      )
+
+      assert_raises(Hive::DailyDigest::Delivery::InFlight) do
+        delivery.deliver(date: DATE)
+      end
+      assert_equal 0, token_calls
+      assert_equal "sending", ledger.read(DATE).fetch("outcome")
+    end
+  end
+
+  def test_default_clock_logger_transport_and_error_classifier_boundaries
+    delivery = Hive::DailyDigest::Delivery.new
+    assert_instance_of Time, delivery.instance_variable_get(:@clock).call
+    assert_nil delivery.send(:delivery_logger)
+
+    with_tmp_dir do |dir|
+      logger = delivery.send(
+        :delivery_logger,
+        { "log_file" => File.join(dir, "daily-digest.log") }
+      )
+      assert_instance_of Hive::Bot::Logger, logger
+      telegram = delivery.send(:build_telegram, token: "token", logger: logger)
+      assert_instance_of Hive::Bot::Telegram, telegram
+    end
+
+    assert_equal false, delivery.send(:telegram_definite_failure?, IOError.new("offline"))
+    response_error = ::Telegram::Bot::Exceptions::ResponseError.allocate
+    assert_equal true, delivery.send(:telegram_definite_failure?, response_error)
+  end
+
   private
 
   DATE = "2026-08-30".freeze

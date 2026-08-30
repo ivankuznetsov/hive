@@ -106,6 +106,7 @@ module Hive
         when Hive::DailyDigest::PrunedRecord then "pruned"
         when Hive::DailyDigest::Delivery::NotClosed then "not_closed"
         when Hive::DailyDigest::Delivery::DeliveryFailed then "delivery_failed"
+        when Hive::DailyDigest::Delivery::InFlight then "delivery_in_flight"
         when Hive::ConfigError then "config"
         when Hive::DailyDigest::Error then "digest_error"
         else "internal"

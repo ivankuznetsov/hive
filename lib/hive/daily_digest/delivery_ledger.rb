@@ -5,7 +5,9 @@ require "time"
 require "hive/atomic_file"
 require "hive/daily_digest"
 require "hive/daily_digest/record"
+require "hive/lock"
 require "hive/paths"
+require "hive/process_kill"
 
 module Hive
   module DailyDigest
@@ -24,8 +26,13 @@ module Hive
 
       attr_reader :root
 
-      def initialize(root: Hive::Paths.daily_digest_delivery_root)
+      def initialize(root: Hive::Paths.daily_digest_delivery_root,
+                     process_identity: nil, process_alive: nil)
         @root = File.expand_path(root)
+        @process_identity = process_identity || lambda do
+          [ Process.pid, Hive::Lock.process_start_time(Process.pid) ]
+        end
+        @process_alive = process_alive || method(:matching_process_alive?)
       end
 
       def prepare(local_date:, record_id:, amendment_frontier:, payload_hash:,
@@ -33,9 +40,13 @@ module Hive
         date = normalize_date(local_date)
         synchronize do
           current = read_unlocked(date)
-          current = promote_sending_unlocked(current, now: now) if current&.fetch("outcome") == "sending"
           if current
             validate_identity!(current, record_id: record_id, destination_chat_id: destination_chat_id)
+            if current.fetch("outcome") == "sending"
+              return Preparation.new(action: :in_flight, receipt: current) if sender_alive?(current)
+
+              current = promote_sending_unlocked(current, now: now)
+            end
             action = preparation_action(current, retry_requested: retry_requested)
             return Preparation.new(action: :send, receipt: current) if action == :resume
             return Preparation.new(action: action, receipt: current) unless action == :send
@@ -70,7 +81,16 @@ module Hive
       end
 
       def mark_sending(local_date, attempt:, now:)
-        transition(local_date, attempt: attempt, from: [ "prepared" ], to: "sending", now: now)
+        pid, process_start_time = @process_identity.call
+        transition(
+          local_date, attempt: attempt, from: [ "prepared" ], to: "sending", now: now,
+          additions: {
+            "sender_pid" => Integer(pid),
+            "sender_process_start_time" => process_start_time&.to_s
+          }
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidTransition, "digest delivery sender identity is invalid"
       end
 
       def mark_sent(local_date, attempt:, now:)
@@ -128,7 +148,7 @@ module Hive
         )
       end
 
-      def transition(local_date, attempt:, from:, to:, now:, reason_code: nil)
+      def transition(local_date, attempt:, from:, to:, now:, reason_code: nil, additions: {})
         date = normalize_date(local_date)
         synchronize do
           receipt = read_unlocked(date)
@@ -136,12 +156,13 @@ module Hive
 
           transition_unlocked(
             receipt, attempt: attempt, from: from, to: to, now: now,
-            reason_code: reason_code
+            reason_code: reason_code, additions: additions
           )
         end
       end
 
-      def transition_unlocked(receipt, attempt:, from:, to:, now:, reason_code: nil)
+      def transition_unlocked(receipt, attempt:, from:, to:, now:, reason_code: nil,
+                              additions: {})
         unless OUTCOMES.include?(to)
           raise InvalidTransition, "unknown digest delivery outcome #{to.inspect}"
         end
@@ -151,7 +172,7 @@ module Hive
         end
 
         timestamp = normalize_time(now)
-        updated = receipt.merge(
+        updated = receipt.merge(additions).merge(
           "outcome" => to, "updated_at" => timestamp, "reason_code" => bounded_reason(reason_code)
         )
         updated["history"] = Array(receipt["history"]) + [
@@ -169,6 +190,22 @@ module Hive
                   receipt.fetch("destination_chat_id") == expected_chat
 
         raise Conflict, "digest delivery identity changed for #{receipt.fetch('local_date')}"
+      end
+
+      def sender_alive?(receipt)
+        pid = receipt["sender_pid"]
+        return false unless pid.is_a?(Integer) && pid.positive?
+
+        @process_alive.call(pid, receipt["sender_process_start_time"])
+      rescue StandardError
+        false
+      end
+
+      def matching_process_alive?(pid, recorded_start)
+        return false unless Hive::ProcessKill.pid_alive?(pid)
+        return true if recorded_start.to_s.empty?
+
+        Hive::Lock.process_start_time(pid).to_s == recorded_start.to_s
       end
 
       def history_entry(attempt:, outcome:, at:, operator_retry: nil, reason_code: nil)

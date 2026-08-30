@@ -72,7 +72,7 @@ module Hive
           identity = [ row["project"], row["task_slug"] ].compact.join(":")
           state = [ row["stage"], row["state"] ].compact.join(" · ")
           age = row["waiting_age_seconds"] ? age_label(row.fetch("waiting_age_seconds")) : "age unknown"
-          lines << "• #{field(identity)} · #{field(row['kind'])} · #{field(state)} · #{age}"
+          lines << "• #{field(identity)} · #{field(row['kind'])} · #{field(state)} · #{field(age)}"
         end
         append_more(lines, rows.length - MAX_ATTENTION, "attention items")
       end

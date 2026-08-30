@@ -44,6 +44,24 @@ class DailyDigestTelegramRendererTest < Minitest::Test
       Hive::DailyDigest::TelegramRenderer.new(web_origin: "javascript:alert(1)")
     end
     assert_match(/http\(s\)/, error.message)
+
+    assert_raises(Hive::ConfigError) do
+      Hive::DailyDigest::TelegramRenderer.new(web_origin: "%")
+    end
+  end
+
+  def test_age_labels_cover_minutes_seconds_and_invalid_values
+    renderer = Hive::DailyDigest::TelegramRenderer.new(web_origin: "https://hive.example")
+    assert_equal "1m", renderer.send(:age_label, 60)
+    assert_equal "<1m", renderer.send(:age_label, 59)
+    assert_equal "age unknown", renderer.send(:age_label, "bad")
+
+    young = record.merge(
+      "attention" => [ record.fetch("attention").first.merge("waiting_age_seconds" => 59) ]
+    )
+    rendered = renderer.render(young)
+    assert_includes rendered.text, "&lt;1m"
+    refute_includes rendered.text, " · <1m"
   end
 
   private

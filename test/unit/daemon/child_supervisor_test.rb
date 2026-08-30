@@ -563,6 +563,26 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal 100, sup.timeout_for_verb(""), "empty verb falls back to default"
   end
 
+  def test_digest_stage_timeout_wins_over_the_shared_digest_verb
+    sup = Hive::Daemon::ChildSupervisor.new(
+      hive_bin: FAKE_HIVE, dry_run: true, default_timeout_sec: 0,
+      verb_timeouts: { "digest" => 3_600 },
+      stage_timeouts: {
+        "daily_digest_refresh" => 900,
+        "daily_digest_close" => 3_600,
+        "daily_digest_delivery" => 300
+      }
+    )
+
+    pid = sup.spawn(
+      command_string: "hive digest send --date 2026-08-30 --json",
+      project: "daily_digest_delivery", slug: "2026-08-30",
+      stage: "daily_digest_delivery"
+    )
+
+    assert_equal 300, sup.instance_variable_get(:@running).fetch(pid).fetch(:timeout_sec)
+  end
+
   def test_enforce_timeouts_terms_then_kills_over_deadline_child
     sup = Hive::Daemon::ChildSupervisor.new(
       hive_bin: FAKE_HIVE, default_timeout_sec: 60, kill_grace_sec: 30
@@ -622,9 +642,14 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
 
   def test_update_timeouts_only_affects_future_spawns
     sup = Hive::Daemon::ChildSupervisor.new(hive_bin: FAKE_HIVE, default_timeout_sec: 60)
-    sup.update_timeouts(default_timeout_sec: 5, verb_timeouts: { "develop" => 9 }, kill_grace_sec: 1)
+    sup.update_timeouts(
+      default_timeout_sec: 5, verb_timeouts: { "develop" => 9 },
+      stage_timeouts: { "daily_digest_delivery" => 3 }, kill_grace_sec: 1
+    )
     assert_equal 9, sup.timeout_for_verb("develop")
     assert_equal 5, sup.timeout_for_verb("review")
+    assert_equal 3, sup.timeout_for_stage("daily_digest_delivery", verb: "digest")
+    assert_equal 9, sup.timeout_for_stage("6-review", verb: "develop")
   end
 
   def test_pgid_for_returns_nil_when_group_gone

@@ -22,11 +22,11 @@ module Hive
         @failure = nil
       end
 
-      def cancel(date:)
+      def cancel(date:, stage: nil)
         @pending.delete(digest_date(date))
       end
 
-      def pending?(date)
+      def pending?(date, stage: nil)
         @pending.key?(digest_date(date))
       end
 

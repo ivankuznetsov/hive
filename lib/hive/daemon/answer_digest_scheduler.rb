@@ -46,7 +46,7 @@ module Hive
         [ dispatch_for(today) ]
       end
 
-      def complete(date:, exit_code:, envelope: nil, now: @clock.call)
+      def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
         local_date = Hive::LocalDateWindow.parse_date(date)
         @pending.delete(local_date.iso8601)
 

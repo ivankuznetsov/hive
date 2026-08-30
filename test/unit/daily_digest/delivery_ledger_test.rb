@@ -29,7 +29,9 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
 
   def test_interrupted_send_becomes_unknown_and_only_explicit_retry_rearms_it
     with_tmp_dir do |dir|
-      ledger = Hive::DailyDigest::DeliveryLedger.new(root: File.join(dir, "deliveries"))
+      ledger = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "deliveries"), process_alive: ->(_pid, _start) { false }
+      )
       ledger.prepare(**identity, now: NOW)
       ledger.mark_sending(DATE, attempt: 1, now: NOW + 1)
 
@@ -41,6 +43,26 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
       assert_equal :send, retrying.action
       assert_equal 2, retrying.receipt.fetch("attempt")
       assert_equal true, retrying.receipt.fetch("operator_retry")
+    end
+  end
+
+  def test_live_sender_remains_in_flight_and_can_commit_success
+    with_tmp_dir do |dir|
+      ledger = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "deliveries"),
+        process_identity: -> { [ 321, "start-321" ] },
+        process_alive: ->(pid, start) { pid == 321 && start == "start-321" }
+      )
+      ledger.prepare(**identity, now: NOW)
+      ledger.mark_sending(DATE, attempt: 1, now: NOW + 1)
+
+      concurrent = ledger.prepare(**identity, now: NOW + 2)
+
+      assert_equal :in_flight, concurrent.action
+      assert_equal "sending", concurrent.receipt.fetch("outcome")
+      assert_equal 321, concurrent.receipt.fetch("sender_pid")
+      assert_equal "start-321", concurrent.receipt.fetch("sender_process_start_time")
+      assert_equal "sent", ledger.mark_sent(DATE, attempt: 1, now: NOW + 3).fetch("outcome")
     end
   end
 
@@ -104,6 +126,58 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
       end
 
       File.write(File.join(root, "#{DATE}.json"), "{bad")
+      assert_raises(Hive::DailyDigest::DeliveryLedger::Error) { ledger.read(DATE) }
+    end
+  end
+
+  def test_transition_validation_rejects_unknown_outcomes_and_attempt_types
+    with_tmp_dir do |dir|
+      ledger = Hive::DailyDigest::DeliveryLedger.new(root: File.join(dir, "deliveries"))
+      receipt = ledger.prepare(**identity, now: NOW).receipt
+      assert_raises(Hive::DailyDigest::DeliveryLedger::InvalidTransition) do
+        ledger.send(
+          :transition_unlocked, receipt, attempt: 1, from: [ "prepared" ],
+          to: "impossible", now: NOW
+        )
+      end
+      assert_raises(Hive::DailyDigest::DeliveryLedger::InvalidTransition) do
+        ledger.send(
+          :transition_unlocked, receipt, attempt: Object.new, from: [ "prepared" ],
+          to: "sending", now: NOW
+        )
+      end
+    end
+  end
+
+  def test_invalid_receipt_shape_and_scalar_inputs_are_typed
+    with_tmp_dir do |dir|
+      root = File.join(dir, "deliveries")
+      FileUtils.mkdir_p(root)
+      File.write(File.join(root, "#{DATE}.json"), JSON.generate("not-an-object"))
+      ledger = Hive::DailyDigest::DeliveryLedger.new(root: root)
+      assert_raises(Hive::DailyDigest::DeliveryLedger::Error) { ledger.read(DATE) }
+
+      assert_raises(Hive::DailyDigest::DeliveryLedger::Error) { ledger.read("bad-date") }
+      assert_raises(Hive::DailyDigest::DeliveryLedger::Error) do
+        ledger.send(:normalize_time, "bad-time")
+      end
+      [ 0, "bad" ].each do |chat_id|
+        assert_raises(Hive::DailyDigest::DeliveryLedger::Error) do
+          ledger.send(:normalize_chat_id, chat_id)
+        end
+      end
+    end
+  end
+
+  def test_symlinked_ledger_lock_is_rejected
+    with_tmp_dir do |dir|
+      root = File.join(dir, "deliveries")
+      FileUtils.mkdir_p(root)
+      target = File.join(dir, "lock-target")
+      File.write(target, "")
+      File.symlink(target, File.join(root, ".ledger.lock"))
+      ledger = Hive::DailyDigest::DeliveryLedger.new(root: root)
+
       assert_raises(Hive::DailyDigest::DeliveryLedger::Error) { ledger.read(DATE) }
     end
   end

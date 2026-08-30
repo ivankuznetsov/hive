@@ -78,6 +78,58 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
     end
   end
 
+  def test_reconfiguration_and_state_write_failure_are_typed
+    with_tmp_dir do |dir|
+      store = build_store(dir, zone: "UTC", dates: %w[2026-08-29 2026-08-30])
+      scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+        state_path: File.join(dir, "state.json"), enabled: false, store: store
+      )
+      scheduler.reconfigure(enabled: true, hour: "9")
+      assert_equal 1, scheduler.tick(now: Time.iso8601("2026-08-30T09:00:00Z")).size
+      scheduler.define_singleton_method(:write_state) { |_value| raise IOError, "disk failed" }
+      assert_raises(IOError) do
+        scheduler.complete(
+          date: "2026-08-29", exit_code: 0,
+          envelope: { "outcome" => "sent" }, now: Time.iso8601("2026-08-30T09:01:00Z")
+        )
+      end
+    end
+  end
+
+  def test_invalid_zone_missing_record_and_record_identity_fallbacks_do_not_dispatch
+    previous = Hive::DailyDigest::Calendar.new(time_zone: "UTC")
+                                          .interval_for("2026-08-29", sequence: 1)
+    current = Hive::DailyDigest::Calendar.new(time_zone: "UTC")
+                                         .interval_for("2026-08-30", sequence: 2)
+    bad_current = current.merge("time_zone" => "Mars/Olympus")
+    store = Object.new
+    store.define_singleton_method(:intervals) { [ previous, bad_current ] }
+    store.define_singleton_method(:read) do |_date|
+      raise Hive::DailyDigest::MissingRecord, "missing"
+    end
+    scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(enabled: true, store: store)
+    now = Time.iso8601("2026-08-30T12:00:00Z")
+
+    assert_nil scheduler.send(:preceding_closed_record, now)
+    assert_equal false, scheduler.send(:due?, now, bad_current)
+    assert_nil scheduler.send(:record_id_for, "2026-08-29")
+
+    store.define_singleton_method(:read) { |_date| { "lifecycle" => "open" } }
+    assert_nil scheduler.send(:record_id_for, "2026-08-29")
+    store.define_singleton_method(:read) do |_date|
+      { "lifecycle" => "closed", "record_id" => "record:one" }
+    end
+    assert_equal "record:one", scheduler.send(:record_id_for, "2026-08-29")
+  end
+
+  def test_invalid_delivery_hours_are_rejected
+    [ -1, 24, "bad" ].each do |hour|
+      assert_raises(ArgumentError) do
+        Hive::Daemon::DailyDigestDeliveryScheduler.new(enabled: true, hour: hour)
+      end
+    end
+  end
+
   private
 
   def build_store(dir, zone:, dates:)

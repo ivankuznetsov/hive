@@ -1301,7 +1301,7 @@ module Hive
       end
 
       def project_brainstorm_suggestions(row, path)
-        return unless row.stage.to_s == "2-brainstorm"
+        return unless row.stage.to_s == Hive::Stages::SHORT_TO_FULL.fetch("brainstorm")
 
         Hive::Tui::BrainstormSuggestions.project!(
           task_root: row.folder.to_s, path: path

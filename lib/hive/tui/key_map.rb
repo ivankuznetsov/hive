@@ -1,5 +1,6 @@
 require "shellwords"
 require "hive/markers"
+require "hive/stages"
 require "hive/task_action"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
@@ -144,7 +145,8 @@ module Hive
       end
 
       def brainstorm_suggestion_row?(row)
-        row.stage.to_s == "2-brainstorm" && row.action_key.to_s == "needs_input"
+        row.stage.to_s == Hive::Stages::SHORT_TO_FULL.fetch("brainstorm") &&
+          row.action_key.to_s == "needs_input"
       end
 
       # Keys that work even when the cursor sits on an empty grid; row

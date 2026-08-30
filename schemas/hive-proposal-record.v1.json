@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-record.v1.json",
+  "title": "Hive proposal candidate record (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "proposal_id", "subject", "revision",
+    "proposed_change", "motivation", "evidence", "author", "lineage",
+    "provenance", "source_event_id", "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-proposal-record" },
+    "schema_version": { "const": 1 },
+    "proposal_id": { "$ref": "#/$defs/ProposalId" },
+    "subject": { "$ref": "#/$defs/Subject" },
+    "revision": { "$ref": "#/$defs/BoundedText" },
+    "proposed_change": { "$ref": "#/$defs/FreeText" },
+    "motivation": { "$ref": "#/$defs/FreeText" },
+    "evidence": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "items": { "$ref": "#/$defs/Evidence" }
+    },
+    "author": { "$ref": "#/$defs/Author" },
+    "lineage": { "$ref": "#/$defs/Lineage" },
+    "provenance": { "$ref": "#/$defs/Provenance" },
+    "source_event_id": { "$ref": "#/$defs/SourceEventId" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SourceEventId": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "GitDigest": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "BoundedText": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "FreeText": { "type": "string", "minLength": 1, "maxLength": 16384 },
+    "Subject": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "reference"],
+      "properties": {
+        "kind": { "enum": ["skill", "workflow"] },
+        "reference": {
+          "type": "string", "minLength": 1, "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        }
+      }
+    },
+    "Retention": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy", "enforcement"],
+      "properties": {
+        "policy": { "enum": ["ephemeral", "task", "project", "indefinite"] },
+        "enforcement": { "const": "none" }
+      }
+    },
+    "Evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label", "digest", "bytes", "media_type", "visibility", "retention"],
+      "properties": {
+        "label": { "$ref": "#/$defs/BoundedText" },
+        "digest": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "media_type": { "$ref": "#/$defs/BoundedText" },
+        "visibility": { "enum": ["restricted", "private", "project"] },
+        "retention": { "$ref": "#/$defs/Retention" },
+        "source_ref": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "summary": { "$ref": "#/$defs/FreeText" }
+      }
+    },
+    "Author": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "binding"],
+      "properties": {
+        "id": { "$ref": "#/$defs/BoundedText" },
+        "kind": { "$ref": "#/$defs/BoundedText" },
+        "binding": { "$ref": "#/$defs/BoundedText" }
+      }
+    },
+    "Lineage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retries", "requested_supersedes"],
+      "properties": {
+        "retries": { "anyOf": [{ "$ref": "#/$defs/ProposalId" }, { "type": "null" }] },
+        "requested_supersedes": { "anyOf": [{ "$ref": "#/$defs/ProposalId" }, { "type": "null" }] }
+      }
+    },
+    "Actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/BoundedText" },
+        "kind": { "$ref": "#/$defs/BoundedText" },
+        "binding_fingerprint": { "$ref": "#/$defs/Digest" },
+        "capability": { "$ref": "#/$defs/BoundedText" }
+      }
+    },
+    "EvaluatorBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "fingerprint"],
+      "properties": {
+        "id": { "$ref": "#/$defs/BoundedText" },
+        "fingerprint": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "task_id", "task_generation", "ownership_generation", "attempt_id",
+        "workflow_id", "stage", "actor", "source_commit"
+      ],
+      "properties": {
+        "task_id": { "$ref": "#/$defs/BoundedText" },
+        "task_generation": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "minLength": 1, "maxLength": 512 }
+          ]
+        },
+        "ownership_generation": { "$ref": "#/$defs/BoundedText" },
+        "attempt_id": { "$ref": "#/$defs/BoundedText" },
+        "workflow_id": { "$ref": "#/$defs/BoundedText" },
+        "stage": { "$ref": "#/$defs/BoundedText" },
+        "actor": { "$ref": "#/$defs/Actor" },
+        "source_commit": { "$ref": "#/$defs/GitDigest" },
+        "configuration_fingerprint": { "$ref": "#/$defs/Digest" },
+        "artifact_reference": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "artifact_digest": { "$ref": "#/$defs/Digest" },
+        "evaluator_binding": { "$ref": "#/$defs/EvaluatorBinding" }
+      }
+    }
+  }
+}

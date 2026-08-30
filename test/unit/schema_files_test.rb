@@ -35,6 +35,17 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_proposal_record_and_event_schemas_are_registered_and_closed
+    %w[hive-proposal-record hive-proposal-event].each do |name|
+      path = Hive::Schemas.schema_path(name)
+      document = JSON.parse(File.read(path))
+
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+      assert_equal false, document.fetch("additionalProperties")
+      assert_equal 1, document.dig("properties", "schema_version", "const")
+    end
+  end
+
   def test_plan_review_schema_is_registered_closed_and_versioned
     path = Hive::Schemas.schema_path("hive-plan-review")
     document = JSON.parse(File.read(path))

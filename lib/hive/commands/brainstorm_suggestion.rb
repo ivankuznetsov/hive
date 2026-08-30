@@ -17,19 +17,30 @@ module Hive
     # not change before reporting that disabling the feature is safe.
     class BrainstormSuggestion
       RECEIPT_SCHEMA = "hive-brainstorm-suggestion-cleanup"
+      ACTION_RECEIPT_SCHEMA = "hive-brainstorm-suggestion-action"
+      ACTIONS = %w[cleanup retry restore dismiss].freeze
 
       def initialize(action, target: nil, project: nil, task_roots: nil,
-                     json: false, output: $stdout)
+                     question: nil, binding: nil, json: false, output: $stdout,
+                     clock: -> { Time.now.utc })
         @action = action.to_s
         @target = target.to_s unless target.nil?
         @project = project.to_s unless project.nil?
         @task_roots = task_roots
+        @question = Integer(question) unless question.nil?
+        @binding = binding.to_s unless binding.nil?
         @json = json
         @output = output
+        @clock = clock
+      rescue ArgumentError, TypeError
+        raise Hive::UsageError, "--question must be a positive integer"
       end
 
       def call
-        raise Hive::UsageError, "expected `cleanup`" unless @action == "cleanup"
+        unless ACTIONS.include?(@action)
+          raise Hive::UsageError, "expected one of: #{ACTIONS.join(', ')}"
+        end
+        return mutate_candidate if @action != "cleanup"
 
         tasks = discover_task_roots
         results = tasks.map { |task_root| cleanup_task(task_root) }
@@ -50,6 +61,112 @@ module Hive
       end
 
       private
+
+      def mutate_candidate
+        unless @target && @question&.positive? && @binding && !@binding.empty?
+          raise Hive::UsageError,
+                "#{@action} requires TARGET, --question, and --binding"
+        end
+        task_root = discover_task_roots.fetch(0) do
+          raise Hive::InvalidTaskPath, "brainstorm suggestion task #{@target.inspect} was not found"
+        end
+        result = mutate_task(task_root)
+        receipt = {
+          "schema" => ACTION_RECEIPT_SCHEMA,
+          "schema_version" => 1,
+          "ok" => result.fetch("status") == "updated",
+          "operation" => @action,
+          "task" => File.basename(task_root),
+          "question" => @question,
+          "status" => result.fetch("status"),
+          "state" => result["state"],
+          "binding" => result["binding"],
+          "reason" => result["reason"]
+        }
+        emit_action(receipt)
+        receipt
+      end
+
+      def mutate_task(task_root)
+        outcome = { "status" => "not_found", "reason" => "candidate_not_found" }
+        Hive::Lock.with_task_lock(
+          task_root,
+          { op: "brainstorm_suggestion_#{@action}", slug: File.basename(task_root) },
+          create: false
+        ) do
+          store = Hive::BrainstormSuggestions::Store.new(task_root)
+          document = store.read
+          record = document.fetch("records").find { |item| item["ordinal"] == @question }
+          unless record && binding_matches?(record)
+            next outcome = { "status" => "stale", "reason" => "binding_mismatch" }
+          end
+
+          unless action_allowed?(record)
+            next outcome = {
+              "status" => "invalid_state", "reason" => "action_not_available",
+              "state" => record["state"], "binding" => current_binding(record)
+            }
+          end
+
+          apply_action!(record)
+          document["updated_at"] = @clock.call.utc.iso8601(6)
+          store.write(document)
+          outcome = {
+            "status" => "updated", "reason" => nil, "state" => record["state"],
+            "binding" => current_binding(record)
+          }
+        end
+        outcome
+      rescue Hive::ConcurrentRunError
+        { "status" => "lock_busy", "reason" => "task_lock_busy" }
+      end
+
+      def binding_matches?(record)
+        [ record["suggestion_binding"], record["input_binding"] ].compact.include?(@binding)
+      end
+
+      def current_binding(record)
+        record["suggestion_binding"] || record["input_binding"]
+      end
+
+      def action_allowed?(record)
+        case @action
+        when "retry"
+          Hive::BrainstormSuggestions::RETRYABLE_STATES.include?(record["state"]) ||
+            record["state"] == "stale" || record["state"] == "fresh"
+        when "restore"
+          record["state"] == "fresh" && record["dismissed"] == true
+        when "dismiss"
+          record["state"] == "fresh" && record["dismissed"] == false
+        end
+      end
+
+      def apply_action!(record)
+        now = @clock.call.utc.iso8601(6)
+        if @action == "restore"
+          record["dismissed"] = false
+        elsif @action == "dismiss"
+          record["dismissed"] = true
+        else
+          record.merge!(
+            "suggestion_binding" => nil,
+            "state" => "stale",
+            "text" => nil,
+            "rationale" => nil,
+            "provenance" => [],
+            "safe_reason" => "A replacement suggestion was requested.",
+            "retryable" => false,
+            "dismissed" => false,
+            "attempt_id" => nil,
+            "candidate_id" => nil,
+            "requested_at" => nil,
+            "next_retry_at" => now,
+            "automatic_attempts" => 0,
+            "error_code" => nil
+          )
+        end
+        record["updated_at"] = now
+      end
 
       def discover_task_roots
         roots = if @task_roots
@@ -176,6 +293,17 @@ module Hive
             "brainstorm suggestions cleanup: #{status}; " \
             "#{receipt.fetch('envelopes_removed')} envelopes, " \
             "#{receipt.fetch('sidecars_removed')} sidecars removed"
+          )
+        end
+      end
+
+      def emit_action(receipt)
+        if @json
+          @output.puts(JSON.generate(receipt))
+        else
+          @output.puts(
+            "brainstorm suggestion #{@action}: #{receipt.fetch('status')} " \
+            "for #{receipt.fetch('task')} question #{receipt.fetch('question')}"
           )
         end
       end

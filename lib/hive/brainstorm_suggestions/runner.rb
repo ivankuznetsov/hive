@@ -24,6 +24,24 @@ module Hive
         keyword_init: true
       )
 
+      # Thread-safe cooperative cancellation. The scheduler uses one token per
+      # bound request; the process loop observes it and terminates the complete
+      # provider process group before returning.
+      class Cancellation
+        def initialize
+          @mutex = Mutex.new
+          @cancelled = false
+        end
+
+        def cancel!
+          @mutex.synchronize { @cancelled = true }
+        end
+
+        def cancelled?
+          @mutex.synchronize { @cancelled }
+        end
+      end
+
       OUTPUT_SCHEMA = {
         "type" => "object",
         "additionalProperties" => false,
@@ -47,6 +65,23 @@ module Hive
           profile.tool_scope_flags.key?(:disallowed)
       end
 
+      def self.sweep_inactive!(runtime_parent = Dir.tmpdir)
+        return 0 unless File.directory?(runtime_parent)
+
+        Dir.children(runtime_parent).count do |name|
+          next false unless name.start_with?(RUNTIME_PREFIX)
+
+          path = File.join(runtime_parent, name)
+          status = File.lstat(path)
+          next false unless status.directory? && !status.symlink? && status.uid == Process.uid
+
+          FileUtils.remove_entry_secure(path)
+          true
+        rescue SystemCallError, IOError
+          false
+        end
+      end
+
       def initialize(profile:, model_arguments: [], timeout_sec: DEFAULT_TIMEOUT_SEC,
                      executor: nil, bwrap_path: "/usr/bin/bwrap",
                      executable_resolver: nil, runtime_parent: Dir.tmpdir)
@@ -59,9 +94,10 @@ module Hive
         @runtime_parent = runtime_parent
       end
 
-      def call(bundle:)
+      def call(bundle:, cancellation: nil)
         executable = available_executable
         return unavailable_result unless executable
+        return failed_result("cancelled") if cancellation&.cancelled?
 
         runtime_root = Dir.mktmpdir(RUNTIME_PREFIX, @runtime_parent)
         File.chmod(0o700, runtime_root)
@@ -74,7 +110,8 @@ module Hive
           executable: executable,
           bundle: bundle
         )
-        execution = @executor.call(launch)
+        execution = invoke_executor(launch, cancellation)
+        return failed_result("cancelled") if cancellation&.cancelled?
         return failed_result("timeout") if execution.timed_out
         return failed_result("provider_exit") unless execution.exit_code == 0
 
@@ -88,6 +125,14 @@ module Hive
       end
 
       private
+
+      def invoke_executor(launch, cancellation)
+        if @executor.respond_to?(:parameters) && @executor.parameters.length >= 2
+          @executor.call(launch, cancellation)
+        else
+          @executor.call(launch)
+        end
+      end
 
       def available_executable
         return unless self.class.profile_supported?(@profile)
@@ -194,7 +239,7 @@ module Hive
         outer
       end
 
-      def execute(launch)
+      def execute(launch, cancellation = nil)
         output_r, output_w = IO.pipe
         input_r, input_w = IO.pipe
         pid = Process.spawn(
@@ -212,7 +257,7 @@ module Hive
             output << chunk if output.bytesize < MAX_OUTPUT_BYTES
           end
         end
-        status = wait_for(pid, @timeout_sec)
+        status = wait_for(pid, @timeout_sec, cancellation: cancellation)
         unless status
           terminate(pid)
           reader.join(KILL_GRACE_SEC)
@@ -233,11 +278,12 @@ module Hive
         output_w&.close unless output_w&.closed?
       end
 
-      def wait_for(pid, timeout)
+      def wait_for(pid, timeout, cancellation: nil)
         deadline = monotonic_now + timeout
         loop do
           waited = Process.waitpid2(pid, Process::WNOHANG)
           return waited.last if waited
+          return if cancellation&.cancelled?
           return if monotonic_now >= deadline
 
           IO.select(nil, nil, nil, 0.05)

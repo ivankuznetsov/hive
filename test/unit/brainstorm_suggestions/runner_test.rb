@@ -174,6 +174,18 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     end
   end
 
+  def test_runtime_owned_by_an_uninspectable_process_is_live
+    Dir.mktmpdir do |root|
+      File.write(
+        File.join(root, Hive::BrainstormSuggestions::Runner::OWNER_FILE),
+        JSON.generate("pid" => Process.pid)
+      )
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::EPERM }) do
+        assert Hive::BrainstormSuggestions::Runner.send(:runtime_live?, root)
+      end
+    end
+  end
+
   def test_supported_profile_live_isolation_matrix
     skip "Bubblewrap is unavailable" unless File.executable?("/usr/bin/bwrap")
     skip "curl is unavailable" unless File.executable?("/usr/bin/curl")
@@ -224,6 +236,18 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     execution = Timeout.timeout(2) do
       runner.send(:execute, launch(command, "x" * (128 * 1024)))
     end
+
+    assert_equal 0, execution.exit_code
+    refute execution.timed_out
+  end
+
+  def test_closed_worker_stdin_is_a_bounded_execution_result
+    runner = Hive::BrainstormSuggestions::Runner.new(
+      profile: FakeProfile.new, timeout_sec: 1, bwrap_path: "/bin/true"
+    )
+    command = [ "/bin/sh", "-c", "exec 0<&-; sleep 0.1" ]
+
+    execution = runner.send(:execute, launch(command, "x" * (4 * 1024 * 1024)))
 
     assert_equal 0, execution.exit_code
     refute execution.timed_out

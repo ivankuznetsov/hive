@@ -46,6 +46,10 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     end
   end
 
+  class UnavailableRunner
+    def available? = false
+  end
+
   def test_missing_record_is_reconciled_and_an_unchanged_fresh_candidate_is_idempotent
     with_project do |_project, folder|
       digest = "a" * 64
@@ -309,6 +313,21 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     scheduler&.shutdown
   end
 
+  def test_tick_isolates_an_unexpected_failure_for_one_row
+    logger = EventLogger.new
+    scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new(logger: logger)
+    scheduler.define_singleton_method(:eligible_row?) { |_| false }
+    scheduler.define_singleton_method(:brainstorm_worker_row?) do |_row|
+      raise RuntimeError, "broken row"
+    end
+
+    assert_equal 0, scheduler.tick(rows: [ Object.new ], complete: false)
+    event = logger.events.find { |name, _| name == :brainstorm_suggestion_scheduler_error }
+    assert_includes event.last.fetch(:error), "broken row"
+  ensure
+    scheduler&.shutdown
+  end
+
   def test_disabled_and_unavailable_rows_cancel_work_without_exposing_errors
     with_project do |_project, folder|
       logger = EventLogger.new
@@ -474,6 +493,75 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     end
   ensure
     scheduler&.shutdown
+  end
+
+  def test_prune_envelope_and_post_publish_failure_paths_are_bounded
+    with_project do |_project, folder|
+      scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new
+      slot = scheduler.send(:inventory_slots, folder).first
+      brainstorm = File.join(folder, "brainstorm.md")
+
+      File.write(
+        brainstorm,
+        "x" * (Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES + 1)
+      )
+      assert scheduler.send(:envelope_present?, brainstorm)
+      File.write(
+        brainstorm,
+        "<!-- hive-suggestion:v1 binding=#{'a' * 64} -->\n"
+      )
+      assert scheduler.send(:envelope_present?, brainstorm)
+
+      with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock,
+        ->(*) { raise Hive::ConcurrentRunError, "busy" }
+      ) do
+        assert_nil scheduler.send(:prune_removed_questions, folder, [ slot ])
+        assert_nil scheduler.send(
+          :invalidate_published_result, row(folder), slot,
+          { "attempt_id" => "attempt" }, "a" * 64
+        )
+      end
+    ensure
+      scheduler&.shutdown
+    end
+  end
+
+  def test_unavailable_route_hides_fresh_candidate_payload
+    with_project do |_project, folder|
+      scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new(
+        runner_factory: ->(*) { UnavailableRunner.new },
+        config_loader: ->(*) { suggestion_config },
+        worker_launcher: ->(work) { work.call },
+        clock: -> { fixture_time }
+      )
+      slot = scheduler.send(:inventory_slots, folder).first
+      scheduler.send(:seed_records, row(folder), [ slot ], now: fixture_time)
+      store = Hive::BrainstormSuggestions::Store.new(folder)
+      store.update do |document|
+        document.fetch("records").first.merge!(
+          "state" => "fresh", "text" => "secret candidate",
+          "rationale" => "secret rationale", "provenance" => [ "repository" ],
+          "suggestion_binding" => "b" * 64
+        )
+        document
+      end
+
+      scheduler.send(
+        :hide_fresh_when_route_unavailable,
+        row(folder), suggestion_config, now: fixture_time
+      )
+
+      record = record_for(folder)
+      assert_equal "unavailable", record.fetch("state")
+      assert_nil record.fetch("text")
+      assert_nil record.fetch("rationale")
+      assert_empty record.fetch("provenance")
+      assert_equal "isolation_unavailable", record.fetch("error_code")
+      assert record.fetch("retryable")
+    ensure
+      scheduler&.shutdown
+    end
   end
 
   private

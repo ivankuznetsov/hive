@@ -162,6 +162,28 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
     end
   end
 
+  def test_json_errors_classify_usage_lock_and_unexpected_failures
+    cases = [
+      [ Hive::UsageError.new("bad action"), "usage", Hive::UsageError ],
+      [ Hive::ConcurrentRunError.new("busy"), "lock_busy", Hive::ConcurrentRunError ],
+      [ RuntimeError.new("unexpected"), "internal", Hive::InternalError ]
+    ]
+
+    cases.each do |failure, kind, raised_class|
+      output = StringIO.new
+      command = Hive::Commands::BrainstormSuggestion.new(
+        "cleanup", task_roots: [], json: true, output: output
+      )
+      command.define_singleton_method(:discover_task_roots) { raise failure }
+
+      error = assert_raises(raised_class) { command.call }
+      payload = JSON.parse(output.string)
+
+      assert_equal kind, payload.fetch("error_kind")
+      assert_includes error.message, failure.message
+    end
+  end
+
   def test_invalid_state_plain_output_and_candidate_lock_contention_are_advisory
     Dir.mktmpdir do |root|
       task = File.join(root, "2-brainstorm", "task-1")

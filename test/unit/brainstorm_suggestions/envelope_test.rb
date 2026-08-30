@@ -15,6 +15,14 @@ class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
     assert_includes error.message, "SHA-256"
   end
 
+  def test_render_rejects_noncanonical_line_endings
+    error = assert_raises(Hive::BrainstormSuggestions::InvalidState) do
+      Hive::BrainstormSuggestions::Envelope.render(binding: BINDING, text: "Candidate\rbody")
+    end
+
+    assert_includes error.message, "canonical line endings"
+  end
+
   def test_rendered_envelope_is_advisory_to_shared_parser
     envelope = Hive::BrainstormSuggestions::Envelope.render(
       binding: BINDING, text: "Use the repository adapter."

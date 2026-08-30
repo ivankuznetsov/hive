@@ -96,6 +96,20 @@ class HiveCommandsAnswerTest < Minitest::Test
     end
   end
 
+  def test_inventory_omits_suggestions_when_the_feature_is_disabled
+    with_project do |project, _folder, _path|
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        { "brainstorm" => { "suggestions" => { "enabled" => false } } }.to_yaml
+      )
+
+      payload = inventory
+
+      assert payload.fetch("slots").all? { |slot| slot["suggestion"].nil? }
+      assert_schema(payload)
+    end
+  end
+
   def test_binding_writes_the_later_same_number_slot_by_document_ordinal
     with_project do |_project, _folder, path|
       token = inventory.fetch("slots").fetch(2).fetch("binding")

@@ -44,6 +44,20 @@ class DigestSendCommandTest < Minitest::Test
     end
   end
 
+  def test_text_covers_fresh_send_and_unknown_transport_outcome
+    {
+      "sent" => /Sent digest/,
+      "queued" => /delivery outcome: queued/
+    }.each do |outcome, expected|
+      output = StringIO.new
+      Hive::Commands::DigestSend.new(
+        date: "2026-08-30", output: output,
+        delivery: FakeDelivery.new(result(outcome: outcome), nil, [])
+      ).call
+      assert_match expected, output.string
+    end
+  end
+
   def test_missing_date_and_typed_delivery_errors_emit_stable_error_envelopes
     output = StringIO.new
     command = Hive::Commands::DigestSend.new(
@@ -63,6 +77,42 @@ class DigestSendCommandTest < Minitest::Test
     )
     assert_raises(Hive::DailyDigest::Delivery::NotClosed) { command.call }
     assert_equal "not_closed", JSON.parse(output.string).fetch("error_kind")
+  end
+
+  def test_invalid_date_and_unexpected_error_are_typed
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::DigestSend.new(
+        date: "not-a-date", delivery: FakeDelivery.new(result, nil, [])
+      ).call
+    end
+
+    output = StringIO.new
+    assert_raises(Hive::InternalError) do
+      Hive::Commands::DigestSend.new(
+        date: "2026-08-30", json: true, output: output,
+        delivery: FakeDelivery.new(nil, RuntimeError.new("boom"), [])
+      ).call
+    end
+    assert_equal "internal", JSON.parse(output.string).fetch("error_kind")
+  end
+
+  def test_error_kinds_and_epipe_cover_every_delivery_boundary
+    command = Hive::Commands::DigestSend.new(date: "2026-08-30")
+    cases = {
+      Hive::DailyDigest::MissingRecord.new("missing") => "missing",
+      Hive::DailyDigest::PrunedRecord.new("pruned") => "pruned",
+      Hive::DailyDigest::Delivery::DeliveryFailed.new("failed") => "delivery_failed",
+      Hive::ConfigError.new("config") => "config",
+      Hive::DailyDigest::Error.new("digest") => "digest_error",
+      RuntimeError.new("other") => "internal"
+    }
+    cases.each { |error, kind| assert_equal kind, command.send(:error_kind, error) }
+
+    output = Object.new
+    output.define_singleton_method(:puts) { |_value| raise Errno::EPIPE }
+    broken = Hive::Commands::DigestSend.new(date: "2026-08-30", output: output)
+    broken.send(:emit, { "ok" => true })
+    assert_equal true, broken.instance_variable_get(:@emitted)
   end
 
   private

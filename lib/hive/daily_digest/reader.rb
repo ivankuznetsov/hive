@@ -102,14 +102,20 @@ module Hive
             gap["project_id"].nil? || gap["project_id"] == project_id
           end
         end
-        copy["amendments"] = Array(copy["amendments"]).map do |amendment|
-          amendment.merge(
+        copy["amendments"] = Array(copy["amendments"]).filter_map do |amendment|
+          resolved_gaps = Array(amendment["resolved_gaps"]).select do |gap|
+            gap["project_id"].nil? || gap["project_id"] == project_id
+          end
+          filtered = amendment.merge(
             "items" => Array(amendment["items"]).select { |item| item["project_id"] == project_id },
             "attention" => Array(amendment["attention"]).select { |item| item["project_id"] == project_id },
             "gaps" => Array(amendment["gaps"]).select do |gap|
               gap["project_id"].nil? || gap["project_id"] == project_id
-            end
+            end,
+            "resolved_gaps" => resolved_gaps,
+            "resolved_gap_ids" => resolved_gaps.map { |gap| gap.fetch("gap_id") }
           )
+          filtered if %w[items attention gaps resolved_gaps].any? { |key| filtered.fetch(key).any? }
         end
         copy
       end
@@ -139,7 +145,20 @@ module Hive
       end
 
       def missing_navigation(date)
-        return { "previous_date" => nil, "next_date" => nil } unless date
+        unless date
+          now = utc(@clock.call)
+          intervals = @store.intervals
+          previous = intervals.select { |entry| utc(entry.fetch("ends_at")) <= now }.max_by do |entry|
+            utc(entry.fetch("ends_at"))
+          end
+          following = intervals.select { |entry| utc(entry.fetch("starts_at")) > now }.min_by do |entry|
+            utc(entry.fetch("starts_at"))
+          end
+          return {
+            "previous_date" => previous && previous.fetch("local_date"),
+            "next_date" => following && following.fetch("local_date")
+          }
+        end
 
         target = Date.iso8601(date.to_s)
         labels = @store.intervals.map { |interval| Date.iso8601(interval.fetch("local_date")) }

@@ -37,7 +37,7 @@
         "schema_version": { "const": 1 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
-        "error_kind": { "enum": ["disabled", "not_initialized", "future_date", "missing", "invalid_date", "config", "digest_error", "internal"] },
+        "error_kind": { "enum": ["usage", "disabled", "not_initialized", "future_date", "missing", "invalid_date", "config", "digest_error", "internal"] },
         "exit_code": { "type": "integer" },
         "message": { "type": "string" }
       }

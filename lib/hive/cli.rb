@@ -1289,6 +1289,7 @@ module Hive
     option :yes, type: :boolean, default: false, desc: "for prune: explicitly confirm projection deletion"
     option :retry, type: :boolean, default: false, desc: "for send: explicitly retry a failed or unknown delivery"
     def digest(action = nil)
+      validate_digest_action_options!(action) if [ nil, "refresh", "send", "prune" ].include?(action)
       case action
       when nil
         require "hive/commands/digest"
@@ -2210,6 +2211,38 @@ module Hive
     end
 
     no_commands do
+      def validate_digest_action_options!(action)
+        allowed = {
+          nil => %i[date project open_web],
+          "refresh" => %i[date],
+          "send" => %i[date retry],
+          "prune" => %i[before dry_run yes]
+        }.fetch(action)
+        supplied = %i[date project open_web before dry_run yes retry].select do |key|
+          value = options[key]
+          value == true || (!value.nil? && value != false && !value.to_s.empty?)
+        end
+        invalid = supplied - allowed
+        return if invalid.empty?
+
+        label = action || "read"
+        error = Hive::UsageError.new(
+          "hive digest #{label} does not accept #{invalid.map { |key| "--#{key.to_s.tr('_', '-')}" }.join(', ')}"
+        )
+        if options[:json]
+          schema = {
+            nil => "hive-digest", "refresh" => "hive-digest-refresh",
+            "send" => "hive-digest-send", "prune" => "hive-digest-prune"
+          }.fetch(action)
+          puts JSON.generate(
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: schema, error: error, error_kind: "usage"
+            )
+          )
+        end
+        raise error
+      end
+
       def closure_options?
         options[:reason] || options[:evidence] || options[:successor] || options[:attestation]
       end

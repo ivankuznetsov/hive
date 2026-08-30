@@ -39,6 +39,13 @@ class DigestPruneCommandTest < Minitest::Test
       Hive::Commands::DigestPrune.new(before: "2026-08-30").call!
     end
     assert_match(/--dry-run or --yes/, error.message)
+
+    error = assert_raises(Hive::UsageError) do
+      Hive::Commands::DigestPrune.new(
+        before: "2026-08-30", dry_run: true, confirm: true
+      ).call!
+    end
+    assert_match(/either --dry-run or --yes/, error.message)
   end
 
   def test_json_errors_use_the_prune_contract
@@ -54,5 +61,40 @@ class DigestPruneCommandTest < Minitest::Test
     assert_equal false, payload.fetch("ok")
     assert_equal "usage", payload.fetch("error_kind")
     assert_equal error.message, payload.fetch("message")
+  end
+
+  def test_unexpected_json_error_is_wrapped
+    pruner = Object.new
+    pruner.define_singleton_method(:call) { |**| raise "boom" }
+    output = StringIO.new
+    assert_raises(Hive::InternalError) do
+      Hive::Commands::DigestPrune.new(
+        before: "2026-08-30", dry_run: true, json: true,
+        pruner: pruner, stdout: output
+      ).call!
+    end
+    assert_equal "internal", JSON.parse(output.string).fetch("error_kind")
+  end
+
+  def test_error_kinds_and_epipe_cover_every_prune_boundary
+    command = Hive::Commands::DigestPrune.new(before: "2026-08-30", dry_run: true)
+    cases = {
+      Hive::DailyDigest::Pruner::ConfirmationRequired.new("confirm") => "confirmation_required",
+      Hive::DailyDigest::InvalidRecord.new("invalid") => "invalid_date",
+      Hive::DailyDigest::MissingRecord.new("missing") => "missing",
+      Hive::DailyDigest::Store::ImmutableRecord.new("open") => "immutable",
+      Hive::ConfigError.new("config") => "config",
+      Hive::InternalError.new("internal") => "internal",
+      Hive::DailyDigest::Error.new("digest") => "digest_error"
+    }
+    cases.each { |error, kind| assert_equal kind, command.send(:error_kind, error) }
+
+    output = Object.new
+    output.define_singleton_method(:puts) { |_value| raise Errno::EPIPE }
+    broken = Hive::Commands::DigestPrune.new(
+      before: "2026-08-30", dry_run: true, stdout: output
+    )
+    broken.send(:emit_error, Hive::ConfigError.new("config"))
+    assert_equal true, broken.instance_variable_get(:@emitted)
   end
 end

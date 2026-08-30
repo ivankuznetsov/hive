@@ -18,7 +18,7 @@ module Hive
         schema_version subject actor evaluator configuration_fingerprint policy
       ].freeze
       EVALUATOR_KEYS = %w[id fingerprint configuration_fingerprint admission].freeze
-      ADMISSION_KEYS = %w[workflows stages agent_profiles].freeze
+      ADMISSION_KEYS = EVALUATOR_CONFIG_KEYS
       SUBMISSION_KEYS = %w[proposed_change motivation evidence lineage].freeze
       EVALUATION_KEYS = %w[method result rationale evidence links].freeze
 
@@ -170,54 +170,9 @@ module Hive
         end
 
         def normalize_evaluation_payload(value, policy:)
-          payload = Proposals.closed_hash!(value, required: EVALUATION_KEYS, label: "proposal evaluation source")
-          method = Proposals.closed_hash!(
-            payload["method"], required: %w[kind label], optional: %w[reference],
-            label: "proposal evaluation method"
+          Proposals.evaluation_facts!(
+            value, policy:, error: InvalidRecord, label: "proposal evaluation source"
           )
-          unless %w[benchmark test manual policy other].include?(method["kind"])
-            raise InvalidRecord, "proposal evaluation method kind is invalid"
-          end
-          method["label"] = Proposals.label!(method["label"], label: "proposal evaluation method label")
-          if method["reference"]
-            method["reference"] = Proposals.safe_reference!(
-              method["reference"], label: "proposal evaluation method reference",
-              allowed_schemes: policy.fetch("allowed_link_schemes")
-            )
-          end
-          result = normalize_result(payload.fetch("result"))
-          payload.merge(
-            "method" => method, "result" => result,
-            "rationale" => Proposals.text!(payload["rationale"], label: "evaluation rationale"),
-            "evidence" => Proposals.evidence!(payload["evidence"], policy:),
-            "links" => Proposals.links!(
-              payload["links"], allowed_schemes: policy.fetch("allowed_link_schemes"),
-              error: InvalidRecord
-            )
-          )
-        end
-
-        def normalize_result(value)
-          result = Proposals.closed_hash!(
-            value, required: %w[outcome metrics], optional: %w[details_digest],
-            label: "proposal evaluation result"
-          )
-          unless RESULT_OUTCOMES.include?(result["outcome"])
-            raise InvalidRecord, "proposal evaluation result outcome is invalid"
-          end
-          metrics = result["metrics"]
-          unless metrics.is_a?(Hash) && metrics.length <= 64 && metrics.all? do |key, entry|
-                   key.to_s.match?(SAFE_LABEL) &&
-                     (entry.nil? || [ true, false ].include?(entry) || entry.is_a?(Numeric))
-                 end
-            raise InvalidRecord, "proposal evaluation metrics must contain only typed facts"
-          end
-          if result["details_digest"]
-            result["details_digest"] = Proposals.digest!(
-              result["details_digest"], label: "proposal evaluation details digest"
-            )
-          end
-          result
         end
 
         def normalize_artifact(value, policy:)

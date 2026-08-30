@@ -18,6 +18,12 @@ module Hive
     VISIBILITIES = %w[restricted private project].freeze
     RETENTIONS = %w[ephemeral task project indefinite].freeze
     RESULT_OUTCOMES = %w[pass fail mixed inconclusive].freeze
+    EVALUATION_FACT_KEYS = %w[method result rationale evidence links].freeze
+    EVALUATOR_CONFIG_KEYS = %w[workflows stages agent_profiles].freeze
+    AUTHORITY_KINDS = %w[operator policy].freeze
+    AUTHORITY_CAPABILITIES = %w[decide supersede rollback].freeze
+    AUTHORITY_REQUIRED_KEYS = %w[kind capabilities version revoked].freeze
+    AUTHORITY_OPTIONAL_KEYS = %w[valid_from valid_until].freeze
     DIGEST = /\A[0-9a-f]{64}\z/
     GIT_DIGEST = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
     PROPOSAL_ID = /\Aprp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i
@@ -258,6 +264,58 @@ module Hive
         )
       end
       data
+    end
+
+    def evaluation_facts!(value, policy: DEFAULT_POLICY, error: InvalidEvent,
+                          label: "proposal evaluation")
+      policy = policy!(policy)
+      data = closed_hash!(value, required: EVALUATION_FACT_KEYS, label:, error:)
+      method = closed_hash!(
+        data["method"], required: %w[kind label], optional: %w[reference],
+        label: "#{label} method", error:
+      )
+      unless %w[benchmark test manual policy other].include?(method["kind"])
+        raise error, "#{label} method kind is invalid"
+      end
+      method["label"] = label!(method["label"], label: "#{label} method label", error:)
+      if method["reference"]
+        method["reference"] = safe_reference!(
+          method["reference"], label: "#{label} method reference",
+          allowed_schemes: policy.fetch("allowed_link_schemes"), error:
+        )
+      end
+      result = evaluation_result!(data["result"], label:, error:)
+      data.merge(
+        "method" => method, "result" => result,
+        "rationale" => text!(data["rationale"], label: "#{label} rationale", error:),
+        "evidence" => evidence!(data["evidence"], policy:, error:),
+        "links" => links!(
+          data["links"], allowed_schemes: policy.fetch("allowed_link_schemes"), error:
+        )
+      )
+    end
+
+    def evaluation_result!(value, label:, error: InvalidEvent)
+      result = closed_hash!(
+        value, required: %w[outcome metrics], optional: %w[details_digest],
+        label: "#{label} result", error:
+      )
+      unless RESULT_OUTCOMES.include?(result["outcome"])
+        raise error, "#{label} result outcome is invalid"
+      end
+      metrics = result["metrics"]
+      unless metrics.is_a?(Hash) && metrics.length <= 64 && metrics.all? do |key, entry|
+               key.to_s.match?(SAFE_LABEL) &&
+                 (entry.nil? || [ true, false ].include?(entry) || entry.is_a?(Numeric))
+             end
+        raise error, "#{label} metrics must contain only bounded typed facts"
+      end
+      if result["details_digest"]
+        result["details_digest"] = digest!(
+          result["details_digest"], label: "#{label} details digest", error:
+        )
+      end
+      result
     end
 
     def evidence!(items, policy: DEFAULT_POLICY, error: InvalidRecord)

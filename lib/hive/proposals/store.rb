@@ -28,6 +28,15 @@ module Hive
 
       attr_reader :root, :records_root, :events_root
 
+      class Transaction
+        def initialize(store)
+          @store = store
+        end
+
+        def snapshot = @store.send(:load_unlocked)
+        def append_event!(**attributes) = @store.send(:append_event_unlocked!, **attributes)
+      end
+
       def initialize(root:, id_generator: -> { SecureRandom.uuid })
         @root = File.expand_path(root)
         @records_root = File.join(@root, "records")
@@ -74,28 +83,15 @@ module Hive
                         occurred_at: Time.now.utc, event_id: nil, policy: DEFAULT_POLICY)
         proposal_id = Proposals.proposal_id!(proposal_id, error: InvalidEvent)
         with_lock do
-          raise InvalidEvent, "proposal does not exist" unless fetch_record_unlocked(proposal_id)
-          existing = find_by_source_event_unlocked(source_event_id)
-          if existing
-            unless existing.is_a?(Event) && existing.proposal_id == proposal_id && existing.type == type.to_s
-              raise Conflict, "proposal source event already belongs to another mutation"
-            end
-            candidate = Event.build(
-              event_id: existing.event_id, proposal_id:, version: existing.version,
-              type:, data:, source_event_id:, provenance:, occurred_at:, policy:
-            )
-            return existing if candidate.to_h == existing.to_h
-
-            raise Conflict, "proposal source event conflicts with its immutable event"
-          end
-          version = next_version_unlocked(proposal_id)
-          id = event_id || "pev-#{@id_generator.call}"
-          event = Event.build(
-            event_id: id, proposal_id:, version:, type:, data:, source_event_id:,
-            provenance:, occurred_at:, policy:
+          append_event_unlocked!(
+            proposal_id:, type:, data:, source_event_id:, provenance:,
+            occurred_at:, event_id:, policy:
           )
-          write_event_unlocked!(event)
         end
+      end
+
+      def transaction
+        with_lock { yield Transaction.new(self) }
       end
 
       def fetch_event(event_id)
@@ -121,6 +117,31 @@ module Hive
       end
 
       private
+
+      def append_event_unlocked!(proposal_id:, type:, data:, source_event_id:, provenance:,
+                                 occurred_at:, event_id:, policy:)
+        raise InvalidEvent, "proposal does not exist" unless fetch_record_unlocked(proposal_id)
+        existing = find_by_source_event_unlocked(source_event_id)
+        if existing
+          unless existing.is_a?(Event) && existing.proposal_id == proposal_id && existing.type == type.to_s
+            raise Conflict, "proposal source event already belongs to another mutation"
+          end
+          candidate = Event.build(
+            event_id: existing.event_id, proposal_id:, version: existing.version,
+            type:, data:, source_event_id:, provenance:, occurred_at:, policy:
+          )
+          return existing if candidate.to_h == existing.to_h
+
+          raise Conflict, "proposal source event conflicts with its immutable event"
+        end
+        version = next_version_unlocked(proposal_id)
+        id = event_id || "pev-#{@id_generator.call}"
+        event = Event.build(
+          event_id: id, proposal_id:, version:, type:, data:, source_event_id:,
+          provenance:, occurred_at:, policy:
+        )
+        write_event_unlocked!(event)
+      end
 
       def write_record_unlocked!(record)
         path = record_path(record.proposal_id)
@@ -308,14 +329,20 @@ module Hive
 
       def cycle_nodes(edges)
         cycles = []
+        finished = {}
         edges.each_key do |origin|
+          next if finished[origin]
+
           path = []
+          positions = {}
           current = origin
-          while current && !path.include?(current)
+          while current && !finished[current] && !positions.key?(current)
+            positions[current] = path.length
             path << current
             current = edges[current]
           end
-          cycles.concat(path.drop(path.index(current))) if current && path.include?(current)
+          cycles.concat(path.drop(positions.fetch(current))) if current && positions.key?(current)
+          path.each { |proposal_id| finished[proposal_id] = true }
         end
         cycles.uniq.sort
       end

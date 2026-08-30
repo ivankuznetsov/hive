@@ -6,6 +6,7 @@ require "hive/output_reference"
 require "hive/billing_evidence"
 require "hive/stringify_keys"
 require "hive/runtime_control_plane/codec"
+require "hive/proposals"
 
 module Hive
   module Attempts
@@ -52,11 +53,11 @@ module Hive
         source_reference
       ].freeze
       SUBJECT_KINDS = %w[task_stage module_hook].freeze
-      PROPOSAL_SUBJECT_KINDS = %w[skill workflow].freeze
-      PROPOSAL_VISIBILITIES = %w[restricted private project].freeze
-      PROPOSAL_RETENTIONS = %w[ephemeral task project indefinite].freeze
-      PROPOSAL_ID_PATTERN = /\Aprp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i
-      PROPOSAL_SAFE_REFERENCE = /\A[A-Za-z0-9][A-Za-z0-9._\/-]{0,511}\z/
+      PROPOSAL_SUBJECT_KINDS = Hive::Proposals::SUBJECT_KINDS
+      PROPOSAL_VISIBILITIES = Hive::Proposals::VISIBILITIES
+      PROPOSAL_RETENTIONS = Hive::Proposals::RETENTIONS
+      PROPOSAL_ID_PATTERN = Hive::Proposals::PROPOSAL_ID
+      PROPOSAL_SAFE_REFERENCE = Hive::Proposals::SAFE_SUBJECT
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze

@@ -6,7 +6,7 @@ module Hive
     # binding is copied into the durable attempt and later source receipt, so
     # replay verifies historical admission without consulting mutable config.
     class EvaluatorAuthority
-      ROW_KEYS = %w[workflows stages agent_profiles].freeze
+      ROW_KEYS = EVALUATOR_CONFIG_KEYS
 
       def initialize(config)
         @config = Proposals.stringify(config.fetch("proposals", config))

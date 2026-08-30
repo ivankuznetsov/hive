@@ -5,7 +5,7 @@ module Hive
     class Event
       KEYS = %w[
         schema schema_version event_id proposal_id version type data source_event_id provenance
-        occurred_at
+        policy occurred_at
       ].freeze
       DATA_KEYS = {
         "evaluation" => %w[evaluator method result rationale evidence links],
@@ -21,7 +21,8 @@ module Hive
 
       def self.build(event_id:, proposal_id:, version:, type:, data:, source_event_id:, provenance:,
                      occurred_at: Time.now.utc, policy: DEFAULT_POLICY)
-        event_data = normalize_data(type.to_s, data, policy:)
+        normalized_policy = Proposals.policy!(policy)
+        event_data = normalize_data(type.to_s, data, policy: normalized_policy)
         new(
           "schema" => EVENT_SCHEMA, "schema_version" => SCHEMA_VERSION,
           "event_id" => Proposals.event_id!(event_id),
@@ -29,6 +30,7 @@ module Hive
           "version" => Integer(version), "type" => type.to_s, "data" => event_data,
           "source_event_id" => Proposals.source_event_id!(source_event_id, error: InvalidEvent),
           "provenance" => Proposals.provenance!(provenance, error: InvalidEvent),
+          "policy" => normalized_policy,
           "occurred_at" => Proposals.timestamp!(occurred_at, label: "occurred_at", error: InvalidEvent)
         )
       rescue ArgumentError, TypeError
@@ -44,9 +46,9 @@ module Hive
         )
         case type
         when "evaluation" then normalize_evaluation(data, policy:)
-        when "decision" then normalize_decision(data)
+        when "decision" then normalize_decision(data, policy:)
         when "supersession" then normalize_supersession(data)
-        when "rollback" then normalize_rollback(data)
+        when "rollback" then normalize_rollback(data, policy:)
         end
       end
 
@@ -61,43 +63,13 @@ module Hive
             evaluator[key], label: "evaluator #{key}", error: InvalidEvent
           ) if evaluator[key]
         end
-        method = Proposals.closed_hash!(
-          data["method"], required: %w[kind label], optional: %w[reference],
-          label: "proposal evaluation method", error: InvalidEvent
+        facts = Proposals.evaluation_facts!(
+          data.slice(*EVALUATION_FACT_KEYS), policy:, error: InvalidEvent
         )
-        unless %w[benchmark test manual policy other].include?(method["kind"])
-          raise InvalidEvent, "proposal evaluation method kind is invalid"
-        end
-        method["label"] = Proposals.label!(method["label"], label: "method label", error: InvalidEvent)
-        method["reference"] = Proposals.safe_reference!(
-          method["reference"], label: "method reference", error: InvalidEvent
-        ) if method["reference"]
-        result = Proposals.closed_hash!(
-          data["result"], required: %w[outcome metrics], optional: %w[details_digest],
-          label: "proposal evaluation result", error: InvalidEvent
-        )
-        unless RESULT_OUTCOMES.include?(result["outcome"])
-          raise InvalidEvent, "proposal evaluation result outcome is invalid"
-        end
-        unless result["metrics"].is_a?(Hash) && result["metrics"].length <= 64 &&
-               result["metrics"].all? do |key, value|
-                 key.to_s.match?(SAFE_LABEL) &&
-                   (value.nil? || value == true || value == false || value.is_a?(Numeric))
-               end
-          raise InvalidEvent, "proposal evaluation metrics must contain only bounded typed facts"
-        end
-        result["details_digest"] = Proposals.digest!(
-          result["details_digest"], label: "result details digest", error: InvalidEvent
-        ) if result["details_digest"]
-        data.merge(
-          "evaluator" => evaluator, "method" => method, "result" => result,
-          "rationale" => Proposals.text!(data["rationale"], label: "evaluation rationale", error: InvalidEvent),
-          "evidence" => Proposals.evidence!(data["evidence"], policy:, error: InvalidEvent),
-          "links" => Proposals.links!(data["links"], error: InvalidEvent)
-        )
+        data.merge(facts).merge("evaluator" => evaluator)
       end
 
-      def self.normalize_decision(data)
+      def self.normalize_decision(data, policy:)
         outcome = data["outcome"].to_s
         raise InvalidEvent, "proposal decision outcome is invalid" unless %w[accepted rejected].include?(outcome)
         ids = Array(data["considered_evaluation_ids"]).map do |id|
@@ -137,7 +109,10 @@ module Hive
           "considered_evaluations" => snapshots,
           "rationale" => Proposals.text!(data["rationale"], label: "decision rationale", error: InvalidEvent),
           "authority" => authority!(data["authority"]),
-          "links" => Proposals.links!(data["links"], error: InvalidEvent),
+          "links" => Proposals.links!(
+            data["links"], allowed_schemes: policy.fetch("allowed_link_schemes"),
+            error: InvalidEvent
+          ),
           "observed_head" => observed_head!(data["observed_head"])
         )
       end
@@ -150,14 +125,15 @@ module Hive
         )
       end
 
-      def self.normalize_rollback(data)
+      def self.normalize_rollback(data, policy:)
         external = Proposals.closed_hash!(
           data["external_revert"], required: %w[kind reference],
           label: "external revert", error: InvalidEvent
         )
         external["kind"] = Proposals.label!(external["kind"], label: "external revert kind", error: InvalidEvent)
         external["reference"] = Proposals.safe_reference!(
-          external["reference"], label: "external revert reference", error: InvalidEvent
+          external["reference"], label: "external revert reference",
+          allowed_schemes: policy.fetch("allowed_link_schemes"), error: InvalidEvent
         )
         data.merge(
           "reverted_revision" => Proposals.label!(
@@ -213,6 +189,7 @@ module Hive
       def data = self["data"]
       def source_event_id = self["source_event_id"]
       def provenance = self["provenance"]
+      def policy = self["policy"]
       def occurred_at = self["occurred_at"]
 
       private
@@ -227,7 +204,10 @@ module Hive
         unless attributes["version"].is_a?(Integer) && attributes["version"].positive?
           raise InvalidEvent, "proposal event version must be a positive integer"
         end
-        attributes["data"] = self.class.normalize_data(attributes["type"], attributes["data"])
+        attributes["policy"] = Proposals.policy!(attributes["policy"])
+        attributes["data"] = self.class.normalize_data(
+          attributes["type"], attributes["data"], policy: attributes["policy"]
+        )
         attributes["source_event_id"] = Proposals.source_event_id!(
           attributes["source_event_id"], error: InvalidEvent
         )

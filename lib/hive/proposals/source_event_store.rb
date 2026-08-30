@@ -42,7 +42,8 @@ module Hive
             raise Conflict, "proposal source event ID was reused with changed content"
           end
           current = read_index_unlocked
-          enforce_quotas!(current, event, bytes.bytesize)
+          recent_admissions = retained_admissions(current)
+          enforce_quotas!(current, event, bytes.bytesize, recent_admissions:)
           create_immutable(event_path(event.source_event_id), bytes)
           current["pending"] << event.source_event_id
           current["pending"].sort!
@@ -52,7 +53,7 @@ module Hive
           usage = current["proposal_usage"][event.proposal_id] ||= { "sources" => 0, "bytes" => 0 }
           usage["sources"] += 1
           usage["bytes"] += bytes.bytesize
-          current["recent_admissions"] = retained_admissions(current).push(
+          current["recent_admissions"] = recent_admissions.push(
             "actor_id" => event.to_h.dig("actor", "id"),
             "at" => Proposals.timestamp!(@clock.call, label: "source admission time")
           )
@@ -144,7 +145,7 @@ module Hive
         end
       end
 
-      def enforce_quotas!(current, event, bytes)
+      def enforce_quotas!(current, event, bytes, recent_admissions:)
         if current["pending"].length >= integer_limit("max_pending_sources")
           raise QuotaExceeded, "proposal pending source quota exceeded"
         end
@@ -164,7 +165,7 @@ module Hive
           raise QuotaExceeded, "proposal byte quota exceeded"
         end
         actor = event.to_h.dig("actor", "id")
-        count = retained_admissions(current).count { |entry| entry["actor_id"] == actor }
+        count = recent_admissions.count { |entry| entry["actor_id"] == actor }
         if count >= integer_limit("max_sources_per_actor_per_hour")
           raise QuotaExceeded, "proposal authority rate limit exceeded"
         end
@@ -263,12 +264,25 @@ module Hive
       end
 
       def read_bytes(path, max_bytes:)
-        stat = File.lstat(path)
-        raise QuarantinedSource, "proposal source path is not a regular file" unless stat.file? && !stat.symlink?
-        raise QuarantinedSource, "proposal source file is oversize" if stat.size >= max_bytes
-        File.binread(path)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(path, flags) do |file|
+          stat = file.stat
+          unless stat.file?
+            raise QuarantinedSource, "proposal source path is not a regular file"
+          end
+          raise QuarantinedSource, "proposal source file is oversize" if stat.size >= max_bytes
+
+          bytes = file.read(max_bytes)
+          if bytes.bytesize >= max_bytes
+            raise QuarantinedSource, "proposal source file is oversize"
+          end
+          bytes
+        end
       rescue Errno::ENOENT
         nil
+      rescue Errno::ELOOP
+        raise QuarantinedSource, "proposal source path is not a regular file"
       end
 
       def create_immutable(path, bytes)

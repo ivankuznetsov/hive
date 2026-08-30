@@ -5,7 +5,7 @@ module Hive
     class Record
       KEYS = %w[
         schema schema_version proposal_id subject revision proposed_change motivation evidence
-        author lineage provenance source_event_id created_at
+        author lineage provenance source_event_id policy created_at
       ].freeze
       LINEAGE_KEYS = %w[retries requested_supersedes].freeze
 
@@ -19,6 +19,7 @@ module Hive
           "retries" => normalized_lineage["retries"],
           "requested_supersedes" => normalized_lineage["requested_supersedes"]
         }
+        normalized_policy = Proposals.policy!(policy)
         new(
           "schema" => RECORD_SCHEMA, "schema_version" => SCHEMA_VERSION,
           "proposal_id" => Proposals.proposal_id!(proposal_id),
@@ -26,10 +27,11 @@ module Hive
           "revision" => revision.to_s,
           "proposed_change" => Proposals.text!(proposed_change, label: "proposed_change"),
           "motivation" => Proposals.text!(motivation, label: "motivation"),
-          "evidence" => Proposals.evidence!(evidence, policy:),
+          "evidence" => Proposals.evidence!(evidence, policy: normalized_policy),
           "author" => Proposals.author!(author), "lineage" => normalized_lineage,
           "provenance" => Proposals.provenance!(provenance),
           "source_event_id" => Proposals.source_event_id!(source_event_id),
+          "policy" => normalized_policy,
           "created_at" => Proposals.timestamp!(created_at, label: "created_at")
         )
       end
@@ -49,6 +51,7 @@ module Hive
       def evidence = self["evidence"]
       def provenance = self["provenance"]
       def source_event_id = self["source_event_id"]
+      def policy = self["policy"]
       def initial_status = "draft"
 
       private
@@ -70,6 +73,7 @@ module Hive
         data["revision"] = Proposals.label!(data["revision"], label: "proposal revision")
         data["proposed_change"] = Proposals.text!(data["proposed_change"], label: "proposed_change")
         data["motivation"] = Proposals.text!(data["motivation"], label: "motivation")
+        data["policy"] = Proposals.policy!(data["policy"])
         validate_evidence!
         data["author"] = Proposals.author!(data["author"])
         validate_lineage!
@@ -116,7 +120,8 @@ module Hive
           evidence["summary"] = Proposals.text!(evidence["summary"], label: "proposal evidence summary")
         end
         evidence["source_ref"] = Proposals.safe_reference!(
-          evidence["source_ref"], label: "proposal evidence source_ref"
+          evidence["source_ref"], label: "proposal evidence source_ref",
+          allowed_schemes: policy.fetch("allowed_link_schemes")
         ) if evidence["source_ref"]
         evidence
       end

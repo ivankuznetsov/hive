@@ -77,6 +77,18 @@ class ProposalRecordTest < Minitest::Test
     end
   end
 
+  def test_persisted_policy_keeps_admitted_evidence_references_replayable
+    attributes = build_attributes
+    attributes[:policy] = attributes.fetch(:policy).merge(
+      "allowed_link_schemes" => %w[git https]
+    )
+    attributes[:evidence] = [ evidence.merge("source_ref" => "git://example.test/results") ]
+    record = Hive::Proposals::Record.build(**attributes)
+
+    assert_equal %w[git https], record.policy.fetch("allowed_link_schemes")
+    assert_equal record.to_h, Hive::Proposals::Record.new(record.to_h).to_h
+  end
+
   private
 
   def build_attributes

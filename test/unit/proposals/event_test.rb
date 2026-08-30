@@ -77,9 +77,32 @@ class ProposalEventTest < Minitest::Test
     end
   end
 
+  def test_persisted_policy_keeps_admitted_non_https_references_replayable
+    policy = {
+      "visibility" => "project", "retention" => "project",
+      "allowed_link_schemes" => %w[git https]
+    }
+    event = build_event(
+      type: "evaluation", policy:,
+      data: {
+        "evaluator" => { "id" => "reviewer", "binding_fingerprint" => "b" * 64 },
+        "method" => {
+          "kind" => "benchmark", "label" => "repository benchmark",
+          "reference" => "git://example.test/review-suite"
+        },
+        "result" => { "outcome" => "pass", "metrics" => { "recall" => 0.91 } },
+        "rationale" => "Improved recall", "evidence" => [],
+        "links" => [ { "kind" => "source", "reference" => "git://example.test/results" } ]
+      }
+    )
+
+    assert_equal policy, event.policy
+    assert_equal event.to_h, Hive::Proposals::Event.new(event.to_h).to_h
+  end
+
   private
 
-  def build_event(version: 1, type:, data:)
+  def build_event(version: 1, type:, data:, policy: Hive::Proposals::DEFAULT_POLICY)
     Hive::Proposals::Event.build(
       event_id: "pev-00000000-0000-4000-8000-%012d" % version,
       proposal_id: "prp-00000000-0000-4000-8000-000000000001",
@@ -91,7 +114,7 @@ class ProposalEventTest < Minitest::Test
         "actor" => { "id" => "alice", "kind" => "configured_identity" },
         "source_commit" => "a" * 40
       },
-      occurred_at: "2026-08-30T12:00:00Z"
+      occurred_at: "2026-08-30T12:00:00Z", policy:
     )
   end
 

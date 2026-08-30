@@ -22,15 +22,29 @@ class ConfigTest < Minitest::Test
               workflows: [coding]
               stages: [4-execute]
               agent_profiles: [codex]
+          authorities:
+            proposal-operator:
+              kind: operator
+              capabilities: [decide, supersede, rollback]
+              version: 1
+              revoked: false
       YAML
       assert_equal [ "coding" ],
                    Hive::Config.load(dir).dig("proposals", "evaluators", "benchmark-reviewer", "workflows")
+      assert_equal %w[decide supersede rollback],
+                   Hive::Config.load(dir).dig("proposals", "authorities", "proposal-operator", "capabilities")
 
       {
         "surprise: true" => /unknown field.*surprise/i,
         "evidence: { visibility: public }" => /visibility.*restricted.*project/i,
         "limits: { max_pending_sources: 0 }" => /max_pending_sources.*positive/i,
-        "evaluators: { bad: { workflows: nope } }" => /workflows.*array/i
+        "evaluators: { bad: { workflows: nope } }" => /workflows.*array/i,
+        "authorities: { bad: { kind: agent, capabilities: [], version: 1, revoked: false } }" =>
+          /kind.*operator.*policy/i,
+        "authorities: { bad: { kind: operator, capabilities: [publish], version: 1, revoked: false } }" =>
+          /capabilities.*malformed/i,
+        "authorities: { bad: { kind: operator, capabilities: [], version: 0, revoked: false } }" =>
+          /version.*positive/i
       }.each do |fragment, pattern|
         File.write(config_path, "proposals:\n  #{fragment}\n")
         assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message

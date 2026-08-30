@@ -17,6 +17,7 @@ require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
+require "hive/proposals"
 
 module Hive
   module Config
@@ -3960,7 +3961,12 @@ module Hive
     end
 
     PROPOSAL_KEYS = %w[evaluators authorities evidence limits context].freeze
-    PROPOSAL_EVALUATOR_KEYS = %w[workflows stages agent_profiles].freeze
+    PROPOSAL_EVALUATOR_KEYS = Hive::Proposals::EVALUATOR_CONFIG_KEYS
+    PROPOSAL_AUTHORITY_KEYS = (
+      Hive::Proposals::AUTHORITY_REQUIRED_KEYS + Hive::Proposals::AUTHORITY_OPTIONAL_KEYS
+    ).freeze
+    PROPOSAL_AUTHORITY_KINDS = Hive::Proposals::AUTHORITY_KINDS
+    PROPOSAL_AUTHORITY_CAPABILITIES = Hive::Proposals::AUTHORITY_CAPABILITIES
     PROPOSAL_EVIDENCE_KEYS = %w[visibility retention allowed_link_schemes].freeze
     PROPOSAL_LIMIT_KEYS = %w[
       max_pending_sources max_project_events max_proposal_events max_project_bytes
@@ -3973,9 +3979,7 @@ module Hive
       proposals = cfg.fetch("proposals")
       validate_closed_mapping!(proposals, PROPOSAL_KEYS, "proposals", source_path)
       validate_proposal_evaluators!(proposals.fetch("evaluators"), source_path)
-      unless proposals.fetch("authorities").is_a?(Hash)
-        raise ConfigError, "proposals.authorities in #{describe_source(source_path)} must be a Hash"
-      end
+      validate_proposal_authorities!(proposals.fetch("authorities"), source_path)
       validate_proposal_evidence!(proposals.fetch("evidence"), source_path)
       validate_proposal_limits!(proposals.fetch("limits"), source_path)
       validate_proposal_context!(proposals.fetch("context"), source_path)
@@ -4001,6 +4005,59 @@ module Hive
           end
         end
       end
+    end
+
+    def validate_proposal_authorities!(authorities, source_path)
+      unless authorities.is_a?(Hash) && authorities.length <= 256
+        raise ConfigError, "proposals.authorities in #{describe_source(source_path)} must be a bounded Hash"
+      end
+      authorities.each do |identity, row|
+        unless identity.to_s.match?(PROPOSAL_IDENTIFIER) && row.is_a?(Hash)
+          raise ConfigError,
+                "proposals.authorities identity in #{describe_source(source_path)} is malformed"
+        end
+        label = "proposals.authorities.#{identity}"
+        validate_closed_mapping!(row, PROPOSAL_AUTHORITY_KEYS, label, source_path)
+        unless PROPOSAL_AUTHORITY_KINDS.include?(row["kind"])
+          raise ConfigError,
+                "#{label}.kind in #{describe_source(source_path)} must be operator or policy"
+        end
+        capabilities = row["capabilities"]
+        unless capabilities.is_a?(Array) && capabilities.length <= 3 &&
+               capabilities.uniq == capabilities &&
+               capabilities.all? { |capability| PROPOSAL_AUTHORITY_CAPABILITIES.include?(capability) }
+          raise ConfigError,
+                "#{label}.capabilities in #{describe_source(source_path)} is malformed"
+        end
+        unless row["version"].is_a?(Integer) && row["version"].positive?
+          raise ConfigError, "#{label}.version in #{describe_source(source_path)} must be positive"
+        end
+        unless [ true, false ].include?(row["revoked"])
+          raise ConfigError, "#{label}.revoked in #{describe_source(source_path)} must be boolean"
+        end
+        validate_proposal_authority_times!(row, label, source_path)
+      end
+    end
+
+    def validate_proposal_authority_times!(row, label, source_path)
+      times = %w[valid_from valid_until].to_h do |key|
+        value = row[key]
+        next [ key, nil ] if value.nil?
+
+        parsed = Time.iso8601(value.to_s)
+        unless value.is_a?(String) && parsed.iso8601 == value
+          raise ArgumentError
+        end
+        [ key, parsed ]
+      end
+      return unless times["valid_from"] && times["valid_until"] &&
+                    times["valid_from"] >= times["valid_until"]
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} has an empty validity interval"
+    rescue ArgumentError
+      raise ConfigError,
+            "#{label} validity timestamps in #{describe_source(source_path)} must be canonical ISO 8601"
     end
 
     def validate_proposal_evidence!(evidence, source_path)

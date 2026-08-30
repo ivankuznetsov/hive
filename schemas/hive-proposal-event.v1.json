@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "event_id", "proposal_id", "version", "type",
-    "data", "source_event_id", "provenance", "occurred_at"
+    "data", "source_event_id", "provenance", "policy", "occurred_at"
   ],
   "properties": {
     "schema": { "const": "hive-proposal-event" },
@@ -25,6 +25,7 @@
     },
     "source_event_id": { "$ref": "#/$defs/SourceEventId" },
     "provenance": { "$ref": "#/$defs/Provenance" },
+    "policy": { "$ref": "#/$defs/Policy" },
     "occurred_at": { "type": "string", "format": "date-time" }
   },
   "allOf": [
@@ -106,6 +107,18 @@
       "properties": {
         "policy": { "enum": ["ephemeral", "task", "project", "indefinite"] },
         "enforcement": { "const": "none" }
+      }
+    },
+    "Policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["visibility", "retention", "allowed_link_schemes"],
+      "properties": {
+        "visibility": { "enum": ["restricted", "private", "project"] },
+        "retention": { "enum": ["ephemeral", "task", "project", "indefinite"] },
+        "allowed_link_schemes": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9+.-]*$" }
+        }
       }
     },
     "Evidence": {

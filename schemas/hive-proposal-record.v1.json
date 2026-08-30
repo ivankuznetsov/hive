@@ -7,7 +7,7 @@
   "required": [
     "schema", "schema_version", "proposal_id", "subject", "revision",
     "proposed_change", "motivation", "evidence", "author", "lineage",
-    "provenance", "source_event_id", "created_at"
+    "provenance", "source_event_id", "policy", "created_at"
   ],
   "properties": {
     "schema": { "const": "hive-proposal-record" },
@@ -25,6 +25,7 @@
     "lineage": { "$ref": "#/$defs/Lineage" },
     "provenance": { "$ref": "#/$defs/Provenance" },
     "source_event_id": { "$ref": "#/$defs/SourceEventId" },
+    "policy": { "$ref": "#/$defs/Policy" },
     "created_at": { "type": "string", "format": "date-time" }
   },
   "$defs": {
@@ -54,6 +55,18 @@
       "properties": {
         "policy": { "enum": ["ephemeral", "task", "project", "indefinite"] },
         "enforcement": { "const": "none" }
+      }
+    },
+    "Policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["visibility", "retention", "allowed_link_schemes"],
+      "properties": {
+        "visibility": { "enum": ["restricted", "private", "project"] },
+        "retention": { "enum": ["ephemeral", "task", "project", "indefinite"] },
+        "allowed_link_schemes": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9+.-]*$" }
+        }
       }
     },
     "Evidence": {

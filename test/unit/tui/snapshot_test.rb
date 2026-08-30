@@ -614,4 +614,157 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal 2, snapshot.hidden_archived_task_count(scope: 2)
     assert_equal 0, snapshot.hidden_archived_task_count(scope: 99)
   end
+
+  def test_new_idea_admission_keeps_only_unique_healthy_projects_in_registry_order
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ]))
+
+    admission = snapshot.new_idea_admission
+
+    assert_equal :available, admission.state
+    assert_equal %w[beta alpha], admission.projects.map(&:name)
+    assert_equal [ "duplicate" ], admission.ambiguous_names
+    assert_predicate admission, :frozen?
+    assert_predicate admission.projects, :frozen?
+    assert_predicate admission.ambiguous_names, :frozen?
+    assert_raises(FrozenError) { admission.projects << snapshot.projects.first }
+  end
+
+  def test_new_idea_admission_distinguishes_unhealthy_ambiguous_and_empty_snapshots
+    unhealthy = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "broken-a", "error" => "missing_project_path", "tasks" => [] },
+      { "name" => "broken-b", "error" => "not_initialised", "tasks" => [] }
+    ])).new_idea_admission
+    both_healthy = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "duplicate", "tasks" => [] }
+    ])).new_idea_admission
+    mixed_health = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "duplicate", "error" => "not_initialised", "tasks" => [] }
+    ])).new_idea_admission
+    empty = Hive::Tui::Snapshot.from_payload(sample_payload([])).new_idea_admission
+
+    assert_equal :unhealthy, unhealthy.state
+    assert_empty unhealthy.projects
+    assert_equal :ambiguous, both_healthy.state
+    assert_equal [ "duplicate" ], both_healthy.ambiguous_names
+    assert_equal :ambiguous, mixed_health.state,
+      "duplicate-name ambiguity must take precedence over project health"
+    assert_equal [ "duplicate" ], mixed_health.ambiguous_names
+    assert_equal :no_projects, empty.state
+  end
+
+  def test_new_idea_name_resolution_is_closed_and_ambiguity_precedes_health
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "duplicate", "error" => "not_initialised", "tasks" => [] }
+    ]))
+
+    available = snapshot.resolve_new_idea_project(name: "alpha")
+    unhealthy = snapshot.resolve_new_idea_project(name: "broken")
+    ambiguous = snapshot.resolve_new_idea_project(name: "duplicate")
+    disappeared = snapshot.resolve_new_idea_project(name: "ghost")
+    required = snapshot.resolve_new_idea_project(name: nil)
+
+    assert_equal :available, available.state
+    assert_equal "alpha", available.name
+    assert_same snapshot.projects.first, available.project
+    assert_predicate available, :available?
+    assert_predicate available, :frozen?
+    assert_equal :unhealthy, unhealthy.state
+    assert_equal "missing_project_path", unhealthy.detail
+    assert_equal :ambiguous, ambiguous.state
+    assert_equal :disappeared, disappeared.state
+    assert_equal :selection_required, required.state
+    refute_predicate ambiguous, :available?
+  end
+
+  def test_new_idea_resolution_reports_no_projects_for_an_empty_snapshot
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([]))
+
+    assert_equal :no_projects, snapshot.resolve_new_idea_project(name: "ghost").state
+    assert_equal :no_projects, snapshot.resolve_new_idea_project(name: nil).state
+    assert_equal :no_projects, snapshot.resolve_new_idea_entry(scope: 1).state
+  end
+
+  def test_new_idea_entry_resolution_rejects_invalid_scopes_and_name_conflicts
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ]))
+
+    [ 0, -1, 3, "1", nil ].each do |scope|
+      resolution = snapshot.resolve_new_idea_entry(scope: scope)
+      assert_equal :invalid_scope, resolution.state, "expected #{scope.inspect} to be invalid"
+      scope.nil? ? assert_nil(resolution.detail) : assert_equal(scope, resolution.detail)
+    end
+
+    conflict = snapshot.resolve_new_idea_entry(scope: 1, name: "alpha")
+    available = snapshot.resolve_new_idea_entry(scope: 2)
+
+    assert_equal :invalid_scope, conflict.state
+    assert_equal "alpha", conflict.name
+    assert_equal :available, available.state
+    assert_equal "beta", available.name
+  end
+
+  def test_new_idea_entry_resolution_reuses_name_policy_for_unhealthy_and_ambiguous_rows
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "duplicate", "error" => "not_initialised", "tasks" => [] }
+    ]))
+
+    assert_equal :unhealthy, snapshot.resolve_new_idea_entry(scope: 1).state
+    assert_equal :ambiguous, snapshot.resolve_new_idea_entry(scope: 2).state
+    assert_equal :ambiguous, snapshot.resolve_new_idea_entry(scope: 3).state
+  end
+
+  def test_new_idea_numeric_scope_is_consumed_once_then_revalidates_only_the_pinned_name
+    original = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ]))
+    reordered = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ]))
+    removed = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [] }
+    ]))
+
+    entry = original.resolve_new_idea_entry(scope: 2)
+    pinned_name = entry.name
+
+    assert_equal "beta", pinned_name
+    assert_equal :available, reordered.resolve_new_idea_project(name: pinned_name).state
+    assert_equal "beta", reordered.resolve_new_idea_project(name: pinned_name).name
+    assert_equal :disappeared, removed.resolve_new_idea_project(name: pinned_name).state
+  end
+
+  def test_invalid_numeric_entry_stays_unpinned_after_a_valid_refresh
+    original = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [] }
+    ]))
+    refreshed = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ]))
+
+    entry = original.resolve_new_idea_entry(scope: 9)
+
+    assert_equal :invalid_scope, entry.state
+    assert_nil entry.project
+    assert_equal :selection_required,
+      refreshed.resolve_new_idea_project(name: entry.name).state,
+      "refresh must not reinterpret the stale numeric position"
+  end
 end

@@ -29,6 +29,7 @@ require "hive/tui/snapshot"
 require "hive/tui/text"
 require "hive/tui/log_tail"
 require "hive/tui/brainstorm_answers"
+require "hive/tui/brainstorm_suggestions"
 require "hive/tui/clipboard"
 require "hive/tui/composer_staging"
 require "hive/tui/subprocess"
@@ -391,6 +392,10 @@ module Hive
           dispatch_red_status_autofix_then_close_detail(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
+        when Hive::Tui::Messages::RestoreBrainstormSuggestion
+          restore_brainstorm_suggestion(message.row)
+        when Hive::Tui::Messages::RetryBrainstormSuggestion
+          retry_brainstorm_suggestion(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
           open_task_folder(message.row)
         when Hive::Tui::Messages::OpenIdeaPreview
@@ -1245,6 +1250,7 @@ module Hive
 
         argv = editor_argv
         callable = lambda do
+          suggestion_lease = project_brainstorm_suggestions(row, path)
           before_mtime = file_mtime(path)
           before_hash = file_content_hash(path)
           # Capture the file's checkbox state pre-edit (and again
@@ -1259,6 +1265,7 @@ module Hive
           after_mtime = file_mtime(path)
           after_hash = file_content_hash(path)
           after_checkboxes = read_checkbox_state(path)
+          reconcile_brainstorm_suggestions(row, path, suggestion_lease)
           # Wipe whatever the editor left on the main screen before
           # bubbletea re-enters alt-screen. Alt-screen *should* hide
           # the main buffer regardless, but on some terminals the
@@ -1291,6 +1298,45 @@ module Hive
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def project_brainstorm_suggestions(row, path)
+        return unless row.stage.to_s == "2-brainstorm"
+
+        Hive::Tui::BrainstormSuggestions.project!(
+          task_root: row.folder.to_s, path: path
+        )
+      end
+
+      def reconcile_brainstorm_suggestions(row, path, lease)
+        return unless lease
+
+        Hive::Tui::BrainstormSuggestions.reconcile_editor_exit!(
+          task_root: row.folder.to_s, path: path, lease: lease
+        )
+      end
+
+      def restore_brainstorm_suggestion(row)
+        result = Hive::Tui::BrainstormSuggestions.restore!(row.folder)
+        [ flashed(brainstorm_suggestion_action_flash("restore", row, result)), nil ]
+      end
+
+      def retry_brainstorm_suggestion(row)
+        result = Hive::Tui::BrainstormSuggestions.retry!(row.folder)
+        [ flashed(brainstorm_suggestion_action_flash("retry", row, result)), nil ]
+      end
+
+      def brainstorm_suggestion_action_flash(action, row, result)
+        case result["status"]
+        when "updated"
+          "suggestion #{action} queued for #{row.slug}"
+        when "not_found", "invalid_state"
+          "no suggestion available to #{action} for #{row.slug}"
+        when "lock_busy"
+          "suggestion #{action} deferred — task is busy"
+        else
+          "suggestion #{action} unavailable for #{row.slug}"
+        end
       end
 
       # Pure browse gesture (R3 in the plan): open the task's hive-state

@@ -181,6 +181,12 @@ module Hive
       # revise inline questions before re-running the stage.
       OpenInputEditor = Data.define(:row)
 
+      # Advisory-only recovery controls for a brainstorm suggestion. They
+      # mutate only the sidecar presentation state; neither writes an answer
+      # nor dispatches a workflow verb.
+      RestoreBrainstormSuggestion = Data.define(:row)
+      RetryBrainstormSuggestion = Data.define(:row)
+
       # `o` in grid mode — suspend the TUI and open the focused row's
       # hive-state task folder in the user's editor for read-only
       # browsing. Pure browse gesture: no marker mutation, no workflow

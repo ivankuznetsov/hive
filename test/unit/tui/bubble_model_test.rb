@@ -3746,6 +3746,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # ---- OpenInputEditor → foreground editor takeover ----
 
+  def test_brainstorm_suggestion_restore_and_retry_only_update_advisory_state
+    row = make_task_row
+    calls = []
+    restore = ->(root) { calls << [ :restore, root ]; { "status" => "updated" } }
+    retry_action = ->(root) { calls << [ :retry, root ]; { "status" => "updated" } }
+
+    with_replaced_singleton_method(Hive::Tui::BrainstormSuggestions, :restore!, restore) do
+      with_replaced_singleton_method(Hive::Tui::BrainstormSuggestions, :retry!, retry_action) do
+        restored, restore_cmd = @model.update(
+          Hive::Tui::Messages::RestoreBrainstormSuggestion.new(row: row)
+        )
+        restore_flash = restored.hive_model.flash
+        retried, retry_cmd = @model.update(
+          Hive::Tui::Messages::RetryBrainstormSuggestion.new(row: row)
+        )
+
+        assert_nil restore_cmd
+        assert_nil retry_cmd
+        assert_match(/restore queued/, restore_flash)
+        assert_match(/retry queued/, retried.hive_model.flash)
+      end
+    end
+    assert_equal [ [ :restore, row.folder ], [ :retry, row.folder ] ], calls
+    assert_empty @messages, "advisory controls must not dispatch workflow messages"
+  end
+
   def test_open_input_editor_returns_sequence_command_and_dispatches_result
     row = make_task_row(state_file: "/tmp/hive/some-slug/brainstorm.md")
     seen_editor_invocation = nil

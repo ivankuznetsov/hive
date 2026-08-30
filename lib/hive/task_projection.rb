@@ -22,6 +22,7 @@ module Hive
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
     class RoutineLockUnavailable < Error; end
+    class RoutineLockInvalid < RoutineLockUnavailable; end
 
     # Projection repair is a producer-owned row classification. Marker attrs
     # are agent-authored evidence and must never grant this control state.

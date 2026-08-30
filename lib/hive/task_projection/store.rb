@@ -258,6 +258,11 @@ module Hive
             require_checkpoint: require_checkpoint, pristine: pristine
           )
         end
+      rescue Hive::TaskProjection::RoutineLockInvalid => e
+        degraded_bounded_read(
+          reason: "journal_lock_invalid", state: "repair_required", error: e,
+          snapshot_limit: snapshot_limit
+        )
       rescue Hive::TaskProjection::RoutineLockUnavailable => e
         degraded_bounded_read(
           reason: "journal_lock_busy", state: "partial", error: e,
@@ -877,7 +882,7 @@ module Hive
         lock_path = File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME)
         path_stat = File.lstat(lock_path)
         unless path_stat.file? && !path_stat.symlink?
-          raise Hive::TaskProjection::RoutineLockUnavailable,
+          raise Hive::TaskProjection::RoutineLockInvalid,
                 "task journal lock is not a regular file"
         end
         flags = File::RDONLY
@@ -890,7 +895,7 @@ module Hive
         begin
           opened = lock.stat
           unless opened.file? && opened.dev == path_stat.dev && opened.ino == path_stat.ino
-            raise Hive::TaskProjection::RoutineLockUnavailable,
+            raise Hive::TaskProjection::RoutineLockInvalid,
                   "task journal lock descriptor changed"
           end
           unless lock.flock(File::LOCK_SH | File::LOCK_NB)
@@ -925,7 +930,10 @@ module Hive
             raise Hive::TaskProjection::InvalidJournal,
                   "task journal lock descriptor changed"
           end
-          lock.flock(File::LOCK_EX)
+          unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+            raise Hive::TaskProjection::InvalidJournal,
+                  "task journal lock is busy; retry the exact-task repair"
+          end
           yield
         ensure
           lock&.flock(File::LOCK_UN)

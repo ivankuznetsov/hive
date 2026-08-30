@@ -2643,10 +2643,24 @@ module Hive
           )
           return
         end
-        if req.recovery.nil? && durable_task_request?(req) &&
-           bound_task_request?(req) && !bound_task_request_current?(req, row: row)
-          reject_request(req, reason: "stale_task_identity")
-          return
+        if req.recovery.nil? && durable_task_request?(req) && bound_task_request?(req)
+          request_admission_context = begin
+            admission_context_loader&.call
+          rescue StandardError => e
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: "admission_context_unavailable",
+              error: "#{e.class}: #{e.message[0, 200]}"
+            )
+            return
+          end
+          unless bound_task_request_current?(
+            req, row: row, admission_context: request_admission_context
+          )
+            reject_request(req, reason: "stale_task_identity")
+            return
+          end
         end
         if req.recovery.is_a?(Hash)
           unless row
@@ -2945,7 +2959,7 @@ module Hive
           !request.expected_stage.to_s.empty?
       end
 
-      def bound_task_request_current?(request, row: nil)
+      def bound_task_request_current?(request, row: nil, admission_context: nil)
         task = Hive::TaskResolver.new(
           request.slug, project_filter: request.project
         ).resolve
@@ -2960,7 +2974,8 @@ module Hive
           project: request.project,
           intended_stage: intended_stage,
           task_input_epoch: row&.condition_task_generation,
-          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil
+          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
+          admission_context: admission_context
         )
         request.task_generation.to_s == generation.task_generation.to_s
       rescue Hive::Error, SystemCallError, IOError

@@ -17,11 +17,13 @@ module Hive
     ) do
       def self.resolve(task:, project:, intended_stage:, progress_token: nil,
                        task_generation: nil, ownership_generation: nil, task_input_epoch: nil,
-                       attempt_store: nil)
+                       attempt_store: nil, admission_context: nil)
         task_id = task.respond_to?(:id) ? task.id : nil
         slug = task.slug.to_s
         locator = task_id.nil? ? "project:#{project}/slug:#{slug}" : "id:#{task_id}"
-        progress = progress_token || artifact_token(task)
+        progress = progress_token || artifact_token(
+          task, admission_context: admission_context
+        )
         generation = ownership_generation || task_generation || ::Digest::SHA256.hexdigest(
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )

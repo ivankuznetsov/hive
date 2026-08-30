@@ -8,6 +8,8 @@ require "hive/gh"
 require "hive/markers"
 require "hive/pr"
 require "hive/task_counter"
+require "hive/task"
+require "hive/task_journal"
 require "hive/task_meta"
 require "hive/task_projection/store"
 require "hive/workflows"
@@ -259,15 +261,38 @@ module Hive
         materialized = materialize(project_root, slug, pr_number)
         verify_head!(pr_number, metadata, materialized)
         write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
-        Hive::TaskProjection::Store.new(
-          task_folder: task_folder
-        ).initialize_pristine!(
-          marker: Hive::Markers.current(File.join(task_folder, "task.md"))
-        )
+        initialize_projection!(task_folder, materialized, now)
         task_folder
       rescue StandardError
         cleanup_failed_task!(project_root, slug, pr_number, task_folder)
         raise
+      end
+
+      def initialize_projection!(task_folder, materialized, now)
+        task = Hive::Task.new(task_folder)
+        marker = Hive::Markers.current(task.state_file)
+        Hive::TaskJournal::Writer.new(
+          task_folder: task_folder, clock: -> { now }
+        ).append(
+          event_type: "legacy_baseline",
+          task: { "id" => task.id&.to_s, "slug" => task.slug },
+          workflow: task.workflow.id.to_s,
+          stage: REVIEW_STAGE,
+          attempt_id: Hive::TaskJournal::LEGACY_ATTEMPT_ID,
+          task_generation: 0,
+          ownership_generation: nil,
+          commit_generation: 0,
+          reason: "ad_hoc_review_created",
+          evidence: [ {
+            "type" => "commit", "sha" => materialized.fetch(:head_sha),
+            "branch" => materialized.fetch(:branch)
+          } ],
+          provenance: { "source" => "ad_hoc_review" },
+          payload: {}
+        )
+        Hive::TaskProjection::Store.new(task_folder: task_folder).rebuild!(
+          marker: marker
+        )
       end
 
       # Roll back a partially-created task after a create-phase failure — a

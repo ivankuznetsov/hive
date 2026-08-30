@@ -14,6 +14,9 @@ class RepairProjectionCommandTest < Minitest::Test
     with_project_tasks(2) do |project, tasks|
       selected, untouched = tasks
       write_legacy_journal(selected)
+      selected_journal = File.binread(
+        File.join(selected.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
       File.write(File.join(untouched.folder, "task-projection.json"), "untouched-snapshot\n")
       File.write(
         File.join(untouched.folder, "task-projection.checkpoint.json"),
@@ -37,6 +40,8 @@ class RepairProjectionCommandTest < Minitest::Test
       assert_equal selected.slug, first.fetch("slug")
       assert_equal project, first.fetch("project")
       assert_equal first.fetch("journal_cursor"), second.fetch("journal_cursor")
+      assert_equal selected_journal,
+                   File.binread(File.join(selected.folder, Hive::TaskJournal::JOURNAL_BASENAME))
       assert_equal "untouched-snapshot\n",
                    File.binread(File.join(untouched.folder, "task-projection.json"))
       assert_equal "untouched-checkpoint\n",

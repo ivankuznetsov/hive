@@ -159,6 +159,17 @@ hive daemon start
             └─ Hive::Daemon::Policy              (pure decisions)
 ```
 
+Routine finalization maintenance opens one attempt projection reader for its
+bounded cold-log sweep and supplies each candidate task's strict bounded
+projection to `TaskAction`; a repair-required task conservatively retains its
+log instead of triggering complete journal replay. Durable task-bound dispatch
+requests likewise reuse the tick's memoized dependency-admission context when
+revalidating their generation, so a queue of N requests does not build N
+fleet-wide dependency snapshots. A PR merge candidate blocked by a temporary
+projection outage returns its archive state to `pending` once strict generation
+validation succeeds, while preserving later independent merge or closure
+blocks.
+
 Lease-backed `attempt_lost` outcomes bypass marker recovery entirely.
 `StaleAgentHealer#heal_attempt_losses` applies
 verified orphan cleanup and dirty capture, then dispatches a same-generation

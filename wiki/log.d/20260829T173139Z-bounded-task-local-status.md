@@ -14,15 +14,18 @@ periodic repair watchers are not substitutes. Checkpoint size and attempt-ID
 cap exhaustion require task-local retained-history compaction;
 predecessor-fetch exhaustion remains exact-task repairable.
 
-Canonical CLI, idempotent/controller, Patrol Fix, and ad-hoc review task
+Canonical initial-stage CLI, idempotent/controller, and Patrol Fix task
 creation now publish a zero-history derived checkpoint before exposing the
-task. The initializer refuses pre-existing projection authority, so it closes
-the new-task gap without becoming an implicit repair or migration path.
+task. Direct-to-review ad-hoc tasks instead publish a generation-0 authoritative
+baseline and derive their checkpoint from it. The initial-stage initializer
+refuses pre-existing projection authority, so it closes the new-task gap
+without becoming an implicit repair or migration path.
 
 Operational-action freshness checks and downstream generation reads now use
 the strict projection path too. Bounded suffix preflight parses attempt IDs and
 event counts once, while PR merge reconciliation reuses one attempt projection
 reader across all selected projects in a tick. Routine journal locks are
-nonblocking and unsafe or contended lock entries degrade only that task. Repair
+nonblocking: contention is transient, while unsafe lock entries are durable
+task-local repair failures. Repair
 classification is a producer-owned status field, not an agent-writable marker
 claim, and merge candidates survive temporary projection outages.

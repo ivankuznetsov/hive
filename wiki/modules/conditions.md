@@ -85,15 +85,21 @@ use the same strict reader; they surface repair-required state instead of
 guessing that an absent journal means a pristine task.
 Routine reads take the task-local journal lock with a nonblocking shared flock
 after regular-file, no-follow, and descriptor-identity checks. A concurrent
-exact repair or unsafe lock entry becomes the transient task-local
-`journal_lock_busy` diagnostic rather than stalling the fleet scan.
+exact repair becomes the transient task-local `journal_lock_busy` diagnostic.
+An unsafe or replaced lock entry is instead the durable task-local
+`journal_lock_invalid` diagnostic, so waiting is never presented as a repair
+for malformed storage. Exact repair also takes its exclusive journal lock
+nonblockingly and fails with a bounded retryable error when another writer owns
+it; it never waits indefinitely.
 
-Canonical task creation publishes a zero-history snapshot and checkpoint before
-the task is committed or admitted. The checkpoint is valid without creating an
-empty authoritative journal, then moves with the task and accepts bounded
-journal suffixes when execution starts. This keeps newly created tasks on the
-strict path from their first scan. It is creation-time derived-state
-initialization, not migration or repair of an existing task.
+Canonical initial-stage task creation publishes a zero-history snapshot and
+checkpoint before the task is committed or admitted. The checkpoint is valid
+without creating an empty authoritative journal, then moves with the task and
+accepts bounded journal suffixes when execution starts. Direct-to-review ad-hoc
+tasks are not pristine initial-stage tasks: their creator writes a generation-0
+authoritative baseline and derives the initial snapshot/checkpoint from it, so
+the exact repair command can recover lost derived files later. Both paths are
+creation-time initialization, not migration or repair of an existing task.
 
 A task with durable history and a missing, invalid, stale, torn, oversized, or
 otherwise unverifiable bounded projection becomes a synthetic

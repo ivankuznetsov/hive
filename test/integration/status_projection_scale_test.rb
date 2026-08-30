@@ -24,6 +24,11 @@ class StatusProjectionScaleTest < Minitest::Test
       assert_equal 0, full.dig(:counters, :full_journal_reads)
       assert_operator empty.dig(:counters, :journal_suffix_bytes), :>, 0
       assert_operator full.dig(:counters, :journal_suffix_bytes), :>, 0
+      suffixes = full.dig(:counters, :journal_suffix_bytes_by_task)
+      assert_equal Fixture::TASK_COUNT - 1, suffixes.length
+      assert suffixes.values.all?(&:positive?),
+             "every healthy task must replay its own bounded journal suffix"
+      refute suffixes.key?(fixture.invalid_slug)
       assert_equal empty.fetch(:counters), full.fetch(:counters)
       assert_equal Fixture::TASK_COUNT, full.dig(:counters, :stores)
       assert_equal empty.fetch(:attempt_store).point_fetches,

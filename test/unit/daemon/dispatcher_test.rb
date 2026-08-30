@@ -788,6 +788,40 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  coordinator.resumes.map { |entry| entry.fetch(:admission_context) }
   end
 
+  def test_dispatch_request_scan_reuses_one_admission_context_for_all_bound_tasks
+    dispatcher, = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("s1", "s2")
+    requests.each { |request| request.recovery = nil }
+    rows = recovery_scan_rows("s1", "s2")
+    admission_context = Hive::DependencyAdmission::Context.new(projects: [])
+    context_builds = 0
+    observed_contexts = []
+    dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, **options|
+      observed_contexts << options.fetch(:admission_context)
+      false
+    end
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          lambda do |_projects|
+            context_builds += 1
+            admission_context
+          end
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_equal 1, context_builds
+    assert_equal [ admission_context, admission_context ], observed_contexts
+  end
+
   def test_empty_dispatch_request_scan_skips_global_index_work
     dispatcher, = make_dispatcher(rows: [])
     rows = Object.new
@@ -7854,6 +7888,35 @@ end
     assert_equal 7, captured.fetch(:task_input_epoch)
   end
 
+  def test_bound_dispatch_generation_reuses_the_supplied_admission_context
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug)
+      .new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "current-generation"
+    )
+    context = Object.new
+    captured = nil
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      replacement = lambda do |**options|
+        captured = options
+        generation
+      end
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, replacement) do
+        assert dispatcher.send(
+          :bound_task_request_current?, request, admission_context: context
+        )
+      end
+    end
+
+    assert_same context, captured.fetch(:admission_context)
+  end
+
   def test_dispatcher_removes_a_durable_request_with_stale_task_identity
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, = make_dispatcher(
@@ -7865,7 +7928,7 @@ end
         expected_stage: "4-execute", task_generation: "old-generation",
         state_home: state_home, now: T0
       )
-      dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, row: nil|
+      dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, row: nil, **|
         false
       end
       stub_find_project!(dispatcher, "p1")

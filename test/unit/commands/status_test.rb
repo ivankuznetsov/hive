@@ -1596,6 +1596,8 @@ class CommandsStatusTest < Minitest::Test
       corrupt_row = project.fetch("tasks").find { |row| row["slug"] == "corrupt-journal-260717-abcd" }
       healthy_row = project.fetch("tasks").find { |row| row["slug"] == "healthy-journal-260717-bcde" }
       assert_equal "error", corrupt_row.fetch("action")
+      assert_equal true, corrupt_row.fetch("projection_repair")
+      assert_equal false, healthy_row.fetch("projection_repair")
       assert_equal "condition_projection_repair_required", corrupt_row.fetch("attrs").fetch("reason")
       assert_equal "operator", corrupt_row.fetch("attrs").fetch("owner")
       assert_equal(
@@ -1659,6 +1661,12 @@ class CommandsStatusTest < Minitest::Test
       command = Hive::Commands::Status.new
 
       assert command.send(:pristine_projection_task?, task, marker)
+      File.write(File.join(folder, ".lock"), "controller lock\n")
+      refute command.send(:pristine_projection_task?, task, marker)
+      assert Hive::TaskProjection::Store.pristine_task?(
+        task, marker, held_task_lock: true
+      )
+      FileUtils.rm_f(File.join(folder, ".lock"))
       File.write(File.join(folder, "closure.json"), "{}")
       refute command.send(:pristine_projection_task?, task, marker)
       FileUtils.rm_f(File.join(folder, "closure.json"))

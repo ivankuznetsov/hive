@@ -78,7 +78,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => [
         task_row(slug: "fix-bug").merge(
           "pr_url" => "https://github.com/acme/writero/pull/42",
-          "plan_review" => plan_review
+          "plan_review" => plan_review,
+          "projection_repair" => true
         )
       ]
     } ])
@@ -94,9 +95,26 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
       assert_equal plan_review, row.plan_review
+      assert_equal true, row.projection_repair
       assert_equal payload, result.status_payload
       assert_equal 3, result.hidden_archived_task_count
       assert_equal 3, result.projects.first.hidden_archived_task_count
+    end
+  end
+
+  def test_projection_repair_requires_a_literal_json_boolean
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [
+        task_row(slug: "true").merge("projection_repair" => true),
+        task_row(slug: "false").merge("projection_repair" => false),
+        task_row(slug: "string").merge("projection_repair" => "true")
+      ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      rows = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows
+      assert_equal [ true, false, false ], rows.map(&:projection_repair)
     end
   end
 

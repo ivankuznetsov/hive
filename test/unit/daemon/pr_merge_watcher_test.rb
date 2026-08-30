@@ -574,6 +574,8 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       candidate = store.load(identity_for(task.project_root))
                        .fetch("candidates").values.first
       refute_equal "superseded", candidate.dig("archive", "status")
+      assert_equal "pending", candidate.dig("archive", "status")
+      assert_nil candidate.dig("archive", "last_error")
     end
   end
 

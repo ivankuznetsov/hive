@@ -22,6 +22,7 @@ module Hive
     # receipt live in PrMergeReconciliationStore, so daemon restart and a
     # transient GitHub or intake failure cannot silently forget a task.
     class PrMergeWatcher
+      PROJECTION_OUTAGE_PREFIX = "projection_unavailable: ".freeze
       SUPPORTED_STAGES = %w[open-pr review artifacts finalize].map do |verb|
         Hive::Workflows::VERBS.fetch(verb).fetch(:target)
       end.freeze
@@ -358,7 +359,7 @@ module Hive
             status: :blocked,
             archive: {
               "status" => "blocked",
-              "last_error" => generation.fetch(:reason)
+              "last_error" => "#{PROJECTION_OUTAGE_PREFIX}#{generation.fetch(:reason)}"
             },
             next_poll_at: now + @poll_interval_sec
           }
@@ -370,11 +371,16 @@ module Hive
                        "last_error" => "task generation changed before reconciliation" }
           }
         end
+        recovered_archive = if candidate.dig("archive", "status") == "blocked" &&
+          candidate.dig("archive", "last_error").to_s.start_with?(PROJECTION_OUTAGE_PREFIX)
+          { "status" => "pending", "last_error" => nil }
+        end
 
         remote = candidate.fetch("remote")
         unless remote["state"] == "merged"
           facts = poll_facts(identity, candidate)
           remote_result = remote_result(facts, candidate, now: now)
+          remote_result[:archive] = recovered_archive if recovered_archive
           checkpoint!(identity, candidate, remote_result, now: now)
           return remote_result unless remote_result.fetch(:status) == :merged
 
@@ -397,6 +403,7 @@ module Hive
         architecture = ensure_architecture_intake(
           identity, candidate, remote, now: now
         )
+        architecture[:archive] = recovered_archive if recovered_archive
         checkpoint!(identity, candidate, architecture, now: now)
         return architecture if %i[deferred blocked].include?(architecture.fetch(:status))
         if @dry_run
@@ -404,7 +411,7 @@ module Hive
             status: :dry_run,
             remote: remote,
             architecture: architecture.fetch(:architecture),
-            archive: candidate.fetch("archive"),
+            archive: recovered_archive || candidate.fetch("archive"),
             next_poll_at: now + @poll_interval_sec
           }
         end

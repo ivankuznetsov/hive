@@ -66,6 +66,8 @@ module HiveStatusProjectionScaleFixture
     def journal_suffix(cursor, limit)
       suffix, size, over = super
       @scale_counters[:journal_suffix_bytes] += suffix.bytesize
+      @scale_counters[:journal_suffix_bytes_by_task][File.basename(task_folder)] +=
+        suffix.bytesize
       [ suffix, size, over ]
     end
   end
@@ -121,7 +123,8 @@ module HiveStatusProjectionScaleFixture
 
   def counters
     Hash.new(0).merge(
-      stores: 0, full_journal_reads: 0, journal_suffix_bytes: 0
+      stores: 0, full_journal_reads: 0, journal_suffix_bytes: 0,
+      journal_suffix_bytes_by_task: Hash.new(0)
     )
   end
 

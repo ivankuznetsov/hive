@@ -694,7 +694,27 @@ class TaskProjectionStoreTest < Minitest::Test
 
       assert_operator elapsed, :<, 0.5
       assert_equal "repair_required", result.state
-      assert_equal "journal_lock_busy", result.diagnostics.first.fetch("reason")
+      assert_equal "journal_lock_invalid", result.diagnostics.first.fetch("reason")
+    end
+  end
+
+  def test_explicit_repair_fails_immediately_when_the_journal_lock_is_busy
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        assert lock.flock(File::LOCK_EX)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+          store.repair!
+        end
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        assert_operator elapsed, :<, 0.5
+        assert_match(/journal lock is busy/, error.message)
+      end
     end
   end
 

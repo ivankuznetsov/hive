@@ -3,7 +3,7 @@ title: Hive::SecretPatterns
 type: module
 source: lib/hive/secret_patterns.rb
 created: 2026-04-26
-updated: 2026-08-21
+updated: 2026-08-30
 tags: [security, secrets, regex, secret-scan, redact]
 ---
 
@@ -36,7 +36,7 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 | `github_fine_grained_pat` | `github_pat_[A-Za-z0-9_]{20,}` | Current fine-grained GitHub personal access tokens. |
 | `generic_api_key` | `\bapi[_-]?key\b[\s:=]{0,3}['"]?…20+ chars` | Quoted or unquoted assignments. |
 | `pem_private_key` | `-----BEGIN … PRIVATE KEY-----…-----END … PRIVATE KEY-----` (`/m`) | Block form — redacts the base64 body, not just the BEGIN header. PR #84 #3. |
-| `password_assignment` | conventional names ending in `password`, `passwd`, or `pwd`, followed by `:` or `=` and 6+ chars | Catches shell / env / YAML assignment shapes such as `DB_PASSWORD=...` as well as bare `password: ...`. |
+| `password_assignment` | conventional names ending in `password`, `passwd`, or `pwd`, followed by `:` or `=` and 6+ chars | Catches shell / env / YAML assignment shapes such as `DB_PASSWORD=...` as well as bare `password: ...`. A whole `$NAME` or `${NAME}` reference, optionally quoted, is indirection rather than secret material; mixed reference-plus-literal values remain findings. |
 | `bearer_token` | `\bauthorization\s*[:=]\s*['"]?(Bearer|Basic|Token)\s+…8+ chars` | HTTP `Authorization:` headers across curl / log / framework formats. |
 | `session_cookie` | `(Set-)?Cookie:\s*…(session(id)?|sid|auth)…=…8+` | Cookie / Set-Cookie values containing a session-like key. |
 | `openai_api_key` | `\bsk-[A-Za-z0-9]{20,}` | OpenAI API key prefix. |

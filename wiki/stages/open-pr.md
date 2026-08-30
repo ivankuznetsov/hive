@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, lib/hive/github_publication.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-08-21
+updated: 2026-08-30
 tags: [stage, pr, github]
 ---
 
@@ -41,11 +41,19 @@ outside `pr-draft.json`. The agent never writes `pr.md` or a completion marker.
 - push only with an expected-absence lease and verify the remote OID;
 - create the PR only after intent is durable and exact local/remote evidence is
   revalidated;
+- after review or artifact rework, fast-forward the same controller-owned draft
+  only when its original number, URL, title, body marker, repository, base, and
+  branch are unchanged, the hosted head still equals the remote branch, and
+  that head is an ancestor of the new local commit;
 - safely retry a failed absent-branch push or a definite `gh pr create`
   failure; unknown attempted outcomes remain reconciliation-only.
 
 The durable controller state stores identities and digests, never raw title,
-body, or diff bytes.
+body, or diff bytes. A rework fast-forward keeps the first observed publication
+state as its immutable ownership anchor. Its expected-remote-OID push is safe to
+reconcile after a lost response, while a changed/ambiguous PR, non-fast-forward
+head, rewritten hosted history, remote mismatch, or terminal PR missing the new
+revision fails closed.
 
 ## Outcomes
 

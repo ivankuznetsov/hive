@@ -37,8 +37,8 @@ case "$cwd" in
       '# Plan' \
       '' \
       '## Files' \
-      '- `implementation.txt`' \
-      '- `test/implementation_test.rb`' \
+      "- \`implementation.txt\`" \
+      "- \`test/implementation_test.rb\`" \
       '' \
       '## Test scenarios' \
       '- verifies the sample implementation marker is present' \

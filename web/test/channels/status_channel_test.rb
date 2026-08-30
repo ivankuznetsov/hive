@@ -111,6 +111,10 @@ class StatusChannelAsyncStreamLifecycleTest < ActiveSupport::TestCase
   def stream_lifecycle_adapter_name
     "async"
   end
+
+  def stream_lifecycle_pending_entries(channel)
+    channel.instance_variable_get(:@status_stream_attempts).to_a
+  end
 end
 
 class StatusChannelTest < ActionCable::Channel::TestCase
@@ -271,6 +275,9 @@ class StatusChannelTest < ActionCable::Channel::TestCase
     assert_predicate fenced, :unsubscribed?
     assert_empty fenced_fixture.registrations
     assert_empty fenced_fixture.confirmations
+    assert_empty fenced_fixture.raw_unsubscribes,
+                 "queued cancellation must not issue an ineffective adapter unsubscribe"
+    assert_empty pending_stream_attempts(fenced)
   end
 
   test "the application fence removes registration completed after teardown" do
@@ -287,11 +294,138 @@ class StatusChannelTest < ActionCable::Channel::TestCase
     assert_predicate fenced, :unsubscribed?
     assert_empty fenced_fixture.registrations
     assert_empty fenced_fixture.confirmations
+    assert_equal 1, fenced_fixture.raw_unsubscribes.length,
+                 "a handler that registered after teardown must have one cleanup owner"
+    assert_empty pending_stream_attempts(fenced)
+  end
+
+  test "targeted stop cancels queued work without raw unsubscribe" do
+    fixture = ControlledStreamLifecycleFixture.new
+    channel = StatusChannel.new(fixture.connection, "targeted-queued", {})
+    channel.stream_from("targeted-queued")
+    channel.send(:ensure_confirmation_sent)
+
+    channel.stop_stream_from("targeted-queued")
+    channel.stop_stream_from("targeted-queued")
+    fixture.run_next_posted
+
+    assert_empty fixture.registrations
+    assert_empty fixture.raw_unsubscribes
+    assert_empty channel.send(:streams)
+    assert_empty pending_stream_attempts(channel)
+  end
+
+  test "targeted stop during registration waits to unsubscribe the real handler once" do
+    fixture = ControlledStreamLifecycleFixture.new(pause_subscribe: true)
+    channel = StatusChannel.new(fixture.connection, "targeted-registering", {})
+    channel.stream_from("targeted-registering")
+    channel.send(:ensure_confirmation_sent)
+    worker = Thread.new { fixture.run_next_posted }
+    fixture.await_subscribe
+
+    channel.stop_stream_from("targeted-registering")
+    channel.stop_stream_from("targeted-registering")
+    assert_empty fixture.raw_unsubscribes
+
+    fixture.release_subscribe
+    worker.value
+    fixture.drain_posted
+
+    assert_empty fixture.registrations
+    assert_equal 1, fixture.raw_unsubscribes.length
+    assert_empty fixture.confirmations
+    assert_empty channel.send(:streams)
+    assert_empty pending_stream_attempts(channel)
+  ensure
+    fixture&.release_subscribe if worker&.alive?
+    worker&.join(1)
+  end
+
+  test "global stop cancels every queued attempt without raw unsubscribe" do
+    fixture = ControlledStreamLifecycleFixture.new
+    channel = StatusChannel.new(fixture.connection, "global-queued", {})
+    channel.stream_from("global-one")
+    channel.stream_from("global-two")
+    channel.send(:ensure_confirmation_sent)
+
+    channel.stop_all_streams
+    channel.stop_all_streams
+    2.times { fixture.run_next_posted }
+
+    assert_empty fixture.registrations
+    assert_empty fixture.raw_unsubscribes
+    assert_empty channel.send(:streams)
+    assert_empty pending_stream_attempts(channel)
+  end
+
+  test "a later registered stream resolves confirmation after targeted pending cancellation" do
+    fixture = ControlledStreamLifecycleFixture.new
+    channel = StatusChannel.new(fixture.connection, "targeted-recovery", {})
+    channel.stream_from("cancelled-stream")
+    channel.send(:ensure_confirmation_sent)
+    channel.stop_stream_from("cancelled-stream")
+    channel.stream_from("replacement-stream")
+
+    2.times { fixture.run_next_posted }
+
+    assert_equal [ "replacement-stream" ], fixture.registrations.map(&:first)
+    assert_empty fixture.raw_unsubscribes
+    assert_equal 1, fixture.confirmations.length
+    assert_equal [ "replacement-stream" ], channel.send(:streams).keys
+    assert_empty pending_stream_attempts(channel)
+  ensure
+    channel&.unsubscribe_from_channel
+  end
+
+  test "targeted stop winning an adapter failure suppresses reconnect" do
+    posted = Queue.new
+    entered_subscribe = Queue.new
+    release_subscribe = Queue.new
+    raw_unsubscribes = []
+    close_calls = []
+    confirmations = []
+    event_loop = Object.new
+    event_loop.define_singleton_method(:post) { |task = nil, &block| posted << (task || block) }
+    pubsub = Object.new
+    pubsub.define_singleton_method(:subscribe) do |*_args|
+      entered_subscribe << true
+      release_subscribe.pop
+      raise ActiveRecord::ConnectionNotEstablished, "adapter stopped with the stream"
+    end
+    pubsub.define_singleton_method(:unsubscribe) { |*args| raw_unsubscribes << args }
+    server = Struct.new(:event_loop).new(event_loop)
+    connection = Object.new
+    connection.define_singleton_method(:server) { server }
+    connection.define_singleton_method(:pubsub) { pubsub }
+    connection.define_singleton_method(:identifiers) { [] }
+    connection.define_singleton_method(:logger) { Rails.logger }
+    connection.define_singleton_method(:close) { |**options| close_calls << options }
+    connection.define_singleton_method(:transmit) { |frame| confirmations << frame }
+    channel = StatusChannel.new(connection, "stopped-failure", {})
+    channel.stream_from("stopped-failure")
+    channel.send(:ensure_confirmation_sent)
+    worker = Thread.new { Timeout.timeout(5) { posted.pop.call } }
+    Timeout.timeout(5) { entered_subscribe.pop }
+
+    channel.stop_stream_from("stopped-failure")
+    release_subscribe << true
+    worker.value
+    Timeout.timeout(5) { posted.pop.call }
+
+    assert_empty raw_unsubscribes
+    assert_empty close_calls
+    assert_empty confirmations
+    assert_empty channel.send(:streams)
+    assert_empty pending_stream_attempts(channel)
+  ensure
+    release_subscribe << true if worker&.alive?
+    worker&.join(1)
   end
 
   test "a deferred adapter failure releases its lease and reconnects the transport" do
     posted = Queue.new
     close_calls = []
+    raw_unsubscribes = []
     connected = 0
     disconnected = 0
     event_loop = Object.new
@@ -300,7 +434,7 @@ class StatusChannelTest < ActionCable::Channel::TestCase
     pubsub.define_singleton_method(:subscribe) do |*_args|
       raise ActiveRecord::ConnectionNotEstablished, "cable database unavailable"
     end
-    pubsub.define_singleton_method(:unsubscribe) { |*_args| }
+    pubsub.define_singleton_method(:unsubscribe) { |*args| raw_unsubscribes << args }
     server = Struct.new(:event_loop).new(event_loop)
     connection = Object.new
     connection.define_singleton_method(:server) { server }
@@ -315,6 +449,7 @@ class StatusChannelTest < ActionCable::Channel::TestCase
         channel.send(:begin_status_subscription!)
         channel.send(:activate_status_subscription!, StatusBroadcaster::CHANNEL)
         Timeout.timeout(5) { posted.pop.call }
+        Timeout.timeout(5) { posted.pop.call }
         channel.unsubscribe_from_channel
       end
     end
@@ -325,6 +460,36 @@ class StatusChannelTest < ActionCable::Channel::TestCase
       reason: ActionCable::INTERNAL[:disconnect_reasons][:server_restart],
       reconnect: true
     } ], close_calls
+    assert_empty raw_unsubscribes
+    assert_empty channel.send(:streams)
+    assert_empty pending_stream_attempts(channel)
+    assert_equal :closed, channel.instance_variable_get(:@status_subscription_state)
+  end
+
+  test "the lifecycle fence private Action Cable dependencies retain their call shape" do
+    required_private_methods = %i[
+      worker_pool_stream_handler
+      defer_subscription_confirmation!
+      ensure_confirmation_sent
+      streams
+    ]
+    required_private_methods.each do |method_name|
+      assert StatusChannel.private_method_defined?(method_name),
+             "Action Cable private API changed: StatusChannel requires ##{method_name}"
+    end
+
+    [
+      ActionCable::SubscriptionAdapter::Async,
+      ActionCable::SubscriptionAdapter::SolidCable
+    ].each do |adapter_class|
+      subscribe = adapter_class.instance_method(:subscribe)
+      minimum_arity = subscribe.arity.negative? ? -subscribe.arity - 1 : subscribe.arity
+      accepts_success_callback = minimum_arity <= 3 && subscribe.arity != 2
+
+      assert accepts_success_callback,
+             "Action Cable adapter API changed: #{adapter_class}#subscribe must accept " \
+             "(broadcasting, handler, success_callback)"
+    end
   end
 
   test "repeated concurrent teardown releases each channel lease exactly once" do
@@ -407,6 +572,10 @@ class StatusChannelTest < ActionCable::Channel::TestCase
   end
 
   private
+
+  def pending_stream_attempts(channel)
+    channel.instance_variable_get(:@status_stream_attempts) || {}
+  end
 
   def exercise_teardown_before_deferred_start(channel_class)
     fixture = ControlledStreamLifecycleFixture.new

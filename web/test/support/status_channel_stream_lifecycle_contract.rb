@@ -18,6 +18,7 @@ module ActionCableStreamLifecycleContract
       @events = Queue.new
       @recorded_events = []
       @mutex = Mutex.new
+      @fail_next_subscribe = false
     end
 
     def broadcast(...)
@@ -25,6 +26,17 @@ module ActionCableStreamLifecycleContract
     end
 
     def subscribe(broadcasting, handler, success_callback = nil)
+      failure = @mutex.synchronize do
+        next false unless @fail_next_subscribe
+
+        @fail_next_subscribe = false
+        true
+      end
+      if failure
+        record([ :subscribe_failed, broadcasting, handler ])
+        raise ActiveRecord::ConnectionNotEstablished, "injected adapter subscription failure"
+      end
+
       @adapter.subscribe(broadcasting, handler, lambda do
         success_callback&.call
         record([ :registered, broadcasting, handler ])
@@ -38,6 +50,10 @@ module ActionCableStreamLifecycleContract
 
     def shutdown
       @adapter.shutdown
+    end
+
+    def fail_next_subscribe!
+      @mutex.synchronize { @fail_next_subscribe = true }
     end
 
     def recorded_events
@@ -133,6 +149,30 @@ module ActionCableStreamLifecycleContract
         refute environment.frames.any? { |frame| frame[:message] == { "kind" => "forbidden" } }
       end
     end
+
+    test "real adapter subscription failure leaves clean state and later recovers" do
+      with_stream_lifecycle_environment do |environment|
+        environment.adapter.fail_next_subscribe!
+        failed_channel = build_stream_lifecycle_channel(environment)
+        begin_stream(environment, failed_channel, "contract-failure")
+
+        close = await_close(environment, failed_channel)
+        assert_equal true, close[:reconnect]
+        assert_equal ActionCable::INTERNAL[:disconnect_reasons][:server_restart], close[:reason]
+        assert_empty failed_channel.send(:streams)
+        assert_empty stream_lifecycle_pending_entries(failed_channel)
+        assert_empty environment.frames.select { |frame| frame[:type] == confirmation_type }
+        assert_equal 1, environment.close_calls.length
+
+        recovered_channel = build_stream_lifecycle_channel(environment)
+        start_stream(environment, recovered_channel, "contract-recovery")
+        environment.server.broadcast("contract-recovery", { "kind" => "recovered" })
+        recovered = await_frame(environment, recovered_channel) do |frame|
+          frame[:message] == { "kind" => "recovered" }
+        end
+        assert_equal({ "kind" => "recovered" }, recovered[:message])
+      end
+    end
   end
 
   private
@@ -194,12 +234,16 @@ module ActionCableStreamLifecycleContract
   end
 
   def start_stream(environment, channel, broadcasting, callback = nil, coder: nil, &block)
+    begin_stream(environment, channel, broadcasting, callback, coder: coder, &block)
+    await_adapter_event(environment, channel, :registered, broadcasting)
+  end
+
+  def begin_stream(environment, channel, broadcasting, callback = nil, coder: nil, &block)
     channel.stream_from(broadcasting, callback, coder: coder, &block)
     unless environment.initialized_channels.include?(channel.object_id)
       environment.initialized_channels << channel.object_id
       channel.send(:ensure_confirmation_sent)
     end
-    await_adapter_event(environment, channel, :registered, broadcasting)
   end
 
   def await_adapter_event(environment, channel, kind, broadcasting)
@@ -228,6 +272,12 @@ module ActionCableStreamLifecycleContract
     Timeout.timeout(WAIT_TIMEOUT) { queue.pop }
   rescue Timeout::Error
     flunk lifecycle_timeout_message(environment, channel, label)
+  end
+
+  def await_close(environment, channel)
+    Timeout.timeout(WAIT_TIMEOUT) { environment.close_events.pop }
+  rescue Timeout::Error
+    flunk lifecycle_timeout_message(environment, channel, "transport reconnect")
   end
 
   def unsubscribe_count(environment, broadcasting)

@@ -16,6 +16,7 @@ require "hive/plan_review/finding"
 require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
+require "hive/warnings"
 
 module Hive
   module Config
@@ -898,9 +899,10 @@ module Hive
       end
       return unless should_warn
 
-      warn "hive: top-level `reviewers` in #{describe_source(source_path)} is deprecated; " \
-           "using it as `review.reviewers` for upgrade compatibility; run `hive migrate` " \
-           "in the project to rewrite the config"
+      message = "hive: top-level `reviewers` in #{describe_source(source_path)} is deprecated; " \
+                "using it as `review.reviewers` for upgrade compatibility; run `hive migrate` " \
+                "in the project to rewrite the config"
+      Hive::Warnings.emit(message)
     end
 
     def validate_project_top_level_keys!(data, source_path, project_root, stage_names: nil)
@@ -4000,8 +4002,10 @@ module Hive
       # deprecated_bot_keys already returns the fully-qualified key
       # ("bot.<name>"), so the warn line does not add its own prefix.
       deprecated_bot_keys(bot).each do |entry|
-        warn "hive: #{entry[:key]} in #{describe_source(source_path)} is deprecated; " \
-             "alert lifecycle now uses #{entry[:replacement]}"
+        Hive::Warnings.emit(
+          "hive: #{entry[:key]} in #{describe_source(source_path)} is deprecated; " \
+          "alert lifecycle now uses #{entry[:replacement]}"
+        )
       end
     end
 

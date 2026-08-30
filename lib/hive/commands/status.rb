@@ -35,6 +35,7 @@ require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 require "hive/events"
+require "hive/warnings"
 
 module Hive
   module Commands
@@ -103,7 +104,7 @@ module Hive
       ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false, daemon_tasks: nil)
+                     operational: false, full: false, daemon_tasks: nil, warning_sink: nil)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -114,8 +115,14 @@ module Hive
         @operational = operational
         @full = full
         @daemon_tasks = Array(daemon_tasks).compact
+        @warning_sink = warning_sink
         @next_retention_boundary = nil
       end
+
+      def warn(message)
+        Hive::Warnings.emit(message, sink: @warning_sink)
+      end
+      private :warn
 
       def call
         call_with_envelope do
@@ -188,6 +195,20 @@ module Hive
           @stdout_written = true
         else
           render_running(payload)
+        end
+      end
+
+      # Internal object boundary used by the long-lived daemon. It returns the
+      # exact task-graph document without spawning another Ruby process or
+      # serializing the graph through JSON only to parse it again.
+      def internal_task_graph_payload(now: Time.now.utc)
+        Hive::Warnings.with_sink(@warning_sink) do
+          projects = Hive::Config.registered_projects
+          if daemon_task_mode?
+            daemon_task_payload(projects, now: now)
+          else
+            json_payload(projects, now: now)
+          end
         end
       end
 

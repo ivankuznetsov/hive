@@ -4102,24 +4102,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :status_failure)
   end
 
-  # A forward schema-version skew (newer binary, daemon not restarted) is
-  # tolerated: the consumer returns ok=true with a non-fatal `warning`,
-  # the tick proceeds and dispatches, and the dispatcher logs the warning
-  # once (under the neutral :status_warning event — the channel also carries
-  # status-stderr breadcrumbs, so the name is deliberately not skew-specific)
-  # instead of crashing the tick.
-  def test_forward_schema_skew_warning_is_logged_and_tick_proceeds
+  # A non-fatal projection warning does not invalidate the graph: the tick
+  # logs it once, continues, and dispatches eligible work.
+  def test_projection_warning_is_logged_and_tick_proceeds
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
     project = Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "p1", legacy_stage_dirs: [])
     dispatcher.instance_variable_get(:@status_consumer).next_result =
       Hive::Daemon::StatusConsumer::Result.new(
         ok: true, rows: rows, projects: [ project ], error: nil,
-        warning: "envelope schema v99 is newer than this process (v3); parsing best-effort. " \
-                 "Restart the hive daemon to pick up the new schema."
+        warning: "dependency admission degraded for one task"
       )
     dispatcher.tick(now: T0)
-    assert_equal 1, sup.spawned.size, "forward-skew tick must still dispatch"
+    assert_equal 1, sup.spawned.size, "warning-only tick must still dispatch"
     assert events_include?(logger, :status_warning)
   end
 

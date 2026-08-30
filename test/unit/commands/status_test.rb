@@ -230,6 +230,18 @@ class CommandsStatusTest < Minitest::Test
                     "--internal-task-graph cannot be combined with --operational"
   end
 
+  def test_warning_sink_captures_projection_warnings_without_stderr
+    warnings = []
+    command = Hive::Commands::Status.new(warning_sink: warnings)
+
+    _stdout, stderr = capture_io do
+      command.send(:warn, "projection degraded")
+    end
+
+    assert_equal [ "projection degraded" ], warnings
+    assert_empty stderr
+  end
+
   def test_status_payloads_preserve_subsecond_generation_time
     now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
     command = Hive::Commands::Status.new(json: true, daemon_tasks: [])

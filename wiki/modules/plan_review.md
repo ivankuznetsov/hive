@@ -16,6 +16,13 @@ resolution can authorize `3-plan` to `4-execute`. Markers, generic approval,
 `--force`, daemon automation, Web forms, and direct execute entry cannot replace
 that authority.
 
+An implementation returned from `7-artifacts` by the native outcome-evidence
+rework command retains that already-used clearance when reviewer routing changes
+later. The exact rework receipt and current evidence package must validate first;
+the reviewed plan digest, task generation, executable resolution, and empty
+blocker set remain mandatory. Raw moves and first-time plan transitions still
+require the current review policy fingerprint.
+
 ## Applicability and boundary
 
 The first release applies only when all of these are true:

@@ -51,7 +51,17 @@ module Hive
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
-        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+        rework_context = nil
+        begin
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+        rescue Hive::PlanReview::TransitionBlocked
+          rework_context = outcome_evidence_rework_context(task, require_receipt: true)
+          raise unless rework_context&.fetch("feedback")
+
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+            task:, config: cfg, reviewed_rework: true
+          )
+        end
         plan_path = File.join(task.folder, "plan.md")
         unless File.exist?(plan_path)
           warn "hive: plan.md missing; this task did not pass through 3-plan"
@@ -68,7 +78,7 @@ module Hive
         end
 
         identity = capture_implementation_identity(task, cfg)
-        rework_context = outcome_evidence_rework_context(task)
+        rework_context ||= outcome_evidence_rework_context(task)
         FileUtils.mkdir_p(task.reviews_dir)
 
         if File.exist?(task.worktree_yml_path)
@@ -633,12 +643,14 @@ module Hive
         merged
       end
 
-      def outcome_evidence_rework_context(task)
+      def outcome_evidence_rework_context(task, require_receipt: false)
         project = File.basename(task.project_root)
         tracker = Hive::Artifacts::OutcomeEvidence::Rework.new(
           task: task, project: project
         )
         records = tracker.records
+        return nil if require_receipt && records.empty?
+
         package = unless records.empty?
           Hive::Artifacts::OutcomeEvidence::Store.new(
             task: task, project: project

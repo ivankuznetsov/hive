@@ -90,6 +90,66 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_reuses_clearance_only_after_validated_reviewed_rework
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      calls = []
+      guard = lambda do |**kwargs|
+        calls << kwargs
+        raise Hive::PlanReview::TransitionBlocked, "policy changed" if calls.one?
+
+        true
+      end
+      package = {
+        "current" => {
+          "status" => "rework", "reason" => "implementation_rework",
+          "generation" => "a" * 64, "recovery_digest" => "b" * 64,
+          "failed_targets" => [ "claim-interface" ],
+          "reviewer_reasons" => [ "Repair and recapture the interface." ],
+          "attempts" => []
+        },
+        "requirement" => {
+          "generation" => "a" * 64,
+          "implementation" => {
+            "implementation_base" => "a" * 40,
+            "implementation_head" => "b" * 40
+          }
+        },
+        "attempts" => []
+      }
+      Hive::Artifacts::OutcomeEvidence::Rework.new(
+        task:, project: File.basename(task.project_root)
+      ).record!(
+        package:, expected_generation: "a" * 64, expected_digest: "b" * 64
+      )
+      store = Object.new
+      store.define_singleton_method(:package_metadata) do
+        package
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :validate_execute_entry!, guard
+      ) do
+        with_replaced_singleton_method(
+          Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::Execute, :task_state, ->(*) { :complete }
+          ) do
+            captured = nil
+            capture_io { captured = Hive::Stages::Execute.run!(task, {}) }
+            captured
+          end
+        end
+      end
+
+      assert_equal({ commit: nil, status: :execute_complete }, result)
+      assert_nil calls.fetch(0)[:reviewed_rework]
+      assert_equal true, calls.fetch(1).fetch(:reviewed_rework)
+    end
+  end
+
   def test_apply_execute_outcome_publishes_projection_before_compatibility_marker
     with_tmp_git_repo do |worktree|
       with_tmp_dir do |dir|
@@ -1592,6 +1652,15 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal expected, context
 
       tracker.define_singleton_method(:records) { [] }
+      required = with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
+      ) do
+        Hive::Stages::Execute.outcome_evidence_rework_context(
+          task, require_receipt: true
+        )
+      end
+      assert_nil required
+
       empty = with_replaced_singleton_method(
         Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
       ) do

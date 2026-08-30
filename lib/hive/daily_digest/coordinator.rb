@@ -1,0 +1,252 @@
+require "date"
+require "digest"
+require "time"
+require "hive/config"
+require "hive/daily_digest/calendar"
+require "hive/daily_digest/collector"
+require "hive/daily_digest/coverage"
+require "hive/daily_digest/projector"
+require "hive/daily_digest/store"
+
+module Hive
+  module DailyDigest
+    # Sole materialization owner. Reads stay in Reader; this object performs
+    # chronological catch-up, close, late amendment, gap recovery, and pruned
+    # frontier acknowledgement.
+    class Coordinator
+      class Disabled < DailyDigest::Error; end
+      class NotInitialized < DailyDigest::Error; end
+      class FutureDate < DailyDigest::Error; end
+      MAX_CATCH_UP_INTERVALS = 10_000
+
+      Batch = Data.define(:projects, :facts, :attention, :gaps, :frontiers)
+
+      def initialize(
+        config_loader: Hive::Config.method(:load_global_daily_digest),
+        history_loader: Hive::Config.method(:load_global_project_membership_history),
+        store: Store.new,
+        collector_factory: ->(**options) { Collector.new(**options) },
+        clock: -> { Time.now.utc }
+      )
+        @config_loader = config_loader
+        @history_loader = history_loader
+        @store = store
+        @collector_factory = collector_factory
+        @clock = clock
+      end
+
+      def refresh(date: nil)
+        config = @config_loader.call
+        validate_config!(config)
+        now = utc(@clock.call)
+        intervals = intervals_through(config, now: now, selected_date: date)
+        selected = if date
+          target = Date.iso8601(date.to_s).iso8601
+          interval = intervals.find { |candidate| candidate.fetch("local_date") == target }
+          raise DailyDigest::MissingRecord, "digest interval #{target} does not exist" unless interval
+
+          [ interval ]
+        else
+          intervals
+        end
+        coverage = Coverage.new(
+          daily_config: config, membership_history: @history_loader.call,
+          observed_at: @clock
+        )
+        selected.map do |interval|
+          materialize(interval, config: config, coverage: coverage, now: now)
+        end
+      rescue Date::Error
+        raise DailyDigest::InvalidRecord, "invalid digest local date #{date.inspect}"
+      end
+
+      private
+
+      def validate_config!(config)
+        raise Disabled, "daily digest is disabled" unless config["enabled"] == true
+        required = %w[time_zone coverage_started_at initial_membership first_interval]
+        missing = required.select { |key| config[key].nil? }
+        return if missing.empty?
+
+        raise NotInitialized,
+              "daily digest is not initialized (missing #{missing.join(', ')}); run `hive migrate --all`"
+      end
+
+      def intervals_through(config, now:, selected_date:)
+        persisted = @store.intervals
+        intervals = persisted.empty? ? [ normalize_first_interval(config.fetch("first_interval")) ] : persisted.dup
+        intervals.sort_by! { |entry| [ entry["sequence"] || 1, entry.fetch("starts_at") ] }
+        target_date = selected_date && Date.iso8601(selected_date.to_s)
+        first_date = Date.iso8601(intervals.first.fetch("local_date"))
+        raise DailyDigest::MissingRecord, "digest date predates durable coverage" if target_date && target_date < first_date
+
+        limit = 0
+        loop do
+          last = intervals.last
+          enough = if target_date
+            Date.iso8601(last.fetch("local_date")) >= target_date
+          else
+            contains?(last, now) || utc(last.fetch("starts_at")) > now
+          end
+          break if enough
+
+          raise FutureDate, "digest date is in the future" if target_date && utc(last.fetch("ends_at")) > now
+          limit += 1
+          raise DailyDigest::Error, "daily digest catch-up exceeds safety bound" if limit > MAX_CATCH_UP_INTERVALS
+
+          intervals << next_interval(last, config)
+        end
+        if target_date && !intervals.any? { |entry| entry.fetch("local_date") == target_date.iso8601 }
+          raise DailyDigest::MissingRecord, "digest interval #{target_date.iso8601} was skipped by a zone boundary"
+        end
+        if target_date
+          selected = intervals.find { |entry| entry.fetch("local_date") == target_date.iso8601 }
+          raise FutureDate, "digest date is in the future" if utc(selected.fetch("starts_at")) > now
+        end
+        intervals
+      end
+
+      def normalize_first_interval(value)
+        interval = value.to_h.transform_keys(&:to_s).dup
+        interval["sequence"] ||= 1
+        interval["boundary_kind"] ||= "calendar_day"
+        interval["duration_seconds"] ||= (
+          utc(interval.fetch("ends_at")) - utc(interval.fetch("starts_at"))
+        ).to_i
+        interval["cutover"] = nil unless interval.key?("cutover")
+        interval["interval_id"] ||= Digest::SHA256.hexdigest(
+          Record.canonical_json(interval.reject { |key, _| key == "interval_id" })
+        )
+        interval.freeze
+      rescue KeyError, NoMethodError
+        raise NotInitialized, "daily digest first interval is invalid"
+      end
+
+      def next_interval(previous, config)
+        sequence = previous.fetch("sequence", 0).to_i + 1
+        configured_zone = config.fetch("time_zone")
+        if configured_zone != previous.fetch("time_zone")
+          return Calendar.cutover_interval(
+            previous: previous, time_zone: configured_zone,
+            requested_at: config["time_zone_requested_at"] || @clock.call,
+            sequence: sequence
+          )
+        end
+
+        calendar = Calendar.new(time_zone: configured_zone)
+        label = Date.iso8601(previous.fetch("local_date")).next_day
+        skipped = []
+        loop do
+          interval = calendar.interval_for(label, sequence: sequence)
+          if interval.fetch("duration_seconds").positive?
+            unless utc(interval.fetch("starts_at")) == utc(previous.fetch("ends_at"))
+              raise DailyDigest::InvalidRecord, "daily digest intervals are not continuous"
+            end
+            return interval if skipped.empty?
+
+            return interval.merge("skipped_labels" => skipped).freeze
+          end
+          skipped << label.iso8601
+          label = label.next_day
+        end
+      end
+
+      def materialize(interval, config:, coverage:, now:)
+        date = interval.fetch("local_date")
+        membership = coverage.projects_for(
+          starts_at: interval.fetch("starts_at"), ends_at: interval.fetch("ends_at")
+        )
+        collection_start = [
+          utc(interval.fetch("starts_at")), utc(config.fetch("coverage_started_at"))
+        ].max
+        collected = @collector_factory.call(
+          projects: membership.projects,
+          starts_at: collection_start,
+          ends_at: utc(interval.fetch("ends_at"))
+        ).collect
+        batch = Batch.new(
+          projects: collected.projects,
+          facts: collected.facts,
+          attention: collected.attention,
+          gaps: (Array(collected.gaps) + membership.gaps).uniq { |gap| gap.fetch("gap_id") },
+          frontiers: collected.frontiers
+        )
+        existing = read_optional(date)
+        if existing&.fetch("lifecycle") == "pruned"
+          discarded = discard_entries(batch)
+          @store.discard_pruned(
+            date, entries: discarded, source_frontiers: batch.frontiers,
+            discarded_at: now
+          ) unless discarded.empty? && batch.frontiers.empty?
+          return result_row(date, "pruned", discarded: discarded.length)
+        end
+
+        lifecycle = now >= utc(interval.fetch("ends_at")) ? "closed" : "open"
+        projector = Projector.new(clock: -> { now })
+        if existing.nil? || existing.fetch("lifecycle") == "open"
+          base = projector.base(interval: interval, batch: batch, lifecycle: lifecycle)
+          begin
+            written = @store.write_base(base)
+            return result_row(date, written.fetch("lifecycle"), record_id: written.fetch("record_id"))
+          rescue Store::ImmutableRecord
+            existing = @store.read(date)
+          end
+        end
+
+        amendment = projector.amendment(existing: existing, batch: batch)
+        if amendment
+          begin
+            written = @store.append_amendment(date, amendment)
+            result_row(date, "amended", amendment_id: written.fetch("amendment_id"))
+          rescue Store::Conflict
+            # A concurrent writer may have admitted the same semantic delta
+            # with a different wall-clock amended_at. Re-read and accept only
+            # when no delta remains.
+            latest = @store.read(date)
+            retry_amendment = projector.amendment(existing: latest, batch: batch)
+            raise if retry_amendment
+
+            result_row(date, "unchanged")
+          end
+        else
+          @store.advance_frontiers(date, batch.frontiers)
+          result_row(date, "unchanged")
+        end
+      end
+
+      def read_optional(date)
+        @store.read(date)
+      rescue DailyDigest::MissingRecord
+        nil
+      end
+
+      def discard_entries(batch)
+        Array(batch.facts).map do |fact|
+          {
+            "identity" => fact.fetch("fact_id"), "kind" => fact.fetch("kind"),
+            "source" => fact.fetch("source", "task_journal"),
+            "observed_at" => fact.fetch("observed_at"), "reason" => "digest projection was pruned"
+          }
+        end + Array(batch.gaps).map do |gap|
+          {
+            "identity" => gap.fetch("gap_id"), "kind" => "gap",
+            "source" => gap.fetch("source"), "observed_at" => gap.fetch("observed_at"),
+            "reason" => "digest projection was pruned"
+          }
+        end
+      end
+
+      def result_row(date, status, **attributes)
+        { "local_date" => date, "status" => status, **attributes.transform_keys(&:to_s) }
+      end
+
+      def contains?(interval, instant)
+        utc(interval.fetch("starts_at")) <= instant && instant < utc(interval.fetch("ends_at"))
+      end
+
+      def utc(value)
+        (value.is_a?(Time) ? value : Time.iso8601(value.to_s)).utc
+      end
+    end
+  end
+end

@@ -70,7 +70,23 @@ class DaemonServiceInstallerTest < Minitest::Test
       fake_bin = File.join(dir, "bin")
       FileUtils.mkdir_p(fake_bin)
       systemctl = File.join(fake_bin, "systemctl")
-      File.write(systemctl, "#!/bin/sh\necho systemctl-noise\nexit 0\n")
+      unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
+      File.write(
+        systemctl,
+        "#!/bin/sh\n" \
+        "if [ \"$2\" = show ]; then\n" \
+        "  echo LoadState=loaded\n" \
+        "  echo FragmentPath=#{unit}\n" \
+        "  echo NeedDaemonReload=no\n" \
+        "  echo UnitFileState=enabled\n" \
+        "  echo ActiveState=active\n" \
+        "  echo MainPID=123\n" \
+        "  echo ExecMainStartTimestampMonotonic=1\n" \
+        "else\n" \
+        "  echo systemctl-noise\n" \
+        "fi\n" \
+        "exit 0\n"
+      )
       FileUtils.chmod(0755, systemctl)
 
       with_env("PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do

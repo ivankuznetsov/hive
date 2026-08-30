@@ -29,6 +29,14 @@ module Hive
           "web unit"
         end
 
+        def install!(autostart:, force: false, restart_if_running: false)
+          outcome = super
+          if restart_if_running && outcome.restarted
+            @messages << "restarted running web service to load the refreshed application bundle"
+          end
+          outcome
+        end
+
         def restart!
           super
           @messages << "restarted running web service to load the refreshed application bundle"

@@ -53,7 +53,7 @@ class UninstallCommandTest < Minitest::Test
       Hive::Commands::Uninstall.new(
         purge: true,
         output: StringIO.new,
-        runner: ->(argv) { calls << argv; true },
+        runner: successful_manager_runner(calls),
         host_os: "darwin"
       ).call
 
@@ -484,7 +484,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+        runner: successful_manager_runner(calls), host_os: "linux"
       ).call
 
       assert_includes calls, %w[systemctl --user disable --now hive-bot]
@@ -501,7 +501,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+        runner: successful_manager_runner(calls), host_os: "linux"
       ).call
 
       assert_includes calls, %w[systemctl --user disable --now hive-babysitter]
@@ -570,7 +570,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+        runner: successful_manager_runner(calls), host_os: "linux"
       ).call
 
       assert_includes calls, %w[systemctl --user disable --now hive-web]
@@ -658,7 +658,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "darwin"
+        runner: successful_manager_runner(calls), host_os: "darwin"
       ).call
 
       assert_includes calls, [ "launchctl", "unload", plist ]
@@ -985,10 +985,7 @@ class UninstallCommandTest < Minitest::Test
       Hive::Commands::Uninstall.new(
         purge: true,
         output: out,
-        runner: lambda do |argv|
-          calls << argv
-          argv != %w[systemctl --user daemon-reload]
-        end,
+        runner: successful_manager_runner(calls, fail_reload: true),
         host_os: "linux"
       ).call
 
@@ -1015,7 +1012,7 @@ class UninstallCommandTest < Minitest::Test
         diagnostics: [ :remove_failed ]
       )
     ]
-    installer.define_singleton_method(:remove!) { results.shift }
+    installer.define_singleton_method(:remove!) { |**_options| results.shift }
 
     2.times { command.send(:deregister_unit, installer) }
 
@@ -1024,6 +1021,37 @@ class UninstallCommandTest < Minitest::Test
   end
 
   private
+
+  def successful_manager_runner(calls, fail_reload: false)
+    enabled = Hash.new(true)
+    running = Hash.new(true)
+    loaded = Hash.new(true)
+    lambda do |argv|
+      calls << argv
+      case argv
+      when [ "systemctl", "--user", "daemon-reload" ]
+        !fail_reload
+      else
+        if argv[0, 3] == %w[systemctl --user is-enabled]
+          enabled[argv.last]
+        elsif argv[0, 3] == %w[systemctl --user is-active]
+          running[argv.last]
+        elsif argv[0, 3] == %w[systemctl --user disable]
+          enabled[argv.last] = false
+          running[argv.last] = false
+          true
+        elsif argv[0, 2] == %w[launchctl list]
+          loaded[argv.last]
+        elsif argv[0, 2] == %w[launchctl unload]
+          label = File.basename(argv.last, ".plist")
+          loaded[label] = false
+          true
+        else
+          true
+        end
+      end
+    end
+  end
 
   def manager_disable_failure_runner(service_name: nil)
     lambda do |argv|

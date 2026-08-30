@@ -51,10 +51,16 @@ module Hive
         # lost silently. On Linux with autostart, force also triggers a
         # `restart` instead of `enable --now` — restart is the only way
         # to pick up new Environment= lines from an already-running unit.
-        def install!(autostart:, force: false)
+        def install!(autostart:, force: false, restart_if_running: false)
           @messages.clear
           service = user_service
-          result = service.apply(service.plan(autostart: autostart, force: force))
+          result = service.apply(
+            service.plan(
+              autostart: autostart,
+              force: force,
+              restart_if_running: restart_if_running
+            )
+          )
           record_user_service_messages(result)
           Outcome.new(
             install_outcome_kind(result.kind),
@@ -139,9 +145,13 @@ module Hive
           )
         end
 
-        def remove!
+        def remove!(inspect_absent_manager: true)
           service = user_service
-          service.remove(service.plan_remove)
+          service.remove(
+            service.plan_remove(
+              inspect_absent_manager: inspect_absent_manager
+            )
+          )
         end
 
         def start!
@@ -200,7 +210,12 @@ module Hive
         def user_service(definition: service_definition)
           Hive::UserService.new(
             definition: definition,
-            runner: @runner,
+            # A caller-supplied runner is an intentional synchronous test or
+            # embedding seam. Production manager commands stay nil here so
+            # UserService can enforce its bounded process-group runner and
+            # collect rich systemd observations instead of boolean-only
+            # injected evidence.
+            runner: @runner_injected ? @runner : nil,
             query_available: -> { manager_query_available? },
             manager_available: -> { service_manager_availability },
             status_reader: @status_reader,
@@ -296,7 +311,7 @@ module Hive
                          "Restore manager availability and retry."
           end
           if result.diagnostics.include?(:prior_state_restored)
-            @messages << "the requested transition could not be verified; the prior #{service_noun} state was restored."
+            @messages << "the requested transition could not be verified; the previous state was restored for #{service_noun}."
           end
         end
 
@@ -514,6 +529,7 @@ module Hive
               return :indeterminate
             end
             return :conclusively_absent unless systemctl_available?
+            return :available unless @runner_injected
 
             @runner.call(%w[systemctl --user show-environment]) ? :available : :indeterminate
           when :macos

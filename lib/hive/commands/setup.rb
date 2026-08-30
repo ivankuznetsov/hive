@@ -331,13 +331,15 @@ module Hive
             environment: @environment,
             config: web_config
           )
-          lifecycle = Hive::Web::ServiceStatus.lifecycle_state(installer)
-          was_running = lifecycle["service_running"]
           # Ordinary setup is intentionally drift-safe. A customized unit is
           # observed and preserved; explicit `hive web install --force` owns
           # the backup-producing repair path.
-          outcome = installer.install!(autostart: true, force: false)
-          restarted = @web_bundle_refreshed && was_running && outcome.success? ? installer.restart! : false
+          outcome = installer.install!(
+            autostart: true,
+            force: false,
+            restart_if_running: @web_bundle_refreshed
+          )
+          restarted = outcome.restarted
           state = setup_web_service_snapshot(installer: installer, wait_for_running: true)
           @web_service = state
           @web_service_platform_exception = outcome.success? &&

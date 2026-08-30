@@ -1652,6 +1652,12 @@ class MigrateTest < Minitest::Test
     assert_empty err
   end
 
+  def test_default_daemon_service_installer_uses_the_shared_adapter
+    installer = migrate_command("/tmp/project").send(:daemon_service_installer)
+
+    assert_instance_of Hive::Commands::Daemon::ServiceInstaller, installer
+  end
+
   def test_restart_daemon_warns_when_the_owned_restart_fails
     migrate = migrate_command("/tmp/project")
     installer = fake_daemon_service_installer(available: true) { raise Hive::Error, "busy" }

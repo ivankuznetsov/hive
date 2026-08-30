@@ -19,11 +19,12 @@ module Hive
       end
 
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
-                   provider: nil, interactive: true, now: Time.now.utc)
+                   provider: nil, interactive: true, now: Time.now.utc,
+                   proposal_admission: nil)
         foreground.dispatch(
           task: task, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider,
-          interactive: interactive, now: now
+          interactive: interactive, now: now, proposal_admission: proposal_admission
         )
       end
 

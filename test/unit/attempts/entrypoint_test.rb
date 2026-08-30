@@ -7,6 +7,51 @@ class AttemptsEntrypointTest < Minitest::Test
 
   FakeTask = Struct.new(:id, :slug, :stage_name, :project_root, :project_name, keyword_init: true)
 
+  def test_controller_admission_builds_the_durable_proposal_and_evaluator_binding
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    task.define_singleton_method(:id) { 42 }
+    result = Hive::Attempts::DispatchResult.new(
+      status: :existing_live, attempt: Struct.new(:attempt_id).new("attempt-1"),
+      receipt: nil, attach_descriptor: nil, reason: nil
+    )
+    calls = []
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**attributes| calls << attributes; result }
+    config = Hive::Config.merge_defaults(
+      "proposals" => {
+        "evaluators" => {
+          "benchmark-reviewer" => {
+            "workflows" => [ "coding" ], "stages" => [ "4-execute" ],
+            "agent_profiles" => [ "codex" ]
+          }
+        }
+      }
+    )
+
+    Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher,
+      config_loader: ->(_root) { config }
+    ).dispatch(
+      task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
+      provider: "codex", interactive: false,
+      proposal_admission: {
+        "subject" => {
+          "kind" => "skill", "reference" => "agent-skills/reviewer",
+          "revision" => "v2", "proposal_id" => nil
+        },
+        "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+        "evaluator_identity" => "benchmark-reviewer",
+        "agent_profile" => "codex"
+      }
+    )
+
+    proposal = calls.one? && calls.first.dig(:subject, "proposal")
+    assert_equal "agent-skills/reviewer", proposal.dig("subject", "reference")
+    assert_equal "benchmark-reviewer", proposal.dig("evaluator", "id")
+    assert_match(/\A[0-9a-f]{64}\z/, proposal.fetch("configuration_fingerprint"))
+    assert_equal "restricted", proposal.dig("policy", "visibility")
+  end
+
   def test_operator_dispatch_still_defers_on_non_loss_reasons
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     deferred = Hive::Attempts::DispatchResult.new(

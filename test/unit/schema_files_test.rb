@@ -36,7 +36,7 @@ require "tmpdir"
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
   def test_proposal_record_and_event_schemas_are_registered_and_closed
-    %w[hive-proposal-record hive-proposal-event].each do |name|
+    %w[hive-proposal-record hive-proposal-event hive-proposal-source-event].each do |name|
       path = Hive::Schemas.schema_path(name)
       document = JSON.parse(File.read(path))
 

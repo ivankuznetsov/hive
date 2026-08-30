@@ -261,6 +261,35 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_commit_additional_pathspecs_extend_default_task_staging_only
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      task_path = "stages/4-execute/proposal-task"
+      receipt_path = "proposals/v1/inbox/pse-#{'a' * 64}.json"
+      unrelated_path = "proposals/v1/records/unrelated.json"
+      [ task_path, File.dirname(receipt_path), File.dirname(unrelated_path) ].each do |path|
+        FileUtils.mkdir_p(File.join(ops.hive_state_path, path))
+      end
+      File.write(File.join(ops.hive_state_path, task_path, "task-journal.jsonl"), "task\n")
+      File.write(File.join(ops.hive_state_path, receipt_path), "receipt\n")
+      File.write(File.join(ops.hive_state_path, unrelated_path), "unrelated\n")
+
+      result = ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "admitted proposal source",
+        additional_pathspecs: [ receipt_path ]
+      )
+
+      assert_equal :committed, result
+      changed = run!(
+        "git", "-C", ops.hive_state_path, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
+      ).lines.map(&:strip)
+      assert_equal [ receipt_path, "#{task_path}/task-journal.jsonl" ].sort, changed.sort
+      assert File.exist?(File.join(ops.hive_state_path, unrelated_path))
+      refute_includes run!("git", "-C", ops.hive_state_path, "ls-files"), unrelated_path
+    end
+  end
+
   def test_hive_commit_serializes_staging_callback_and_commit
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

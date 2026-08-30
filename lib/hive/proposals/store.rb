@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "pathname"
 require "securerandom"
+require "tmpdir"
 require "hive/atomic_file"
 require "hive/proposals/projection"
 
@@ -474,7 +475,9 @@ module Hive
 
       def with_lock
         ensure_safe_directory!(root)
-        lock_path = File.join(root, ".proposal.lock")
+        lock_path = File.join(
+          Dir.tmpdir, "hive-proposal-#{Digest::SHA256.hexdigest(root)}.lock"
+        )
         flags = File::RDWR | File::CREAT
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         File.open(lock_path, flags, 0o600) do |lock|

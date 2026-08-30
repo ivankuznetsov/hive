@@ -67,6 +67,32 @@ class AttemptsContextTest < Minitest::Test
     assert_nil legacy.admitted_route
   end
 
+  def test_context_exposes_only_the_immutable_proposal_binding_from_the_attempt_record
+    binding = {
+      "schema_version" => 1,
+      "subject" => {
+        "kind" => "workflow", "reference" => "coding", "revision" => "v2",
+        "proposal_id" => "prp-00000000-0000-4000-8000-000000000001"
+      },
+      "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:workflow" },
+      "evaluator" => nil, "configuration_fingerprint" => "a" * 64,
+      "policy" => {
+        "visibility" => "restricted", "retention" => "task",
+        "allowed_link_schemes" => [ "https" ]
+      }
+    }
+    context = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt-1", task_generation: 1,
+      ownership_generation: "owner-1", proposal_binding: binding
+    )
+    binding.dig("subject")["reference"] = "changed-after-admission"
+
+    assert_equal "coding", context.proposal_binding.dig("subject", "reference")
+    assert_raises(FrozenError) do
+      context.proposal_binding.dig("subject")["reference"].replace("changed")
+    end
+  end
+
   def test_environment_context_is_authenticated_bound_and_scrubbed
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(

@@ -10,6 +10,7 @@ module Hive
   module Proposals
     RECORD_SCHEMA = "hive-proposal-record".freeze
     EVENT_SCHEMA = "hive-proposal-event".freeze
+    SOURCE_EVENT_SCHEMA = "hive-proposal-source-event".freeze
     SCHEMA_VERSION = 1
     SUBJECT_KINDS = %w[skill workflow].freeze
     EVENT_TYPES = %w[evaluation decision supersession rollback].freeze
@@ -56,6 +57,10 @@ module Hive
     end
     class QuarantinedSource < Error
       def exit_code = Hive::ExitCodes::USAGE
+    end
+
+    class SourceUnavailable < Error
+      def exit_code = Hive::ExitCodes::TEMPFAIL
     end
 
     module_function

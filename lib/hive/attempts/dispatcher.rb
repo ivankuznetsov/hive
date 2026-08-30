@@ -55,7 +55,7 @@ module Hive
                    interactive: false, generation: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
                    admission_view: nil, routing_policy: nil, retry_release: false,
-                   replay_semantic_terminal: false)
+                   subject: nil, replay_semantic_terminal: false)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage,
@@ -66,7 +66,7 @@ module Hive
           task: task, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          recovery_source_attempt_id: nil, now: now, admission_view: admission_view,
+          recovery_source_attempt_id: nil, subject: subject, now: now, admission_view: admission_view,
           routing_policy: policy, retry_release: retry_release,
           replay_semantic_terminal: replay_semantic_terminal,
           failed_route_id: nil
@@ -100,7 +100,7 @@ module Hive
           inherited_outputs: inherited,
           retry_charge: retry_charge.nil? ? source_attempt["retry_charge"] : retry_charge,
           recovery_source_attempt_id: source_attempt.state == "lost" ? source_attempt.attempt_id : nil,
-          now: now,
+          subject: source_attempt.subject, now: now,
           admission_view: admission_view,
           routing_policy: routing_policy || resolve_routing_policy(task, source_attempt["intended_stage"]),
           retry_release: retry_release,

@@ -4,6 +4,38 @@ require "hive/attempts/record"
 class AttemptsRecordTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
 
+  def test_task_subject_can_carry_an_immutable_controller_authored_proposal_binding
+    proposal = {
+      "schema_version" => 1,
+      "subject" => {
+        "kind" => "skill", "reference" => "agent-skills/reviewer",
+        "revision" => "v2", "proposal_id" => nil
+      },
+      "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+      "evaluator" => nil,
+      "configuration_fingerprint" => "c" * 64,
+      "policy" => {
+        "visibility" => "restricted", "retention" => "task",
+        "allowed_link_schemes" => [ "https" ]
+      }
+    }
+    subject = Hive::Attempts::Record.task_stage_subject(
+      task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", proposal: proposal
+    )
+    record = Hive::Attempts::Record.launching(
+      **identity.merge(task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", subject: subject),
+      now: NOW, launch_timeout_sec: 30
+    )
+
+    assert_equal proposal, record.proposal_binding
+    assert record.data.dig("subject", "proposal").frozen?
+    assert_raises(FrozenError) { record.data.dig("subject", "proposal", "actor", "id").replace("mallory") }
+
+    spoofed = record.to_h
+    spoofed.dig("subject", "proposal", "subject")["kind"] = "unknown"
+    assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(spoofed) }
+  end
+
   def test_launching_record_exposes_unclaimed_deadline_and_immutable_identity
     record = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
 

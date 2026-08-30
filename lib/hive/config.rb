@@ -663,6 +663,27 @@ module Hive
         "log_max_files" => 5,
         "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"
       },
+      # Tracking-only skill/workflow proposal history. Empty actor maps make
+      # evaluator and lifecycle mutation authority opt-in; evidence defaults
+      # to digest-only restricted storage.
+      "proposals" => {
+        "evaluators" => {},
+        "authorities" => {},
+        "evidence" => {
+          "visibility" => "restricted",
+          "retention" => "task",
+          "allowed_link_schemes" => [ "https" ]
+        },
+        "limits" => {
+          "max_pending_sources" => 256,
+          "max_project_events" => 10_000,
+          "max_proposal_events" => 1_000,
+          "max_project_bytes" => 67_108_864,
+          "max_proposal_bytes" => 8_388_608,
+          "max_sources_per_actor_per_hour" => 100
+        },
+        "context" => { "max_items" => 20, "max_bytes" => 2_048 }
+      },
       # Stage-level invariants enforced by `Hive::Stages::Base.with_stage_events`.
       # `ensure_clean_on_exit` (default true) makes worktree-owning stages
       # — `4-execute`, `6-review`, `8-finalize` — fail loudly when they
@@ -2059,6 +2080,7 @@ module Hive
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_attempt_timers!(cfg, source_path)
+      validate_proposals!(cfg, source_path)
       validate_conditions!(cfg, source_path)
       validate_artifact_capture!(cfg, source_path)
       validate_daemon!(cfg, source_path)
@@ -2104,6 +2126,7 @@ module Hive
       refactor_patrol
       answer_digest
       bot
+      proposals
       rebase
     ].freeze
 
@@ -3934,6 +3957,109 @@ module Hive
       raise ConfigError,
             "#{label} in #{describe_source(source_path)} must be an integer " \
             ">= #{min}; got #{value.inspect} (#{value.class})"
+    end
+
+    PROPOSAL_KEYS = %w[evaluators authorities evidence limits context].freeze
+    PROPOSAL_EVALUATOR_KEYS = %w[workflows stages agent_profiles].freeze
+    PROPOSAL_EVIDENCE_KEYS = %w[visibility retention allowed_link_schemes].freeze
+    PROPOSAL_LIMIT_KEYS = %w[
+      max_pending_sources max_project_events max_proposal_events max_project_bytes
+      max_proposal_bytes max_sources_per_actor_per_hour
+    ].freeze
+    PROPOSAL_CONTEXT_KEYS = %w[max_items max_bytes].freeze
+    PROPOSAL_IDENTIFIER = /\A[a-z][a-z0-9_.-]{0,127}\z/
+
+    def validate_proposals!(cfg, source_path)
+      proposals = cfg.fetch("proposals")
+      validate_closed_mapping!(proposals, PROPOSAL_KEYS, "proposals", source_path)
+      validate_proposal_evaluators!(proposals.fetch("evaluators"), source_path)
+      unless proposals.fetch("authorities").is_a?(Hash)
+        raise ConfigError, "proposals.authorities in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_proposal_evidence!(proposals.fetch("evidence"), source_path)
+      validate_proposal_limits!(proposals.fetch("limits"), source_path)
+      validate_proposal_context!(proposals.fetch("context"), source_path)
+    end
+
+    def validate_proposal_evaluators!(evaluators, source_path)
+      unless evaluators.is_a?(Hash) && evaluators.length <= 256
+        raise ConfigError, "proposals.evaluators in #{describe_source(source_path)} must be a bounded Hash"
+      end
+      evaluators.each do |identity, row|
+        unless identity.to_s.match?(PROPOSAL_IDENTIFIER) && row.is_a?(Hash)
+          raise ConfigError,
+                "proposals.evaluators identity in #{describe_source(source_path)} is malformed"
+        end
+        label = "proposals.evaluators.#{identity}"
+        validate_closed_mapping!(row, PROPOSAL_EVALUATOR_KEYS, label, source_path)
+        PROPOSAL_EVALUATOR_KEYS.each do |key|
+          values = row[key]
+          unless values.is_a?(Array) && values.length <= 64 && values.uniq == values &&
+                 values.all? { |value| bounded_proposal_identifier?(value) }
+            raise ConfigError,
+                  "#{label}.#{key} in #{describe_source(source_path)} must be a bounded unique array"
+          end
+        end
+      end
+    end
+
+    def validate_proposal_evidence!(evidence, source_path)
+      unless evidence.is_a?(Hash)
+        raise ConfigError, "proposals.evidence in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_closed_mapping!(evidence, PROPOSAL_EVIDENCE_KEYS, "proposals.evidence", source_path)
+      unless %w[restricted private project].include?(evidence["visibility"])
+        raise ConfigError,
+              "proposals.evidence.visibility in #{describe_source(source_path)} must be restricted, private, or project"
+      end
+      unless %w[ephemeral task project indefinite].include?(evidence["retention"])
+        raise ConfigError,
+              "proposals.evidence.retention in #{describe_source(source_path)} is invalid"
+      end
+      schemes = evidence["allowed_link_schemes"]
+      unless schemes.is_a?(Array) && schemes.length <= 16 && schemes.uniq == schemes &&
+             schemes.all? { |scheme| scheme.to_s.match?(/\A[a-z][a-z0-9+.-]*\z/) }
+        raise ConfigError,
+              "proposals.evidence.allowed_link_schemes in #{describe_source(source_path)} is malformed"
+      end
+    end
+
+    def validate_proposal_limits!(limits, source_path)
+      unless limits.is_a?(Hash)
+        raise ConfigError, "proposals.limits in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_closed_mapping!(limits, PROPOSAL_LIMIT_KEYS, "proposals.limits", source_path)
+      PROPOSAL_LIMIT_KEYS.each do |key|
+        value = limits[key]
+        unless value.is_a?(Integer) && value.positive?
+          raise ConfigError,
+                "proposals.limits.#{key} in #{describe_source(source_path)} must be a positive integer"
+        end
+      end
+      if limits["max_proposal_events"] > limits["max_project_events"] ||
+         limits["max_proposal_bytes"] > limits["max_project_bytes"]
+        raise ConfigError,
+              "proposal-level limits in #{describe_source(source_path)} cannot exceed project limits"
+      end
+    end
+
+    def validate_proposal_context!(context, source_path)
+      unless context.is_a?(Hash)
+        raise ConfigError, "proposals.context in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_closed_mapping!(context, PROPOSAL_CONTEXT_KEYS, "proposals.context", source_path)
+      PROPOSAL_CONTEXT_KEYS.each do |key|
+        value = context[key]
+        unless value.is_a?(Integer) && value.positive?
+          raise ConfigError,
+                "proposals.context.#{key} in #{describe_source(source_path)} must be a positive integer"
+        end
+      end
+    end
+
+    def bounded_proposal_identifier?(value)
+      value.is_a?(String) && !value.empty? && value.bytesize <= 128 &&
+        !value.match?(/[\u0000-\u001f\u007f]/)
     end
 
     def validate_removed_digest!(cfg, source_path)

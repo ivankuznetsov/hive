@@ -35,7 +35,8 @@ class AttemptsAPITest < Minitest::Test
       request_id: "request-1",
       provider: "codex",
       interactive: true,
-      now: Time.at(0).utc
+      now: Time.at(0).utc,
+      proposal_admission: { "subject" => "controller-owned" }
     )
 
     assert_equal :attached, result
@@ -46,6 +47,7 @@ class AttemptsAPITest < Minitest::Test
     assert_equal "codex", call.fetch(:provider)
     assert_equal true, call.fetch(:interactive)
     assert_equal Time.at(0).utc, call.fetch(:now)
+    assert_equal({ "subject" => "controller-owned" }, call.fetch(:proposal_admission))
   end
 
   def test_dispatch_request_delegates_daemon_delivery

@@ -15,7 +15,7 @@ module Hive
       ENV_PREFIX = "HIVE_ATTEMPT_"
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token
+                  :progress_token, :proposal_binding
 
       class << self
         def current
@@ -76,6 +76,7 @@ module Hive
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"],
             progress_token: record["progress_token"],
+            proposal_binding: record.proposal_binding,
             routing: record["routing"],
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
@@ -183,7 +184,7 @@ module Hive
                      project: nil, task_slug: nil, intended_stage: nil,
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
-                     progress_token: nil)
+                     progress_token: nil, proposal_binding: nil)
         @attempt_id = attempt_id.to_s
         @task_generation = Integer(task_generation)
         @ownership_generation = ownership_generation&.to_s
@@ -192,6 +193,9 @@ module Hive
         @intended_stage = intended_stage&.to_s
         @progress_token = progress_token&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
+        @proposal_binding = if proposal_binding
+          deep_freeze(Hive::StringifyKeys.call(proposal_binding))
+        end
         @evidence_writer = evidence_writer
         @diagnostic_writer = diagnostic_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?

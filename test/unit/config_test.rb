@@ -2,6 +2,42 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_proposal_defaults_are_fail_closed_and_configuration_is_closed
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir).fetch("proposals")
+
+      assert_equal({}, cfg.fetch("evaluators"))
+      assert_equal({}, cfg.fetch("authorities"))
+      assert_equal "restricted", cfg.dig("evidence", "visibility")
+      assert_equal "task", cfg.dig("evidence", "retention")
+      assert_equal [ "https" ], cfg.dig("evidence", "allowed_link_schemes")
+      assert_equal 256, cfg.dig("limits", "max_pending_sources")
+
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        proposals:
+          evaluators:
+            benchmark-reviewer:
+              workflows: [coding]
+              stages: [4-execute]
+              agent_profiles: [codex]
+      YAML
+      assert_equal [ "coding" ],
+                   Hive::Config.load(dir).dig("proposals", "evaluators", "benchmark-reviewer", "workflows")
+
+      {
+        "surprise: true" => /unknown field.*surprise/i,
+        "evidence: { visibility: public }" => /visibility.*restricted.*project/i,
+        "limits: { max_pending_sources: 0 }" => /max_pending_sources.*positive/i,
+        "evaluators: { bad: { workflows: nope } }" => /workflows.*array/i
+      }.each do |fragment, pattern|
+        File.write(config_path, "proposals:\n  #{fragment}\n")
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+    end
+  end
+
   def test_plan_review_defaults_are_closed_and_conservative
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)

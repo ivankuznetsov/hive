@@ -26,6 +26,41 @@ module Hive
       run_git!("-C", @project_root, "rev-parse", "HEAD").strip
     end
 
+    def hive_state_head_sha
+      run_git!("-C", hive_state_path, "rev-parse", "HEAD").strip
+    end
+
+    def hive_state_commit_for_path(path)
+      relative = safe_hive_state_relative_path(path)
+      commit = run_git!(
+        "-C", hive_state_path, "log", "-1", "--format=%H", "--", relative
+      ).strip
+      return commit if commit.match?(/\A[0-9a-f]{40,64}\z/i)
+
+      nil
+    end
+
+    def read_hive_state_blob_at(revision, path, max_bytes:)
+      revision = revision.to_s
+      relative = safe_hive_state_relative_path(path)
+      limit = Integer(max_bytes, exception: false)
+      return unless revision.match?(/\A[0-9a-f]{40,64}\z/i) && limit&.positive?
+
+      spec = "#{revision}:#{relative}"
+      size_out, _size_err, size_status = run_git_quiet(
+        "-C", hive_state_path, "cat-file", "-s", "--", spec
+      )
+      return unless size_status.success?
+
+      size = Integer(size_out.strip, exception: false)
+      return unless size && size < limit
+
+      bytes, _blob_err, blob_status = run_git_quiet(
+        "-C", hive_state_path, "cat-file", "blob", "--", spec
+      )
+      bytes if blob_status.success? && bytes.bytesize == size
+    end
+
     # Read the full message for one already-resolved commit. Callers use this
     # for controller-owned protocol trailers, so accept only an object ID:
     # arbitrary revision syntax would turn a repository fact into an
@@ -249,13 +284,20 @@ module Hive
     # Scoped add. With no `pathspecs:`, stages files under
     # stages/<stage_name>/<slug>/ plus the logs/ directory so a crashed
     # prior run's leftover staging cannot cross-contaminate this commit.
-    # With `pathspecs:`, callers (drop) pin the exact paths to stage —
+    # `additional_pathspecs:` extends that normal scope with independently
+    # owned exact paths (for example a proposal inbox receipt). With
+    # `pathspecs:`, callers (drop) pin the exact paths to stage —
     # the per-pathspec `git add -A --` runs in the hive-state worktree
     # and supports already-deleted entries (pathspec scope is honoured
     # by `ls-files` so untracked siblings cannot leak in).
-    def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false,
-                    after_stage: nil)
+    def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil,
+                    additional_pathspecs: nil, allow_empty: false,
+                    before_stage: nil, after_stage: nil)
+      if pathspecs && additional_pathspecs
+        raise ArgumentError, "additional_pathspecs cannot extend an exclusive pathspec commit"
+      end
       Hive::Lock.with_commit_lock(hive_state_path) do
+        before_stage&.call
         message = "hive: #{stage_name}/#{slug} #{action}"
         task_path = File.join("stages", stage_name, slug)
         if pathspecs
@@ -265,6 +307,7 @@ module Hive
             run_git!("-C", hive_state_path, "add", task_path)
           end
           run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
+          Array(additional_pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
         end
         after_stage&.call
         _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
@@ -333,6 +376,14 @@ module Hive
       if File.exist?(abs) || hive_state_pathspec_tracked?(rel)
         run_git!("-C", hive_state_path, "add", "-A", "--", rel)
       end
+    end
+
+    def safe_hive_state_relative_path(path)
+      relative = path.to_s.tr("\\", "/")
+      if relative.empty? || relative.start_with?("/") || relative.split("/").include?("..")
+        raise GitError, "invalid hive-state path #{path.inspect}"
+      end
+      relative
     end
 
     def hive_state_pathspec_tracked?(pathspec)

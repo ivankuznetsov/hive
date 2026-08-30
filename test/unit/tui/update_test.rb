@@ -1408,6 +1408,38 @@ class HiveTuiUpdateTest < Minitest::Test
     end
   end
 
+  def test_new_idea_authority_feedback_is_closed_and_cause_specific
+    available = Hive::Tui::Snapshot::NewIdeaResolution.new(state: :available)
+    available_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :available,
+      projects: []
+    )
+    ambiguous_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :ambiguous,
+      projects: [],
+      ambiguous_names: [ "duplicate" ]
+    )
+    empty_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :no_projects,
+      projects: []
+    )
+    unknown = Struct.new(:state).new(:unknown)
+
+    assert_nil Hive::Tui::Update.new_idea_resolution_flash(available)
+    assert_match(/choose a project/i,
+      Hive::Tui::Update.new_idea_admission_flash(available_admission))
+    assert_match(/duplicate project name.*"duplicate"/i,
+      Hive::Tui::Update.new_idea_admission_flash(ambiguous_admission))
+    assert_match(/no projects.*hive init/i,
+      Hive::Tui::Update.new_idea_admission_flash(empty_admission))
+    assert_raises(ArgumentError) do
+      Hive::Tui::Update.new_idea_resolution_flash(unknown)
+    end
+    assert_raises(ArgumentError) do
+      Hive::Tui::Update.new_idea_admission_flash(unknown)
+    end
+  end
+
   def test_unresolved_numeric_entry_never_reuses_scope_after_snapshot_arrives
     starting = model.with(snapshot: nil, scope: 2)
     blocked, _cmd = Hive::Tui::Update.apply(

@@ -96,6 +96,16 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     refute_match(/no healthy projects/i, out)
   end
 
+  def test_empty_message_has_a_safe_fallback_for_nonempty_authority_states
+    admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :available,
+      projects: []
+    )
+
+    assert_equal "No selectable projects available",
+      Hive::Tui::Views::NewIdeaProjectPicker.empty_message(admission)
+  end
+
   def test_nil_cursor_renders_admissible_rows_without_a_highlight
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea_project,

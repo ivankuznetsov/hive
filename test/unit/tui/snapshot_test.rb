@@ -662,6 +662,15 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal :no_projects, empty.state
   end
 
+  def test_new_idea_value_objects_reject_unknown_states
+    assert_raises(ArgumentError) do
+      Hive::Tui::Snapshot::NewIdeaAdmission.new(state: :unknown, projects: [])
+    end
+    assert_raises(ArgumentError) do
+      Hive::Tui::Snapshot::NewIdeaResolution.new(state: :unknown)
+    end
+  end
+
   def test_new_idea_name_resolution_is_closed_and_ambiguity_precedes_health
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
       { "name" => "alpha", "tasks" => [] },

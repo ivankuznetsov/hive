@@ -367,6 +367,32 @@ class StatusFeedTest < Minitest::Test
     feed&.stop
   end
 
+  def test_brainstorm_sidecar_changes_wake_consumers_without_entering_status_payload
+    with_tmp_dir do |root|
+      sidecar = File.join(root, Hive::BrainstormSuggestions::STORE_FILENAME)
+      File.write(sidecar, "first")
+      File.chmod(0o600, sidecar)
+      payload = {
+        "projects" => [ {
+          "name" => "demo",
+          "tasks" => [ { "slug" => "task", "stage" => "2-brainstorm", "folder" => root } ]
+        } ]
+      }
+      feed = Hive::Web::StatusFeed.new
+      token = feed.prime(payload)
+
+      File.write(sidecar, "second")
+      File.chmod(0o600, sidecar)
+      feed.send(:publish, payload)
+
+      refute feed.current_version?(token)
+      refute payload.dig("projects", 0, "tasks", 0).key?("brainstorm_suggestion"),
+             "owner-private advisory state must not enter the fleet payload"
+    ensure
+      feed&.stop
+    end
+  end
+
   def test_token_digest_is_not_shadowed_by_a_hive_namespace_constant
     hive_digest = Hive.const_defined?(:Digest, false) ? Hive.const_get(:Digest) : nil
     Hive.const_set(:Digest, Module.new) unless hive_digest

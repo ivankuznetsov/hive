@@ -1,0 +1,61 @@
+<% if suggestion %>
+  <% binding = suggestion["suggestion_binding"] || suggestion["input_binding"] %>
+  <% fresh = suggestion["state"] == "fresh" && suggestion["text"].present? %>
+  <aside class="brainstorm-suggestion"
+         data-suggestion-key="<%= binding %>"
+         data-suggestion-text="<%= fresh ? suggestion["text"] : nil %>"
+         data-suggestion-initial-declined="<%= suggestion["dismissed"] == true %>">
+    <div class="brainstorm-suggestion-heading">
+      <strong>Repository-aware suggestion</strong>
+      <span class="suggestion-state suggestion-state-<%= suggestion.fetch("state") %>">
+        <%= suggestion.fetch("state").tr("_", " ") %>
+      </span>
+    </div>
+
+    <% if fresh %>
+      <div data-suggestion-part="candidate">
+        <p class="brainstorm-suggestion-text"><%= suggestion.fetch("text") %></p>
+        <p class="brainstorm-suggestion-rationale"><%= suggestion.fetch("rationale") %></p>
+        <p class="brainstorm-suggestion-sources muted">
+          Sources: <%= suggestion.fetch("provenance").map { |source| source.tr("_", " ") }.join(", ") %>
+        </p>
+      </div>
+      <p class="muted" data-suggestion-part="declined" hidden>Suggestion hidden. Your draft is unchanged.</p>
+      <div class="brainstorm-suggestion-actions">
+        <button type="button" class="button-secondary"
+                data-suggestion-part="approve"
+                data-action="click->answers#approveSuggestion">Approve</button>
+        <button type="button" class="button-secondary"
+                data-suggestion-part="undo" hidden
+                data-action="click->answers#undoSuggestion">Undo</button>
+        <button type="button" class="button-secondary"
+                data-suggestion-part="decline"
+                data-action="click->answers#declineSuggestion">Decline</button>
+        <button type="button" class="button-secondary"
+                data-suggestion-part="restore" hidden
+                data-action="click->answers#restoreSuggestion">Restore</button>
+        <% if suggestion["retryable"] && binding.present? %>
+          <%= link_to "Retry",
+                task_brainstorm_suggestion_retry_path(
+                  @project.name, @task.slug, source: @task_source,
+                  question: question.fetch("ordinal"), binding: binding
+                ),
+                class: "button-secondary", data: { turbo_method: :post } %>
+        <% end %>
+        <span class="muted" data-suggestion-part="approved" hidden>Copied into your editable answer.</span>
+      </div>
+    <% else %>
+      <p class="brainstorm-suggestion-reason">
+        <%= suggestion["safe_reason"].presence || "A suggestion is being prepared. You can answer now without waiting." %>
+      </p>
+      <% if suggestion["retryable"] && binding.present? %>
+        <%= link_to "Retry suggestion",
+              task_brainstorm_suggestion_retry_path(
+                @project.name, @task.slug, source: @task_source,
+                question: question.fetch("ordinal"), binding: binding
+              ),
+              class: "button-secondary", data: { turbo_method: :post } %>
+      <% end %>
+    <% end %>
+  </aside>
+<% end %>

@@ -1,6 +1,9 @@
 class TasksController < Tasks::BaseController
   def show
     questions = @task.open_questions
+    @brainstorm_suggestions = questions.to_h do |question|
+      [ question.ordinal, question.suggestion ]
+    end
     @daemon_enabled = @project.daemon_enabled?
     builder = task_workspace_builder(
       questions: questions, daemon_enabled: @daemon_enabled

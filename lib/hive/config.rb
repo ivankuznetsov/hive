@@ -1580,6 +1580,16 @@ module Hive
       load_global_block("daily_digest", validator: :validate_daily_digest!)
     end
 
+    def load_global_project_membership_history
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      Array(data["project_membership_history"])
+    end
+
     def load_global_web
       Hive::Paths.ensure_migrated!
       validate_hive_home!

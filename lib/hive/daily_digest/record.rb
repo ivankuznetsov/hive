@@ -86,7 +86,13 @@ module Hive
           raise InvalidRecord, "#{key} must be an array" unless data[key].is_a?(Array)
         end
         data["gaps"] ||= []
+        data["attention"] ||= []
+        data["source_frontiers"] ||= {}
         raise InvalidRecord, "gaps must be an array" unless data["gaps"].is_a?(Array)
+        raise InvalidRecord, "attention must be an array" unless data["attention"].is_a?(Array)
+        unless data["source_frontiers"].is_a?(Hash)
+          raise InvalidRecord, "source_frontiers must be an object"
+        end
         canonical_object(data).freeze
       end
 

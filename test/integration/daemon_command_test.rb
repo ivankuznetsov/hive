@@ -1311,11 +1311,49 @@ class HiveDaemonCommandTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(unit_path))
       File.write(unit_path, "stale-pre-existing-content\n")
 
-      File.write(File.join(home, "bin", "systemctl"), "#!/bin/sh\nexit 0\n")
+      systemctl_state = File.join(home, "systemctl-state")
+      systemctl_log = File.join(home, "systemctl.log")
+      File.write(
+        File.join(home, "bin", "systemctl"),
+        "#!/bin/sh\n" \
+        "state=#{systemctl_state}\n" \
+        "echo \"$@\" >> #{systemctl_log}\n" \
+        "if [ \"$2\" = show ]; then\n" \
+        "  if [ -f \"$state\" ]; then\n" \
+        "    echo LoadState=loaded\n" \
+        "    echo FragmentPath=#{unit_path}\n" \
+        "    echo NeedDaemonReload=no\n" \
+        "    if grep -q active \"$state\"; then\n" \
+        "      echo UnitFileState=enabled\n" \
+        "      echo ActiveState=active\n" \
+        "      echo MainPID=123\n" \
+        "      echo ExecMainStartTimestampMonotonic=1\n" \
+        "    else\n" \
+        "      echo UnitFileState=disabled\n" \
+        "      echo ActiveState=inactive\n" \
+        "      echo MainPID=0\n" \
+        "      echo ExecMainStartTimestampMonotonic=0\n" \
+        "    fi\n" \
+        "  else\n" \
+        "    echo LoadState=not-found\n" \
+        "    echo FragmentPath=\n" \
+        "    echo NeedDaemonReload=no\n" \
+        "    echo UnitFileState=disabled\n" \
+        "    echo ActiveState=inactive\n" \
+        "    echo MainPID=0\n" \
+        "    echo ExecMainStartTimestampMonotonic=0\n" \
+        "  fi\n" \
+        "elif [ \"$2\" = daemon-reload ]; then\n" \
+        "  echo reloaded > \"$state\"\n" \
+        "elif [ \"$2\" = enable ] || [ \"$2\" = restart ]; then\n" \
+        "  echo active > \"$state\"\n" \
+        "fi\n" \
+        "exit 0\n"
+      )
       FileUtils.chmod(0755, File.join(home, "bin", "systemctl"))
 
-      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
-                                         "daemon", "install", "--force", "--json")
+      out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                        "daemon", "install", "--force", "--json")
       doc = JSON.parse(out)
       errors = schema.validate(doc).map { |e| e["error"] }
       assert_empty errors,
@@ -1326,7 +1364,10 @@ class HiveDaemonCommandTest < Minitest::Test
       # now restore the prior endpoint or retain replay evidence instead of
       # accepting desired bytes as a terminal partial install.
       assert_includes File.read(unit_path), "ExecStart=",
-                      "a successful upgrade must finish with the desired unit bytes"
+                      "a successful upgrade must finish with the desired unit bytes; " \
+                      "status=#{status.exitstatus} envelope=#{doc.inspect} stderr=#{err.inspect} " \
+                      "systemctl=#{File.read(systemctl_log).inspect} state=#{File.exist?(systemctl_state)} " \
+                      "journals=#{Dir[File.join(home, '.local/state/hive/user-service/*.journal.json')].map { |path| File.read(path) }.inspect}"
       backups = Dir["#{unit_path}.bak-*"]
       assert_equal 1, backups.size, "force must write exactly one timestamped backup"
       assert_equal "stale-pre-existing-content\n", File.read(backups.first)

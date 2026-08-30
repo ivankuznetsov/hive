@@ -14,7 +14,10 @@ module Hive
         @force_purge_state = force_purge_state
         @input = input
         @output = output
-        @runner = runner || ->(argv) { system(*argv) }
+        # Keep nil as the production path so UserService owns bounded manager
+        # execution and rich observations. A supplied runner remains the
+        # explicit test/embedding seam.
+        @runner = runner
         @host_os = host_os
       end
 
@@ -88,7 +91,7 @@ module Hive
         path = installer.target_path
         return unless path
 
-        result = installer.remove!
+        result = installer.remove!(inspect_absent_manager: false)
         if result.diagnostics.include?(:unsafe_unit_path)
           @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
         elsif result.diagnostics.include?(:manager_disable_failed)

@@ -361,14 +361,12 @@ module Hive
           environment: @environment,
           config: config
         )
-        was_running = Hive::Web::ServiceStatus.lifecycle_state(installer)["service_running"]
-        outcome = installer.install!(autostart: true, force: @force)
-        restarted = outcome.restarted
-        if bundle_refreshed && was_running && outcome.success? && !restarted
-          installer.restart!
-          restarted = true
-        end
-        envelope = service_envelope(installer, outcome, config: config, restarted: restarted)
+        outcome = installer.install!(
+          autostart: true,
+          force: @force,
+          restart_if_running: bundle_refreshed
+        )
+        envelope = service_envelope(installer, outcome, config: config)
         if @json
           emit_install_json(envelope)
         else

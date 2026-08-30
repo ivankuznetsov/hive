@@ -151,6 +151,10 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
       system("git", "-C", root, "commit", "-qm", "initial", exception: true)
       task = File.join(root, ".hive-state", "stages", "2-brainstorm", "task-1")
       FileUtils.mkdir_p(task)
+      File.write(
+        File.join(root, ".hive-state", "config.yml"),
+        { "brainstorm" => { "suggestions" => { "enabled" => true } } }.to_yaml
+      )
       path = File.join(task, "brainstorm.md")
       question = "Which scheduler seam?"
       File.write(File.join(task, "idea.md"), "Choose the adapter scheduler.\n")

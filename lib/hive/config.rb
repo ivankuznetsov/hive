@@ -109,7 +109,7 @@ module Hive
         "agent" => "claude",
         "skill" => "/ce-brainstorm",
         "suggestions" => {
-          "enabled" => true,
+          "enabled" => false,
           "agent" => "claude",
           "capture_timeout_sec" => 5,
           "timeout_sec" => 120,

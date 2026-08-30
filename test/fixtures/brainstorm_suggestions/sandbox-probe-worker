@@ -25,7 +25,7 @@ if printf '%s\n' "$@" | grep -qx -- '--tools'; then
     previous=$argument
   done
 fi
-printf 'probe\n' > "$alternate_path" 2>/dev/null && alternate=true || true
+if (printf 'probe\n' > "$alternate_path") 2>/dev/null; then alternate=true; fi
 /usr/bin/curl --silent --max-time 1 "http://127.0.0.1:${network_port}/" >/dev/null 2>&1 && network=true || true
 
 printf '{"structured_output":{"disposition":"suggestion","text":"repository=%s task=%s shell=%s network=%s escape=%s alternate=%s","rationale":"The live sandbox probe completed.","provenance":["repository"]}}\n' \

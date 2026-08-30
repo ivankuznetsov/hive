@@ -81,6 +81,10 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
       Hive::Commands::Init.new(project).call
       Hive::Commands::New.new(File.basename(project), "Add repository-aware answer suggestions").call
     end
+    File.write(
+      File.join(project, ".hive-state", "config.yml"),
+      { "brainstorm" => { "suggestions" => { "enabled" => true } } }.to_yaml
+    )
     inbox = Dir[File.join(project, ".hive-state", "stages", "1-inbox", "*")].fetch(0)
     folder = File.join(project, ".hive-state", "stages", "2-brainstorm", File.basename(inbox))
     FileUtils.mv(inbox, folder)

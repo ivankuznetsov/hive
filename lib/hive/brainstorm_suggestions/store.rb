@@ -46,7 +46,7 @@ module Hive
         raw = File.open(path, flags) { |file| file.read(MAX_STORE_BYTES + 1) }
         return corrupt_document if raw.bytesize > MAX_STORE_BYTES
 
-        validate_document(JSON.parse(raw), persisted: true)
+        validate_document(JSON.parse(raw))
       rescue JSON::ParserError, SystemCallError, IOError, InvalidState
         corrupt_document
       end
@@ -54,7 +54,7 @@ module Hive
       def write(attributes)
         validate_root!
         document = normalize_document(attributes)
-        validate_document(document, persisted: false)
+        validate_document(document)
         payload = "#{JSON.pretty_generate(document)}\n"
         raise InvalidState, "suggestion sidecar exceeds #{MAX_STORE_BYTES} bytes" if
           payload.bytesize > MAX_STORE_BYTES
@@ -121,7 +121,7 @@ module Hive
         empty_document.merge(input)
       end
 
-      def validate_document(document, persisted: nil)
+      def validate_document(document)
         raise InvalidState, "suggestion sidecar must be an object" unless document.is_a?(Hash)
 
         unknown = document.keys - DOCUMENT_KEYS

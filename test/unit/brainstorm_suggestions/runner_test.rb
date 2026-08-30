@@ -219,7 +219,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
 
       result = runner.call(bundle: probe_bundle)
 
-      assert_equal "fresh", result.fetch("state")
+      assert_equal "fresh", result.fetch("state"), result.inspect
       assert_equal "repository=false task=false shell=false network=false escape=false alternate=false",
                    result.fetch("text")
       refute File.exist?(alternate)

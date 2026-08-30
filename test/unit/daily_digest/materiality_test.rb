@@ -22,7 +22,7 @@ class DailyDigestMaterialityTest < Minitest::Test
       next if status == "unsupported_legacy"
 
       source = File.read(File.expand_path("../../../#{path}", __dir__))
-      assert_includes source, %Q["#{kind}"], "#{kind} must be emitted by #{path}"
+      assert_includes source, %Q("#{kind}"), "#{kind} must be emitted by #{path}"
     end
   end
 

@@ -1,5 +1,32 @@
 import { Turbo, cable } from "@hotwired/turbo-rails"
 
+class CleanupCollector {
+  constructor() {
+    this.failed = false
+    this.error = undefined
+  }
+
+  capture(error) {
+    if (!this.failed) {
+      this.failed = true
+      this.error = error
+    }
+  }
+
+  run(operation) {
+    try {
+      return operation()
+    } catch (error) {
+      this.capture(error)
+      return undefined
+    }
+  }
+
+  rethrow() {
+    if (this.failed) throw this.error
+  }
+}
+
 // One owner contains every application-level status lifecycle resource. Each
 // setup attempt receives its own consumer; Action Cable transport reconnects
 // stay on that attempt, while application retries replace it.
@@ -19,24 +46,34 @@ class StatusStreamOwner {
   }
 
   disconnect() {
-    if (this.state === "disconnected") return
+    if ([ "disconnecting", "disconnected" ].includes(this.state)) return
 
-    this.state = "disconnected"
-    this.clearRetryTimer()
+    const cleanup = new CleanupCollector()
+    this.state = "disconnecting"
     const attempt = this.currentAttempt
     this.currentAttempt = null
-    if (!attempt) return
+    this.catchUpAttempt = null
+    const retryTimer = this.retryTimer
+    this.retryTimer = null
+    if (attempt) attempt.openAllowed = false
 
-    attempt.openAllowed = false
-    if (attempt.subscription && !attempt.confirmed) {
+    this.cancelTimer(retryTimer, cleanup)
+
+    if (attempt?.subscription && !attempt.confirmed) {
       // Subscribe and unsubscribe are independent server jobs. Until one of
       // Action Cable's disposition callbacks arrives, keep local custody so
       // an unsubscribe cannot overtake the pending subscribe.
       this.pendingReleaseDisposition = { attempt }
-      this.schedulePendingRelease(attempt)
-    } else {
-      this.releaseAndRetire(attempt)
+      if (!this.schedulePendingRelease(attempt, cleanup)) {
+        this.pendingReleaseDisposition = null
+        this.retireAttempt(attempt, cleanup, { transportFirst: true })
+      }
+    } else if (attempt) {
+      this.retireAttempt(attempt, cleanup)
     }
+
+    this.state = "disconnected"
+    cleanup.rethrow()
   }
 
   startAttempt() {
@@ -47,6 +84,7 @@ class StatusStreamOwner {
       consumer: null,
       connection: null,
       socket: null,
+      monitor: null,
       subscription: null,
       confirmations: 0,
       catchUps: 0,
@@ -58,7 +96,13 @@ class StatusStreamOwner {
     }
     this.currentAttempt = attempt
     this.state = "connecting"
-    void this.setupAttempt(attempt)
+    void this.setupAttempt(attempt).catch((error) => {
+      if (this.isCurrentAttempt(attempt)) {
+        this.failAttempt(attempt, error)
+      } else {
+        this.retireStaleAttempt(attempt, error)
+      }
+    })
   }
 
   async setupAttempt(attempt) {
@@ -70,20 +114,37 @@ class StatusStreamOwner {
       return
     }
 
-    this.installConsumer(attempt, consumer)
+    try {
+      this.installConsumer(attempt, consumer)
+    } catch (error) {
+      if (this.isCurrentAttempt(attempt)) {
+        this.failAttempt(attempt, error)
+      } else {
+        this.retireStaleAttempt(attempt, error)
+      }
+      return
+    }
+
     if (!this.isCurrentAttempt(attempt)) {
-      attempt.retired = true
-      attempt.openAllowed = false
-      this.closeTransport(attempt)
+      this.retireStaleAttempt(attempt)
       return
     }
 
     try {
       const subscription = consumer.subscriptions.create(this.source.channel, {
         received: (data) => this.received(attempt, data),
-        connected: (details) => this.subscriptionConnected(attempt, details),
-        disconnected: (details = {}) => this.subscriptionDisconnected(attempt, details),
-        rejected: () => this.subscriptionRejected(attempt)
+        connected: (details) => this.runAttemptCallback(
+          attempt,
+          () => this.subscriptionConnected(attempt, details)
+        ),
+        disconnected: (details = {}) => this.runAttemptCallback(
+          attempt,
+          () => this.subscriptionDisconnected(attempt, details)
+        ),
+        rejected: () => this.runAttemptCallback(
+          attempt,
+          () => this.subscriptionRejected(attempt)
+        )
       })
       attempt.subscription = subscription
       attempt.released = false
@@ -94,13 +155,14 @@ class StatusStreamOwner {
         // A synchronous custom-element supersession can happen while a fake
         // or adapter create call is returning. The retired attempt's transport
         // is the authoritative cleanup edge, so close it before local release.
-        attempt.retired = true
-        attempt.openAllowed = false
-        this.closeTransport(attempt)
-        this.releaseSubscription(attempt)
+        this.retireStaleAttempt(attempt)
       }
     } catch (error) {
-      this.failAttempt(attempt, error)
+      if (this.isCurrentAttempt(attempt)) {
+        this.failAttempt(attempt, error)
+      } else {
+        this.retireStaleAttempt(attempt, error)
+      }
     }
   }
 
@@ -109,6 +171,7 @@ class StatusStreamOwner {
     const connection = consumer?.connection
     attempt.connection = connection || null
     attempt.socket = connection?.webSocket || null
+    attempt.monitor = connection?.monitor || null
     if (!connection) return
 
     if (typeof connection.open === "function") {
@@ -198,116 +261,188 @@ class StatusStreamOwner {
   failAttempt(attempt, error) {
     if (!this.isCurrentAttempt(attempt)) return
 
-    this.currentAttempt = null
-    attempt.openAllowed = false
-    this.releaseAndRetire(attempt)
-    if (!this.isMounted()) return
-
+    const cleanup = new CleanupCollector()
+    cleanup.capture(error)
     this.state = "retry_wait"
-    this.source.removeAttribute("connected")
     this.catchUpAttempt = null
-    this.source.clearCatchUpRefresh()
-    this.scheduleRetry(error)
+    this.retireAttempt(attempt, cleanup)
+    cleanup.run(() => this.source.removeAttribute("connected"))
+    cleanup.run(() => this.source.clearCatchUpRefresh())
+    this.scheduleRetry(cleanup)
+    this.warnCleanup("hive status subscription failed; retrying", cleanup)
   }
 
-  scheduleRetry(error) {
-    if (!this.isMounted() || this.state !== "retry_wait" || this.retryTimer) return
+  failOwnerSetup(error) {
+    if (this.currentAttempt) {
+      this.failAttempt(this.currentAttempt, error)
+      return
+    }
+    if (this.source.statusOwner !== this || !this.source.isConnected
+      || [ "disconnecting", "disconnected" ].includes(this.state)) return
 
-    console.warn("hive status subscription failed; retrying", error)
-    const timer = setTimeout(() => {
-      if (this.retryTimer !== timer) return
-
-      this.retryTimer = null
-      if (!this.isMounted() || this.state !== "retry_wait") return
-
-      this.startAttempt()
-    }, this.source.constructor.retryDelay)
-    this.retryTimer = timer
+    const cleanup = new CleanupCollector()
+    cleanup.capture(error)
+    this.state = "retry_wait"
+    this.catchUpAttempt = null
+    cleanup.run(() => this.source.removeAttribute("connected"))
+    cleanup.run(() => this.source.clearCatchUpRefresh())
+    this.scheduleRetry(cleanup)
+    this.warnCleanup("hive status subscription failed; retrying", cleanup)
   }
 
-  clearRetryTimer() {
-    clearTimeout(this.retryTimer)
-    this.retryTimer = null
+  retireStaleAttempt(attempt, error) {
+    const cleanup = new CleanupCollector()
+    if (arguments.length > 1) cleanup.capture(error)
+    this.retireAttempt(attempt, cleanup)
+    this.warnCleanup("hive status subscription cleanup failed", cleanup)
   }
 
-  schedulePendingRelease(attempt) {
+  runAttemptCallback(attempt, callback) {
+    try {
+      callback()
+    } catch (error) {
+      if (this.isCurrentAttempt(attempt)) {
+        this.failAttempt(attempt, error)
+      } else {
+        this.retireStaleAttempt(attempt, error)
+      }
+    }
+  }
+
+  scheduleRetry(cleanup) {
+    if (!this.isRetryable() || this.retryTimer) return
+
+    let timer
+    cleanup.run(() => {
+      timer = setTimeout(() => {
+        if (this.retryTimer !== timer) return
+
+        this.retryTimer = null
+        if (!this.isRetryable()) return
+
+        this.startAttempt()
+      }, this.source.constructor.retryDelay)
+      this.retryTimer = timer
+    })
+  }
+
+  schedulePendingRelease(attempt, cleanup) {
     if (!this.isPendingRelease(attempt) || this.pendingReleaseTimer) return
 
-    const timer = setTimeout(() => {
-      if (this.pendingReleaseTimer !== timer || !this.isPendingRelease(attempt)) return
+    let timer
+    let scheduled = false
+    cleanup.run(() => {
+      timer = setTimeout(
+        () => this.pendingReleaseTimedOut(attempt, timer),
+        this.source.constructor.pendingReleaseDelay
+      )
+      this.pendingReleaseTimer = timer
+      scheduled = true
+    })
+    return scheduled
+  }
 
-      this.pendingReleaseTimer = null
-      this.pendingReleaseDisposition = null
-      // With exclusive transport ownership the fallback needs no registry
-      // scan: close first, then forget the client handle locally.
-      this.retireAttempt(attempt)
-      this.releaseSubscription(attempt)
-    }, this.source.constructor.pendingReleaseDelay)
-    this.pendingReleaseTimer = timer
+  pendingReleaseTimedOut(attempt, timer) {
+    if (this.pendingReleaseTimer !== timer || !this.isPendingRelease(attempt)) return
+
+    const cleanup = new CleanupCollector()
+    this.pendingReleaseTimer = null
+    this.pendingReleaseDisposition = null
+    // With exclusive transport ownership the fallback needs no registry
+    // scan: close first, then forget the client handle locally.
+    this.retireAttempt(attempt, cleanup, { transportFirst: true })
+    this.warnCleanup("hive status subscription cleanup failed", cleanup)
   }
 
   finishPendingRelease(attempt) {
     if (!this.isPendingRelease(attempt)) return
 
-    this.clearPendingReleaseTimer()
-    this.pendingReleaseDisposition = null
-    this.releaseAndRetire(attempt)
-  }
-
-  clearPendingReleaseTimer() {
-    clearTimeout(this.pendingReleaseTimer)
+    const cleanup = new CleanupCollector()
+    const timer = this.pendingReleaseTimer
     this.pendingReleaseTimer = null
+    this.pendingReleaseDisposition = null
+    this.cancelTimer(timer, cleanup)
+    this.retireAttempt(attempt, cleanup)
+    this.warnCleanup("hive status subscription cleanup failed", cleanup)
   }
 
-  releaseAndRetire(attempt) {
-    this.releaseSubscription(attempt)
-    this.retireAttempt(attempt)
-  }
-
-  releaseSubscription(attempt) {
-    if (!attempt.subscription || attempt.released) return
-
-    const subscription = attempt.subscription
-    attempt.released = true
-    attempt.subscription = null
-    subscription.unsubscribe()
-  }
-
-  retireAttempt(attempt) {
-    if (attempt.retired) return
-
+  retireAttempt(attempt, cleanup, { transportFirst = false } = {}) {
     attempt.retired = true
     attempt.openAllowed = false
     if (this.currentAttempt === attempt) this.currentAttempt = null
-    this.closeTransport(attempt)
-  }
 
-  closeTransport(attempt) {
-    if (attempt.transportClosed) return
-
+    const subscription = attempt.subscription && !attempt.released
+      ? attempt.subscription
+      : null
     const consumer = attempt.consumer
     const connection = attempt.connection
-    const socket = attempt.socket || connection?.webSocket
-    // Consumer creation may still be pending when the owner retires. Leave
-    // this slot closable so the late dedicated consumer is disposed on arrival.
-    if (!consumer && !connection && !socket) return
-
-    attempt.transportClosed = true
+    const socket = attempt.socket
+    const monitor = attempt.monitor
+    if (subscription) attempt.released = true
+    attempt.subscription = null
     attempt.consumer = null
     attempt.connection = null
     attempt.socket = null
+    attempt.monitor = null
 
-    consumer?.disconnect?.()
-    if (this.socketCanClose(socket)) connection?.close?.({ allowReconnect: false })
-    if (this.socketCanClose(socket)) socket.close?.()
+    const releaseSubscription = () => {
+      if (subscription) cleanup.run(() => subscription.unsubscribe())
+    }
+
+    const closeTransport = () => {
+      if (!consumer && !connection && !socket && !monitor) return
+
+      attempt.transportClosed = true
+      if (consumer) cleanup.run(() => consumer.disconnect?.())
+      if (this.socketCanClose(socket, cleanup)) {
+        cleanup.run(() => connection?.close?.({ allowReconnect: false }))
+      }
+      if (this.socketCanClose(socket, cleanup)) cleanup.run(() => socket.close?.())
+      this.stopMonitor(monitor, cleanup)
+    }
+
+    // Consumer creation may still be pending when the owner retires. Leave
+    // this slot closable so the late dedicated consumer is disposed on arrival.
+    if (transportFirst) {
+      closeTransport()
+      releaseSubscription()
+    } else {
+      releaseSubscription()
+      closeTransport()
+    }
   }
 
-  socketCanClose(socket) {
+  socketCanClose(socket, cleanup) {
     if (!socket) return false
 
     const connecting = globalThis.WebSocket?.CONNECTING ?? 0
     const open = globalThis.WebSocket?.OPEN ?? 1
-    return socket.readyState === connecting || socket.readyState === open
+    let canClose = false
+    cleanup.run(() => {
+      const readyState = socket.readyState
+      canClose = readyState === connecting || readyState === open
+    })
+    return canClose
+  }
+
+  stopMonitor(monitor, cleanup) {
+    if (!monitor) return
+
+    let shouldStop = true
+    cleanup.run(() => {
+      if (typeof monitor.isRunning === "function") shouldStop = monitor.isRunning()
+    })
+    if (shouldStop) cleanup.run(() => monitor.stop?.())
+  }
+
+  cancelTimer(timer, cleanup) {
+    if (timer == null) return
+
+    cleanup.run(() => clearTimeout(timer))
+  }
+
+  warnCleanup(message, cleanup) {
+    if (cleanup.failed) this.source.reportStatusFailure(message, cleanup.error)
   }
 
   catchUp(attempt) {
@@ -332,7 +467,13 @@ class StatusStreamOwner {
   }
 
   isMounted() {
-    return this.state !== "disconnected"
+    return [ "connecting", "connected", "reconnecting", "retry_wait" ].includes(this.state)
+      && this.source.statusOwner === this
+      && this.source.isConnected
+  }
+
+  isRetryable() {
+    return this.state === "retry_wait"
       && this.source.statusOwner === this
       && this.source.isConnected
   }
@@ -342,7 +483,7 @@ class StatusStreamOwner {
   }
 
   isPendingRelease(attempt) {
-    return this.state === "disconnected"
+    return [ "disconnecting", "disconnected" ].includes(this.state)
       && this.pendingReleaseDisposition?.attempt === attempt
       && !attempt.retired
   }
@@ -354,31 +495,98 @@ class HiveStatusStreamSourceElement extends HTMLElement {
   static pendingReleaseDelay = 5_000
 
   connectedCallback() {
+    if (!this.isConnected) return
+    if (this.statusOwner && this.statusOwner.state !== "disconnected") return
+
     if (this.catchUpRefresh?.location !== undefined
       && this.catchUpRefresh.location !== this.statusLocation) {
       this.clearCatchUpRefresh()
     }
 
-    Turbo.connectStreamSource(this)
     const owner = new StatusStreamOwner(this)
     this.statusOwner = owner
-    owner.connect()
+    try {
+      Turbo.connectStreamSource(this)
+      owner.connect()
+    } catch (error) {
+      owner.failOwnerSetup(error)
+    }
   }
 
   disconnectedCallback() {
-    Turbo.disconnectStreamSource(this)
-
     const owner = this.statusOwner
     this.statusOwner = null
-    owner?.disconnect()
-    this.removeAttribute("connected")
+    const cleanup = new CleanupCollector()
+    cleanup.run(() => Turbo.disconnectStreamSource(this))
+    if (owner) cleanup.run(() => owner.disconnect())
+    cleanup.run(() => this.removeAttribute("connected"))
+    if (cleanup.failed) {
+      this.reportStatusFailure("hive status subscription disconnect failed", cleanup.error)
+    }
   }
 
   attributeChangedCallback(_name, oldValue, newValue) {
     if (!this.isConnected || oldValue === null || oldValue === newValue) return
 
-    this.disconnectedCallback()
-    this.connectedCallback()
+    const previousWarnings = this.statusWarningQueue
+    const deferredWarnings = []
+    this.statusWarningQueue = deferredWarnings
+
+    const owner = this.statusOwner
+    this.statusOwner = null
+    const oldCleanup = new CleanupCollector()
+    oldCleanup.run(() => Turbo.disconnectStreamSource(this))
+    if (owner) oldCleanup.run(() => owner.disconnect())
+    oldCleanup.run(() => this.removeAttribute("connected"))
+
+    if (!this.statusOwner) {
+      const successorSetup = new CleanupCollector()
+      successorSetup.run(() => this.connectedCallback())
+      if (successorSetup.failed && !this.statusOwner) {
+        const successor = new StatusStreamOwner(this)
+        this.statusOwner = successor
+        successor.failOwnerSetup(successorSetup.error)
+      }
+    }
+
+    this.statusWarningQueue = previousWarnings
+    const warnings = []
+    if (oldCleanup.failed) {
+      warnings.push({
+        message: "hive status subscription disconnect failed",
+        error: oldCleanup.error
+      })
+    }
+    warnings.push(...deferredWarnings)
+    this.publishStatusWarnings(warnings)
+  }
+
+  reportStatusFailure(message, error) {
+    const warning = { message, error }
+    if (this.statusWarningQueue) {
+      this.statusWarningQueue.push(warning)
+    } else {
+      this.publishStatusWarnings([ warning ])
+    }
+  }
+
+  publishStatusWarnings(warnings) {
+    if (this.statusWarningQueue) {
+      this.statusWarningQueue.push(...warnings)
+      return
+    }
+
+    const reported = []
+    warnings.forEach(({ message, error }) => {
+      if (reported.some((reportedError) => Object.is(reportedError, error))) return
+
+      reported.push(error)
+      try {
+        console.warn(message, error)
+      } catch (_warningError) {
+        // A diagnostic failure must not escape a custom-element reaction.
+      }
+    })
   }
 
   createConsumer() {

@@ -322,6 +322,898 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     }, result)
   end
 
+  test "direct teardown is fallback-only, failure-complete, and preserves the first thrown value" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const runScenario = async (options) => {
+          const sentinels = {
+            unsubscribe: { seam: `${options.name}-unsubscribe` },
+            consumer: { seam: `${options.name}-consumer` },
+            connection: { seam: `${options.name}-connection` },
+            socket: { seam: `${options.name}-socket` },
+            readyState: { seam: `${options.name}-ready-state` },
+            retryTimer: { seam: `${options.name}-retry-timer` }
+          }
+          const counters = {
+            unsubscribe: 0,
+            consumerDisconnect: 0,
+            primaryConnectionClose: 0,
+            fallbackConnectionClose: 0,
+            primarySocketClose: 0,
+            fallbackConnectionSocketClose: 0,
+            rawSocketClose: 0,
+            readyStateReads: 0,
+            monitorStop: 0,
+            retryCancel: 0,
+            open: 0,
+            reopen: 0
+          }
+          let socketState = options.socketState
+          let readyStateFailures = options.readyStateFailures || 0
+          let phase = null
+          const monitor = {
+            running: true,
+            isRunning() { return this.running },
+            stop() {
+              counters.monitorStop += 1
+              this.running = false
+            }
+          }
+          const socket = {
+            get readyState() {
+              counters.readyStateReads += 1
+              if (readyStateFailures > 0) {
+                readyStateFailures -= 1
+                throw sentinels.readyState
+              }
+              return socketState
+            },
+            close() {
+              if (phase === "consumer") counters.primarySocketClose += 1
+              else if (phase === "connection-fallback") counters.fallbackConnectionSocketClose += 1
+              else counters.rawSocketClose += 1
+              if (options.failSocket) throw sentinels.socket
+              socketState = WebSocket.CLOSING
+            }
+          }
+          const connection = {
+            monitor,
+            webSocket: socket,
+            open() { counters.open += 1; return true },
+            reopen() { counters.reopen += 1; return this.open() },
+            close({ allowReconnect } = {}) {
+              if (phase === "consumer") counters.primaryConnectionClose += 1
+              else counters.fallbackConnectionClose += 1
+              if (allowReconnect === false && options.failConnection) throw sentinels.connection
+              if (allowReconnect === false) monitor.stop()
+              if (socketState === WebSocket.OPEN) socket.close()
+            }
+          }
+          let callbacks
+          const subscription = {
+            perform() { return true },
+            unsubscribe() {
+              counters.unsubscribe += 1
+              if (options.failUnsubscribe) throw sentinels.unsubscribe
+            }
+          }
+          const consumer = {
+            connection,
+            disconnect() {
+              counters.consumerDisconnect += 1
+              if (options.failConsumer) throw sentinels.consumer
+              if (options.consumerLeavesOpen) {
+                monitor.stop()
+                return
+              }
+              phase = "consumer"
+              try {
+                connection.close({ allowReconnect: false })
+              } finally {
+                phase = null
+              }
+            },
+            subscriptions: {
+              create(_channel, mixin) {
+                callbacks = mixin
+                queueMicrotask(() => mixin.connected({ reconnected: false }))
+                return subscription
+              }
+            }
+          }
+          const host = document.createElement("div")
+          host.dataset.statusVersion = options.name
+          const source = document.createElement("hive-status-stream-source")
+          source.setAttribute("channel", "StatusChannel")
+          source.setAttribute("signed-stream-name", `test-${options.name}`)
+          source.createConsumer = async () => consumer
+          host.appendChild(source)
+          document.body.appendChild(host)
+
+          let originalClearTimeout
+          let caught
+          let caughtValue
+          try {
+            const deadline = performance.now() + 1_000
+            while (!source.hasAttribute("connected") && performance.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 0))
+            }
+            const owner = source.statusOwner
+            const attempt = owner.currentAttempt
+            const queuedOpen = connection.open
+            const queuedReopen = connection.reopen
+            if (options.failRetryTimer) {
+              owner.retryTimer = 123_456
+              originalClearTimeout = window.clearTimeout
+              window.clearTimeout = () => {
+                counters.retryCancel += 1
+                throw sentinels.retryTimer
+              }
+            }
+
+            try {
+              owner.disconnect()
+            } catch (error) {
+              caught = true
+              caughtValue = error
+            } finally {
+              if (originalClearTimeout) window.clearTimeout = originalClearTimeout
+            }
+            owner.disconnect()
+            queuedOpen()
+            queuedReopen()
+            callbacks.connected({ reconnected: true })
+            callbacks.rejected()
+            callbacks.disconnected({ willAttemptReconnect: false })
+
+            return {
+              caught: Boolean(caught),
+              caughtSeam: Object.entries(sentinels).find(([, value]) => value === caughtValue)?.[0] || null,
+              exactIdentity: options.expectedError ? caughtValue === sentinels[options.expectedError] : !caught,
+              counters,
+              state: owner.state,
+              currentAttempt: Boolean(owner.currentAttempt),
+              retryTimerCleared: owner.retryTimer === null,
+              attemptRetired: attempt.retired,
+              attemptDetached: attempt.subscription === null && attempt.consumer === null &&
+                attempt.connection === null && attempt.socket === null,
+              monitorRunning: monitor.running,
+              socketState
+            }
+          } finally {
+            if (originalClearTimeout) window.clearTimeout = originalClearTimeout
+            host.remove()
+          }
+        }
+
+        return {
+          normalOpen: await runScenario({
+            name: "normal-open",
+            socketState: WebSocket.OPEN
+          }),
+          connecting: await runScenario({
+            name: "connecting",
+            socketState: WebSocket.CONNECTING
+          }),
+          cascade: await runScenario({
+            name: "cascade",
+            socketState: WebSocket.OPEN,
+            failUnsubscribe: true,
+            failConsumer: true,
+            failConnection: true,
+            failSocket: true,
+            expectedError: "unsubscribe"
+          }),
+          readyState: await runScenario({
+            name: "ready-state",
+            socketState: WebSocket.OPEN,
+            consumerLeavesOpen: true,
+            readyStateFailures: 1,
+            expectedError: "readyState"
+          }),
+          connectionFailure: await runScenario({
+            name: "connection-failure",
+            socketState: WebSocket.OPEN,
+            consumerLeavesOpen: true,
+            failConnection: true,
+            expectedError: "connection"
+          }),
+          retryTimer: await runScenario({
+            name: "retry-timer",
+            socketState: WebSocket.OPEN,
+            failRetryTimer: true,
+            expectedError: "retryTimer"
+          }),
+          connectingSocketFailure: await runScenario({
+            name: "connecting-socket-failure",
+            socketState: WebSocket.CONNECTING,
+            failSocket: true,
+            expectedError: "socket"
+          })
+        }
+      })()
+    JS
+
+    normal = result.fetch("normalOpen")
+    refute normal.fetch("caught")
+    assert normal.fetch("exactIdentity")
+    assert_equal 1, normal.dig("counters", "unsubscribe")
+    assert_equal 1, normal.dig("counters", "consumerDisconnect")
+    assert_equal 1, normal.dig("counters", "primaryConnectionClose")
+    assert_equal 0, normal.dig("counters", "fallbackConnectionClose")
+    assert_equal 1, normal.dig("counters", "primarySocketClose")
+    assert_equal 0, normal.dig("counters", "rawSocketClose")
+
+    connecting = result.fetch("connecting")
+    assert_equal 1, connecting.dig("counters", "unsubscribe")
+    assert_equal 1, connecting.dig("counters", "consumerDisconnect")
+    assert_equal 1, connecting.dig("counters", "fallbackConnectionClose")
+    assert_equal 1, connecting.dig("counters", "rawSocketClose")
+
+    cascade = result.fetch("cascade")
+    assert cascade.fetch("exactIdentity")
+    assert_equal "unsubscribe", cascade.fetch("caughtSeam")
+    assert_equal 1, cascade.dig("counters", "unsubscribe")
+    assert_equal 1, cascade.dig("counters", "consumerDisconnect")
+    assert_equal 1, cascade.dig("counters", "fallbackConnectionClose")
+    assert_equal 1, cascade.dig("counters", "rawSocketClose")
+    assert_equal 1, cascade.dig("counters", "monitorStop")
+
+    ready_state = result.fetch("readyState")
+    assert ready_state.fetch("exactIdentity")
+    assert_equal 2, ready_state.dig("counters", "readyStateReads")
+    assert_equal 0, ready_state.dig("counters", "fallbackConnectionClose")
+    assert_equal 1, ready_state.dig("counters", "rawSocketClose")
+
+    connection_failure = result.fetch("connectionFailure")
+    assert connection_failure.fetch("exactIdentity")
+    assert_equal 1, connection_failure.dig("counters", "fallbackConnectionClose")
+    assert_equal 1, connection_failure.dig("counters", "rawSocketClose")
+
+    retry_timer = result.fetch("retryTimer")
+    assert retry_timer.fetch("exactIdentity")
+    assert_equal 1, retry_timer.dig("counters", "retryCancel")
+    assert_equal 1, retry_timer.dig("counters", "unsubscribe")
+    assert_equal 1, retry_timer.dig("counters", "consumerDisconnect")
+
+    connecting_socket_failure = result.fetch("connectingSocketFailure")
+    assert connecting_socket_failure.fetch("exactIdentity")
+    assert_equal 1, connecting_socket_failure.dig("counters", "rawSocketClose")
+
+    result.each_value do |scenario|
+      assert_equal "disconnected", scenario.fetch("state")
+      refute scenario.fetch("currentAttempt")
+      assert scenario.fetch("retryTimerCleared")
+      assert scenario.fetch("attemptRetired")
+      assert scenario.fetch("attemptDetached")
+      refute scenario.fetch("monitorRunning")
+      assert_equal 0, scenario.dig("counters", "open")
+      assert_equal 0, scenario.dig("counters", "reopen")
+    end
+  end
+
+  test "real DOM disconnect warns once after cleanup and recovers with a fresh owner" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const originalWarn = console.warn
+        const warnings = []
+        const pageErrors = []
+        const unhandled = []
+        const sentinel = { seam: "dom-unsubscribe" }
+        let factoryCalls = 0
+        let failedDisconnects = 0
+        let recoveredSubscriptions = 0
+        let activeSubscriptions = 0
+        const onError = (event) => { pageErrors.push(event.error || event.message); event.preventDefault() }
+        const onUnhandled = (event) => { unhandled.push(event.reason); event.preventDefault() }
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "dom-disconnect"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-dom-disconnect")
+        host.appendChild(source)
+        source.createConsumer = async () => {
+          factoryCalls += 1
+          const failed = factoryCalls === 1
+          return {
+            disconnect() {
+              if (failed) failedDisconnects += 1
+              activeSubscriptions = Math.max(0, activeSubscriptions - 1)
+            },
+            subscriptions: {
+              create(_channel, callbacks) {
+                activeSubscriptions += 1
+                if (!failed) recoveredSubscriptions += 1
+                const subscription = {
+                  perform() { return true },
+                  unsubscribe() {
+                    if (failed) throw sentinel
+                    activeSubscriptions = Math.max(0, activeSubscriptions - 1)
+                  }
+                }
+                queueMicrotask(() => callbacks.connected({ reconnected: false }))
+                return subscription
+              }
+            }
+          }
+        }
+
+        try {
+          console.warn = (...args) => warnings.push(args)
+          addEventListener("error", onError)
+          addEventListener("unhandledrejection", onUnhandled)
+          document.body.appendChild(host)
+          const firstDeadline = performance.now() + 1_000
+          while (!source.hasAttribute("connected") && performance.now() < firstDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const failedOwner = source.statusOwner
+          const failedAttempt = failedOwner.currentAttempt
+          host.remove()
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          const afterDisconnect = {
+            ownerCleared: source.statusOwner === null,
+            connectedAttribute: source.hasAttribute("connected"),
+            state: failedOwner.state,
+            attemptRetired: failedAttempt.retired,
+            attemptDetached: failedAttempt.subscription === null && failedAttempt.consumer === null,
+            warningCount: warnings.length,
+            exactWarning: warnings[0]?.includes(sentinel) || false,
+            pageErrors: pageErrors.length,
+            unhandled: unhandled.length,
+            failedDisconnects
+          }
+
+          document.body.appendChild(host)
+          const recoveryDeadline = performance.now() + 1_000
+          while (!source.hasAttribute("connected") && performance.now() < recoveryDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return {
+            afterDisconnect,
+            recovered: source.hasAttribute("connected"),
+            freshOwner: source.statusOwner !== failedOwner,
+            freshAttempt: source.statusOwner?.currentAttempt !== failedAttempt,
+            factoryCalls,
+            recoveredSubscriptions,
+            activeSubscriptions,
+            warningCount: warnings.length,
+            pageErrors: pageErrors.length,
+            unhandled: unhandled.length
+          }
+        } finally {
+          host.remove()
+          removeEventListener("error", onError)
+          removeEventListener("unhandledrejection", onUnhandled)
+          console.warn = originalWarn
+        }
+      })()
+    JS
+
+    assert_equal({
+      "ownerCleared" => true,
+      "connectedAttribute" => false,
+      "state" => "disconnected",
+      "attemptRetired" => true,
+      "attemptDetached" => true,
+      "warningCount" => 1,
+      "exactWarning" => true,
+      "pageErrors" => 0,
+      "unhandled" => 0,
+      "failedDisconnects" => 1
+    }, result.fetch("afterDisconnect"))
+    assert result.fetch("recovered")
+    assert result.fetch("freshOwner")
+    assert result.fetch("freshAttempt")
+    assert_equal 2, result.fetch("factoryCalls")
+    assert_equal 1, result.fetch("recoveredSubscriptions")
+    assert_equal 1, result.fetch("activeSubscriptions")
+    assert_equal 1, result.fetch("warningCount")
+    assert_equal 0, result.fetch("pageErrors")
+    assert_equal 0, result.fetch("unhandled")
+  end
+
+  test "attribute supersession installs a failed successor before reporting old teardown" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalDelay = sourceClass.retryDelay
+        const originalWarn = console.warn
+        const warnings = []
+        const pageErrors = []
+        const oldSentinel = { seam: "old-unsubscribe" }
+        const successorSentinel = { seam: "successor-setup" }
+        let factoryCalls = 0
+        let oldDisconnects = 0
+        const onError = (event) => { pageErrors.push(event.error || event.message); event.preventDefault() }
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "attribute-supersession"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-old")
+        host.appendChild(source)
+        source.createConsumer = () => {
+          factoryCalls += 1
+          if (factoryCalls === 2) throw successorSentinel
+          return Promise.resolve({
+            disconnect() { oldDisconnects += 1 },
+            subscriptions: {
+              create(_channel, callbacks) {
+                const subscription = {
+                  perform() { return true },
+                  unsubscribe() {
+                    source.connectedCallback()
+                    throw oldSentinel
+                  }
+                }
+                queueMicrotask(() => callbacks.connected({ reconnected: false }))
+                return subscription
+              }
+            }
+          })
+        }
+
+        try {
+          sourceClass.retryDelay = 10_000
+          console.warn = (...args) => warnings.push(args)
+          addEventListener("error", onError)
+          document.body.appendChild(host)
+          const connectedDeadline = performance.now() + 1_000
+          while (!source.hasAttribute("connected") && performance.now() < connectedDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const oldOwner = source.statusOwner
+          const oldAttempt = oldOwner.currentAttempt
+          source.setAttribute("signed-stream-name", "test-successor")
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          const successor = source.statusOwner
+
+          return {
+            factoryCalls,
+            oldDisconnects,
+            oldState: oldOwner.state,
+            oldRetired: oldAttempt.retired,
+            oldDetached: oldAttempt.subscription === null && oldAttempt.consumer === null,
+            successorInstalled: Boolean(successor) && successor !== oldOwner,
+            successorState: successor?.state,
+            successorAttemptRetired: successor?.currentAttempt === null,
+            successorRetry: Boolean(successor?.retryTimer),
+            warningCount: warnings.length,
+            warningOrder: warnings.map((args) => {
+              if (args.includes(oldSentinel)) return "old"
+              if (args.includes(successorSentinel)) return "successor"
+              return "other"
+            }),
+            pageErrors: pageErrors.length
+          }
+        } finally {
+          host.remove()
+          removeEventListener("error", onError)
+          console.warn = originalWarn
+          sourceClass.retryDelay = originalDelay
+        }
+      })()
+    JS
+
+    assert_equal({
+      "factoryCalls" => 2,
+      "oldDisconnects" => 1,
+      "oldState" => "disconnected",
+      "oldRetired" => true,
+      "oldDetached" => true,
+      "successorInstalled" => true,
+      "successorState" => "retry_wait",
+      "successorAttemptRetired" => true,
+      "successorRetry" => true,
+      "warningCount" => 2,
+      "warningOrder" => [ "old", "successor" ],
+      "pageErrors" => 0
+    }, result)
+  end
+
+  test "pending release failures warn after timer and custody finalization" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalDelay = sourceClass.pendingReleaseDelay
+        const originalWarn = console.warn
+        const nativeClearTimeout = window.clearTimeout
+        const warnings = []
+        const pageErrors = []
+        const unhandled = []
+        const onError = (event) => { pageErrors.push(event.error || event.message); event.preventDefault() }
+        const onUnhandled = (event) => { unhandled.push(event.reason); event.preventDefault() }
+
+        const makeSource = (name, consumer) => {
+          const host = document.createElement("div")
+          host.dataset.statusVersion = name
+          const source = document.createElement("hive-status-stream-source")
+          source.setAttribute("channel", "StatusChannel")
+          source.setAttribute("signed-stream-name", `test-${name}`)
+          source.createConsumer = async () => consumer
+          host.appendChild(source)
+          return { host, source }
+        }
+
+        const confirmationCancellation = async () => {
+          const sentinel = { seam: "pending-timer-cancel" }
+          let callbacks
+          let socketState = WebSocket.CONNECTING
+          let unsubscribes = 0
+          let disconnects = 0
+          let timerCancels = 0
+          const socket = { get readyState() { return socketState }, close() { socketState = WebSocket.CLOSING } }
+          const consumer = {
+            connection: { webSocket: socket, close() {} },
+            disconnect() { disconnects += 1; socketState = WebSocket.CLOSING },
+            subscriptions: {
+              create(_channel, mixin) {
+                callbacks = mixin
+                return {
+                  perform() { return true },
+                  unsubscribe() { unsubscribes += 1 }
+                }
+              }
+            }
+          }
+          const { host, source } = makeSource("pending-timer-cancel", consumer)
+          const warningStart = warnings.length
+          sourceClass.pendingReleaseDelay = 10_000
+          document.body.appendChild(host)
+          const setupDeadline = performance.now() + 1_000
+          while (!callbacks && performance.now() < setupDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const owner = source.statusOwner
+          const attempt = owner.currentAttempt
+          host.remove()
+          const timer = owner.pendingReleaseTimer
+          window.clearTimeout = (candidate) => {
+            if (candidate === timer) {
+              timerCancels += 1
+              throw sentinel
+            }
+            return nativeClearTimeout(candidate)
+          }
+          let callbackThrew = false
+          try {
+            callbacks.connected({ reconnected: false })
+          } catch (_error) {
+            callbackThrew = true
+          } finally {
+            window.clearTimeout = nativeClearTimeout
+            nativeClearTimeout(timer)
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          return {
+            callbackThrew,
+            timerCancels,
+            unsubscribes,
+            disconnects,
+            state: owner.state,
+            pendingCleared: owner.pendingReleaseDisposition === null,
+            timerCleared: owner.pendingReleaseTimer === null,
+            retired: attempt.retired,
+            detached: attempt.subscription === null && attempt.consumer === null,
+            warnings: warnings.length - warningStart,
+            exactWarning: warnings.at(-1)?.includes(sentinel) || false
+          }
+        }
+
+        const timeoutCleanup = async () => {
+          const sentinels = {
+            consumer: { seam: "timeout-consumer" },
+            connection: { seam: "timeout-connection" },
+            socket: { seam: "timeout-socket" },
+            unsubscribe: { seam: "timeout-unsubscribe" }
+          }
+          const counters = { consumer: 0, connection: 0, socket: 0, unsubscribe: 0, monitor: 0 }
+          let callbacks
+          const monitor = {
+            running: true,
+            isRunning() { return this.running },
+            stop() { counters.monitor += 1; this.running = false }
+          }
+          const socket = {
+            readyState: WebSocket.CONNECTING,
+            close() { counters.socket += 1; throw sentinels.socket }
+          }
+          const consumer = {
+            connection: {
+              webSocket: socket,
+              monitor,
+              close() { counters.connection += 1; throw sentinels.connection }
+            },
+            disconnect() { counters.consumer += 1; throw sentinels.consumer },
+            subscriptions: {
+              create(_channel, mixin) {
+                callbacks = mixin
+                return {
+                  perform() { return true },
+                  unsubscribe() { counters.unsubscribe += 1; throw sentinels.unsubscribe }
+                }
+              }
+            }
+          }
+          const { host, source } = makeSource("pending-timeout-errors", consumer)
+          const warningStart = warnings.length
+          sourceClass.pendingReleaseDelay = 0
+          document.body.appendChild(host)
+          const setupDeadline = performance.now() + 1_000
+          while (!callbacks && performance.now() < setupDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const owner = source.statusOwner
+          const attempt = owner.currentAttempt
+          host.remove()
+          const cleanupDeadline = performance.now() + 1_000
+          while ((!attempt.retired || warnings.length === warningStart)
+            && performance.now() < cleanupDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return {
+            counters,
+            state: owner.state,
+            pendingCleared: owner.pendingReleaseDisposition === null,
+            timerCleared: owner.pendingReleaseTimer === null,
+            retired: attempt.retired,
+            released: attempt.released,
+            detached: attempt.subscription === null && attempt.consumer === null &&
+              attempt.connection === null && attempt.socket === null,
+            monitorRunning: monitor.running,
+            warnings: warnings.length - warningStart,
+            exactWarning: warnings.at(-1)?.includes(sentinels.consumer) || false
+          }
+        }
+
+        try {
+          console.warn = (...args) => warnings.push(args)
+          addEventListener("error", onError)
+          addEventListener("unhandledrejection", onUnhandled)
+          return {
+            confirmationCancellation: await confirmationCancellation(),
+            timeoutCleanup: await timeoutCleanup(),
+            pageErrors: pageErrors.length,
+            unhandled: unhandled.length
+          }
+        } finally {
+          window.clearTimeout = nativeClearTimeout
+          sourceClass.pendingReleaseDelay = originalDelay
+          removeEventListener("error", onError)
+          removeEventListener("unhandledrejection", onUnhandled)
+          console.warn = originalWarn
+        }
+      })()
+    JS
+
+    assert_equal({
+      "callbackThrew" => false,
+      "timerCancels" => 1,
+      "unsubscribes" => 1,
+      "disconnects" => 1,
+      "state" => "disconnected",
+      "pendingCleared" => true,
+      "timerCleared" => true,
+      "retired" => true,
+      "detached" => true,
+      "warnings" => 1,
+      "exactWarning" => true
+    }, result.fetch("confirmationCancellation"))
+    assert_equal({
+      "counters" => {
+        "consumer" => 1,
+        "connection" => 1,
+        "socket" => 1,
+        "unsubscribe" => 1,
+        "monitor" => 1
+      },
+      "state" => "disconnected",
+      "pendingCleared" => true,
+      "timerCleared" => true,
+      "retired" => true,
+      "released" => true,
+      "detached" => true,
+      "monitorRunning" => false,
+      "warnings" => 1,
+      "exactWarning" => true
+    }, result.fetch("timeoutCleanup"))
+    assert_equal 0, result.fetch("pageErrors")
+    assert_equal 0, result.fetch("unhandled")
+  end
+
+  test "mounted attempt failures retire before one warning and recover without rejected work" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalDelay = sourceClass.retryDelay
+        const originalWarn = console.warn
+        const warnings = []
+        const pageErrors = []
+        const unhandled = []
+        const onError = (event) => { pageErrors.push(event.error || event.message); event.preventDefault() }
+        const onUnhandled = (event) => { unhandled.push(event.reason); event.preventDefault() }
+
+        const runCase = async (kind) => {
+          const primary = { seam: `${kind}-primary` }
+          const cleanup = { seam: `${kind}-cleanup` }
+          let factoryCalls = 0
+          let failedDisconnects = 0
+          let recoveredCreates = 0
+          let callbacks
+          let callbackThrew = false
+          const host = document.createElement("div")
+          host.dataset.statusVersion = kind
+          const source = document.createElement("hive-status-stream-source")
+          source.setAttribute("channel", "StatusChannel")
+          source.setAttribute("signed-stream-name", `test-${kind}`)
+          host.appendChild(source)
+          source.createConsumer = async () => {
+            factoryCalls += 1
+            if (factoryCalls > 1) {
+              return {
+                disconnect() {},
+                subscriptions: {
+                  create(_channel, recoveredCallbacks) {
+                    recoveredCreates += 1
+                    const subscription = { perform() { return true }, unsubscribe() {} }
+                    queueMicrotask(() => recoveredCallbacks.connected({ reconnected: false }))
+                    return subscription
+                  }
+                }
+              }
+            }
+            if (kind === "consumer-rejection") throw primary
+
+            return {
+              disconnect() {
+                failedDisconnects += 1
+                if (kind !== "false-disconnect") throw cleanup
+              },
+              subscriptions: {
+                create(_channel, failedCallbacks) {
+                  callbacks = failedCallbacks
+                  if (kind === "registration") throw primary
+                  const subscription = {
+                    perform() { return true },
+                    unsubscribe() {
+                      if (kind === "false-disconnect") throw cleanup
+                    }
+                  }
+                  if (kind === "false-disconnect") {
+                    queueMicrotask(() => failedCallbacks.connected({ reconnected: false }))
+                  }
+                  return subscription
+                }
+              }
+            }
+          }
+
+          const warningStart = warnings.length
+          document.body.appendChild(host)
+          const owner = source.statusOwner
+          const failedAttempt = owner.currentAttempt
+          if (kind !== "consumer-rejection") {
+            const callbackDeadline = performance.now() + 1_000
+            while (!callbacks && performance.now() < callbackDeadline) {
+              await new Promise((resolve) => setTimeout(resolve, 0))
+            }
+          }
+          if ([ "rejection", "false-disconnect" ].includes(kind)) {
+            if (kind === "false-disconnect") {
+              const confirmedDeadline = performance.now() + 1_000
+              while (!source.hasAttribute("connected") && performance.now() < confirmedDeadline) {
+                await new Promise((resolve) => setTimeout(resolve, 0))
+              }
+            }
+            try {
+              if (kind === "rejection") callbacks.rejected()
+              else callbacks.disconnected({ willAttemptReconnect: false })
+            } catch (_error) {
+              callbackThrew = true
+            }
+          }
+
+          const retryDeadline = performance.now() + 1_000
+          while (owner.state !== "retry_wait" && factoryCalls < 2 && performance.now() < retryDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const retrySnapshot = {
+            state: owner.state,
+            currentCleared: owner.currentAttempt === null,
+            retired: failedAttempt?.retired || false,
+            detached: failedAttempt ? failedAttempt.subscription === null && failedAttempt.consumer === null : false,
+            retryOwned: Boolean(owner.retryTimer),
+            warnings: warnings.length - warningStart,
+            callbackThrew,
+            failedDisconnects
+          }
+          const recoveryDeadline = performance.now() + 1_000
+          while (!source.hasAttribute("connected") && performance.now() < recoveryDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          const recoveredAttempt = owner.currentAttempt
+          if (callbacks) {
+            callbacks.connected({ reconnected: true })
+            callbacks.rejected()
+            callbacks.disconnected({ willAttemptReconnect: false })
+          }
+          const recovered = {
+            connected: source.hasAttribute("connected"),
+            state: owner.state,
+            factoryCalls,
+            recoveredCreates,
+            freshAttempt: Boolean(recoveredAttempt) && recoveredAttempt !== failedAttempt,
+            staleCallbacksInert: owner.currentAttempt === recoveredAttempt,
+            warnings: warnings.length - warningStart
+          }
+          host.remove()
+          return { retrySnapshot, recovered }
+        }
+
+        try {
+          sourceClass.retryDelay = 100
+          console.warn = (...args) => warnings.push(args)
+          addEventListener("error", onError)
+          addEventListener("unhandledrejection", onUnhandled)
+          return {
+            consumerRejection: await runCase("consumer-rejection"),
+            registration: await runCase("registration"),
+            rejection: await runCase("rejection"),
+            falseDisconnect: await runCase("false-disconnect"),
+            pageErrors: pageErrors.length,
+            unhandled: unhandled.length
+          }
+        } finally {
+          removeEventListener("error", onError)
+          removeEventListener("unhandledrejection", onUnhandled)
+          console.warn = originalWarn
+          sourceClass.retryDelay = originalDelay
+        }
+      })()
+    JS
+
+    %w[consumerRejection registration rejection falseDisconnect].each do |kind|
+      attempt = result.fetch(kind)
+      expected_disconnects = kind == "consumerRejection" ? 0 : 1
+      assert_equal({
+        "state" => "retry_wait",
+        "currentCleared" => true,
+        "retired" => true,
+        "detached" => true,
+        "retryOwned" => true,
+        "warnings" => 1,
+        "callbackThrew" => false,
+        "failedDisconnects" => expected_disconnects
+      }, attempt.fetch("retrySnapshot"))
+      assert_equal({
+        "connected" => true,
+        "state" => "connected",
+        "factoryCalls" => 2,
+        "recoveredCreates" => 1,
+        "freshAttempt" => true,
+        "staleCallbacksInert" => true,
+        "warnings" => 1
+      }, attempt.fetch("recovered"))
+    end
+    assert_equal 0, result.fetch("pageErrors")
+    assert_equal 0, result.fetch("unhandled")
+  end
+
   test "retired attempts fence late consumers and queued open or reopen work" do
     sign_in!
     visit repos_path

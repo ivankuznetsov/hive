@@ -11,6 +11,7 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
   HIVE_BIN = File.expand_path("../../bin/hive", __dir__)
   HIVE_LIB = File.expand_path("../../lib", __dir__)
   FAKE_CLAUDE = File.expand_path("../fixtures/fake-claude", __dir__)
+  CHILD_GEM_PATH = Gem.path.join(File::PATH_SEPARATOR).freeze
 
   def setup
     @old_claude_bin = ENV["HIVE_CLAUDE_BIN"]
@@ -34,8 +35,10 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
       if ready
         begin
           buffer << reader.read_nonblock(4096)
-        rescue IO::WaitReadable, EOFError
+        rescue IO::WaitReadable
           nil
+        rescue EOFError, Errno::EIO
+          return buffer
         end
       end
 
@@ -77,10 +80,11 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
         env = {
           "TERM" => "xterm-256color",
+          "GEM_PATH" => CHILD_GEM_PATH,
           "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png,screenshot-2.png,screenshot-3.png",
           "HIVE_TUI_TEST_CLIPBOARD_BASE" => File.expand_path("../fixtures/composer", __dir__)
         }
-        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+        PTY.spawn(env, RbConfig.ruby, "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
           reader.winsize = [ 30, 120 ]
 
           buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?(project_prefix) }
@@ -208,11 +212,12 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
         env = {
           "TERM" => "xterm-256color",
+          "GEM_PATH" => CHILD_GEM_PATH,
           "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png",
           "HIVE_TUI_TEST_CLIPBOARD_BASE" => File.expand_path("../fixtures/composer", __dir__),
           "HIVE_TUI_TEST_CLIPBOARD_STRICT" => "1"
         }
-        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+        PTY.spawn(env, RbConfig.ruby, "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
           reader.winsize = [ 30, 120 ]
 
           buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?(project_prefix) }

@@ -712,6 +712,27 @@ class HiveTuiBubbleModelTest < Minitest::Test
            "flash row must precede the prompt strip so it is visible"
   end
 
+  def test_view_renders_new_idea_project_picker_mode
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea_project,
+        snapshot: snap,
+        new_idea_project_cursor: 0
+      ),
+      dispatch: @dispatch,
+      update_state: EmptyUpdateState.new(nudge: nil)
+    )
+
+    out = with_zero_usage { @model.view }
+
+    assert_includes out, "Choose project for new idea"
+    assert_includes out, "hive"
+  end
+
   def test_red_status_detail_view_renders_header_panels_log_artifacts_and_action_bar
     require "tmpdir"
     Dir.mktmpdir do |project_root|
@@ -1666,6 +1687,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal "", @model.hive_model.new_idea_buffer
   end
 
+  # This proves the installed-snapshot guard cannot substitute the new row at
+  # the old numeric position. The later Commands::New live name lookup remains
+  # intentionally non-atomic with this preflight and is outside this contract.
   def test_numeric_entry_reorder_dispatches_the_original_pinned_identity
     original = new_idea_snapshot([
       { "name" => "alpha", "tasks" => [] },
@@ -1746,6 +1770,24 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert File.directory?(@model.hive_model.new_idea_staging_dir)
   ensure
     Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+  end
+
+  def test_default_clipboard_probe_delegates_to_clipboard_authority
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    captured = nil
+
+    with_singleton_method_stub(Hive::Tui::Clipboard, :probe, lambda { |pasted_text:|
+      captured = pasted_text
+      clipboard_none
+    }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+    end
+
+    assert_equal "", captured
+    assert_equal "", @model.hive_model.new_idea_buffer
   end
 
   def test_empty_paste_outside_new_idea_short_circuits_without_clipboard_probe
@@ -2485,7 +2527,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # Each named class in submit_rich_new_idea's rescue list deserves a
   # direct test so a future narrowing of the list lands as a regression
   # rather than a backtrace-on-submit when the user pastes images.
-  def rich_submit_with_raise(raise_proc)
+  def rich_submit_with_raise(raise_proc, staging_tmp_root: nil)
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-13",
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
@@ -2506,7 +2548,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         new_idea_buffer: "title [image1]",
         new_idea_cursor: 14,
         new_idea_attachments: [ attachment ],
-        new_idea_staging_dir: staging_dir
+        new_idea_staging_dir: staging_dir,
+        new_idea_staging_tmp_root: staging_tmp_root
       ),
       dispatch: @dispatch
     )
@@ -2582,11 +2625,46 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # and ENOENT on the first write. Pin the reset here so a future
   # ensure-block edit can't silently regress it.
   def test_rich_submit_programmer_error_clears_model_staging_dir
-    rich_submit_with_raise(-> { raise NoMethodError, "undefined method `foo'" })
+    rich_submit_with_raise(
+      -> { raise NoMethodError, "undefined method `foo'" },
+      staging_tmp_root: Dir.tmpdir
+    )
     assert_nil @model.hive_model.new_idea_staging_dir,
       "programmer-error path must clear the model's staging_dir " \
       "after the ensure-block cleanup removes the disk tmpdir"
     assert_match(/internal error/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_images_only_uses_default_title_feedback
+    with_staged_image_attachment do |staging_dir, _staging_path, attachment|
+      command = Struct.new(:called) do
+        def call!
+          self.called = true
+        end
+      end.new(false)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(
+          mode: :new_idea,
+          snapshot: new_idea_snapshot([ { "name" => "hive", "tasks" => [] } ]),
+          new_idea_project_name: "hive",
+          new_idea_buffer: "[image1]",
+          new_idea_cursor: 8,
+          new_idea_attachments: [ attachment ],
+          new_idea_staging_dir: staging_dir,
+          new_idea_staging_tmp_root: Dir.tmpdir
+        ),
+        dispatch: @dispatch
+      )
+
+      with_singleton_method_stub(Hive::Commands::New, :new, ->(*_args, **_kwargs) { command }) do
+        capture_io { @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+      end
+
+      assert command.called
+      assert_equal :grid, @model.hive_model.mode
+      assert_match(/titled 'task'/, @model.hive_model.flash.to_s)
+      refute File.exist?(staging_dir)
+    end
   end
 
   def test_rich_submit_logs_when_staging_cleanup_fails

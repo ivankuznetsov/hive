@@ -92,9 +92,10 @@ module Hive
       end
 
       # Counts exact predecessor point reads while the bounded journal suffix
-      # is validated. Primary attempt IDs are collected from the checkpoint and
-      # suffix before replay, so an attempt referenced by a journal event never
-      # consumes the separate predecessor budget.
+      # is validated. Primary attempt IDs are collected from mutable checkpoint
+      # bindings and the suffix before replay. Immutable terminal checkpoint
+      # bindings are already covered by the checkpoint byte budget and require
+      # no attempt-store read.
       class BoundedAttemptStore
         attr_reader :failure
 
@@ -448,7 +449,7 @@ module Hive
           )
         end
         suffix_attempt_ids, event_count = journal_summary(suffix)
-        attempt_ids = (checkpoint_attempt_ids(snapshot) + suffix_attempt_ids).uniq
+        attempt_ids = (checkpoint_mutable_attempt_ids(snapshot) + suffix_attempt_ids).uniq
         budget_failure = attempt_budget_failure(
           attempt_ids, attempt_limit: attempt_limit
         )
@@ -800,9 +801,10 @@ module Hive
         end
       end
 
-      def checkpoint_attempt_ids(snapshot)
+      def checkpoint_mutable_attempt_ids(snapshot)
         Array(snapshot.dig("journal", "attempts")).filter_map do |binding|
           next unless binding.is_a?(Hash)
+          next if Hive::Attempts::Record::FINAL_STATES.include?(binding["state"])
 
           attempt_id = binding["attempt_id"].to_s
           attempt_id unless attempt_id.empty?

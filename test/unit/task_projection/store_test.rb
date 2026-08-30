@@ -314,6 +314,93 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_routine_read_does_not_charge_terminal_checkpoint_history_to_attempt_budget
+    with_tmp_dir do |dir|
+      attempts = 101.times.to_h do |index|
+        attempt_id = "attempt-#{index}"
+        [ attempt_id, durable_attempt.merge(
+          "attempt_id" => attempt_id,
+          "ownership_generation" => "owner-#{index}",
+          "state" => "terminal", "outcome" => "failed", "lease_version" => 2
+        ) ]
+      end
+      reads = 0
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      events = attempts.keys.each_with_index.map do |attempt_id, index|
+        condition_event("event-#{index}", state: "unsatisfied").tap do |event|
+          event["attempt_id"] = attempt_id
+          event["ownership_generation"] = "owner-#{index}"
+          event.dig("evidence", 0)["attempt_id"] = attempt_id
+        end
+      end
+      write_journal(dir, events)
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      store.rebuild!
+      reads = 0
+
+      result = store.read_routine
+
+      assert_equal 101,
+                   result.projection.to_h.dig("journal", "attempts").length
+      assert_equal 0, reads
+      assert_equal "current", result.state
+      assert_empty result.diagnostics
+    end
+  end
+
+  def test_routine_read_still_bounds_mutable_checkpoint_attempts
+    with_tmp_dir do |dir|
+      attempts = 101.times.to_h do |index|
+        attempt_id = "attempt-#{index}"
+        [ attempt_id, durable_attempt.merge(
+          "attempt_id" => attempt_id,
+          "ownership_generation" => "owner-#{index}"
+        ) ]
+      end
+      reads = 0
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      events = attempts.keys.each_with_index.map do |attempt_id, index|
+        condition_event("event-#{index}").tap do |event|
+          event["attempt_id"] = attempt_id
+          event["ownership_generation"] = "owner-#{index}"
+          event.dig("evidence", 0)["attempt_id"] = attempt_id
+        end
+      end
+      write_journal(dir, events)
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      store.rebuild!
+      reads = 0
+
+      result = store.read_routine
+
+      assert_equal 0, reads
+      assert_equal "repair_required", result.state
+      assert result.truncated
+      assert_equal "attempt_ids_exhausted",
+                   result.diagnostics.first.fetch("reason")
+    end
+  end
+
   def test_routine_read_replays_only_the_bounded_suffix_after_an_append
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])

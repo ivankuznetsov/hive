@@ -76,8 +76,10 @@ mutating reconciliation republishes it.
 Routine task-graph scans use the separately bounded
 `task-projection.checkpoint.json` as a strict read model. One scan-wide attempt
 projection reader is reused; each task may validate a 512 KiB checkpoint, a
-1 MiB / 2,000-event append-only suffix, 100 attempt IDs, and 32 predecessor
-point fetches. The reader refreshes referenced mutable attempt bindings and
+1 MiB / 2,000-event append-only suffix, 100 IDs across mutable checkpoint
+bindings plus that suffix, and 32 predecessor point fetches. Immutable terminal bindings remain
+covered by the checkpoint byte cap but consume no mutable-ID budget. The reader
+refreshes referenced mutable attempt bindings and
 reprojects only the bounded suffix. It never falls back to the complete
 journal, invokes `rebuild!`, or enumerates permanent proof storage.
 Operational-action token revalidation and downstream attempt-generation reads

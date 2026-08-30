@@ -42,6 +42,20 @@ class SetupOrchestratorTest < Minitest::Test
     assert Hive::Commands::Setup.new(input: closed).send(:unattended_without_yes?)
   end
 
+  def test_daily_digest_initialization_failure_is_advisory
+    error = StringIO.new
+    setup = Hive::Commands::Setup.new(error: error)
+    with_replaced_singleton_method(
+      Hive::DailyDigest::Migration,
+      :ensure!,
+      -> { raise Hive::DailyDigest::Migration::InitializationError, "zone unavailable" }
+    ) do
+      assert_nil setup.send(:initialize_daily_digest)
+    end
+
+    assert_match(/daily digest remains disabled: zone unavailable/, error.string)
+  end
+
   # ── diagnostics fakes ────────────────────────────────────────────────
 
   def diag(*rows, ok: nil)

@@ -91,9 +91,10 @@ module Hive
           File.dirname(task.state_file)
         end
         store = attempt_store || default_attempt_store
-        marker = if task.respond_to?(:workflow) && task.workflow&.controller?
+        workflow = task.respond_to?(:workflow) ? task.workflow : nil
+        marker = if workflow.respond_to?(:controller?) && workflow.controller?
           Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
-        elsif task.respond_to?(:workflow)
+        elsif workflow
           Hive::Markers.current(task.state_file)
         end
         bounded = Hive::TaskProjection::Store.new(

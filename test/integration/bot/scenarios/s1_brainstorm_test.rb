@@ -46,6 +46,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
       <!-- WAITING -->
     MARKDOWN
+    seed_task_projection(File.dirname(brainstorm), state_file: brainstorm)
     File.write(File.join(@home, "config.yml"), {
       "registered_projects" => [
         { "name" => "hive", "path" => project, "hive_state_path" => File.join(project, ".hive-state") }

@@ -13,3 +13,9 @@ immediately rather than waiting forever on a held journal lock. Ad-hoc review
 tasks record an authoritative generation-0 creation baseline so their derived
 projection remains exactly repairable. Merge candidates also clear a stale
 projection-outage archive block after healthy generation validation resumes.
+
+The status schema and TUI snapshot now preserve the producer-owned
+`projection_repair` boolean explicitly. Lightweight task adapters may continue
+to expose a workflow ID string; only descriptor objects are queried for
+controller behavior. Post-cutover test task factories publish the same
+zero-history checkpoint as canonical production task creators.

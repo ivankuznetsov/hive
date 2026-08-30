@@ -12,6 +12,7 @@ class AttemptsGenerationTest < Minitest::Test
   )
 
   FolderTask = Struct.new(:folder, :state_file, keyword_init: true)
+  WorkflowIdTask = Struct.new(:folder, :state_file, :workflow, keyword_init: true)
 
   def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |state_home|
@@ -57,6 +58,19 @@ class AttemptsGenerationTest < Minitest::Test
     assert_equal "opaque-owner", generation.task_generation
     assert_equal "opaque-owner", generation.ownership_generation
     assert_equal 9, generation.task_input_epoch
+  end
+
+  def test_current_input_epoch_accepts_a_workflow_id_without_a_descriptor
+    with_tmp_dir do |folder|
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "task\n<!-- WAITING -->\n")
+      seed_task_projection(folder, state_file: state_file)
+      task = WorkflowIdTask.new(
+        folder: folder, state_file: state_file, workflow: "routine"
+      )
+
+      assert_equal 0, Hive::Attempts::Generation.current_task_input_epoch(task)
+    end
   end
 
   def test_legacy_locator_and_progress_change_are_deterministic

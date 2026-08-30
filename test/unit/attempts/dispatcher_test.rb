@@ -1543,10 +1543,7 @@ class AttemptsDispatcherTest < Minitest::Test
                       transient_retry_backoff_sec: 60,
                       clock: -> { NOW })
     with_tmp_dir do |root|
-      state_file = File.join(root, "task.md")
-      File.write(state_file, "task\n<!-- WAITING -->\n")
-      task = FakeTask.new(id: 42, slug: "durable-task", state_file: state_file,
-                          stage_index: 4, stage_name: "execute")
+      task = task_fixture(root, id: 42, slug: "durable-task")
       store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
       launcher = FakeLauncher.new
       ids = %w[attempt-one attempt-two attempt-three].each
@@ -1561,12 +1558,16 @@ class AttemptsDispatcherTest < Minitest::Test
   end
 
   def task_fixture(root, id:, slug:)
-    state_file = File.join(root, "#{slug}.md")
+    folder = File.join(root, slug)
+    FileUtils.mkdir_p(folder)
+    state_file = File.join(folder, "task.md")
     File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
-    FakeTask.new(
+    task = FakeTask.new(
       id: id, slug: slug, state_file: state_file,
       stage_index: 4, stage_name: "execute"
     )
+    seed_task_projection(folder, state_file: state_file)
+    task
   end
 
   def dispatch(dispatcher, task, request_id:, interactive: false, intended_stage: "4-execute",

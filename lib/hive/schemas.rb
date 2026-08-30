@@ -102,6 +102,8 @@ module Hive
       # conversations. Bindings are revalidated under a creation-disabled task
       # lock; the command never advances a workflow stage.
       "hive-answer" => 1,
+      "hive-brainstorm-suggestion-cleanup" => 1,
+      "hive-brainstorm-suggestion-action" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,

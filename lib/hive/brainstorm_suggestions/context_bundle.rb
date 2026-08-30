@@ -4,8 +4,11 @@ require "digest"
 require "fileutils"
 require "json"
 require "time"
+require "yaml"
 require "hive/brainstorm_parser"
 require "hive/brainstorm_suggestions/binding"
+require "hive/brainstorm_suggestions/process_capture"
+require "hive/brainstorm_suggestions/safety"
 require "hive/secret_patterns"
 
 module Hive
@@ -56,6 +59,39 @@ module Hive
 
       attr_reader :manifest, :diagnostics, :settled_answers, :question, :task_request
 
+      def self.validated_main_wiki_root(project_root, configured)
+        return unless configured.is_a?(String) && !configured.empty?
+
+        project = File.realpath(File.expand_path(project_root))
+        candidate = File.realpath(File.expand_path(configured, project))
+        return candidate if candidate == project || candidate.start_with?("#{project}/")
+
+        operator_main_wiki_roots.filter_map do |path|
+          File.realpath(path) if File.directory?(path)
+        rescue SystemCallError
+          nil
+        end.include?(candidate) ? candidate : nil
+      rescue SystemCallError, ArgumentError
+        nil
+      end
+
+      def self.operator_main_wiki_roots
+        config_home = ENV["XDG_CONFIG_HOME"].to_s
+        config_home = File.join(ENV.fetch("HOME", ""), ".config") if config_home.empty?
+        qmd_config = File.join(config_home, "qmd", "index.yml")
+        payload = YAML.safe_load_file(qmd_config, permitted_classes: [], aliases: false)
+        collection = payload.is_a?(Hash) ? payload.dig("collections", "hive-wiki") : nil
+        configured = collection.is_a?(Hash) ? collection["path"] : nil
+        roots = []
+        roots << File.expand_path(configured, File.dirname(qmd_config)) if configured.is_a?(String) && !configured.empty?
+        home = ENV.fetch("HOME", "")
+        roots.concat(%w[master main].map { |name| File.join(home, "wikis", name, "wiki") }) unless home.empty?
+        roots
+      rescue SystemCallError, Psych::Exception, ArgumentError
+        []
+      end
+      private_class_method :operator_main_wiki_roots
+
       def self.capture(project_root:, task_root:, question_ordinal:, deadline: nil)
         new(
           project_root: project_root,
@@ -65,11 +101,24 @@ module Hive
         ).tap(&:capture!)
       end
 
-      def initialize(project_root:, task_root:, question_ordinal:, deadline: nil)
+      def self.capture_many(project_root:, task_root:, question_ordinals:, deadline: nil)
+        deadline ||= Process.clock_gettime(Process::CLOCK_MONOTONIC) + MAX_CAPTURE_SECONDS
+        session = { git: {}, files: {} }
+        Array(question_ordinals).uniq.to_h do |ordinal|
+          bundle = new(
+            project_root: project_root, task_root: task_root,
+            question_ordinal: ordinal, deadline: deadline, session: session
+          ).tap(&:capture!)
+          [ Integer(ordinal), bundle ]
+        end.freeze
+      end
+
+      def initialize(project_root:, task_root:, question_ordinal:, deadline: nil, session: nil)
         @project_root = canonical_directory(project_root, "project_unavailable")
         @task_root = canonical_directory(task_root, "task_unavailable")
         @question_ordinal = Integer(question_ordinal)
         @deadline = deadline || monotonic_now + MAX_CAPTURE_SECONDS
+        @session = session
         raise CaptureError.new("question_unavailable") unless @question_ordinal.positive?
       rescue ArgumentError, TypeError
         raise CaptureError.new("question_unavailable")
@@ -77,7 +126,7 @@ module Hive
 
       def capture!
         check_deadline!
-        @task_request = redact_untrusted(
+        @task_request = screened_untrusted!(
           stable_read(File.join(@task_root, "idea.md"), max_bytes: MAX_REQUEST_BYTES,
                       code: "task_request_unavailable")
         )
@@ -93,7 +142,7 @@ module Hive
           "ordinal" => @question_ordinal,
           "round" => selected_question.round,
           "number" => selected_question.n,
-          "text" => selected_question.text,
+          "text" => screened_untrusted!(selected_question.text, code: "unsafe_question"),
           "fingerprint" => Hive::BrainstormParser.question_fingerprint(selected_question.text)
         }.freeze
         @settled_answers = questions.first(@question_ordinal - 1).filter_map do |item|
@@ -102,8 +151,8 @@ module Hive
           {
             "round" => item.round,
             "question_number" => item.n,
-            "question" => redact_untrusted(item.text),
-            "answer" => redact_untrusted(item.answer)
+            "question" => screened_untrusted!(item.text, code: "unsafe_settled_context"),
+            "answer" => screened_untrusted!(item.answer, code: "unsafe_settled_context")
           }.freeze
         end.freeze
 
@@ -135,12 +184,12 @@ module Hive
         manifest.fetch("entries").map { |entry| entry.fetch("source") }.uniq.sort.freeze
       end
 
-      def render_context
+      def render_context(user_supplied_tag: "untrusted-source")
         @entries.each_with_index.map do |entry, index|
           <<~SOURCE
-            <untrusted-source index="#{index + 1}" class="#{entry.source}" path="#{entry.path}" sha256="#{entry.digest}">
+            <#{user_supplied_tag} content_type="repository_evidence" index="#{index + 1}" class="#{xml_attribute(entry.source)}" path="#{xml_attribute(entry.path)}" sha256="#{entry.digest}">
             #{entry.content}
-            </untrusted-source>
+            </#{user_supplied_tag}>
           SOURCE
         end.join("\n")
       end
@@ -185,8 +234,8 @@ module Hive
           header, path = row.split("\t", 2)
           mode, oid, stage = header.to_s.split(" ", 3)
           raise CaptureError.new("index_conflict") unless stage == "0"
-          raise CaptureError.new("unsafe_tracked_entry") unless %w[100644 100755].include?(mode)
-          raise CaptureError.new("unsafe_tracked_entry") unless safe_relative_path?(path)
+          next unless %w[100644 100755].include?(mode)
+          next unless safe_relative_path?(path)
 
           { path: path, mode: mode, oid: oid }
         end
@@ -211,14 +260,14 @@ module Hive
           content = stable_tracked_read(path)
           next if content.nil? || content.include?("\0") || !content.dup.force_encoding(Encoding::UTF_8).valid_encoding?
           content = content.force_encoding(Encoding::UTF_8)
-          next if Hive::SecretPatterns.match?(content)
+          next unless safe_evidence?(content)
 
           source = path.start_with?("wiki/") ? "project_wiki" : "repository"
           relevance = path_relevance_score(path, tokens) + content_score(content, tokens)
           next unless overlay_paths[path] || relevance.positive?
 
           score = relevance + path_type_bonus(path) + (overlay_paths[path] ? 1_000 : 0)
-          [ score, build_entry(path, row.fetch(:mode), source, content) ]
+          [ score, build_entry(path, worktree_mode(path), source, content) ]
         end
 
         choose_bounded(candidates)
@@ -233,7 +282,8 @@ module Hive
         configured = config["main_wiki_path"] if config.is_a?(Hash)
         return [] unless configured.is_a?(String) && !configured.empty?
 
-        root = File.expand_path(configured, @project_root)
+        root = self.class.validated_main_wiki_root(@project_root, configured)
+        return [] unless root
         root = canonical_directory(root, "main_wiki_unavailable")
         candidates = Dir.glob(File.join(root, "**", "*.md")).sort.first(MAX_CANDIDATE_FILES).filter_map do |path|
           check_deadline!
@@ -241,7 +291,7 @@ module Hive
           next unless safe_relative_path?(relative)
 
           content = stable_external_read(root, relative)
-          next if content.nil? || Hive::SecretPatterns.match?(content)
+          next if content.nil? || !safe_evidence?(content)
 
           relevance = path_relevance_score(relative, tokens) + content_score(content, tokens)
           next unless relevance.positive?
@@ -258,8 +308,6 @@ module Hive
         total = 0
         candidates.sort_by { |score, entry| [ -score, entry.path ] }.filter_map do |_score, entry|
           next if total + entry.content.bytesize > max_bytes
-          break if total >= max_bytes
-
           total += entry.content.bytesize
           entry
         end.first(max_files)
@@ -292,25 +340,35 @@ module Hive
       end
 
       def stable_regular_read(root, relative, max_bytes:)
-        verify_components!(root, relative)
-        full = File.join(root, relative)
-        status = File.lstat(full)
-        raise CaptureError.new("unsafe_tracked_entry") unless status.file? && !status.symlink?
-        return nil if status.size > max_bytes
+        cache_key = [ root, relative, max_bytes ]
+        cached = @session&.dig(:files, cache_key)
+        return cached.dup if cached
 
-        flags = File::RDONLY
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        File.open(full, flags) do |file|
-          opened = file.stat
-          current = File.lstat(full)
-          raise CaptureError.new("capture_race") unless
-            opened.file? && !current.symlink? && opened.dev == current.dev && opened.ino == current.ino
+        raise CaptureError.new("unsafe_tracked_entry") unless safe_relative_path?(relative)
 
-          value = file.read(max_bytes + 1)
-          raise CaptureError.new("capture_too_large") if value.bytesize > max_bytes
-
-          value
+        descriptors = [ File.open(root, File::RDONLY) ]
+        relative.split("/").each_with_index do |part, index|
+          flags = File::RDONLY
+          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+          opened = File.open("/proc/self/fd/#{descriptors.last.fileno}/#{part}", flags)
+          status = opened.stat
+          final = index == relative.split("/").length - 1
+          unless final ? status.file? : status.directory?
+            opened.close
+            raise CaptureError.new("unsafe_tracked_entry")
+          end
+          descriptors << opened
         end
+        file = descriptors.last
+        return nil if file.stat.size > max_bytes
+
+        value = file.read(max_bytes + 1)
+        raise CaptureError.new("capture_too_large") if value.bytesize > max_bytes
+
+        @session&.fetch(:files)&.store(cache_key, value.freeze)
+        value
+      ensure
+        descriptors&.reverse_each { |descriptor| descriptor.close unless descriptor.closed? }
       end
 
       def stable_read(path, max_bytes:, code:)
@@ -331,21 +389,6 @@ module Hive
         end
       rescue SystemCallError, IOError
         raise CaptureError.new(code)
-      end
-
-      def verify_components!(root, relative)
-        current = root
-        relative.split("/").each_with_index do |part, index|
-          current = File.join(current, part)
-          status = File.lstat(current)
-          raise CaptureError.new("unsafe_tracked_entry") if status.symlink?
-          next if index == relative.split("/").length - 1
-
-          raise CaptureError.new("unsafe_tracked_entry") unless status.directory?
-        end
-        real = File.realpath(current)
-        raise CaptureError.new("unsafe_tracked_entry") unless
-          real == root || real.start_with?("#{root}/")
       end
 
       def relevance_tokens(text)
@@ -383,63 +426,55 @@ module Hive
         parts.none? { |part| part.empty? || part == "." || part == ".." }
       end
 
-      def redact_untrusted(value)
-        Hive::SecretPatterns.redact(value.to_s)
+      def screened_untrusted!(value, code: "unsafe_prompt_context")
+        redacted = Hive::SecretPatterns.redact(value.to_s)
+        raise CaptureError.new(code) unless safe_evidence?(redacted)
+
+        redacted
+      end
+
+      def safe_evidence?(value)
+        !Hive::SecretPatterns.match?(value) &&
+          !value.match?(Hive::BrainstormSuggestions::Safety::CONTROL_RE) &&
+          !value.match?(Hive::BrainstormSuggestions::Safety::BARE_CR_RE) &&
+          !value.match?(Hive::BrainstormSuggestions::Safety::PROMPT_CONTROL_RE)
+      end
+
+      def xml_attribute(value)
+        value.to_s.gsub("&", "&amp;").gsub('"', "&quot;").gsub("<", "&lt;").gsub(">", "&gt;")
+      end
+
+      def worktree_mode(path)
+        status = File.stat(File.join(@project_root, path))
+        (status.mode & 0o111).zero? ? "100644" : "100755"
+      rescue SystemCallError
+        "100644"
       end
 
       def git_output(*arguments)
+        cached = @session&.dig(:git, arguments)
+        return cached.dup if cached
+
         run_process(
           [ "git", "-C", @project_root, *arguments ],
           environment: { "GIT_OPTIONAL_LOCKS" => "0", "GIT_TERMINAL_PROMPT" => "0" }
-        )
+        ).tap { |value| @session&.fetch(:git)&.store(arguments.freeze, value.freeze) }
       end
 
       def run_process(argv, environment: {})
-        reader, writer = IO.pipe
-        pid = Process.spawn(environment, *argv, pgroup: true, in: File::NULL, out: writer, err: writer)
-        writer.close
-        output = +"".b
-        reading = Thread.new do
-          while (chunk = reader.read(65_536))
-            output << chunk
-            break if output.bytesize > MAX_GIT_OUTPUT_BYTES
-          end
-        end
-        status = nil
-        loop do
-          waited = Process.waitpid2(pid, Process::WNOHANG)
-          if waited
-            status = waited.last
-            break
-          end
-          raise CaptureError.new("capture_timeout") if monotonic_now >= @deadline
+        result = Hive::BrainstormSuggestions::ProcessCapture.call(
+          argv, environment: environment, deadline: @deadline,
+          max_bytes: MAX_GIT_OUTPUT_BYTES
+        )
+        raise CaptureError.new("repository_unavailable") unless result.status.success?
 
-          IO.select(nil, nil, nil, 0.02)
-        end
-        reading.join
-        raise CaptureError.new("capture_too_large") if output.bytesize > MAX_GIT_OUTPUT_BYTES
-        raise CaptureError.new("repository_unavailable") unless status.success?
-
-        output.force_encoding(Encoding::UTF_8).scrub
-      rescue CaptureError
-        terminate_process_group(pid)
-        raise
-      rescue SystemCallError, IOError
-        terminate_process_group(pid)
+        result.output.force_encoding(Encoding::UTF_8).scrub
+      rescue Hive::BrainstormSuggestions::ProcessCapture::Timeout
+        raise CaptureError.new("capture_timeout")
+      rescue Hive::BrainstormSuggestions::ProcessCapture::TooLarge
+        raise CaptureError.new("capture_too_large")
+      rescue Hive::BrainstormSuggestions::ProcessCapture::SpawnFailed
         raise CaptureError.new("repository_unavailable")
-      ensure
-        writer&.close unless writer&.closed?
-        reader&.close unless reader&.closed?
-        reading&.kill if reading&.alive?
-      end
-
-      def terminate_process_group(pid)
-        return unless pid
-
-        Process.kill("TERM", -pid)
-        Process.wait(pid)
-      rescue Errno::ESRCH, Errno::ECHILD
-        nil
       end
 
       def canonical_directory(path, code)

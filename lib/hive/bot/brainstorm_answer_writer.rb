@@ -112,6 +112,7 @@ module Hive
           brainstorm_path, create: false, timeout: MARKER_LOCK_TIMEOUT_SEC
         ) do
           content = normalize_lone_cr(File.read(brainstorm_path, encoding: "UTF-8").scrub)
+          content = Hive::BrainstormSuggestions::Envelope.strip(content).text
           parsed = Hive::Bot::BrainstormParser.parse_text(content)
           target = parsed[ordinal - 1]
           next :question_not_found unless target

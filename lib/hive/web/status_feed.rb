@@ -467,8 +467,7 @@ module Hive
         return nil unless File.exist?(path) || File.symlink?(path)
 
         status = File.lstat(path)
-        return "unsafe" unless status.file? && !status.symlink? &&
-                               status.uid == Process.uid && (status.mode & 0o077).zero? &&
+        return "unsafe" unless Hive::BrainstormSuggestions::Store.owned_private_file?(status) &&
                                status.size <= Hive::BrainstormSuggestions::MAX_STORE_BYTES
 
         flags = File::RDONLY

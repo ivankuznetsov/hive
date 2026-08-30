@@ -4,7 +4,9 @@ require "erb"
 require "fileutils"
 require "json"
 require "tmpdir"
+require "time"
 require "hive/brainstorm_suggestions/validator"
+require "hive/stages/base"
 
 module Hive
   module BrainstormSuggestions
@@ -16,6 +18,8 @@ module Hive
       KILL_GRACE_SEC = 1
       REQUIRED_CAPABILITY = :brainstorm_suggestion_data_only
       RUNTIME_PREFIX = "hive-brainstorm-suggestion-"
+      OWNER_FILE = ".owner.json"
+      SWEEP_GRACE_SEC = 300
 
       Execution = Struct.new(:stdout, :exit_code, :timed_out, keyword_init: true)
       Launch = Struct.new(
@@ -64,7 +68,7 @@ module Hive
           profile.tool_scope_flags.key?(:disallowed)
       end
 
-      def self.sweep_inactive!(runtime_parent = Dir.tmpdir)
+      def self.sweep_inactive!(runtime_parent = Dir.tmpdir, now: Time.now)
         return 0 unless File.directory?(runtime_parent)
 
         Dir.children(runtime_parent).count do |name|
@@ -73,6 +77,8 @@ module Hive
           path = File.join(runtime_parent, name)
           status = File.lstat(path)
           next false unless status.directory? && !status.symlink? && status.uid == Process.uid
+          next false if runtime_live?(path)
+          next false if now - status.mtime < SWEEP_GRACE_SEC
 
           FileUtils.remove_entry_secure(path)
           true
@@ -80,6 +86,19 @@ module Hive
           false
         end
       end
+
+
+      def self.runtime_live?(path)
+        owner = JSON.parse(File.read(File.join(path, OWNER_FILE), 4 * 1024))
+        pid = Integer(owner.fetch("pid"))
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH, Errno::ENOENT, JSON::ParserError, KeyError, ArgumentError, TypeError
+        false
+      rescue Errno::EPERM
+        true
+      end
+      private_class_method :runtime_live?
 
       def initialize(profile:, model_arguments: [], timeout_sec: DEFAULT_TIMEOUT_SEC,
                      executor: nil, bwrap_path: "/usr/bin/bwrap",
@@ -100,6 +119,11 @@ module Hive
 
         runtime_root = Dir.mktmpdir(RUNTIME_PREFIX, @runtime_parent)
         File.chmod(0o700, runtime_root)
+        File.write(
+          File.join(runtime_root, OWNER_FILE),
+          JSON.generate("pid" => Process.pid, "created_at" => Time.now.utc.iso8601),
+          mode: "w", perm: 0o400
+        )
         bundle_root = bundle.materialize(runtime_root)
         auth_root = prepare_auth(runtime_root)
         launch = build_launch(
@@ -121,6 +145,14 @@ module Hive
         failed_result("spawn_error")
       ensure
         FileUtils.remove_entry_secure(runtime_root) if runtime_root && File.exist?(runtime_root)
+      end
+
+      private
+
+      public
+
+      def available?
+        !available_executable.nil?
       end
 
       private
@@ -163,7 +195,8 @@ module Hive
 
       def build_launch(runtime_root:, bundle_root:, auth_root:, executable:, bundle:)
         argv = [ @bwrap_path, "--die-with-parent", "--new-session",
-                 "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try" ]
+                 "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+                 "--unshare-cgroup-try" ]
         argv.concat([ "--ro-bind", "/usr", "/usr" ])
         append_compatibility_mounts(argv)
         argv.concat([ "--ro-bind", "/etc", "/etc" ])
@@ -186,7 +219,7 @@ module Hive
           "--safe-mode", "--disable-slash-commands",
           "--setting-sources", "", "--settings", "{}",
           "--strict-mcp-config", "--mcp-config", "{}",
-          "--tools", "", "--allowedTools", "", "--disallowedTools", "default",
+          "--tools", "", "--allowedTools", "",
           "--permission-mode", "dontAsk", "--no-session-persistence",
           "--output-format", "json", "--json-schema", JSON.generate(OUTPUT_SCHEMA),
           *@model_arguments
@@ -223,7 +256,8 @@ module Hive
 
       def render_prompt(bundle)
         question_text = bundle.question.fetch("text")
-        bound_context = bundle.render_context
+        user_supplied_tag = Hive::Stages::Base.user_supplied_tag
+        bound_context = bundle.render_context(user_supplied_tag: user_supplied_tag)
         source = File.read(
           File.expand_path("../../../templates/brainstorm_suggestion_prompt.md.erb", __dir__)
         )
@@ -248,22 +282,29 @@ module Hive
         )
         input_r.close
         output_w.close
-        input_w.write(launch.stdin)
-        input_w.close
         output = +"".b
         reader = Thread.new do
           while (chunk = output_r.read(65_536))
             output << chunk if output.bytesize < MAX_OUTPUT_BYTES
           end
         end
+        writer = Thread.new do
+          input_w.write(launch.stdin)
+          input_w.close
+        rescue Errno::EPIPE, IOError
+          nil
+        end
         status = wait_for(pid, @timeout_sec, cancellation: cancellation)
         unless status
           terminate(pid)
+          writer.join(KILL_GRACE_SEC)
+          writer.kill if writer.alive?
           reader.join(KILL_GRACE_SEC)
           reader.kill if reader.alive?
           return Execution.new(stdout: output.byteslice(0, MAX_OUTPUT_BYTES), exit_code: nil, timed_out: true)
         end
 
+        writer.join
         reader.join
         Execution.new(
           stdout: output.byteslice(0, MAX_OUTPUT_BYTES).to_s.force_encoding(Encoding::UTF_8).scrub,
@@ -275,6 +316,8 @@ module Hive
         input_w&.close unless input_w&.closed?
         output_r&.close unless output_r&.closed?
         output_w&.close unless output_w&.closed?
+        writer&.kill if writer&.alive?
+        reader&.kill if reader&.alive?
       end
 
       def wait_for(pid, timeout, cancellation: nil)

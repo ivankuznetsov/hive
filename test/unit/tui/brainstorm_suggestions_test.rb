@@ -143,16 +143,54 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
 
   def with_task
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
+      system("git", "init", "-q", root, exception: true)
+      system("git", "-C", root, "config", "user.email", "test@example.com", exception: true)
+      system("git", "-C", root, "config", "user.name", "Hive Test", exception: true)
+      File.write(File.join(root, "adapter.rb"), "class Adapter; end\n")
+      system("git", "-C", root, "add", "adapter.rb", exception: true)
+      system("git", "-C", root, "commit", "-qm", "initial", exception: true)
+      task = File.join(root, ".hive-state", "stages", "2-brainstorm", "task-1")
       FileUtils.mkdir_p(task)
       path = File.join(task, "brainstorm.md")
       question = "Which scheduler seam?"
+      File.write(File.join(task, "idea.md"), "Choose the adapter scheduler.\n")
       File.write(
         path,
         "## Round 1\n\n### Q1. #{question}\n### A1.\n\n<!-- WAITING -->\n"
       )
+      task_object = Hive::Task.new(task)
+      parsed = Hive::BrainstormParser.parse(path)
+      bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
+        project_root: root, task_root: task, question_ordinal: 1
+      )
+      stat = File.stat(task)
+      incarnation = Digest::SHA256.hexdigest(
+        [ "hive-brainstorm-suggestion-incarnation-v1", task_object.id, task_object.slug,
+          stat.dev, stat.ino ].join("\0")
+      )
+      task_generation = Hive::Attempts::Generation.current_task_input_epoch(task_object)
+      brainstorm_generation = Hive::BrainstormSuggestions::Binding.digest(
+        "questions" => parsed.map do |item|
+          { "round" => item.round, "number" => item.n, "text" => item.text,
+            "settled_answer" => item.answer }
+        end
+      )
+      record = fresh_record(question)
+      input_binding = Hive::BrainstormSuggestions::Binding.input(
+        task_incarnation: incarnation, task_generation: task_generation,
+        brainstorm_generation: brainstorm_generation,
+        question_identity: record.fetch("question_id"), question_text: question,
+        manifest: bundle.manifest, settled_answers: bundle.settled_answers
+      )
+      record["input_binding"] = input_binding
+      record["input_epoch"] = input_binding
       store = Hive::BrainstormSuggestions::Store.new(task)
-      store.write("records" => [ fresh_record(question) ])
+      store.write(
+        "task_incarnation" => incarnation, "task_generation" => task_generation,
+        "brainstorm_generation" => brainstorm_generation,
+        "recipe_version" => Hive::BrainstormSuggestions::ContextBundle::RECIPE_VERSION,
+        "records" => [ record ]
+      )
       yield task, path, store
     end
   end

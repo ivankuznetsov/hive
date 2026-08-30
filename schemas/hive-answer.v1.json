@@ -27,7 +27,7 @@
       "additionalProperties": false,
       "required": [
         "ordinal", "round", "question_number", "text", "answered",
-        "answer", "fingerprint", "binding", "suggestion"
+        "answer", "fingerprint", "binding"
       ],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1 },

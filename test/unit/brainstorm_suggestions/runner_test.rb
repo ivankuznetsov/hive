@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/agent_profiles"
 require "hive/brainstorm_suggestions/runner"
+require "socket"
 
 class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
   include HiveTestHelper
@@ -40,7 +41,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       path
     end
 
-    def render_context = "repository evidence"
+    def render_context(**) = "repository evidence"
     def question = { "text" => "Which adapter?" }
   end
 
@@ -64,7 +65,8 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       tools_index = launch.argv.index("--tools")
       assert_equal "", launch.argv.fetch(tools_index + 1)
       assert_equal "", launch.argv.fetch(launch.argv.index("--allowedTools") + 1)
-      assert_equal "default", launch.argv.fetch(launch.argv.index("--disallowedTools") + 1)
+      refute_includes launch.argv, "--disallowedTools"
+      assert_includes launch.argv, "--unshare-net"
       assert_equal "", launch.argv.fetch(launch.argv.index("--setting-sources") + 1)
       assert_equal "{}", launch.argv.fetch(launch.argv.index("--settings") + 1)
       assert_equal "{}", launch.argv.fetch(launch.argv.index("--mcp-config") + 1)
@@ -146,11 +148,85 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       unrelated = File.join(root, "other-runtime")
       FileUtils.mkdir_p(stale)
       FileUtils.mkdir_p(unrelated)
+      old = Time.now - Hive::BrainstormSuggestions::Runner::SWEEP_GRACE_SEC - 1
+      File.utime(old, old, stale)
 
       assert_equal 1, Hive::BrainstormSuggestions::Runner.sweep_inactive!(root)
       refute File.exist?(stale)
       assert File.directory?(unrelated)
     end
+  end
+
+
+  def test_startup_sweep_preserves_another_live_process_runtime
+    Dir.mktmpdir do |root|
+      active = File.join(root, "#{Hive::BrainstormSuggestions::Runner::RUNTIME_PREFIX}active")
+      FileUtils.mkdir_p(active)
+      File.write(
+        File.join(active, Hive::BrainstormSuggestions::Runner::OWNER_FILE),
+        JSON.generate("pid" => Process.pid)
+      )
+      old = Time.now - Hive::BrainstormSuggestions::Runner::SWEEP_GRACE_SEC - 1
+      File.utime(old, old, active)
+
+      assert_equal 0, Hive::BrainstormSuggestions::Runner.sweep_inactive!(root)
+      assert File.directory?(active)
+    end
+  end
+
+  def test_supported_profile_live_isolation_matrix
+    skip "Bubblewrap is unavailable" unless File.executable?("/usr/bin/bwrap")
+    skip "curl is unavailable" unless File.executable?("/usr/bin/curl")
+
+    Dir.mktmpdir do |root|
+      repository = File.join(root, "repository-secret")
+      task = File.join(root, "task-secret")
+      alternate = File.join(root, "alternate-output")
+      File.write(repository, "repository")
+      File.write(task, "task")
+      server = TCPServer.new("127.0.0.1", 0)
+      probes = [ repository, task, alternate, server.local_address.ip_port ].join("\n") + "\n"
+      probe_bundle = Class.new(Bundle) do
+        define_method(:initialize) do |manifest, probes|
+          super(manifest)
+          @probes = probes
+        end
+
+        define_method(:materialize) do |runtime|
+          path = super(runtime)
+          File.write(File.join(path, "probes.txt"), @probes, mode: "w", perm: 0o400)
+          File.chmod(0o400, File.join(path, "probes.txt"))
+          path
+        end
+      end.new(bundle.manifest, probes)
+      worker = File.expand_path("../../fixtures/brainstorm_suggestions/sandbox-probe-worker", __dir__)
+      runner = Hive::BrainstormSuggestions::Runner.new(
+        profile: FakeProfile.new(bin: worker), bwrap_path: "/usr/bin/bwrap",
+        executable_resolver: ->(*) { worker }
+      )
+
+      result = runner.call(bundle: probe_bundle)
+
+      assert_equal "fresh", result.fetch("state")
+      assert_equal "repository=false task=false shell=false network=false escape=false alternate=false",
+                   result.fetch("text")
+      refute File.exist?(alternate)
+    ensure
+      server&.close
+    end
+  end
+
+  def test_large_stdin_and_eager_stdout_cannot_deadlock_before_timeout
+    runner = Hive::BrainstormSuggestions::Runner.new(
+      profile: FakeProfile.new, timeout_sec: 1, bwrap_path: "/bin/true"
+    )
+    command = [ "/bin/sh", "-c", "dd if=/dev/zero bs=65536 count=2 2>/dev/null; cat >/dev/null" ]
+    execution = Timeout.timeout(2) do
+      runner.send(:execute, launch(command, "x" * (128 * 1024)))
+    end
+
+    assert_equal 0, execution.exit_code
+    refute execution.timed_out
   end
 
   def test_cancelled_execution_discards_output_and_removes_runtime

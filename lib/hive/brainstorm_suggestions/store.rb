@@ -19,6 +19,7 @@ module Hive
         input_binding suggestion_binding state text rationale provenance
         safe_reason retryable dismissed attempt_id candidate_id requested_at
         updated_at next_retry_at automatic_attempts input_epoch error_code
+        total_automatic_attempts
       ].freeze
       REQUIRED_RECORD_KEYS = %w[
         question_id ordinal input_binding state text rationale provenance
@@ -37,7 +38,7 @@ module Hive
         return empty_document unless File.exist?(path) || File.symlink?(path)
 
         status = File.lstat(path)
-        return corrupt_document unless safe_file?(status)
+        return corrupt_document unless self.class.owned_private_file?(status)
         return corrupt_document if status.size > MAX_STORE_BYTES
 
         flags = File::RDONLY
@@ -69,6 +70,8 @@ module Hive
         document = read
         document = empty_document if document["corrupt"]
         updated = yield(deep_copy(document))
+        return document if updated == document
+
         write(updated)
       end
 
@@ -118,7 +121,7 @@ module Hive
         empty_document.merge(input)
       end
 
-      def validate_document(document, persisted:)
+      def validate_document(document, persisted: nil)
         raise InvalidState, "suggestion sidecar must be an object" unless document.is_a?(Hash)
 
         unknown = document.keys - DOCUMENT_KEYS
@@ -129,10 +132,6 @@ module Hive
 
         document["records"].each { |record| validate_record(record) }
         document
-      ensure
-        # `persisted` makes the call sites self-documenting and reserves the
-        # distinction for migrations without relaxing validation today.
-        persisted
       end
 
       def validate_record(record)
@@ -214,10 +213,11 @@ module Hive
         return unless File.exist?(path) || File.symlink?(path)
 
         status = File.lstat(path)
-        raise UnsafePath, "suggestion sidecar must be an owned regular file" unless safe_file?(status)
+        raise UnsafePath, "suggestion sidecar must be an owned regular file" unless
+          self.class.owned_private_file?(status)
       end
 
-      def safe_file?(status)
+      def self.owned_private_file?(status)
         status.file? && !status.symlink? && status.uid == Process.uid && (status.mode & 0o077).zero?
       end
 

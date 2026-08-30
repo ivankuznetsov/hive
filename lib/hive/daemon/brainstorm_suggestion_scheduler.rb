@@ -45,6 +45,7 @@ module Hive
         @jobs = {}
         @next_launch_at = {}
         @task_next_launch_at = {}
+        @fair_offsets = {}
         @mutex = Mutex.new
       end
 
@@ -57,25 +58,26 @@ module Hive
       def tick(rows:, now: @clock.call, complete: true)
         active = []
         Array(rows).each do |row|
-          if eligible_row?(row)
-            cfg = config_for(row)
-            if cfg&.dig("brainstorm", "suggestions", "enabled") == true
-              active << [ row, cfg ]
-              reconcile_row(row, cfg, now: now)
-              next
+          begin
+            if eligible_row?(row)
+              cfg = config_for(row)
+              if cfg&.dig("brainstorm", "suggestions", "enabled") == true
+                active << [ row, cfg ]
+                reconcile_row(row, cfg, now: now)
+                next
+              end
             end
-          end
-          if brainstorm_worker_row?(row)
-            cancel_task(row.folder)
-          else
-            cleanup_row(row)
+            if brainstorm_worker_row?(row)
+              cancel_task(row.folder)
+            else
+              cleanup_row(row)
+            end
+          rescue StandardError => error
+            log(:brainstorm_suggestion_scheduler_error, error: bounded_error(error))
           end
         end
         cancel_missing(active.map { |row, _cfg| File.expand_path(row.folder.to_s) }) if complete
         active.length
-      rescue StandardError => error
-        log(:brainstorm_suggestion_scheduler_error, error: bounded_error(error))
-        0
       end
 
       def shutdown
@@ -93,6 +95,7 @@ module Hive
           @jobs.clear
           @next_launch_at.clear
           @task_next_launch_at.clear
+          @fair_offsets.clear
         end
       end
 
@@ -137,7 +140,8 @@ module Hive
         end
 
         seed_records(row, slots, now: now)
-        slots.each { |slot| schedule(row, cfg, slot, now: now) }
+        hide_fresh_when_route_unavailable(row, cfg, now: now)
+        fair_slots(row.folder, slots).each { |slot| schedule(row, cfg, slot, now: now) }
       rescue Hive::ConcurrentRunError
         log(:brainstorm_suggestion_deferred, project: row.project, slug: row.slug, reason: "task_lock_busy")
       rescue Hive::Error, SystemCallError, IOError => error
@@ -190,14 +194,14 @@ module Hive
 
               records << seed_record(slot, now: now)
             end
-            document.merge(
+            replacement = document.merge(
               "task_incarnation" => incarnation,
               "task_generation" => generation,
               "brainstorm_generation" => current_slots.first&.brainstorm_generation,
               "recipe_version" => Hive::BrainstormSuggestions::ContextBundle::RECIPE_VERSION,
-              "records" => records.sort_by { |record| record.fetch("ordinal") },
-              "updated_at" => now.utc.iso8601(6)
+              "records" => records.sort_by { |record| record.fetch("ordinal") }
             )
+            replacement == document ? document : replacement.merge("updated_at" => now.utc.iso8601(6))
           end
         end
       end
@@ -224,6 +228,7 @@ module Hive
           "updated_at" => now.utc.iso8601(6),
           "next_retry_at" => nil,
           "automatic_attempts" => 0,
+          "total_automatic_attempts" => 0,
           "input_epoch" => nil,
           "error_code" => nil
         }
@@ -270,15 +275,15 @@ module Hive
         result = runner.call(bundle: bundle, cancellation: token)
         return if token.cancelled?
 
-        observed = capture(row, cfg, slot)
-        observed_binding = bound_input(row.folder, slot, observed)
-        if observed_binding != input_binding
-          result = stale_result("selected_inputs_changed")
-        end
-        publish_result(
+        published = publish_result(
           row, slot, attempt: attempt, input_binding: input_binding,
           result: result, now: @clock.call, cfg: cfg
         )
+        return unless published
+
+        observed = capture(row, cfg, slot)
+        observed_binding = bound_input(row.folder, slot, observed)
+        invalidate_published_result(row, slot, attempt, input_binding) if observed_binding != input_binding
       rescue Hive::BrainstormSuggestions::ContextBundle::CaptureError => error
         publish_capture_failure(row, slot, error.code, now: @clock.call)
       rescue Hive::ConcurrentRunError
@@ -352,6 +357,7 @@ module Hive
               "updated_at" => now.utc.iso8601(6),
               "next_retry_at" => nil,
               "automatic_attempts" => attempts + 1,
+              "total_automatic_attempts" => record.fetch("total_automatic_attempts", 0).to_i + 1,
               "error_code" => nil
             )
             prepared = { "attempt_id" => attempt_id, "automatic_attempts" => attempts + 1 }
@@ -364,7 +370,11 @@ module Hive
 
       def request_due?(record, input_binding, cfg, now:)
         same_epoch = record["input_epoch"] == input_binding
-        return true unless same_epoch
+        unless same_epoch
+          requested_at = parse_time(record["requested_at"])
+          floor = cfg.dig("brainstorm", "suggestions", "min_retry_interval_sec").to_i
+          return !requested_at || now >= requested_at + floor
+        end
         return false if %w[fresh no_safe_suggestion unavailable].include?(record["state"])
         if record["state"] == "loading" && record["attempt_id"]
           requested_at = parse_time(record["requested_at"])
@@ -377,6 +387,7 @@ module Hive
 
       def publish_result(row, slot, attempt:, input_binding:, result:, now:, cfg:)
         task_root = row.folder.to_s
+        published = false
         Hive::Lock.with_task_lock(
           task_root,
           { op: "brainstorm_suggestion_result", slug: row.slug },
@@ -389,26 +400,26 @@ module Hive
             record = document.fetch("records").find do |candidate|
               candidate["question_id"] == slot.question_id
             end
-            return document unless record && record["attempt_id"] == attempt.fetch("attempt_id") &&
-                                          record["input_binding"] == input_binding
+            next document unless record && record["attempt_id"] == attempt.fetch("attempt_id") &&
+                                        record["input_binding"] == input_binding
 
             apply_result!(record, result, input_binding, attempt, cfg, now: now)
+            published = true
             document["updated_at"] = now.utc.iso8601(6)
             document
           end
         end
+        published
       end
 
       def apply_result!(record, result, input_binding, attempt, cfg, now:)
         state = result.fetch("state")
-        candidate_id = state == "fresh" ? SecureRandom.uuid : nil
-        suggestion_binding = if candidate_id
-          Hive::BrainstormSuggestions::Binding.suggestion(
-            input_binding: input_binding,
-            attempt_id: attempt.fetch("attempt_id"),
-            candidate_id: candidate_id
-          )
-        end
+        candidate_id = SecureRandom.uuid
+        suggestion_binding = Hive::BrainstormSuggestions::Binding.suggestion(
+          input_binding: input_binding,
+          attempt_id: attempt.fetch("attempt_id"),
+          candidate_id: candidate_id
+        )
         record.merge!(
           "suggestion_binding" => suggestion_binding,
           "state" => state,
@@ -581,6 +592,21 @@ module Hive
             job_root == root && !current_ids[question_id]
           end
         end
+        Hive::Lock.with_task_lock(
+          root, { op: "brainstorm_suggestion_prune", slug: File.basename(root) }, create: false
+        ) do
+          store = Hive::BrainstormSuggestions::Store.new(root)
+          document = store.read
+          kept = document.fetch("records").select { |record| current_ids[record["question_id"]] }
+          next if kept.length == document.fetch("records").length
+
+          document["records"] = kept
+          document["updated_at"] = @clock.call.utc.iso8601(6)
+          kept.empty? ? store.delete! : store.write(document)
+          cleanup_envelopes(state_path(root))
+        end
+      rescue Hive::ConcurrentRunError, Hive::BrainstormSuggestions::Error, SystemCallError, IOError
+        nil
       end
 
       def reserve_task_window(task_root, cfg, now:)
@@ -596,7 +622,11 @@ module Hive
       end
 
       def envelope_present?(path)
-        File.file?(path) && File.read(path, 256 * 1024).match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE)
+        return false unless File.file?(path)
+
+        bytes = File.binread(path, Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES + 1)
+        bytes.bytesize > Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES ||
+          bytes.lines.any? { |line| line.match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE) }
       rescue SystemCallError, IOError
         false
       end
@@ -617,6 +647,69 @@ module Hive
           model_arguments: routing ? routing.native_arguments : [],
           timeout_sec: suggestion_cfg.fetch("timeout_sec")
         )
+      end
+
+      def hide_fresh_when_route_unavailable(row, cfg, now:)
+        runner = @runner_factory.call(cfg, Hive::Task.new(row.folder.to_s).project_root)
+        return unless runner.respond_to?(:available?) && !runner.available?
+
+        Hive::Lock.with_task_lock(
+          row.folder.to_s, { op: "brainstorm_suggestion_route_check", slug: row.slug }, create: false
+        ) do
+          store = Hive::BrainstormSuggestions::Store.new(row.folder.to_s)
+          store.update do |document|
+            changed = false
+            document.fetch("records").each do |record|
+              next unless record["state"] == "fresh"
+
+              record.merge!(
+                "state" => "unavailable", "text" => nil, "rationale" => nil,
+                "provenance" => [],
+                "safe_reason" => "The configured suggestion route cannot enforce Hive's data-only sandbox.",
+                "retryable" => true, "updated_at" => now.utc.iso8601(6),
+                "error_code" => "isolation_unavailable"
+              )
+              changed = true
+            end
+            document["updated_at"] = now.utc.iso8601(6) if changed
+            document
+          end
+        end
+      end
+
+      def fair_slots(task_root, slots)
+        return slots if slots.length < 2
+
+        root = File.expand_path(task_root.to_s)
+        @mutex.synchronize do
+          offset = @fair_offsets.fetch(root, 0) % slots.length
+          @fair_offsets[root] = (offset + @max_workers) % slots.length
+          slots.rotate(offset)
+        end
+      end
+
+      def invalidate_published_result(row, slot, attempt, input_binding)
+        Hive::Lock.with_task_lock(
+          row.folder.to_s, { op: "brainstorm_suggestion_post_publish_check", slug: row.slug }, create: false
+        ) do
+          store = Hive::BrainstormSuggestions::Store.new(row.folder.to_s)
+          store.update do |document|
+            record = document.fetch("records").find { |item| item["question_id"] == slot.question_id }
+            next document unless record && record["attempt_id"] == attempt.fetch("attempt_id") &&
+                                        record["input_binding"] == input_binding
+
+            apply_result!(
+              record, stale_result("selected_inputs_changed"), input_binding, attempt,
+              { "brainstorm" => { "suggestions" => { "coalesce_window_sec" => 0,
+                                                       "max_automatic_attempts" => 0 } } },
+              now: @clock.call
+            )
+            document["updated_at"] = @clock.call.utc.iso8601(6)
+            document
+          end
+        end
+      rescue Hive::ConcurrentRunError, Hive::BrainstormSuggestions::Error, SystemCallError, IOError
+        nil
       end
 
       def capture_context(**kwargs)

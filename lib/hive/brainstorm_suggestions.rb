@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "hive/errors"
+
 module Hive
   # Repository-aware brainstorm suggestions are advisory state. Nothing in
   # this namespace writes an operator answer or advances a workflow stage.
@@ -36,3 +38,4 @@ require "hive/brainstorm_suggestions/context_bundle"
 require "hive/brainstorm_suggestions/validator"
 require "hive/brainstorm_suggestions/runner"
 require "hive/brainstorm_suggestions/projection"
+require "hive/brainstorm_suggestions/transition_cleanup"

@@ -84,12 +84,17 @@ module Hive
         generation = task_generation(task, project)
         content = read_brainstorm!(task)
         questions = Hive::BrainstormParser.parse_text(content)
-        suggestions = Hive::BrainstormSuggestions::Projection.call(
-          task_root: task.folder,
-          project_root: task.project_root,
-          questions: questions,
-          task_generation: generation
-        )
+        suggestion_config = Hive::Config.load(task.project_root).dig("brainstorm", "suggestions")
+        suggestions = if suggestion_config&.fetch("enabled", false)
+          Hive::BrainstormSuggestions::Projection.call(
+            task_root: task.folder,
+            project_root: task.project_root,
+            questions: questions,
+            task_generation: generation
+          )
+        else
+          {}
+        end
 
         # A second identity observation catches a stage move or task replacement
         # during the lock-free, strictly read-only inventory path. A concurrent

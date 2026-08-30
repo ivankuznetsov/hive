@@ -17,7 +17,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 17, skill.reference_paths.size
+    assert_equal 18, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
@@ -129,6 +129,47 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
       refute_includes text, legacy
     end
     refute_match(/pgrep\s+-af|kill\s+-0|while\s+:/, text)
+  end
+
+  def test_daily_activity_questions_use_the_persisted_pure_digest_reader
+    files = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
+    route = files.fetch("SKILL.md")
+    policy = files.fetch("references/daily-digest.md")
+
+    assert_includes route, "what happened today, yesterday"
+    assert_includes route, "hive digest --json"
+    assert_includes route, "Do not run the current operational-status loop first"
+    assert_includes policy, "hive digest --json"
+    assert_includes policy, "hive digest --date YYYY-MM-DD --json"
+    assert_includes policy, "hive digest --date YYYY-MM-DD --project PROJECT --json"
+    assert_includes policy, "previous_date"
+    assert_includes policy, "reader_status"
+    assert_includes policy, "completeness"
+    assert_includes policy, "content"
+    assert_includes policy, "amendments"
+    assert_includes policy, "complete `empty` day"
+    assert_includes policy, "hive answer TASK --project PROJECT --json"
+    assert_includes policy, "Never reconstruct a daily record"
+    assert_includes policy, "Never invoke `hive digest refresh`"
+    assert_includes policy, "Never invoke `hive digest send`"
+    assert_includes policy, "Never use `hive digest --open-web` in machine mode"
+    assert_includes policy, "Never use the sendful `hive answer-digest`"
+    assert_includes policy, "Never create a polling loop"
+
+    scenario_table = policy[/\| Operator request \| Read sequence \|.*?(?=\n\n)/m]
+    refute_nil scenario_table
+    {
+      "What happened today?" => "`hive digest --json`",
+      "What happened yesterday?" => "`hive digest --json`, then `hive digest --date PREVIOUS_DATE --json`",
+      "What happened in one project today?" => "`hive digest --project PROJECT --json`",
+      "Is a persisted day partial?" => "`hive digest --date YYYY-MM-DD --json`",
+      "Show a persisted day's late amendments." => "`hive digest --date YYYY-MM-DD --json`"
+    }.each do |request, command|
+      row = scenario_table.lines.find { |line| line.include?("| #{request} |") }
+      refute_nil row, request
+      assert_includes row, command
+      refute_match(/hive status|logs?|refresh|send|open-web|Telegram|answer-digest/, row)
+    end
   end
 
   def test_policy_preserves_consent_safe_setup_and_host_boundaries

@@ -5,6 +5,7 @@
   "name": "hive",
   "version": "0.1.5",
   "references": [
+    "references/daily-digest.md",
     "references/workflow-creator.md",
     "references/workflow-creator-example.md",
     "references/workflow-schema.md",

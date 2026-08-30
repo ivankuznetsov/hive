@@ -1,10 +1,10 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-09-01
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
 **TLDR**: Authored task/project documents remain in `.hive-state` and feature
@@ -1242,8 +1242,95 @@ stale generation or digest is rejected.
 
 See [[stages/index]] for one page per stage.
 
+## Host-global daily digest state
+
+The daily activity record is the deliberate exception to project-local task
+storage: one versioned projection spans every registration under
+`Hive::Paths.state_home/daily-digest/v1/`.
+
+```text
+daily-digest/v1/
+├── .store.lock                         # global projection transaction flock
+├── records/YYYY-MM-DD/
+│   ├── base.json                       # replaceable only while open
+│   ├── frontiers.json                  # source frontier sidecar
+│   └── amendments/<sha256>.json        # immutable, ID-addressed late facts
+├── tombstones/YYYY-MM-DD.json          # permanent prune receipt + discards
+└── deliveries/
+    ├── .ledger.lock
+    └── YYYY-MM-DD.json                 # Telegram intent/outcome receipt
+```
+
+Directories are owner-only `0700`; records, receipts, and lock files are
+`0600`. Canonical JSON and SHA-256 content identities make replay and conflict
+checks deterministic. The store's single flock covers base, amendment,
+frontier, prune, and post-prune discard transactions. Delivery has a separate
+lock because publication and notification are independent lifecycles.
+
+### Persisted interval identity
+
+Each base records:
+
+```text
+local_date · sequence · time_zone · starts_at · ends_at
+boundary_kind · cutover · interval_id · record_id
+```
+
+The UTC range is half-open. `sequence` is the monotonic calendar identity;
+`local_date` is its stable human label. Ordinary boundaries come from the
+persisted IANA zone and may span 23/24/25 hours. A zone cutover starts at the
+previous record's immutable `ends_at`, stores the requested/effective metadata,
+and can skip zero-duration labels. Readers select the interval containing an
+instant and navigate by sequence, never by recalculating local midnights or
+adding days to labels.
+
+Global configuration holds `coverage_started_at`, `initial_membership`, and the
+`first_interval`. Ordered registry mutation history assigns each later interval
+the registrations effective at its boundary. Missing legacy membership evidence
+is a gap; it is not guessed from the current registry.
+
+### Orthogonal record axes
+
+Lifecycle, completeness, and content are separate:
+
+| Axis | Values | Meaning |
+|---|---|---|
+| Lifecycle | `open`, `closed`; tombstone reader outcome `pruned` | Whether the base may still be replaced |
+| Completeness | `complete`, `partial` | Whether every required source was observed sufficiently |
+| Content | `empty`, `non_empty`, `unknown` | Whether material facts/attention are present or source gaps prevent an empty claim |
+
+`missing` is a reader outcome and no file exists for it. A day can be closed and
+partial. `empty` is valid only with complete observation. Staleness is virtual
+reader data for an overdue open materialization and never rewrites the base.
+
+The open base is replaced atomically. A closed base has a non-null `closed_at`
+and is write-once; only a byte-identical identity is accepted thereafter. Each
+amendment has a stable `amendment_id`, source, known nullable event time,
+`observed_at`, `amended_at`, facts/attention/gaps, resolved gap IDs, and source
+frontiers. Effective completeness/content are derived from the frozen base plus
+ordered amendments.
+
+### Gaps, pruning, and delivery
+
+A source gap has a stable identity, source, bounded scope/reason, observation
+time, freshness, and retry state. Recovery appends an amendment referencing the
+exact resolved gap. Source frontiers advance in the same lock transaction as
+their admitted base/amendment effect so crashes replay safely.
+
+Pruning removes a closed record directory only after writing a tombstone with
+record/interval identity, prior frontiers, and discarded amendment IDs. Later
+facts, corrections, or gap recovery append bounded idempotent discard entries
+to that tombstone and advance source frontiers without recreating the base.
+
+Daily Telegram delivery receipts retain the exact record identity, amendment
+frontier, payload hash, one private destination identity, attempt number,
+history, and `prepared|sending|sent|suppressed_empty|failed|unknown` outcome.
+They never contain a bot token or message body and survive projection pruning.
+An orphaned `sending` intent becomes `unknown` when the next send attempt
+prepares that day; neither sent nor ambiguous outcomes auto-resend.
+
 ## Backlinks
 
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
-- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]] · [[commands/refactor-patrol]]
+- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/patrol]] · [[commands/digest]] · [[commands/refactor-patrol]]

@@ -80,6 +80,39 @@ The irreversible fleet cutover imports only validated token-usage history,
 rebuilds project/task identity from files, and discards other legacy runtime
 state after proving services, attempts, and leases are quiescent.
 
+## Host-global daily activity projection
+
+The daily digest is a global projection beside, not inside, the per-project
+workflow state machines. Authoritative task creation receipts, task journals,
+publication evidence, status transitions, and ordered registry membership feed
+one materiality classifier and collector. The store persists one IANA-zone
+interval per effective day under the global state home.
+
+```text
+project-local task/PR owners ─┐
+ordered registry history ────┼→ DailyDigest::Collector → Coordinator → Store
+source health / gaps ─────────┘                                  │
+                                                                 ▼
+                                                   DailyDigest::Reader
+                                                  ├─ CLI text / JSON
+                                                  ├─ authenticated Rails
+                                                  ├─ Telegram renderer
+                                                  └─ canonical agent skill
+```
+
+Only daemon or explicit refresh paths own collection and materialization. An
+open base can be atomically replaced; the first materialization after its
+persisted boundary freezes it. Late facts, corrections, and recovered source
+gaps are immutable idempotent amendments. CLI, Web, Telegram rendering, and
+agents share a pure persisted-record reader, so no output surface becomes a
+workflow authority or reconstructs history from current status.
+
+GitHub is a fail-soft observation source when Hive-owned PR facts are
+insufficient. PRDigest is neither called nor authoritative. Refresh/close and
+opt-in Telegram delivery have separate scheduler/capacity identities and
+ledgers, so an unavailable notification channel cannot block publication. See
+[[modules/daily-digest]], [[commands/digest]], and ADR-052 in [[decisions]].
+
 ## Scheduled architecture-patrol boundary
 
 Architecture patrol is a post-merge subsystem beside the ordinary task state
@@ -526,4 +559,4 @@ precedence, budgets, and negative guarantees are owned by
 - [[cli]] — command surface.
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
-- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/refactor-patrol]]
+- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/digest]] · [[commands/refactor-patrol]]

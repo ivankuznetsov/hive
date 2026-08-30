@@ -2072,7 +2072,9 @@ module Hive
       "attempts" => %w[max_transient timeout_sec],
       "coverage" => %w[required optional],
       "reviewers" => %w[primary adversarial verification],
-      "routes" => %w[primary adversarial verification fallbacks]
+      "routes" => %w[
+        primary adversarial verification fallbacks planner_revision_fallback
+      ]
     }.freeze
     PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
     PLAN_REVIEW_BENCHMARK_OPT_OUT_ENV = "HIVE_BENCH_ALLOW_DISABLED_PLAN_REVIEW"
@@ -2197,6 +2199,19 @@ module Hive
         validate_closed_mapping!(row, route_keys, "plan_review.routes.fallbacks[#{index}]", source_path)
         validate_plan_review_route_row!(row, "plan_review.routes.fallbacks[#{index}]", source_path)
       end
+      planner_fallback = routes["planner_revision_fallback"]
+      return unless routes.key?("planner_revision_fallback")
+
+      unless planner_fallback.is_a?(Hash)
+        raise ConfigError,
+              "plan_review.routes.planner_revision_fallback in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_closed_mapping!(
+        planner_fallback, route_keys, "plan_review.routes.planner_revision_fallback", source_path
+      )
+      validate_plan_review_route_row!(
+        planner_fallback, "plan_review.routes.planner_revision_fallback", source_path
+      )
     end
 
     def validate_plan_review_route_row!(row, label, source_path)

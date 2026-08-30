@@ -775,16 +775,19 @@ module Hive
           end
 
           attempt_id = Identity.attempt(record.review_id)
+          revision_identity, fallback = planner_revision_identity(record)
           revision = @planner_revision.call(
             review_id: record.review_id, plan_bytes:, findings:,
-            planner_identity: planner_identity(record),
+            planner_identity: revision_identity,
+            planner_authority: planner_identity(record),
             timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
           )
           retry_at = if TRANSIENT_OUTCOMES.include?(revision.outcome)
             default_retry_at(record, role, attempt_id)
           end
           route = planner_revision_route(
-            revision, record, attempt_id:, retry_at:
+            revision, record, requested: revision_identity, fallback:,
+            attempt_id:, retry_at:
           )
           refs = @store.write_attempt!(
             review_id: record.review_id, attempt_id:, plan_bytes:,
@@ -1248,10 +1251,11 @@ module Hive
         }
       end
 
-      def planner_revision_route(revision, record, attempt_id: nil, retry_at: nil)
-        actual = revision.route_receipt.empty? ? planner_identity(record) : revision.route_receipt
-        {
-          "role" => "planner_revision", "requested" => planner_identity(record),
+      def planner_revision_route(revision, record, requested:, fallback:,
+                                 attempt_id: nil, retry_at: nil)
+        actual = revision.route_receipt.empty? ? requested : revision.route_receipt
+        route = {
+          "role" => "planner_revision", "requested" => requested,
           "actual" => actual, "capability_result" => "present",
           "independence_verified" => false, "independence_reason" => "same_plan_authority",
           "outcome" => revision.outcome, "attempt_id" => attempt_id,
@@ -1259,6 +1263,38 @@ module Hive
           "diagnostic" => revision.diagnostic,
           "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION
         }.compact
+        return route unless fallback
+
+        route.merge(
+          "planner_revision_fallback" => true,
+          "planner_authority" => planner_identity(record),
+          "fallback_reason" => "captured_planner_transient_failure"
+        )
+      end
+
+      def planner_revision_identity(record)
+        authority = planner_identity(record)
+        row = @cfg.dig("plan_review", "routes", "planner_revision_fallback")
+        return [ authority, false ] unless row.is_a?(Hash)
+
+        fallback = {
+          "provider" => row.fetch("agent"), "model" => row.fetch("model"),
+          "family" => row.fetch("family"), "effort" => row.fetch("effort"),
+          "route" => row.fetch("route")
+        }
+        previous = latest_route(record, "planner_revision")
+        return [ authority, false ] unless previous
+
+        fallback_used = previous["planner_revision_fallback"] == true ||
+          identity_matches?(previous["requested"], fallback)
+        fallback_due = TRANSIENT_OUTCOMES.include?(previous["outcome"])
+        (fallback_used || fallback_due) ? [ fallback, true ] : [ authority, false ]
+      end
+
+      def identity_matches?(observed, expected)
+        observed.is_a?(Hash) && expected.all? do |key, value|
+          observed[key].to_s == value.to_s
+        end
       end
 
       def stale_planner_revision_contract?(route)

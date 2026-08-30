@@ -227,6 +227,17 @@ exact planner-owned transient blocks written by older builds as
 Stale-contract records retain their versioned adjudication reset. Invalid
 candidate results and other terminal planner outcomes remain blocked and
 operator-owned.
+
+Projects may configure the optional operational
+`plan_review.routes.planner_revision_fallback` route. Hive still tries the
+captured planner first; after a transient revision failure it uses the fallback
+for subsequent attempts in the same lineage, including later cooled series.
+The fallback is deliberately excluded from the reviewer-policy fingerprint so
+recovery preserves all finding decisions. It has no authority to change review
+routes or verdicts: each revision receipt names both the original planner
+authority and the effective fallback route, while reviewer-route changes still
+rekey the review.
+
 Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A

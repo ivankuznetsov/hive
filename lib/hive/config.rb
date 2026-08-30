@@ -17,6 +17,7 @@ require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
+require "tzinfo"
 
 module Hive
   module Config
@@ -619,6 +620,18 @@ module Hive
       "answer_digest" => {
         "enabled" => false,
         "hour" => 9
+      },
+      # Hive-owned host-global activity record. Upgrades remain disabled and
+      # readable until migration has persisted an explicit coverage boundary.
+      "daily_digest" => {
+        "enabled" => false,
+        "time_zone" => nil,
+        "coverage_started_at" => nil,
+        "initial_membership" => nil,
+        "first_interval" => nil,
+        "materialization_interval_sec" => 300,
+        "freshness_budget_sec" => 900,
+        "telegram" => { "enabled" => false, "hour" => 9 }
       },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
@@ -1562,6 +1575,10 @@ module Hive
       load_global_block("answer_digest", validator: :validate_answer_digest!)
     end
 
+    def load_global_daily_digest
+      load_global_block("daily_digest", validator: :validate_daily_digest!)
+    end
+
     def load_global_web
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -2069,6 +2086,7 @@ module Hive
       validate_refactor_patrol!(cfg, source_path)
       validate_removed_digest!(cfg, source_path)
       validate_answer_digest!(cfg, source_path)
+      validate_daily_digest!(cfg, source_path)
       validate_model_routing_capabilities!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
@@ -2103,6 +2121,7 @@ module Hive
       patrol
       refactor_patrol
       answer_digest
+      daily_digest
       bot
       rebase
     ].freeze
@@ -3962,6 +3981,100 @@ module Hive
       raise ConfigError,
             "answer_digest.hour in #{describe_source(source_path)} must be an integer between 0 and 23; " \
             "got #{hour.inspect} (#{hour.class})"
+    end
+
+    def validate_daily_digest!(cfg, source_path)
+      daily = cfg["daily_digest"]
+      return if daily.nil?
+
+      unless daily.is_a?(Hash)
+        raise ConfigError,
+              "daily_digest in #{describe_source(source_path)} must be a Hash; got #{daily.class}"
+      end
+      validate_boolean!(daily["enabled"], "daily_digest.enabled", source_path)
+      %w[materialization_interval_sec freshness_budget_sec].each do |key|
+        value = daily[key]
+        unless value.is_a?(Integer) && value >= 1
+          raise ConfigError,
+                "daily_digest.#{key} in #{describe_source(source_path)} must be an integer >= 1; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+
+      telegram = daily["telegram"]
+      unless telegram.is_a?(Hash)
+        raise ConfigError,
+              "daily_digest.telegram in #{describe_source(source_path)} must be a Hash; " \
+              "got #{telegram.inspect} (#{telegram.class})"
+      end
+      validate_boolean!(telegram["enabled"], "daily_digest.telegram.enabled", source_path)
+      hour = telegram["hour"]
+      unless hour.is_a?(Integer) && hour.between?(0, 23)
+        raise ConfigError,
+              "daily_digest.telegram.hour in #{describe_source(source_path)} must be an integer " \
+              "between 0 and 23; got #{hour.inspect} (#{hour.class})"
+      end
+
+      zone = daily["time_zone"]
+      validate_daily_digest_zone!(zone, source_path) if zone
+      coverage = daily["coverage_started_at"]
+      validate_digest_timestamp!(coverage, "daily_digest.coverage_started_at", source_path) if coverage
+      membership = daily["initial_membership"]
+      unless membership.nil? || (membership.is_a?(Array) && membership.all? { |entry| entry.is_a?(Hash) })
+        raise ConfigError,
+              "daily_digest.initial_membership in #{describe_source(source_path)} must be an Array of objects"
+      end
+      interval = daily["first_interval"]
+      validate_digest_interval!(interval, source_path) if interval
+      return unless daily["enabled"]
+
+      if zone.nil?
+        raise ConfigError,
+              "daily_digest.time_zone is required when daily_digest.enabled is true in " \
+              "#{describe_source(source_path)}; run `hive migrate --all`"
+      end
+      if coverage.nil? || membership.nil? || interval.nil?
+        raise ConfigError,
+              "daily_digest coverage frontier, initial_membership, and first_interval are required " \
+              "before enablement in #{describe_source(source_path)}; run `hive migrate --all`"
+      end
+    end
+
+    def validate_daily_digest_zone!(zone, source_path)
+      unless zone.is_a?(String) && !zone.strip.empty?
+        raise ConfigError,
+              "daily_digest.time_zone in #{describe_source(source_path)} must be a non-empty IANA zone"
+      end
+      TZInfo::Timezone.get(zone)
+    rescue TZInfo::InvalidTimezoneIdentifier
+      raise ConfigError,
+            "daily_digest.time_zone in #{describe_source(source_path)} is an unknown IANA time zone " \
+            "#{zone.inspect}"
+    end
+
+    def validate_digest_timestamp!(value, label, source_path)
+      Time.iso8601(value.to_s)
+    rescue ArgumentError, TypeError
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be an ISO-8601 timestamp"
+    end
+
+    def validate_digest_interval!(interval, source_path)
+      unless interval.is_a?(Hash)
+        raise ConfigError,
+              "daily_digest.first_interval in #{describe_source(source_path)} must be a Hash"
+      end
+      required = %w[local_date time_zone starts_at ends_at]
+      missing = required.reject { |key| interval.key?(key) }
+      raise ArgumentError, "missing #{missing.join(', ')}" unless missing.empty?
+      Date.iso8601(interval.fetch("local_date").to_s)
+      starts_at = Time.iso8601(interval.fetch("starts_at").to_s)
+      ends_at = Time.iso8601(interval.fetch("ends_at").to_s)
+      raise ArgumentError, "ends_at must be after starts_at" unless ends_at > starts_at
+      validate_daily_digest_zone!(interval.fetch("time_zone"), source_path)
+    rescue Date::Error, ArgumentError, TypeError, KeyError => error
+      raise ConfigError,
+            "daily_digest.first_interval in #{describe_source(source_path)} is invalid: #{error.message}"
     end
 
     BOT_NUMERIC_BOUNDS = [

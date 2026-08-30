@@ -98,6 +98,10 @@ module Hive
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
+      # Host-global immutable daily activity base. Amendments and public read
+      # envelopes have separate contracts so base bytes never drift with a
+      # renderer.
+      "hive-digest-record" => 1,
       # Exact-slot brainstorm inventory/write boundary used by canonical-skill
       # conversations. Bindings are revalidated under a creation-disabled task
       # lock; the command never advances a workflow stage.

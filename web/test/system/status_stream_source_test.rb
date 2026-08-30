@@ -14,6 +14,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     connected = Queue.new
     disconnected = Queue.new
     released = false
+    original_connected = StatusBroadcaster.method(:subscriber_connected!)
+    original_disconnected = StatusBroadcaster.method(:subscriber_disconnected!)
     signed_name = Turbo::StreamsChannel.signed_stream_name([ StatusBroadcaster::CHANNEL ])
     original_verifier = StatusChannel.instance_method(:verified_stream_name_from_params)
     blocked_verifier = proc do
@@ -22,8 +24,17 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       original_verifier.bind_call(self)
     end
 
-    with_replaced_singleton_method(StatusBroadcaster, :subscriber_connected!, -> { connected << true }) do
-      with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, -> { disconnected << true }) do
+    record_connected = lambda do
+      original_connected.call
+      connected << StatusBroadcaster.instance_variable_get(:@subscriber_count).to_i
+    end
+    record_disconnected = lambda do
+      original_disconnected.call
+      disconnected << StatusBroadcaster.instance_variable_get(:@subscriber_count).to_i
+    end
+
+    with_replaced_singleton_method(StatusBroadcaster, :subscriber_connected!, record_connected) do
+      with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, record_disconnected) do
         with_replaced_instance_method(StatusChannel, :verified_stream_name_from_params, blocked_verifier) do
           execute_script(<<~JS, signed_name)
             const owner = document.createElement("div")
@@ -42,8 +53,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           release_subscription << true
           released = true
 
-          Timeout.timeout(10) { connected.pop }
-          Timeout.timeout(10) { disconnected.pop }
+          assert_equal 1, Timeout.timeout(10) { connected.pop }
+          assert_equal 0, Timeout.timeout(10) { disconnected.pop }
         end
       end
     end
@@ -162,6 +173,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         let disconnects = 0
         let socketCloses = 0
         let unsubscribes = 0
+        let callbacks
         const socket = {
           readyState: WebSocket.CONNECTING,
           close() {
@@ -176,7 +188,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             close() { events.push("connection_close") }
           },
           subscriptions: {
-            create() {
+            create(_channel, mixin) {
+              callbacks = mixin
               const subscription = {
                 perform() { return true },
                 unsubscribe() {
@@ -216,6 +229,10 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           while (!attempt.released && performance.now() < cleanupDeadline) {
             await new Promise((resolve) => setTimeout(resolve, 0))
           }
+          const beforeLateCallbacks = { disconnects, socketCloses, unsubscribes }
+          callbacks.connected({ reconnected: false })
+          callbacks.rejected()
+          callbacks.disconnected({ willAttemptReconnect: false })
 
           return {
             disconnects,
@@ -227,7 +244,12 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             activeTransport: socket.readyState === WebSocket.OPEN ||
               socket.readyState === WebSocket.CONNECTING,
             pendingTimer: Boolean(lifecycle.pendingReleaseTimer),
-            retryTimer: Boolean(lifecycle.retryTimer)
+            retryTimer: Boolean(lifecycle.retryTimer),
+            lateCallbacksInert: lifecycle.currentAttempt === null &&
+              lifecycle.pendingReleaseDisposition === null &&
+              disconnects === beforeLateCallbacks.disconnects &&
+              socketCloses === beforeLateCallbacks.socketCloses &&
+              unsubscribes === beforeLateCallbacks.unsubscribes
           }
         } finally {
           owner.remove()
@@ -245,8 +267,88 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       "attemptRetired" => true,
       "activeTransport" => false,
       "pendingTimer" => false,
-      "retryTimer" => false
+      "retryTimer" => false,
+      "lateCallbacksInert" => true
     }, result)
+  end
+
+  test "a real unconfirmed status lease is released by bounded transport cleanup" do
+    sign_in!
+    visit repos_path
+    wait_for_status_subscribers(0)
+
+    signed_name = Turbo::StreamsChannel.signed_stream_name([ StatusBroadcaster::CHANNEL ])
+    never_confirm = proc do |*_args, **_kwargs, &_block|
+      defer_subscription_confirmation!
+    end
+
+    with_replaced_instance_method(StatusChannel, :stream_from, never_confirm) do
+      original_delay = evaluate_script(<<~JS, signed_name)
+        (() => {
+          const sourceClass = customElements.get("hive-status-stream-source")
+          const originalDelay = sourceClass.pendingReleaseDelay
+          sourceClass.pendingReleaseDelay = 50
+          const host = document.createElement("div")
+          host.id = "real-pending-status-owner"
+          host.dataset.statusVersion = "real-pending-token"
+          const source = document.createElement("hive-status-stream-source")
+          source.setAttribute("channel", "StatusChannel")
+          source.setAttribute("signed-stream-name", arguments[0])
+          host.appendChild(source)
+          document.body.appendChild(host)
+          window.realPendingStatusFixture = { host, source }
+          return originalDelay
+        })()
+      JS
+
+      wait_for_status_subscribers(1)
+      execute_script(<<~JS)
+        const { host, source } = window.realPendingStatusFixture
+        window.realPendingStatusLifecycle = source.statusOwner
+        window.realPendingStatusAttempt = source.statusOwner.currentAttempt
+        host.remove()
+      JS
+      wait_for_status_subscribers(0)
+
+      result = evaluate_script(<<~JS)
+        (() => {
+          const lifecycle = window.realPendingStatusLifecycle
+          const attempt = window.realPendingStatusAttempt
+          return {
+            state: lifecycle.state,
+            retired: attempt.retired,
+            released: attempt.released,
+            detached: attempt.subscription === null && attempt.consumer === null &&
+              attempt.connection === null && attempt.socket === null,
+            pendingTimer: Boolean(lifecycle.pendingReleaseTimer),
+            pendingDisposition: Boolean(lifecycle.pendingReleaseDisposition),
+            retryTimer: Boolean(lifecycle.retryTimer)
+          }
+        })()
+      JS
+
+      assert_equal({
+        "state" => "disconnected",
+        "retired" => true,
+        "released" => true,
+        "detached" => true,
+        "pendingTimer" => false,
+        "pendingDisposition" => false,
+        "retryTimer" => false
+      }, result)
+    ensure
+      if page&.current_url
+        execute_script(<<~JS, original_delay)
+          window.realPendingStatusFixture?.host?.remove()
+          if (arguments[0] !== null) {
+            customElements.get("hive-status-stream-source").pendingReleaseDelay = arguments[0]
+          }
+          delete window.realPendingStatusFixture
+          delete window.realPendingStatusLifecycle
+          delete window.realPendingStatusAttempt
+        JS
+      end
+    end
   end
 
   test "each setup attempt owns a dedicated consumer without changing Turbo's shared consumer" do
@@ -595,6 +697,89 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     end
   end
 
+  test "a socket created by a throwing open remains reachable for cleanup" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalDelay = sourceClass.retryDelay
+        const originalWarn = console.warn
+        const warnings = []
+        let socketCloses = 0
+        let disconnects = 0
+        const socket = {
+          readyState: WebSocket.CONNECTING,
+          close() {
+            socketCloses += 1
+            this.readyState = WebSocket.CLOSING
+          }
+        }
+        const connection = {
+          webSocket: null,
+          open() {
+            this.webSocket = socket
+            throw new Error("open failed after socket allocation")
+          },
+          close() {}
+        }
+        const consumer = {
+          connection,
+          disconnect() { disconnects += 1 },
+          subscriptions: {
+            create() {
+              connection.open()
+              return { perform() { return true }, unsubscribe() {} }
+            }
+          }
+        }
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "throwing-open"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-throwing-open")
+        source.createConsumer = async () => consumer
+        host.appendChild(source)
+
+        try {
+          sourceClass.retryDelay = 10_000
+          console.warn = (...args) => warnings.push(args)
+          document.body.appendChild(host)
+          const lifecycle = source.statusOwner
+          const attempt = lifecycle.currentAttempt
+          const deadline = performance.now() + 1_000
+          while (lifecycle.state !== "retry_wait" && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return {
+            state: lifecycle.state,
+            retired: attempt.retired,
+            detached: attempt.socket === null && attempt.connection === null && attempt.consumer === null,
+            disconnects,
+            socketCloses,
+            socketState: socket.readyState,
+            warnings: warnings.length
+          }
+        } finally {
+          host.remove()
+          sourceClass.retryDelay = originalDelay
+          console.warn = originalWarn
+        }
+      })()
+    JS
+
+    assert_equal({
+      "state" => "retry_wait",
+      "retired" => true,
+      "detached" => true,
+      "disconnects" => 1,
+      "socketCloses" => 1,
+      "socketState" => 2,
+      "warnings" => 1
+    }, result)
+  end
+
   test "real DOM disconnect warns once after cleanup and recovers with a fresh owner" do
     sign_in!
     visit repos_path
@@ -719,6 +904,92 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     assert_equal 0, result.fetch("unhandled")
   end
 
+  test "a retry restores Turbo stream registration after owner setup fails" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalDelay = sourceClass.retryDelay
+        const originalWarn = console.warn
+        let connectCalls = 0
+        let disconnectCalls = 0
+        let factoryCalls = 0
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "turbo-registration-retry"
+        const target = document.createElement("div")
+        target.id = "turbo-registration-retry-target"
+        target.textContent = "stale"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-turbo-registration-retry")
+        const originalConnect = source.connectTurboStreamSource.bind(source)
+        const originalDisconnect = source.disconnectTurboStreamSource.bind(source)
+        source.connectTurboStreamSource = () => {
+          connectCalls += 1
+          if (connectCalls === 1) throw new Error("Turbo registration failed")
+          return originalConnect()
+        }
+        source.disconnectTurboStreamSource = () => {
+          disconnectCalls += 1
+          return originalDisconnect()
+        }
+        source.createConsumer = async () => {
+          factoryCalls += 1
+          return {
+            disconnect() {},
+            subscriptions: {
+              create(_channel, callbacks) {
+                const subscription = { perform() { return true }, unsubscribe() {} }
+                queueMicrotask(() => callbacks.connected({ reconnected: false }))
+                return subscription
+              }
+            }
+          }
+        }
+        host.append(source, target)
+
+        try {
+          sourceClass.retryDelay = 50
+          console.warn = () => {}
+          document.body.appendChild(host)
+          const deadline = performance.now() + 1_000
+          while (!source.hasAttribute("connected") && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          source.dispatchMessageEvent(
+            '<turbo-stream action="update" target="turbo-registration-retry-target"><template>fresh</template></turbo-stream>'
+          )
+          const renderDeadline = performance.now() + 1_000
+          while (target.textContent !== "fresh" && performance.now() < renderDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          host.remove()
+          return {
+            connected: source.hasAttribute("connected"),
+            connectCalls,
+            disconnectCalls,
+            factoryCalls,
+            rendered: target.textContent
+          }
+        } finally {
+          host.remove()
+          sourceClass.retryDelay = originalDelay
+          console.warn = originalWarn
+        }
+      })()
+    JS
+
+    assert_equal({
+      "connected" => false,
+      "connectCalls" => 2,
+      "disconnectCalls" => 1,
+      "factoryCalls" => 1,
+      "rendered" => "fresh"
+    }, result)
+  end
+
   test "attribute supersession installs a failed successor before reporting old teardown" do
     sign_in!
     visit repos_path
@@ -817,6 +1088,153 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       "warningCount" => 2,
       "warningOrder" => [ "old", "successor" ],
       "pageErrors" => 0
+    }, result)
+  end
+
+  test "attribute supersession restores warning delivery after successor setup escapes" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (() => {
+        const originalWarn = console.warn
+        const warnings = []
+        const setupFailure = { seam: "successor-setup" }
+        const reportingFailure = { seam: "successor-reporting" }
+        const laterFailure = { seam: "later-warning" }
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "warning-queue-restoration"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-old")
+        source.createConsumer = () => new Promise(() => {})
+        host.appendChild(source)
+
+        let caught
+        let oldOwner
+        try {
+          console.warn = (...args) => warnings.push(args)
+          document.body.appendChild(host)
+          oldOwner = source.statusOwner
+          source.statusOwner = null
+          source.connectedCallback = () => { throw setupFailure }
+          source.reportStatusFailure = () => { throw reportingFailure }
+          try {
+            source.attributeChangedCallback("signed-stream-name", "test-old", "test-successor")
+          } catch (error) {
+            caught = error
+          }
+          delete source.reportStatusFailure
+          source.reportStatusFailure("later warning", laterFailure)
+          return {
+            caughtSetupFailure: caught === reportingFailure,
+            queueRestored: source.statusWarningQueue === undefined,
+            laterWarningPublished: warnings.some((args) => args.includes(laterFailure))
+          }
+        } finally {
+          host.remove()
+          oldOwner?.disconnect()
+          console.warn = originalWarn
+        }
+      })()
+    JS
+
+    assert_equal({
+      "caughtSetupFailure" => true,
+      "queueRestored" => true,
+      "laterWarningPublished" => true
+    }, result)
+  end
+
+  test "a stale unconfirmed registration closes transport before local release" do
+    sign_in!
+    visit repos_path
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const events = []
+        let factoryCalls = 0
+        let staleAttempt
+        const socket = {
+          readyState: WebSocket.CONNECTING,
+          close() {
+            events.push("socket_close")
+            this.readyState = WebSocket.CLOSING
+          }
+        }
+        const connection = {
+          webSocket: socket,
+          close() { events.push("connection_close") }
+        }
+        const host = document.createElement("div")
+        host.dataset.statusVersion = "stale-registration-order"
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "test-old")
+        source.createConsumer = async () => {
+          factoryCalls += 1
+          if (factoryCalls > 1) {
+            return {
+              disconnect() {},
+              subscriptions: {
+                create(_channel, callbacks) {
+                  const subscription = { perform() { return true }, unsubscribe() {} }
+                  queueMicrotask(() => callbacks.connected({ reconnected: false }))
+                  return subscription
+                }
+              }
+            }
+          }
+
+          const consumer = {
+            connection,
+            disconnect() { events.push("disconnect") },
+            subscriptions: {
+              create() {
+                const owner = source.statusOwner
+                staleAttempt = owner.currentAttempt
+                source.setAttribute("signed-stream-name", "test-successor")
+                events.length = 0
+                socket.readyState = WebSocket.CONNECTING
+                staleAttempt.consumer = consumer
+                staleAttempt.connection = connection
+                staleAttempt.socket = socket
+                return {
+                  perform() { return true },
+                  unsubscribe() { events.push("unsubscribe") }
+                }
+              }
+            }
+          }
+          return consumer
+        }
+        host.appendChild(source)
+
+        try {
+          document.body.appendChild(host)
+          const deadline = performance.now() + 1_000
+          while ((!staleAttempt?.released || !source.hasAttribute("connected"))
+            && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return {
+            events,
+            retired: staleAttempt.retired,
+            released: staleAttempt.released,
+            detached: staleAttempt.subscription === null && staleAttempt.consumer === null &&
+              staleAttempt.connection === null && staleAttempt.socket === null
+          }
+        } finally {
+          host.remove()
+        }
+      })()
+    JS
+
+    assert_equal({
+      "events" => [ "disconnect", "connection_close", "socket_close", "unsubscribe" ],
+      "retired" => true,
+      "released" => true,
+      "detached" => true
     }, result)
   end
 
@@ -1056,11 +1474,13 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           let recoveredCreates = 0
           let callbacks
           let callbackThrew = false
+          const recoveredRefreshAttempts = []
           const host = document.createElement("div")
           host.dataset.statusVersion = kind
           const source = document.createElement("hive-status-stream-source")
           source.setAttribute("channel", "StatusChannel")
           source.setAttribute("signed-stream-name", `test-${kind}`)
+          source.catchUpRefresh = { token: kind, location: source.statusLocation }
           host.appendChild(source)
           source.createConsumer = async () => {
             factoryCalls += 1
@@ -1070,7 +1490,13 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
                 subscriptions: {
                   create(_channel, recoveredCallbacks) {
                     recoveredCreates += 1
-                    const subscription = { perform() { return true }, unsubscribe() {} }
+                    const subscription = {
+                      perform(_action, data) {
+                        recoveredRefreshAttempts.push(data.refresh_attempted)
+                        return true
+                      },
+                      unsubscribe() {}
+                    }
                     queueMicrotask(() => recoveredCallbacks.connected({ reconnected: false }))
                     return subscription
                   }
@@ -1159,7 +1585,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             recoveredCreates,
             freshAttempt: Boolean(recoveredAttempt) && recoveredAttempt !== failedAttempt,
             staleCallbacksInert: owner.currentAttempt === recoveredAttempt,
-            warnings: warnings.length - warningStart
+            warnings: warnings.length - warningStart,
+            recoveredRefreshAttempts
           }
           host.remove()
           return { retrySnapshot, recovered }
@@ -1207,7 +1634,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         "recoveredCreates" => 1,
         "freshAttempt" => true,
         "staleCallbacksInert" => true,
-        "warnings" => 1
+        "warnings" => 1,
+        "recoveredRefreshAttempts" => kind == "falseDisconnect" ? [ false ] : [ true ]
       }, attempt.fetch("recovered"))
     end
     assert_equal 0, result.fetch("pageErrors")
@@ -1222,6 +1650,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       (async () => {
         let releaseLateConsumer
         const lateConsumerPromise = new Promise((resolve) => { releaseLateConsumer = resolve })
+        let rejectLateConsumer
+        const rejectedConsumerPromise = new Promise((_resolve, reject) => { rejectLateConsumer = reject })
         let lateCreates = 0
         let lateDisconnects = 0
         let lateOpens = 0
@@ -1260,6 +1690,37 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
         }
         lateConnection.open()
         lateConnection.reopen()
+
+        const originalWarn = console.warn
+        const staleWarnings = []
+        let rejectedResult
+        try {
+          const rejectedHost = document.createElement("div")
+          rejectedHost.dataset.statusVersion = "late-rejection"
+          const rejectedSource = document.createElement("hive-status-stream-source")
+          rejectedSource.setAttribute("channel", "StatusChannel")
+          rejectedSource.setAttribute("signed-stream-name", "test-token")
+          rejectedSource.createConsumer = () => rejectedConsumerPromise
+          rejectedHost.appendChild(rejectedSource)
+          console.warn = (...args) => staleWarnings.push(args)
+          document.body.appendChild(rejectedHost)
+          const rejectedLifecycle = rejectedSource.statusOwner
+          const rejectedAttempt = rejectedLifecycle.currentAttempt
+          rejectedHost.remove()
+          rejectLateConsumer(new Error("late consumer rejection"))
+          const rejectionDeadline = performance.now() + 1_000
+          while (staleWarnings.length === 0 && performance.now() < rejectionDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          rejectedResult = {
+            state: rejectedLifecycle.state,
+            retired: rejectedAttempt.retired,
+            currentAttempt: Boolean(rejectedLifecycle.currentAttempt),
+            warnings: staleWarnings.length
+          }
+        } finally {
+          console.warn = originalWarn
+        }
 
         let activeDisconnects = 0
         let activeOpens = 0
@@ -1321,6 +1782,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             opens: lateOpens,
             reopens: lateReopens
           },
+          rejected: rejectedResult,
           queued: {
             state: activeLifecycle.state,
             retired: activeAttempt.retired,
@@ -1342,6 +1804,12 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       "opens" => 0,
       "reopens" => 0
     }, result.fetch("late"))
+    assert_equal({
+      "state" => "disconnected",
+      "retired" => true,
+      "currentAttempt" => false,
+      "warnings" => 1
+    }, result.fetch("rejected"))
     assert_equal({
       "state" => "disconnected",
       "retired" => true,
@@ -1683,15 +2151,25 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           const predecessorAttempt = predecessorOwner.currentAttempt
           const normal = active.size
 
-          superseded.source.dataset.testAutoConfirm = "true"
-          superseded.source.setAttribute("signed-stream-name", "test-successor")
+          superseded.source.setAttribute("signed-stream-name", "test-middle")
           const overlapDeadline = performance.now() + 1_000
           while (active.size < 2 && performance.now() < overlapDeadline) {
             await new Promise((resolve) => setTimeout(resolve, 0))
           }
+          const middleOwner = superseded.source.statusOwner
+          const middleAttempt = middleOwner.currentAttempt
+          const overlap = active.size
+
+          superseded.source.dataset.testAutoConfirm = "true"
+          superseded.source.setAttribute("signed-stream-name", "test-successor")
+          const repeatedOverlapDeadline = performance.now() + 1_000
+          while ((!superseded.source.hasAttribute("connected") || active.size < 2)
+            && performance.now() < repeatedOverlapDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
           const successorOwner = superseded.source.statusOwner
           const successorAttempt = successorOwner.currentAttempt
-          const overlap = active.size
+          const repeatedOverlap = active.size
 
           const settledDeadline = performance.now() + 1_000
           while ((active.size !== 1 || !superseded.source.hasAttribute("connected"))
@@ -1718,6 +2196,7 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
           return {
             normal,
             overlap,
+            repeatedOverlap,
             settled,
             detached,
             twoSources,
@@ -1725,7 +2204,9 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
             peak,
             predecessorDisconnected: predecessorOwner.state === "disconnected",
             predecessorRetired: predecessorAttempt.retired,
-            successorDifferent: successorAttempt !== predecessorAttempt,
+            middleRetired: middleAttempt.retired,
+            successorDifferent: successorAttempt !== predecessorAttempt &&
+              successorAttempt !== middleAttempt,
             isolated: new Set(simultaneousConsumers).size === 2,
             sharedUntouched: (await cable.getConsumer()) === sharedConsumer
           }
@@ -1738,6 +2219,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       })()
     JS
 
+    assert_operator result.fetch("repeatedOverlap"), :>=, 1
+    assert_operator result.fetch("repeatedOverlap"), :<=, 2
     assert_equal({
       "normal" => 1,
       "overlap" => 2,
@@ -1748,10 +2231,101 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       "peak" => 2,
       "predecessorDisconnected" => true,
       "predecessorRetired" => true,
+      "middleRetired" => true,
       "successorDifferent" => true,
       "isolated" => true,
       "sharedUntouched" => true
-    }, result)
+    }, result.except("repeatedOverlap"))
+  end
+
+  test "Turbo navigation replaces one dedicated transport without overlap" do
+    project = create_hive_project!("status-transport-navigation-app")
+    slug = create_task!(project, "Navigate with one status transport")
+    sign_in!
+    assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+
+    initial = evaluate_script(<<~JS)
+      (async () => {
+        const sourceClass = customElements.get("hive-status-stream-source")
+        const originalCreate = sourceClass.prototype.createConsumer
+        const probe = {
+          active: new Set(),
+          allocations: 0,
+          disconnects: 0,
+          peak: 0,
+          originalCreate
+        }
+        window.statusNavigationTransportProbe = probe
+        sourceClass.prototype.createConsumer = async function () {
+          const consumer = await originalCreate.call(this)
+          const id = ++probe.allocations
+          probe.active.add(id)
+          probe.peak = Math.max(probe.peak, probe.active.size)
+          const disconnect = consumer.disconnect.bind(consumer)
+          consumer.disconnect = (...args) => {
+            if (probe.active.delete(id)) probe.disconnects += 1
+            return disconnect(...args)
+          }
+          return consumer
+        }
+
+        const source = document.querySelector("#status-stream-source")
+        source.attributeChangedCallback("channel", "StatusChannel", "StatusChannel-refresh")
+        const deadline = performance.now() + 5_000
+        while ((probe.allocations < 1 || !source.hasAttribute("connected"))
+          && performance.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        return {
+          allocations: probe.allocations,
+          active: probe.active.size,
+          peak: probe.peak
+        }
+      })()
+    JS
+    assert_equal({ "allocations" => 1, "active" => 1, "peak" => 1 }, initial)
+
+    find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
+    assert_current_path task_path(project, slug), wait: 10
+    assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+    navigated = evaluate_script(<<~JS)
+      (() => {
+        const probe = window.statusNavigationTransportProbe
+        return {
+          allocations: probe.allocations,
+          disconnects: probe.disconnects,
+          active: probe.active.size,
+          peak: probe.peak
+        }
+      })()
+    JS
+    assert_equal({
+      "allocations" => 2,
+      "disconnects" => 1,
+      "active" => 1,
+      "peak" => 1
+    }, navigated)
+
+    click_link "Repos"
+    assert_current_path repos_path, wait: 10
+    assert_no_selector "#status-stream-source", visible: :all
+    detached = evaluate_script(<<~JS)
+      (() => {
+        const probe = window.statusNavigationTransportProbe
+        return { disconnects: probe.disconnects, active: probe.active.size }
+      })()
+    JS
+    assert_equal({ "disconnects" => 2, "active" => 0 }, detached)
+  ensure
+    if page&.current_url
+      execute_script(<<~JS)
+        const probe = window.statusNavigationTransportProbe
+        if (probe) {
+          customElements.get("hive-status-stream-source").prototype.createConsumer = probe.originalCreate
+          delete window.statusNavigationTransportProbe
+        }
+      JS
+    end
   end
 
   test "a server startup rejection retries the live source" do
@@ -1769,22 +2343,36 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     attempts = 0
     disconnected = 0
     counter_mutex = Mutex.new
+    original_connected = StatusBroadcaster.method(:subscriber_connected!)
+    original_disconnected = StatusBroadcaster.method(:subscriber_disconnected!)
     connect = lambda do
       attempt = counter_mutex.synchronize { attempts += 1 }
       raise ThreadError, "cannot create broadcaster" if attempt == 1
+
+      original_connected.call
     end
-    disconnect = -> { counter_mutex.synchronize { disconnected += 1 } }
+    disconnect = lambda do
+      original_disconnected.call
+      counter_mutex.synchronize { disconnected += 1 }
+    end
 
     with_replaced_singleton_method(StatusBroadcaster, :subscriber_connected!, connect) do
       with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, disconnect) do
-        visit root_path
-        assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
-        assert_equal 2, counter_mutex.synchronize { attempts }
+        with_status_catch_up_observer do |catch_ups|
+          visit root_path
+          assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+          assert_equal 2, counter_mutex.synchronize { attempts }
+          wait_for_status_subscribers(1)
+          page_token = find("[data-status-version]", visible: :all)["data-status-version"]
+          catch_up = wait_for_status_catch_up(catch_ups, page_token)
+          assert_equal page_token, catch_up.fetch("status_version")
+          refute catch_up.fetch("refresh_attempted")
 
-        visit repos_path
-        page.document.synchronize(10) do
-          count = counter_mutex.synchronize { disconnected }
-          raise Capybara::ElementNotFound, "recovered subscription did not release" unless count == 1
+          visit repos_path
+          page.document.synchronize(10) do
+            count = counter_mutex.synchronize { disconnected }
+            raise Capybara::ElementNotFound, "recovered subscription did not release" unless count == 1
+          end
         end
       end
     end
@@ -1931,6 +2519,28 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
   def wait_for_status_subscribers(expected)
     Timeout.timeout(10) do
       sleep 0.01 until StatusBroadcaster.instance_variable_get(:@subscriber_count).to_i == expected
+    end
+  end
+
+  def with_status_catch_up_observer
+    original = StatusChannel.instance_method(:catch_up)
+    completed = Queue.new
+    StatusChannel.define_method(:catch_up) do |data|
+      result = original.bind_call(self, data)
+      completed << data.to_h
+      result
+    end
+    yield completed
+  ensure
+    StatusChannel.define_method(:catch_up, original) if original
+  end
+
+  def wait_for_status_catch_up(catch_ups, token)
+    Timeout.timeout(10) do
+      loop do
+        catch_up = catch_ups.pop
+        return catch_up if catch_up.fetch("status_version") == token
+      end
     end
   end
 end

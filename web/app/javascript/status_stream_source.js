@@ -79,8 +79,8 @@ class StatusStreamOwner {
   startAttempt() {
     if (!this.isMounted() || this.currentAttempt) return
 
+    this.source.connectTurboStreamSource()
     const attempt = {
-      id: Symbol("status-stream-attempt"),
       consumer: null,
       connection: null,
       socket: null,
@@ -91,8 +91,7 @@ class StatusStreamOwner {
       confirmed: false,
       released: false,
       retired: false,
-      openAllowed: true,
-      transportClosed: false
+      openAllowed: true
     }
     this.currentAttempt = attempt
     this.state = "connecting"
@@ -110,7 +109,11 @@ class StatusStreamOwner {
     try {
       consumer = await this.source.createConsumer()
     } catch (error) {
-      this.failAttempt(attempt, error)
+      if (this.isCurrentAttempt(attempt)) {
+        this.failAttempt(attempt, error)
+      } else {
+        this.retireStaleAttempt(attempt, error)
+      }
       return
     }
 
@@ -155,7 +158,9 @@ class StatusStreamOwner {
         // A synchronous custom-element supersession can happen while a fake
         // or adapter create call is returning. The retired attempt's transport
         // is the authoritative cleanup edge, so close it before local release.
-        this.retireStaleAttempt(attempt)
+        const cleanup = new CleanupCollector()
+        this.retireAttempt(attempt, cleanup, { transportFirst: true })
+        this.warnCleanup("hive status subscription cleanup failed", cleanup)
       }
     } catch (error) {
       if (this.isCurrentAttempt(attempt)) {
@@ -179,9 +184,11 @@ class StatusStreamOwner {
       connection.open = (...args) => {
         if (!this.mayOpen(attempt)) return false
 
-        const result = open(...args)
-        attempt.socket = connection.webSocket || attempt.socket
-        return result
+        try {
+          return open(...args)
+        } finally {
+          attempt.socket = connection.webSocket || attempt.socket
+        }
       }
     }
 
@@ -190,9 +197,11 @@ class StatusStreamOwner {
       connection.reopen = (...args) => {
         if (!this.mayOpen(attempt)) return false
 
-        const result = reopen(...args)
-        attempt.socket = connection.webSocket || attempt.socket
-        return result
+        try {
+          return reopen(...args)
+        } finally {
+          attempt.socket = connection.webSocket || attempt.socket
+        }
       }
     }
   }
@@ -267,7 +276,6 @@ class StatusStreamOwner {
     this.catchUpAttempt = null
     this.retireAttempt(attempt, cleanup)
     cleanup.run(() => this.source.removeAttribute("connected"))
-    cleanup.run(() => this.source.clearCatchUpRefresh())
     this.scheduleRetry(cleanup)
     this.warnCleanup("hive status subscription failed; retrying", cleanup)
   }
@@ -285,7 +293,6 @@ class StatusStreamOwner {
     this.state = "retry_wait"
     this.catchUpAttempt = null
     cleanup.run(() => this.source.removeAttribute("connected"))
-    cleanup.run(() => this.source.clearCatchUpRefresh())
     this.scheduleRetry(cleanup)
     this.warnCleanup("hive status subscription failed; retrying", cleanup)
   }
@@ -348,6 +355,7 @@ class StatusStreamOwner {
     const cleanup = new CleanupCollector()
     this.pendingReleaseTimer = null
     this.pendingReleaseDisposition = null
+    this.source.forgetRetiringStatusOwner(this)
     // With exclusive transport ownership the fallback needs no registry
     // scan: close first, then forget the client handle locally.
     this.retireAttempt(attempt, cleanup, { transportFirst: true })
@@ -361,9 +369,22 @@ class StatusStreamOwner {
     const timer = this.pendingReleaseTimer
     this.pendingReleaseTimer = null
     this.pendingReleaseDisposition = null
+    this.source.forgetRetiringStatusOwner(this)
     this.cancelTimer(timer, cleanup)
     this.retireAttempt(attempt, cleanup)
     this.warnCleanup("hive status subscription cleanup failed", cleanup)
+  }
+
+  forcePendingRelease(cleanup) {
+    const attempt = this.pendingReleaseDisposition?.attempt
+    if (!attempt) return
+
+    const timer = this.pendingReleaseTimer
+    this.pendingReleaseTimer = null
+    this.pendingReleaseDisposition = null
+    this.source.forgetRetiringStatusOwner(this)
+    this.cancelTimer(timer, cleanup)
+    this.retireAttempt(attempt, cleanup, { transportFirst: true })
   }
 
   retireAttempt(attempt, cleanup, { transportFirst = false } = {}) {
@@ -392,7 +413,6 @@ class StatusStreamOwner {
     const closeTransport = () => {
       if (!consumer && !connection && !socket && !monitor) return
 
-      attempt.transportClosed = true
       if (consumer) cleanup.run(() => consumer.disconnect?.())
       if (this.socketCanClose(socket, cleanup)) {
         cleanup.run(() => connection?.close?.({ allowReconnect: false }))
@@ -506,7 +526,6 @@ class HiveStatusStreamSourceElement extends HTMLElement {
     const owner = new StatusStreamOwner(this)
     this.statusOwner = owner
     try {
-      Turbo.connectStreamSource(this)
       owner.connect()
     } catch (error) {
       owner.failOwnerSetup(error)
@@ -517,7 +536,10 @@ class HiveStatusStreamSourceElement extends HTMLElement {
     const owner = this.statusOwner
     this.statusOwner = null
     const cleanup = new CleanupCollector()
-    cleanup.run(() => Turbo.disconnectStreamSource(this))
+    const retiringOwner = this.statusRetiringOwner
+    this.statusRetiringOwner = null
+    if (retiringOwner && retiringOwner !== owner) retiringOwner.forcePendingRelease(cleanup)
+    cleanup.run(() => this.disconnectTurboStreamSource())
     if (owner) cleanup.run(() => owner.disconnect())
     cleanup.run(() => this.removeAttribute("connected"))
     if (cleanup.failed) {
@@ -535,30 +557,48 @@ class HiveStatusStreamSourceElement extends HTMLElement {
     const owner = this.statusOwner
     this.statusOwner = null
     const oldCleanup = new CleanupCollector()
-    oldCleanup.run(() => Turbo.disconnectStreamSource(this))
-    if (owner) oldCleanup.run(() => owner.disconnect())
-    oldCleanup.run(() => this.removeAttribute("connected"))
+    try {
+      const retiringOwner = this.statusRetiringOwner
+      this.statusRetiringOwner = null
+      if (retiringOwner && retiringOwner !== owner) retiringOwner.forcePendingRelease(oldCleanup)
+      oldCleanup.run(() => this.disconnectTurboStreamSource())
+      if (owner) oldCleanup.run(() => owner.disconnect())
+      if (owner?.pendingReleaseDisposition) this.statusRetiringOwner = owner
+      oldCleanup.run(() => this.removeAttribute("connected"))
 
-    if (!this.statusOwner) {
-      const successorSetup = new CleanupCollector()
-      successorSetup.run(() => this.connectedCallback())
-      if (successorSetup.failed && !this.statusOwner) {
-        const successor = new StatusStreamOwner(this)
-        this.statusOwner = successor
-        successor.failOwnerSetup(successorSetup.error)
+      if (!this.statusOwner) {
+        const successorSetup = new CleanupCollector()
+        successorSetup.run(() => this.connectedCallback())
+        if (successorSetup.failed && !this.statusOwner) {
+          const successor = new StatusStreamOwner(this)
+          this.statusOwner = successor
+          successor.failOwnerSetup(successorSetup.error)
+        }
       }
+    } finally {
+      this.statusWarningQueue = previousWarnings
+      const warnings = []
+      if (oldCleanup.failed) {
+        warnings.push({
+          message: "hive status subscription disconnect failed",
+          error: oldCleanup.error
+        })
+      }
+      warnings.push(...deferredWarnings)
+      this.publishStatusWarnings(warnings)
     }
+  }
 
-    this.statusWarningQueue = previousWarnings
-    const warnings = []
-    if (oldCleanup.failed) {
-      warnings.push({
-        message: "hive status subscription disconnect failed",
-        error: oldCleanup.error
-      })
-    }
-    warnings.push(...deferredWarnings)
-    this.publishStatusWarnings(warnings)
+  connectTurboStreamSource() {
+    return Turbo.connectStreamSource(this)
+  }
+
+  disconnectTurboStreamSource() {
+    return Turbo.disconnectStreamSource(this)
+  }
+
+  forgetRetiringStatusOwner(owner) {
+    if (this.statusRetiringOwner === owner) this.statusRetiringOwner = null
   }
 
   reportStatusFailure(message, error) {

@@ -222,6 +222,24 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     assert_operator deadlines.first, :>, deadlines.last
   end
 
+  def test_browser_receipt_describes_the_controller_owned_sandbox
+    proxy = Struct.new(:hostname, :proxy_url, :origin, :app_port).new(
+      "evidence.invalid", "http://127.0.0.1:9999", "http://evidence.invalid", 4321
+    )
+    toolkit = Toolkit.new(hive_executable: "/opt/hive/bin/hive")
+    toolkit.instance_variable_set(:@capture_proxy, proxy)
+
+    receipt = toolkit.send(:browser_receipt, browser_entry, { "app_port" => 4321 }, "/tmp/output")
+
+    assert_equal "agent-browser", receipt.fetch("driver")
+    assert_equal "/tmp/output", receipt.fetch("output_root")
+    assert_equal [ RbConfig.ruby, "/opt/hive/bin/hive", "evidence", "browser" ],
+                 receipt.fetch("argv_prefix")
+    assert_equal "http://127.0.0.1:4321", receipt.fetch("app_endpoint")
+    assert_equal "producer-workspace", receipt.dig("sandbox", "driver")
+    assert_match(/limited proxy/, receipt.dig("sandbox", "network"))
+  end
+
   def test_browser_daemon_receipt_is_owned_and_teardown_is_bounded
     Dir.mktmpdir("hive-capture-daemon") do |root|
       namespace = "n-test"

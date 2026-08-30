@@ -1640,6 +1640,19 @@ class CommandsStatusTest < Minitest::Test
                  annotation.fetch(:suggested_command)
     refute_equal row.dig(:marker_attrs, "repair_command"),
                  annotation.fetch(:suggested_command)
+
+    terminal = command.send(
+      :projection_repair_annotation,
+      row.merge(
+        projection_repair: true,
+        marker_attrs: row.fetch(:marker_attrs).merge(
+          "projection_reason" => "checkpoint_oversized"
+        )
+      ),
+      project: "demo"
+    )
+    assert_nil terminal.fetch(:suggested_command)
+    assert_nil terminal.dig(:diagnostic, "suggested_next_action")
   end
 
   def test_pristine_projection_requires_complete_initial_zero_state
@@ -1678,6 +1691,11 @@ class CommandsStatusTest < Minitest::Test
       refute command.send(:pristine_projection_task?, task, completed)
       task.stage_index = 2
       refute command.send(:pristine_projection_task?, task, marker)
+      task.stage_index = 1
+      FileUtils.mkdir_p(task.log_dir)
+      with_replaced_singleton_method(Dir, :empty?, ->(*) { raise IOError, "blocked" }) do
+        refute command.send(:pristine_projection_task?, task, marker)
+      end
     end
   end
 

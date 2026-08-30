@@ -271,6 +271,15 @@ class E2EStepExecutorTest < Minitest::Test
           - kind: state_assert
             path: "{task_dir:2-brainstorm}/extra.md"
             contains: "extra body"
+          - kind: state_assert
+            path: "{task_dir:2-brainstorm}/task-projection.json"
+            contains: '"schema":"hive-task-projection"'
+          - kind: state_assert
+            path: "{task_dir:2-brainstorm}/task-projection.checkpoint.json"
+            contains: '"schema":"hive-task-projection-checkpoint"'
+          - kind: state_assert
+            path: "{task_dir:2-brainstorm}/task-journal.jsonl"
+            absent: true
       YAML
 
       Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all

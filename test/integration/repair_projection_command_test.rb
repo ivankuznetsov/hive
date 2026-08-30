@@ -218,6 +218,70 @@ class RepairProjectionCommandTest < Minitest::Test
     end
   end
 
+  def test_nonterminal_postcondition_recommends_only_the_exact_task_retry
+    with_project_tasks(1) do |project, tasks|
+      task = tasks.first
+      projection = Hive::TaskProjection.project(records: [])
+      bounded = Hive::TaskProjection::Store::BoundedRead.new(
+        projection: projection, state: "repair_required",
+        diagnostics: [ { "reason" => "checkpoint_missing" } ],
+        truncated: false, journal_cursor: 0, journal_records: []
+      )
+      fake_store = Object.new
+      fake_store.define_singleton_method(:repair!) do |**|
+        Hive::TaskProjection::Store::RepairResult.new(
+          projection: projection, bounded: bounded
+        )
+      end
+
+      payload = nil
+      with_replaced_singleton_method(
+        Hive::TaskProjection::Store, :new, ->(**) { fake_store }
+      ) do
+        payload = command_error_payload(
+          task.slug, project: project, stage: "1-inbox"
+        )
+      end
+
+      assert_schema_valid(payload)
+      assert_equal "projection_repair_failed", payload.fetch("error_kind")
+      assert_equal false, payload.fetch("terminal")
+      assert_equal "retry_exact_repair", payload.dig("next_action", "kind")
+      assert_equal(
+        "hive repair-projection #{task.slug} --project #{project} --stage 1-inbox",
+        payload.dig("next_action", "command")
+      )
+    end
+  end
+
+  def test_unregistered_task_and_unknown_error_are_typed_without_mutation
+    with_tmp_dir do |root|
+      candidate = File.join(root, "candidate")
+      FileUtils.mkdir_p(candidate)
+      task = Struct.new(:project_root).new(root)
+      original_realpath = File.method(:realpath)
+
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "stale", "path" => candidate } ] }
+      ) do
+        replacement = lambda do |path|
+          raise Errno::ENOENT, path if path == candidate
+
+          original_realpath.call(path)
+        end
+        with_replaced_singleton_method(File, :realpath, replacement) do
+          command = Hive::Commands::RepairProjection.new("task")
+          error = assert_raises(Hive::InvalidTaskPath) do
+            command.send(:registered_project_for, task)
+          end
+          assert_match(/registered project/, error.message)
+          assert_equal "error", command.send(:envelope_error_kind, RuntimeError.new)
+        end
+      end
+    end
+  end
+
   private
 
   def with_project_tasks(count)

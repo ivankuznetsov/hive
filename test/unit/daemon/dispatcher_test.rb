@@ -875,6 +875,37 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
   end
 
+  def test_bound_dispatch_requests_stay_queued_when_admission_context_is_unavailable
+    dispatcher, supervisor, _controller, logger = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("s1", "s2")
+    requests.each { |request| request.recovery = nil }
+    rows = recovery_scan_rows("s1", "s2")
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          ->(*) { raise "fleet snapshot unavailable" }
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_empty supervisor.spawned
+    blocked = logger.events.filter_map do |name, attributes|
+      next unless name == :dispatch_request_blocked
+      next unless attributes[:reason] == "admission_context_unavailable"
+
+      attributes[:request_id]
+    end
+    assert_equal %w[recovery-s1 recovery-s2], blocked
+    refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
+  end
+
   def test_dispatch_request_scan_caches_registry_failure_without_pacing_recoveries
     coordinator = FakeRecoveryCoordinator.new(status: "blocked")
     dispatcher, _supervisor, _controller, logger = make_dispatcher(

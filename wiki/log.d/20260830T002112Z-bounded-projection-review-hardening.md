@@ -17,5 +17,7 @@ projection-outage archive block after healthy generation validation resumes.
 The status schema and TUI snapshot now preserve the producer-owned
 `projection_repair` boolean explicitly. Lightweight task adapters may continue
 to expose a workflow ID string; only descriptor objects are queried for
-controller behavior. Post-cutover test task factories publish the same
-zero-history checkpoint as canonical production task creators.
+controller behavior. Post-cutover test task factories, including E2E
+`seed_state` and Hive Web's production-backed creator, publish the same
+zero-history checkpoint as canonical production task creators; historical
+checkpoint-loss fixtures must opt into that damage explicitly.

@@ -238,6 +238,27 @@ class AttemptsGenerationTest < Minitest::Test
     end
   end
 
+  def test_current_input_epoch_normalizes_a_non_integer_projection_generation
+    projection = Object.new
+    projection.define_singleton_method(:to_h) do
+      { "identity" => { "task_generation" => "not-an-integer" } }
+    end
+    bounded = Hive::TaskProjection::Store::BoundedRead.new(
+      projection: projection, state: "current", diagnostics: [], truncated: false,
+      journal_cursor: 0, journal_records: []
+    )
+    store = Object.new
+    store.define_singleton_method(:read_routine) { |**| bounded }
+    task = FolderTask.new(folder: "/tmp/task", state_file: "/tmp/task/pr.md")
+
+    with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::Attempts::Generation.current_task_input_epoch(task)
+      end
+      assert_match(/invalid value for Integer/, error.message)
+    end
+  end
+
   def test_current_input_epoch_builds_default_read_only_attempt_store
     with_tmp_dir do |dir|
       task = FolderTask.new(folder: dir, state_file: File.join(dir, "pr.md"))

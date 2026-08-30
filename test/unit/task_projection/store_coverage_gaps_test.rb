@@ -111,6 +111,7 @@ class TaskProjectionStoreCoverageGapsTest < Minitest::Test
       pristine = store.read_routine(pristine: true)
 
       assert_equal "repair_required", broken.state
+      assert broken.repair_required?
       assert_equal "pristine", pristine.state
       assert_equal 0, pristine.journal_cursor
       assert_empty pristine.diagnostics
@@ -185,6 +186,86 @@ class TaskProjectionStoreCoverageGapsTest < Minitest::Test
       assert_equal "KeyError", degraded.diagnostics.first.dig("details", "error_class")
 
       refute projection_store(dir).send(:checkpoint_prefix_valid?, {}, 0)
+    end
+  end
+
+  def test_bounded_attempt_store_supports_direct_fetch
+    calls = []
+    underlying = Object.new
+    underlying.define_singleton_method(:fetch) do |attempt_id|
+      calls << attempt_id
+      { "attempt_id" => attempt_id }
+    end
+    bounded_class = Hive::TaskProjection::Store.const_get(:BoundedAttemptStore, false)
+    bounded = bounded_class.new(
+      store: underlying, primary_attempt_ids: [ "attempt-1" ], predecessor_limit: 1
+    )
+
+    assert_equal "attempt-1", bounded.fetch("attempt-1").fetch("attempt_id")
+    assert_equal [ "attempt-1" ], calls
+  end
+
+  def test_pristine_initialization_fails_closed_when_its_checkpoint_is_not_current
+    with_tmp_dir do |dir|
+      store = projection_store(dir)
+      projection = Hive::TaskProjection.project(records: [])
+      bounded = Hive::TaskProjection::Store::BoundedRead.new(
+        projection: projection, state: "repair_required",
+        diagnostics: [ { "reason" => "checkpoint_invalid" } ], truncated: false,
+        journal_cursor: 0, journal_records: []
+      )
+      store.define_singleton_method(:read_bounded_unlocked) { |**| bounded }
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.initialize_pristine!
+      end
+      assert_match(/checkpoint_invalid/, error.message)
+    end
+  end
+
+  def test_checkpoint_prefix_returns_false_on_an_open_failure
+    with_tmp_dir do |dir|
+      store = projection_store(dir)
+      File.write(store.journal_path, "journal\n")
+      original_open = File.method(:open)
+      replacement = lambda do |path, *args, **kwargs, &block|
+        raise Errno::EACCES, path if path == store.journal_path
+
+        original_open.call(path, *args, **kwargs, &block)
+      end
+
+      with_replaced_singleton_method(File, :open, replacement) do
+        refute store.send(:checkpoint_prefix_valid?, {}, 0)
+      end
+    end
+  end
+
+  def test_journal_locks_reject_descriptor_replacement
+    %i[read write].each do |mode|
+      with_tmp_dir do |dir|
+        store = projection_store(dir)
+        lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+        File.write(lock_path, "old\n")
+        old_path = "#{lock_path}.old"
+        original_open = File.method(:open)
+        swapped = false
+        replacement = lambda do |path, *args, **kwargs, &block|
+          if path == lock_path && !swapped
+            swapped = true
+            File.rename(lock_path, old_path)
+            File.write(lock_path, "new\n")
+          end
+          original_open.call(path, *args, **kwargs, &block)
+        end
+
+        with_replaced_singleton_method(File, :open, replacement) do
+          error_class = mode == :read ?
+            Hive::TaskProjection::RoutineLockInvalid : Hive::TaskProjection::InvalidJournal
+          assert_raises(error_class) do
+            store.send("with_journal_#{mode}_lock") { flunk "mismatched lock must not yield" }
+          end
+        end
+      end
     end
   end
 

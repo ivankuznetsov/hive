@@ -18,8 +18,8 @@ module Hive
       CONTENT = %w[empty non_empty unknown].freeze
       BOUNDARY_KINDS = %w[calendar_day zone_cutover].freeze
       REQUIRED_KEYS = %w[
-        schema schema_version local_date sequence time_zone starts_at ends_at
-        boundary_kind lifecycle closed_at completeness content
+        schema schema_version interval_id local_date sequence time_zone starts_at ends_at
+        duration_seconds boundary_kind cutover lifecycle closed_at completeness content
         last_materialized_at projects items attention gaps source_frontiers
       ].freeze
 
@@ -41,10 +41,18 @@ module Hive
         starts_at = parse_time!(data.fetch("starts_at"), "starts_at")
         ends_at = parse_time!(data.fetch("ends_at"), "ends_at")
         raise InvalidRecord, "ends_at must be after starts_at" unless ends_at > starts_at
+        unless data.fetch("interval_id").to_s.match?(/\A[0-9a-f]{64}\z/)
+          raise InvalidRecord, "interval_id must be a SHA-256 digest"
+        end
+        duration = data.fetch("duration_seconds")
+        unless duration.is_a?(Integer) && duration.positive? && duration == (ends_at - starts_at).to_i
+          raise InvalidRecord, "duration_seconds must match the persisted interval"
+        end
         enum!(data, "lifecycle", LIFECYCLES)
         enum!(data, "completeness", COMPLETENESS)
         enum!(data, "content", CONTENT)
         enum!(data, "boundary_kind", BOUNDARY_KINDS)
+        validate_cutover!(data, starts_at)
         if data["lifecycle"] == "closed"
           parse_time!(data.fetch("closed_at"), "closed_at")
         elsif !data["closed_at"].nil?
@@ -146,6 +154,38 @@ module Hive
         raise InvalidRecord, "#{key} must be one of #{values.join(', ')}"
       end
       private_class_method :enum!
+
+      def validate_cutover!(data, starts_at)
+        cutover = data.fetch("cutover")
+        if data.fetch("boundary_kind") == "calendar_day"
+          raise InvalidRecord, "calendar-day intervals cannot carry cutover metadata" unless cutover.nil?
+
+          return
+        end
+        unless cutover.is_a?(Hash)
+          raise InvalidRecord, "zone-cutover intervals require cutover metadata"
+        end
+        required = %w[requested_at effective_at previous_time_zone skipped_labels]
+        missing = required.reject { |key| cutover.key?(key) }
+        raise InvalidRecord, "cutover is missing #{missing.join(', ')}" unless missing.empty?
+
+        parse_time!(cutover.fetch("requested_at"), "cutover.requested_at")
+        effective_at = parse_time!(cutover.fetch("effective_at"), "cutover.effective_at")
+        unless effective_at == starts_at
+          raise InvalidRecord, "cutover.effective_at must equal starts_at"
+        end
+        if cutover.fetch("previous_time_zone").to_s.empty?
+          raise InvalidRecord, "cutover.previous_time_zone must be non-empty"
+        end
+        Calendar.timezone!(cutover.fetch("previous_time_zone"))
+        unless cutover.fetch("skipped_labels").is_a?(Array)
+          raise InvalidRecord, "cutover.skipped_labels must be an array"
+        end
+        cutover.fetch("skipped_labels").each { |label| validate_date!(label) }
+      rescue KeyError
+        raise InvalidRecord, "cutover metadata is incomplete"
+      end
+      private_class_method :validate_cutover!
     end
   end
 end

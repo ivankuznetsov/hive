@@ -4100,16 +4100,18 @@ module Hive
       end
 
       zone = daily["time_zone"]
-      validate_daily_digest_zone!(zone, source_path) if zone
+      validate_daily_digest_zone!(zone, source_path) unless zone.nil?
       coverage = daily["coverage_started_at"]
-      validate_digest_timestamp!(coverage, "daily_digest.coverage_started_at", source_path) if coverage
+      unless coverage.nil?
+        validate_digest_timestamp!(coverage, "daily_digest.coverage_started_at", source_path)
+      end
       membership = daily["initial_membership"]
       unless membership.nil? || (membership.is_a?(Array) && membership.all? { |entry| entry.is_a?(Hash) })
         raise ConfigError,
               "daily_digest.initial_membership in #{describe_source(source_path)} must be an Array of objects"
       end
       interval = daily["first_interval"]
-      validate_digest_interval!(interval, source_path) if interval
+      validate_digest_interval!(interval, source_path) unless interval.nil?
       return unless daily["enabled"]
 
       if zone.nil?

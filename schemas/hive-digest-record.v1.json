@@ -163,6 +163,7 @@
         "draft": { "$ref": "#/$defs/DetailValue" },
         "check_state": { "$ref": "#/$defs/DetailValue" },
         "conclusion": { "$ref": "#/$defs/DetailValue" },
+        "review_state": { "$ref": "#/$defs/DetailValue" },
         "merge_state": { "$ref": "#/$defs/DetailValue" },
         "merge_oid": { "$ref": "#/$defs/DetailValue" },
         "merged_at": { "$ref": "#/$defs/DetailValue" },

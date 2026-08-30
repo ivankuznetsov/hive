@@ -7,6 +7,7 @@ require "hive/daily_digest/materiality"
 require "hive/daily_digest/source_health"
 require "hive/daily_digest/task_creation_receipt"
 require "hive/task_journal"
+require "hive/markers"
 require "hive/workflows/registry"
 require "hive/gh"
 
@@ -30,21 +31,22 @@ module Hive
       end
 
       def collect
+        @collection_observed_at = normalize_time(@observed_at.call)
         state_root = verified_state_root!
-        stages_root = File.join(state_root, "stages")
-        unless File.directory?(stages_root)
-          raise SourceUnavailable, "registered project has no readable Hive stages"
-        end
+        stages_root = verified_stages_root!(state_root)
 
         facts = []
         boundary_records = Hash.new { |hash, key| hash[key] = [] }
         gaps = unknown_stage_gaps(stages_root)
         fingerprints = []
-        task_directories(stages_root, gaps).each do |task_folder|
+        task_folders = task_directories(stages_root, gaps)
+        task_folders.each do |task_folder|
+          boundary_records[task_folder]
           collect_creation(task_folder, facts, gaps, fingerprints)
           collect_journal(task_folder, facts, gaps, fingerprints, boundary_records)
         end
         attention = boundary_attention(boundary_records)
+        gaps.concat(boundary_history_gaps(task_folders, attention))
         facts = facts.uniq { |fact| fact.fetch("fact_id") }
                      .sort_by { |fact| [ fact.fetch("occurred_at"), fact.fetch("fact_id") ] }
         gaps = gaps.uniq { |gap| gap.fetch("gap_id") }
@@ -52,7 +54,7 @@ module Hive
         frontier = {
           "source" => "task_journal",
           "project_id" => @project.fetch("project_id"),
-          "observed_at" => iso(@observed_at.call),
+          "observed_at" => iso(observation_time),
           "fingerprints" => fingerprints.uniq.sort
         }
         health = gaps.empty? ?
@@ -90,6 +92,21 @@ module Hive
         Hive::Workflows::Registry.workflows.values.flat_map(&:stage_dirs).uniq
       end
 
+      def verified_stages_root!(state_root)
+        path = File.join(state_root, "stages")
+        unless File.directory?(path) && !File.symlink?(path)
+          raise SourceUnavailable, "registered project has no readable Hive stages"
+        end
+
+        real = File.realpath(path)
+        unless real.start_with?("#{state_root}#{File::SEPARATOR}")
+          raise SourceUnavailable, "registered project stages escape its state root"
+        end
+        real
+      rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR
+        raise SourceUnavailable, "registered project has no readable Hive stages"
+      end
+
       def unknown_stage_gaps(stages_root)
         Dir.children(stages_root).sort.filter_map do |name|
           path = File.join(stages_root, name)
@@ -105,7 +122,14 @@ module Hive
       def task_directories(stages_root, gaps)
         @known_stage_dirs.sort.flat_map do |stage|
           stage_root = File.join(stages_root, stage)
-          next [] unless File.directory?(stage_root)
+          next [] unless File.exist?(stage_root) || File.symlink?(stage_root)
+          unless safe_stage_root?(stage_root, stages_root)
+            gaps << scoped_gap(
+              "unsafe_stage_path", "stage directory escaped the Hive stages root",
+              task_slug: nil, scope: "#{@project.fetch('name')}:#{stage}"
+            )
+            next []
+          end
 
           Dir.children(stage_root).sort.filter_map do |name|
             candidate = File.join(stage_root, name)
@@ -117,6 +141,15 @@ module Hive
             candidate if File.directory?(candidate)
           end
         end
+      end
+
+      def safe_stage_root?(stage_root, stages_root)
+        return false if File.symlink?(stage_root) || !File.directory?(stage_root)
+
+        real = File.realpath(stage_root)
+        real.start_with?("#{File.realpath(stages_root)}#{File::SEPARATOR}")
+      rescue SystemCallError
+        false
       end
 
       def unsafe_task_path?(candidate, stage_root)
@@ -168,15 +201,24 @@ module Hive
           next if line.strip.empty?
 
           record = JSON.parse(line)
+          unless record.is_a?(Hash)
+            gaps << scoped_gap(
+              "malformed_journal", "task journal contains an invalid row",
+              task_slug: File.basename(task_folder), discriminator: index
+            )
+            next
+          end
           next unless relevant_record?(record)
 
           boundary_records[task_folder] << record if before_boundary?(record["occurred_at"])
           record = enrich_pr_evidence(task_folder, record)
 
-          result = Materiality.classify(record, project: @project)
+          result = Materiality.classify(
+            record, project: @project, observed_at: observation_time
+          )
           if result.disposition == :fact
             if in_window?(result.value.fetch("occurred_at"))
-              facts << result.value
+              facts << with_task_url(result.value)
               gaps << incomplete_pr_gap(record, task_folder) if incomplete_pr_evidence?(record)
             end
           elsif result.disposition == :gap
@@ -197,7 +239,8 @@ module Hive
 
       def enrich_pr_evidence(task_folder, record)
         payload = stringify(record["payload"] || {})
-        return record unless %w[pr_observed check_observed merge_observed].include?(payload["activity_kind"])
+        return record unless %w[pr_observed check_observed review_observed merge_observed]
+          .include?(payload["activity_kind"])
 
         core = pr_core(task_folder)
         payload["pr_url"] ||= core["pr_url"]
@@ -249,11 +292,12 @@ module Hive
 
       def incomplete_pr_evidence?(record)
         payload = stringify(record["payload"] || {})
-        return false unless %w[pr_observed check_observed merge_observed]
+        return false unless %w[pr_observed check_observed review_observed merge_observed]
           .include?(payload["activity_kind"])
 
         required = case payload["activity_kind"]
         when "check_observed" then %w[pr_number pr_url head_oid check_state]
+        when "review_observed" then %w[pr_number pr_url head_oid review_state]
         else %w[pr_number pr_url head_oid pr_state]
         end
         required.any? { |key| payload[key].nil? || payload[key].to_s.empty? }
@@ -264,7 +308,7 @@ module Hive
           source: "github", scope: "#{@project.fetch('name')}:#{File.basename(task_folder)}",
           reason_code: "pr_evidence_incomplete",
           reason: "Hive-owned pull request evidence lacks a required identity or outcome field",
-          observed_at: record["observed_at"] || @observed_at.call,
+          observed_at: record["observed_at"] || observation_time,
           project_id: @project["project_id"], task_slug: File.basename(task_folder)
         )
       end
@@ -304,7 +348,10 @@ module Hive
             when "session_finished"
               failure = record if failed_boundary_session?(payload)
             when "recovery_recorded"
-              failure = nil if %w[recovered complete completed resumed retrying].include?(payload["outcome"].to_s)
+              if %w[recovered complete completed resumed retrying].include?(payload["outcome"].to_s)
+                failure = nil
+                active_holds.clear
+              end
             end
           end
           question_items = open_questions.values.map do |record|
@@ -333,12 +380,56 @@ module Hive
           "task_slug" => slug,
           "stage" => record["stage"].to_s,
           "state" => state,
-          "since_at" => at.utc.iso8601(6),
-          "waiting_age_seconds" => [ (@ends_at - at).floor, 0 ].max,
-          "task_path" => "/tasks/#{url_component(@project.fetch('name'))}/#{url_component(slug)}#task-questions"
+          "waiting_since" => at.utc.iso8601(6),
+          "waiting_age_seconds" => [ (attention_boundary - at).floor, 0 ].max,
+          "task_url" => task_url(slug, anchor: "task-questions")
         }
-        item["waiting_age_seconds"] = nil if at > @ends_at
+        item["waiting_age_seconds"] = nil if at > attention_boundary
         item
+      end
+
+      def boundary_history_gaps(task_folders, attention)
+        known = attention.to_h { |item| [ item.fetch("task_slug"), true ] }
+        task_folders.filter_map do |task_folder|
+          slug = File.basename(task_folder)
+          next if known[slug]
+          next unless boundary_marker?(task_folder)
+
+          scoped_gap(
+            "boundary_history_missing",
+            "durable entry into the current attention state is unavailable",
+            task_slug: slug, scope: "#{@project.fetch('name')}:#{slug}"
+          )
+        end
+      end
+
+      def boundary_marker?(task_folder)
+        stage_dir = File.basename(File.dirname(task_folder))
+        stage = Hive::Workflows::Registry.workflows.values.flat_map(&:stages).find do |candidate|
+          candidate.dir == stage_dir
+        end
+        return false unless stage
+
+        marker = Hive::Markers.current(File.join(task_folder, stage.state_file))
+        %i[waiting execute_waiting review_waiting error review_error].include?(marker.name)
+      rescue Hive::Error, SystemCallError, IOError
+        false
+      end
+
+      def with_task_url(fact)
+        slug = fact["task_slug"].to_s
+        return fact if slug.empty?
+
+        fact.merge("task_url" => task_url(slug))
+      end
+
+      def task_url(slug, anchor: nil)
+        path = "/tasks/#{url_component(@project.fetch('name'))}/#{url_component(slug)}"
+        anchor ? "#{path}##{anchor}" : path
+      end
+
+      def attention_boundary
+        [ @ends_at, observation_time ].min
       end
 
       def failed_boundary_session?(payload)
@@ -361,7 +452,7 @@ module Hive
         scope = "#{scope}:#{discriminator}" if discriminator
         Materiality.build_gap(
           source: "project_state", scope: scope, reason_code: reason_code, reason: reason,
-          observed_at: @observed_at.call, project_id: @project["project_id"], task_slug: task_slug
+          observed_at: observation_time, project_id: @project["project_id"], task_slug: task_slug
         )
       end
 
@@ -386,6 +477,10 @@ module Hive
       end
 
       def iso(value) = normalize_time(value).iso8601(6)
+
+      def observation_time
+        @collection_observed_at || normalize_time(@observed_at.call)
+      end
     end
   end
 end

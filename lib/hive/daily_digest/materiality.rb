@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/daily_digest"
+require "hive/gh"
 require "hive/task_journal"
 
 module Hive
@@ -34,10 +35,38 @@ module Hive
         "push_observed" => :fact,
         "pr_observed" => :fact,
         "check_observed" => :fact,
+        "review_observed" => :fact,
         "merge_observed" => :fact,
         "operator_action" => :fact,
         "correction" => :fact,
         "activity_gap" => :gap
+      }.freeze
+
+      # Producer coverage is deliberately explicit. `instrumented` entries
+      # name the durable owner whose source contains the journal kind; legacy
+      # vocabulary without a current authoritative owner is declared instead
+      # of being mistaken for observed coverage.
+      PRODUCER_COVERAGE = {
+        "session_finished" => [ "instrumented", "lib/hive/agent_observation.rb" ],
+        "resource_limit_observed" => [ "instrumented", "lib/hive/agent_observation.rb" ],
+        "stage_transition" => [ "instrumented", "lib/hive/stages/base.rb" ],
+        "question_asked" => [ "instrumented", "lib/hive/stages/base.rb" ],
+        "answer_recorded" => [ "instrumented", "lib/hive/commands/answer.rb" ],
+        "approval_recorded" => [ "instrumented", "lib/hive/commands/approve.rb" ],
+        "rejection_recorded" => [ "instrumented", "lib/hive/commands/approve.rb" ],
+        "decision_recorded" => [ "instrumented", "lib/hive/commands/decide.rb" ],
+        "retry_requested" => [ "instrumented", "lib/hive/recovery/api.rb" ],
+        "recovery_recorded" => [ "instrumented", "lib/hive/recovery/api.rb" ],
+        "pr_observed" => [ "instrumented", "lib/hive/stages/open_pr.rb" ],
+        "check_observed" => [ "instrumented", "lib/hive/task_workspace/publication_activity.rb" ],
+        "review_observed" => [ "instrumented", "lib/hive/task_workspace/publication_activity.rb" ],
+        "merge_observed" => [ "instrumented", "lib/hive/stages/open_pr.rb" ],
+        "activity_gap" => [ "instrumented", "lib/hive/task_activity.rb" ],
+        "hold_recorded" => [ "unsupported_legacy", nil ],
+        "commit_observed" => [ "unsupported_legacy", nil ],
+        "push_observed" => [ "unsupported_legacy", nil ],
+        "operator_action" => [ "unsupported_legacy", nil ],
+        "correction" => [ "unsupported_legacy", nil ]
       }.freeze
 
       DETAIL_KEYS = {
@@ -49,12 +78,13 @@ module Hive
         "decision_recorded" => %w[decision],
         "recovery_recorded" => %w[outcome retry_at],
         "hold_recorded" => %w[hold_kind state provider retry_at],
-        "resource_limit_observed" => %w[resource_kind kind unit retry_at],
+        "resource_limit_observed" => %w[resource_kind kind unit state provider retry_at],
         "session_finished" => %w[health outcome timed_out provider actual_provider actual_model],
         "commit_observed" => %w[commit_oid branch],
         "push_observed" => %w[commit_oid branch],
         "pr_observed" => %w[pr_number pr_state pr_url commit_oid head_oid draft],
         "check_observed" => %w[pr_number check_state conclusion commit_oid head_oid],
+        "review_observed" => %w[pr_number review_state pr_state pr_url commit_oid head_oid draft],
         "merge_observed" => %w[pr_number merge_state pr_state pr_url commit_oid head_oid merge_oid merged_at],
         "operator_action" => %w[action outcome],
         "correction" => %w[corrected_fact_id correction_kind]
@@ -75,6 +105,7 @@ module Hive
         "push_observed" => "Push observed",
         "pr_observed" => "Pull request changed",
         "check_observed" => "Pull request checks changed",
+        "review_observed" => "Pull request review changed",
         "merge_observed" => "Pull request merged",
         "operator_action" => "Operator action recorded",
         "correction" => "Historical fact corrected"
@@ -82,7 +113,7 @@ module Hive
 
       module_function
 
-      def classify(record, project:)
+      def classify(record, project:, observed_at: nil)
         row = stringify(record)
         return Result.new(disposition: :noise, value: nil) unless row["event_type"] == "activity_recorded"
 
@@ -99,7 +130,10 @@ module Hive
         else Result.new(disposition: :fact, value: fact(row, payload, kind, project))
         end
       rescue JSON::GeneratorError, TypeError, ArgumentError
-        Result.new(disposition: :gap, value: invalid_record_gap(record, project))
+        Result.new(
+          disposition: :gap,
+          value: invalid_record_gap(record, project, observed_at: observed_at)
+        )
       end
 
       def build_gap(source:, scope:, reason_code:, reason:, observed_at:, freshness_at: nil,
@@ -149,7 +183,7 @@ module Hive
           "project_id" => project["project_id"],
           "task" => row["task"], "details" => details
         }
-        {
+        normalized = {
           "fact_id" => "fact:#{Digest::SHA256.hexdigest(canonical_json(identity))}",
           "kind" => kind,
           "category" => category(kind, payload),
@@ -164,6 +198,9 @@ module Hive
           "source" => bounded(row.dig("provenance", "source"), 80, fallback: "task_journal"),
           "details" => details
         }
+        pr = pull_request(kind, details)
+        normalized["pr"] = pr if pr
+        normalized
       end
       private_class_method :fact
 
@@ -181,17 +218,46 @@ module Hive
       end
       private_class_method :gap
 
-      def invalid_record_gap(record, project)
+      def invalid_record_gap(record, project, observed_at: nil)
         row = stringify(record || {})
         project = stringify(project || {})
         build_gap(
           source: "task_journal", scope: project["name"] || "project",
           reason_code: "malformed_activity", reason: "activity record could not be normalized",
-          observed_at: row["observed_at"] || row["occurred_at"] || Time.now.utc,
+          observed_at: safe_observation_time(row, observed_at),
           project_id: project["project_id"], task_slug: row.dig("task", "slug")
         )
       end
       private_class_method :invalid_record_gap
+
+      def safe_observation_time(row, fallback)
+        [ fallback, row["observed_at"], row["occurred_at"] ].compact.each do |candidate|
+          return iso_time(candidate)
+        rescue ArgumentError, TypeError
+          next
+        end
+        iso_time(Time.now.utc)
+      end
+      private_class_method :safe_observation_time
+
+      def pull_request(kind, details)
+        return nil unless %w[pr_observed check_observed review_observed merge_observed].include?(kind)
+
+        parsed = Hive::Gh.parse_pull_request_url(details["pr_url"])
+        number = Integer(details["pr_number"], exception: false)
+        number ||= parsed && parsed.fetch("number")
+        {
+          "number" => number,
+          "url" => parsed && parsed.fetch("url"),
+          "state" => details["pr_state"] || details["merge_state"],
+          "draft" => details.key?("draft") ? details["draft"] == true : nil,
+          "head_revision" => details["head_oid"] || details["commit_oid"],
+          "checks" => details["check_state"] || details["conclusion"],
+          "review" => details["review_state"],
+          "merged_at" => details["merged_at"]
+        }
+      end
+      private_class_method :pull_request
 
       def failed_session?(payload)
         %w[failed error timeout timed_out interrupted resource_exhausted].include?(payload["outcome"].to_s) ||

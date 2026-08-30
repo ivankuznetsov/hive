@@ -60,6 +60,44 @@ class DailyDigestCoverageTest < Minitest::Test
     end
   end
 
+  def test_invalid_snapshot_and_history_discontinuities_become_deduplicated_gaps
+    original = project("old", "/old")
+    replacement_before = original.merge("path" => "/moved", "hive_state_path" => "/moved/.hive-state")
+    coverage = Hive::DailyDigest::Coverage.new(
+      daily_config: {
+        "coverage_started_at" => "2026-08-30T00:00:00Z",
+        "initial_membership" => [ {}, original ]
+      },
+      membership_history: [
+        event("registered", "2026-08-30T00:00:00Z", before: original, after: original),
+        event("replaced", "2026-08-30T01:00:00Z",
+              before: replacement_before, after: project("new", "/new")),
+        event("unregistered", "2026-08-30T02:00:00Z",
+              before: project("ghost", "/ghost").merge("project_id" => "ghost-project"),
+              after: nil)
+      ]
+    )
+
+    result = coverage.projects_for(
+      starts_at: "2026-08-30T03:00:00Z", ends_at: "2026-08-30T04:00:00Z"
+    )
+    codes = result.gaps.map { |gap| gap.fetch("reason_code") }
+    assert_includes codes, "registry_snapshot_invalid"
+    assert_includes codes, "registry_history_invalid"
+    assert_includes codes, "registry_history_discontinuous"
+    assert_equal [ "/new" ], result.projects.map { |row| row.fetch("path") }
+  end
+
+  def test_missing_coverage_configuration_is_a_typed_invalid_record
+    coverage = Hive::DailyDigest::Coverage.new(
+      daily_config: { "initial_membership" => [] }, membership_history: []
+    )
+    assert_raises(Hive::DailyDigest::InvalidRecord) do
+      coverage.projects_for(starts_at: "2026-08-30T00:00:00Z",
+                            ends_at: "2026-08-31T00:00:00Z")
+    end
+  end
+
   private
 
   def project(registration, path)

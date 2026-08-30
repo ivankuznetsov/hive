@@ -125,6 +125,30 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT, msg
   end
 
+  def test_waiting_brainstorm_exposes_restore_and_retry_without_dispatch
+    row = make_row(
+      action_key: "needs_input", stage: "2-brainstorm",
+      suggested_command: "hive brainstorm some-slug --from 2-brainstorm"
+    )
+
+    restore = Hive::Tui::KeyMap.message_for(mode: :grid, key: "u", row: row)
+    retry_message = Hive::Tui::KeyMap.message_for(mode: :grid, key: "R", row: row)
+
+    assert_kind_of Hive::Tui::Messages::RestoreBrainstormSuggestion, restore
+    assert_kind_of Hive::Tui::Messages::RetryBrainstormSuggestion, retry_message
+    assert_equal row, restore.row
+    assert_equal row, retry_message.row
+  end
+
+  def test_suggestion_recovery_keys_are_inert_outside_waiting_brainstorm
+    row = make_row(action_key: "ready_to_plan", stage: "3-plan")
+
+    assert_same Hive::Tui::Messages::NOOP,
+                Hive::Tui::KeyMap.message_for(mode: :grid, key: "u", row: row)
+    assert_same Hive::Tui::Messages::NOOP,
+                Hive::Tui::KeyMap.message_for(mode: :grid, key: "R", row: row)
+  end
+
   # ---- v2 g/G jump-to-top/bottom (Plan R4 stretch nav) ----
 
   def test_grid_lowercase_g_returns_cursor_jump_top_singleton

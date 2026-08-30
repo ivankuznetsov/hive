@@ -158,6 +158,13 @@ class SecretPatternsTest < Minitest::Test
     assert_match_name("password: s3cretpassphrase42", :password_assignment)
   end
 
+  def test_password_assignment_shell_variable_indirection_is_not_a_secret
+    refute_match_any("MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}")
+    refute_match_any('DATABASE_PASSWORD="$DATABASE_PASSWORD"')
+    assert_match_name("DATABASE_PASSWORD=${DATABASE_PASSWORD}-literal", :password_assignment)
+    assert_match_name('DATABASE_PASSWORD="$DATABASE_PASSWORD-suffix"', :password_assignment)
+  end
+
   def test_password_before_json_delimiter_is_detected
     assert_match_name(
       '{"password":"s3cretpassphrase42"}',

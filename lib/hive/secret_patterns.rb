@@ -44,7 +44,10 @@ module Hive
       # not mistaken for a credential.
       # Include conventional prefixes (`DB_PASSWORD`, `ADMIN_PASSWORD`) so a
       # dotted unquoted credential cannot hide behind the variable name.
-      password_assignment:   /\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
+      # A whole shell variable reference is not itself secret material. Exempt
+      # only `$NAME` / `${NAME}` (optionally quoted); mixed reference-plus-
+      # literal values remain fail-closed.
+      password_assignment:   /\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*(?!['"]?\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)['"]?(?=[\s,;}\]]|$))['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
       password_sql:          /\bPASSWORD\s+['"][^\s'"]{6,}['"]/i,
       password_xml:          /<password>\s*[^<\s]{6,}\s*<\/password>/i,
       password_cli:          /--password\s+['"]?[^\s'"]{6,}['"]?(?=\s|$)/i,

@@ -46,6 +46,7 @@ class HiveCommandsAnswerTest < Minitest::Test
         )
         path = File.join(folder, "brainstorm.md")
         File.write(path, content)
+        seed_task_projection(folder, state_file: path)
         Hive::Config.register_project(name: "demo", path: project)
         yield(project, folder, path)
       end
@@ -294,6 +295,7 @@ class HiveCommandsAnswerTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       FileUtils.cp(File.join(old_incarnation, "meta.yml"), File.join(folder, "meta.yml"))
       FileUtils.cp(File.join(old_incarnation, "brainstorm.md"), path)
+      seed_task_projection(folder, state_file: path)
       before = File.binread(path)
 
       rejected = call_answer(binding: token, answer: "replacement folder")

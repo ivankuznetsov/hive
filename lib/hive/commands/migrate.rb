@@ -1,4 +1,5 @@
 require "fileutils"
+require "json"
 require "open3"
 require "time"
 require "yaml"
@@ -212,10 +213,9 @@ module Hive
             @daemon_cutover || method(:restart_daemon_for_patrol_index_cutover!)
           ).call
           if cutover_restarted
-            # The first pass may race only with the old daemon, which does not
-            # maintain this index. A synchronous restart followed by one
-            # second explicit pass closes that finite cutover window. The new
-            # daemon uses the inventory lock for every mutation.
+            # The first pass may race with the old daemon, which can omit the
+            # current index. A synchronous restart followed by one second
+            # explicit pass closes that finite cutover window.
             final_index = migrate_patrol_fix_pending_index(hive_state)
             patrol_admission_index = final_index.merge(changed: true).freeze
             restart_requested = true

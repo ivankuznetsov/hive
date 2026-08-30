@@ -61,6 +61,28 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_claim_window_starts_after_prelaunch_context_capture
+    wall_time = NOW
+    context_provenance = Object.new
+    context_provenance.define_singleton_method(:capture_launch) do |**_attributes|
+      wall_time = NOW + 45
+    end
+
+    with_dispatcher(
+      context_provenance: context_provenance,
+      clock: -> { wall_time }
+    ) do |dispatcher, launcher, task|
+      task.folder = File.dirname(task.state_file)
+      task.project_root = task.folder
+      result = dispatch(dispatcher, task, request_id: "request-one")
+      launched = launcher.launched.fetch(0).fetch(0)
+
+      assert_equal :accepted, result.status
+      assert_equal NOW.iso8601(6), launched["accepted_at"]
+      assert_equal (NOW + 75).iso8601(6), launched["claim_deadline"]
+    end
+  end
+
   def test_changed_generation_waits_for_live_stage_owner_instead_of_attaching
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "request-one")
@@ -718,7 +740,13 @@ class AttemptsDispatcherTest < Minitest::Test
           result_r.close
           store = Hive::Attempts::Store.new(root: attempt_root)
           original_generation_lock = store.method(:with_generation_lock)
+          admission_generation_lock = true
           store.define_singleton_method(:with_generation_lock) do |generation, &block|
+            unless admission_generation_lock
+              next original_generation_lock.call(generation, &block)
+            end
+
+            admission_generation_lock = false
             original_generation_lock.call(generation) do
               entered_w.write("1")
               entered_w.close
@@ -1512,17 +1540,15 @@ class AttemptsDispatcherTest < Minitest::Test
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
                       context_provenance: Hive::ContextProvenance,
-                      transient_retry_backoff_sec: 60)
+                      transient_retry_backoff_sec: 60,
+                      clock: -> { NOW })
     with_tmp_dir do |root|
-      state_file = File.join(root, "task.md")
-      File.write(state_file, "task\n<!-- WAITING -->\n")
-      task = FakeTask.new(id: 42, slug: "durable-task", state_file: state_file,
-                          stage_index: 4, stage_name: "execute")
+      task = task_fixture(root, id: 42, slug: "durable-task")
       store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
       launcher = FakeLauncher.new
       ids = %w[attempt-one attempt-two attempt-three].each
       dispatcher = Hive::Attempts::Dispatcher.new(
-        store: store, launcher: launcher, limits: limits, clock: -> { NOW },
+        store: store, launcher: launcher, limits: limits, clock: clock,
         id_generator: -> { ids.next }, capability_generator: -> { CLAIM_CAPABILITY },
         context_provenance: context_provenance,
         transient_retry_backoff_sec: transient_retry_backoff_sec
@@ -1532,12 +1558,16 @@ class AttemptsDispatcherTest < Minitest::Test
   end
 
   def task_fixture(root, id:, slug:)
-    state_file = File.join(root, "#{slug}.md")
+    folder = File.join(root, slug)
+    FileUtils.mkdir_p(folder)
+    state_file = File.join(folder, "task.md")
     File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
-    FakeTask.new(
+    task = FakeTask.new(
       id: id, slug: slug, state_file: state_file,
       stage_index: 4, stage_name: "execute"
     )
+    seed_task_projection(folder, state_file: state_file)
+    task
   end
 
   def dispatch(dispatcher, task, request_id:, interactive: false, intended_stage: "4-execute",

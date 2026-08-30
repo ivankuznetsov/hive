@@ -3,8 +3,8 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-08-16
-tags: [commands, api, skills, agents, operational, provisioning]
+updated: 2026-08-29
+tags: [commands, api, skills, agents, operational, provisioning, projection-repair]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
@@ -15,7 +15,7 @@ corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
 agent-first `hive status --operational --json`, explicit `hive circuits`
 inspection/administration, bounded `hive watch`, closed `hive act`, native
-semantic `hive task` detail, the
+semantic `hive task` detail, exact-task [[commands/repair-projection]], the
 `hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
@@ -78,6 +78,8 @@ authorized actions), and
 [[commands/circuits]] as the generation-fenced provider-health surface,
 [[commands/task]] as the bounded read-only semantic result/usage/diagnostic
 surface for one exact task,
+[[commands/repair-projection]] as the explicit exact-task rebuild for a
+synthetic bounded-projection repair row,
 `--json` envelopes where the command page says they exist.
 Bare `hive status` and `hive status --json` are the bounded current-liveness
 surface. `--operational --json` selects the v4 agent workflow document with a

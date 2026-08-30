@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-24
+updated: 2026-08-30
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -55,6 +55,21 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `9-done` | `task.md` | reused from `4-execute` |
 
 For coding tasks, mapping is encoded in `Hive::Task::STATE_FILES` (`lib/hive/task.rb:15`), derived from `Hive::Workflows::Registry.default`. `Hive::Task#state_file` uses the task's selected workflow descriptor (`workflow.state_file_for(stage_name)`) so non-coding workflows can carry their own stage-state filenames while field-less coding tasks keep the historical paths.
+
+Outcome-evidence implementation rework is an audited backward transition, not a
+new stage or a marker clear. A strict `current.json` pointer at
+`status=rework` binds the rejected generation and digest; the controller rearms
+`7-artifacts` to `4-execute` through `Commands::Approve` and appends one of two
+mode-0600 receipts under `<task>/outcome-evidence/reworks/`. Each receipt binds
+the reviewed base/head, targets, and reasons. The evidence generation remains
+immutable, and both future receipt slots are protected while the implementer
+runs, including before the first receipt exists. The same custody manifest
+protects every representation and project-provider manifest named by the
+rejected attempts. Unrecognized siblings are not controller receipts and cannot
+poison the bounded inventory. Exact replay is idempotent; a third distinct
+authorization is impossible. Execute compares the reviewed and resulting
+repository trees through the hardened Git read boundary, so an empty descendant
+commit does not count as implementation progress.
 
 An opted-in terminal agent state file carries two distinct signals: the trailing
 Hive marker controls the runner protocol, while the exact first-line `Outcome:`
@@ -255,7 +270,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_WORKING phase=ci\|reviewers\|triage\|fix\|browser pass=NN -->` | 6-review phase in flight (transient — replaced at phase exit). The daemon can clear a wedged row and log `reason=review_agent_died` when the recorded Claude child is dead and the live review lock holder has no remaining children, allowing the next tick to retry review. Claude/tmux reviewer waits also fail fast when the managed tmux session disappears before writing the expected output file; a non-empty expected artifact is accepted after session death only when the Claude Stop hook already wrote `.done`, so partial files do not get promoted as successful reviews. Provider-limit pane menus are classified as `limits reached for claude:` before readiness/session-death errors. | `Stages::Review` phase entry |
 | `<!-- REVIEW_WAITING escalations=N pass=NN -->` | review pass produced escalations awaiting human edit | `Stages::Review` orchestrator |
 | `<!-- REVIEW_CI_STALE attempts=N -->` | CI hard-block — `cfg.review.ci.max_attempts` reached without green; reviewers don't run on red CI | `Stages::Review` CI phase |
-| `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 2) | `Stages::Review` orchestrator |
+| `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 2); a fresh pass-completion receipt makes restart recovery automatic, while a newer escalation edit remains operator-owned | `Stages::Review` orchestrator |
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to run `hive artifacts` into 7-artifacts (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=... reason=... message="..." -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`). Every review error remains indefinitely retryable when no live task lock exists. Every reason uses the same shared marker-age cooldown. Re-entry runs the same phase, tamper, Git-status, and protected-file checks; it does not turn those checks off. `limits_reached` keeps its provider/reset display metadata but follows the same unbounded retry invariant. | `Stages::Review` orchestrator |
 
@@ -282,9 +297,11 @@ admission. The low-level `hive markers clear FOLDER --name <NAME>` command
 remains only as an explicit operator repair primitive. Its clear allowlist is
 `REVIEW_STALE`, `REVIEW_CI_STALE`, `REVIEW_ERROR`, `EXECUTE_STALE`, `ERROR`;
 terminal-success markers (`REVIEW_COMPLETE`, `EXECUTE_COMPLETE`, `COMPLETE`)
-are refused. A max-pass `REVIEW_STALE` with a current escalation artifact
-requires the operator to edit that input and use the TUI's explicit `r`
-gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
+are refused. A max-pass `REVIEW_STALE` requires operator input only when its
+escalation artifact is newer than the matching `fix-success-NN.md` receipt (or
+no receipt exists). A fresh completion receipt exposes normal guarded retry and
+lets the daemon recover a restart boundary; ordinary action, web, and bot
+surfaces still cannot bypass a newer operator edit.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
@@ -311,7 +328,7 @@ repair attempt for that task generation across request IDs; after that repair
 terminalizes, its newest receipt replays so missing output can be repaired
 without creating an infinite loop.
 
-- **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
+- **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, headless `Hive::Agent`, native OpenCode, and tmux-backed `Hive::ClaudeLauncher` write the active child `claude_pid` and its `claude_pid_start_time`. Confirmed completion or shared-session teardown compare-and-clears that exact pair while preserving the live parent lock; a replacement child with another identity cannot be erased. Cleanup compares identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
 ## Task condition journal and projection
@@ -438,6 +455,11 @@ producers include Telegram and hivebox web. Every recoverable-marker surface
 submits through `Hive::Recovery::API`; `RecoveryCoordinator` is the only
 producer of a recovery transition. The `requestor` field records the actual
 adapter rather than disguising web or TUI requests as bot traffic.
+Pending requests are consumed in `(created_at, request_id)` order. If an older
+request observes global or generic durable-attempt capacity exhaustion, later
+requests stay pending for the next scan even when a short-lived worker frees a
+slot before the current scan ends. Project and daily caps preserve order only
+within that project, so unrelated projects can still use available capacity.
 Each pending request is one JSON file:
 
 ```yaml
@@ -783,14 +805,15 @@ repository, or branch change are quarantined and block intake rather than
 silently replacing the baseline.
 
 The authoritative checkpoint schema remains v2. Incremental catch-up uses a
-separate `hive-refactor-patrol-reconciler-progress` v1 sidecar rather than
+separate `hive-refactor-patrol-reconciler-progress` v2 sidecar rather than
 putting transient cursors into `reconciler.json`. The sidecar repeats the exact
 registration/host/repository/default-branch identity and binds itself to the
 SHA-256 fingerprint of the v2 checkpoint it started from. It persists two
 restart-safe phases: paginated scan state (fixed overlap start, next/seen
 cursors, accumulated merged-PR identities, fixed upper time bound, and frozen
-result count), followed by manifest intake state (next item index and
-already-enqueued PR numbers). Search traversal is creation-ordered inside that
+result count), followed by manifest intake state (next item index, the exact
+processed PR prefix, and its ordered subset of already-enqueued PR numbers).
+Search traversal is creation-ordered inside that
 fixed merge window. Count or terminal-size drift restarts page traversal while
 retaining the upper bound. Origin identity discovery and each remote page or
 intake item consume one shared project-step deadline within the reconciler's
@@ -811,6 +834,8 @@ progress only in memory. The sidecar is continuation evidence, never high-water
 or job-completion authority. Its timestamps, protocol scalars, merge OIDs, and
 cursors are strictly typed; a persisted current cursor already present in the
 consumed set is impossible state and is quarantined before any GitHub call.
+Runtime ticks accept only the current continuation schema; unsupported shapes
+are quarantined and block intake.
 
 The job aggregate remains the only completion authority. It stores the
 enqueue-time discovery snapshot, one pinned `analysis_sha`, feature-level

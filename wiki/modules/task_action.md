@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/task_workspace/builder.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
-updated: 2026-08-13
+updated: 2026-08-30
 tags: [module, status, action, classifier, human-stage, diagnostic, blocked, plan-review, terminal-outcomes]
 ---
 
@@ -24,7 +24,11 @@ action.payload     # { "key", "label", "command", "next_action" } for JSON emiss
 Status dispatch adapters share the classifier's derived
 `TaskAction::READY_COMMANDS` lookup. The bot exposes every ready command,
 including in-process `approve`; the web exposes only commands accepted by the
-daemon dispatch-request queue.
+daemon dispatch-request queue. The exceptional `outcome_evidence_rework` kind
+is intentionally outside that ordinary ready-command map: bot, Web,
+OperationalAction, and daemon policy route it explicitly, revalidate its live
+stage/generation/digest binding, and dispatch the canonical evidence command
+instead of reconstructing a stage verb.
 
 ## Red-status diagnostic (`#diagnostic`)
 
@@ -36,7 +40,7 @@ Diagnostic artifacts are resolved with `File.realpath` and accepted only when th
 
 `marker_signature` is the SHA256 hex of `marker.name + sorted(attrs)` joined by newline. It's the freshness key shared with `Hive::DiagnosisAgent` (which validates it pre-write) and the TUI live-update gate (`Hive::Tui::Update#red_status_marker_signature`); producer + both consumers compute identical bytes.
 
-`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers with the guarded agent action `hive act workflow.retry PROJECT:SLUG --observation TOKEN`. The token binds the complete current observation, including marker occurrence; direct `markers clear && run` recipes are intentionally not published because they bypass the durable lifecycle. For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-passes `:review_stale`, the value reports `kind: manual_fix` with `command: nil` — the operator must edit or inspect findings before retry.
+`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / retryable `:review_stale` / `:error` markers with the guarded agent action `hive act workflow.retry PROJECT:SLUG --observation TOKEN`. The token binds the complete current observation, including marker occurrence; direct `markers clear && run` recipes are intentionally not published because they bypass the durable lifecycle. A max-pass `:review_stale` is retryable when its `fix-success-NN.md` receipt is at least as new as `escalations-NN.md`; this is completed work recovering across a restart. For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-pass review stale with missing or newer escalation input, the value reports `kind: manual_fix` with `command: nil`.
 
 EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non-nil `diagnostic` even though `Hive::Tui::KeyMap#red_detail_row?` does not yet open the detail view for them; bot/daemon consumers rely on the internal field, while external agents use `hive status --diagnose` or `hive task TARGET --json`.
 
@@ -51,6 +55,7 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 | `brainstorm_complete` | `READY_TO_PLAN` | "Ready to plan" | plan |
 | `plan_waiting` | `NEEDS_INPUT` | "Needs your input" | plan |
 | `plan_complete` | `READY_TO_DEVELOP` | "Ready to develop" | develop |
+| `artifacts_rework` | `OUTCOME_EVIDENCE_REWORK` | "Implementation rework required" | exact digest-bound `evidence rework` |
 | `execute_waiting` | `NEEDS_INPUT` | "Needs your input" | develop |
 | `execute_complete` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
 | `open_pr_complete` | `READY_FOR_REVIEW` | "Ready for review" | review |
@@ -120,7 +125,15 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 
 - **`live_task_lock: true`** → `agent_running` (label "Agent running", command nil). `Hive::Commands::Status` sets this when a task `.lock` holder PID is alive and its recorded process start time still matches. This covers pre-marker work inside `hive run`, such as auto-rebase before `REVIEW_WORKING` is written, so status and the TUI do not offer a duplicate runnable command that would immediately hit `ConcurrentRunError`.
 - **`:agent_working`** → `agent_running` (label "Agent running", command nil) when the agent is actually alive. A `hive run` is in flight; surfacing a workflow command would send the user (or an agent retry loop) straight into `ConcurrentRunError`. **Stale carve-out:** when the caller passes `pid_alive:` and `state_file_mtime:` kwargs and either (a) `pid_alive` is `false` (the per-task `.lock` recorded a `claude_pid` that's now dead), or (b) `pid_alive` is `nil` (no `.lock` claude_pid), the marker has no `pid` attr, and the state-file mtime is older than `agent_marker_grace_sec` (default 300s; threaded from `daemon.agent_marker_grace_sec` by `Hive::Commands::Status`), the action is reclassified as `:error` with a synthesized diagnostic (summary describes "agent process not alive" / "agent never attached"; detail explains the daemon will heal the on-disk marker within ~30s). This makes the row a recoverable red status immediately, without waiting for the daemon's `StaleAgentHealer` to rewrite the marker on disk.
-- **`:error`** → always `error` at the status/action layer. The stage agent recorded a failure; automatic and operator-triggered recovery both submit a fresh observation to `RecoveryCoordinator`. Consumers must refresh status before invoking the guarded `workflow.retry` action; no surface should construct its own marker-clear recipe. `StaleAgentHealer` uses the same coordinator for cooled terminal errors, including `tmux_session_terminated` / `agent_orphaned`. The coordinator derives the owning workflow command for every stage; `3-plan` therefore needs no separate clear/requeue mechanism even when an empty markerless `plan.md` would otherwise remain `:error`.
+- **`:error`** → normally `error` at the status/action layer. The stage agent recorded a failure; automatic and operator-triggered recovery both submit a fresh observation to `RecoveryCoordinator`. Consumers must refresh status before invoking the guarded `workflow.retry` action; no surface should construct its own marker-clear recipe. `StaleAgentHealer` uses the same coordinator for cooled terminal errors, including `tmux_session_terminated` / `agent_orphaned`. The coordinator derives the owning workflow command for every stage; `3-plan` therefore needs no separate clear/requeue mechanism even when an empty markerless `plan.md` would otherwise remain `:error`.
+- **`:error reason=outcome_evidence_implementation_rework`** is the narrow
+  exception to the generic error projection. With valid 64-hex generation and
+  recovery-digest attributes it emits the distinct `OUTCOME_EVIDENCE_REWORK`
+  wire kind and the exact `hive evidence rework ... --stage 7-artifacts`
+  controller command. Malformed bindings fail closed as ordinary `error`.
+  `READY_TO_DEVELOP` remains reserved for ordinary `develop`; every row
+  consumer routes the exceptional action explicitly and revalidates the exact
+  live binding before dispatch.
 - **`:error reason=terminal_outcome_blocked`** keeps the same public `error`
   action key, but its label is `Blocked`; it is active rather than archived.
   Its diagnostic retains the guarded `workflow.retry` recommendation and says
@@ -158,6 +171,7 @@ a complete plan is `ready_to_develop`, never a misleading
 | absent/uninitialized/reviewing/revising/verifying | `plan_reviewing` | `hive plan-review-run ...`; agent/scheduler |
 | future transient retry | `plan_review_retry` | no command until `retry_at` |
 | due transient retry | `plan_review_retry` | `hive plan-review-run ...` |
+| legacy blocked mandatory coverage with an attempted transient primary/adversarial leg | `plan_reviewing` | `hive plan-review-run ...`; orchestrator restores the paced retry series |
 | open gated/manual decision | `plan_review_decision` | no synthesized authority command; operator |
 | `degraded_cleared` | `plan_review_degraded` | guarded `hive develop ...` with degradation retained |
 | unsupported/configuration block | `plan_review_unsupported` | operator/configuration |

@@ -273,6 +273,8 @@ class E2EReproScriptWriterTest < Minitest::Test
           assert_includes body, "seed_state: 2-brainstorm/auth-task",
                           "seed_state should emit a heredoc-write block"
           assert_includes body, "<!-- COMPLETE -->", "seed_state content must land in the heredoc body"
+          assert_includes body, "CHECKPOINT_BASENAME",
+                          "seed_state replay must publish the current zero-history projection checkpoint"
           assert_includes body, "write_file: notes/extra.md",
                           "write_file should emit a heredoc-write block"
           assert_includes body, "register_project: project-b",
@@ -292,6 +294,8 @@ class E2EReproScriptWriterTest < Minitest::Test
                           "tui_expect cannot replay offline"
           # cli step still re-runs.
           assert_match(/bin\/hive\b.*\bversion\b/, body, "the cli step is still emitted")
+          _syntax_out, syntax_status = Open3.capture2e("bash", "-n", path)
+          assert syntax_status.success?, "seed-state repro must remain valid bash"
         end
       end
     end

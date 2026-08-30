@@ -211,7 +211,12 @@ report and receive no shell permission when OpenCode is deliberately selected
 as the Patrol review agent. Fix may edit the owned worktree and its exact report
 and receives the explicit `Bash(*)` grant needed to reproduce, test, and commit
 the repair. This full-shell grant has the authority of the Hive OS user;
-artifact custody and Git validation remain the outcome boundary.
+artifact custody and Git validation remain the outcome boundary. The managed
+Inbox, Fix, and Review custody manifest includes the complete shared
+orchestrator-owned set, including `task.md`, the authoritative task journal,
+and both derived projection files, plus the Patrol-specific manifests and
+receipts. An agent cannot establish a trusted projection or journal state by
+rewriting those task-folder files during its run.
 
 Every managed Patrol Fix agent is also told to return its report as the exact
 final JSON object. If the agent exits successfully without creating the report,

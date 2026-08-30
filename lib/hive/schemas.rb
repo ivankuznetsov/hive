@@ -10,6 +10,7 @@ module Hive
       "hive-status" => 7,
       "hive-running-status" => 1,
       "hive-operational-status" => 4,
+      "hive-repair-projection" => 1,
       "hive-circuits" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
@@ -235,6 +236,7 @@ module Hive
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze
       READY_TO_DEVELOP    = "ready_to_develop".freeze
+      OUTCOME_EVIDENCE_REWORK = "outcome_evidence_rework".freeze
       READY_TO_OPEN_PR    = "ready_to_open_pr".freeze
       READY_FOR_REVIEW    = "ready_for_review".freeze
       READY_TO_ARTIFACTS  = "ready_to_artifacts".freeze

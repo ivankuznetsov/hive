@@ -121,6 +121,25 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_command_runner_reuses_the_bounded_ci_fix_loop
+    with_ci_dir do |dir, task_folder|
+      calls = []
+      runner = lambda do |max_bytes:, timeout_sec:|
+        calls << [ max_bytes, timeout_sec ]
+        Hive::Stages::Review::CiFix::Run.new("hosted checks green\n", 0)
+      end
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+        command: "hosted checks", command_runner: runner
+      )
+
+      assert_equal :green, result.status
+      assert_equal [ [ Hive::Stages::Review::CiFix::DEFAULT_MAX_LOG_BYTES, 5 ] ], calls
+      assert_equal "hosted checks green\n", result.last_output
+    end
+  end
+
   # --- green after fix --------------------------------------------------
 
   def test_returns_green_after_fix_agent_recovers_failing_ci
@@ -324,6 +343,38 @@ class CiFixTest < Minitest::Test
       assert_includes result.last_output, "test FAILED"
       refute_includes result.last_output, "\e[", "ANSI escape sequences must be stripped"
       refute_includes result.last_output, "\033[", "ANSI escape sequences must be stripped (octal form)"
+    end
+  end
+
+  def test_binary_command_runner_output_is_normalized_before_the_fix_prompt
+    with_ci_dir do |dir, task_folder|
+      calls = 0
+      runner = lambda do |**|
+        calls += 1
+        if calls == 1
+          Hive::Stages::Review::CiFix::Run.new(
+            "hosted \xE2\x80\x94 failure \xFF\n".b, 1
+          )
+        else
+          Hive::Stages::Review::CiFix::Run.new("hosted checks green\n", 0)
+        end
+      end
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+        command: "hosted checks", command_runner: runner
+      )
+
+      assert_equal :green, result.status
+      assert_equal 2, result.attempts
+      prompt = File.binread(File.join(log_dir, "fake-claude-argv.log"))
+        .force_encoding(Encoding::UTF_8)
+      assert_predicate prompt, :valid_encoding?
+      assert_includes prompt, "hosted — failure ?"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
     end
   end
 

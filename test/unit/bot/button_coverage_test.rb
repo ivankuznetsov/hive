@@ -101,7 +101,7 @@ class HiveBotButtonCoverageTest < Minitest::Test
   def test_new_task_action_kind_requires_row_action_decision
     expected = %w[
       needs_input recover_draft_pr recover_execute recover_review error ready_to_brainstorm
-      ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
+      ready_to_plan ready_to_develop outcome_evidence_rework ready_to_open_pr ready_for_review
       ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance
       ready_to_run plan_reviewing plan_review_retry plan_review_decision
       plan_review_degraded plan_review_unsupported plan_review_blocked

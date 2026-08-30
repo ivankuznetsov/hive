@@ -301,6 +301,12 @@ class HiveCommandsInitTest < Minitest::Test
                  "fresh-render and rebind paths must emit byte-identical default_workflow quoting"
   end
 
+  def test_fresh_render_uses_the_plan_review_timeout_default
+    rendered = YAML.safe_load(render_fresh_config("coding"), aliases: true)
+
+    assert_equal 1800, rendered.dig("plan_review", "attempts", "timeout_sec")
+  end
+
   def render_fresh_config(default_workflow, answers: project_config_answers)
     require "erb"
     template = File.read(File.expand_path("../../../templates/project_config.yml.erb", __dir__))

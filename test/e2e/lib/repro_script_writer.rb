@@ -197,6 +197,24 @@ module Hive
           lines << "mkdir -p #{Shellwords.escape(File.dirname(full))}"
           lines << heredoc_write(full, expand_string(spec.fetch("content", "")))
         end
+        projection_bootstrap = <<~'RUBY'.strip
+          folder, state_file = ARGV
+          paths = [Hive::TaskJournal::JOURNAL_BASENAME,
+                   Hive::TaskProjection::Store::SNAPSHOT_BASENAME,
+                   Hive::TaskProjection::Store::CHECKPOINT_BASENAME]
+          unless paths.any? { |name| File.lexist?(File.join(folder, name)) }
+            marker = Hive::Markers.current(state_file)
+            Hive::TaskProjection::Store.new(task_folder: folder).initialize_pristine!(marker: marker)
+          end
+        RUBY
+        lines << [
+          Shellwords.escape(RbConfig.ruby),
+          "-I#{Shellwords.escape(Paths.lib_dir)}",
+          "-rhive/markers",
+          "-rhive/task_projection/store",
+          "-e", Shellwords.escape(projection_bootstrap),
+          "--", Shellwords.escape(folder), Shellwords.escape(contained_relative_path(folder, state_file, "seed_state state_file"))
+        ].join(" ")
         lines
       end
 

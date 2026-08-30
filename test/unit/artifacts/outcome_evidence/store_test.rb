@@ -369,6 +369,111 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_rework_pointer_is_distinct_from_operator_blocking_and_binds_the_review
+    with_store do |store, task, controller|
+      requirement = store.open_generation!(**requirement_input)
+      review = accepted_review(task, actor("reviewer-rework"))
+      review.fetch("verdicts").first.merge!(
+        "verdict" => "rework",
+        "reason" => "The implementation must expose the completed state before evidence can prove it."
+      )
+      attempt = store.append_attempt!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-rework",
+        status: "rework", evidence: [ document_evidence(task) ],
+        producer: actor("producer-rework"), review: review,
+        diagnostic: "The implementation must expose the completed state before evidence can prove it."
+      )
+
+      pointer = store.publish_rework!(
+        generation: requirement.fetch("generation"),
+        failed_targets: [ "claim-a" ],
+        reviewer_reasons: [
+          "The implementation must expose the completed state before evidence can prove it."
+        ],
+        attempt_ids: [ attempt.fetch("attempt_id") ]
+      )
+
+      assert_equal "rework", pointer.fetch("status")
+      assert_equal "implementation_rework", pointer.fetch("reason")
+      assert store.rework_for_identity?(identity)
+      refute store.blocked_for_identity?(identity)
+      assert_equal "rework", store.package.dig("current", "status")
+
+      current_path = File.join(task.folder, "outcome-evidence", "current.json")
+      original = File.read(current_path)
+      contradicted = JSON.parse(original)
+      contradicted["reason"] = "review_blocked"
+      contradicted["recovery_digest"] = store.send(
+        :recovery_digest,
+        generation: contradicted.fetch("generation"),
+        reason: contradicted.fetch("reason"),
+        attempts: contradicted.fetch("attempts"),
+        failed_targets: contradicted.fetch("failed_targets"),
+        reviewer_reasons: contradicted.fetch("reviewer_reasons")
+      )
+      File.write(current_path, JSON.generate(contradicted) << "\n")
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { store.package }
+      assert_match(/rework package binding/, error.message)
+
+      File.write(current_path, original)
+      contradicted = JSON.parse(File.read(current_path))
+      contradicted["status"] = "blocked"
+      File.write(current_path, JSON.generate(contradicted) << "\n")
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { store.package }
+      assert_match(/blocked package reason/, error.message)
+
+      controller["task_generation"] = "controller-generation-2"
+      refute store.rework_for_identity?(identity)
+    end
+  end
+
+  def test_rework_pointer_retains_prior_revise_attempts
+    with_store do |store, task, _controller|
+      requirement = store.open_generation!(**requirement_input)
+      generation = requirement.fetch("generation")
+      revise = store.append_attempt!(
+        generation: generation, attempt_id: "attempt-revise", status: "revise",
+        evidence: [ document_evidence(task) ], producer: actor("producer-revise"),
+        review: revising_review(task, actor("reviewer-revise")),
+        diagnostic: "The retained proof needs a clearer user outcome demonstration."
+      )
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.publish_rework!(
+          generation: generation, failed_targets: [ "claim-a" ],
+          reviewer_reasons: [
+            "The implementation must expose the completed state before proof can exist."
+          ],
+          attempt_ids: [ revise.fetch("attempt_id") ]
+        )
+      end
+      assert_match(/latest rework attempt/, error.message)
+      review = accepted_review(task, actor("reviewer-rework"))
+      review.fetch("verdicts").first.merge!(
+        "verdict" => "rework",
+        "reason" => "The implementation must expose the completed state before proof can exist."
+      )
+      rework = store.append_attempt!(
+        generation: generation, attempt_id: "attempt-rework", status: "rework",
+        evidence: [ document_evidence(task) ], producer: actor("producer-rework"),
+        review: review,
+        diagnostic: "The implementation must expose the completed state before proof can exist."
+      )
+
+      pointer = store.publish_rework!(
+        generation: generation, failed_targets: [ "claim-a" ],
+        reviewer_reasons: [
+          "The implementation must expose the completed state before proof can exist."
+        ],
+        attempt_ids: [ revise.fetch("attempt_id"), rework.fetch("attempt_id") ]
+      )
+
+      assert_equal %w[attempt-revise attempt-rework],
+                   pointer.fetch("attempts").map { |attempt| attempt.fetch("attempt_id") }
+      assert_equal "attempt-rework", pointer.fetch("attempt_id")
+      assert_equal "rework", store.package.dig("current", "status")
+    end
+  end
+
   def test_exclusion_only_rejection_is_retained_as_a_failed_review_target
     with_store do |store, task, _controller|
       input = requirement_input.merge(

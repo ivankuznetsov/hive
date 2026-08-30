@@ -617,8 +617,13 @@ module Hive
       # cap makes short jobs underspend while truncating the large failing
       # job more aggressively than the budget allows (plan IU-8).
       raw = jobs.map do |job|
-        job_id = job["databaseId"] || job["id"]
-        { "name" => job["name"].to_s, "job_id" => job_id, "log" => fetch_job_log(worktree_path, job_id, cfg: cfg) }
+        job_id = job["databaseId"] || job["id"] ||
+                 job["detailsUrl"].to_s[%r{/job/(\d+)(?:\z|[/?#])}, 1]
+        {
+          "name" => utf8_text(job["name"] || job["context"]),
+          "job_id" => job_id,
+          "log" => fetch_job_log(worktree_path, job_id, cfg: cfg)
+        }
       end
 
       caps = allocate_log_budget(raw.map { |entry| entry["log"].bytesize }, byte_cap)
@@ -631,9 +636,10 @@ module Hive
       return "[hive-babysitter: no job id available, cannot fetch log]" unless job_id
 
       fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
-      return fetch_result[:log] if fetch_result[:success]
+      return utf8_text(fetch_result[:log]) if fetch_result[:success]
 
-      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
+      error = utf8_text(fetch_result[:error])
+      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{error}]"
     end
 
     # Max-min fair allocation: repeatedly hand out an even share of the
@@ -709,7 +715,9 @@ module Hive
 
         conclusion = entry["conclusion"].to_s.upcase
         status = entry["status"].to_s.upcase
-        conclusion == "FAILURE" || conclusion == "TIMED_OUT" || conclusion == "CANCELLED" || status == "FAILURE"
+        state = entry["state"].to_s.upcase
+        conclusion == "FAILURE" || conclusion == "TIMED_OUT" ||
+          conclusion == "CANCELLED" || status == "FAILURE" || state == "FAILURE"
       end
     end
 
@@ -736,6 +744,10 @@ module Hive
       tail = text.byteslice(-byte_cap, byte_cap).to_s
       tail.scrub!("")
       "\n...[truncated, #{elided} bytes elided]\n#{tail}"
+    end
+
+    def utf8_text(value)
+      value.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
     end
 
     def lookup_merged_pr(worktree_path, branch, cfg: nil, head_oid: nil)

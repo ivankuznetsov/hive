@@ -13,7 +13,9 @@ require "hive/markers"
 require "hive/provider_routing/decision"
 require "hive/recovery"
 require "hive/recovery/retry_policy"
+require "hive/runtime_identity"
 require "hive/task"
+require "hive/task_projection"
 require "hive/task_resolver"
 
 module Hive
@@ -139,7 +141,8 @@ module Hive
                      task_resolver: nil,
                      safety: Hive::Daemon::AutoRetrySafety.method(:safe_to_retry?),
                      generation_resolver: nil, attempt_store: nil,
-                     attempt_store_factory: nil)
+                     attempt_store_factory: nil,
+                     runtime_digest: Hive::RuntimeIdentity.source_digest)
         @state_home = state_home
         @request_queue = request_queue
         @task_resolver = task_resolver || method(:resolve_task)
@@ -148,6 +151,10 @@ module Hive
         @attempt_store = attempt_store
         @attempt_store_factory = attempt_store_factory || lambda do
           Hive::Attempts::Store.open_default(state_home: @state_home)
+        end
+        @runtime_digest = runtime_digest.to_s
+        unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
+          raise ArgumentError, "recovery runtime digest is invalid"
         end
       end
 
@@ -204,6 +211,14 @@ module Hive
                   now: Time.now.utc)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
+        if projection_repair_row?(row)
+          return receipt(
+            "blocked", failure_origin: failure_origin, owner: "operator",
+            reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+            remediation: value(row, :suggested_command) ||
+              "repair the exact task projection before retrying"
+          )
+        end
         retry_count = durable_retry_count(row)
         assessment = assessment(row, now: now, retry_count: retry_count)
         operator_request = OPERATOR_REQUESTORS.include?(requestor.to_s)
@@ -319,7 +334,8 @@ module Hive
             state_home: @state_home
           )
           if existing
-            existing = unpark_deterministic_failure(existing, now:) if operator_request
+            existing = rearm_changed_runtime(existing, now:)
+            existing = expedite_operator_recovery(existing, now:) if operator_request
             return receipt_for_request(
               existing,
               replay: existing.recovery&.fetch("phase", nil) == "terminal",
@@ -360,7 +376,8 @@ module Hive
           end
           attrs = Hive::Recovery.canonical_marker_attrs(current.attrs)
           marker_id = marker_identity(current)
-          next_eligible_at = assessment[:retry_at].utc.iso8601(6)
+          next_eligible_at =
+            (operator_request ? now : assessment[:retry_at].utc).iso8601(6)
           failure_evidence = failure_evidence_for(
             row, retry_count: retry_count, marker_attrs: attrs
           )
@@ -381,6 +398,7 @@ module Hive
             "failure_fingerprint" => failure_evidence.fetch("fingerprint"),
             "identical_failure_count" => failure_evidence.fetch("count"),
             "failure_attempt_history" => failure_evidence.fetch("attempts"),
+            "runtime_digest" => @runtime_digest,
             "provider_hint" => provider_hint(row),
             "policy_digest" => nil,
             "source_receipt" => source_receipt,
@@ -530,6 +548,7 @@ module Hive
             "retry_count" => durable_retry_count_for(
               project: project, slug: slug, expected_stage: task_stage(locked_task)
             ) + 1,
+            "runtime_digest" => @runtime_digest,
             "provider_hint" => nil,
             "policy_digest" => decision.policy_digest,
             "source_receipt" => nil,
@@ -665,6 +684,7 @@ module Hive
             "failure_fingerprint" => failure_evidence.fetch("fingerprint"),
             "identical_failure_count" => failure_evidence.fetch("count"),
             "failure_attempt_history" => failure_evidence.fetch("attempts"),
+            "runtime_digest" => @runtime_digest,
             "provider_hint" => provider_hint(row),
             "policy_digest" => nil,
             "source_receipt" => nil,
@@ -762,8 +782,19 @@ module Hive
       # fingerprint was persisted before mutation.
       def resume(request:, row:, now: Time.now.utc, admission_context: nil)
         now = now.utc
+        request = rearm_changed_runtime(request, now:)
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
+        if projection_repair_row?(row)
+          return receipt(
+            "blocked", request_id: request.request_id,
+            phase: recovery["phase"], failure_origin: recovery["failure_origin"],
+            owner: "operator", reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+            remediation: value(row, :suggested_command) ||
+              "repair the exact task projection before retrying",
+            retry_count: recovery["retry_count"]
+          )
+        end
         return receipt_for_request(request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
         return receipt_for_request(request, now: now) if
           INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
@@ -1118,7 +1149,7 @@ module Hive
       def durable_retry_count_for(project:, slug:, expected_stage:)
         @request_queue.recovery_retry_count(
           project: project, slug: slug, expected_stage: expected_stage,
-          state_home: @state_home
+          runtime_digest: @runtime_digest, state_home: @state_home
         )
       end
 
@@ -1129,7 +1160,8 @@ module Hive
           expected_stage: value(row, :stage), state_home: @state_home
         )
         previous_recovery = previous&.recovery || {}
-        repeated = previous_recovery["failure_fingerprint"].to_s == fingerprint
+        repeated = previous_recovery["runtime_digest"] == @runtime_digest &&
+          previous_recovery["failure_fingerprint"].to_s == fingerprint
         count = repeated ? previous_recovery["identical_failure_count"].to_i + 1 : 1
         attempts = repeated ? Array(previous_recovery["failure_attempt_history"]).dup : []
         attempt_id = marker_attrs["attempt_id"].to_s
@@ -1160,7 +1192,8 @@ module Hive
 
       def rearm_markerless_recovery(request, row:, reason:, now:)
         recovery = request.recovery || {}
-        retry_count = recovery["retry_count"].to_i
+        retry_count = recovery["runtime_digest"] == @runtime_digest ?
+          recovery["retry_count"].to_i : 0
         evidence = failure_evidence_for(
           row, retry_count: retry_count,
           marker_attrs: {
@@ -1179,6 +1212,7 @@ module Hive
           "failure_fingerprint" => evidence.fetch("fingerprint"),
           "identical_failure_count" => evidence.fetch("count"),
           "failure_attempt_history" => evidence.fetch("attempts"),
+          "runtime_digest" => @runtime_digest,
           "attempt_id" => nil,
           "terminal_outcome" => nil,
           "terminal_at" => nil
@@ -1339,6 +1373,10 @@ module Hive
         attrs = value(row, :marker_attrs)
         attrs = value(row, :attrs) unless attrs.is_a?(Hash)
         attrs.is_a?(Hash) ? attrs.to_h.transform_keys(&:to_s) : {}
+      end
+
+      def projection_repair_row?(row)
+        Hive::TaskProjection.repair_required_row?(row)
       end
 
       def observed_marker_generation(row)
@@ -1668,29 +1706,61 @@ module Hive
         request
       end
 
-      # Evidence parking is inert under daemon replay. Only an explicit,
-      # freshness-bound operator retry releases the same guarded request back
-      # into its admitted -> cleared -> dispatched transition.
-      def unpark_deterministic_failure(request, now:)
+      def rearm_changed_runtime(request, now:)
         recovery = request.recovery || {}
         return request unless recovery["phase"] == "admitted"
         return request unless recovery["blocked_reason"] == "deterministic_failure"
+        return request if recovery["runtime_digest"] == @runtime_digest
 
         transitioned = @request_queue.update_recovery!(
           request.request_id,
           expected_phase: "admitted",
-          changes: {
-            "next_eligible_at" => now.utc.iso8601(6),
-            "blocked_reason" => nil,
-            "blocked_remediation" => nil,
-            "owner" => "scheduler"
-          },
+          changes: deterministic_rearm_changes(now:),
           state_home: @state_home
         )
         refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
         return refreshed if transitioned && refreshed
 
         request
+      end
+
+      # An explicit, freshness-bound operator retry still releases a park
+      # immediately. A validated runtime replacement does the same once per
+      # runtime digest through +rearm_changed_runtime+.
+      def expedite_operator_recovery(request, now:)
+        recovery = request.recovery || {}
+        return request unless recovery["phase"] == "admitted"
+        blocked_reason = recovery["blocked_reason"]
+        return request unless blocked_reason.nil? || blocked_reason == "deterministic_failure"
+
+        changes = { "next_eligible_at" => now.utc.iso8601(6) }
+        if blocked_reason == "deterministic_failure"
+          changes = deterministic_rearm_changes(now:)
+        end
+        transitioned = @request_queue.update_recovery!(
+          request.request_id,
+          expected_phase: "admitted",
+          changes: changes,
+          state_home: @state_home
+        )
+        refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+        return refreshed if transitioned && refreshed
+
+        request
+      end
+
+      def deterministic_rearm_changes(now:)
+        {
+          "next_eligible_at" => now.utc.iso8601(6),
+          "owner" => "scheduler",
+          "blocked_reason" => nil,
+          "blocked_remediation" => nil,
+          "retry_count" => 1,
+          "failure_fingerprint" => nil,
+          "identical_failure_count" => 0,
+          "failure_attempt_history" => [],
+          "runtime_digest" => @runtime_digest
+        }
       end
 
       def recovery_due?(recovery, now:)

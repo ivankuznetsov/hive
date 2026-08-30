@@ -170,6 +170,26 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_browser_bootstrap_gets_a_longer_deadline_than_close
+    toolkit = Toolkit.new
+    deadlines = []
+    timeout = lambda do |seconds, &block|
+      deadlines << seconds
+      block.call
+    end
+
+    with_replaced_singleton_method(Timeout, :timeout, timeout) do
+      toolkit.send(:run_browser_command, {}, [ RbConfig.ruby, "-e", "exit" ])
+      toolkit.send(:run_browser_command, {}, [ RbConfig.ruby, "-e", "exit", "close" ])
+    end
+
+    assert_equal [
+      Toolkit::BROWSER_BOOTSTRAP_TIMEOUT_SECONDS,
+      Toolkit::BROWSER_CLOSE_TIMEOUT_SECONDS
+    ], deadlines
+    assert_operator deadlines.first, :>, deadlines.last
+  end
+
   def test_browser_daemon_receipt_is_owned_and_teardown_is_bounded
     Dir.mktmpdir("hive-capture-daemon") do |root|
       namespace = "n-test"

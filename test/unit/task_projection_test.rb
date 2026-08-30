@@ -137,6 +137,45 @@ class TaskProjectionTest < Minitest::Test
     end
   end
 
+  def test_parse_journal_normalizes_lines_without_trailing_newlines
+    event = condition_event("AgentHealthy", event_id: "parsed")
+
+    records = Hive::TaskProjection.parse_journal([ JSON.generate(event) ])
+
+    assert_equal [ "parsed" ], records.map { |record| record.fetch("event_id") }
+  end
+
+  def test_repair_marker_distinguishes_transient_and_terminal_failures
+    projection = Hive::TaskProjection.project(records: [])
+    transient = Hive::TaskProjection::Store::BoundedRead.new(
+      projection: projection, state: "repair_required",
+      diagnostics: [ { "reason" => "journal_lock_busy" } ], truncated: false,
+      journal_cursor: 0, journal_records: []
+    )
+    terminal = Hive::TaskProjection::Store::BoundedRead.new(
+      projection: projection, state: "repair_required",
+      diagnostics: [ {
+        "reason" => "checkpoint_oversized",
+        "message" => "checkpoint is too large",
+        "details" => { "cap" => "projection_snapshot_bytes" }
+      } ],
+      truncated: true, journal_cursor: 0, journal_records: []
+    )
+
+    transient_attrs = Hive::TaskProjection.repair_marker_attrs(
+      bounded: transient, project: "demo", slug: "task", stage: "4-execute"
+    )
+    terminal_attrs = Hive::TaskProjection.repair_marker_attrs(
+      bounded: terminal, project: "demo", slug: "task", stage: "4-execute"
+    )
+
+    assert_match(/locked by an exact-task repair/, transient_attrs.fetch("message"))
+    refute transient_attrs.key?("repair_command")
+    assert_match(/compact.*retained projection history/, terminal_attrs.fetch("message"))
+    assert_equal "projection_snapshot_bytes", terminal_attrs.fetch("projection_cap")
+    refute terminal_attrs.key?("repair_command")
+  end
+
   def test_snapshot_and_hash_attempt_metadata_validation_fail_closed
     assert_raises(Hive::TaskProjection::InvalidJournal) do
       Hive::TaskProjection.from_data("schema" => "wrong", "schema_version" => 1)

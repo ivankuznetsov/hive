@@ -14,6 +14,9 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/planner_identity"
+require "hive/plan_review/result_parser"
+require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
 require "hive/patrol_fix/projection"
 require "hive/plan_review/approval_policy"
@@ -53,6 +56,11 @@ module Hive
         key: Hive::Schemas::TaskActionKind::READY_TO_DEVELOP,
         label: "Ready to develop",
         command: "develop"
+      },
+      artifacts_rework: {
+        key: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+        label: "Implementation rework required",
+        command: :outcome_evidence_rework
       },
       plan_reviewing: {
         key: Hive::Schemas::TaskActionKind::PLAN_REVIEWING,
@@ -267,7 +275,8 @@ module Hive
     # cannot drift from the command Hive actually reports for an action.
     READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
       key = action.fetch(:key)
-      commands[key] = action.fetch(:command) if key.start_with?("ready_")
+      command = action.fetch(:command)
+      commands[key] = command if key.start_with?("ready_") && command.is_a?(String)
     end.merge(
       Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED => "develop"
     ).freeze
@@ -286,6 +295,7 @@ module Hive
     DEFAULT_AGENT_MARKER_GRACE_SEC = 300
 
     PLAN_REVIEW_UNRESOLVED = Object.new.freeze
+    PLAN_REVIEW_TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
 
     attr_reader :plan_review
 
@@ -341,6 +351,8 @@ module Hive
       stage = workflow_stage
       return nil unless stage
       stage_ref = command_stage_dir(stage)
+
+      return outcome_evidence_rework_command(stage_ref) if verb == :outcome_evidence_rework
 
       parts = command_prefix(verb)
       if verb == "approve"
@@ -452,6 +464,10 @@ module Hive
       end
       if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
         return ACTIONS.fetch(:recover_draft_pr)
+      end
+      if marker.name == :error && Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs)
+        return outcome_evidence_rework_marker_valid? ?
+          ACTIONS.fetch(:artifacts_rework) : ACTIONS.fetch(:error)
       end
       if marker.name == :error && Hive::TerminalOutcome.blocked_error?(marker.attrs)
         return ACTIONS.fetch(:blocked)
@@ -728,7 +744,19 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if stale_planner_revision_contract?
+        if recoverable_planner_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif stale_planner_revision_contract?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_capability_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_adversarial_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_selected_lenses_contract_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_residual_evidence_contract_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
@@ -879,6 +907,27 @@ module Hive
       parts
     end
 
+    def outcome_evidence_rework_command(stage_ref)
+      return nil unless outcome_evidence_rework_marker_valid?
+
+      parts = [ "hive", "evidence", "rework", task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts.concat(
+        [
+          "--stage", stage_ref,
+          "--generation", marker.attrs.fetch("generation"),
+          "--recovery-digest", marker.attrs.fetch("recovery_digest")
+        ]
+      )
+      parts.shelljoin
+    end
+
+    def outcome_evidence_rework_marker_valid?
+      %w[generation recovery_digest].all? do |field|
+        marker.attrs[field].to_s.match?(/\A[0-9a-f]{64}\z/)
+      end
+    end
+
     def load_plan_review
       # Folderless tasks (a bare state file with no task directory) have no
       # place to keep review evidence, so they can never carry a projection.
@@ -930,12 +979,20 @@ module Hive
         entry["role"] == "planner_revision"
       end
       return false unless route
-      return false unless %w[provider_limit timeout retryable_failure].include?(route["outcome"])
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
 
       Integer(route["planner_revision_contract_version"] || 0) <
         Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
     rescue ArgumentError, TypeError
       true
+    end
+
+    def recoverable_planner_identity_review?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner"
+      end
+      identity = route&.fetch("actual", nil) || route&.fetch("requested", nil)
+      Hive::PlanReview::PlannerIdentity.recoverable?(identity)
     end
 
     # An awaiting-decision projection normally belongs to the operator. A
@@ -969,6 +1026,69 @@ module Hive
         Array(plan_review["routes"]).any? do |route|
           route["capability_result"] == "unsupported"
         end
+    end
+
+    # Older Hive builds terminalised missing reviewer binaries and emitted no
+    # command. Re-enter those exact persisted initial legs once so the current
+    # orchestrator can preserve successful coverage and move the missing leg
+    # onto its paced automatic retry schedule. Configuration-only blocks with
+    # no attempted route remain operator-owned.
+    def recoverable_capability_review?
+      %w[primary adversarial].any? do |role|
+        route = Array(plan_review["routes"]).reverse.find do |entry|
+          entry["role"] == role
+        end
+        route && route["outcome"] == "unsupported"
+      end
+    end
+
+    # A successful legacy Grok attempt can still carry the pre-alias-fix
+    # `reviewer_family_unknown` receipt. Re-enter only when current provider
+    # support can now attest the exact requested/served identity pair, and only
+    # until the orchestrator has recorded its versioned one-time retry.
+    def recoverable_adversarial_identity_review?
+      routes = Array(plan_review["routes"])
+      planner = routes.find { |entry| entry["role"] == "planner" }
+      planner_identity = planner&.fetch("actual", nil) || planner&.fetch("requested", nil)
+      !Hive::PlanReview::RouteResolver.recoverable_identity_route(
+        routes:, planner_identity:
+      ).nil?
+    end
+
+    # The old selected-lens grammar rejected natural lowercase kebab-case
+    # names. Surface that exact versionless parser verdict as runnable until the
+    # orchestrator records its one-time contract recovery reset.
+    def recoverable_selected_lenses_contract_review?
+      !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
+        plan_review["routes"]
+      ).empty?
+    end
+
+    def recoverable_residual_evidence_contract_review?
+      !Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
+        plan_review["routes"]
+      ).empty?
+    end
+
+    # A mandatory initial reviewer can exhaust its bounded in-process retry
+    # series while a provider is unavailable. That is still scheduler-owned:
+    # the orchestrator persists a paced recovery series and retries after the
+    # provider has had time to recover. Require both an attempted transient
+    # leg and the exact missing-coverage blocker so unrelated blocked verdicts
+    # remain inert.
+    def recoverable_transient_coverage_review?
+      return false unless plan_review["effective_level"] == "mandatory"
+      return false unless Array(plan_review["blockers"]).any? do |blocker|
+        blocker["reason"] == "coverage_failed"
+      end
+
+      %w[primary adversarial].any? do |role|
+        route = Array(plan_review["routes"]).reverse.find do |entry|
+          entry["role"] == role
+        end
+        route && !route["attempt_id"].to_s.empty? &&
+          PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+      end
     end
 
     def legacy_execute_findings?

@@ -61,6 +61,33 @@ class RunPlanTest < Minitest::Test
     end
   end
 
+  class UnavailableAdversarialAdapter
+    attr_reader :calls
+
+    def initialize
+      @calls = []
+    end
+
+    def call(request)
+      @calls << request
+      return Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported") if
+        request.kind == "adversarial"
+
+      Hive::PlanReview::Adapters::Base::Result.new(
+        outcome: "success",
+        coverage: request.required_coverage.map do |name|
+          { "name" => name, "required" => true, "status" => "completed" }
+        end,
+        route_receipt: {
+          "role" => request.kind, "requested" => request.reviewer,
+          "actual" => request.reviewer, "capability_result" => "present",
+          "independence_verified" => true,
+          "independence_reason" => "different_model_family"
+        }
+      )
+    end
+  end
+
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
     ENV["HIVE_CLAUDE_BIN"] = FAKE_BIN
@@ -202,6 +229,53 @@ class RunPlanTest < Minitest::Test
           assert_equal 1, revision.calls.length
           assert_equal candidate, File.read(plan_md)
         end
+      end
+    end
+  end
+
+  def test_required_review_keeps_an_agent_complete_plan_at_waiting_until_clearance
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          set_project_claude_mode(dir, "headless")
+          Hive::Commands::New.new(File.basename(dir), "required review marker").call
+        end
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+        slug = File.basename(inbox)
+        plan_dir = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(File.dirname(plan_dir))
+        FileUtils.mv(inbox, plan_dir)
+        File.write(File.join(plan_dir, "brainstorm.md"), "## Requirements\n- x\n<!-- COMPLETE -->\n")
+
+        plan_md = File.join(plan_dir, "plan.md")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = plan_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = mandatory_review_plan
+        adapter = UnavailableAdversarialAdapter.new
+        route_resolver = method(:review_route)
+        replacement = lambda do |task:, cfg:, planner_identity:, **|
+          Hive::PlanReview::Orchestrator.new(
+            task:, cfg:, planner_identity:, adapter:,
+            route_resolver:,
+            clock: -> { Time.utc(2026, 8, 12, 12) }
+          ).advance!
+        end
+
+        with_replaced_singleton_method(
+          Hive::PlanReview::Orchestrator, :run!, replacement
+        ) do
+          capture_io { Hive::Commands::Run.new(plan_dir).call }
+        end
+
+        assert_equal :waiting, Hive::Markers.current(plan_md).name
+        review = JSON.parse(File.read(File.join(plan_dir, "plan-review", "current.json")))
+        assert_equal "mandatory", review.fetch("effective_level")
+        assert_equal "reviewing", review.fetch("state")
+        refute review.fetch("execution_allowed")
+        assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
+        events = File.readlines(File.join(plan_dir, "events.jsonl"), chomp: true)
+          .map { |line| JSON.parse(line) }
+        assert_includes events.map { |event| event.fetch("event_type") }, "round_waiting"
       end
     end
   end

@@ -354,6 +354,10 @@
           "maxItems": 64,
           "items": { "type": "string", "minLength": 1, "maxLength": 128 }
         },
+        "runtime_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "provider_hint": {
           "type": ["object", "null"],
           "additionalProperties": false,

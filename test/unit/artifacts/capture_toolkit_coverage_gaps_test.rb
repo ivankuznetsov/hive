@@ -76,6 +76,38 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     assert_nil toolkit.instance_variable_get(:@browser_preflight)
   end
 
+  def test_browser_preflight_serves_a_request_and_releases_its_listener
+    toolkit = Toolkit.new
+    preflight = toolkit.send(:start_browser_preflight)
+
+    socket = TCPSocket.new("127.0.0.1", preflight.fetch(:app_port))
+    socket.write("GET / HTTP/1.1\r\nHost: evidence.invalid\r\n\r\n")
+    response = socket.read
+
+    assert_includes response, "HTTP/1.1 200 OK"
+    assert_includes response, "<!doctype html>"
+  ensure
+    socket&.close
+    toolkit&.send(:close_browser_preflight)
+  end
+
+  def test_browser_preflight_ignores_waiting_and_closed_request_reads
+    toolkit = Toolkit.new
+    socket_closed = false
+    socket = Object.new
+    reads = [ :wait_readable, nil ]
+    socket.define_singleton_method(:read_nonblock) { |*| reads.shift }
+    socket.define_singleton_method(:write) { |_| nil }
+    socket.define_singleton_method(:closed?) { socket_closed }
+    socket.define_singleton_method(:close) { socket_closed = true }
+
+    with_replaced_singleton_method(IO, :select, ->(*) { true }) do
+      assert_nil toolkit.send(:serve_browser_preflight, socket)
+    end
+
+    assert socket_closed
+  end
+
   def test_managed_web_server_default_and_error_paths
     Dir.mktmpdir("hive-capture-toolkit-server") do |root|
       source = hive_web_source(root)

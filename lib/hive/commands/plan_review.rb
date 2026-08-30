@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/plan_review/decision_service"
+require "hive/plan_review/automation"
 require "hive/plan_review/orchestrator"
 require "hive/task"
 require "hive/task_resolver"
@@ -138,8 +139,9 @@ module Hive
             locked = Hive::Task.new(task.folder)
             cfg = Hive::Config.load(locked.project_root)
             current = Hive::PlanReview::Projection.load(task_folder: locked.folder)
-            planner = current.record["routes"].find { |entry| entry["role"] == "planner" }
-            identity = planner&.fetch("actual", nil) || planner&.fetch("requested", nil) || {}
+            identity = Hive::PlanReview::Automation.planner_identity_for(
+              current.record, cfg
+            )
             projection = Hive::PlanReview::Orchestrator.run!(
               task: locked, cfg:, planner_identity: identity
             )

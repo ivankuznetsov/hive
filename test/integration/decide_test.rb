@@ -534,6 +534,7 @@ class DecideTest < Minitest::Test
         fake = Object.new
         fake.define_singleton_method(:call) do
           kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          kwargs.fetch(:post_rearm_mutation).call(Hive::Task.new(approval))
           FileUtils.mkdir_p(File.dirname(destination))
           File.rename(approval, destination)
           raise Hive::GitError, "move failed"
@@ -565,6 +566,7 @@ class DecideTest < Minitest::Test
         fake = Object.new
         fake.define_singleton_method(:call) do
           kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          kwargs.fetch(:post_rearm_mutation).call(Hive::Task.new(approval))
           FileUtils.mkdir_p(File.dirname(destination))
           File.rename(approval, destination)
           raise Interrupt, "stop"
@@ -596,6 +598,7 @@ class DecideTest < Minitest::Test
         fake = Object.new
         fake.define_singleton_method(:call) do
           kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          kwargs.fetch(:post_rearm_mutation).call(Hive::Task.new(approval))
           raise Hive::WrongStage, "another transition won"
         end
         fake

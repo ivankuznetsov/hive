@@ -180,6 +180,87 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_runtime_aware_daemon_rearms_a_legacy_deterministic_park
+    attrs = {
+      "reason" => "implementer_failed", "marker_id" => "marker-3",
+      "provider" => "pi", "status" => "error", "message" => "same crash",
+      "attempt_id" => "attempt-3"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2]
+      )
+      coordinator.request(
+        row:, requestor: "healer", request_id: "legacy-deterministic", now: NOW
+      )
+      parked = Q.fetch("legacy-deterministic", state_home: state_home)
+      payload = JSON.parse(File.read(parked.path))
+      payload.fetch("recovery").merge!(
+        "runtime_digest" => nil,
+        "blocked_reason" => "deterministic_failure",
+        "blocked_remediation" => "repair the implementation",
+        "owner" => "operator",
+        "retry_count" => Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        "failure_fingerprint" => fingerprint,
+        "identical_failure_count" => 3,
+        "failure_attempt_history" => %w[attempt-1 attempt-2 attempt-3]
+      ).delete("runtime_digest")
+      File.write(parked.path, JSON.generate(payload))
+      parked = Q.fetch("legacy-deterministic", state_home: state_home)
+
+      resumed = coordinator.resume(request: parked, row:, now: NOW + 1)
+
+      assert_equal "queued", resumed.status
+      assert_equal "cleared", resumed.phase
+      recovery = Q.fetch("legacy-deterministic", state_home: state_home).recovery
+      assert_equal Hive::RuntimeIdentity.source_digest, recovery.fetch("runtime_digest")
+      assert_equal 1, recovery.fetch("retry_count")
+      assert_nil recovery.fetch("failure_fingerprint")
+      assert_equal 0, recovery.fetch("identical_failure_count")
+      assert_empty recovery.fetch("failure_attempt_history")
+      assert_predicate Hive::Markers.current(row.state_file), :none?
+    end
+  end
+
+  def test_changed_runtime_keeps_the_park_when_the_rearm_transition_is_lost
+    attrs = {
+      "reason" => "implementer_failed", "marker_id" => "marker-3",
+      "provider" => "pi", "status" => "error", "message" => "same crash",
+      "attempt_id" => "attempt-3"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2]
+      )
+      coordinator.request(
+        row:, requestor: "healer", request_id: "runtime-transition-lost", now: NOW
+      )
+      parked = Q.fetch("runtime-transition-lost", state_home: state_home)
+      payload = JSON.parse(File.read(parked.path))
+      payload.fetch("recovery")["runtime_digest"] = "a" * 64
+      File.write(parked.path, JSON.generate(payload))
+      parked = Q.fetch("runtime-transition-lost", state_home: state_home)
+
+      result = with_replaced_singleton_method(Q, :update_recovery!, ->(*) { false }) do
+        coordinator.resume(request: parked, row:, now: NOW + 1)
+      end
+
+      assert_equal "blocked", result.status
+      assert_equal "deterministic_failure", result.reason
+      recovery = Q.fetch("runtime-transition-lost", state_home: state_home).recovery
+      assert_equal "deterministic_failure", recovery.fetch("blocked_reason")
+      assert_equal "operator", recovery.fetch("owner")
+    end
+  end
+
   def test_explicit_retry_unparks_and_changed_failure_reenters_with_a_fresh_count
     attrs = {
       "reason" => "implementer_failed", "marker_id" => "marker-3",
@@ -210,6 +291,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       request = Q.fetch("deterministic", state_home: state_home)
       assert_nil request.recovery.fetch("blocked_reason")
       assert_equal "scheduler", request.recovery.fetch("owner")
+      assert_equal 1, request.recovery.fetch("retry_count")
+      assert_nil request.recovery.fetch("failure_fingerprint")
+      assert_equal 0, request.recovery.fetch("identical_failure_count")
+      assert_empty request.recovery.fetch("failure_attempt_history")
 
       resumed = coordinator.resume(request:, row:, now: NOW + 1)
       assert_equal "queued", resumed.status
@@ -308,6 +393,34 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_changed_runtime_digest_starts_a_fresh_failure_series
+    attrs = {
+      "reason" => "implementer_failed", "marker_id" => "marker-new-runtime",
+      "provider" => "pi", "message" => "same crash", "attempt_id" => "attempt-3"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      old_runtime = Hive::RuntimeIdentity.source_digest == "a" * 64 ? "b" * 64 : "a" * 64
+      write_terminal_recovery_history(
+        row:, state_home:,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 20,
+        failure_attempt_history: %w[attempt-1 attempt-2], runtime_digest: old_runtime
+      )
+
+      receipt = coordinator.request(
+        row:, requestor: "healer", request_id: "changed-runtime", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      assert_equal 1, receipt.retry_count
+      recovery = Q.fetch("changed-runtime", state_home: state_home).recovery
+      assert_equal Hive::RuntimeIdentity.source_digest, recovery.fetch("runtime_digest")
+      assert_equal 1, recovery.fetch("identical_failure_count")
+      assert_equal [ "attempt-3" ], recovery.fetch("failure_attempt_history")
+    end
+  end
+
   # The cooldown paces Hive's own retry sweep. First failure waits the first
   # backoff step, not the provider-sized hour.
   def test_request_before_cooldown_returns_cooldown_without_writing
@@ -335,7 +448,34 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         refute_equal "cooldown", receipt.status,
                      "#{requestor} must not be held by the automatic cooldown"
         refute_empty Q.pending(state_home: state_home), requestor
+        persisted = Q.pending(state_home: state_home).fetch(0)
+        assert_equal NOW.iso8601(6), persisted.recovery.fetch("next_eligible_at"),
+                     "#{requestor} retry must be immediately due after persistence"
+        assert_equal "queued", coordinator.receipt_for_request(persisted, now: NOW).status,
+                     "#{requestor} retry must remain due when the daemon reloads it"
       end
+    end
+  end
+
+  def test_an_operator_retry_makes_an_existing_admitted_recovery_due
+    with_fixture(mtime: NOW - 6) do |coordinator, row, state_home|
+      admitted = coordinator.request(
+        row: row, requestor: "healer", request_id: "automatic", now: NOW
+      )
+      Q.update_recovery!(
+        admitted.request_id, expected_phase: "admitted",
+        changes: { "next_eligible_at" => (NOW + 60).iso8601(6) },
+        state_home: state_home
+      )
+
+      retried = coordinator.request(
+        row: row, requestor: "action", request_id: "manual", now: NOW
+      )
+
+      assert_equal admitted.request_id, retried.request_id
+      assert_equal "queued", retried.status
+      persisted = Q.fetch(admitted.request_id, state_home: state_home)
+      assert_equal NOW.iso8601(6), persisted.recovery.fetch("next_eligible_at")
     end
   end
 
@@ -1049,6 +1189,15 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       coordinator.send(:retry_argv, malformed_command)
     end
     assert_includes error.message, "invalid retry command"
+  end
+
+  def test_invalid_runtime_digest_is_rejected_before_recovery
+    assert_raises(ArgumentError) do
+      Hive::Daemon::RecoveryCoordinator.new(
+        state_home: "/tmp/hive-invalid-recovery-runtime",
+        runtime_digest: "invalid"
+      )
+    end
   end
 
   def test_assessment_and_resolved_block_updates_fail_closed
@@ -2142,7 +2291,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   def write_terminal_recovery_history(row:, state_home:, retry_count:,
                                       failure_fingerprint: nil,
                                       identical_failure_count: nil,
-                                      failure_attempt_history: nil)
+                                      failure_attempt_history: nil,
+                                      runtime_digest: Hive::RuntimeIdentity.source_digest)
     Q.write_request!(
       project: row.project,
       slug: row.slug,
@@ -2173,7 +2323,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         "retry_count" => retry_count,
         "attempt_id" => "attempt-previous",
         "terminal_outcome" => "failed",
-        "terminal_at" => (NOW - 60).iso8601(6)
+        "terminal_at" => (NOW - 60).iso8601(6),
+        "runtime_digest" => runtime_digest
       }.merge({
         "failure_fingerprint" => failure_fingerprint,
         "identical_failure_count" => identical_failure_count,

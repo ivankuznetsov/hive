@@ -8,17 +8,17 @@ module Hive
   module Daemon
     # Durable, identity-bound continuation state for incremental merge intake.
     # The authoritative reconciler checkpoint remains schema v2; this sidecar
-    # can be discarded only after its base-checkpoint fingerprint is stale.
+    # can be discarded after its base-checkpoint fingerprint becomes stale.
     class RefactorPatrolMergeProgressStore
       SCHEMA = "hive-refactor-patrol-reconciler-progress".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
       KEYS = %w[
         schema schema_version registration host repository default_branch
         base_checkpoint_sha256 scan retry updated_at
       ].freeze
       SCAN_KEYS = %w[
         phase merged_since merged_until result_count cursor items seen_cursors
-        started_at ingest_index enqueued_prs
+        started_at ingest_index processed_prs enqueued_prs
       ].freeze
       RETRY_KEYS = %w[failures not_before last_error].freeze
       CHECKPOINT_KEYS = %w[
@@ -116,6 +116,7 @@ module Hive
             "seen_cursors" => [],
             "started_at" => now.utc.iso8601,
             "ingest_index" => 0,
+            "processed_prs" => [],
             "enqueued_prs" => []
           },
           "retry" => nil,
@@ -273,6 +274,9 @@ module Hive
           raise Invalid, "reconciler progress has more items than its frozen result count"
         end
         unless scan["ingest_index"].is_a?(Integer) && scan["ingest_index"] >= 0 &&
+               scan["processed_prs"].is_a?(Array) &&
+               scan["processed_prs"].all? { |number| number.is_a?(Integer) && number.positive? } &&
+               scan["processed_prs"].uniq.length == scan["processed_prs"].length &&
                scan["enqueued_prs"].is_a?(Array) &&
                scan["enqueued_prs"].all? { |number| number.is_a?(Integer) && number.positive? } &&
                scan["enqueued_prs"].uniq.length == scan["enqueued_prs"].length

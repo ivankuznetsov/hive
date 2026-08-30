@@ -101,6 +101,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         assert File.directory?(File.join(cwd, ".git")) || File.file?(File.join(cwd, ".git"))
         assert_includes prompt, "ce-doc-review"
         assert_includes prompt, "Repository root: `#{cwd}`"
+        assert_includes prompt,
+                        "`selected_lenses` names may use lowercase letters, digits, hyphens, and underscores"
+        assert_includes prompt, "`residual_evidence` must be exactly an empty array"
         File.write(File.join(cwd, "review-notes.md"), "reviewer scratch work")
         File.write(output_path, JSON.generate(valid_result(request)))
         { "status" => "ok", "actual_route" => request.reviewer }
@@ -115,6 +118,24 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "success", result.outcome
       assert_equal original, File.binread(plan_path)
       assert_equal 1, result.findings.length
+    end
+  end
+
+  def test_success_preserves_findings_when_selected_lenses_are_hyphenated
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        payload = valid_result(request).merge(
+          "selected_lenses" => [ "product-lens", "security-lens", "scope-guardian" ]
+        )
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "success", result.outcome
+      assert_equal 1, result.findings.length
+      assert_equal %w[product-lens security-lens scope-guardian], result.selected_lenses
     end
   end
 
@@ -184,6 +205,45 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal "terminal_failure", result.outcome
       assert_equal request.reviewer, result.route_receipt.fetch("actual")
       assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
+      assert_equal "parser", result.route_receipt.fetch("diagnostic_source")
+    end
+  end
+
+  def test_reviewer_authored_diagnostic_is_distinct_from_a_parser_failure
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        payload = valid_result(request).merge(
+          "outcome" => "terminal_failure",
+          "diagnostic" => "plan review selected_lenses must contain lowercase names"
+        )
+        File.write(output_path, JSON.generate(payload))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = adapter_for(runner).call(request)
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal "reviewer", result.route_receipt.fetch("diagnostic_source")
+    end
+  end
+
+  def test_adapter_config_error_preserves_the_actual_route_and_diagnostic_source
+    with_request do |request, _plan_path|
+      runner = lambda do |output_path:, request:, **|
+        File.write(output_path, JSON.generate(valid_result(request)))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::PlanReview::ResultParser, :parse,
+        ->(*, **) { raise Hive::ConfigError, "invalid adapter configuration" }
+      ) do
+        adapter_for(runner).call(request)
+      end
+
+      assert_equal "terminal_failure", result.outcome
+      assert_equal request.reviewer, result.route_receipt.fetch("actual")
+      assert_equal "adapter", result.route_receipt.fetch("diagnostic_source")
     end
   end
 

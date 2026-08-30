@@ -160,6 +160,7 @@ class ClaudeLauncherTest < Minitest::Test
       runner.define_singleton_method(:start_detached) { |command:| @command = command }
       runner.define_singleton_method(:kill_session) { }
       captured_flags = nil
+      cleared_child = nil
       cfg = {
         "claude" => {
           "permission_mode" => "bypassPermissions",
@@ -177,18 +178,24 @@ class ClaudeLauncherTest < Minitest::Test
                 [ "claude" ]
               }) do
                 with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_until_session_exists!, ->(*) { }) do
-                  with_replaced_singleton_method(Hive::ClaudeLauncher, :record_claude_pid, ->(*) { }) do
+                  child = { pid: 12_345, process_start_time: "child-start" }
+                  with_replaced_singleton_method(Hive::ClaudeLauncher, :record_claude_pid, ->(*) { child }) do
                     with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, ->(*) { }) do
                       with_replaced_singleton_method(Hive::ClaudeLauncher, :shutdown_claude, ->(*) { }) do
                         with_replaced_singleton_method(Hive::ClaudeLauncher, :sweep_orphan_processes, ->(*) { }) do
-                          with_replaced_singleton_method(Hive::ClaudeLauncher, :cleanup_done, ->(*) { }) do
-                            Hive::ClaudeLauncher.with_shared_session(
-                              task: task,
-                              cfg: cfg,
-                              session_name: "hive-test-session",
-                              cwd: task.folder,
-                              add_dirs: [],
-                            ) { |_handle| }
+                          clear = lambda do |folder, pid:, process_start_time:|
+                            cleared_child = [ folder, pid, process_start_time ]
+                          end
+                          with_replaced_singleton_method(Hive::Lock, :clear_task_lock_child, clear) do
+                            with_replaced_singleton_method(Hive::ClaudeLauncher, :cleanup_done, ->(*) { }) do
+                              Hive::ClaudeLauncher.with_shared_session(
+                                task: task,
+                                cfg: cfg,
+                                session_name: "hive-test-session",
+                                cwd: task.folder,
+                                add_dirs: [],
+                              ) { |_handle| }
+                            end
                           end
                         end
                       end
@@ -202,6 +209,7 @@ class ClaudeLauncherTest < Minitest::Test
       end
 
       assert_equal %w[--model sonnet --effort medium], captured_flags
+      assert_equal [ task.folder, 12_345, "child-start" ], cleared_child
     end
   end
 

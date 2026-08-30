@@ -189,6 +189,40 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_review_blocked", blocked.key
     assert_nil blocked.command
 
+    stale_planner_identity = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair the planner route",
+        "routes" => [
+          {
+            "role" => "planner",
+            "actual" => {
+              "provider" => "codex", "model" => "claude-opus-4-8"
+            }
+          },
+          { "role" => "planner_revision", "outcome" => "retryable_failure" }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", stale_planner_identity.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", stale_planner_identity.command
+
+    stale_residual_evidence = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked", "required_action" => "repair initial review output",
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "terminal_failure",
+            "diagnostic" => "invalid plan review residual evidence entry",
+            "diagnostic_source" => "parser"
+          }
+        ]
+      }
+    )
+    assert_equal "plan_reviewing", stale_residual_evidence.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", stale_residual_evidence.command
+
     stale_revision = Hive::TaskAction.for(
       task, waiting,
       plan_review: {
@@ -2175,6 +2209,26 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
     assert_equal "plan_review_unsupported", unknown.key
     assert_nil unknown.command
+  end
+
+  def test_plan_review_recovers_a_legacy_selected_lenses_parser_rejection
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    legacy = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "routes" => [
+          {
+            "role" => "primary", "outcome" => "terminal_failure",
+            "diagnostic" => "plan review selected_lenses must contain lowercase names"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", legacy.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
   end
 
   def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair

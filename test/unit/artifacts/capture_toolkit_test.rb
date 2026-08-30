@@ -147,6 +147,9 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     assert_includes filesystem_policy, "/managed/codex-runtime"
     assert_includes filesystem_policy, "/opt/hive/bin/hive"
     assert_includes filesystem_policy, "/opt/hive/lib"
+    assert_includes filesystem_policy, RbConfig.ruby
+    assert_includes filesystem_policy, RbConfig::CONFIG.fetch("bindir")
+    assert_includes filesystem_policy, RbConfig::CONFIG.fetch("libdir")
     domain = URI.parse(receipt.dig("web", "origin")).host
     browser_environment, browser_argv = browser_commands.first
     assert_includes browser_argv, domain
@@ -163,8 +166,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
                  toolkit.launch_environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")
     refute toolkit.launch_environment.key?("HOME")
     refute toolkit.launch_environment.key?("AGENT_BROWSER_EXECUTABLE_PATH")
-    assert_equal "open", browser_commands.first.last[-2]
-    assert_equal receipt.dig("web", "origin"), browser_commands.first.last.last
+    assert_equal %w[snapshot -i], browser_commands.first.last.last(2)
     toolkit.close
     refute File.exist?(socket_root)
     refute File.exist?(mailbox_root)

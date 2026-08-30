@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-08-29
 tags: [agent, claude, subprocess]
 ---
 
@@ -65,7 +65,7 @@ Hive::Agent.new(
 
 `Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. The broad "limit reached/exceeded/reset" family is intentionally usage-qualified (`usage`, `rate`, `token`, `credit`, `quota`, account/subscription/time-window terms, etc.) so healthy agent output about UI limits such as scroll, window, viewport, page, buffer, or line limits does not trip a false `limits_reached` wall. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`. `AgentLimit` also owns the periodic readiness interval: `RETRY_COOLDOWN_SEC` (default 3600s = 1h, overridable per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`, validated to a positive integer). `retry_after(text:, now:)` still preserves a complete provider reset estimate for status/TUI display, falling back to `now + cooldown`, but daemon scheduling deliberately ignores that estimate: `retry_due?` uses the latest quota marker's mtime so credits, usage resets, and account switches are noticed within one interval. See [[daemon]] and [[state-model]].
 
-Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. Ordinary successful command output is never scanned into failure, but a profile extractor's typed provider error remains authoritative even when the CLI exits zero. A typed quota error retains `limits_reached`; another provider-side failed turn returns `error_reason=provider_error` with its bounded redacted diagnostic. For `:state_file_marker` spawns Hive stamps the corresponding `ERROR`; for `:exit_code_only` and `:output_file_exists` spawns it returns the error without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same limit classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
+Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. Structured provider status extraction accepts both the generic `code` field and Grok's nested `http_status` field, so an HTTP 402 Grok Build balance exhaustion is typed as `provider_limit` instead of a generic reviewer error. Ordinary successful command output is never scanned into failure, but a profile extractor's typed provider error remains authoritative even when the CLI exits zero. A typed quota error retains `limits_reached`; another provider-side failed turn returns `error_reason=provider_error` with its bounded redacted diagnostic. For `:state_file_marker` spawns Hive stamps the corresponding `ERROR`; for `:exit_code_only` and `:output_file_exists` spawns it returns the error without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same limit classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
 
 Claude's own per-invocation cap has a separate protocol boundary.
 `MessageExtractor.extract_failure` recognizes only a structured terminal
@@ -217,7 +217,12 @@ the strict JSONL run boundary becomes a typed `malformed_output` failure.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
+12. Once child completion is confirmed, compare-and-clear its PID/start-time
+    pair from the still-live task lock. Native OpenCode uses the same lifecycle
+    boundary after its recorded `run` child exits; post-agent parsing and
+    hosted-CI polling therefore retain the live runner lock without presenting
+    a dead child to daemon healing.
+13. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}` plus `failure_origin` / `failure_details` only when a recognized structured failure was observed. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode, must pass the Artifact Firewall's non-empty regular-file/root admission, and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -235,7 +240,9 @@ failure.
 Claude/tmux launches record the managed pane PID in the same per-task lock.
 `Hive::ClaudeLauncher#record_claude_pid` waits for `pane_pid`, then writes both
 `claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the
-same PID-reuse identity guard as headless `Hive::Agent` spawns.
+same PID-reuse identity guard as headless `Hive::Agent` spawns. Shared-session
+teardown compare-and-clears that exact identity after shutdown, session kill,
+and orphan sweep; a concurrently re-established replacement remains recorded.
 
 Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers,
 triage/browser helpers) poll the expected artifact and managed tmux session

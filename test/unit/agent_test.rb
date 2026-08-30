@@ -2156,6 +2156,26 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_completed_agent_clears_its_child_identity_from_the_live_task_lock
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      Hive::Lock.with_task_lock(task.folder) do
+        result = Hive::Agent.new(
+          task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+        ).run!
+        lock = YAML.safe_load_file(File.join(task.folder, ".lock"))
+
+        assert_equal :waiting, result[:status]
+        refute lock.key?("claude_pid")
+        refute lock.key?("claude_pid_start_time")
+      end
+    end
+  end
+
   def test_signaled_subprocess_reports_negative_exit_code
     with_tmp_dir do |dir|
       task = make_task(dir)

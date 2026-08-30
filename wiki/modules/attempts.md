@@ -224,11 +224,13 @@ explicit operator recovery request may claim that probe early, but cannot
 bypass global, project, task, or daily limits, and a second
 release cannot overlap it. A successful probe closes the cohort; a failed
 probe reopens it, and a failed pre-persistence or definitively unstarted
-handoff releases only its matching probe fence. The runtime digest uses the
-validated channel, release version, and dogfood build SHA; deployment identity
-alone cannot reset pacing. A different validated runtime build digest or the
-next UTC shard starts open, so repaired deployed code and daily rollover do not
-inherit stale pacing.
+handoff releases only its matching probe fence. The shared runtime-source
+digest uses the validated channel, release version, and dogfood build SHA;
+deployment identity alone cannot reset pacing. Recovery requests use this same
+identity so a replacement runtime also starts their retry ladder and
+repeated-failure evidence fresh. A different validated runtime build digest or
+the next UTC shard starts Patrol pacing open, so repaired deployed code and
+daily rollover do not inherit stale pacing.
 Only a retry with its own receipt-bound matching failure identity is held;
 unrelated Patrol codes and healthy stages continue.
 

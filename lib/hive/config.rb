@@ -377,6 +377,12 @@ module Hive
           "enabled" => true,
           "max_attempts" => 2
         },
+        # Exact-head hosted checks are a completion invariant, independent of
+        # reviewer-comment publication. Set false only for repositories whose
+        # PR checks are intentionally managed outside Hive.
+        "github_checks" => {
+          "enabled" => true
+        },
         "max_passes" => 2,
         # Outer wall-clock budget for the whole reviewers phase. Sized to
         # fit a couple of claude-tmux reviewers each running up to their
@@ -2422,7 +2428,8 @@ module Hive
       review = cfg.fetch("review")
       add_model_routing_call(
         calls, cfg, "review_ci", review.dig("ci", "agent") || execute_agent,
-        enabled: command_configured?(review.dig("ci", "command")),
+        enabled: command_configured?(review.dig("ci", "command")) ||
+          review.dig("github_checks", "enabled") != false,
         current: model_routing_current(review["ci"])
       )
       add_model_routing_call(

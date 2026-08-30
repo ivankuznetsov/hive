@@ -100,4 +100,29 @@ class HiveBrainstormSuggestionsConfigTest < Minitest::Test
       end
     end
   end
+
+  def test_disable_check_rejects_oversized_and_reserved_brainstorm_content
+    with_project do |root, state|
+      task = File.join(state, "stages", "2-brainstorm", "task-1")
+      FileUtils.mkdir_p(task)
+      brainstorm = File.join(task, "brainstorm.md")
+      cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+      cfg["project_root"] = root
+      cfg["hive_state_path"] = state
+      cfg["brainstorm"]["suggestions"]["enabled"] = false
+
+      File.write(
+        brainstorm,
+        "x" * (Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES + 1)
+      )
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:validate_brainstorm_suggestion_disable!, cfg, "fixture.yml")
+      end
+
+      File.write(brainstorm, "<!-- hive-suggestion:v1 binding=#{'a' * 64} -->\n")
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:validate_brainstorm_suggestion_disable!, cfg, "fixture.yml")
+      end
+    end
+  end
 end

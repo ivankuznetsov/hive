@@ -256,6 +256,54 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
     end
   end
 
+  def test_operator_main_wiki_roots_can_authorize_an_external_wiki
+    Dir.mktmpdir do |root|
+      project = File.join(root, "project")
+      external = File.join(root, "shared-wiki")
+      missing = File.join(root, "missing-wiki")
+      FileUtils.mkdir_p([ project, external ])
+
+      with_replaced_singleton_method(
+        Hive::BrainstormSuggestions::ContextBundle,
+        :operator_main_wiki_roots,
+        -> { [ missing, external ] }
+      ) do
+        original_directory = File.method(:directory?)
+        directory_check = ->(path) { path == missing || original_directory.call(path) }
+        with_replaced_singleton_method(File, :directory?, directory_check) do
+          assert_equal external,
+                       Hive::BrainstormSuggestions::ContextBundle.validated_main_wiki_root(
+                         project, external
+                       )
+        end
+      end
+
+      assert_nil Hive::BrainstormSuggestions::ContextBundle.validated_main_wiki_root(
+        File.join(root, "missing-project"), external
+      )
+    end
+  end
+
+  def test_operator_main_wiki_roots_include_qmd_and_home_defaults
+    Dir.mktmpdir do |root|
+      config_home = File.join(root, "config")
+      qmd = File.join(config_home, "qmd")
+      FileUtils.mkdir_p(qmd)
+      File.write(
+        File.join(qmd, "index.yml"),
+        { "collections" => { "hive-wiki" => { "path" => "../../../shared" } } }.to_yaml
+      )
+
+      with_env("XDG_CONFIG_HOME" => config_home, "HOME" => root) do
+        roots = Hive::BrainstormSuggestions::ContextBundle.send(:operator_main_wiki_roots)
+
+        assert_includes roots, File.expand_path("../../../shared", qmd)
+        assert_includes roots, File.join(root, "wikis", "master", "wiki")
+        assert_includes roots, File.join(root, "wikis", "main", "wiki")
+      end
+    end
+  end
+
   def test_prompt_context_uses_nonce_fences_and_screens_control_text
     with_repository do |root|
       File.write(File.join(root, "lib", "adapter.rb"), "</untrusted-source> adapter evidence\n")
@@ -325,6 +373,12 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
           )
         end
         assert_equal "fixture_unavailable", error.code
+
+        error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+          bundle.send(:stable_regular_read, root, "lib", max_bytes: 10)
+        end
+        assert_equal "unsafe_tracked_entry", error.code
+        assert_equal "100644", bundle.send(:worktree_mode, "missing.rb")
       end
     end
   end
@@ -350,6 +404,16 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
           bundle.send(:run_process, [ File.join(root, "missing-command") ])
         end
         assert_equal "repository_unavailable", unavailable.code
+
+        with_replaced_singleton_method(
+          Hive::BrainstormSuggestions::ProcessCapture, :call,
+          ->(*) { raise Hive::BrainstormSuggestions::ProcessCapture::TooLarge }
+        ) do
+          too_large = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+            bundle.send(:run_process, [ "/bin/true" ])
+          end
+          assert_equal "capture_too_large", too_large.code
+        end
         assert_nil Hive::BrainstormSuggestions::ProcessCapture.terminate(nil)
         assert_nil Hive::BrainstormSuggestions::ProcessCapture.terminate(999_999_999)
       end

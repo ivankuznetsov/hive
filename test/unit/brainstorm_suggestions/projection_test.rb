@@ -349,6 +349,29 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
+  def test_git_identity_maps_bounded_capture_failures_to_io_errors
+    with_task do |root|
+      projection = build_projection(root)
+      failures = {
+        Hive::BrainstormSuggestions::ProcessCapture::TooLarge => "exceeded its bound",
+        Hive::BrainstormSuggestions::ProcessCapture::SpawnFailed.new("git unavailable") =>
+          "git unavailable"
+      }
+
+      failures.each do |failure, message|
+        replacement = ->(*) { raise failure }
+        with_replaced_singleton_method(
+          Hive::BrainstormSuggestions::ProcessCapture, :call, replacement
+        ) do
+          error = assert_raises(IOError) do
+            projection.send(:run_git, [ "status" ], Float::INFINITY)
+          end
+          assert_includes error.message, message
+        end
+      end
+    end
+  end
+
   private
 
   def with_task

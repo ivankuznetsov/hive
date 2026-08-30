@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-digest-record.v1.json",
+  "title": "Hive daily activity digest base record (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "record_id", "local_date", "sequence",
+    "time_zone", "starts_at", "ends_at", "boundary_kind", "lifecycle",
+    "closed_at", "completeness", "content", "last_materialized_at",
+    "projects", "items", "attention", "gaps", "source_frontiers"
+  ],
+  "properties": {
+    "schema": { "const": "hive-digest-record" },
+    "schema_version": { "const": 1 },
+    "record_id": { "$ref": "#/$defs/Sha256" },
+    "local_date": { "$ref": "#/$defs/Date" },
+    "sequence": { "type": ["integer", "null"], "minimum": 1 },
+    "time_zone": { "type": "string", "minLength": 1 },
+    "starts_at": { "$ref": "#/$defs/Timestamp" },
+    "ends_at": { "$ref": "#/$defs/Timestamp" },
+    "boundary_kind": { "enum": ["calendar_day", "zone_cutover"] },
+    "lifecycle": { "enum": ["open", "closed"] },
+    "closed_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+    "completeness": { "enum": ["complete", "partial"] },
+    "content": { "enum": ["empty", "non_empty", "unknown"] },
+    "last_materialized_at": { "$ref": "#/$defs/Timestamp" },
+    "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/Fact" } },
+    "attention": { "type": "array", "items": { "$ref": "#/$defs/Attention" } },
+    "gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } },
+    "source_frontiers": {
+      "type": "object",
+      "additionalProperties": { "type": ["string", "integer", "object", "null"] }
+    }
+  },
+  "$defs": {
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "Timestamp": { "type": "string", "format": "date-time" },
+    "Project": {
+      "type": "object",
+      "required": ["project_id", "name"],
+      "properties": {
+        "project_id": { "type": "string", "minLength": 1 },
+        "registration_id": { "type": ["string", "null"] },
+        "name": { "type": "string" },
+        "repository_identity": { "type": ["string", "null"] },
+        "historical": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "Fact": {
+      "type": "object",
+      "required": ["fact_id", "kind", "project_id", "occurred_at", "observed_at"],
+      "properties": {
+        "fact_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "project_id": { "type": ["string", "null"] },
+        "project": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "integer", "null"] },
+        "task_slug": { "type": ["string", "null"] },
+        "stage": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "summary": { "type": ["string", "null"] },
+        "occurred_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "observed_at": { "$ref": "#/$defs/Timestamp" },
+        "source": { "type": ["string", "null"] },
+        "task_url": { "type": ["string", "null"] },
+        "pr": { "anyOf": [{ "$ref": "#/$defs/PullRequest" }, { "type": "null" }] },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "Attention": {
+      "type": "object",
+      "required": ["attention_id", "kind", "project_id", "task_slug", "stage", "state"],
+      "properties": {
+        "attention_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "project_id": { "type": ["string", "null"] },
+        "project": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "integer", "null"] },
+        "task_slug": { "type": ["string", "null"] },
+        "stage": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "waiting_since": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "waiting_age_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "task_url": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "Gap": {
+      "type": "object",
+      "required": ["gap_id", "source", "scope", "reason", "observed_at", "freshness_at"],
+      "properties": {
+        "gap_id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "scope": { "type": ["string", "null"] },
+        "project_id": { "type": ["string", "null"] },
+        "task_slug": { "type": ["string", "null"] },
+        "reason": { "type": "string", "maxLength": 512 },
+        "observed_at": { "$ref": "#/$defs/Timestamp" },
+        "freshness_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "retry_state": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "PullRequest": {
+      "type": "object",
+      "properties": {
+        "number": { "type": ["integer", "null"] },
+        "url": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "draft": { "type": ["boolean", "null"] },
+        "head_revision": { "type": ["string", "null"] },
+        "checks": { "type": ["string", "null"] },
+        "review": { "type": ["string", "null"] },
+        "merged_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

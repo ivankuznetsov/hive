@@ -57,3 +57,15 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 # answer_digest:
 #   enabled: false
 #   hour: 9
+
+# Hive-owned durable cross-project activity record. Disabled by default. Run
+# `hive migrate --all` before enabling so the IANA zone and coverage frontier
+# are persisted. Telegram recap delivery is a separate opt-in.
+#
+# daily_digest:
+#   enabled: false
+#   materialization_interval_sec: 300
+#   freshness_budget_sec: 900
+#   telegram:
+#     enabled: false
+#     hour: 9

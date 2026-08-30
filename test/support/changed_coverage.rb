@@ -21,6 +21,24 @@ module HiveChangedCoverage
       "test/integration/run_review_test.rb",
       "test/unit/stages/review/ci_gates_test.rb",
       "test/unit/stages/review/run_reviewers_test.rb"
+    ],
+    # BubbleModel and Update are shared TUI boundaries whose exact coverage is
+    # deliberately distributed across their large focused units and smaller
+    # integration/gap suites. Keep the changed-source gate non-vacuous without
+    # turning it into the complete repository suite.
+    "lib/hive/tui/bubble_model.rb" => [
+      "test/integration/tui_new_idea_attachments_test.rb",
+      "test/integration/tui_token_stats_test.rb",
+      "test/integration/tui_usage_footer_test.rb",
+      "test/unit/current_main_coverage_gap_test.rb",
+      "test/unit/tui/bubble_model_test.rb",
+      "test/unit/tui/bubble_model_update_nudge_test.rb",
+      "test/unit/tui/new_idea_project_resolution_boundary_test.rb"
+    ],
+    "lib/hive/tui/update.rb" => [
+      "test/integration/tui_token_stats_test.rb",
+      "test/unit/current_main_coverage_gap_test.rb",
+      "test/unit/tui/update_test.rb"
     ]
   }.freeze
 

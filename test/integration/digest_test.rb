@@ -77,9 +77,11 @@ class DailyDigestIntegrationTest < Minitest::Test
   def record
     {
       "schema" => "hive-digest-record", "schema_version" => 1,
+      "interval_id" => "a" * 64,
       "local_date" => "2026-08-30", "sequence" => 1,
       "time_zone" => "Europe/London", "starts_at" => "2026-08-29T23:00:00Z",
-      "ends_at" => "2026-08-30T23:00:00Z", "boundary_kind" => "calendar_day",
+      "ends_at" => "2026-08-30T23:00:00Z", "duration_seconds" => 86_400,
+      "boundary_kind" => "calendar_day", "cutover" => nil,
       "lifecycle" => "closed", "closed_at" => "2026-08-30T23:01:00Z",
       "completeness" => "complete", "content" => "non_empty",
       "last_materialized_at" => "2026-08-30T23:01:00Z",

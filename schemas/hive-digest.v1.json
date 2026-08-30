@@ -33,7 +33,7 @@
         "ends_at": { "type": ["string", "null"], "format": "date-time" },
         "duration_seconds": { "type": ["integer", "null"], "minimum": 1 },
         "boundary_kind": { "enum": ["calendar_day", "zone_cutover", null] },
-        "cutover": { "type": ["object", "null"] },
+        "cutover": { "anyOf": [{ "$ref": "#/$defs/Cutover" }, { "type": "null" }] },
         "lifecycle": { "enum": ["open", "closed", "missing", "pruned"] },
         "closed_at": { "type": ["string", "null"], "format": "date-time" },
         "completeness": { "enum": ["complete", "partial", "unknown"] },
@@ -41,11 +41,11 @@
         "last_materialized_at": { "type": ["string", "null"], "format": "date-time" },
         "stale": { "type": "boolean" },
         "selected_project": { "type": ["string", "null"] },
-        "projects": { "type": "array", "items": { "type": "object" } },
-        "attention": { "type": "array", "items": { "type": "object" } },
-        "items": { "type": "array", "items": { "type": "object" } },
-        "gaps": { "type": "array", "items": { "type": "object" } },
-        "amendments": { "type": "array", "items": { "type": "object" } },
+        "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } },
+        "attention": { "type": "array", "items": { "$ref": "#/$defs/Attention" } },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/Fact" } },
+        "gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } },
+        "amendments": { "type": "array", "items": { "$ref": "#/$defs/Amendment" } },
         "previous_date": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
         "next_date": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
         "coverage_started_at": { "type": ["string", "null"], "format": "date-time" },
@@ -74,6 +74,159 @@
         },
         "exit_code": { "type": "integer" },
         "message": { "type": "string" }
+      }
+    },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": { "type": ["string", "null"] },
+        "registration_id": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "repository_identity": { "type": ["string", "null"] },
+        "historical": { "type": ["boolean", "null"] }
+      }
+    },
+    "Fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fact_id": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"] },
+        "category": { "type": ["string", "null"] },
+        "summary": { "type": ["string", "null"] },
+        "project_id": { "type": ["string", "null"] },
+        "project": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "integer", "null"] },
+        "task_slug": { "type": ["string", "null"] },
+        "stage": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "occurred_at": { "type": ["string", "null"] },
+        "observed_at": { "type": ["string", "null"] },
+        "source": { "type": ["string", "null"] },
+        "task_url": { "type": ["string", "null"] },
+        "details": { "$ref": "#/$defs/FactDetails" },
+        "pr": { "anyOf": [{ "$ref": "#/$defs/PullRequest" }, { "type": "null" }] }
+      }
+    },
+    "Attention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attention_id": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"] },
+        "project_id": { "type": ["string", "null"] },
+        "project": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "integer", "null"] },
+        "task_slug": { "type": ["string", "null"] },
+        "stage": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "waiting_since": { "type": ["string", "null"] },
+        "waiting_age_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "task_url": { "type": ["string", "null"] }
+      }
+    },
+    "Gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gap_id": { "type": ["string", "null"] },
+        "source": { "type": ["string", "null"] },
+        "scope": { "type": ["string", "null"] },
+        "reason_code": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "observed_at": { "type": ["string", "null"] },
+        "freshness_at": { "type": ["string", "null"] },
+        "project_id": { "type": ["string", "null"] },
+        "task_slug": { "type": ["string", "null"] },
+        "retry_state": { "type": ["string", "null"] }
+      }
+    },
+    "Amendment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "attention", "gaps", "resolved_gap_ids", "resolved_gaps"],
+      "properties": {
+        "amendment_id": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"] },
+        "source": { "type": ["string", "null"] },
+        "event_at": { "type": ["string", "null"] },
+        "observed_at": { "type": ["string", "null"] },
+        "amended_at": { "type": ["string", "null"] },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/Fact" } },
+        "attention": { "type": "array", "items": { "$ref": "#/$defs/Attention" } },
+        "gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } },
+        "resolved_gap_ids": { "type": "array", "items": { "type": "string" } },
+        "resolved_gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } }
+      }
+    },
+    "FactDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transition": { "$ref": "#/$defs/DetailValue" },
+        "marker": { "$ref": "#/$defs/DetailValue" },
+        "to_stage": { "$ref": "#/$defs/DetailValue" },
+        "question_id": { "$ref": "#/$defs/DetailValue" },
+        "answer_id": { "$ref": "#/$defs/DetailValue" },
+        "approval": { "$ref": "#/$defs/DetailValue" },
+        "decision": { "$ref": "#/$defs/DetailValue" },
+        "outcome": { "$ref": "#/$defs/DetailValue" },
+        "retry_at": { "$ref": "#/$defs/DetailValue" },
+        "hold_kind": { "$ref": "#/$defs/DetailValue" },
+        "state": { "$ref": "#/$defs/DetailValue" },
+        "provider": { "$ref": "#/$defs/DetailValue" },
+        "resource_kind": { "$ref": "#/$defs/DetailValue" },
+        "kind": { "$ref": "#/$defs/DetailValue" },
+        "unit": { "$ref": "#/$defs/DetailValue" },
+        "health": { "$ref": "#/$defs/DetailValue" },
+        "timed_out": { "$ref": "#/$defs/DetailValue" },
+        "actual_provider": { "$ref": "#/$defs/DetailValue" },
+        "actual_model": { "$ref": "#/$defs/DetailValue" },
+        "commit_oid": { "$ref": "#/$defs/DetailValue" },
+        "branch": { "$ref": "#/$defs/DetailValue" },
+        "pr_number": { "$ref": "#/$defs/DetailValue" },
+        "pr_state": { "$ref": "#/$defs/DetailValue" },
+        "pr_url": { "$ref": "#/$defs/DetailValue" },
+        "head_oid": { "$ref": "#/$defs/DetailValue" },
+        "draft": { "$ref": "#/$defs/DetailValue" },
+        "check_state": { "$ref": "#/$defs/DetailValue" },
+        "conclusion": { "$ref": "#/$defs/DetailValue" },
+        "review_state": { "$ref": "#/$defs/DetailValue" },
+        "merge_state": { "$ref": "#/$defs/DetailValue" },
+        "merge_oid": { "$ref": "#/$defs/DetailValue" },
+        "merged_at": { "$ref": "#/$defs/DetailValue" },
+        "action": { "$ref": "#/$defs/DetailValue" },
+        "corrected_fact_id": { "$ref": "#/$defs/DetailValue" },
+        "correction_kind": { "$ref": "#/$defs/DetailValue" },
+        "workflow": { "$ref": "#/$defs/DetailValue" }
+      }
+    },
+    "DetailValue": { "type": ["string", "integer", "boolean", "null"] },
+    "PullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "number": { "type": ["integer", "string", "null"] },
+        "url": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "draft": { "type": ["boolean", "null"] },
+        "head_revision": { "type": ["string", "null"] },
+        "checks": { "type": ["string", "null"] },
+        "review": { "type": ["string", "null"] },
+        "merged_at": { "type": ["string", "null"] }
+      }
+    },
+    "Cutover": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requested_at": { "type": ["string", "null"] },
+        "effective_at": { "type": ["string", "null"] },
+        "previous_time_zone": { "type": ["string", "null"] },
+        "skipped_labels": {
+          "type": "array", "items": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+        }
       }
     }
   }

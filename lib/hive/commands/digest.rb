@@ -2,6 +2,7 @@ require "json"
 require "time"
 require "uri"
 require "hive/config"
+require "hive/daily_digest/public_view"
 require "hive/daily_digest/reader"
 require "hive/tui/text"
 
@@ -95,7 +96,7 @@ module Hive
           "ends_at" => interval["ends_at"],
           "duration_seconds" => interval["duration_seconds"],
           "boundary_kind" => interval["boundary_kind"],
-          "cutover" => interval["cutover"],
+          "cutover" => DailyDigest::PublicView.cutover(interval["cutover"]),
           "lifecycle" => lifecycle,
           "closed_at" => view["closed_at"],
           "completeness" => completeness,
@@ -103,11 +104,21 @@ module Hive
           "last_materialized_at" => view["last_materialized_at"],
           "stale" => view.fetch("stale", false) == true,
           "selected_project" => @project || view["selected_project"],
-          "projects" => Array(view["projects"]),
-          "attention" => Array(view["attention"]),
-          "items" => Array(view["items"]),
-          "gaps" => Array(view["effective_gaps"] || view["gaps"]),
-          "amendments" => Array(view["amendments"]),
+          "projects" => Array(view["projects"]).filter_map do |row|
+            DailyDigest::PublicView.project(row) if row.is_a?(Hash)
+          end,
+          "attention" => Array(view["attention"]).filter_map do |row|
+            DailyDigest::PublicView.attention(row) if row.is_a?(Hash)
+          end,
+          "items" => Array(view["items"]).filter_map do |row|
+            DailyDigest::PublicView.fact(row) if row.is_a?(Hash)
+          end,
+          "gaps" => Array(view["effective_gaps"] || view["gaps"]).filter_map do |row|
+            DailyDigest::PublicView.gap(row) if row.is_a?(Hash)
+          end,
+          "amendments" => Array(view["amendments"]).filter_map do |row|
+            DailyDigest::PublicView.amendment(row) if row.is_a?(Hash)
+          end,
           "previous_date" => view["previous_date"],
           "next_date" => view["next_date"],
           "coverage_started_at" => view["coverage_started_at"],
@@ -231,6 +242,21 @@ module Hive
             "#{Array(row['resolved_gap_ids']).length} resolved gap(s)"
           ].join(", ")
           @stdout.puts("- #{safe(row['amended_at'])} · #{safe(row['kind'])} · #{summary}")
+          Array(row["items"]).each do |item|
+            @stdout.puts(
+              "  - late: #{safe(item['summary'] || item['kind'])} · " \
+              "#{safe([ item['project'], item['task_slug'] ].compact.join(':'))}"
+            )
+          end
+          resolved = Array(row["resolved_gaps"])
+          resolved.each do |gap|
+            @stdout.puts("  - recovered: #{safe(gap['source'])} · #{safe(gap['scope'])}")
+          end
+          if resolved.empty?
+            Array(row["resolved_gap_ids"]).each do |gap_id|
+              @stdout.puts("  - recovered gap: #{safe(gap_id)}")
+            end
+          end
         end
       end
 

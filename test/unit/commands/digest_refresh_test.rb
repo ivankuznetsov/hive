@@ -37,4 +37,44 @@ class DigestRefreshCommandTest < Minitest::Test
     assert_equal false, payload.fetch("ok")
     assert_equal "disabled", payload.fetch("error_kind")
   end
+
+  def test_text_output_and_unexpected_json_errors_are_bounded
+    coordinator = Object.new
+    coordinator.define_singleton_method(:refresh) do |**|
+      [ { "local_date" => "2026-08-30", "status" => "open" } ]
+    end
+    output = StringIO.new
+    Hive::Commands::DigestRefresh.new(coordinator: coordinator, stdout: output).call
+    assert_equal "2026-08-30 open\n", output.string
+
+    exploding = Object.new
+    exploding.define_singleton_method(:refresh) { |**| raise "boom" }
+    output = StringIO.new
+    assert_raises(Hive::InternalError) do
+      Hive::Commands::DigestRefresh.new(
+        json: true, coordinator: exploding, stdout: output
+      ).call
+    end
+    assert_equal "internal", JSON.parse(output.string).fetch("error_kind")
+  end
+
+  def test_error_kinds_and_epipe_cover_all_refresh_outcomes
+    command = Hive::Commands::DigestRefresh.new
+    cases = {
+      Hive::DailyDigest::Coordinator::NotInitialized.new("missing") => "not_initialized",
+      Hive::DailyDigest::Coordinator::FutureDate.new("future") => "future_date",
+      Hive::DailyDigest::MissingRecord.new("missing") => "missing",
+      Hive::DailyDigest::InvalidRecord.new("invalid") => "invalid_date",
+      Hive::ConfigError.new("config") => "config",
+      Hive::InternalError.new("internal") => "internal",
+      Hive::DailyDigest::Error.new("digest") => "digest_error"
+    }
+    cases.each { |error, kind| assert_equal kind, command.send(:error_kind, error) }
+
+    output = Object.new
+    output.define_singleton_method(:puts) { |_value| raise Errno::EPIPE }
+    broken = Hive::Commands::DigestRefresh.new(stdout: output)
+    broken.send(:emit_error, Hive::ConfigError.new("config"))
+    assert_equal true, broken.instance_variable_get(:@emitted)
+  end
 end

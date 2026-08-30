@@ -125,6 +125,28 @@ class HiveCliTest < Minitest::Test
     assert_equal "usage", payload.fetch("error_kind")
   end
 
+  def test_digest_rejects_options_that_belong_to_a_different_action
+    cases = [
+      [ [ "digest", "refresh", "--dry-run" ], "--dry-run" ],
+      [ [ "digest", "send", "--date", "2026-08-30", "--dry-run" ], "--dry-run" ],
+      [ [ "digest", "prune", "--before", "2026-08-30", "--yes", "--retry" ], "--retry" ],
+      [ [ "digest", "--retry" ], "--retry" ]
+    ]
+    cases.each do |argv, option|
+      error = assert_raises(Hive::UsageError) { Hive::CLI.start(argv) }
+      assert_includes error.message, option
+    end
+
+    out, = capture_io do
+      assert_raises(Hive::UsageError) do
+        Hive::CLI.start([ "digest", "refresh", "--dry-run", "--json" ])
+      end
+    end
+    payload = JSON.parse(out)
+    assert_equal "hive-digest-refresh", payload.fetch("schema")
+    assert_equal "usage", payload.fetch("error_kind")
+  end
+
   def test_setup_agents_help_exposes_consent_json_and_filters
     out, _err = capture_io { Hive::CLI.start([ "help", "setup-agents" ]) }
 

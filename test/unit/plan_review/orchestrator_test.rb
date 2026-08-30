@@ -76,8 +76,9 @@ class PlanReviewOrchestratorTest < Minitest::Test
   class TransientRevision
     attr_reader :calls
 
-    def initialize(candidate)
+    def initialize(candidate, failures: 1)
       @candidate = candidate
+      @failures = failures
       @calls = []
     end
 
@@ -86,7 +87,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
       return Hive::PlanReview::PlannerRevision::Result.new(
         outcome: "retryable_failure", candidate_bytes: nil, candidate_digest: nil,
         route_receipt: arguments.fetch(:planner_identity), diagnostic: "route failed"
-      ) if @calls.length == 1
+      ) if @calls.length <= @failures
 
       Hive::PlanReview::PlannerRevision::Result.new(
         outcome: "success", candidate_bytes: @candidate,
@@ -174,6 +175,39 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_planner_revision_opens_cooled_retry_series_until_provider_recovers
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      revision = TransientRevision.new(revised, failures: 2)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record
+
+      assert_equal "retry_scheduled", first.state
+      first_due = Time.iso8601(first["retry_at"])
+
+      second = orchestrator(
+        task, cfg, adapter:, planner_revision: revision, clock: -> { first_due }
+      ).advance!.record
+
+      assert_equal "retry_scheduled", second.state
+      second_due = Time.iso8601(second["retry_at"])
+      assert_operator second_due - first_due, :>=, 10 * 60
+
+      cleared = orchestrator(
+        task, cfg, adapter:, planner_revision: revision, clock: -> { second_due }
+      ).advance!.record
+
+      assert_equal "cleared", cleared.state
+      assert_equal 3, revision.calls.length
+      recoveries = cleared["routes"].select do |route|
+        route["role"] == "planner_revision" && route["transient_series_recovery"]
+      end
+      assert_equal [ 1, 2 ], recoveries.map { |route| route.fetch("transient_series") }
+    end
+  end
+
   def test_legacy_cross_provider_planner_model_recovers_once_with_the_same_provider
     revised = standard_plan.sub("# Plan", "# Revised plan")
     with_task(standard_plan) do |task, cfg|
@@ -216,20 +250,28 @@ class PlanReviewOrchestratorTest < Minitest::Test
       adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
       runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
 
-      blocked = runner.advance!
-      assert_equal "blocked", blocked.record.state
+      scheduled = runner.advance!
+      assert_equal "retry_scheduled", scheduled.record.state
 
-      routes = blocked.record["routes"].map(&:dup)
+      routes = scheduled.record["routes"].reject do |route|
+        route["transient_series_recovery"]
+      end.map(&:dup)
       routes.last.delete("planner_revision_contract_version")
       legacy = Hive::PlanReview::Record.new(
-        blocked.record.to_h.merge(
-          "version" => blocked.record.version + 1,
+        scheduled.record.to_h.merge(
+          "version" => scheduled.record.version + 1,
+          "state" => "blocked", "outcome" => "blocked",
           "routes" => routes,
+          "blockers" => [
+            { "owner" => "planner", "reason" => "planner_revision_retryable_failure" }
+          ],
+          "required_action" => "repair the planner route and start a linked plan generation",
+          "retry_at" => nil,
           "updated_at" => "2026-08-12T12:01:00.000000Z"
         )
       )
       store = runner.instance_variable_get(:@store)
-      store.publish_current!(legacy, expected_version: blocked.record.version)
+      store.publish_current!(legacy, expected_version: scheduled.record.version)
 
       cleared = runner.advance!
 
@@ -237,6 +279,42 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal 2, revision.calls.length
       reset = cleared.record["routes"].find { |route| route["contract_upgrade_recovery"] }
       assert_equal true, reset.fetch("recovery_reset")
+      assert_equal Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION,
+                   reset.fetch("planner_revision_contract_version")
+    end
+  end
+
+  def test_current_contract_blocked_planner_revision_enters_cooled_recovery
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      revision = TransientRevision.new(revised)
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+      scheduled = runner.advance!.record
+      routes = scheduled["routes"].reject { |route| route["transient_series_recovery"] }
+      legacy = Hive::PlanReview::Record.new(
+        scheduled.to_h.merge(
+          "version" => scheduled.version + 1,
+          "state" => "blocked", "outcome" => "blocked", "routes" => routes,
+          "blockers" => [
+            { "owner" => "planner", "reason" => "planner_revision_retryable_failure" }
+          ],
+          "required_action" => "repair the planner route and start a linked plan generation",
+          "retry_at" => nil,
+          "updated_at" => "2026-08-12T12:01:00.000000Z"
+        )
+      )
+      store = runner.instance_variable_get(:@store)
+      store.publish_current!(legacy, expected_version: scheduled.version)
+
+      recovered = runner.advance!.record
+
+      assert_equal "retry_scheduled", recovered.state
+      assert_equal 1, revision.calls.length
+      reset = recovered["routes"].last
+      assert_equal "planner_revision", reset.fetch("role")
+      assert_equal true, reset.fetch("transient_series_recovery")
       assert_equal Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION,
                    reset.fetch("planner_revision_contract_version")
     end
@@ -1252,8 +1330,8 @@ class PlanReviewOrchestratorTest < Minitest::Test
         adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
         planner_revision: revision
       )
-      assert_equal "blocked", runner.advance!.record.state
-      assert_equal "blocked", runner.advance!.record.state
+      assert_equal "retry_scheduled", runner.advance!.record.state
+      assert_equal "retry_scheduled", runner.advance!.record.state
       assert_equal 1, revision.calls.length
     end
   end

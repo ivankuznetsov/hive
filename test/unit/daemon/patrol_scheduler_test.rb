@@ -8,11 +8,11 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
   T0 = Time.utc(2026, 5, 28, 12, 0, 0)
 
   def setup
-    @previous_usage_path = Hive::UsageDb.path
+    @previous_usage_database = Hive::UsageDb.database
   end
 
   def teardown
-    Hive::UsageDb.path = @previous_usage_path
+    Hive::UsageDb.database = @previous_usage_database
   end
 
   class FakeGit
@@ -324,15 +324,19 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
   end
 
   def test_daily_launch_limit_skips_a_due_command_until_the_next_utc_day
-    old_path = Hive::UsageDb.path
+    old_database = Hive::UsageDb.database
     with_tmp_dir do |dir|
       entry = project_entry(dir)
-      Hive::UsageDb.database = runtime_database(entry)
-      8.times do
-        Hive::UsageDb.record!(
-          agent: "codex", model: nil, project_slug: "p1",
-          task_slug: "patrol-review", stage: "patrol-review",
-          started_at: T0, ended_at: T0, input: 1, output: 1, cached: 0
+      database = runtime_database(entry)
+      Hive::UsageDb.database = database
+      budget = Hive::Patrol::LaunchBudget.new(
+        dir, cfg: enabled_cfg, project_id: entry.fetch("project_id"),
+        project_name: entry.fetch("name"), engine: :ordinary, database: database
+      )
+      4.times do |index|
+        assert budget.acquire(
+          profile: "codex", stage: "patrol-review", started_at: T0,
+          reservation_id: "launch-#{index}"
         )
       end
       write_state(dir, "last_scanned_sha" => "old")
@@ -344,11 +348,11 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal 1, sched.tick(now: T0 + 43_200).size
     end
   ensure
-    Hive::UsageDb.path = old_path
+    Hive::UsageDb.database = old_database
   end
 
   def test_provider_retry_hold_survives_scheduler_restart_without_parking_architecture
-    old_path = Hive::UsageDb.path
+    old_database = Hive::UsageDb.database
     with_tmp_dir do |dir|
       entry = project_entry(dir)
       Hive::UsageDb.database = runtime_database(entry)
@@ -380,7 +384,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal 1, restarted.tick(now: retry_at).size
     end
   ensure
-    Hive::UsageDb.path = old_path
+    Hive::UsageDb.database = old_database
   end
 
   # Finding U2/poll_interval_sec: the new_commits trigger must run its

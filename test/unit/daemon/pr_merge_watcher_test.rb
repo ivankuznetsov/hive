@@ -528,14 +528,9 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       candidate = store.candidates(identity_for(task.project_root)).first
       assert_equal head, candidate.dig("pull_request", "observed_head")
-      database = Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path
-      ).migrate!
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(home, "attempts")) do
-        result = watcher.tick(now: T0).first
-        assert_equal :archived, result.fetch(:status), result.inspect
-      end
-      database.disconnect
+      prepare_test_runtime_project(task.project_root, state_home: Hive::Paths.state_home)
+      result = watcher.tick(now: T0).first
+      assert_equal :archived, result.fetch(:status), result.inspect
       archived = Hive::TaskResolver.new(task.slug, project_filter: "app").resolve
       assert_equal "9-done", stage_dir(archived)
     end
@@ -634,21 +629,16 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
   end
 
   def test_real_remote_merge_closure_archives_stage_five_through_eight
-    with_merge_project(stages: Hive::Daemon::PrMergeWatcher::SUPPORTED_STAGES) do |tasks, home|
+    with_merge_project(stages: Hive::Daemon::PrMergeWatcher::SUPPORTED_STAGES) do |tasks, _home|
       gh = FakeGh.new(state: "MERGED")
       watcher, = build_watcher(gh: gh, task_closure: Hive::TaskClosure)
       rows = tasks.map { |task| row_for(task) }
-      database = Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path
-      ).migrate!
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(home, "attempts")) do
-        watcher.observe(rows, now: T0)
-        tasks.length.times do |index|
-          result = watcher.tick(now: T0 + index).first
-          assert_equal :archived, result.fetch(:status), result.inspect
-        end
+      prepare_test_runtime_project(tasks.first.project_root, state_home: Hive::Paths.state_home)
+      watcher.observe(rows, now: T0)
+      tasks.length.times do |index|
+        result = watcher.tick(now: T0 + index).first
+        assert_equal :archived, result.fetch(:status), result.inspect
       end
-      database.disconnect
 
       tasks.each do |task|
         archived = Hive::TaskResolver.new(task.slug, project_filter: "app").resolve

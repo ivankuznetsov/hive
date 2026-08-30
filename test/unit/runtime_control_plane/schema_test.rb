@@ -17,12 +17,10 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     dispatch_outbox
     dispatch_requests
     installations
-    maintenance_checkpoints
     patrol_allowances
     payload_references
     pr_merge_project_state
     pr_merge_reconciliations
-    projections
     projects
     provider_audit
     provider_circuits
@@ -31,7 +29,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     task_counters
     task_leases
     task_subjects
-    terminal_pending_publications
+    terminal_pending_publications terminal_publication_obligations
     token_usage
   ].freeze
 
@@ -193,54 +191,6 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     loaded = codec.load_time(dumped)
     assert_equal local.utc, loaded
     assert_equal 123_456, loaded.usec
-  end
-
-  def test_identity_adapter_preserves_project_ids_and_rejects_aliases
-    identity = Hive::RuntimeControlPlane::Identity.new(uuid_generator: -> { uuid("f") })
-    original = project_entry(path: "/old/path")
-    moved = project_entry(path: "/new/path")
-
-    assert_equal identity.project(original).project_id, identity.project(moved).project_id
-    assert_equal "/new/path", identity.project(moved).observed_path
-    legacy = original.merge("registration_id" => "legacy:#{original.fetch('project_id')}")
-    assert_equal legacy.fetch("registration_id"), identity.project(legacy).registration_id
-
-    duplicate = project_entry(
-      project_id: original.fetch("project_id"), registration_id: uuid("d"),
-      path: "/clone/path"
-    )
-    error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
-      identity.validate_projects!([ original, duplicate ])
-    end
-    assert_equal :project_identity_collision, error.code
-
-    alias_entry = project_entry(
-      project_id: uuid("c"), registration_id: uuid("b"), path: "/different",
-      hive_state_path: original.fetch("hive_state_path")
-    )
-    error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
-      identity.validate_projects!([ original, alias_entry ])
-    end
-    assert_equal :state_root_collision, error.code
-
-    subject = identity.task_subject(
-      project_id: original.fetch("project_id"), workflow_id: "coding", task_slug: "task-a"
-    )
-    assert_equal uuid("f"), subject.task_id
-    assert_equal subject.task_id, identity.task_subject(
-      project_id: original.fetch("project_id"), workflow_id: "coding", task_slug: "task-a",
-      task_id: subject.task_id
-    ).task_id
-
-    assert_raises(Hive::RuntimeControlPlane::IdentityError) do
-      identity.validate_task_subjects!([
-        subject,
-        identity.task_subject(
-          project_id: original.fetch("project_id"), workflow_id: "coding", task_slug: "task-b",
-          task_id: subject.task_id
-        )
-      ])
-    end
   end
 
   private

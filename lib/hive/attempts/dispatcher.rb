@@ -194,8 +194,8 @@ module Hive
         view = admission_view
         begin
           @store.observe_task_source(task: task, generation: generation, observed_at: now) if task
-          view ||= AdmissionView.new(store: @store, hot_scan: @store.scan)
-            records = view.refresh_for_admission
+          view ||= AdmissionView.new(store: @store, records: @store.scan.records)
+            records = view.records
             semantic_owner = find_semantic_owner(records, generation)
             if semantic_owner&.live?
               result = if semantic_owner.task_generation == generation.task_generation
@@ -252,10 +252,12 @@ module Hive
               predecessor_attempt_id: successor_of
             )
             if existing_successor
-              result = DispatchResult.new(
-                status: :deferred, attempt: existing_successor, receipt: nil,
-                attach_descriptor: nil, reason: "successor_exists"
-              )
+              result = existing_successor.live? ?
+                live_result(existing_successor, interactive: interactive) :
+                DispatchResult.new(
+                  status: :deferred, attempt: existing_successor, receipt: nil,
+                  attach_descriptor: nil, reason: "successor_exists"
+                )
               return result
             end
             if successor_of.nil? && lost.any?
@@ -266,7 +268,7 @@ module Hive
               return result
             end
 
-            snapshot = view.capacity(now: now, records: records)
+            snapshot = view.capacity(now: now)
             utc_date = now.utc.to_date
             if snapshot.at_limit?(
               project: generation.project, task_slug: generation.task_slug, date: utc_date,
@@ -374,8 +376,6 @@ module Hive
 
                 stale_retries += 1
                 raise if stale_retries >= 3
-
-                health_available = reconcile_provider_health(health)
               end
               return result if result
             else
@@ -640,7 +640,6 @@ module Hive
                                  admission_view: nil, cohort_identity: nil,
                                  cohort_date: nil)
         current = @store.fetch_hot(created.attempt_id)
-        admission_view&.record(current) if current
         adopted = result_for_adopted_handoff(current, interactive: interactive)
         return adopted if adopted
         if current&.state == "lost"
@@ -658,14 +657,12 @@ module Hive
           diagnostics: diagnostics,
           now: @clock.call
         )
-        admission_view&.record(lost)
         release_failed_handoff_probe(
           lost, cohort_identity: cohort_identity, cohort_date: cohort_date
         )
         deferred_handoff_result(lost)
       rescue CompareAndSwapFailed
         current = @store.fetch_hot(created.attempt_id)
-        admission_view&.record(current) if current
         release_failed_handoff_probe(
           current, cohort_identity: cohort_identity, cohort_date: cohort_date
         ) if current&.state == "lost"
@@ -765,17 +762,9 @@ module Hive
       end
 
       def resolve_provider_health
-        health = provider_health_store
-        [ health, reconcile_provider_health(health) ]
+        [ provider_health_store, true ]
       rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
         [ nil, false ]
-      end
-
-      def reconcile_provider_health(health)
-        health.reconcile!
-        true
-      rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
-        false
       end
 
       def open_health_store
@@ -785,22 +774,26 @@ module Hive
       def select_provider_route(policy:, health:, snapshot:, records:, generation:, now:,
                                 health_available: true)
         routes = policy.eligible_routes
-        route_evaluations = if health_available
-          health.evaluate_routes(
-            routes: routes.map do |route|
-              { account_id: route.account, model_id: route.model }
-            end,
-            now: now
-          )
-        else
+        route_evaluations = begin
+          if health_available
+            health.evaluate_routes(
+              routes: routes.map do |route|
+                { account_id: route.account, model_id: route.model }
+              end,
+              now: now
+            )
+          else
+            routes.map { |route| unavailable_route_evaluation(route) }
+          end
+        rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
           routes.map { |route| unavailable_route_evaluation(route) }
         end
         evaluations = routes.each_with_index.to_h do |route, index|
           [ route.id, route_evaluations.fetch(index) ]
         end
-        capacity = snapshot.provider_account_capacity(
-          policy: policy,
-          records: records
+        capacity = CapacitySnapshot.provider_account_capacity(
+          accounts: policy.account_policy, records: records,
+          reserved_attempt_ids: snapshot.reserved_attempt_ids
         )
         request = Hive::ProviderRouting::Request.new(
           policy: policy,
@@ -885,7 +878,7 @@ module Hive
           launch_timeout_sec: @launch_timeout_sec,
           now: now
         )
-        view.record(record)
+        record
       end
 
       def patrol_admission_metadata(task:, generation:, now:)

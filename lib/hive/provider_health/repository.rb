@@ -30,11 +30,7 @@ module Hive
       def inspect_scopes(scopes, now: current_time)
         Array(scopes).map do |scope|
           require_scope!(scope)
-          circuit = database.read { |db| circuit_for(db, scope) }
-          Inspection.new(
-            status: "available", scope: scope, circuit: circuit,
-            generation: circuit.generation, journal_epoch: circuit.journal_epoch
-          )
+          database.read { |db| inspection_for(db, scope) }
         end.freeze
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         raise Unavailable, "provider health is unavailable: #{error.message}"
@@ -48,13 +44,7 @@ module Hive
         database.read do |db|
           Array(routes).map do |route|
             scopes = route_scopes(route)
-            inspections = scopes.map do |scope|
-              circuit = circuit_for(db, scope)
-              Inspection.new(
-                status: "available", scope: scope, circuit: circuit,
-                generation: circuit.generation, journal_epoch: circuit.journal_epoch
-              )
-            end
+            inspections = scopes.map { |scope| inspection_for(db, scope) }
             route_evaluation(inspections, now: now)
           end.freeze
         end
@@ -63,8 +53,6 @@ module Hive
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         raise Unavailable, "provider health is unavailable: #{error.message}"
       end
-
-      def reconcile! = [].freeze
 
       def apply_evidence(evidence:, attempt:, terminal_receipt:, expected_generation:)
         unless evidence.is_a?(Evidence) && attempt.is_a?(AttemptBinding)
@@ -197,6 +185,12 @@ module Hive
 
       def current_time = @clock.call.utc
 
+      def inspection_for(db, scope)
+        circuit = circuit_for(db, scope)
+        Inspection.new(status: "available", scope: scope, circuit: circuit,
+                       generation: circuit.generation, journal_epoch: circuit.journal_epoch)
+      end
+
       def require_scope!(scope)
         raise InvalidScope, "provider-health scope is invalid" unless scope.is_a?(Scope)
       end
@@ -288,15 +282,9 @@ module Hive
         end
         current = current.with(last_event_id: event_id)
         persist_circuit(db, current)
-        sequence = db[:provider_audit].where(circuit_id: previous.scope.key).max(:sequence).to_i + 1
         payload = { "previous" => previous.to_h, "current" => current.to_h, "audit" => audit&.to_h }
-        db[:provider_audit].insert(
-          event_id: event_id, circuit_id: previous.scope.key,
-          generation: current.generation, sequence: sequence, event_type: kind,
-          idempotency_key: key, status: "accepted", reason: nil,
-          payload_json: encode(payload), occurred_at: current_time.iso8601(6),
-          retain_until: (current_time + 30 * 24 * 60 * 60).iso8601(6)
-        )
+        append_audit(db, current, event_id: event_id, key: key, kind: kind,
+                     status: "accepted", payload: payload)
         prune_audit(db, previous.scope.key)
         MutationResult.new(
           status: "accepted", reason: kind, previous: previous, current: current,
@@ -306,16 +294,9 @@ module Hive
 
       def persist_rejection(db, circuit, key, reason)
         event_id = SecureRandom.uuid
-        sequence = db[:provider_audit].where(circuit_id: circuit.scope.key).max(:sequence).to_i + 1
         persist_circuit(db, circuit) unless db[:provider_circuits].where(circuit_id: circuit.scope.key).any?
-        db[:provider_audit].insert(
-          event_id: event_id, circuit_id: circuit.scope.key,
-          generation: circuit.generation, sequence: sequence,
-          event_type: "evidence_rejected", idempotency_key: key,
-          status: "rejected", reason: reason, payload_json: encode("reason" => reason),
-          occurred_at: current_time.iso8601(6),
-          retain_until: (current_time + 30 * 24 * 60 * 60).iso8601(6)
-        )
+        append_audit(db, circuit, event_id: event_id, key: key, kind: "evidence_rejected",
+                     status: "rejected", reason: reason, payload: { "reason" => reason })
         MutationResult.new(
           status: "rejected", reason: reason, previous: circuit, current: circuit,
           generation: circuit.generation, event_id: event_id, audit_receipt: nil
@@ -330,6 +311,17 @@ module Hive
           status: "duplicate", reason: "duplicate_evidence",
           previous: circuit, current: circuit, generation: circuit.generation,
           event_id: row.fetch(:event_id), audit_receipt: nil
+        )
+      end
+
+      def append_audit(db, circuit, event_id:, key:, kind:, status:, payload:, reason: nil)
+        now = current_time
+        db[:provider_audit].insert(
+          event_id: event_id, circuit_id: circuit.scope.key, generation: circuit.generation,
+          sequence: db[:provider_audit].where(circuit_id: circuit.scope.key).max(:sequence).to_i + 1,
+          event_type: kind, idempotency_key: key, status: status, reason: reason,
+          payload_json: encode(payload), occurred_at: now.iso8601(6),
+          retain_until: (now + 30 * 24 * 60 * 60).iso8601(6)
         )
       end
 

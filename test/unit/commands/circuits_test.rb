@@ -7,12 +7,10 @@ class CommandsCircuitsTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
 
-  AttemptStore = Data.define(:rows) do
+  AttemptStore = Data.define(:rows, :database) do
     def scan
-      Hive::Attempts::Scan.new(records: [].freeze, invalid_records: [].freeze)
+      Hive::Attempts::Scan.new(records: [].freeze)
     end
-    def live_reservations = {}
-    def daily_counts(date:) = {}
     def routing_decisions(limit:) = rows.first(limit)
   end
 
@@ -22,7 +20,7 @@ class CommandsCircuitsTest < Minitest::Test
       path: File.join(@root, "runtime.sqlite3")
     ).migrate!
     @health = Hive::ProviderHealth::Repository.new(database: @database, clock: -> { NOW })
-    @attempts = AttemptStore.new(rows: [])
+    @attempts = AttemptStore.new(rows: [], database: @database)
   end
 
   def teardown
@@ -48,7 +46,7 @@ class CommandsCircuitsTest < Minitest::Test
   end
 
   def test_json_includes_exact_durable_decision_and_admitted_attempt_identity
-    @attempts = AttemptStore.new(rows: [ decision_entry ])
+    @attempts = AttemptStore.new(rows: [ decision_entry ], database: @database)
 
     payload = invoke("list")
     identity = payload.dig("decisions", 0, "identity")
@@ -60,7 +58,7 @@ class CommandsCircuitsTest < Minitest::Test
   end
 
   def test_human_inspection_explains_durable_decision_and_ordered_candidates
-    @attempts = AttemptStore.new(rows: [ decision_entry ])
+    @attempts = AttemptStore.new(rows: [ decision_entry ], database: @database)
 
     stdout, = capture_io { command("list", json: false).call }
 
@@ -226,7 +224,7 @@ class CommandsCircuitsTest < Minitest::Test
     assert_includes summary, "repair_epoch=1"
     assert_includes summary, "repair_last_verified_generation=3"
 
-    @attempts = AttemptStore.new(rows: [ decision_entry ])
+    @attempts = AttemptStore.new(rows: [ decision_entry ], database: @database)
     entry = Marshal.load(Marshal.dump(invoke("list").fetch("decisions").fetch(0)))
     candidate = entry.dig("decision", "candidates", 0)
     candidate["capacity"] = nil

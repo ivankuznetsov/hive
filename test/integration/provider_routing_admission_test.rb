@@ -9,7 +9,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
   NOW = Time.utc(2026, 8, 10, 12)
   CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
-    :id, :slug, :state_file, :stage_index, :stage_name, :project_root,
+    :id, :slug, :folder, :state_file, :stage_index, :stage_name, :project_root,
     :worktree_path, :workflow, keyword_init: true
   )
 
@@ -57,8 +57,17 @@ class ProviderRoutingAdmissionTest < Minitest::Test
 
   def setup
     @root = Dir.mktmpdir("provider-routing-admission")
+    @project_root = File.join(@root, "demo")
+    @state_root = File.join(@project_root, ".hive-state")
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(@root, "runtime-control-plane.sqlite3")
+    ).migrate!
+    register_runtime_project(
+      database: database, name: "demo", path: @project_root,
+      state_root_path: @state_root
+    )
     @store = Hive::Attempts::Repository.new(
-      root: File.join(@root, "attempts"), migrate: true
+      root: File.join(@root, "attempts"), database: database
     )
     @launcher = Launcher.new
     @ids = (1..20).map { |number| "attempt-#{number}" }.each
@@ -209,12 +218,11 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_empty @launcher.launched
   end
 
-  def test_preselection_reconciliation_failure_is_a_typed_no_route_decision
+  def test_preselection_health_failure_is_a_typed_no_route_decision
     failing_health = Object.new
-    failing_health.define_singleton_method(:reconcile!) do
+    failing_health.define_singleton_method(:evaluate_routes) do |**|
       raise Hive::ProviderHealth::Unavailable, "health_state_unavailable"
     end
-    failing_health.define_singleton_method(:evaluate_routes) { |**| raise "must not evaluate" }
     dispatcher = build_dispatcher(health_store: failing_health)
 
     result = dispatcher.dispatch(
@@ -331,11 +339,14 @@ class ProviderRoutingAdmissionTest < Minitest::Test
   end
 
   def task(slug, id)
-    state_file = File.join(@root, "#{slug}.md")
+    folder = File.join(@state_root, "stages", "4-execute", slug)
+    FileUtils.mkdir_p(folder)
+    state_file = File.join(folder, "task.md")
     File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
     FakeTask.new(
       id: id,
       slug: slug,
+      folder: folder,
       state_file: state_file,
       stage_index: 4,
       stage_name: "execute"
@@ -456,12 +467,21 @@ class ProviderRoutingAdmissionTest < Minitest::Test
   end
 
   def persist_terminal_health_attempt(attempt)
+    source = "source-#{attempt.attempt_id}"
+    evidence_task = task(attempt.attempt_id, attempt.attempt_id)
+    generation = Hive::Attempts::Generation.resolve(
+      task: evidence_task, project: "demo", intended_stage: "4-execute",
+      progress_token: source, task_generation: attempt.task_generation,
+      ownership_generation: attempt.ownership_fence, task_input_epoch: 1,
+      attempt_store: @store
+    )
+    @store.observe_task_source(task: evidence_task, generation: generation, observed_at: NOW)
     @store.create_launching(
       attempt_id: attempt.attempt_id, request_id: nil, predecessor_attempt_id: nil,
       task_id: attempt.attempt_id, project: "demo", task_slug: attempt.attempt_id,
       intended_stage: "4-execute", task_generation: attempt.task_generation,
       ownership_generation: attempt.ownership_fence, task_input_epoch: 1,
-      progress_token: "source-#{attempt.attempt_id}", provider: "codex",
+      progress_token: source, provider: "codex",
       routing: { "mode" => "legacy" }, worker_argv: %w[hive run evidence],
       claim_capability_digest: Hive::Attempts::Capability.digest("e" * 64),
       starting_revision: nil, retry_charge: 0, inherited_outputs: [],

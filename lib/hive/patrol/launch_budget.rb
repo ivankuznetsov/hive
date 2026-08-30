@@ -7,14 +7,14 @@ require "hive/usage_db"
 module Hive
   module Patrol
     class LaunchBudget
-      class SeedUnavailable < Hive::Error; end
+      class AllowanceError < Hive::Error; end
 
       ENGINES = %i[ordinary architecture].freeze
       DISCOVERY_STAGES = {
         "patrol-review" => :ordinary,
         "refactor-patrol-review" => :architecture
       }.freeze
-      DAILY_EXHAUSTION_REASONS = %w[daily_agent_spawn_limit legacy_attribution_ambiguous].freeze
+      DAILY_EXHAUSTION_REASONS = %w[daily_agent_spawn_limit].freeze
       DEFAULT_MAX_AGENT_SPAWNS_PER_DAY = 4
       MAX_RESERVATION_ID_BYTES = 256
       MAX_RESERVATIONS_PER_LANE = 10_000
@@ -90,10 +90,6 @@ module Hive
           )
           status = "provider_backoff"
           remaining = 0
-        elsif lane.fetch(:seed_state) == "parked"
-          @last_exhaustion = exhaustion("legacy_attribution_ambiguous", used, engine: engine)
-          status = "legacy_attribution_ambiguous"
-          remaining = 0
         elsif remaining.zero?
           @last_exhaustion = exhaustion("daily_agent_spawn_limit", used, engine: engine)
           status = "exhausted"
@@ -102,17 +98,14 @@ module Hive
         end
         {
           engine: engine.to_s, utc_date: date_for(now), limit: @limit,
-          used: used, remaining: remaining, status: status, retry_at: retry_at,
-          seeded_launches: lane.fetch(:seeded_launches),
-          ambiguous_legacy_rows: lane.fetch(:ambiguous_rows)
+          used: used, remaining: remaining, status: status, retry_at: retry_at
         }
       rescue StandardError => error
         @ledger_error = error
         @last_exhaustion = exhaustion("allowance_store_unavailable", 1, engine: engine)
         {
           engine: engine.to_s, utc_date: date_for(now), limit: @limit,
-          used: nil, remaining: 0, status: "unavailable", retry_at: nil,
-          seeded_launches: nil, ambiguous_legacy_rows: nil
+          used: nil, remaining: 0, status: "unavailable", retry_at: nil
         }
       end
 
@@ -137,7 +130,11 @@ module Hive
               retry_not_before: timestamp_for(instant), hold_reason: normalized_reason,
               revision: Sequel[:revision] + 1, updated_at: timestamp
             }
-          ).insert(hold_row(engine, instant, normalized_reason, timestamp))
+          ).insert(
+            project_id: @project_id, kind: "#{engine}:hold", window_key: "provider",
+            used: 0, limit_value: 0, revision: 0, retry_not_before: timestamp_for(instant),
+            hold_reason: normalized_reason, updated_at: timestamp
+          )
         end
         true
       rescue StandardError => error
@@ -161,9 +158,6 @@ module Hive
         when "daily_agent_spawn_limit"
           "#{detail.fetch(:engine)} patrol daily discovery launch limit reached " \
             "(#{detail.fetch(:observed)}/#{detail.fetch(:limit)} launches today)"
-        when "legacy_attribution_ambiguous"
-          "#{detail.fetch(:engine)} patrol discovery is parked until the next UTC day " \
-            "because legacy launch attribution is ambiguous"
         else
           "#{detail.fetch(:engine)} patrol discovery launch blocked (#{detail.fetch(:reason)})"
         end
@@ -220,19 +214,13 @@ module Hive
             )
             next false
           end
-          if row.fetch(:seed_state) == "parked"
-            @last_exhaustion = exhaustion(
-              "legacy_attribution_ambiguous", row.fetch(:used), engine: engine
-            )
-            next false
-          end
           ids = decode_ids(row.fetch(:reservation_ids_json))
           next true if ids.include?(id)
           if row.fetch(:used) >= @limit
             @last_exhaustion = exhaustion("daily_agent_spawn_limit", row.fetch(:used), engine: engine)
             next false
           end
-          raise SeedUnavailable, "discovery reservations exceed the safety bound" if
+          raise AllowanceError, "discovery reservations exceed the safety bound" if
             ids.length >= MAX_RESERVATIONS_PER_LANE
 
           ids << id
@@ -254,44 +242,17 @@ module Hive
 
       def ensure_lane(engine, date)
         project_id!
-        existing = @database.read { |db| lane_dataset(db, engine, date).first }
-        return lane_from(existing) if existing
-
-        seed = legacy_seed(date)
-        raise SeedUnavailable, "legacy discovery seed is unavailable" unless seed
-        lane_seed = seed.fetch(engine)
-        count = lane_seed.fetch(:count)
-        ambiguous = lane_seed.fetch(:ambiguous)
-        raise SeedUnavailable, "legacy discovery seed exceeds the safety bound" if
-          count > MAX_RESERVATIONS_PER_LANE
-        ids = Array.new(count) { |index| "legacy:#{engine}:#{date}:#{index + 1}" }
         timestamp = timestamp_for(now)
         @database.transaction do |db|
-          lane_dataset(db, engine, date).insert_conflict.insert(
+          dataset = lane_dataset(db, engine, date)
+          dataset.insert_conflict.insert(
             project_id: @project_id, kind: engine.to_s, window_key: date,
-            used: count, limit_value: [ @limit, count ].max, revision: 0,
-            reservation_ids_json: Hive::RuntimeControlPlane::Codec.dump_json(ids),
-            seed_state: ambiguous.positive? ? "parked" : "complete",
-            seeded_launches: count, ambiguous_rows: ambiguous,
-            updated_at: timestamp
+            used: 0, limit_value: @limit, revision: 0,
+            reservation_ids_json: "[]", updated_at: timestamp
           )
-          lane_from(lane_dataset(db, engine, date).first)
+          dataset.first.slice(:used)
         end
       end
-
-      def legacy_seed(date)
-        return empty_seed unless @usage_db.respond_to?(:patrol_discovery_seed)
-        result = @usage_db.patrol_discovery_seed(scope: { project_slug: @project_slug }, date: date)
-        return nil unless result.is_a?(Hash) && result[:available] != false
-        ENGINES.to_h do |engine|
-          value = result.fetch(engine, {})
-          [ engine, { count: integer(value[:count]), ambiguous: integer(value[:ambiguous]) } ]
-        end
-      rescue StandardError
-        nil
-      end
-
-      def empty_seed = ENGINES.to_h { |engine| [ engine, { count: 0, ambiguous: 0 } ] }
 
       def reserve_telemetry!(profile:, stage:, started_at:)
         identity = telemetry_identity
@@ -313,35 +274,19 @@ module Hive
       end
 
       def lane_dataset(db, engine, date)
-        db[:patrol_allowances].where(
-          project_id: @project_id, kind: engine.to_s, window_key: date
-        )
+        allowance_dataset(db, engine, date)
       end
 
       def hold_dataset(db, engine)
-        db[:patrol_allowances].where(
-          project_id: @project_id, kind: "#{engine}:hold", window_key: "provider"
-        )
-      end
-
-      def hold_row(engine, instant, reason, timestamp)
-        {
-          project_id: @project_id, kind: "#{engine}:hold", window_key: "provider",
-          used: 0, limit_value: 0, revision: 0, retry_not_before: timestamp_for(instant),
-          hold_reason: reason, updated_at: timestamp
-        }
+        allowance_dataset(db, "#{engine}:hold", "provider")
       end
 
       def read_hold(engine)
-        row = @database.read { |db| hold_dataset(db, engine).first }
-        row && { retry_not_before: row.fetch(:retry_not_before), reason: row[:hold_reason] }
+        @database.read { |db| hold_dataset(db, engine).first }
       end
 
-      def lane_from(row)
-        {
-          used: row.fetch(:used), seed_state: row.fetch(:seed_state),
-          seeded_launches: row.fetch(:seeded_launches), ambiguous_rows: row.fetch(:ambiguous_rows)
-        }
+      def allowance_dataset(db, kind, window)
+        db[:patrol_allowances].where(project_id: @project_id, kind: kind.to_s, window_key: window)
       end
 
       def decode_ids(value)

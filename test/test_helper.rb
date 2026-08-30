@@ -14,6 +14,7 @@ if ENV["HIVE_COVERAGE"]
 end
 
 require "minitest/autorun"
+require "digest"
 require "tmpdir"
 require "fileutils"
 require "stringio"
@@ -182,6 +183,55 @@ Minitest::Test.include(HiveWorkflowTestHelper)
 # fake-gh / fake-claude. Use as `FAKE_GH_FIXTURE` / `FAKE_CLAUDE_FIXTURE`.
 FAKE_GH_FIXTURE = File.expand_path("fixtures/fake-gh", __dir__).freeze
 FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
+
+# Legacy attempt tests use compact SQL fixtures while production requires an
+# injected, already migrated control plane and registered task subjects.
+require "hive/attempts/repository"
+module HiveTestAttemptRepository
+  def initialize(root: Hive::Paths.runtime_payload_root, database: nil,
+                 create_directories: true, migrate: false)
+    fixture_database = database.nil?
+    database ||= Hive::RuntimeControlPlane::Database.new(
+      path: File.join(File.expand_path(root), ".runtime-control-plane.sqlite3")
+    )
+    database.migrate! if migrate
+    super(root: root, database: database, create_directories: create_directories)
+    @hive_test_register_subjects = fixture_database && migrate
+  end
+
+  def create_launching(source_fingerprint: nil, **attributes)
+    register_test_subject(attributes, source_fingerprint) if @hive_test_register_subjects
+    super(source_fingerprint: source_fingerprint, **attributes)
+  end
+
+  private
+
+  def register_test_subject(attributes, source_fingerprint)
+    now = Hive::Attempts::Record.iso8601(attributes.fetch(:now))
+    project_name = attributes.fetch(:project).to_s
+    task_id = attributes.fetch(:task_id).to_s
+    task_slug = attributes.fetch(:task_slug).to_s
+    project_id = "test-#{Digest::SHA256.hexdigest(project_name)[0, 32]}"
+    project_root = File.join(@root, "fixture-projects", project_id)
+    database.transaction do |db|
+      installation = db[:installations].get(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: project_id, installation_id: installation,
+        registration_id: project_id, name: project_name, observed_path: project_root,
+        state_root_path: File.join(project_root, ".hive-state"), active: 1,
+        registered_at: now, last_observed_at: now
+      )
+      db[:task_subjects].insert_conflict.insert(
+        task_id: task_id, project_id: project_id, workflow_id: "coding",
+        task_slug: task_slug, observed_path: File.join(project_root, task_slug),
+        source_fingerprint: (source_fingerprint || attributes[:progress_token]).to_s,
+        generation: Integer(attributes.fetch(:task_input_epoch, 0)),
+        created_at: now, last_observed_at: now
+      )
+    end
+  end
+end
+Hive::Attempts::Repository.prepend(HiveTestAttemptRepository)
 
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze

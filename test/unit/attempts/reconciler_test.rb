@@ -273,11 +273,6 @@ class AttemptsReconcilerTest < Minitest::Test
         attempt_suspect attempt_terminal attempt_lost
       ], logger.events.map(&:first)
 
-      invalid = Hive::Attempts::InvalidStoredRecord.new(path: "/broken", error: "bad json")
-      observer.send(:log_invalid_records, [ invalid ])
-      observer.send(:log_invalid_records, [ invalid ])
-      assert_equal 1, logger.events.count { |name, _fields| name == :fatal }
-
       unknown = Hive::Attempts::ReconciledAttempt.new(
         attempt: running, classification: :unchanged, owner_status: :matching, evidence: {}
       )
@@ -376,10 +371,8 @@ class AttemptsReconcilerTest < Minitest::Test
 
       assert_equal 1, scans
       assert_equal [ "attempt-1" ], snapshot.hot_scan.records.map(&:attempt_id)
-      assert_same snapshot.hot_scan, snapshot.admission_view.hot_scan
-      records = snapshot.admission_view.refresh_for_admission
       assert_equal snapshot.capacity,
-                   snapshot.admission_view.capacity(now: NOW + 1, records: records)
+                   snapshot.admission_view.capacity(now: NOW + 1)
     end
   end
 

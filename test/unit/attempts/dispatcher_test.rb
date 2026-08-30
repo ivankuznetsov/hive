@@ -486,7 +486,10 @@ class AttemptsDispatcherTest < Minitest::Test
 
   def test_patrol_failure_cohort_survives_restart_and_runtime_change_releases_it
     with_tmp_dir do |root|
-      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      database = attempt_database(root, projects: [ "demo" ])
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: database
+      )
       launcher = FakeLauncher.new
       ids = (1..8).map { |index| "attempt-#{index}" }.each
       runtime_digest = "a" * 64
@@ -498,11 +501,11 @@ class AttemptsDispatcherTest < Minitest::Test
         runtime_digest: runtime_digest
       )
       tasks = 3.times.map do |index|
-        task_fixture(root, id: index + 1, slug: "patrol-#{index}").tap do |task|
+        task_fixture(
+          project_state_root(root, "demo"), id: index + 1,
+          slug: "patrol-#{index}", stage: "2-fix"
+        ).tap do |task|
           task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
-          task.stage_index = 2
-          task.stage_name = "fix"
-          task.folder = File.dirname(task.state_file)
         end
       end
       failures = tasks.each_with_index.map do |task, index|
@@ -522,7 +525,7 @@ class AttemptsDispatcherTest < Minitest::Test
       end
 
       capped = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Repository.new(root: store.root, migrate: true), launcher: launcher,
+        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
         limits: { max_global: 6, max_per_project: 6, max_daily: 3 },
         clock: -> { NOW + 40 }, id_generator: -> { ids.next },
         capability_generator: -> { CLAIM_CAPABILITY },
@@ -536,7 +539,7 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "capacity", hard_capped.reason
 
       restarted = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Repository.new(root: store.root, migrate: true), launcher: launcher,
+        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
         limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
         clock: -> { NOW + 40 }, id_generator: -> { ids.next },
         capability_generator: -> { CLAIM_CAPABILITY },
@@ -626,7 +629,7 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "failure_cohort_cooldown", second_release.reason
 
       repaired = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Repository.new(root: store.root, migrate: true), launcher: launcher,
+        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
         limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
         clock: -> { NOW + 41 }, id_generator: -> { ids.next },
         capability_generator: -> { CLAIM_CAPABILITY },
@@ -1031,16 +1034,9 @@ class AttemptsDispatcherTest < Minitest::Test
         original_scan.call
       end
       admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
-      second_task = task.dup
-      second_task.id = 43
-      second_task.slug = "durable-task-two"
-      second_task.state_file = File.join(File.dirname(task.state_file), "task-two.md")
-      File.write(second_task.state_file, "task two\n<!-- WAITING -->\n")
-      third_task = task.dup
-      third_task.id = 44
-      third_task.slug = "durable-task-three"
-      third_task.state_file = File.join(File.dirname(task.state_file), "task-three.md")
-      File.write(third_task.state_file, "task three\n<!-- WAITING -->\n")
+      state_root = task_state_root(task)
+      second_task = task_fixture(state_root, id: 43, slug: "durable-task-two")
+      third_task = task_fixture(state_root, id: 44, slug: "durable-task-three")
 
       first = dispatch(
         dispatcher, task, request_id: "request-one", admission_view: admission_view
@@ -1061,9 +1057,10 @@ class AttemptsDispatcherTest < Minitest::Test
 
   def test_stale_tick_view_observes_external_dispatch_through_live_capacity_cell
     with_tmp_dir do |root|
+      database = attempt_database(root, projects: %w[external daemon])
       attempt_root = File.join(root, "attempts")
-      tick_store = Hive::Attempts::Repository.new(root: attempt_root, migrate: true)
-      external_store = Hive::Attempts::Repository.new(root: attempt_root, migrate: true)
+      tick_store = Hive::Attempts::Repository.new(root: attempt_root, database: database)
+      external_store = Hive::Attempts::Repository.new(root: attempt_root, database: database)
       tick_scans = 0
       external_scans = 0
       tick_scan = tick_store.method(:scan)
@@ -1082,8 +1079,8 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal 1, tick_scans
       assert_equal 0, external_scans
 
-      external_task = task_fixture(root, id: 41, slug: "external-task")
-      daemon_task = task_fixture(root, id: 42, slug: "daemon-task")
+      external_task = task_fixture(project_state_root(root, "external"), id: 41, slug: "external-task")
+      daemon_task = task_fixture(project_state_root(root, "daemon"), id: 42, slug: "daemon-task")
       limits = { max_global: 1, max_per_project: 1, max_daily: 50 }
       external = Hive::Attempts::Dispatcher.new(
         store: external_store, launcher: FakeLauncher.new, limits: limits,
@@ -1126,7 +1123,7 @@ class AttemptsDispatcherTest < Minitest::Test
         store, launcher, first, outcome: "failed", exit_status: 1,
         now: NOW + 3
       )
-      other_task = task_fixture(File.dirname(task.state_file), id: 43, slug: "other-task")
+      other_task = task_fixture(task_state_root(task), id: 43, slug: "other-task")
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 4)
                                                   .admission_view
@@ -1226,11 +1223,7 @@ class AttemptsDispatcherTest < Minitest::Test
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 5)
                                                   .admission_view
-      other_task = task.dup
-      other_task.id = 43
-      other_task.slug = "other-task"
-      other_task.state_file = File.join(File.dirname(task.state_file), "other.md")
-      File.write(other_task.state_file, "other\n<!-- WAITING -->\n")
+      other_task = task_fixture(task_state_root(task), id: 43, slug: "other-task")
 
       blocked = dispatch(
         dispatcher, other_task, request_id: "request-two",
@@ -1254,11 +1247,7 @@ class AttemptsDispatcherTest < Minitest::Test
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 5)
                                                   .admission_view
-      other_task = task.dup
-      other_task.id = 43
-      other_task.slug = "other-task"
-      other_task.state_file = File.join(File.dirname(task.state_file), "other.md")
-      File.write(other_task.state_file, "other\n<!-- WAITING -->\n")
+      other_task = task_fixture(task_state_root(task), id: 43, slug: "other-task")
 
       accepted = dispatch(
         dispatcher, other_task, request_id: "request-two",
@@ -1267,12 +1256,9 @@ class AttemptsDispatcherTest < Minitest::Test
       )
 
       assert_equal :accepted, accepted.status
-      assert_equal 0, store.daily_count(
-        project: "demo", date: Date.new(2026, 7, 17)
-      )
-      assert_equal 1, store.daily_count(
-        project: "demo", date: NOW.utc.to_date
-      )
+      snapshot = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW)
+      assert_equal 0, snapshot.daily_count("demo", Date.new(2026, 7, 17))
+      assert_equal 1, snapshot.daily_count("demo", NOW.utc.to_date)
     end
   end
 
@@ -1359,11 +1345,11 @@ class AttemptsDispatcherTest < Minitest::Test
                       transient_retry_backoff_sec: 60,
                       clock: -> { NOW })
     with_tmp_dir do |root|
-      state_file = File.join(root, "task.md")
-      File.write(state_file, "task\n<!-- WAITING -->\n")
-      task = FakeTask.new(id: 42, slug: "durable-task", state_file: state_file,
-                          stage_index: 4, stage_name: "execute")
-      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      database = attempt_database(root, projects: [ "demo" ])
+      task = task_fixture(project_state_root(root, "demo"), id: 42, slug: "durable-task")
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: database
+      )
       launcher = FakeLauncher.new
       ids = %w[attempt-one attempt-two attempt-three].each
       dispatcher = Hive::Attempts::Dispatcher.new(
@@ -1376,13 +1362,45 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def task_fixture(root, id:, slug:)
-    state_file = File.join(root, "#{slug}.md")
+  def task_fixture(state_root, id:, slug:, stage: "4-execute")
+    folder = File.join(state_root, "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    state_file = File.join(folder, "state.md")
     File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
     FakeTask.new(
       id: id, slug: slug, state_file: state_file,
-      stage_index: 4, stage_name: "execute"
+      stage_index: Integer(stage.split("-", 2).first), stage_name: stage.split("-", 2).last,
+      project_root: File.dirname(state_root), folder: folder
     )
+  end
+
+  def project_state_root(root, project)
+    File.join(root, "projects", project, ".hive-state")
+  end
+
+  def task_state_root(task)
+    File.dirname(File.dirname(File.dirname(task.folder)))
+  end
+
+  def attempt_database(root, projects:)
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(root, "runtime-control-plane.sqlite3")
+    ).migrate!
+    timestamp = Hive::Attempts::Record.iso8601(NOW)
+    installation = database.read { |db| db[:installations].get(:installation_id) }
+    database.transaction do |db|
+      projects.each do |name|
+        state_root = project_state_root(root, name)
+        FileUtils.mkdir_p(state_root)
+        db[:projects].insert(
+          project_id: "test-#{name}", installation_id: installation,
+          registration_id: "test-#{name}", name: name,
+          observed_path: File.dirname(state_root), state_root_path: state_root,
+          active: 1, registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+    end
+    database
   end
 
   def dispatch(dispatcher, task, request_id:, interactive: false, intended_stage: "4-execute",

@@ -97,7 +97,6 @@ class ProviderHealthValueObjectsTest < Minitest::Test
       store = Hive::ProviderHealth.open(database: database)
 
       assert_instance_of Hive::ProviderHealth::Repository, store
-      assert_equal [], store.reconcile!
     ensure
       database&.disconnect
     end

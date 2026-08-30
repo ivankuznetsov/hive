@@ -1,1 +1,0 @@
-{"schema":"hive-task-journal","schema_version":1,"event_id":"event-1","project":"alpha","task":{"slug":"task-1"},"task_generation":3,"event_type":"merge_observed"}

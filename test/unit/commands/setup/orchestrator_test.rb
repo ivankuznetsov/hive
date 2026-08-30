@@ -16,7 +16,7 @@ require "hive/commands/daemon/service_installer"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
-require "hive/recovery/migration"
+require "hive/runtime_control_plane/cutover"
 
 # End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
 # #call phase ordering, the --no-bootstrap / --no-init / --service branches, each
@@ -165,7 +165,7 @@ class SetupOrchestratorTest < Minitest::Test
                     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                       ->(**_kw) { status }) do
                       runtime = Struct.new(:phase, :database_path).new("active", "/runtime.sqlite3")
-                      with_replaced_singleton_method(Hive::Recovery::Migration, :bootstrap,
+                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Cutover, :bootstrap,
                         ->(**) { runtime }) do
                         stub_web_config { yield }
                       end

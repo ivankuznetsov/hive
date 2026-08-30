@@ -92,7 +92,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.begin_tick(now: T0)
       assembler.update_attempt_storage(
         "status" => "healthy",
-        "layout" => { "generation" => 4, "migration" => "complete" },
+        "layout" => { "generation" => 4 },
         "hot" => { "records" => 2, "invalid" => 0 },
         "maintenance" => {
           "last_started_at" => T0.iso8601(6),
@@ -130,7 +130,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "route-decision-1",
                    snapshot.dig("tasks", 0, "disposition", "routing", "decision_id")
       assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
-      assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
+      assert_equal 4, snapshot.dig("attempt_storage", "layout", "generation")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")
       assert File.file?(path)
       refute File.exist?(File.join(dir, "operational", "daemon-snapshot.json"))
@@ -292,9 +292,10 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         status_payload: payload, now: T0 + 1
       )
       database_for(path).transaction do |db|
-        db[:projections].where(
-          projection_key: Hive::RuntimeControlPlane::OperationalRepository::STATUS_PROJECTION_KEY
-        ).update(source_fingerprint: "0" * 64)
+        dataset = db[:daemon_runtime].where(daemon_kind: "operational")
+        document = Hive::RuntimeControlPlane::Codec.load_json(dataset.get(:observation_json))
+        document.fetch("status_projection")["tick_sequence"] += 1
+        dataset.update(observation_json: Hive::RuntimeControlPlane::Codec.dump_json(document))
       end
 
       snapshot = reader.read(now: T0 + 2)
@@ -346,7 +347,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       database.read do |db|
         db.run <<~SQL
           CREATE TRIGGER reject_status_projection
-          BEFORE INSERT ON projections
+          BEFORE UPDATE ON daemon_runtime
           BEGIN
             SELECT RAISE(ABORT, 'projection unavailable');
           END

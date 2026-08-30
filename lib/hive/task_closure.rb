@@ -833,11 +833,7 @@ module Hive
     end
 
     def active_attempts(task, project)
-      scan = @attempt_store.scan
-      unless scan.invalid_records.empty?
-        raise VerificationFailed, "durable attempt store contains unreadable records"
-      end
-      scan.records.select do |attempt|
+      @attempt_store.scan.records.select do |attempt|
         attempt.live? &&
           attempt["project"].to_s == project.to_s &&
           attempt["task_slug"].to_s == task.slug.to_s

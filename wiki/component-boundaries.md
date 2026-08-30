@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 
@@ -72,20 +72,20 @@ enforces internal-owner boundaries.
 
 The Runtime Control Plane boundary owns the lazy process-local Sequel connection,
 exact integer migration gate, SQLite application identity, canonical codecs,
-stable identity adapters, and the complete target coordination schema. The
+and the complete target coordination schema. The
 boundary does not activate any legacy runtime consumer or move task/workflow
 authority out of project task folders.
 
-The clean cutover has three helpers that are deliberately not loaded by the
-minimal entry point. `LegacyImport` is a migration-only total decoder with a
-per-source disposition ledger for the last filesystem runtime layout;
+The clean cutover keeps two focused helpers outside the minimal entry point.
 `PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
 addresses only at terminal publication; and `CutoverManifest` publishes a
-digest-bound, owner-private inventory outside both the legacy roots and the
+digest-bound, owner-private phase record outside both the legacy roots and the
 candidate database. Attempts and routing-policy persistence now use the
 activated runtime control plane directly. Dispatch, provider health, and PR
 merge reconciliation now use the same database through their typed
-repositories. Normal runtime never creates, migrates, imports, or repairs
+repositories. Cutover rejects live legacy owners, discards derived runtime
+rows, and directly imports only validated token-usage history. Fresh bootstrap
+loads no legacy decoder. Normal runtime never creates, imports, or repairs
 legacy state.
 
 ## Patrol Fix boundary

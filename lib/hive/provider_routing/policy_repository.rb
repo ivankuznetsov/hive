@@ -1,6 +1,4 @@
 require "digest"
-require "json_schemer"
-require "pathname"
 require "time"
 require "hive/provider_routing/policy"
 require "hive/runtime_control_plane"
@@ -9,8 +7,6 @@ module Hive
   module ProviderRouting
     # First-writer-wins routing policy snapshots in the runtime control plane.
     class PolicyRepository
-      SCHEMA = "hive-routing-policy".freeze
-      SCHEMA_VERSION = 1
       KIND = "routing-policy".freeze
       MAX_SNAPSHOT_BYTES = 1024 * 1024
 
@@ -30,7 +26,7 @@ module Hive
         key = storage_key(ownership_generation, subject)
         normalize_policy(policy, key: key)
         row = policy_row(key)
-        row && parse(row.fetch(:policy_json), expected_key: key)
+        row && parse(row)
       end
 
       # Point-read an already frozen explicit policy when the original
@@ -39,13 +35,15 @@ module Hive
       def fetch_snapshot(ownership_generation:, subject:)
         key = storage_key(ownership_generation, subject)
         row = policy_row(key)
-        row && parse(row.fetch(:policy_json), expected_key: key)
+        row && parse(row)
       end
 
       # Atomically installs the first explicit policy for this ownership point
       # and always returns that winner. A changed candidate for the same point
       # never overwrites the original snapshot.
       def fetch_or_store(ownership_generation:, subject:, policy:)
+        return policy if legacy_policy?(policy)
+
         @database.transaction do |db|
           fetch_or_store_in(
             db, ownership_generation: ownership_generation,
@@ -69,9 +67,9 @@ module Hive
         current = db[:routing_policies].where(
           installation_id: installation, policy_key: key_digest(key)
         ).first
-        return parse(current.fetch(:policy_json), expected_key: key) if current
+        return parse(current) if current
 
-        payload = dump(snapshot(key, candidate.to_h))
+        payload = dump(candidate.to_h)
         invalid! if payload.bytesize > MAX_SNAPSHOT_BYTES
         db[:routing_policies].insert(
           installation_id: installation, policy_key: key_digest(key), revision: 0,
@@ -95,12 +93,6 @@ module Hive
 
       def key_digest(key)
         Digest::SHA256.hexdigest(RuntimeControlPlane::Codec.dump_json(key))
-      end
-
-      def snapshot_schema
-        @snapshot_schema ||= JSONSchemer.schema(
-          Pathname(File.join(Hive::Schemas.schema_dir, "hive-routing-policy.v1.json"))
-        )
       end
 
       def legacy_policy?(policy)
@@ -128,30 +120,16 @@ module Hive
         invalid!
       end
 
-      def snapshot(key, policy_hash)
-        {
-          "schema" => SCHEMA,
-          "schema_version" => SCHEMA_VERSION,
-          "ownership_generation" => key.fetch("ownership_generation"),
-          "subject" => key.fetch("subject"),
-          "policy" => policy_hash
-        }
-      end
-
       def dump(value) = RuntimeControlPlane::Codec.dump_json(value)
 
-      def parse(bytes, expected_key:)
+      def parse(row)
+        bytes = row.fetch(:policy_json)
         invalid! unless bytes.is_a?(String) && bytes.bytesize <= MAX_SNAPSHOT_BYTES
 
         data = RuntimeControlPlane::Codec.load_json(bytes)
-        validate_snapshot!(data)
-        embedded_key = {
-          "ownership_generation" => data.fetch("ownership_generation"),
-          "subject" => data.fetch("subject")
-        }
-        invalid! unless embedded_key == expected_key
-
-        rebuild_policy(data.fetch("policy"))
+        policy = rebuild_policy(data)
+        invalid! unless policy.digest == row.fetch(:policy_digest)
+        policy
       rescue InvalidSnapshot
         raise
       rescue RuntimeControlPlane::Error, EncodingError, KeyError, TypeError, ArgumentError
@@ -168,13 +146,8 @@ module Hive
       def normalize_policy(policy, key:)
         invalid! unless policy.is_a?(Policy) && policy.explicit?
 
-        payload = snapshot(key, policy.to_h)
-        validate_snapshot!(payload)
-        rebuild_policy(payload.fetch("policy"))
-      end
-
-      def validate_snapshot!(payload)
-        invalid! unless snapshot_schema.valid?(payload)
+        storage_key(key.fetch("ownership_generation"), key.fetch("subject"))
+        rebuild_policy(policy.to_h)
       end
 
       def rebuild_policy(data)

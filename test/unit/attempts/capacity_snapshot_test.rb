@@ -22,14 +22,14 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
-  def test_admission_view_refreshes_from_sql_without_repairing_indexes
+  def test_admission_view_keeps_one_immutable_scan_while_queries_remain_current
     with_tmp_dir do |root|
       first = Hive::Attempts::Repository.new(root: root, migrate: true)
-      view = Hive::Attempts::AdmissionView.new(store: first, hot_scan: first.scan)
+      view = Hive::Attempts::AdmissionView.new(store: first, records: first.scan.records)
       second = Hive::Attempts::Repository.new(root: root, migrate: true)
       created = create(second, attempt_id: "external", task_slug: "external")
 
-      assert_empty view.refresh_for_admission
+      assert_empty view.records
       assert_equal created.to_h, view.find(created.attempt_id).to_h
       assert_equal 1, view.capacity(now: NOW).global_count
     end
@@ -44,10 +44,12 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
 
       snapshot = Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW)
       assert_equal 1, snapshot.daily_count("demo", NOW.to_date)
-      assert_equal false,
-                   repository.daily_acceptances(date: NOW.to_date).fetch(charged.attempt_id).fetch("refunded")
-      assert_equal true,
-                   repository.daily_acceptances(date: NOW.to_date).fetch(lost.attempt_id).fetch("refunded")
+      refunds = repository.database.read do |db|
+        db[:attempt_accounting].where(attempt_id: [ charged.attempt_id, lost.attempt_id ])
+          .select_map([ :attempt_id, :refunded ]).to_h
+      end
+      assert_equal 0, refunds.fetch(charged.attempt_id)
+      assert_equal 1, refunds.fetch(lost.attempt_id)
     end
   end
 

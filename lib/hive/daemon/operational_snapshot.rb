@@ -3,7 +3,7 @@ require "time"
 require "yaml"
 
 require "hive/agent_limit"
-require "hive/attempts/storage_health"
+require "hive/attempts/storage_status"
 require "hive/lock"
 require "hive/paths"
 require "hive/recovery"
@@ -138,7 +138,7 @@ module Hive
           @started_at = nil
           @observations = {}
           @runtime_ready = false
-          @attempt_storage = Hive::Attempts::StorageHealth.unknown_snapshot
+          @attempt_storage = Hive::Attempts::StorageStatus.unknown
           @last_completed_record = nil
         end
 

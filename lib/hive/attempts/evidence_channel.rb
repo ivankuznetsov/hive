@@ -120,13 +120,7 @@ module Hive
       end
 
       def route_identity(route)
-        Hive::ProviderHealth::RouteIdentity.new(
-          route_id: route.fetch("route_id"),
-          account_id: route.fetch("provider_account_id"),
-          adapter: route.fetch("adapter"),
-          launch_binding_id: route.fetch("launch_binding_id"),
-          model_id: route.fetch("model")
-        )
+        Hive::ProviderHealth::RouteIdentity.from_h(route)
       rescue KeyError, Hive::ProviderHealth::Error => e
         raise RepositoryError, "attempt provider route rejected: #{e.class.name.split('::').last}"
       end

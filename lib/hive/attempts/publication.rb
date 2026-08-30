@@ -44,73 +44,57 @@ module Hive
       end
 
       def prepare_publication(attempt_id:, consumers:)
-        id = publication_attempt_id(attempt_id)
+        id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
         names = Array(consumers).map { |value| consumer_name(value) }.uniq.sort
         if names.empty? || names.length > MAX_CONSUMERS
           raise RepositoryError, "pending finalization consumers are invalid"
         end
         database.transaction do |db|
-          row = db[:terminal_pending_publications].where(attempt_id: id).first
-          raise RepositoryError, "final attempt is not pending publication" unless row
-          current = row[:publication_json] && decode(row[:publication_json])
-          if current && current.fetch("consumers").keys.sort != names
+          pending = db[:terminal_pending_publications].where(attempt_id: id)
+          raise RepositoryError, "final attempt is not pending publication" unless pending.any?
+          obligations = db[:terminal_publication_obligations].where(attempt_id: id)
+          existing = obligations.order(:consumer).select_map(:consumer)
+          if existing.any? && existing != names
             raise RepositoryError, "pending finalization conflicts with existing obligations"
           end
-          current ||= {
-            "attempt_id" => id,
-            "consumers" => names.to_h { |name| [ name, false ] }
-          }
-          db[:terminal_pending_publications].where(attempt_id: id).update(
-            publication_json: encode(current)
-          )
-          current.freeze
+          names.each do |name|
+            obligations.insert_conflict.insert(
+              attempt_id: id, consumer: name, acknowledged: 0
+            )
+          end
+          publication_in(db, id)
         end
       end
 
       def publication(attempt_id)
-        id = publication_attempt_id(attempt_id)
-        row = database.read do |db|
-          db[:terminal_pending_publications].where(attempt_id: id).first
-        end
-        return nil unless row&.fetch(:publication_json)
-        parse(row.fetch(:publication_json), id)
+        id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
+        database.read { |db| publication_in(db, id) }
       end
 
       def acknowledge_publication(attempt_id, consumer:)
-        id = publication_attempt_id(attempt_id)
+        id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
         name = consumer_name(consumer)
         database.transaction do |db|
-          row = db[:terminal_pending_publications].where(attempt_id: id).first
-          current = row && row[:publication_json] && parse(row[:publication_json], id)
-          raise RepositoryError, "pending finalization is missing" unless current
-          unless current.fetch("consumers").key?(name)
-            raise RepositoryError, "pending finalization consumer is unknown"
-          end
-          replacement = current.merge(
-            "consumers" => current.fetch("consumers").merge(name => true)
-          )
-          complete = replacement.fetch("consumers").values.all?(true)
-          db[:terminal_pending_publications].where(attempt_id: id).update(
-            publication_json: encode(replacement),
-            state: complete ? "published" : "pending",
-            published_at: complete ? Record.iso8601(Time.now.utc) : nil
-          )
-          replacement.freeze
+          changed = db[:terminal_publication_obligations].where(
+            attempt_id: id, consumer: name
+          ).update(acknowledged: 1)
+          raise RepositoryError, "pending finalization consumer is unknown" unless changed == 1
+
+          publication_in(db, id)
         end
       end
 
       def publication_complete?(attempt_id)
         entry = publication(attempt_id)
-        entry && entry.fetch("consumers").values.all?(true) || false
+        !!entry && entry.fetch("consumers").values.all?
       end
 
       def finish_publication(attempt_id)
-        id = publication_attempt_id(attempt_id)
+        id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
         database.transaction do |db|
-          row = db[:terminal_pending_publications].where(attempt_id: id).first
-          return false unless row&.fetch(:publication_json)
-          entry = parse(row.fetch(:publication_json), id)
-          unless entry.fetch("consumers").values.all?(true)
+          obligations = db[:terminal_publication_obligations].where(attempt_id: id)
+          return false unless obligations.any?
+          if obligations.where(acknowledged: 0).any?
             raise RepositoryError, "pending finalization is incomplete"
           end
           db[:terminal_pending_publications].where(attempt_id: id).delete == 1
@@ -214,18 +198,15 @@ module Hive
         reference.slice("path", "size", "sha256").freeze
       end
 
-      def parse(bytes, expected_id)
-        data = decode(bytes)
-        consumers = data["consumers"] if data.is_a?(Hash)
-        valid = data.is_a?(Hash) && data.keys.sort == %w[attempt_id consumers] &&
-          data["attempt_id"] == expected_id && consumers.is_a?(Hash) &&
-          !consumers.empty? && consumers.length <= MAX_CONSUMERS &&
-          consumers.keys.all? { |name| consumer_name(name) == name } &&
-          consumers.values.all? { |value| value == true || value == false }
-        raise RepositoryError, "pending finalization row is invalid" unless valid
-        data
-      rescue RuntimeControlPlane::Error, TypeError, ArgumentError
-        raise RepositoryError, "pending finalization row is invalid"
+      def publication_in(db, attempt_id)
+        consumers = db[:terminal_publication_obligations].where(attempt_id: attempt_id)
+          .order(:consumer).to_h { |row| [ row.fetch(:consumer), row.fetch(:acknowledged) == 1 ] }
+        return nil if consumers.empty?
+
+        {
+          "attempt_id" => attempt_id,
+          "consumers" => consumers.freeze
+        }.freeze
       end
 
       def consumer_name(value)
@@ -233,15 +214,6 @@ module Hive
         return name if /\A[a-z][a-z0-9_-]{0,63}\z/.match?(name)
         raise RepositoryError, "pending finalization consumer is invalid"
       end
-
-      def publication_attempt_id(value)
-        id = value.to_s
-        return id if /\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\z/.match?(id)
-        raise RepositoryError, "pending finalization attempt id is invalid"
-      end
-
-      def encode(value) = RuntimeControlPlane::Codec.dump_json(value)
-      def decode(value) = RuntimeControlPlane::Codec.load_json(value)
     end
   end
 end

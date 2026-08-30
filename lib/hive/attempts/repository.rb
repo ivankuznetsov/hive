@@ -20,15 +20,13 @@ module Hive
     class CapacityExceeded < RepositoryError; end
     class StaleTaskSource < RepositoryError; end
 
-    InvalidStoredRecord = Data.define(:path, :error)
-    Scan = Data.define(:records, :invalid_records)
+    Scan = Data.define(:records)
 
     # The attempt facade persists lifecycle state in the runtime control plane.
     # The filesystem root contains only retained bytes referenced by those rows.
     class Repository
       include Coordination
       include Publication
-      DEFAULT_ROOT = Object.new.freeze
 
       class ProjectionReader
         def initialize(store)
@@ -64,36 +62,24 @@ module Hive
 
       attr_reader :database
 
-      def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
+      def self.open_default(state_home: Hive::Paths.state_home, create_directories: true) =
         runtime(state_home: state_home, create_directories: create_directories)
-      end
 
       def self.runtime(create_directories: true, state_home: Hive::Paths.state_home)
-        default_home = File.expand_path(Hive::Paths.state_home)
         requested_home = File.expand_path(state_home)
-        database = if requested_home == default_home
-          RuntimeControlPlane.database
-        else
-          RuntimeControlPlane::Database.new(
+        new(
+          database: RuntimeControlPlane.database(
             path: Hive::Paths.runtime_control_plane_path(requested_home)
-          )
-        end
-        options = { database: database, create_directories: create_directories, migrate: false }
-        options[:root] = Hive::Paths.runtime_payload_root(requested_home) unless requested_home == default_home
-        new(**options)
+          ), create_directories: create_directories,
+          root: Hive::Paths.runtime_payload_root(requested_home)
+        )
       end
 
-      def initialize(root: DEFAULT_ROOT, database: nil, create_directories: true, migrate: false)
-        explicit_root = !root.equal?(DEFAULT_ROOT)
-        root = Hive::Paths.runtime_payload_root if !explicit_root
+      def initialize(database:, root: Hive::Paths.runtime_payload_root, create_directories: true)
         @root = File.expand_path(root)
         @create_directories = create_directories
-        @database = database || RuntimeControlPlane::Database.new(
-          path: explicit_root ? File.join(@root, ".runtime-control-plane.sqlite3") :
-            Hive::Paths.runtime_control_plane_path
-        )
-        @isolated_identity = database.nil? && explicit_root
-        connect!(migrate: migrate)
+        @database = database
+        database.open! if File.file?(database.path) || create_directories
         prepare_payload_root! if create_directories
       rescue RuntimeControlPlane::Error, SystemCallError, IOError => error
         raise RepositoryError, "attempt runtime control plane is unavailable: #{error.message}"
@@ -114,11 +100,6 @@ module Hive
       def log_archive
         require "hive/attempts/log_archive"
         @log_archive ||= LogArchive.new(store: self)
-      end
-
-      def storage_health
-        require "hive/attempts/storage_health"
-        @storage_health ||= StorageHealth.new(store: self)
       end
 
       def routing_policies
@@ -196,16 +177,23 @@ module Hive
       # admission lock, while a concurrent newer observation still fences this
       # caller at admission_validate_subject_in.
       def observe_task_source(task:, generation:, observed_at:)
-        return true if @isolated_identity
-
         task_id = generation.task_id.to_s
         fingerprint = generation.progress_token.to_s
         input_epoch = Integer(generation.task_input_epoch)
-        folder = observed_task_path(task)
-        workflow_id = observed_workflow_id(task)
+        folder = File.expand_path(task.folder)
+        stages = File.dirname(File.dirname(folder))
+        unless File.basename(stages) == "stages" && File.basename(folder) == generation.task_slug.to_s
+          raise StaleTaskSource, "attempt task path is outside a workflow stage"
+        end
+        workflow = task.workflow
+        workflow_id = (workflow.respond_to?(:id) ? workflow.id : workflow).to_s
+        workflow_id = "coding" if workflow_id.empty?
         timestamp = Record.iso8601(observed_at)
         database.transaction do |db|
-          project = observed_project!(db, generation, folder)
+          project = db[:projects].where(state_root_path: File.dirname(stages)).first
+          unless project && project.fetch(:name) == generation.project.to_s
+            raise StaleTaskSource, "attempt project identity is not registered for the task path"
+          end
           alias_row = db[:task_subjects].where(
             project_id: project.fetch(:project_id), workflow_id: workflow_id,
             task_slug: generation.task_slug.to_s
@@ -324,17 +312,7 @@ module Hive
           pending = db[:terminal_pending_publications].select_map(:attempt_id)
           db[:attempts].where(state: %w[launching running]).or(attempt_id: pending).order(:attempt_id).all
         end
-        records = []
-        invalid = []
-        rows.each do |row|
-          records << record_from(row)
-        rescue RepositoryError => error
-          invalid << InvalidStoredRecord.new(
-            path: "runtime-control-plane:attempt:#{row.fetch(:attempt_id)}",
-            error: error.message
-          )
-        end
-        Scan.new(records: records.freeze, invalid_records: invalid.freeze)
+        Scan.new(records: rows.map { |row| record_from(row) }.freeze)
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt scan failed")
       end
@@ -463,16 +441,6 @@ module Hive
 
       private
 
-      def connect!(migrate:)
-        if migrate
-          database.migrate!
-        elsif File.file?(database.path)
-          database.open!
-        elsif @create_directories
-          database.open!
-        end
-      end
-
       def validate_capacity!(db, record, limits)
         limits = limits.to_h
         reserved = db[:capacity_reservations].where(
@@ -523,13 +491,13 @@ module Hive
               update: {
                 task_source_fingerprint: row.fetch(:source_fingerprint),
                 receipt_json: receipt_json, expected_receipt_digest: digest,
-                state: "pending", created_at: replacement["ended_at"], published_at: nil
+                created_at: replacement["ended_at"]
               }
             ).insert(
               attempt_id: current.attempt_id,
               task_source_fingerprint: row.fetch(:source_fingerprint),
               receipt_json: receipt_json, expected_receipt_digest: digest,
-              state: "pending", created_at: replacement["ended_at"]
+              created_at: replacement["ended_at"]
             )
           end
           if replacement.final?
@@ -565,19 +533,19 @@ module Hive
         payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
         {
           attempt_id: record.attempt_id, request_id: record["request_id"], task_id: task_id,
-          subject_kind: record.subject_kind, subject_key: subject_key(record.subject),
+          subject_kind: record.subject_kind, subject_key: digest(record.subject),
           task_generation: record.task_generation,
           ownership_generation: record.ownership_generation, state: record.state,
           outcome: record.outcome, lease_version: record.lease_version,
-          owner_identity_json: json_or_nil(record.wrapper),
+          owner_identity_json: json(record.wrapper),
           routing_json: RuntimeControlPlane::Codec.dump_json(record["routing"]),
           source_fingerprint: source_fingerprint.to_s,
-          checkpoint_json: json_or_nil(record.checkpoint), record_json: payload,
+          checkpoint_json: json(record.checkpoint), record_json: payload,
           record_digest: Digest::SHA256.hexdigest(payload),
           subject_json: RuntimeControlPlane::Codec.dump_json(record.subject),
           project_name: record["project"], task_slug: record["task_slug"],
           accepted_date: Time.iso8601(record["accepted_at"]).utc.to_date.iso8601,
-          terminal_receipt_digest: receipt_digest(record.receipt),
+          terminal_receipt_digest: digest(record.receipt),
           created_at: record["created_at"], accepted_at: record["accepted_at"],
           started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
           ended_at: record["ended_at"]
@@ -589,10 +557,10 @@ module Hive
         {
           state: record.state, outcome: record.outcome,
           lease_version: record.lease_version,
-          owner_identity_json: json_or_nil(record.wrapper),
-          checkpoint_json: json_or_nil(record.checkpoint),
+          owner_identity_json: json(record.wrapper),
+          checkpoint_json: json(record.checkpoint),
           record_json: payload, record_digest: Digest::SHA256.hexdigest(payload),
-          terminal_receipt_digest: receipt_digest(record.receipt),
+          terminal_receipt_digest: digest(record.receipt),
           started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
           ended_at: record["ended_at"]
         }
@@ -622,82 +590,13 @@ module Hive
       end
 
       def ensure_subject!(db, record, source_fingerprint:)
-        project_id = "isolated-#{Digest::SHA256.hexdigest(record['project'])[0, 40]}"
-        task_id = "isolated-#{Digest::SHA256.hexdigest([ record['project'], record['task_id'], record['task_slug'] ].join("\0"))[0, 40]}"
-        unless @isolated_identity
-          task = db[:task_subjects].where(task_id: record["task_id"].to_s).first
-          raise RepositoryError, "attempt task identity is not registered in the runtime control plane" unless task
-          return [ task.fetch(:task_id), task.fetch(:project_id) ]
-        end
-
-        installation = db[:installations].first.fetch(:installation_id)
-        now = record["accepted_at"]
-        db[:projects].insert_conflict.insert(
-          project_id: project_id, installation_id: installation,
-          registration_id: project_id, name: record["project"], observed_path: @root,
-          state_root_path: @root, active: 1, registered_at: now, last_observed_at: now
-        )
-        db[:task_subjects].insert_conflict(
-          target: :task_id,
-          update: {
-            source_fingerprint: source_fingerprint.to_s,
-            generation: record.task_input_epoch,
-            last_observed_at: now
-          }
-        ).insert(
-          task_id: task_id, project_id: project_id, workflow_id: "attempt-runtime",
-          task_slug: record["task_slug"], observed_path: record["task_id"].to_s,
-          source_fingerprint: source_fingerprint.to_s, generation: record.task_input_epoch,
-          created_at: now, last_observed_at: now
-        )
-        [ task_id, project_id ]
+        task = db[:task_subjects].where(task_id: record["task_id"].to_s).first
+        raise RepositoryError, "attempt task identity is not registered in the runtime control plane" unless task
+        [ task.fetch(:task_id), task.fetch(:project_id) ]
       end
 
-      def observed_task_path(task)
-        folder = task.respond_to?(:folder) ? task.folder.to_s : ""
-        if folder.empty? && task.respond_to?(:state_file)
-          folder = File.dirname(task.state_file.to_s)
-        end
-        raise StaleTaskSource, "attempt task path is unavailable" if folder.empty?
-
-        File.expand_path(folder)
-      end
-
-      def observed_workflow_id(task)
-        workflow = task.respond_to?(:workflow) ? task.workflow : nil
-        workflow = workflow.id if workflow.respond_to?(:id)
-        value = workflow.to_s
-        value.empty? ? "coding" : value
-      end
-
-      def observed_project!(db, generation, folder)
-        stage_directory = File.dirname(folder)
-        stages_directory = File.dirname(stage_directory)
-        unless File.basename(stages_directory) == "stages" &&
-               File.basename(folder) == generation.task_slug.to_s
-          raise StaleTaskSource, "attempt task path is outside a workflow stage"
-        end
-
-        state_root = File.dirname(stages_directory)
-        project = db[:projects].where(state_root_path: state_root).first
-        unless project && project.fetch(:name) == generation.project.to_s
-          raise StaleTaskSource, "attempt project identity is not registered for the task path"
-        end
-        project
-      end
-
-      def subject_key(subject)
-        Digest::SHA256.hexdigest(RuntimeControlPlane::Codec.dump_json(subject))
-      end
-
-      def receipt_digest(receipt)
-        return nil unless receipt
-        Digest::SHA256.hexdigest(RuntimeControlPlane::Codec.dump_json(receipt))
-      end
-
-      def json_or_nil(value)
-        value && RuntimeControlPlane::Codec.dump_json(value)
-      end
+      def json(value) = value && RuntimeControlPlane::Codec.dump_json(value)
+      def digest(value) = value && Digest::SHA256.hexdigest(json(value))
 
       def prepare_payload_root!
         RuntimeControlPlane::PayloadStore.new(root: @root)
@@ -733,10 +632,10 @@ module Hive
         nil
       end
 
-      def safe_id(value)
+      def safe_id(value, error: "unsafe attempt id")
         string = value.to_s
         return string if /\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\z/.match?(string)
-        raise RepositoryError, "unsafe attempt id"
+        raise RepositoryError, error
       end
 
       def translate_store_error(error, prefix)

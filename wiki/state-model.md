@@ -438,22 +438,24 @@ after `ended_at`, whichever is earlier, unless recovery remains pinned. This
 retention does not delete the terminal attempt row or still-referenced payloads.
 
 The one-way installation cutover is offline and fleet-atomic. A durable
-`preparing → ready → intended → active` manifest binds the registered projects,
-task-authority fingerprints, strict immutable legacy inventory, consistent usage
-snapshot, closed database/payload candidate, and every path-shape fence. Before
-candidate startup mutation an early read-only gate refuses ordinary commands.
-Services stop and live owners are rejected before sealing. Once sealed, every
-retry consumes only the immutable source and candidate and converges forward;
-`active` is published only after current services start. There is no
-attempts-v4 migration state machine, dual reader/writer, reverse hydration,
-implicit database creation, rollback, or downgrade.
+`ready → intended → active` manifest binds the registered projects,
+task-authority fingerprints, a validated immutable token-usage snapshot, and
+every path-shape fence. Before candidate startup mutation an early read-only
+gate refuses ordinary commands. Services stop and live owners are rejected
+before task identity is rebuilt from file authority. All other machine-local
+runtime domains start empty. Every retry converges forward from the manifest;
+`active` is published only after the services recorded as running at cutover
+start again. There is no general legacy decoder, attempts-v4 migration state
+machine, dual reader/writer, reverse hydration, implicit database creation,
+rollback, or downgrade.
 
 The package manager publishes the candidate normally; Hive never renames
 package-owned launcher entries or retains the previous executable tree.
-`hive runtime` exposes only bounded status and forward resume. The sealed bundle
-is cutover evidence, not a user-selectable backup or restore source. Workflow
-files and task journal/projection files remain task authority and writable after
-activation; only genuinely retired runtime writer paths receive tombstones.
+`hive runtime` exposes only bounded status and forward resume. The external
+manifest is cutover evidence, not a user-selectable backup or restore source.
+Workflow files, task journals and projections, artifacts, and referenced
+payload files remain under their existing authorities after activation; only
+genuinely retired runtime writer paths receive tombstones.
 
 ## Runtime dispatch queue and web snapshots
 

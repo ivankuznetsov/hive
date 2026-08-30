@@ -115,14 +115,6 @@ module Hive
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat through the transactional dispatch outbox (ADV-1).
       "hive-dispatch-result" => 2,
-      # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 4,
-      # Admission-owned immutable provider-routing policy snapshots.
-      "hive-routing-policy" => 1,
-      # Owner-private provider-account and exact-model circuit projection and
-      # its authoritative scoped journal events.
-      "hive-provider-health" => 1,
-      "hive-provider-health-event" => 1,
       # Dedicated operator-confirmed task closure input/receipt. These are
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,
@@ -131,9 +123,7 @@ module Hive
       # and JSON. It is intentionally independent from fleet-wide status v7.
       "hive-task-workspace" => 2,
       # Forward-only controller and agent context provenance receipts.
-      "hive-context-receipt" => 1,
-      # Project-local daemon ledger for task-bound merged-PR reconciliation.
-      "hive-pr-merge-reconciliation" => 1
+      "hive-context-receipt" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

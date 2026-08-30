@@ -111,6 +111,14 @@ module Hive
     RouteIdentity = Data.define(
       :route_id, :account_id, :adapter, :launch_binding_id, :model_id
     ) do
+      def self.from_h(data)
+        new(
+          route_id: data.fetch("route_id"), account_id: data.fetch("provider_account_id"),
+          adapter: data.fetch("adapter"), launch_binding_id: data.fetch("launch_binding_id"),
+          model_id: data.fetch("model")
+        )
+      end
+
       def initialize(route_id:, account_id:, adapter:, launch_binding_id:, model_id:)
         super(
           route_id: ProviderHealth.identifier(route_id, "route"),
@@ -137,6 +145,16 @@ module Hive
       :scope, :journal_epoch, :observed_generation, :claim_generation,
       :attempt_id, :task_generation, :ownership_fence
     ) do
+      def self.from_h(data)
+        new(
+          scope: ProviderHealth.scope_from_h(data.fetch("scope")),
+          **data.slice(
+            "journal_epoch", "observed_generation", "claim_generation", "attempt_id",
+            "task_generation", "ownership_fence"
+          ).transform_keys(&:to_sym)
+        )
+      end
+
       def initialize(scope:, journal_epoch:, observed_generation:, claim_generation:,
                      attempt_id:, task_generation:, ownership_fence:)
         unless scope.is_a?(Scope)

@@ -11,7 +11,10 @@ class ProviderRoutingRecoveryTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
   CAPABILITY = "c" * 64
-  Task = Data.define(:id, :slug, :folder, :state_file, :stage_index, :stage_name)
+  Task = Data.define(
+    :id, :slug, :folder, :state_file, :stage_index, :stage_name,
+    :project_root, :workflow
+  )
   Row = Data.define(
     :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
     :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
@@ -36,9 +39,17 @@ class ProviderRoutingRecoveryTest < Minitest::Test
   def test_failed_a_health_acknowledges_before_one_recovery_successor_selects_b
     with_tmp_dir do |root|
       task = build_task(root)
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ).migrate!
       attempts = Hive::Attempts::Repository.new(
-        root: File.join(root, "attempts"), migrate: true
+        root: File.join(root, "attempts"), database: database
       )
+      register_runtime_project(
+        database: attempts.database, name: "demo", path: task.project_root,
+        state_root_path: File.join(task.project_root, ".hive-state")
+      )
+      prepare_test_task_lease_repository(task.folder, state_home: root)
       dispatch = Hive::RuntimeControlPlane::DispatchRepository.new(
         database: attempts.database, clock: -> { NOW }
       )
@@ -111,13 +122,19 @@ class ProviderRoutingRecoveryTest < Minitest::Test
   private
 
   def build_task(root)
-    folder = File.join(root, "task")
+    project_root = File.join(root, "demo")
+    folder = File.join(project_root, ".hive-state", "stages", "4-execute", "routed-task")
     FileUtils.mkdir_p(folder)
     state_file = File.join(folder, "task.md")
     File.write(state_file, "# Routed task\n")
+    File.write(
+      File.join(folder, Hive::TaskMeta::FILENAME),
+      { "id" => 42, "slug" => "routed-task", "workflow" => "coding" }.to_yaml
+    )
     Task.new(
       id: 42, slug: "routed-task", folder: folder, state_file: state_file,
-      stage_index: 4, stage_name: "execute"
+      stage_index: 4, stage_name: "execute", project_root: project_root,
+      workflow: nil
     )
   end
 

@@ -499,7 +499,7 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
       "Hive::UsageDb" => <<~RUBY
         require 'hive/usage_db'
         ok = Hive::UsageDb.record!(agent: :codex, model: 'old', project_slug: 'project', task_slug: 'first-task', stage: 'execute', started_at: Time.now.utc, ended_at: Time.now.utc, input: 1, output: 1, cached: 0)
-        raise Errno::EISDIR, Hive::UsageDb.path unless ok
+        raise Errno::EISDIR, Hive::UsageDb.database.path unless ok
       RUBY
     }
   end

@@ -25,22 +25,22 @@ hive migrate --all [--yes] [--exclude-project NAME]
 and requires explicit confirmation. On a TTY it prompts for `yes`; non-TTY use
 without the flag fails with the exact `hive migrate --all --yes` action. Missing registered projects must be repaired or named with
 `--exclude-project`; exclusions and their reason are durable manifest evidence.
-Corrupt reachable projects, unattributed legacy state, live owners, changing
-sources, missing task ids, or any non-empty legacy domain without an exact SQL
-representation stop activation. Project task files remain byte-identical before
-the activation-intent manifest.
+Corrupt reachable projects, live owners, changing task authority, or missing
+task ids stop activation. Project task files remain byte-identical before the
+activation-intent manifest.
 
 The package manager publishes the candidate normally; Hive never renames a
 package-owned launcher or preserves the previous executable tree. Before any
 candidate startup mutation, an early read-only gate refuses ordinary commands.
-Cutover stops daemon, bot, and Web, rejects live owners, seals the complete raw
-legacy set including consistent SQLite WAL/SHM state, and installs permanent
-path-shape tombstones over retired writer paths. It imports only from that
-immutable source, validates a closed fleet candidate, records irreversible
-intent, activates, and restarts current services. An interruption after sealing
-leaves evidence and fences in place; `hive runtime resume` only converges
-forward. Normal runtime never creates or migrates the database and has no
-legacy fallback.
+Cutover stops daemon, bot, and Web, rejects live owners, snapshots and validates
+token usage including consistent SQLite WAL/SHM state, and installs permanent
+path-shape tombstones over retired writer paths. It rebuilds project and task
+identity from file authority, resets the remaining machine-local runtime
+domains, records irreversible intent, activates, and restarts only services
+that were running. Task journals, projections, artifacts, and referenced
+payload files remain untouched. An interruption after fencing leaves evidence
+and tombstones in place; `hive runtime resume` only converges forward. Normal
+runtime never creates or migrates the database and has no legacy fallback.
 
 ## Task-folder renames
 
@@ -170,13 +170,15 @@ restore the workflow, then rerun migrate.
 
 ## Runtime activation surface
 
-The attempts-v4 recovery state machine is deleted. `Hive::Recovery::Migration`
-is now only the explicit fleet cutover/bootstrap/resume composition boundary and
-the lazy, migration-only legacy decoder. `hive runtime status|resume` is the
-entire maintenance surface. Status validates the immutable manifest and exact
-database identity; resume revalidates the sealed source and candidate and moves
-forward. Hive deliberately provides no runtime backup, restore, rollback, or
-downgrade branch for this one-way transition.
+The attempts-v4 recovery state machine and `Hive::Recovery::Migration` facade
+are deleted. `Hive::RuntimeControlPlane::Cutover` is the explicit fleet
+cutover/bootstrap/resume composition boundary. It has no general legacy decoder:
+the only retained-history adapter validates and imports the legacy token-usage
+SQLite database. `hive runtime status|resume` is the entire maintenance surface.
+Status validates the immutable manifest and exact database identity; resume
+revalidates task authority and the token-usage snapshot before moving forward.
+Hive deliberately provides no runtime backup, restore, rollback, or downgrade
+branch for this one-way transition.
 
 ## Registered repository identity backfill
 
@@ -262,14 +264,11 @@ A rerun after successful migration prints that there is nothing to move and keep
   moves, same-position repins, removed-stage refusal, lock contention, cleanup,
   and idempotency.
 - `test/unit/runtime_control_plane/cutover_test.rb` covers fleet atomicity,
-  source/import parity, permanent path-shape fences, strict sealed-source and
-  candidate validation, and crash-forward resume across every activation
-  boundary.
+  live-owner refusal, disposable runtime reset, exact-once token-usage import,
+  permanent path-shape fences, and crash-forward resume.
 - `test/unit/runtime_control_plane/activation_gate_test.rb` proves inactive
   ordinary commands fail before wiki reconciliation while maintenance routes
   remain available.
-- `test/unit/recovery/migration_test.rb` covers explicit cutover, bootstrap,
-  and resume composition without the retired per-layout state machine.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

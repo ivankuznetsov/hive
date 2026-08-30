@@ -66,7 +66,7 @@ class TaskClosureTest < Minitest::Test
 
   EmptyAttempts = Struct.new(:unused) do
     def scan
-      Hive::Attempts::Scan.new(records: [], invalid_records: [])
+      Hive::Attempts::Scan.new(records: [])
     end
   end
 
@@ -77,7 +77,7 @@ class TaskClosureTest < Minitest::Test
 
   AttemptStore = Struct.new(:records, keyword_init: true) do
     def scan
-      Hive::Attempts::Scan.new(records: records, invalid_records: [])
+      Hive::Attempts::Scan.new(records: records)
     end
   end
 
@@ -943,19 +943,6 @@ class TaskClosureTest < Minitest::Test
         task: task, project: project, input: input_for("acme/app#42")
       )
       assert preview.blockers.any? do |entry|
-        entry.fetch("code") == "ownership_unverifiable"
-      end
-
-      invalid_attempts = Object.new
-      invalid_attempts.define_singleton_method(:scan) do
-        Hive::Attempts::Scan.new(
-          records: [], invalid_records: [ { "error" => "corrupt" } ]
-        )
-      end
-      invalid_preview = service_for(attempt_store: invalid_attempts).preview(
-        task: task, project: project, input: input_for("acme/app#42")
-      )
-      assert invalid_preview.blockers.any? do |entry|
         entry.fetch("code") == "ownership_unverifiable"
       end
 

@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics]
 ---
 
@@ -31,7 +31,7 @@ and become immutable SHA-256 addresses only at terminal publication.
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, validate one child diagnostic frame, bind its exact private log reference, and terminalize only after appending the diagnostic output reference. |
 | `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
-| `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, normalize loss, and publish current hot counts beside cached storage-maintenance health without scanning historical proof or cold logs. |
+| `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, normalize loss, and publish current hot counts beside process-local maintenance status without scanning historical proof or cold logs. |
 | `DirtyStateCapture`, `LostOutcomeTransition` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent through typed SQL rows. |
 
 ## Admission API boundary
@@ -156,11 +156,20 @@ to the canonical row. A SQL keyset cursor examines at most 512 retained logs
 per maintenance pass, and expiry removes shared content only after no sealed or
 pinned reference remains.
 
-Operational status reads one bounded maintenance cell plus counts already
-produced by the current hot reconciliation. It reports only the latest
-migration and maintenance deltas (`promoted`, `deleted`, and `cold_examined`),
-not lifetime totals, and a failed write/read becomes one concise degraded
-warning. Status never scans filesystem attempt history.
+Operational status derives database health directly from control-plane
+diagnostics plus the current immutable hot reconciliation snapshot. The fixed
+layout generation is informational; there is no projection table, runtime
+layout-migration state, repair method, or invalid-record compatibility path.
+Maintenance timing and its last process-local error are advisory only, and a
+database failure becomes one concise degraded warning. Status never scans
+filesystem attempt history.
+
+Capacity uses one grouped SQL read for live reservations and daily accounting.
+The reconciler hands admission an immutable typed attempt snapshot; point
+lookups remain indexed and current, while capacity cannot trigger filesystem
+rescans or per-project query loops. Custom repositories require an injected,
+already-migrated control-plane database, so production no longer fabricates
+isolated identities or silently creates a second runtime authority.
 
 The current explicit-routing decision cell is the one bounded exception for
 operator inspection. It retains project, task generation, strict subject,
@@ -235,9 +244,9 @@ adapter maps unambiguously; legacy admission itself never consults that cap.
 All-compatible provider saturation creates no attempt or probe and returns a
 scheduler-owned observation.
 
-Opening and reconciling provider health are both inside the same fail-closed
-admission boundary. If the health store cannot be constructed because its
-state is unavailable or its managed directory is unsafe, admission evaluates
+Reading provider health and revalidating its generation are both inside the
+same fail-closed admission boundary. If the repository cannot be constructed
+or read, admission evaluates
 every candidate as `health_state_unavailable`, persists the operator-owned
 no-route decision, and starts no attempt. Legacy admission still returns
 before constructing provider health.
@@ -328,13 +337,13 @@ this path.
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
 as `ownership_generation`. `hive-attempt` v4 remains the sole runtime value
-shape. The explicit runtime-control-plane cutover refuses live writers,
-decodes each supported legacy source once, imports validated records and
-relationships transactionally, verifies the cutover manifest, and activates
-only after parity succeeds. Runtime code has no dual reader or filesystem
-repair branch. A competing root, unsupported record schema, unsafe path,
-ownership mismatch, changed corpus, or unresolved import disposition fails
-closed without choosing an authority. Every
+shape. The explicit runtime-control-plane cutover refuses live writers and
+discards legacy attempt/runtime rows after quiescence. Project and task
+identities are rebuilt from file authority, existing task journals, artifacts,
+projections, and referenced payload bytes stay untouched, and only validated
+token-usage history is imported. Runtime code has no dual reader, decoder, or
+filesystem repair branch. A competing root, unsafe path, ownership mismatch,
+or changed task authority fails closed without choosing an authority. Every
 condition event must name a durable attempt whose task/stage ownership matches
 the record. Retry and adoption reuse the numeric epoch when accepted inputs
 are unchanged.

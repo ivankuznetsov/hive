@@ -1,39 +1,46 @@
 require "date"
+require "forwardable"
 require "hive/attempts/repository"
 
 module Hive
   module Attempts
-    # Rebuildable capacity view derived from the durable attempt history.
-    # Invalid records reserve a global slot fail-closed but cannot safely be
-    # attributed to a project or task.
     CapacitySnapshot = Data.define(
       :global_count, :per_project, :per_task, :daily_counts,
-      :reserved_attempt_ids, :invalid_count
+      :reserved_attempt_ids
     ) do
-      def self.build(store:, scan: nil, now: Time.now, daily_counts: nil)
-        scan ||= store.scan
-        reservations = store.live_reservations
-        per_project = Hash.new(0)
-        per_task = Hash.new(0)
-        reservations.each_value do |reservation|
-          project = reservation.fetch("project")
-          task_slug = reservation.fetch("task_slug")
-          per_project[project] += 1
-          per_task[[ project, task_slug ]] += 1
-        end
+      MAX_RESERVATIONS = 1_024
+      MAX_DAILY_ATTEMPTS = 10_000
 
-        daily = daily_counts || store.daily_counts(date: now.utc.to_date)
-        reserved_ids = reservations.keys.freeze
-        unreserved_invalid = scan.invalid_records.count do |invalid|
-          !reservations.key?(invalid.path.to_s.split(":").last)
+      def self.build(store:, now: Time.now)
+        date = now.utc.to_date
+        reservations, daily_counts = store.database.read do |db|
+          live = db[:capacity_reservations].where(
+            Sequel[:capacity_reservations][:state] => "reserved"
+          )
+            .join(:attempts, attempt_id: :attempt_id)
+            .limit(MAX_RESERVATIONS + 1).select_map([
+              Sequel[:capacity_reservations][:attempt_id],
+              Sequel[:attempts][:project_name], Sequel[:attempts][:task_slug]
+            ])
+          daily = db[:attempts].where(accepted_date: date.iso8601)
+            .join(:attempt_accounting, attempt_id: :attempt_id)
+            .where(Sequel[:attempt_accounting][:refunded] => 0)
+            .group_and_count(Sequel[:attempts][:project_name]).all
+          [ live, daily ]
         end
+        raise RepositoryError, "live capacity exceeds its bounded set" if reservations.size > MAX_RESERVATIONS
+        raise RepositoryError, "daily accounting exceeds its bounded UTC shard" if
+          daily_counts.sum { |row| row.fetch(:count) } > MAX_DAILY_ATTEMPTS
+
+        projects = reservations.map { |_id, project, _slug| project }.tally.freeze
+        tasks = reservations.map { |_id, project, slug| [ project, slug ] }.tally.freeze
         new(
-          global_count: reservations.size + unreserved_invalid,
-          per_project: per_project.to_h.freeze,
-          per_task: per_task.to_h.freeze,
-          daily_counts: daily.to_h.freeze,
-          reserved_attempt_ids: reserved_ids,
-          invalid_count: scan.invalid_records.size
+          global_count: reservations.size,
+          per_project: projects, per_task: tasks,
+          daily_counts: daily_counts.to_h do |row|
+            [ [ row.fetch(:project_name), date ], row.fetch(:count) ]
+          end.freeze,
+          reserved_attempt_ids: reservations.map(&:first).freeze
         )
       end
 
@@ -42,165 +49,55 @@ module Hive
       def daily_count(project, date) = daily_counts.fetch([ project, date ], 0)
       def task_reserved?(project:, task_slug:) = task_count(project: project, task_slug: task_slug).positive?
 
-      # Explicit routing shares one provider-account cap across projects. The
-      # attempt ledger remains the semaphore: routed records carry their exact
-      # account, while a legacy record contributes only when it maps
-      # unambiguously to the configured default binding for its adapter.
-      def provider_account_capacity(policy:, records:)
-        accounts = policy.account_policy
-        counts = accounts.keys.to_h { |account_id| [ account_id, 0 ] }
-        reserved = reserved_attempt_ids.to_h { |attempt_id| [ attempt_id, true ] }
-        default_accounts = accounts.each_with_object(Hash.new { |hash, key| hash[key] = [] }) do |(id, entry), result|
-          if entry.fetch("launch_binding") == "default"
-            result[entry.fetch("adapter")] << id
-          end
-        end
-
-        Array(records).each do |record|
-          next unless reserved[record.attempt_id]
-
-          routing = record["routing"]
-          account_id = if routing.is_a?(Hash) && routing["mode"] == "explicit"
-            routing.dig("route", "provider_account_id")
-          else
-            candidates = default_accounts[record["provider"]]
-            candidates.one? ? candidates.first : nil
-          end
-          counts[account_id] += 1 if counts.key?(account_id)
-        end
-
-        counts.to_h do |account_id, observed|
-          maximum = Integer(accounts.fetch(account_id).fetch("max_concurrent"))
-          [ account_id, { "observed" => observed, "max" => maximum }.freeze ]
-        end.freeze
+      def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:, max_daily:)
+        global_count >= max_global || project_count(project) >= max_per_project ||
+          task_count(project: project, task_slug: task_slug).positive? ||
+          daily_count(project, date) >= max_daily
       end
 
-      def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:, max_daily:)
-        global_count >= max_global ||
-          project_count(project) >= max_per_project ||
-          task_reserved?(project: project, task_slug: task_slug) ||
-          daily_count(project, date) >= max_daily
+      def self.provider_account_capacity(accounts:, records:, reserved_attempt_ids:)
+        counts = accounts.to_h do |id, account|
+          [ id, { "observed" => 0, "max" => Integer(account.fetch("max_concurrent")) } ]
+        end
+        defaults = accounts.select { |_id, account| account.fetch("launch_binding") == "default" }
+          .group_by { |_id, account| account.fetch("adapter") }.transform_values { |values| values.map(&:first) }
+        defaults.default = []
+        reserved = reserved_attempt_ids.to_h { |id| [ id, true ] }
+        Array(records).each do |record|
+          next unless reserved[record.attempt_id]
+          routing = record["routing"]
+          id = if routing.is_a?(Hash) && routing["mode"] == "explicit"
+            routing.dig("route", "provider_account_id")
+          elsif defaults[record["provider"]].one?
+            defaults[record["provider"]].first
+          end
+          counts[id]["observed"] += 1 if counts.key?(id)
+        end
+        counts.transform_values!(&:freeze).freeze
       end
     end
 
-    # A bounded attempt view for one scheduler decision. SQL indexes own
-    # freshness and historical lookups; this object keeps only the records a
-    # caller already observed during the decision.
-    class AdmissionView
-      attr_reader :hot_scan
+    class AdmissionView < Data.define(:store, :records)
+      extend Forwardable
+      def_delegators :store, :failure_cohort_admission, :claim_failure_cohort_probe,
+                     :release_failure_cohort_probe, :record_routing_decision, :routing_decision
 
-      def initialize(store:, hot_scan:)
-        @store = store
-        @hot_scan = hot_scan
-        @records = hot_scan.records.to_h { |record| [ record.attempt_id, record ] }
-      end
-
-      def records
-        @records.keys.each do |attempt_id|
-          current = @store.fetch(attempt_id)
-          current ? @records[attempt_id] = current : @records.delete(attempt_id)
-        end
-        @records.values.freeze
-      end
-
-      def refresh_for_admission = records
-
-      def capacity(now:, records: nil)
-        current = records || self.records
-        CapacitySnapshot.build(
-          store: @store,
-          scan: Scan.new(
-            records: current.freeze,
-            invalid_records: hot_scan.invalid_records
-          ),
-          now: now
-        )
-      end
-
-      def failure_cohort_admission(**attributes)
-        repository.failure_cohort_admission(**attributes)
-      end
-
-      def claim_failure_cohort_probe(**attributes)
-        repository.claim_failure_cohort_probe(**attributes)
-      end
-
-      def release_failure_cohort_probe(**attributes)
-        repository.release_failure_cohort_probe(**attributes)
-      end
-
-      def record(record)
-        @records[record.attempt_id] = record
-        record
-      end
+      def capacity(now:) = CapacitySnapshot.build(store: store, now: now)
 
       def find(attempt_id)
-        return nil if attempt_id.to_s.empty?
-
-        record = @store.fetch(attempt_id)
-        return self.record(record) if record
-
-        @records.delete(attempt_id)
-        nil
+        return if attempt_id.to_s.empty?
+        store.fetch(attempt_id)
       end
 
-      def terminal_attempt(request_id:)
-        find(repository.terminal_attempt_id(request_id: request_id))
-      end
-
-      def latest_terminal_attempt(task_generation:, subject:)
-        find(
-          repository.latest_terminal_attempt_id(
-            task_generation: task_generation, subject: subject
-          )
-        )
-      end
-
-      def successful_attempt(task_generation:, subject:)
-        find(
-          repository.successful_attempt_id(
-            task_generation: task_generation, subject: subject
-          )
-        )
-      end
-
-      def unresolved_loss(task_generation:, subject:)
-        find(
-          repository.unresolved_loss_attempt_id(
-            task_generation: task_generation, subject: subject
-          )
-        )
-      end
-
-      def successor(predecessor_attempt_id:)
-        find(
-          repository.successor_attempt_id(
-            predecessor_attempt_id: predecessor_attempt_id
-          )
-        )
-      end
-
-      def record_routing_decision(decision:, task_generation:, subject:, project:,
-                                  attempt_id: nil)
-        repository.record_routing_decision(
-          decision: decision,
-          task_generation: task_generation,
-          subject: subject,
-          project: project,
-          attempt_id: attempt_id
-        )
-      end
-
-      def routing_decision(task_generation:, subject:)
-        repository.routing_decision(
-          task_generation: task_generation,
-          subject: subject
-        )
-      end
+      def terminal_attempt(request_id:) = lookup(:terminal_attempt_id, request_id: request_id)
+      def latest_terminal_attempt(**args) = lookup(:latest_terminal_attempt_id, **args)
+      def successful_attempt(**args) = lookup(:successful_attempt_id, **args)
+      def unresolved_loss(**args) = lookup(:unresolved_loss_attempt_id, **args)
+      def successor(**args) = lookup(:successor_attempt_id, **args)
 
       private
 
-      def repository = @store
+      def lookup(method, **args) = find(store.public_send(method, **args))
     end
   end
 end

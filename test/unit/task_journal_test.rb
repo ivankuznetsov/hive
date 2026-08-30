@@ -59,29 +59,23 @@ class TaskJournalTest < Minitest::Test
   def test_missing_and_cyclic_attempt_lineage_fail_closed
     with_writer do |writer, _dir|
       store = writer.attempt_store
-      first_path = store.record_path("attempt-1")
-      first = JSON.parse(File.binread(first_path))
-      File.write(first_path, JSON.generate(first.merge("predecessor_attempt_id" => "missing")) + "\n")
+      first = attempt_record(store, "attempt-1")
+      rewrite_attempt(store, first.merge("predecessor_attempt_id" => "missing"))
 
       error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
         writer.append(event("condition_observed"))
       end
       assert_includes error.message, "missing predecessor"
 
-      second = first.merge(
-        "attempt_id" => "attempt-2", "request_id" => "request-2",
-        "predecessor_attempt_id" => "attempt-1"
-      )
-      File.write(store.record_path("attempt-2"), JSON.generate(second) + "\n")
-      File.write(
-        first_path,
-        JSON.generate(first.merge("predecessor_attempt_id" => "attempt-2")) + "\n"
-      )
+      create_successor(store)
+      rewrite_attempt(store, first.merge("predecessor_attempt_id" => "attempt-2"))
       fresh_writer = Hive::TaskJournal::Writer.new(
         task_folder: writer.task_folder, attempt_store: store, clock: -> { NOW }
       )
       error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
-        fresh_writer.append(event("condition_observed", attempt_id: "attempt-2"))
+        fresh_writer.append(event(
+          "condition_observed", attempt_id: "attempt-2", ownership_generation: "ownership-2"
+        ))
       end
       assert_includes error.message, "lineage cycle"
     end
@@ -90,24 +84,21 @@ class TaskJournalTest < Minitest::Test
   def test_attempt_lineage_rejects_an_incompatible_predecessor_identity
     with_writer do |writer, _dir|
       store = writer.attempt_store
-      first_path = store.record_path("attempt-1")
-      first = JSON.parse(File.binread(first_path))
-      second = first.merge(
-        "attempt_id" => "attempt-2", "request_id" => "request-2",
-        "predecessor_attempt_id" => "attempt-1"
-      )
-      File.write(store.record_path("attempt-2"), JSON.generate(second) + "\n")
+      first = attempt_record(store, "attempt-1")
+      create_successor(store)
       incompatible = first.merge(
         "task_slug" => "other-task",
         "subject" => first.fetch("subject").merge("task_slug" => "other-task")
       )
-      File.write(first_path, JSON.generate(incompatible) + "\n")
+      rewrite_attempt(store, incompatible)
 
       fresh_writer = Hive::TaskJournal::Writer.new(
         task_folder: writer.task_folder, attempt_store: store, clock: -> { NOW }
       )
       error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
-        fresh_writer.append(event("condition_observed", attempt_id: "attempt-2"))
+        fresh_writer.append(event(
+          "condition_observed", attempt_id: "attempt-2", ownership_generation: "ownership-2"
+        ))
       end
       assert_includes error.message, "incompatible identity"
     end
@@ -352,6 +343,35 @@ class TaskJournalTest < Minitest::Test
   end
 
   private
+
+  def attempt_record(store, attempt_id)
+    store.database.read do |db|
+      Hive::RuntimeControlPlane::Codec.load_json(
+        db[:attempts].where(attempt_id: attempt_id).get(:record_json)
+      )
+    end
+  end
+
+  def rewrite_attempt(store, record)
+    json = Hive::RuntimeControlPlane::Codec.dump_json(record)
+    store.database.transaction do |db|
+      db[:attempts].where(attempt_id: record.fetch("attempt_id")).update(
+        record_json: json, record_digest: Digest::SHA256.hexdigest(json)
+      )
+    end
+  end
+
+  def create_successor(store)
+    store.create_launching(
+      attempt_id: "attempt-2", request_id: "request-2", predecessor_attempt_id: "attempt-1",
+      task_id: "42", project: "demo", task_slug: "durable-task", intended_stage: "4-execute",
+      task_generation: "ownership-2", ownership_generation: "ownership-2", task_input_epoch: 3,
+      progress_token: "progress", provider: "codex", starting_revision: nil,
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("d" * 64),
+      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+    )
+  end
 
   def with_writer
     with_tmp_dir do |dir|

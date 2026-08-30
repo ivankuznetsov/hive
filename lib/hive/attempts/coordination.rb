@@ -11,8 +11,6 @@ module Hive
     # Historical lookup is now an indexed query over attempts, not a second
     # set of transactional rows rather than repairable point-addressed files.
     module Coordination
-      MAX_DAILY_ATTEMPTS = 10_000
-      MAX_LIVE_RESERVATIONS = 1_024
       MAX_ROUTING_PROJECTIONS = 4_096
       MAX_FAILURE_COHORTS = 512
       FAILURE_COHORT_THRESHOLD = 3
@@ -68,49 +66,17 @@ module Hive
 
       def mark_refunded(record)
         row = acceptance_for!(record)
-        billing = decode(row.fetch(:billing_json))
+        billing = RuntimeControlPlane::Codec.load_json(row.fetch(:billing_json))
         update_accounting(
           record.attempt_id,
-          refunded: 1, billing_json: encode(billing.merge("refunded" => true))
+          refunded: 1, billing_json: RuntimeControlPlane::Codec.dump_json(billing.merge("refunded" => true))
         )
         record
       end
 
-      def daily_count(project:, date:)
-        daily_counts(date: date).fetch([ identifier(project), date_value(date) ], 0)
-      end
-
-      def daily_counts(date:)
-        utc_date = date_value(date)
-        daily_acceptances(date: utc_date).each_value.with_object(Hash.new(0)) do |acceptance, counts|
-          counts[[ acceptance.fetch("project"), utc_date ]] += 1 unless acceptance["refunded"]
-        end.to_h.freeze
-      end
-
-      def daily_acceptances(date:)
-        utc_date = date_value(date).iso8601
-        rows = attempts.where(accepted_date: utc_date)
-                       .join(:attempt_accounting, attempt_id: :attempt_id)
-                       .select_all(:attempts)
-                       .select_append(Sequel[:attempt_accounting][:refunded])
-                       .limit(MAX_DAILY_ATTEMPTS + 1).all
-        raise RepositoryError, "daily accounting exceeds its bounded UTC shard" if rows.length > MAX_DAILY_ATTEMPTS
-
-        rows.to_h do |row|
-          [
-            row.fetch(:attempt_id).freeze,
-            {
-              "accepted_at" => row.fetch(:accepted_at),
-              "project" => row.fetch(:project_name),
-              "refunded" => row.fetch(:refunded) == 1
-            }.freeze
-          ]
-        end.freeze
-      end
-
       def reservation_metadata(attempt_id)
         row = accounting.where(attempt_id: identifier(attempt_id)).first
-        row && decode(row.fetch(:reservation_json))
+        row && RuntimeControlPlane::Codec.load_json(row.fetch(:reservation_json))
       end
 
       def release_live(attempt_id:)
@@ -120,19 +86,6 @@ module Hive
                                     .update(state: "released", released_at: Record.iso8601(Time.now.utc))
         end
         true
-      end
-
-      def live_reservations
-        rows = database.read do |db|
-          db[:capacity_reservations].where(state: "reserved").limit(MAX_LIVE_RESERVATIONS + 1).all
-        end
-        raise RepositoryError, "live capacity exceeds its bounded set" if rows.length > MAX_LIVE_RESERVATIONS
-
-        rows.to_h do |reservation|
-          row = accounting.where(attempt_id: reservation.fetch(:attempt_id)).first
-          value = row ? decode(row.fetch(:reservation_json)) : {}
-          [ reservation.fetch(:attempt_id).freeze, value.freeze ]
-        end.freeze
       end
 
       def record_failure_cohort(attempt_id:, identity:, occurred_at:)
@@ -234,8 +187,8 @@ module Hive
         unless decision.request.task_generation == generation
           raise RepositoryError, "routing decision task generation does not match its key"
         end
-        subject_json = encode(subject)
-        decision_json = encode(decision.to_h)
+        subject_json = RuntimeControlPlane::Codec.dump_json(subject)
+        decision_json = RuntimeControlPlane::Codec.dump_json(decision.to_h)
         key = semantic_key(generation, subject_json)
         row = {
           decision_key: key, task_generation: generation, subject_json: subject_json,
@@ -255,13 +208,13 @@ module Hive
 
       def routing_decision(task_generation:, subject:)
         generation = identifier(task_generation)
-        subject_json = encode(subject)
+        subject_json = RuntimeControlPlane::Codec.dump_json(subject)
         row = database.read do |db|
           db[:attempt_routing_decisions].where(
             decision_key: semantic_key(generation, subject_json)
           ).first
         end
-        row && decode(row.fetch(:decision_json))
+        row && RuntimeControlPlane::Codec.load_json(row.fetch(:decision_json))
       end
 
       def routing_decisions(limit: MAX_ROUTING_PROJECTIONS)
@@ -274,9 +227,9 @@ module Hive
         rows.map do |row|
           {
             "task_generation" => row.fetch(:task_generation),
-            "subject" => decode(row.fetch(:subject_json)),
+            "subject" => RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json)),
             "project" => row.fetch(:project_name), "attempt_id" => row[:attempt_id],
-            "decision" => decode(row.fetch(:decision_json))
+            "decision" => RuntimeControlPlane::Codec.load_json(row.fetch(:decision_json))
           }.freeze
         end.freeze
       end
@@ -319,7 +272,7 @@ module Hive
       def semantic_attempts(task_generation, subject)
         attempts.where(
           task_generation: identifier(task_generation),
-          subject_json: encode(subject)
+          subject_json: RuntimeControlPlane::Codec.dump_json(subject)
         )
       end
 
@@ -351,7 +304,7 @@ module Hive
       end
 
       def live_admission(admission)
-        value = decode(encode(admission))
+        value = RuntimeControlPlane::Codec.normalize(admission)
         unless value.keys.sort == %w[runtime_digest stage utc_date workflow] &&
                value["workflow"] == "patrol_fix" &&
                Record::SHA256_PATTERN.match?(value["runtime_digest"].to_s)
@@ -365,7 +318,7 @@ module Hive
       end
 
       def failure_cohort_identity(identity)
-        value = decode(encode(identity))
+        value = RuntimeControlPlane::Codec.normalize(identity)
         unless value.keys.sort == %w[code project runtime_digest stage workflow]
           raise RepositoryError, "failure cohort identity is invalid"
         end
@@ -378,7 +331,8 @@ module Hive
         raise RepositoryError, "failure cohort identity is invalid"
       end
 
-      def failure_cohort_digest(identity) = Digest::SHA256.hexdigest(encode(identity))
+      def failure_cohort_digest(identity) =
+        Digest::SHA256.hexdigest(RuntimeControlPlane::Codec.dump_json(identity))
 
       def cohort_row(identity, date)
         database.read do |db|
@@ -391,7 +345,8 @@ module Hive
 
       def insert_empty_cohort(db, date, digest, identity, occurred)
         row = {
-          utc_date: date, identity_digest: digest, identity_json: encode(identity),
+          utc_date: date, identity_digest: digest,
+          identity_json: RuntimeControlPlane::Codec.dump_json(identity),
           failure_count: 0, retry_at: nil, probe_attempt_id: nil,
           probe_expires_at: nil, updated_at: Record.iso8601(occurred)
         }
@@ -470,8 +425,6 @@ module Hive
         string
       end
 
-      def encode(value) = RuntimeControlPlane::Codec.dump_json(value)
-      def decode(value) = RuntimeControlPlane::Codec.load_json(value)
 
       def record!(record)
         return record if record.is_a?(Record)

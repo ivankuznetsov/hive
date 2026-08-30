@@ -1,5 +1,4 @@
 require "hive/config"
-require "hive/recovery/migration"
 require "hive/runtime_control_plane/cutover"
 
 module Hive
@@ -8,7 +7,7 @@ module Hive
     # the cutover; no project is committed before the global activation intent.
     class MigrateAll
       def initialize(projects: nil, output: $stdout, input: $stdin, confirm: false, exclusions: [],
-                     cutover: Hive::Recovery::Migration.method(:cutover))
+                     cutover: Hive::RuntimeControlPlane::Cutover.method(:cutover))
         @projects = projects || Hive::Config.registered_projects
         @output = output
         @input = input

@@ -21,17 +21,9 @@ module Hive
       end
     end
 
-    class MigrationRequired < Error
-      def exit_code = Hive::ExitCodes::CONFIG
-    end
-
-    class Unavailable < Error
-      def exit_code = Hive::ExitCodes::UNAVAILABLE
-    end
-
-    class IntegrityError < Error
-      def exit_code = Hive::ExitCodes::SOFTWARE
-    end
+    class MigrationRequired < Error; def exit_code = Hive::ExitCodes::CONFIG; end
+    class Unavailable < Error; def exit_code = Hive::ExitCodes::UNAVAILABLE; end
+    class IntegrityError < Error; def exit_code = Hive::ExitCodes::SOFTWARE; end
 
     class ForkUnsafe < Error
       def initialize(message)
@@ -45,12 +37,16 @@ module Hive
       def exit_code = Hive::ExitCodes::TEMPFAIL
     end
 
-    class CodecError < Error
-      def exit_code = Hive::ExitCodes::CONFIG
-    end
+    class CodecError < Error; def exit_code = Hive::ExitCodes::CONFIG; end
+    class IdentityError < Error; def exit_code = Hive::ExitCodes::CONFIG; end
 
-    class IdentityError < Error
-      def exit_code = Hive::ExitCodes::CONFIG
+    Diagnosis = Data.define(
+      :status, :path, :application_id, :schema_version, :sqlite_version, :integrity, :error
+    ) do
+      def ok? = status == :ok
+      def to_h = { status: status, path: path, application_id: application_id,
+                   schema_version: schema_version, sqlite_version: sqlite_version, integrity: integrity,
+                   error: error && { code: error.code, message: error.message, action: error.action } }
     end
 
     class << self
@@ -96,7 +92,5 @@ end
 
 require "hive/runtime_control_plane/process_guard"
 require "hive/runtime_control_plane/codec"
-require "hive/runtime_control_plane/identity"
-require "hive/runtime_control_plane/diagnostics"
 require "hive/runtime_control_plane/database"
 require "hive/runtime_control_plane/operational_repository"

@@ -1,11 +1,5 @@
 require "test_helper"
-require "hive/attempts/repository"
-require "hive/commands/runtime"
 require "hive/runtime_control_plane/cutover"
-require "hive/runtime_control_plane/legacy_import"
-require "hive/runtime_control_plane/maintenance"
-require "hive/task_journal"
-require "hive/task_projection/store"
 
 class RuntimeControlPlaneCutoverTest < Minitest::Test
   include HiveTestHelper
@@ -27,39 +21,24 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     end
   end
 
-  def test_fresh_bootstrap_requires_confirmation_and_activates_verified_database
+  def test_fresh_bootstrap_requires_confirmation_and_creates_only_current_authorities
     with_home do |state, data, projects|
       cutover = build_cutover(state, data, projects)
       error = assert_raises(Hive::RuntimeControlPlane::Cutover::ConfirmationRequired) do
         cutover.bootstrap(confirm: false)
       end
       assert_equal :confirmation_required, error.code
-      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
 
       result = cutover.bootstrap(confirm: true)
 
       assert_equal "active", result.phase
-      assert Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path(state)
-      ).diagnostics.ok?
+      assert_path_exists result.database_path
+      assert_path_exists Hive::Paths.runtime_payload_root(state)
       assert_equal %i[stopped active], cutover.services.events
-    end
-  end
-
-  def test_failure_after_sealing_keeps_fences_and_resumes_forward
-    with_home do |state, data, projects|
-      legacy = File.join(state, "task-counter.yml")
-      File.binwrite(legacy, "---\ngeneration: 4\n")
-      cutover = build_cutover(state, data, projects, fault: lambda { |point|
-        raise "injected" if point == :candidate_validated
-      })
-
-      assert_raises(RuntimeError) { cutover.run(confirm: true) }
-
-      assert File.directory?(legacy)
-      assert_path_exists File.join(state, ".runtime-cutover", "current", "sealed", "state", "task-counter.yml")
-      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
-      assert_equal "active", build_cutover(state, data, projects).resume.phase
+      Hive::RuntimeControlPlane::Cutover::TARGETS.each do |target|
+        home = target.home == :state ? state : data
+        refute_path_exists File.join(home, target.relative_path)
+      end
     end
   end
 
@@ -74,458 +53,89 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       assert_equal "stop after preflight", error.message
       assert_empty cutover.services.events
       assert_empty Dir.glob(File.join(File.dirname(state), "**", ".hive-cutover-probe-*"))
-      assert_path_exists File.join(state, ".runtime-cutover", "current")
-      refute_path_exists File.join(state, ".runtime-cutover", "current", "sealed")
+      refute_path_exists File.join(state, ".runtime-cutover", "current", "preparing.json")
     end
   end
 
-  def test_post_intent_failure_resumes_forward_without_reading_mutable_legacy_source
+  def test_failure_after_fencing_resumes_forward_from_sealed_evidence
     with_home do |state, data, projects|
-      legacy = File.join(state, "operational")
-      FileUtils.mkdir_p(legacy)
-      attempts = 0
+      counter = File.join(state, "task-counter.yml")
+      File.binwrite(counter, "---\ngeneration: 99\n")
       cutover = build_cutover(state, data, projects, fault: lambda { |point|
-        next unless point == :activation_intent
-
-        attempts += 1
-        raise "power loss" if attempts == 1
+        raise "injected" if point == :sources_sealed
       })
 
       assert_raises(RuntimeError) { cutover.run(confirm: true) }
-      assert File.file?(legacy), "retired directory must remain fenced after intent"
-      File.binwrite(legacy, "tampered tombstone")
 
-      result = cutover.resume
-
-      assert_equal "active", result.phase
-      assert Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path(state)
-      ).diagnostics.ok?
-      assert_equal 1, attempts
+      assert File.directory?(counter)
+      ready = File.join(state, ".runtime-cutover", "current", "ready.json")
+      assert_path_exists ready
+      refute_path_exists File.join(state, ".runtime-cutover", "current", "sealed")
+      assert_equal "active", build_cutover(state, data, projects).resume.phase
     end
   end
 
-  def test_intended_resume_rejects_a_tampered_closed_candidate
-    with_home do |state, data, projects|
-      crashing = build_cutover(state, data, projects, fault: lambda { |point|
-        raise SimulatedCrash if point == :activation_intent
-      })
-      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      candidate = File.join(state, ".runtime-cutover", "current", "candidate.sqlite3")
-      File.open(candidate, "ab") { |file| file << "tampered" }
-
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        build_cutover(state, data, projects).resume
-      end
-
-      assert_equal :candidate_invalid, error.code
-      refute_path_exists File.join(state, ".runtime-cutover", "current", "active.json")
-    end
-  end
-
-  def test_unsafe_intended_manifest_never_downgrades_to_pre_intent_rollback
-    with_home do |state, data, projects|
-      crashing = build_cutover(state, data, projects, fault: lambda { |point|
-        raise SimulatedCrash if point == :activation_intent
-      })
-      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      current = File.join(state, ".runtime-cutover", "current")
-      intended = File.join(current, "intended.json")
-      File.unlink(intended)
-      File.symlink("missing-intended.json", intended)
-
-      error = assert_raises(Hive::RuntimeControlPlane::CutoverManifest::IntegrityError) do
-        build_cutover(state, data, projects).resume
-      end
-
-      assert_equal :manifest_unsafe, error.code
-      assert_path_exists current
-      assert_path_exists File.join(current, "candidate.sqlite3")
-    end
-  end
-
-  def test_each_candidate_install_boundary_resumes_from_the_retained_bundle
-    %i[candidate_payloads_installed candidate_database_installed candidate_identity_published].each do |boundary|
-      with_home do |state, data, projects|
-        crashing = build_cutover(state, data, projects, fault: lambda { |point|
-          raise SimulatedCrash if point == boundary
-        })
-        assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-        candidate = File.join(state, ".runtime-cutover", "current", "candidate.sqlite3")
-        assert_path_exists candidate
-
-        result = build_cutover(state, data, projects).resume
-
-        assert_equal "active", result.phase, boundary
-        assert Hive::RuntimeControlPlane::Database.new(path: result.database_path).diagnostics.ok?
-        assert_path_exists candidate
-      end
-    end
-  end
-
-  def test_intended_resume_replaces_corrupt_live_database_and_payloads_from_candidate
-    with_home do |state, data, projects|
-      crashing = build_cutover(state, data, projects, fault: lambda { |point|
-        raise SimulatedCrash if point == :candidate_database_installed
-      })
-      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      live = Hive::Paths.runtime_control_plane_path(state)
-      File.binwrite(live, "corrupt")
-      payloads = Hive::Paths.runtime_payload_root(state)
-      File.binwrite(File.join(payloads, "unexpected"), "corrupt")
-
-      result = build_cutover(state, data, projects).resume
-
-      assert_equal "active", result.phase
-      assert Hive::RuntimeControlPlane::Database.new(path: live).diagnostics.ok?
-      refute_path_exists File.join(payloads, "unexpected")
-    end
-  end
-
-  def test_missing_project_requires_an_explicit_recorded_exclusion
-    with_home(create_project: false) do |state, data, projects|
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
-        build_cutover(state, data, projects).run(confirm: true)
-      end
-      assert_equal :project_missing, error.code
-      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
-
-      result = build_cutover(state, data, projects).run(
-        confirm: true, exclusions: [ "alpha" ]
-      )
-      assert_equal [ "alpha" ], result.exclusions.map { |entry| entry.fetch("name") }
-    end
-  end
-
-  def test_terminal_attempt_receipt_and_payload_are_preserved_once
-    with_home do |state, data, projects|
-      record = terminal_attempt(File.join(state, "record-builder"))
-      attempt_root = File.join(state, "attempts", "v4")
-      FileUtils.mkdir_p(File.join(attempt_root, "records"))
-      FileUtils.mkdir_p(File.join(attempt_root, "proof"))
-      FileUtils.mkdir_p(File.join(attempt_root, "logs"))
-      File.binwrite(File.join(attempt_root, "records", "attempt-1.json"), JSON.generate(record.to_h))
-      receipt_digest = Digest::SHA256.hexdigest(
-        Hive::RuntimeControlPlane::Codec.dump_json(record.receipt)
-      )
-      File.binwrite(
-        File.join(attempt_root, "proof", "attempt-1.json"),
-        JSON.generate("attempt_id" => "attempt-1", "receipt_digest" => receipt_digest)
-      )
-      File.binwrite(File.join(attempt_root, "logs", "attempt-1.frames"), "terminal log\n")
-      usage = Sequel.sqlite(File.join(data, "usage.db"))
-      usage.create_table(:token_usage) do
-        String :id, primary_key: true
-        String :agent, null: false
-        String :started_at, null: false
-        String :task_id
-        String :attempt_id
-      end
-      usage[:token_usage].insert(
-        id: "usage-1", agent: "codex", started_at: "2026-08-29T12:00:00.000000Z",
-        task_id: "7", attempt_id: "attempt-1"
-      )
-      usage.disconnect
-
-      result = build_cutover(state, data, projects).run(confirm: true)
-      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
-      attempt = database.read { |db| db[:attempts].where(attempt_id: "attempt-1").first }
-      payload = database.read { |db| db[:payload_references].first }
-
-      assert_equal "terminal", attempt.fetch(:state)
-      assert_equal receipt_digest, attempt.fetch(:terminal_receipt_digest)
-      assert_equal 1, database.read { |db| db[:attempts].where(attempt_id: "attempt-1").count }
-      assert_equal 0, database.read { |db| db[:terminal_pending_publications].count }
-      assert_equal "attempt-1", database.read { |db| db[:token_usage].get(:attempt_id) }
-      assert_equal "terminal log\n", File.binread(
-        File.join(Hive::Paths.runtime_payload_root(state), payload.fetch(:relative_path))
-      )
-    ensure
-      usage&.disconnect
-      database&.disconnect
-    end
-  end
-
-  def test_dispatch_sequence_and_pending_result_survive_cutover
-    with_home do |state, data, projects|
-      requests = File.join(state, "dispatch_requests")
-      results = File.join(state, "dispatch_results")
-      FileUtils.mkdir_p([ requests, results ])
-      File.binwrite(File.join(requests, "request-1.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 5,
-        "request_id" => "request-1", "project" => "alpha", "slug" => "first-task",
-        "argv" => %w[run first-task], "requestor" => "bot",
-        "created_at" => "2026-08-29T12:00:00.000000Z"
-      ))
-      File.binwrite(File.join(requests, "request-1.sequence"), JSON.generate(
-        "request_id" => "request-1", "remaining_argvs" => [ %w[status alpha] ]
-      ))
-      File.binwrite(File.join(results, "result-1.json"), JSON.generate(
-        "schema" => "hive-dispatch-result", "schema_version" => 2,
-        "result_id" => "result-1", "request_id" => "request-1", "project" => "alpha",
-        "slug" => "first-task", "chat_id" => "chat-1", "exit_code" => 0,
-        "command" => "run", "created_at" => "2026-08-29T12:00:01.000000Z"
-      ))
-
-      result = build_cutover(state, data, projects).run(confirm: true)
-      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
-      request = database.read { |db| db[:dispatch_requests].where(request_id: "request-1").first }
-      outbox = database.read { |db| db[:dispatch_outbox].where(delivery_id: "result-1").first }
-
-      assert_equal [ %w[status alpha] ], JSON.parse(request.fetch(:payload_json)).fetch("remaining_argvs")
-      assert_equal "completed", request.fetch(:state)
-      assert_equal "pending", outbox.fetch(:state)
-      assert_equal "legacy-result:result-1", outbox.fetch(:idempotency_key)
-    ensure
-      database&.disconnect
-    end
-  end
-
-  def test_unsupported_nonempty_legacy_domain_fails_without_activation
-    with_home do |state, data, projects|
-      runtime = File.join(projects.first.fetch("hive_state_path"), "daemon")
-      FileUtils.mkdir_p(runtime)
-      source = File.join(runtime, "pr-merge-reconciliation.json")
-      File.binwrite(source, JSON.generate("project" => "alpha"))
-
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        build_cutover(state, data, projects).run(confirm: true)
-      end
-
-      assert_equal :unsupported_legacy_state, error.code
-      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
-      assert File.directory?(source)
-      assert_path_exists File.join(
-        state, ".runtime-cutover", "current", "sealed",
-        "project-#{PROJECT_ID}", ".hive-state", "daemon", "pr-merge-reconciliation.json"
-      )
-    end
-  end
-
-  def test_real_pr_reconciliation_and_provider_journal_survive_cutover
-    with_home do |state, data, projects|
-      project = projects.first
-      daemon = File.join(project.fetch("hive_state_path"), "daemon")
-      FileUtils.mkdir_p(daemon)
-      key = "a" * 64
-      timestamp = "2026-08-29T12:00:00.000000Z"
-      candidate = {
-        "key" => key,
-        "task" => { "project" => "alpha", "slug" => "first-task", "id" => 7,
-                    "workflow" => "coding", "folder" => "stages/1-inbox/first-task" },
-        "observation" => { "stage" => "5-open-pr", "marker" => "complete",
-                           "marker_generation" => "b" * 64,
-                           "task_generation" => "c" * 64, "state_file_mtime" => timestamp,
-                           "held" => false, "hold_reason" => nil },
-        "pull_request" => { "url" => "https://github.com/acme/alpha/pull/42",
-                            "host" => "github.com", "repository" => "acme/alpha",
-                            "number" => 42, "observed_head" => "d" * 40 },
-        "remote" => { "state" => "unknown", "merge_oid" => nil,
-                      "merged_at" => nil, "observed_at" => nil },
-        "architecture" => { "status" => "pending", "request_id" => nil,
-                            "receipt" => nil, "last_error" => nil },
-        "archive" => { "status" => "pending", "receipt_digest" => nil,
-                       "archived_at" => nil, "last_error" => nil },
-        "retry" => { "failures" => 0, "not_before" => nil }, "updated_at" => timestamp
-      }
-      File.binwrite(File.join(daemon, "pr-merge-reconciliation.json"), JSON.generate(
-        "schema" => "hive-pr-merge-reconciliation", "schema_version" => 1,
-        "registration" => REGISTRATION_ID, "project_path" => project.fetch("path"),
-        "hive_state_path" => project.fetch("hive_state_path"), "host" => "github.com",
-        "repository" => "acme/alpha", "default_branch" => "main", "cursor" => key,
-        "backlog" => { "watermark" => timestamp, "scanned_at" => timestamp,
-                       "complete" => true, "outcomes" => {} },
-        "updated_at" => timestamp, "candidates" => { key => candidate }
-      ))
-      provider_root = File.join(
-        state, "provider-health", "v1", "scopes", "provider-account",
-        "ad9163f4d87c3214735bcd893bbe1891fa7b9db4f44a14d3c6490b9bdd33aa2a"
-      )
-      FileUtils.mkdir_p(provider_root)
-      File.binwrite(File.join(provider_root, "journal.jsonl"), provider_snapshot_event)
-
-      result = build_cutover(state, data, projects).run(confirm: true)
-      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
-
-      assert_equal key, database.read { |db| db[:pr_merge_reconciliations].get(:reconciliation_id) }
-      assert_equal key, database.read { |db| db[:pr_merge_project_state].get(:cursor) }
-      assert_equal "closed", database.read { |db| db[:provider_circuits].get(:automatic_state) }
-      assert_equal "event-1", database.read { |db| db[:provider_audit].get(:event_id) }
-    ensure
-      database&.disconnect
-    end
-  end
-
-  def test_retry_restarts_forward_after_a_crash_before_the_first_manifest
-    with_home do |state, data, projects|
-      crashing = build_cutover(state, data, projects, fault: lambda { |point|
-        raise SimulatedCrash if point == :run_prepared
-      })
-      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      assert_path_exists File.join(state, ".runtime-cutover", "current")
-
-      resumed = build_cutover(state, data, projects).run(confirm: true)
-
-      assert_equal "active", resumed.phase
-      assert_path_exists Hive::Paths.runtime_control_plane_path(state)
-    end
-  end
-
-  def test_resume_completes_an_absent_source_fence_after_a_mid_fence_crash
+  def test_resume_completes_fences_after_a_mid_fence_crash
     with_home do |state, data, projects|
       crashing = build_cutover(state, data, projects, fault: lambda { |point|
         raise SimulatedCrash if point == :fence_installed
       })
       assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      tombstone = File.join(state, "dispatch_requests")
-      assert File.file?(tombstone)
+
+      result = build_cutover(state, data, projects).run(confirm: true)
+
+      assert_equal "active", result.phase
+      assert Hive::RuntimeControlPlane::Database.new(path: result.database_path).diagnostics.ok?
+    end
+  end
+
+  def test_intended_resume_uses_installed_all_in_database
+    with_home do |state, data, projects|
+      crashing = build_cutover(state, data, projects, fault: lambda { |point|
+        raise SimulatedCrash if point == :activation_intent
+      })
+      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
+      live = Hive::Paths.runtime_control_plane_path(state)
+      assert_path_exists live
 
       result = build_cutover(state, data, projects).resume
 
       assert_equal "active", result.phase
-      assert File.file?(tombstone)
-      assert_path_exists Hive::Paths.runtime_control_plane_path(state)
+      assert_path_exists live
     end
   end
 
-  def test_sealed_source_mutation_fails_closed_without_restoration
+  def test_intended_resume_rejects_a_tampered_live_database_without_restore
     with_home do |state, data, projects|
-      live = File.join(state, "task-counter.yml")
-      File.binwrite(live, "---\ngeneration: 4\n")
-      cutover = build_cutover(state, data, projects, fault: lambda { |point|
-        File.binwrite(
-          File.join(state, ".runtime-cutover", "current", "sealed", "state", "task-counter.yml"),
-          "---\ngeneration: 999\n"
-        ) if point == :sources_sealed
-      })
-
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        cutover.run(confirm: true)
-      end
-
-      assert_equal :sealed_source_corrupt, error.code
-      assert File.directory?(live)
-      assert_equal "---\ngeneration: 999\n", File.binread(
-        File.join(state, ".runtime-cutover", "current", "sealed", "state", "task-counter.yml")
-      )
-      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
-    end
-  end
-
-  def test_sealed_inventory_rejects_traversal_wrong_mode_and_wrong_type
-    with_home do |state, data, projects|
-      source = File.join(state, "task-counter.yml")
-      File.binwrite(source, "---\ngeneration: 4\n")
-      cutover = build_cutover(state, data, projects)
-      cutover.run(confirm: true)
-      sealed = File.join(state, ".runtime-cutover", "current", "sealed")
-      manifest_path = File.join(sealed, "manifest.json")
-      original = JSON.parse(File.binread(manifest_path))
-      entry = original.fetch("legacy_paths").find { |item| item["relative_path"] == "task-counter.yml" }
-
-      entry["relative_path"] = "../outside"
-      File.binwrite(manifest_path, JSON.generate(original))
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        cutover.send(:validate_sealed_set!, sealed)
-      end
-      assert_equal :sealed_source_corrupt, error.code
-
-      File.binwrite(manifest_path, JSON.generate(original.tap { entry["relative_path"] = "task-counter.yml" }))
-      copy = File.join(sealed, "state", "task-counter.yml")
-      File.chmod(0o777, copy)
-      assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        cutover.send(:validate_sealed_set!, sealed)
-      end
-      File.chmod(entry.fetch("mode"), copy)
-      File.unlink(copy)
-      FileUtils.mkdir_p(copy)
-      assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        cutover.send(:validate_sealed_set!, sealed)
-      end
-    end
-  end
-
-  def test_corrupt_fence_journal_preserves_recovery_evidence_and_mixed_state
-    with_home do |state, data, projects|
-      source = File.join(state, "task-counter.yml")
-      File.binwrite(source, "---\ngeneration: 4\n")
       crashing = build_cutover(state, data, projects, fault: lambda { |point|
-        raise SimulatedCrash if point == :sources_sealed
+        raise SimulatedCrash if point == :activation_intent
       })
       assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      current = File.join(state, ".runtime-cutover", "current")
-      File.binwrite(File.join(current, "fences.json"), "{")
+      live = Hive::Paths.runtime_control_plane_path(state)
+      File.binwrite(live, "tampered")
 
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+      error = assert_raises(Hive::RuntimeControlPlane::Error) do
         build_cutover(state, data, projects).resume
       end
 
-      assert_equal :recovery_metadata_corrupt, error.code
-      assert_path_exists current
-      assert_path_exists File.join(current, "sealed", "state", "task-counter.yml")
-      assert File.directory?(source)
+      assert_equal :database_corrupt, error.code
+      refute_path_exists File.join(state, ".runtime-cutover", "current", "active.json")
     end
   end
 
-  def test_unsafe_fence_journal_preserves_recovery_evidence_and_mixed_state
-    with_home do |state, data, projects|
-      source = File.join(state, "task-counter.yml")
-      File.binwrite(source, "---\ngeneration: 4\n")
-      crashing = build_cutover(state, data, projects, fault: lambda { |point|
-        raise SimulatedCrash if point == :sources_sealed
-      })
-      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
-      current = File.join(state, ".runtime-cutover", "current")
-      journal = File.join(current, "fences.json")
-      File.unlink(journal)
-      File.symlink("missing-fences.json", journal)
-
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
-        build_cutover(state, data, projects).resume
-      end
-
-      assert_equal :recovery_metadata_corrupt, error.code
-      assert_path_exists current
-      assert_path_exists File.join(current, "sealed", "state", "task-counter.yml")
-      assert File.directory?(source)
-    end
-  end
-
-  def test_missing_task_identity_fails_without_mutating_task_authority
-    with_home do |state, data, projects|
-      metadata = File.join(
-        projects.first.fetch("hive_state_path"), "stages", "1-inbox", "first-task", "meta.yml"
-      )
-      File.binwrite(metadata, "---\nworkflow: coding\n")
-      original = File.binread(metadata)
-
-      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
-        build_cutover(state, data, projects).run(confirm: true)
-      end
-
-      assert_equal :task_identity_missing, error.code
-      assert_equal original, File.binread(metadata)
-      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
-    end
-  end
-
-  def test_active_phase_is_published_only_after_service_activation_and_retries
+  def test_service_activation_failure_retries_without_publishing_active
     with_home do |state, data, projects|
       services = FlakyServices.new([])
       cutover = build_cutover(state, data, projects, services: services)
-
       assert_raises(RuntimeError) { cutover.bootstrap(confirm: true) }
       refute_path_exists File.join(state, ".runtime-cutover", "current", "active.json")
-      assert_path_exists File.join(state, ".runtime-cutover", "current", "intended.json")
 
-      result = cutover.resume
-
-      assert_equal "active", result.phase
+      assert_equal "active", cutover.resume.phase
       assert_equal 2, services.events.count(:active)
     end
   end
 
-  def test_existing_active_cutover_is_idempotent_without_lifecycle_side_effects
+  def test_active_cutover_is_idempotent
     with_home do |state, data, projects|
       cutover = build_cutover(state, data, projects)
       original = cutover.bootstrap(confirm: true)
@@ -538,96 +148,226 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     end
   end
 
-  def test_live_attempt_refuses_cutover_with_owner_before_activation
-    with_home do |state, data, projects|
-      record = launching_attempt(File.join(state, "record-builder"))
-      records = File.join(state, "attempts", "v4", "records")
-      FileUtils.mkdir_p(records)
-      File.binwrite(File.join(records, "attempt-1.json"), JSON.generate(record.to_h))
+  def test_missing_project_requires_an_explicit_recorded_exclusion
+    with_home(create_project: false) do |state, data, projects|
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :project_missing, error.code
 
-      error = assert_raises(Hive::RuntimeControlPlane::LegacyImport::QuiescenceError) do
+      result = build_cutover(state, data, projects).run(confirm: true, exclusions: [ "alpha" ])
+      assert_equal [ "alpha" ], result.exclusions.map { |entry| entry.fetch("name") }
+    end
+  end
+
+  def test_missing_task_identity_fails_without_mutating_task_files
+    with_home do |state, data, projects|
+      metadata = task_path(projects, "meta.yml")
+      File.binwrite(metadata, "---\nworkflow: coding\n")
+      before = tree_digest(projects.first.fetch("hive_state_path"))
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
         build_cutover(state, data, projects).run(confirm: true)
       end
 
-      assert_equal :live_attempt, error.code
-      assert_equal "attempt-1", error.details.fetch(:attempt_id)
+      assert_equal :task_identity_missing, error.code
+      assert_equal before, tree_digest(projects.first.fetch("hive_state_path"))
       refute_path_exists Hive::Paths.runtime_control_plane_path(state)
     end
   end
 
-  def test_live_wal_and_shm_are_backed_up_and_usage_imports_from_a_consistent_snapshot
+  def test_active_legacy_attempt_refuses_cutover_before_any_fence
     with_home do |state, data, projects|
-      source = File.join(state, "usage-source.sqlite3")
-      legacy = Sequel.sqlite(source)
-      legacy.run("PRAGMA journal_mode=WAL")
-      legacy.run("PRAGMA wal_autocheckpoint=0")
-      legacy.create_table(:token_usage) do
-        String :id, primary_key: true
-        String :agent, null: false
-        String :started_at, null: false
+      records = File.join(state, "attempts", "v4", "records")
+      FileUtils.mkdir_p(records)
+      File.binwrite(File.join(records, "attempt-1.json"), JSON.generate(
+        "attempt_id" => "attempt-1", "state" => "running"
+      ))
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
       end
-      legacy[:token_usage].insert(
-        id: "usage-1", agent: "codex", started_at: "2026-08-29T12:00:00.000000Z"
-      )
-      %w[ usage-source.sqlite3 usage-source.sqlite3-wal usage-source.sqlite3-shm ].each do |name|
-        suffix = name.delete_prefix("usage-source.sqlite3")
-        FileUtils.cp(File.join(state, name), File.join(data, "usage.db#{suffix}"))
-      end
-      legacy.disconnect
+
+      assert_equal :live_runtime_owner, error.code
+      assert_equal "attempt-1", error.details.fetch(:attempt_id)
+      assert File.file?(File.join(records, "attempt-1.json"))
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_disposable_pending_dispatch_request_is_reset_after_services_stop
+    with_home do |state, data, projects|
+      requests = File.join(state, "dispatch_requests")
+      FileUtils.mkdir_p(requests)
+      File.binwrite(File.join(requests, "request-1.json"), JSON.generate(
+        "request_id" => "request-1", "project" => "alpha"
+      ))
 
       result = build_cutover(state, data, projects).run(confirm: true)
-      sealed = JSON.parse(File.binread(
-        File.join(state, ".runtime-cutover", "current", "sealed", "manifest.json")
-      ))
-      paths = sealed.fetch("legacy_paths").map { |entry| entry.fetch("relative_path") }
       database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
 
-      assert_includes paths, "usage.db-wal"
-      assert_includes paths, "usage.db-shm"
-      assert_equal "codex", database.read { |db| db[:token_usage].where(id: "usage-1").get(:agent) }
+      assert_equal 0, database.read { |db| db[:dispatch_requests].count }
+      assert File.file?(requests), "legacy directory must be replaced by a fence"
     ensure
-      legacy&.disconnect
       database&.disconnect
     end
   end
 
-  def test_cutover_fences_every_retired_project_writer_path_without_changing_task_authority
+  def test_held_legacy_writer_lock_refuses_cutover
     with_home do |state, data, projects|
-      before = Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+      lock_path = File.join(state, ".task-counter.lock")
+      File.binwrite(lock_path, "")
+      File.open(lock_path, "r+") do |lock|
+        assert lock.flock(File::LOCK_EX | File::LOCK_NB)
+        error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
 
-      build_cutover(state, data, projects).run(confirm: true)
-
-      task = File.join(projects.first.fetch("hive_state_path"), "stages", "1-inbox", "first-task")
-      paths = [
-        File.join(projects.first.fetch("hive_state_path"), "daemon", "pr-merge-reconciliation.json"),
-        *Hive::RuntimeControlPlane::Cutover::TASK_RUNTIME_FILES.map { |name| File.join(task, name) }
-      ]
-      assert paths.all? { |path| File.directory?(path) }
-      assert_equal before, Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+        assert_equal :live_runtime_owner, error.code
+      end
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
     end
   end
 
-  def test_current_task_journal_and_projection_remain_writable_after_cutover
+  def test_quiescent_disposable_runtime_is_not_imported
     with_home do |state, data, projects|
-      build_cutover(state, data, projects).run(confirm: true)
-      task = File.join(projects.first.fetch("hive_state_path"), "stages", "1-inbox", "first-task")
-      before = Hive::RuntimeControlPlane::Cutover.task_authority(projects)
-      writer = Hive::TaskJournal::Writer.new(task_folder: task)
-      writer.append(
-        event_type: "legacy_baseline", task: { "id" => "7", "slug" => "first-task" },
-        workflow: "coding", stage: "1-inbox", attempt_id: "legacy", task_generation: 0,
-        reason: "marker_import", evidence: [], provenance: { "source" => "cutover-test" }
-      )
-      journal = File.join(task, "task-journal.jsonl")
-      projection = Hive::TaskProjection.project(
-        records: Hive::TaskProjection.read_journal(journal), cursor: File.size(journal),
-        journal_hash: Digest::SHA256.file(journal).hexdigest
-      )
-      Hive::TaskProjection::Store.new(task_folder: task, attempt_store: nil).publish(projection)
+      write_quiescent_legacy_runtime(state, data, projects)
 
-      assert File.file?(journal)
-      assert File.file?(File.join(task, "task-projection.json"))
-      refute_equal before, Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+      result = build_cutover(state, data, projects).run(confirm: true)
+      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
+
+      %i[
+        attempts dispatch_requests dispatch_outbox provider_circuits provider_audit
+        routing_policies patrol_allowances pr_merge_reconciliations daemon_runtime
+      ].each { |table| assert_equal 0, database.read { |db| db[table].count }, table }
+      assert_equal 0, database.read { |db| db[:task_counters].count }
+      assert_equal [ "7" ], database.read { |db| db[:task_subjects].select_map(:task_id) }
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_usage_history_is_imported_exactly_once_with_availability_semantics
+    with_home do |state, data, projects|
+      write_usage(File.join(data, "usage.db"), input: 4, input_available: 0,
+                  cache_read: 9, cache_read_available: 1, cost: 0.25, cost_available: 1)
+      crashing = build_cutover(state, data, projects, fault: lambda { |point|
+        raise SimulatedCrash if point == :database_built
+      })
+      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
+
+      result = build_cutover(state, data, projects).run(confirm: true)
+      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
+      row = database.read { |db| db[:token_usage].where(id: "usage-1").first }
+
+      assert_equal 1, database.read { |db| db[:token_usage].count }
+      assert_equal "attempt-history-1", row.fetch(:attempt_id)
+      assert_equal "7", row.fetch(:task_id)
+      assert_equal 4, row.fetch(:input)
+      assert_equal 0, row.fetch(:input_available)
+      assert_equal 9, row.fetch(:cache_read)
+      assert_equal 1, row.fetch(:cache_read_available)
+      assert_in_delta 0.25, row.fetch(:cost)
+      assert_equal 1, row.fetch(:cost_available)
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_wal_usage_is_snapshotted_consistently
+    with_home do |state, data, projects|
+      source = File.join(state, "usage-source.sqlite3")
+      usage = write_usage(source, keep_open: true)
+      usage.run("PRAGMA journal_mode=WAL")
+      usage.run("PRAGMA wal_autocheckpoint=0")
+      usage[:token_usage].where(id: "usage-1").update(agent: "pi")
+      %w[ usage-source.sqlite3 usage-source.sqlite3-wal usage-source.sqlite3-shm ].each do |name|
+        suffix = name.delete_prefix("usage-source.sqlite3")
+        FileUtils.cp(File.join(state, name), File.join(data, "usage.db#{suffix}"))
+      end
+
+      result = build_cutover(state, data, projects).run(confirm: true)
+      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
+
+      assert_equal "pi", database.read { |db| db[:token_usage].get(:agent) }
+    ensure
+      usage&.disconnect
+      database&.disconnect
+    end
+  end
+
+  def test_malformed_usage_schema_refuses_cutover
+    with_home do |state, data, projects|
+      usage = Sequel.sqlite(File.join(data, "usage.db"))
+      usage.create_table(:token_usage) { String :id, primary_key: true }
+      usage.disconnect
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+
+      assert_equal :usage_snapshot_invalid, error.code
+      assert File.file?(File.join(data, "usage.db"))
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_corrupt_usage_database_refuses_cutover
+    with_home do |state, data, projects|
+      File.binwrite(File.join(data, "usage.db"), "not sqlite")
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+
+      assert_equal :usage_snapshot_invalid, error.code
+      assert_equal "not sqlite", File.binread(File.join(data, "usage.db"))
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_task_projection_artifacts_and_referenced_payloads_remain_untouched
+    with_home do |state, data, projects|
+      File.binwrite(task_path(projects, "task-journal.jsonl"), "{\"event\":\"existing\"}\n")
+      File.binwrite(task_path(projects, "task-projection.json"), "{\"state\":\"existing\"}\n")
+      artifacts = task_path(projects, "artifacts")
+      FileUtils.mkdir_p(artifacts)
+      File.binwrite(File.join(artifacts, "review.md"), "evidence\n")
+      payloads = File.join(state, "attempts", "v4", "logs")
+      FileUtils.mkdir_p(payloads)
+      File.binwrite(File.join(payloads, "attempt-1.frames"), "retained log\n")
+      retained = [
+        task_path(projects, "meta.yml"), task_path(projects, "idea.md"),
+        task_path(projects, "task-journal.jsonl"), task_path(projects, "task-projection.json"),
+        File.join(artifacts, "review.md")
+      ]
+      task_before = retained.to_h { |path| [ path, File.binread(path) ] }
+      payload_before = tree_digest(payloads)
+
+      build_cutover(state, data, projects).run(confirm: true)
+
+      assert_equal task_before, retained.to_h { |path| [ path, File.binread(path) ] }
+      assert_equal payload_before, tree_digest(payloads)
+    end
+  end
+
+  def test_project_runtime_fences_follow_the_registered_custom_state_root
+    with_home do |state, data, projects|
+      project = projects.fetch(0)
+      default_state = project.fetch("hive_state_path")
+      custom_state = File.join(project.fetch("path"), ".custom-state")
+      FileUtils.mv(default_state, custom_state)
+      project["hive_state_path"] = custom_state
+      legacy = File.join(custom_state, "daemon", "pr-merge-reconciliation.json")
+      FileUtils.mkdir_p(File.dirname(legacy))
+      File.binwrite(legacy, "{}\n")
+
+      build_cutover(state, data, projects).run(confirm: true)
+
+      assert File.directory?(legacy), "retired file must be replaced by a directory fence"
+      assert_equal Hive::RuntimeControlPlane::Cutover::FENCE_BYTES,
+                   File.binread(File.join(legacy, "RETIRED"))
+      refute_path_exists File.join(default_state, "daemon", "pr-merge-reconciliation.json")
     end
   end
 
@@ -657,60 +397,66 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     File.binwrite(File.join(task, "idea.md"), "# First task\n")
   end
 
+  def task_path(projects, name)
+    File.join(projects.first.fetch("hive_state_path"), "stages", "1-inbox", "first-task", name)
+  end
+
   def build_cutover(state, data, projects, fault: nil, services: FakeServices.new([]))
     Hive::RuntimeControlPlane::Cutover.new(
       state_home: state, data_home: data, projects: projects,
-      source_release: "0.7.2", target_release: "next",
-      services: services, fault: fault
+      source_release: "0.7.2", target_release: "next", services: services, fault: fault
     )
   end
 
-  def provider_snapshot_event
-    <<~JSON
-      {"schema":"hive-provider-health-event","schema_version":1,"event_id":"event-1","sequence":1,"scope":{"kind":"provider_account","provider_account_id":"codex","model":null},"journal_epoch":0,"kind":"snapshot","occurred_at":"2026-08-29T12:00:00.000000Z","idempotency_key":"16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112","expected_generation":2,"previous_generation":2,"resulting_generation":2,"payload":{"state":{"automatic_state":"closed","eligible_at":null,"evidence":null,"last_event_id":null,"manual_block":null,"probe":null}}}
-    JSON
+  def write_usage(path, keep_open: false, **values)
+    usage = Sequel.sqlite(path)
+    usage.create_table(:token_usage) do
+      String :id, primary_key: true
+      String :task_id
+      String :attempt_id
+      String :agent, null: false
+      String :session_id
+      String :started_at, null: false
+      Integer :input, default: 0
+      Integer :output, default: 0
+      Integer :cached, default: 0
+      Integer :cache_read
+      Float :cost
+      Integer :input_available, default: 1
+      Integer :output_available, default: 1
+      Integer :cached_available, default: 1
+      Integer :cache_read_available, default: 0
+      Integer :cost_available, default: 0
+    end
+    usage[:token_usage].insert({
+      id: "usage-1", task_id: "7", attempt_id: "attempt-history-1", agent: "codex",
+      session_id: "session-1", started_at: "2026-08-29T12:00:00.000000Z"
+    }.merge(values))
+    usage.disconnect unless keep_open
+    usage
   end
 
-  def terminal_attempt(root)
-    repository = Hive::Attempts::Repository.new(root: root, migrate: true)
-    now = Time.utc(2026, 8, 29, 12)
-    launching = build_launching(repository, now)
-    claimed = repository.claim(
-      launching,
-      owner: { "pid" => Process.pid, "start_fingerprint" => "start", "session_id" => Process.getsid(0),
-               "process_group_id" => Process.getpgrp },
-      claim_capability: "c" * 64, first_heartbeat_timeout_sec: 30, now: now + 1
-    )
-    running = repository.first_heartbeat(claimed, stale_sec: 30, now: now + 2)
-    repository.terminalize(
-      running, outcome: "succeeded", exit_status: 0,
-      final_checkpoint: { "revision" => "b" * 40, "progress_token" => "progress-1" },
-      output_references: [],
-      log_reference: { "path" => "open/attempt-1.frames", "size" => 0,
-                       "sha256" => Digest::SHA256.hexdigest("") },
-      now: now + 3
-    )
-  ensure
-    repository&.database&.disconnect
-  end
-
-  def launching_attempt(root)
-    repository = Hive::Attempts::Repository.new(root: root, migrate: true)
-    build_launching(repository, Time.utc(2026, 8, 29, 12))
-  ensure
-    repository&.database&.disconnect
-  end
-
-  def build_launching(repository, now)
-    repository.create_launching(
-      attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
-      task_id: "7", project: "alpha", task_slug: "first-task", intended_stage: "4-execute",
-      task_generation: "generation-1", ownership_generation: "owner-1", task_input_epoch: 1,
-      progress_token: "progress-1", provider: "codex", worker_argv: %w[hive run first-task],
-      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
-      starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 30, now: now
-    )
+  def write_quiescent_legacy_runtime(state, data, projects)
+    records = File.join(state, "attempts", "v4", "records")
+    FileUtils.mkdir_p(records)
+    File.binwrite(File.join(records, "attempt-1.json"), JSON.generate(
+      "attempt_id" => "attempt-1", "state" => "terminal"
+    ))
+    requests = File.join(state, "dispatch_requests")
+    results = File.join(state, "dispatch_results")
+    FileUtils.mkdir_p([ requests, results, File.join(state, "operational") ])
+    File.binwrite(File.join(requests, "request-1.json"), JSON.generate("request_id" => "request-1"))
+    File.binwrite(File.join(results, "result-1.json"), JSON.generate("request_id" => "request-1"))
+    File.binwrite(File.join(state, "operational", "snapshot.json"), "{}")
+    File.binwrite(File.join(state, "task-counter.yml"), "---\ngeneration: 99\n")
+    allowance = File.join(data, "usage.db.patrol-discovery-allowances")
+    FileUtils.mkdir_p(allowance)
+    File.binwrite(File.join(allowance, "allowance.json"), "{}")
+    daemon = File.join(projects.first.fetch("hive_state_path"), "daemon")
+    FileUtils.mkdir_p(daemon)
+    File.binwrite(File.join(daemon, "pr-merge-reconciliation.json"), JSON.generate(
+      "candidates" => {}, "backlog" => { "complete" => true }
+    ))
   end
 
   def tree_digest(root)

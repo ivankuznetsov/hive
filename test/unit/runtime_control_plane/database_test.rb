@@ -15,24 +15,32 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       database = Hive::RuntimeControlPlane::Database.new(path: path)
 
       refute_path_exists path
-      refute database.migration_current?
       assert_equal :missing, database.diagnostics.status
       refute_path_exists path, "validation-only calls must not create SQLite state"
 
       database.migrate!
 
       assert_path_exists path
-      assert database.migration_current?
-      assert_equal Hive::RuntimeControlPlane::SCHEMA_VERSION, database.schema_version
-      assert_equal Hive::RuntimeControlPlane::APPLICATION_ID, database.application_id
-      assert_equal :ok, database.diagnostics.status
+      diagnosis = database.diagnostics
+      assert_equal :ok, diagnosis.status
+      assert_equal Hive::RuntimeControlPlane::SCHEMA_VERSION, diagnosis.schema_version
+      assert_equal Hive::RuntimeControlPlane::APPLICATION_ID, diagnosis.application_id
       assert_equal 1, database.read { |connection| connection[:installations].count }
     end
   end
 
   def test_live_connections_use_the_required_sqlite_settings
     with_database do |database|
-      settings = database.settings
+      settings = database.read do |connection|
+        pragma = ->(name) { connection.fetch("PRAGMA #{name}").first.values.first }
+        {
+          journal_mode: pragma.call("journal_mode").to_s.downcase,
+          foreign_keys: pragma.call("foreign_keys"),
+          synchronous: pragma.call("synchronous"),
+          trusted_schema: pragma.call("trusted_schema"),
+          busy_timeout_ms: pragma.call("busy_timeout")
+        }
+      end
 
       assert_equal "wal", settings.fetch(:journal_mode)
       assert_equal 1, settings.fetch(:foreign_keys)

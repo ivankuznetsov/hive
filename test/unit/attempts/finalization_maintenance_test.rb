@@ -164,10 +164,9 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       first = subject.run_if_due(now: NOW + 60)
       assert first.fetch(:ran)
       refute subject.run_if_due(now: NOW + 61).fetch(:ran)
-      snapshot = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+      snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
       assert_equal "healthy", snapshot.fetch("status")
-      assert_equal first.slice(:promoted, :deleted, :cold_examined),
-                   snapshot.dig("maintenance", "last_result").transform_keys(&:to_sym)
+      assert_nil snapshot.dig("maintenance", "last_result")
     end
   end
 

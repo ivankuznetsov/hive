@@ -93,7 +93,6 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::ProcessIdentity
       Hive::Attempts::Reconciler
       Hive::Attempts::Repository
-      Hive::Attempts::StorageHealth
       Hive::Attempts::Supervisor
     ]
     assert_equal expected_internal_collaborators,
@@ -102,19 +101,15 @@ class ComponentBoundariesTest < Minitest::Test
                  attempts.fetch("forbidden_constructions").sort
     assert_equal(
       {
-        "Hive::Attempts::AdmissionView" => [ "lib/hive/recovery/migration.rb" ],
         "Hive::Attempts::FinalizationMaintenance" => [
-          "lib/hive/commands/daemon.rb",
-          "lib/hive/recovery/migration.rb"
+          "lib/hive/commands/daemon.rb"
         ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeTransition" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::ProcessIdentity" => [
-          "lib/hive/commands/daemon.rb",
-          "lib/hive/recovery/migration.rb"
+          "lib/hive/commands/daemon.rb"
         ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],
         "Hive::Attempts::Repository" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/circuits.rb",
@@ -127,7 +122,6 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/modules/inspector.rb",
           "lib/hive/provider_routing/operational_projection.rb",
           "lib/hive/daemon/recovery_coordinator.rb",
-          "lib/hive/recovery/migration.rb",
           "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"

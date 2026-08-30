@@ -52,7 +52,7 @@ class HivePatrolReviewerTest < Minitest::Test
   end
 
   def with_usage_db(project_root, budget_cfg: cfg)
-    old_path = Hive::UsageDb.path
+    old_database = Hive::UsageDb.database
     with_tmp_dir do |state_home|
       project_name = File.basename(project_root)
       database = prepare_runtime_project(
@@ -66,7 +66,7 @@ class HivePatrolReviewerTest < Minitest::Test
       )
       yield budget
     ensure
-      Hive::UsageDb.path = old_path
+      Hive::UsageDb.database = old_database
       database&.disconnect
     end
   end
@@ -81,7 +81,7 @@ class HivePatrolReviewerTest < Minitest::Test
   def usage_rows
     require "sqlite3"
 
-    db = SQLite3::Database.new(Hive::UsageDb.path)
+    db = SQLite3::Database.new(Hive::UsageDb.database.path)
     db.results_as_hash = true
     db.execute("SELECT agent, model, project_slug, task_slug, stage, input, output, cached FROM token_usage")
   ensure

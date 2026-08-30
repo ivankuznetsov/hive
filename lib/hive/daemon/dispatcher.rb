@@ -849,9 +849,7 @@ module Hive
             request = dispatch_repository.fetch(
               entry.request_id, state_home: dispatch_request_state_home
             )
-            meta = dispatch_repository.metadata(
-              entry.request_id, state_home: dispatch_request_state_home
-            )
+            meta = request&.to_h
             terminal_recovery = request&.recovery.is_a?(Hash)
             if terminal_recovery
               @recovery_coordinator.mark_dispatched(

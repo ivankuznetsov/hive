@@ -2195,23 +2195,29 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # `:markerless_stalled` and NOT re-spawn — proving the
   # handle_row → :markerless_stalled wiring end-to-end.
   def test_generic_ready_to_run_unchanged_mtime_is_healed_without_respawning
-    rows = [ row(slug: "g1", stage: "2-gather", workflow: "research",
-                 action: "ready_to_run", command: "hive run g1",
-                 marker: "none", mtime: T0 - 600) ]
-    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
-    # Baseline equal to the row's mtime ⇒ no progress since the last dispatch.
-    ctrl.observe_state_file_mtime(project: "p1", slug: "g1", mtime: T0 - 600)
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "2-gather", "g1")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "idea.md")
+      File.write(state_file, "unchanged\n")
+      prepare_test_task_lease_repository(folder)
+      rows = [ row(slug: "g1", stage: "2-gather", workflow: "research",
+                   action: "ready_to_run", command: "hive run g1", marker: "none",
+                   mtime: T0 - 600, folder: folder, state_file: state_file) ]
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+      ctrl.observe_state_file_mtime(project: "p1", slug: "g1", mtime: T0 - 600)
 
-    dispatcher.tick(now: T0)
+      dispatcher.tick(now: T0)
 
-    assert_empty sup.spawned, "an unchanged markerless generic run must not re-dispatch"
-    stalled = logger.events.find { |(n, _)| n == :markerless_stalled }
-    refute_nil stalled, "the stall must be surfaced explicitly, not as a silent skip"
-    assert_equal "agent_exited_without_marker", stalled[1][:reason]
-    marker = Hive::Markers.current(rows.first.state_file)
-    assert_equal :error, marker.name
-    assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
-    refute events_include?(logger, :dispatched)
+      assert_empty sup.spawned, "an unchanged markerless generic run must not re-dispatch"
+      stalled = logger.events.find { |(n, _)| n == :markerless_stalled }
+      refute_nil stalled, "the stall must be surfaced explicitly, not as a silent skip"
+      assert_equal "agent_exited_without_marker", stalled[1][:reason]
+      marker = Hive::Markers.current(state_file)
+      assert_equal :error, marker.name
+      assert_equal "agent_exited_without_terminal_marker", marker.attrs["reason"]
+      refute events_include?(logger, :dispatched)
+    end
   end
 
   def test_generic_ready_to_run_does_not_treat_same_process_newer_baseline_as_replacement
@@ -4439,11 +4445,11 @@ end
 def test_shutdown_during_attempt_reconciliation_stops_loss_healing_admission
   capacity = Hive::Attempts::CapacitySnapshot.new(
     global_count: 0, per_project: {}, per_task: {}, daily_counts: {},
-    reserved_attempt_ids: [], invalid_count: 0
+    reserved_attempt_ids: []
   )
   snapshot = Hive::Attempts::ReconciliationSnapshot.new(
     capacity: capacity, attempts: [], lost_attempts: [],
-    newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+    newly_lost_attempts: [], terminal_attempts: []
   )
   dispatcher_ref = nil
   reconciler = Object.new
@@ -5562,7 +5568,7 @@ end
     end.new({}, 0, {})
     snapshot = Hive::Attempts::ReconciliationSnapshot.new(
       capacity: capacity, attempts: [], lost_attempts: [],
-      newly_lost_attempts: [], terminal_attempts: [], invalid_records: [],
+      newly_lost_attempts: [], terminal_attempts: [],
       admission_view: admission_view
     )
     reconciler = Object.new
@@ -5615,12 +5621,11 @@ end
       per_project: { "p1" => 1 },
       per_task: { [ "p1", "demo-task" ] => 1 },
       daily_counts: {},
-      reserved_attempt_ids: [ "attempt-1" ],
-      invalid_count: 0
+      reserved_attempt_ids: [ "attempt-1" ]
     )
     snapshot = Hive::Attempts::ReconciliationSnapshot.new(
       capacity: capacity, attempts: [], lost_attempts: [],
-      newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+      newly_lost_attempts: [], terminal_attempts: []
     )
     reconciler = Object.new
     reconciler.define_singleton_method(:reconcile) { |now:| snapshot }
@@ -5799,7 +5804,7 @@ end
         :@attempt_snapshot,
         Hive::Attempts::ReconciliationSnapshot.new(
           capacity: nil, attempts: [], lost_attempts: [],
-          newly_lost_attempts: [], terminal_attempts: [ terminal ], invalid_records: []
+          newly_lost_attempts: [], terminal_attempts: [ terminal ]
         )
       )
       dispatcher.send(:reconcile_attempt_deliveries, now: T0)
@@ -5809,7 +5814,7 @@ end
         :@attempt_snapshot,
         Hive::Attempts::ReconciliationSnapshot.new(
           capacity: nil, attempts: [], lost_attempts: [ lost ],
-          newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+          newly_lost_attempts: [], terminal_attempts: []
         )
       )
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
@@ -5855,7 +5860,7 @@ end
         :@attempt_snapshot,
         Hive::Attempts::ReconciliationSnapshot.new(
           capacity: nil, attempts: [], lost_attempts: [],
-          newly_lost_attempts: [], terminal_attempts: [ terminal ], invalid_records: []
+          newly_lost_attempts: [], terminal_attempts: [ terminal ]
         )
       )
 

@@ -10,59 +10,40 @@ module Hive
       def dump_json(value)
         JSON.generate(normalize(value))
       rescue JSON::GeneratorError, EncodingError, ArgumentError => error
-        raise CodecError.new(
-          "runtime control-plane JSON is invalid: #{error.message}",
-          code: :invalid_json
-        )
+        invalid!(:json, error.message)
       end
 
       def load_json(value)
         source = String(value)
         parsed = JSON.parse(source)
         canonical = dump_json(parsed)
-        unless canonical == source
-          raise CodecError.new(
-            "runtime control-plane JSON is not canonical",
-            code: :noncanonical_json
-          )
-        end
+        invalid!(:json, "is not canonical", canonical: true) unless canonical == source
         parsed
       rescue JSON::ParserError, TypeError => error
-        raise CodecError.new(
-          "runtime control-plane JSON is invalid: #{error.message}",
-          code: :invalid_json
-        )
+        invalid!(:json, error.message)
       end
 
       def dump_time(value)
         unless value.respond_to?(:utc)
-          raise CodecError.new("runtime timestamp must be time-like", code: :invalid_timestamp)
+          invalid!(:timestamp, "must be time-like")
         end
 
         value.utc.iso8601(6)
       rescue ArgumentError => error
-        raise CodecError.new(
-          "runtime timestamp is invalid: #{error.message}", code: :invalid_timestamp
-        )
+        invalid!(:timestamp, error.message)
       end
 
       def load_time(value)
         source = String(value)
         parsed = Time.iso8601(source)
         canonical = dump_time(parsed)
-        unless source == canonical
-          raise CodecError.new(
-            "runtime timestamp must be canonical UTC with microseconds",
-            code: :noncanonical_timestamp
-          )
-        end
+        invalid!(:timestamp, "must be canonical UTC with microseconds", canonical: true) unless
+          source == canonical
         parsed.utc
       rescue ArgumentError, TypeError => error
         raise error if error.is_a?(CodecError)
 
-        raise CodecError.new(
-          "runtime timestamp is invalid: #{error.message}", code: :invalid_timestamp
-        )
+        invalid!(:timestamp, error.message)
       end
 
       def normalize(value)
@@ -99,6 +80,12 @@ module Hive
         string.unicode_normalize(:nfc)
       rescue EncodingError
         raise ArgumentError, "canonical JSON requires valid UTF-8"
+      end
+
+      def invalid!(kind, detail, canonical: false)
+        label = kind == :json ? "runtime control-plane JSON" : "runtime timestamp"
+        message = canonical ? "#{label} #{detail}" : "#{label} is invalid: #{detail}"
+        raise CodecError.new(message, code: :"#{canonical ? 'noncanonical' : 'invalid'}_#{kind}")
       end
     end
   end

@@ -222,8 +222,8 @@ module Hive
           end
           raise diagnosis.error unless diagnosis.status == :missing
 
-          require "hive/recovery/migration"
-          result = Hive::Recovery::Migration.bootstrap(
+          require "hive/runtime_control_plane/cutover"
+          result = Hive::RuntimeControlPlane::Cutover.bootstrap(
             confirm: true, projects: Hive::Config.registered_projects
           )
           [ true, { "phase" => result.phase, "database" => result.database_path } ]

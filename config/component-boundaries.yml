@@ -16,7 +16,6 @@ components:
         - Hive::RuntimeControlPlane::Database
         - Hive::RuntimeControlPlane::Diagnosis
         - Hive::RuntimeControlPlane::Identity::Project
-        - Hive::RuntimeControlPlane::Identity::TaskSubject
         - Hive::RuntimeControlPlane::OperationalRepository
         - Hive::RuntimeControlPlane::ProcessGuard
       errors:
@@ -30,8 +29,6 @@ components:
       - lib/hive/runtime_control_plane.rb
       - lib/hive/runtime_control_plane/codec.rb
       - lib/hive/runtime_control_plane/database.rb
-      - lib/hive/runtime_control_plane/diagnostics.rb
-      - lib/hive/runtime_control_plane/identity.rb
       - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
       - lib/hive/runtime_control_plane/operational_repository.rb
       - lib/hive/runtime_control_plane/process_guard.rb
@@ -118,15 +115,13 @@ components:
       - lib/hive/provider_health/evidence.rb
       - lib/hive/provider_health/event.rb
       - lib/hive/provider_health/repository.rb
-      - schemas/hive-provider-health.v1.json
-      - schemas/hive-provider-health-event.v1.json
     state_contracts:
       - "Provider-account and exact-model circuits are constrained runtime-control-plane rows composed only at read time"
       - "Evidence, probe, and operator mutations use generation CAS in short immediate transactions"
       - "Probe ownership binds directly to durable attempt identity and ownership fences; no timer, lease, retry, successor, or dispatch owner exists here"
       - "Malformed or corrupt SQL rows fail closed without a filesystem fallback"
     schema_contracts:
-      - "Projection and event schemas are recursively closed against raw prompts, messages, stdout, stderr, tool output, tokens, and credentials"
+      - "Circuit and event value objects are recursively closed against raw prompts, messages, stdout, stderr, tool output, tokens, and credentials before database writes"
       - "Evidence fingerprints derive only from canonical allowlisted class, scope, provenance, route ID, and bounded reset hint"
       - "Audit rows are bounded and idempotent per circuit without retaining raw provider output"
     lock_contracts:
@@ -160,7 +155,7 @@ components:
       - test/unit/provider_health/audit_test.rb
       - test/unit/provider_health/circuit_test.rb
       - test/unit/provider_health/evidence_test.rb
-      - test/unit/provider_health/schema_test.rb
+      - test/unit/provider_health/value_objects_test.rb
       - test/unit/provider_health/repository_test.rb
       - test/unit/provider_health/attempt_observer_test.rb
     migration_exceptions: []
@@ -199,14 +194,13 @@ components:
       - lib/hive/provider_routing/request.rb
       - lib/hive/provider_routing/route.rb
       - lib/hive/provider_routing/router.rb
-      - schemas/hive-routing-policy.v1.json
     state_contracts:
       - "An absent routing.pool returns a structural legacy policy before global account, health, or capacity state is consulted"
       - "An explicit policy freezes ordered account, adapter, launch-binding, model, effort, capability, requirement, and pin identity"
       - "Provider-account identity is separate from the existing adapter/profile provider identity"
       - "Explicit policies are first-writer-wins runtime-control-plane rows keyed by ownership generation and durable subject; legacy mode performs no repository I/O"
     schema_contracts:
-      - "The v1 canonical digest covers every normalized selection input and no credential material"
+      - "The canonical digest covers every normalized selection input and no credential material"
       - "Account, route, requirements, pin, policy, request, and decision values are deeply immutable"
     lock_contracts:
       - "Policy construction and static compatibility filtering are pure and acquire no lock"
@@ -516,7 +510,6 @@ components:
       - Hive::Attempts::LostOutcomeProcessor
       - Hive::Attempts::FinalizationMaintenance
       - Hive::Attempts::LogArchive
-      - Hive::Attempts::StorageHealth
       - Hive::Attempts::AdmissionView
     forbidden_constructions:
       - Hive::Attempts::Entrypoint
@@ -533,7 +526,6 @@ components:
       - Hive::Attempts::LostOutcomeProcessor
       - Hive::Attempts::FinalizationMaintenance
       - Hive::Attempts::LogArchive
-      - Hive::Attempts::StorageHealth
       - Hive::Attempts::AdmissionView
     authorized_internal_constructions:
       - constant: Hive::Attempts::Repository
@@ -549,7 +541,6 @@ components:
           - lib/hive/modules/inspector.rb
           - lib/hive/provider_routing/operational_projection.rb
           - lib/hive/daemon/recovery_coordinator.rb
-          - lib/hive/recovery/migration.rb
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_projection/store.rb
@@ -565,8 +556,7 @@ components:
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-          - lib/hive/recovery/migration.rb
-        reason: "The daemon composition root and v3-to-v4 migration share the process-identity verifier needed to classify persisted live workers safely."
+        reason: "The daemon composition root uses the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb
@@ -578,16 +568,7 @@ components:
       - constant: Hive::Attempts::FinalizationMaintenance
         files:
           - lib/hive/commands/daemon.rb
-          - lib/hive/recovery/migration.rb
-        reason: "The runtime factory and daemon composition root own finalization wiring; callers receive the composed service."
-      - constant: Hive::Attempts::StorageHealth
-        files:
-          - lib/hive/recovery/migration.rb
-        reason: "Store and the one-off migration publish the bounded storage-health cell."
-      - constant: Hive::Attempts::AdmissionView
-        files:
-          - lib/hive/recovery/migration.rb
-        reason: "Admission, reconciliation, and one-off migration are the only builders of the bounded decision view."
+        reason: "The daemon composition root owns finalization wiring; callers receive the composed service."
     hive_consumers:
       - lib/hive/commands/run.rb
       - lib/hive/commands/stage_action.rb

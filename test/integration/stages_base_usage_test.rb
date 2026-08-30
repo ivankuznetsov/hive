@@ -11,14 +11,14 @@ class StagesBaseUsageTest < Minitest::Test
 
   def setup
     @old_bin = ENV["HIVE_CLAUDE_BIN"]
-    @old_usage_path = Hive::UsageDb.path
+    @old_usage_database = Hive::UsageDb.database
     ENV["HIVE_CLAUDE_BIN"] = FAKE_BIN
     Hive::AgentProfile.reset_version_cache!
   end
 
   def teardown
     ENV["HIVE_CLAUDE_BIN"] = @old_bin
-    Hive::UsageDb.path = @old_usage_path
+    Hive::UsageDb.database = @old_usage_database
     %w[
       HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
       HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
@@ -64,7 +64,7 @@ class StagesBaseUsageTest < Minitest::Test
   def token_usage_rows
     require "sqlite3"
 
-    db = SQLite3::Database.new(Hive::UsageDb.path)
+    db = SQLite3::Database.new(Hive::UsageDb.database.path)
     db.results_as_hash = true
     db.execute("SELECT * FROM token_usage ORDER BY started_at")
   ensure
@@ -321,7 +321,7 @@ class StagesBaseUsageTest < Minitest::Test
     with_tmp_dir do |root|
       task = make_task(root)
       configure_fake_agent(task)
-      Hive::UsageDb.path = root
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: root)
 
       _out, err = capture_io do
         result = spawn(task)

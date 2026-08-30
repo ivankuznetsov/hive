@@ -76,9 +76,7 @@ class RuntimeControlPlaneMaintenanceTest < Minitest::Test
       assert_equal :service_lifecycle_failed, error.code
 
       File.binwrite(path, JSON.generate(
-        "cutover_id" => "other", "services" => %w[hive-daemon hive-bot hive-web].map do |name|
-          { "name" => name, "running" => false, "enabled" => false }
-        end
+        "cutover_id" => "other", "running" => []
       ))
       error = assert_raises(Hive::RuntimeControlPlane::Error) do
         services.stop!(cutover_id: "cutover-1")

@@ -38,7 +38,8 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
       assert restarted.acknowledge_provider_health(terminal)
       assert_equal 1, health.inspect_scope(model_scope).generation
 
-      restarted.acknowledge(terminal, :journal)
+      assert restarted.acknowledge(terminal, :journal)
+      assert restarted.publish_after_journal(terminal)
       restarted.acknowledge(terminal, :request_delivery)
       assert restarted.promote(terminal)
       assert_nil attempts.fetch_hot(terminal.attempt_id)

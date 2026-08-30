@@ -28,7 +28,7 @@ module Hive
           raise Errno::ENOENT, folder
         end
         subject = subject_for(folder, observe: true)
-        data = base_payload.merge(payload.transform_keys(&:to_s))
+        data = { "started_at" => Codec.dump_time(@clock.call) }.merge(payload.transform_keys(&:to_s))
         data["pid"] = Process.pid
         data["process_start_time"] = @process_start_time.call(Process.pid)
         data["lock_id"] = @nonce.call
@@ -220,34 +220,28 @@ module Hive
       def claim(subject, observed, data, payload_json)
         timestamp = Codec.dump_time(@clock.call)
         expiry = Codec.dump_time(@clock.call + DEFAULT_LEASE_SEC)
+        values = {
+          holder_kind: data["op"] || data["operation"] || "task_run",
+          holder_id: data.fetch("lock_id"), holder_pid: data.fetch("pid"),
+          holder_process_identity: data["process_start_time"], payload_json: payload_json,
+          generation: subject.fetch(:generation),
+          source_fingerprint: subject.fetch(:source_fingerprint),
+          acquired_at: timestamp, expires_at: expiry, released_at: nil
+        }
         claimed = false
         @database.transaction do |db|
           dataset = db[:task_leases].where(task_id: subject.fetch(:task_id))
           if observed
-            matches = dataset.where(
+            claimed = dataset.where(
               lease_version: observed.fetch(:lease_version), holder_id: observed[:holder_id]
-            )
-            claimed = matches.update(
-              holder_kind: data["op"] || data["operation"] || "task_run",
-              holder_id: data.fetch("lock_id"), holder_pid: data.fetch("pid"),
-              holder_process_identity: data["process_start_time"],
-              payload_json: payload_json,
-              generation: subject.fetch(:generation),
+            ).update(
               lease_version: observed.fetch(:lease_version) + 1,
-              source_fingerprint: subject.fetch(:source_fingerprint),
-              acquired_at: timestamp, expires_at: expiry, released_at: nil
+              **values
             ) == 1
           else
             begin
               dataset.insert(
-                task_id: subject.fetch(:task_id),
-                holder_kind: data["op"] || data["operation"] || "task_run",
-                holder_id: data.fetch("lock_id"), holder_pid: data.fetch("pid"),
-                holder_process_identity: data["process_start_time"],
-                payload_json: payload_json,
-                generation: subject.fetch(:generation), lease_version: 1,
-                source_fingerprint: subject.fetch(:source_fingerprint),
-                acquired_at: timestamp, expires_at: expiry
+                task_id: subject.fetch(:task_id), lease_version: 1, **values
               )
               claimed = true
             rescue Sequel::UniqueConstraintViolation
@@ -259,12 +253,7 @@ module Hive
       end
 
       def payload_from(row)
-        payload = row.fetch(:payload_json).to_s
-        raise CodecError.new(
-          "task lease payload exceeds its size bound", code: :json_invalid
-        ) if payload.bytesize > MAX_PAYLOAD_BYTES
-
-        value = Codec.load_json(payload)
+        value = Codec.load_json(bounded_payload(row.fetch(:payload_json).to_s))
         raise CodecError.new(
           "task lease payload is not an object", code: :json_invalid
         ) unless value.is_a?(Hash)
@@ -272,8 +261,9 @@ module Hive
         value
       end
 
-      def dump_payload(value)
-        payload = Codec.dump_json(value)
+      def dump_payload(value) = bounded_payload(Codec.dump_json(value))
+
+      def bounded_payload(payload)
         raise CodecError.new(
           "task lease payload exceeds its size bound", code: :json_invalid
         ) if payload.bytesize > MAX_PAYLOAD_BYTES
@@ -295,10 +285,6 @@ module Hive
           "another hive run is active for #{folder}", holder: holder,
           lock_path: "runtime-control-plane:task:#{row&.fetch(:task_id, "unknown")}"
         )
-      end
-
-      def base_payload
-        { "started_at" => Codec.dump_time(@clock.call) }
       end
     end
   end

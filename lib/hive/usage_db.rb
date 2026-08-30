@@ -1,4 +1,3 @@
-require "date"
 require "securerandom"
 require "time"
 require "hive/billing_evidence"
@@ -13,6 +12,10 @@ module Hive
     BUCKETS = %i[today 7d 30d all].freeze
     BILLING_ROUTES = Hive::BillingEvidence::ROUTES
     BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
+    CORE_METRICS = %i[input output cached].freeze
+    OPTIONAL_METRICS = %i[cache_read cache_write reasoning cost].freeze
+    METRICS = (CORE_METRICS + OPTIONAL_METRICS).freeze
+    INCLUSION_FLAGS = %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].freeze
     EXACT_COLUMNS = %i[
       session_id agent model project_slug task_slug stage started_at ended_at
       input output cached attempt_id task_generation source requested_backend
@@ -25,24 +28,8 @@ module Hive
 
     module_function
 
-    # Kept as a narrow test/diagnostic seam. Production always resolves to the
-    # one state-home control-plane database; there is no HIVE_USAGE_DB_PATH.
-    def path
-      @path || Hive::Paths.runtime_control_plane_path
-    end
-
-    def path=(value)
-      @database&.disconnect if @owns_database
-      @database = nil
-      @owns_database = false
-      @path = value && File.expand_path(value)
-    end
-
     def database=(value)
-      @database&.disconnect if @owns_database && !@database.equal?(value)
       @database = value
-      @owns_database = false
-      @path = value&.path
     end
 
     def record!(agent:, model:, project_slug:, task_slug:, stage:, started_at:, ended_at:,
@@ -130,7 +117,7 @@ module Hive
       session_limit = positive_limit(session_limit, "session_limit")
       legacy_limit = positive_limit(legacy_limit, "legacy_limit")
       return unavailable_exact("deadline_exhausted") if deadline_exhausted?(deadline, monotonic_clock)
-      return unavailable_exact("store_missing") unless File.file?(path)
+      return unavailable_exact("store_missing") unless File.file?(database.path)
 
       database.read do |db|
         raise IOError, "usage read deadline exhausted" if deadline_exhausted?(deadline, monotonic_clock)
@@ -164,36 +151,25 @@ module Hive
     end
 
     def aggregate(scope:, now: Time.now.utc)
-      return zero_aggregate unless File.file?(path)
+      return zero_aggregate unless File.file?(database.path)
 
       database.read do |db|
         result = zero_aggregate
         bucket_starts(now).each do |bucket, since|
           rows = scoped_usage(db[:token_usage], scope || {}, since)
-                 .select_group(:agent)
-                 .select_append {
-                   [ sum(input).as(:input), sum(output).as(:output), sum(cached).as(:cached),
-                    min(input_available).as(:input_available),
-                    min(output_available).as(:output_available),
-                    min(cached_available).as(:cached_available) ]
-                 }.all
+                 .select_group(:agent).select_append(*aggregate_columns).all
           rows.each do |row|
             values = (result[:agents][row[:agent].to_s.to_sym] ||= zero_buckets).fetch(bucket)
             apply_aggregate!(values, row)
           end
           result[:agents].each_value do |buckets|
             values = buckets.fetch(bucket)
-            %i[input output cached].each { |metric| result[:total][bucket][metric] += values[metric] }
+            CORE_METRICS.each { |metric| result[:total][bucket][metric] += values[metric] }
             propagate_unavailable!(result[:total][bucket], values)
           end
 
           patrol = patrol_dataset(scoped_usage(db[:token_usage], scope || {}, since))
-                   .select {
-                     [ sum(input).as(:input), sum(output).as(:output), sum(cached).as(:cached),
-                      count(:id).as(:count), min(input_available).as(:input_available),
-                      min(output_available).as(:output_available),
-                      min(cached_available).as(:cached_available) ]
-                   }.first || {}
+                   .select(*(aggregate_columns + [ Sequel.function(:count, :id).as(:count) ])).first || {}
           apply_aggregate!(result[:patrol][bucket], patrol) if integer(patrol[:count]).positive?
         end
         result
@@ -222,7 +198,7 @@ module Hive
            sum(Sequel.case({ ordinary & unmetered => 1 }, 0)).as(:ordinary_unmetered_spawns),
            sum(Sequel.case({ architecture & unmetered => 1 }, 0)).as(:architecture_unmetered_spawns) ]
         end.first || {}
-        usage = %i[input output cached].to_h { |metric| [ metric, integer(row[metric]) ] }
+        usage = CORE_METRICS.to_h { |metric| [ metric, integer(row[metric]) ] }
         usage.merge(
           available: true, tokens: usage.values_at(:input, :output).sum,
           agent_spawns: integer(row[:agent_spawns]),
@@ -239,67 +215,15 @@ module Hive
       zero_patrol_activity(available: false)
     end
 
-    def patrol_discovery_seed(scope:, date:)
-      day = Date.iso8601(date.to_s)
-      since = Time.utc(day.year, day.month, day.day)
-      before = since + 86_400
-      database.read do |db|
-        dataset = db[:token_usage].where(started_at: since.iso8601...before.iso8601)
-        dataset = dataset.where(project_slug: scope[:project_slug].to_s) unless
-          blank?(scope && scope[:project_slug])
-        eligible = Sequel.expr(source: nil) | Sequel.~(source: "patrol_non_discovery_launch")
-        ordinary_review = Sequel.expr(stage: %w[patrol-review patrol-review-unmetered])
-        architecture_review = Sequel.expr(
-          stage: %w[refactor-patrol-review refactor-patrol-review-unmetered]
-        )
-        ordinary_fix = Sequel.expr(stage: "patrol-fix") |
-          Sequel.like(:stage, "patrol-fix-%")
-        architecture_fix = Sequel.expr(stage: "refactor-patrol-fix") |
-          Sequel.like(:stage, "refactor-patrol-fix-%")
-        ordinary = Sequel.like(:stage, "patrol%") & ~ordinary_review & ~ordinary_fix
-        architecture = Sequel.like(:stage, "refactor-patrol%") &
-          ~architecture_review & ~architecture_fix
-        row = dataset.select do
-          [ sum(Sequel.case({ eligible & ordinary_review => 1 }, 0)).as(:ordinary_count),
-           sum(Sequel.case({ eligible & ordinary => 1 }, 0)).as(:ordinary_ambiguous),
-           sum(Sequel.case({ eligible & architecture_review => 1 }, 0)).as(:architecture_count),
-           sum(Sequel.case({ eligible & architecture => 1 }, 0)).as(:architecture_ambiguous) ]
-        end.first || {}
-        {
-          available: true,
-          ordinary: {
-            count: integer(row[:ordinary_count]),
-            ambiguous: integer(row[:ordinary_ambiguous])
-          },
-          architecture: {
-            count: integer(row[:architecture_count]),
-            ambiguous: integer(row[:architecture_ambiguous])
-          }
-        }
-      end
-    rescue StandardError => error
-      warn "[hive] patrol discovery seed failed: #{error.class}: #{error.message}"
-      {
-        available: false,
-        ordinary: { count: 0, ambiguous: 0 },
-        architecture: { count: 0, ambiguous: 0 }
-      }
-    end
-
     def database
-      return Hive::RuntimeControlPlane.database unless @path
-
-      @database ||= begin
-        @owns_database = true
-        Hive::RuntimeControlPlane::Database.new(path: @path).open!
-      end
+      @database || Hive::RuntimeControlPlane.database
     end
 
     def validate_session_identity!(existing, incoming)
       identity = %i[attempt_id task_generation]
       compatible = identity.all? { |key| existing[key] == incoming[key] }
       compatible &&= billing_compatible?(existing[:billing_route], incoming[:billing_route])
-      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |key|
+      INCLUSION_FLAGS.each do |key|
         compatible &&= existing[key].nil? || incoming[key].nil? || existing[key] == incoming[key]
       end
       raise Hive::RuntimeControlPlane::IntegrityError.new(
@@ -319,8 +243,8 @@ module Hive
       end
       merged[:started_at] = [ existing[:started_at], incoming[:started_at] ].compact.min
       merged[:ended_at] ||= existing[:ended_at]
-      %i[input output cached].each { |key| merged[key] = [ existing[key], incoming[key] ].compact.max }
-      %i[cache_read cache_write reasoning cost].each do |key|
+      CORE_METRICS.each { |key| merged[key] = [ existing[key], incoming[key] ].compact.max }
+      OPTIONAL_METRICS.each do |key|
         availability_key = :"#{key}_available"
         use_incoming = incoming[availability_key] > existing[availability_key] ||
           (incoming[availability_key] == 1 && incoming[key].to_f > existing[key].to_f)
@@ -334,7 +258,7 @@ module Hive
         merged[:billing_route] = existing[:billing_route]
         merged[:billing_evidence_source] = existing[:billing_evidence_source]
       end
-      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |key|
+      INCLUSION_FLAGS.each do |key|
         merged[key] = existing[key] unless existing[key].nil?
       end
       merged[:source] ||= existing[:source]
@@ -353,7 +277,7 @@ module Hive
     end
 
     def apply_aggregate!(target, row)
-      %i[input output cached].each do |metric|
+      CORE_METRICS.each do |metric|
         target[metric] = integer(row[metric])
         mark_unavailable!(target, metric, row[:"#{metric}_available"])
       end
@@ -361,18 +285,18 @@ module Hive
 
     def exact_row(row)
       result = row.slice(*EXACT_COLUMNS).transform_keys(&:to_sym)
-      availability = %i[input output cached cache_read cache_write reasoning cost].to_h do |metric|
+      availability = METRICS.to_h do |metric|
         [ metric, result.delete(:"#{metric}_available") ]
       end
       result[:provider_reported_cost] = result[:cost]
       result[:harness] = result[:agent]
       result[:billing_route] ||= "unknown"
       result[:billing_evidence_source] ||= "unavailable"
-      %i[input output cached cache_read cache_write reasoning].each { |key| result[key] = integer(result[key]) }
-      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |key|
+      (METRICS - [ :cost ]).each { |key| result[key] = integer(result[key]) }
+      INCLUSION_FLAGS.each do |key|
         result[key] = nullable_boolean_value(result[key])
       end
-      %i[input output cached cache_read cache_write reasoning cost].each do |metric|
+      METRICS.each do |metric|
         mark_unavailable!(result, metric, availability.fetch(metric))
       end
       result
@@ -400,7 +324,7 @@ module Hive
 
     def sum_usage(rows)
       rows.each_with_object(zero_usage) do |row, total|
-        %i[input output cached].each { |key| total[key] += integer(row[key]) }
+        CORE_METRICS.each { |key| total[key] += integer(row[key]) }
         propagate_unavailable!(total, row)
       end
     end
@@ -434,7 +358,7 @@ module Hive
     end
 
     def propagate_unavailable!(target, source)
-      %i[input output cached].each do |metric|
+      CORE_METRICS.each do |metric|
         target[:"#{metric}_available"] = false if source[:"#{metric}_available"] == false
       end
     end
@@ -444,6 +368,13 @@ module Hive
         available: false, sessions: [], totals: nil, unattributed: [],
         unattributed_count: nil, reason: reason
       }
+    end
+
+    def aggregate_columns
+      CORE_METRICS.flat_map do |metric|
+        [ Sequel.function(:sum, metric).as(metric),
+          Sequel.function(:min, :"#{metric}_available").as(:"#{metric}_available") ]
+      end
     end
 
     def iso8601(value)

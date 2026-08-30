@@ -6,11 +6,11 @@ class TuiTokenStatsTest < Minitest::Test
   include HiveTestHelper
 
   def setup
-    @old_usage_path = Hive::UsageDb.path
+    @old_usage_database = Hive::UsageDb.database
   end
 
   def teardown
-    Hive::UsageDb.path = @old_usage_path
+    Hive::UsageDb.database = @old_usage_database
   end
 
   def row

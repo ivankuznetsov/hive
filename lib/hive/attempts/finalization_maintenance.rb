@@ -1,6 +1,7 @@
 require "hive/attempts/lost_outcome"
 require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/repository"
+require "hive/attempts/storage_status"
 require "json"
 require "psych"
 require "time"
@@ -53,7 +54,9 @@ module Hive
         @task_archived = task_archived
         @logger = logger
         @provider_health_observer_factory = provider_health_observer_factory
-        @storage_health = store.storage_health
+        @maintenance_at = nil
+        @maintenance_error = nil
+        @cold_sweep_cursor = { "after" => nil }
         @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
       end
 
@@ -143,35 +146,19 @@ module Hive
       end
 
       def run_if_due(now: Time.now.utc)
-        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
-
-        promoted = 0
-        @store.scan.records.each do |record|
-          promoted += 1 if finalize(record, now: now)
+        maintain(now) do
+          @store.scan.records.count { |record| finalize(record, now: now) }
         end
-        result = sweep_logs(now: now).merge(ran: true, promoted: promoted)
-        @storage_health.complete_maintenance(now: now, result: result)
-        result
-      rescue StandardError => error
-        @storage_health.fail_maintenance(error: error, now: now)
-        raise
       end
 
       def sweep_if_due(now: Time.now.utc)
-        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
-
-        result = sweep_logs(now: now).merge(ran: true, promoted: 0)
-        @storage_health.complete_maintenance(now: now, result: result)
-        result
-      rescue StandardError => error
-        @storage_health.fail_maintenance(error: error, now: now)
-        raise
+        maintain(now) { 0 }
       end
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
         page = @store.log_archive.cold_attempt_ids_page(
-          cursor: @storage_health.cold_sweep_cursor,
+          cursor: @cold_sweep_cursor,
           limit: COLD_SWEEP_LIMIT
         )
         page.attempt_ids.each do |attempt_id|
@@ -182,11 +169,48 @@ module Hive
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
-        @storage_health.advance_cold_sweep(page.cursor)
+        @cold_sweep_cursor = page.cursor
         { deleted: deleted, cold_examined: page.attempt_ids.size }
       end
 
+      def storage_snapshot(hot_count:, invalid_hot_count:)
+        diagnosis = @store.database.diagnostics
+        database_error = !diagnosis.ok? && {
+          "operation" => "status", "class" => diagnosis.error&.class&.name || "IntegrityError"
+        }
+        error = @maintenance_error || database_error
+        status = StorageStatus.unknown
+        status["status"] = error ? "degraded" : (@maintenance_at ? "healthy" : "unknown")
+        status["hot"] = { "records" => hot_count, "invalid" => invalid_hot_count }
+        status["maintenance"].merge!(
+          "last_started_at" => @maintenance_at,
+          "last_completed_at" => @maintenance_error ? nil : @maintenance_at
+        )
+        status["last_error"] = error
+        status["degraded_reason"] = @maintenance_error ? "maintenance_failed" :
+          (database_error && "database_unhealthy")
+        status
+      rescue RuntimeControlPlane::Error
+        StorageStatus.unknown.merge(
+          "status" => "degraded", "last_error" => { "operation" => "status", "class" => "IntegrityError" },
+          "degraded_reason" => "database_unhealthy"
+        )
+      end
+
       private
+
+      def maintain(now)
+        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
+        result = sweep_logs(now: now).merge(ran: true, promoted: yield)
+        @maintenance_error = nil
+        result
+      rescue StandardError => error
+        @maintenance_error = {
+          "operation" => "maintenance", "class" => error.class.name.to_s.byteslice(0, 120),
+          "observed_at" => Record.iso8601(now)
+        }
+        raise
+      end
 
       def acknowledge_journal(record, now:)
         return false unless @condition_observer&.respond_to?(:observe)
@@ -212,17 +236,17 @@ module Hive
       end
 
       def claim_due(now)
-        @storage_health.claim_maintenance(
-          now: now,
-          interval_sec: MAINTENANCE_INTERVAL_SEC
-        )
+        return false if @maintenance_at && now.utc < Time.iso8601(@maintenance_at) + MAINTENANCE_INTERVAL_SEC
+
+        @maintenance_at = Record.iso8601(now)
+        true
       end
 
       def recovery_pinned?(record)
         hot = @store.fetch_hot(record.attempt_id)
         return false unless hot
 
-        !pending.complete?(record.attempt_id)
+        !@store.publication_complete?(record.attempt_id)
       rescue RepositoryError
         true
       end

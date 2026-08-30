@@ -1,6 +1,8 @@
 require "digest"
+require "fileutils"
 require "json"
 require "time"
+require "tmpdir"
 require "hive/runtime_control_plane"
 
 module Hive
@@ -18,12 +20,17 @@ module Hive
 
       class Invalid < Hive::Error; end
 
+      def self.cleanup(root) = ->(_id) { FileUtils.rm_rf(root) }
+
       def initialize(database: nil, dry_run: false, backoff_base_sec: DEFAULT_BACKOFF_BASE_SEC,
                      backoff_max_sec: DEFAULT_BACKOFF_MAX_SEC)
         @database = database
         @dry_run = dry_run
-        @candidates = Hash.new { |hash, key| hash[key] = {} }
-        @project_state = {}
+        if @dry_run && !@database
+          root = Dir.mktmpdir("hive-pr-merge-dry-run-")
+          @database = RuntimeControlPlane::Database.new(path: File.join(root, "runtime.sqlite3")).migrate!
+          ObjectSpace.define_finalizer(self, self.class.cleanup(root))
+        end
         @backoff_base_sec = positive_number(backoff_base_sec, "backoff base")
         @backoff_max_sec = positive_number(backoff_max_sec, "backoff maximum")
         raise ArgumentError, "PR merge backoff maximum cannot be below its base" if
@@ -42,14 +49,10 @@ module Hive
       end
 
       def candidates(identity)
-        if @dry_run
-          deep_copy(@candidates[memory_key(identity)].values)
-        else
-          database.read do |db|
-            project_id = project_id!(db, identity)
-            db[:pr_merge_reconciliations].where(project_id: project_id)
-              .order(:reconciliation_id).map { |row| decode_candidate(row) }
-          end
+        database.read do |db|
+          project_id = project_id!(db, identity)
+          db[:pr_merge_reconciliations].where(project_id: project_id)
+            .order(:reconciliation_id).map { |row| decode_candidate(row) }
         end
       rescue RuntimeControlPlane::Error, Sequel::Error, KeyError => error
         raise Invalid, "cannot read PR merge reconciliation: #{error.message}"
@@ -58,15 +61,6 @@ module Hive
       def upsert_candidate(identity, candidate, now: Time.now.utc)
         validate_candidate!(candidate)
         prune_before = (now - TERMINAL_RETENTION_SEC).utc.iso8601(6)
-        if @dry_run
-          memory = @candidates[memory_key(identity)]
-          memory.delete_if do |_key, item|
-            terminal?(item) && item.fetch("updated_at") < prune_before
-          end
-          revision = memory.dig(candidate.fetch("key"), "_revision").to_i + 1
-          memory[candidate.fetch("key")] = deep_copy(candidate).merge("_revision" => revision)
-          return candidate
-        end
         database.transaction do |db|
           project = project!(db, identity)
           db[:pr_merge_reconciliations].where(project_id: project.fetch(:project_id))
@@ -88,16 +82,6 @@ module Hive
         validate_candidate!(candidate)
         candidate = deep_copy(candidate)
         candidate["updated_at"] = now.utc.iso8601(6)
-        if @dry_run
-          current = @candidates[memory_key(identity)][candidate.fetch("key")]
-          verify_generation!(current, expected_task_generation)
-          expected_revision = Integer(candidate.fetch("_revision"))
-          raise Hive::ConcurrentRunError, "merge reconciliation candidate changed" unless
-            current.fetch("_revision") == expected_revision
-          candidate["_revision"] = expected_revision + 1
-          @candidates[memory_key(identity)][candidate.fetch("key")] = candidate
-          return candidate
-        end
         database.transaction do |db|
           project = project!(db, identity)
           expected_task_id = task_id_for(db, project, candidate)
@@ -124,21 +108,6 @@ module Hive
       end
 
       def next_candidate(identity, now: Time.now.utc)
-        if @dry_run
-          available = candidates(identity).reject do |candidate|
-            terminal?(candidate) || held_without_poll?(candidate) ||
-              future_retry?(candidate, now)
-          end
-          return nil if available.empty?
-
-          keys = available.map { |candidate| candidate.fetch("key") }.sort
-          cursor = project_state(identity).fetch("cursor", nil)
-          selected_key = keys.rotate(
-            cursor && keys.include?(cursor) ? keys.index(cursor) + 1 : 0
-          ).first
-          return available.find { |candidate| candidate.fetch("key") == selected_key }
-        end
-
         database.read do |db|
           project_id = project_id!(db, identity)
           dataset = eligible_candidates(db, project_id, now)
@@ -192,11 +161,6 @@ module Hive
       end
 
       def project_state(identity)
-        if @dry_run
-          return deep_copy(@project_state.fetch(memory_key(identity), {
-            "cursor" => nil, "backlog" => empty_backlog(Time.at(0).utc)
-          }))
-        end
         database.read do |db|
           project_id = project_id!(db, identity)
           row = db[:pr_merge_project_state].where(project_id: project_id).first
@@ -208,10 +172,6 @@ module Hive
       end
 
       def write_project_state(identity, state, now:)
-        if @dry_run
-          @project_state[memory_key(identity)] = deep_copy(state)
-          return state
-        end
         database.transaction do |db|
           project_id = project_id!(db, identity)
           values = {
@@ -294,6 +254,17 @@ module Hive
       def project!(db, identity)
         project = db[:projects].where(registration_id: identity.fetch("registration")).first ||
           db[:projects].where(state_root_path: identity.fetch("hive_state_path")).first
+        if !project && @dry_run
+          project_id = "dry-#{Digest::SHA256.hexdigest(identity.fetch('registration'))}"
+          timestamp = Time.at(0).utc.iso8601(6)
+          db[:projects].insert_conflict.insert(
+            project_id: project_id, installation_id: db[:installations].get(:installation_id),
+            registration_id: identity.fetch("registration"), name: identity.fetch("registration"),
+            observed_path: identity.fetch("project_path"), state_root_path: identity.fetch("hive_state_path"),
+            active: 1, registered_at: timestamp, last_observed_at: timestamp
+          )
+          project = db[:projects].where(project_id: project_id).first
+        end
         raise Invalid, "registered project identity is unavailable" unless project
         project
       end
@@ -347,21 +318,6 @@ module Hive
         %w[archived superseded].include?(candidate.dig("archive", "status"))
       end
 
-      def held_without_poll?(candidate)
-        return false unless candidate.dig("observation", "held") == true
-        reason = candidate.dig("observation", "hold_reason")
-        return true unless remote_poll_hold_reason?(reason)
-        TERMINAL_REMOTE_STATES.include?(candidate.dig("remote", "state")) &&
-          candidate.dig("archive", "status") == "blocked"
-      end
-
-      def future_retry?(candidate, now)
-        value = candidate.dig("retry", "not_before")
-        value && Time.iso8601(value) > now
-      rescue ArgumentError
-        raise Invalid, "candidate retry timestamp is invalid"
-      end
-
       def empty_backlog(time)
         { "watermark" => time.iso8601(6), "scanned_at" => nil,
           "complete" => false, "outcomes" => {} }
@@ -372,10 +328,6 @@ module Hive
         raise Invalid, "#{label} exceeds #{MAX_EVIDENCE_BYTES} bytes" if
           json.bytesize > MAX_EVIDENCE_BYTES
         json
-      end
-
-      def memory_key(identity)
-        [ identity.fetch("registration"), identity.fetch("repository") ].join("\0")
       end
 
       def deep_copy(value) = Marshal.load(Marshal.dump(value))

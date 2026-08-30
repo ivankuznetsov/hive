@@ -707,7 +707,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def test_scheduled_discovery_exhaustion_does_not_block_post_merge_candidates
-    old_path = Hive::UsageDb.path
+    old_database = Hive::UsageDb.database
     with_project do |dir, entry, store|
       database = prepare_runtime_project(
         state_home: tracked_tmp_dir("hive-test-refactor-patrol-runtime"),
@@ -732,7 +732,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
                    scheduler.candidates(now: T0).map { |item| item.fetch(:job_id) }
     end
   ensure
-    Hive::UsageDb.path = old_path
+    Hive::UsageDb.database = old_database
   end
 
   def test_dry_run_leaves_authoritative_job_bytes_unchanged

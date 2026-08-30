@@ -413,7 +413,7 @@ class PatrolCommandTest < Minitest::Test
   private
 
   def with_patrol_project
-    previous_usage_path = Hive::UsageDb.instance_variable_get(:@path)
+    previous_usage_database = Hive::UsageDb.database
     with_tmp_global_config do |global_home|
       with_tmp_git_repo do |repo|
         FileUtils.mkdir_p(File.join(repo, ".hive-state"))
@@ -441,7 +441,7 @@ class PatrolCommandTest < Minitest::Test
         Hive::UsageDb.database = database
         yield repo
       ensure
-        Hive::UsageDb.path = previous_usage_path
+        Hive::UsageDb.database = previous_usage_database
         Hive::RuntimeControlPlane.disconnect
       end
     end

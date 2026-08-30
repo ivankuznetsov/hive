@@ -11,10 +11,8 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     def routing_decisions(limit:) = @rows.first(limit).freeze
   end
 
-  AttemptStore = Data.define(:scan_result, :decision_query) do
+  AttemptStore = Data.define(:scan_result, :decision_query, :database) do
     def scan = scan_result
-    def live_reservations = {}
-    def daily_counts(date:) = {}
     def routing_decisions(limit:) = decision_query.routing_decisions(limit: limit)
   end
 
@@ -31,8 +29,8 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     ).migrate!
     @health = Hive::ProviderHealth::Repository.new(database: @database, clock: -> { NOW })
     @attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: [].freeze, invalid_records: [].freeze),
-      decision_query: DecisionQuery.new
+      scan_result: Hive::Attempts::Scan.new(records: [].freeze),
+      decision_query: DecisionQuery.new, database: @database
     )
   end
 
@@ -83,7 +81,7 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     failing_attempts.define_singleton_method(:scan) do
       raise Hive::Attempts::RepositoryError, "unavailable"
     end
-    failing_attempts.define_singleton_method(:live_reservations) do
+    failing_attempts.define_singleton_method(:database) do
       raise Hive::Attempts::RepositoryError, "unavailable"
     end
     failing_attempts.define_singleton_method(:routing_decisions) do |limit:|
@@ -119,8 +117,8 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
       FakeRecord.new("terminal", "codex", { "mode" => "legacy" }, false)
     ]
     attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: records, invalid_records: []),
-      decision_query: DecisionQuery.new
+      scan_result: Hive::Attempts::Scan.new(records: records),
+      decision_query: DecisionQuery.new, database: @database
     )
     with_replaced_singleton_method(
       Hive::Attempts::CapacitySnapshot, :build,
@@ -140,8 +138,8 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
       raise Hive::Attempts::RepositoryError, "decision index unavailable" if limit
     end
     attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: [], invalid_records: []),
-      decision_query: index
+      scan_result: Hive::Attempts::Scan.new(records: []),
+      decision_query: index, database: @database
     )
     payload = Hive::ProviderRouting::OperationalProjection.new(
       accounts: { "account-a" => account }, attempt_store: attempts,
@@ -156,8 +154,8 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     matching = decision_entry("account-a/model-a")
     unrelated = decision_entry("account-b/model-b")
     attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: [], invalid_records: []),
-      decision_query: DecisionQuery.new([ matching, unrelated ])
+      scan_result: Hive::Attempts::Scan.new(records: []),
+      decision_query: DecisionQuery.new([ matching, unrelated ]), database: @database
     )
 
     payload = Hive::ProviderRouting::OperationalProjection.new(

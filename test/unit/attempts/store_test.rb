@@ -106,23 +106,19 @@ class AttemptsRepositoryTest < Minitest::Test
       values = results.map(&:value)
       assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::Record) }
       assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::CapacityExceeded) }
-      assert_equal 1, repository.live_reservations.length
+      assert_equal 1, Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW).global_count
     end
   end
 
-  def test_malformed_database_record_is_visible_and_reserves_capacity_fail_closed
+  def test_malformed_database_record_fails_the_authoritative_scan_closed
     with_repository do |repository|
       record = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
       repository.database.transaction do |db|
         db[:attempts].where(attempt_id: record.attempt_id).update(record_json: "{")
       end
 
-      scan = repository.scan
-      assert_empty scan.records
-      assert_equal 1, scan.invalid_records.length
-      snapshot = Hive::Attempts::CapacitySnapshot.build(store: repository, scan: scan, now: NOW)
-      assert_equal 1, snapshot.global_count
-      assert_equal 1, snapshot.invalid_count
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.scan }
+      assert_match(/record digest is invalid/, error.message)
     end
   end
 
@@ -178,7 +174,7 @@ class AttemptsRepositoryTest < Minitest::Test
       assert_raises(Hive::Attempts::CompareAndSwapFailed) do
         repository.mark_lost(launching, reason: "stale_generation", now: NOW + 2)
       end
-      assert_empty repository.live_reservations
+      assert_equal 0, Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW).global_count
     end
   end
 

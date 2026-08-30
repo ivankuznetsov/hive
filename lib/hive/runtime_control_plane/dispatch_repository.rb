@@ -64,9 +64,9 @@ module Hive
       attr_reader :database
 
       def self.open_default(state_home: Hive::Paths.state_home)
-        database = Database.new(path: Hive::Paths.runtime_control_plane_path(state_home))
-        database.open!
-        new(database: database)
+        new(database: RuntimeControlPlane.database(
+          path: Hive::Paths.runtime_control_plane_path(state_home)
+        ).open!)
       end
 
       def self.valid_argv?(argv)
@@ -189,20 +189,6 @@ module Hive
       def fetch(request_id, **)
         row = database.read { |db| db[:dispatch_requests].where(request_id: request_id.to_s).first }
         row && request_from(row)
-      end
-
-      def metadata(request_id, **)
-        request = fetch(request_id)
-        return nil unless request
-        {
-          chat_id: request.chat_id, update_id: request.update_id,
-          project: request.project, slug: request.slug, requestor: request.requestor,
-          task_generation: request.task_generation,
-          predecessor_attempt_id: request.predecessor_attempt_id,
-          task_id: request.task_id, expected_stage: request.expected_stage,
-          expected_marker_name: request.expected_marker_name,
-          expected_marker_id: request.expected_marker_id, recovery: request.recovery
-        }
       end
 
       def claim(request_id, pid:, process_start_time: nil, now: @clock.call,

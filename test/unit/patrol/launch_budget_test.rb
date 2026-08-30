@@ -64,42 +64,15 @@ class PatrolLaunchBudgetTest < Minitest::Test
     assert_equal 4, budget(engine: :ordinary, now: retry_at).remaining_launches
   end
 
-  def test_legacy_seed_is_computed_outside_transaction_and_ambiguous_lane_parks
-    transaction_seen = false
+  def test_missing_lane_starts_empty_without_consulting_usage_history
     usage = usage_store
     usage.define_singleton_method(:patrol_discovery_seed) do |**|
-      transaction_seen = true if Thread.current[:inside_test_transaction]
-      {
-        available: true,
-        ordinary: { count: 1, ambiguous: 1 },
-        architecture: { count: 0, ambiguous: 0 }
-      }
+      raise "runtime allowance must not reconstruct legacy state"
     end
     subject = budget(engine: :ordinary, usage_db: usage)
 
-    assert_equal "legacy_attribution_ambiguous", subject.allowance_snapshot.fetch(:status)
-    refute transaction_seen
-    assert_equal 4, budget(engine: :architecture, usage_db: usage).remaining_launches
-  end
-
-  def test_seed_outage_fails_closed_then_retries_without_a_compatibility_file
-    calls = 0
-    usage = usage_store
-    usage.define_singleton_method(:patrol_discovery_seed) do |**|
-      calls += 1
-      next({ available: false }) if calls == 1
-      {
-        available: true,
-        ordinary: { count: 0, ambiguous: 0 },
-        architecture: { count: 0, ambiguous: 0 }
-      }
-    end
-    subject = budget(engine: :ordinary, usage_db: usage)
-
-    assert_equal "unavailable", subject.allowance_snapshot.fetch(:status)
     assert_equal "available", subject.allowance_snapshot.fetch(:status)
-    assert_equal 2, calls
-    refute Dir.glob(File.join(@root, "**", "*allowance*")).any?
+    assert_equal 4, subject.remaining_launches
   end
 
   def test_project_identity_is_resolved_from_the_registered_observed_path
@@ -132,7 +105,6 @@ class PatrolLaunchBudgetTest < Minitest::Test
         project_id: "project-1", kind: "ordinary", window_key: "2026-08-20",
         used: ids.length, limit_value: ids.length + 1, revision: 0,
         reservation_ids_json: Hive::RuntimeControlPlane::Codec.dump_json(ids),
-        seed_state: "complete", seeded_launches: 0, ambiguous_rows: 0,
         updated_at: timestamp
       )
     end
@@ -223,13 +195,6 @@ class PatrolLaunchBudgetTest < Minitest::Test
 
   def usage_store
     store = Struct.new(:recorded).new([])
-    store.define_singleton_method(:patrol_discovery_seed) do |**|
-      {
-        available: true,
-        ordinary: { count: 0, ambiguous: 0 },
-        architecture: { count: 0, ambiguous: 0 }
-      }
-    end
     store.define_singleton_method(:record!) do |**attributes|
       recorded << attributes
       true

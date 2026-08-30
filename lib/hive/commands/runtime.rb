@@ -1,7 +1,6 @@
 require "json"
 require "hive/config"
 require "hive/paths"
-require "hive/recovery/migration"
 require "hive/runtime_control_plane/cutover"
 
 module Hive
@@ -44,7 +43,7 @@ module Hive
       end
 
       def resume_cutover
-        Hive::Recovery::Migration.resume(state_home: @state_home, projects: @projects)
+        Hive::RuntimeControlPlane::Cutover.resume(state_home: @state_home, projects: @projects)
       end
 
       def wire(result)

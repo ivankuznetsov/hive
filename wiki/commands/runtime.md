@@ -32,28 +32,22 @@ installation.
 
 The durable phases are:
 
-- `preparing`: services are quiesced, the legacy source is sealed, retired
-  writers are fenced, and candidate construction may still be in progress.
-- `ready`: the sealed source and closed candidate have passed fleet validation.
-- `intended`: the irreversible activation epoch exists and activation must
-  converge forward.
-- `active`: database, payloads, installation identity, and current services are
-  active.
+- `ready`: services are quiesced, task authority is fingerprinted, and any
+  legacy token-usage database has a validated immutable snapshot.
+- `intended`: retired writers are fenced and the rebuilt SQLite database is
+  installed; activation must converge forward.
+- `active`: database identity and current services are active.
 
 An incomplete result reports `hive runtime resume` as the action. Hive offers
 no rollback, restore, or downgrade command for this irreversible transition.
 
 ## Resume
 
-`resume` reopens the recorded manifest and continues from its durable phase.
-After sealing, it reads only the immutable sealed source, revalidates its exact
-inventory, task fingerprints, candidate digest/schema/identity, and payload
-closure, then converges forward. Candidate database and payload installation
-are idempotent, and `active` is published only after current services start.
-
-Before sealing, a failed invocation can simply retry: live legacy input has not
-been replaced. Once sealing begins, failure evidence and tombstones remain in
-place so another process cannot silently revive a legacy writer.
+`resume` reopens the recorded manifest and continues from its durable phase. It
+revalidates task fingerprints and the token-usage snapshot, installs the rebuilt
+database idempotently, and publishes `active` only after the services recorded
+as running at cutover start again. Once fencing begins, evidence and tombstones
+remain in place so another process cannot silently revive a legacy writer.
 
 ## Early activation gate
 
@@ -69,9 +63,9 @@ and genuinely fresh setup. It never creates or migrates the database.
   corrupt-manifest refusal.
 - `test/unit/runtime_control_plane/activation_gate_test.rb` covers inactive,
   incomplete, active, and pre-wiki gate ordering.
-- `test/unit/runtime_control_plane/cutover_test.rb` covers strict sealed-source
-  validation and crash-forward convergence across database, payload, intent,
-  and service boundaries.
+- `test/unit/runtime_control_plane/cutover_test.rb` covers validated token-usage
+  import, disposable runtime reset, custom state roots, and crash-forward
+  convergence across fencing, database, intent, and service boundaries.
 - `test/unit/runtime_control_plane/maintenance_test.rb` covers idempotent
   service quiescence and restart intent without launcher mutation.
 

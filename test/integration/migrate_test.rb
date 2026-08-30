@@ -1987,8 +1987,7 @@ class MigrateTest < Minitest::Test
     document = Hive::RuntimeControlPlane::CutoverManifest.build(
       phase: "active", installation_id: identity.fetch(:installation_id),
       lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
-      target_release: Hive::VERSION, roots: { "state" => home },
-      required_absences: [], exclusions: [], task_authority: [], payloads: [],
+      target_release: Hive::VERSION, exclusions: [], task_authority: [],
       evidence: { "activation_epoch" => epoch }
     )
     Hive::RuntimeControlPlane::CutoverManifest.new(

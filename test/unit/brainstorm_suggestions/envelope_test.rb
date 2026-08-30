@@ -7,6 +7,14 @@ require "hive/tui/brainstorm_answers"
 class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
   BINDING = "b" * 64
 
+  def test_render_rejects_an_unbound_candidate
+    error = assert_raises(Hive::BrainstormSuggestions::InvalidState) do
+      Hive::BrainstormSuggestions::Envelope.render(binding: "not-a-digest", text: "Candidate")
+    end
+
+    assert_includes error.message, "SHA-256"
+  end
+
   def test_rendered_envelope_is_advisory_to_shared_parser
     envelope = Hive::BrainstormSuggestions::Envelope.render(
       binding: BINDING, text: "Use the repository adapter."

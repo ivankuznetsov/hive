@@ -41,4 +41,24 @@ class HiveBrainstormSuggestionsBindingTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, one)
     refute_equal one, two
   end
+
+  def test_symbol_manifest_keys_and_other_values_are_canonicalized
+    custom = Object.new
+    custom.define_singleton_method(:to_s) { "custom-value" }
+    manifest = {
+      recipe: "tracked-relevance",
+      recipe_version: 1,
+      entries: [ { path: "lib/example.rb", mode: "100644", digest: "a" * 64,
+                   source: "repository" } ]
+    }
+
+    binding = Hive::BrainstormSuggestions::Binding.input(
+      task_incarnation: "task", task_generation: 1, brainstorm_generation: custom,
+      question_identity: "q1", question_text: "Question?", manifest: manifest,
+      settled_answers: []
+    )
+
+    assert_match(/\A[0-9a-f]{64}\z/, binding)
+    assert_match(/\A[0-9a-f]{64}\z/, Hive::BrainstormSuggestions::Binding.digest(custom))
+  end
 end

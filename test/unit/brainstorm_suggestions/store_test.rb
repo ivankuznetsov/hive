@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/brainstorm_suggestions/store"
 
 class HiveBrainstormSuggestionsStoreTest < Minitest::Test
+  include HiveTestHelper
+
   def record
     {
       "question_id" => "round-1-q1",
@@ -92,6 +94,36 @@ class HiveBrainstormSuggestionsStoreTest < Minitest::Test
                                              "safe_reason" => 42) ]
       File.write(store.path, "#{JSON.pretty_generate(payload)}\n", mode: "w", perm: 0o600)
       assert Hive::BrainstormSuggestions::Store.new(root).read.fetch("corrupt")
+    end
+  end
+
+  def test_question_id_deletion_and_unlink_race_are_idempotent
+    Dir.mktmpdir do |root|
+      store = Hive::BrainstormSuggestions::Store.new(root)
+      store.write("records" => [ record ])
+
+      assert store.delete_question!(question_id: "round-1-q1")
+      refute File.exist?(store.path)
+
+      store.write("records" => [])
+      with_replaced_singleton_method(File, :unlink, ->(*) { raise Errno::ENOENT }) do
+        refute store.delete!
+      end
+    end
+  end
+
+  def test_invalid_provenance_and_missing_task_root_fail_closed
+    Dir.mktmpdir do |root|
+      store = Hive::BrainstormSuggestions::Store.new(root)
+      error = assert_raises(Hive::BrainstormSuggestions::InvalidState) do
+        store.write("records" => [ record.merge("provenance" => []) ])
+      end
+      assert_includes error.message, "provenance"
+
+      missing = Hive::BrainstormSuggestions::Store.new(File.join(root, "missing"))
+      assert_raises(Hive::BrainstormSuggestions::UnsafePath) do
+        missing.write("records" => [])
+      end
     end
   end
 end

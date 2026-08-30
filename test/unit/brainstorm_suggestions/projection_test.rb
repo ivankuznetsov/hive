@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/brainstorm_suggestions/projection"
 
 class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
+  include HiveTestHelper
+
   Question = Data.define(:text, :answer) do
     def answered? = !answer.nil?
   end
@@ -209,6 +211,106 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
 
       assert_equal "unavailable", suggestion.fetch("state")
       assert_nil suggestion.fetch("text")
+    end
+  end
+
+  def test_cache_releases_waiters_when_the_owner_raises
+    cache = Hive::BrainstormSuggestions::Projection::Cache.new(limit: 1)
+
+    assert_raises(IOError) { cache.fetch("identity") { raise IOError, "capture failed" } }
+    assert_equal "recovered", cache.fetch("identity") { "recovered" }
+    assert_equal "other", cache.fetch("other") { "other" }
+  end
+
+  def test_observer_maps_capture_and_shape_errors_to_bounded_codes
+    document = {
+      "task_incarnation" => "task", "task_generation" => 1,
+      "brainstorm_generation" => "b" * 64
+    }
+    records = [ fresh_record(1) ]
+
+    observer = Hive::BrainstormSuggestions::Projection::Observer.new(
+      context_factory: ->(**) {
+        raise Hive::BrainstormSuggestions::ContextBundle::CaptureError.new("capture_timeout")
+      }
+    )
+    captured = observer.call(
+      project_root: "/tmp", task_root: "/tmp", questions: questions,
+      records: records, document: document, deadline: Float::INFINITY
+    )
+    assert_equal "capture_timeout", captured.error_code
+
+    observer = Hive::BrainstormSuggestions::Projection::Observer.new(
+      context_factory: ->(**) { raise ArgumentError, "bad bundle" }
+    )
+    unavailable = observer.call(
+      project_root: "/tmp", task_root: "/tmp", questions: questions,
+      records: records, document: document, deadline: Float::INFINITY
+    )
+    assert_equal "observation_unavailable", unavailable.error_code
+  end
+
+  def test_projection_and_task_generation_errors_hide_all_candidates
+    with_task do |root|
+      write_document(root, [ fresh_record(1) ])
+      projection = build_projection(
+        root,
+        questions: questions.first(1),
+        identity_factory: ->(*) { raise IOError, "identity unavailable" }
+      )
+      projection.define_singleton_method(:document_current?) { |_document| true }
+
+      assert_equal "unavailable", projection.call.dig(1, "state")
+
+      with_replaced_singleton_method(
+        Hive::Attempts::Generation, :current_task_input_epoch,
+        ->(*) { raise Hive::Error, "generation unavailable" }
+      ) do
+        assert_nil projection.send(:current_task_generation)
+      end
+    end
+  end
+
+  def test_main_wiki_identity_is_bounded_and_fails_closed
+    with_task do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      wiki = File.join(root, "shared-wiki")
+      FileUtils.mkdir_p(wiki)
+      File.write(File.join(wiki, "adapter.md"), "adapter evidence\n")
+      config = File.join(root, ".llm-wiki", "config.json")
+      File.write(config, JSON.generate("main_wiki_path" => "shared-wiki"))
+      projection = build_projection(root)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+
+      assert_match(/\A[0-9a-f]{64}\z/, projection.send(:main_wiki_identity, deadline))
+      assert_equal "unavailable", projection.send(:main_wiki_identity, 0)
+
+      File.write(config, "{")
+      assert_equal "unavailable", projection.send(:main_wiki_identity, deadline)
+    end
+  end
+
+  def test_git_identity_timeout_terminates_its_process_group
+    with_task do |root|
+      bin = File.join(root, "bin")
+      FileUtils.mkdir_p(bin)
+      fake_git = File.join(bin, "git")
+      File.write(fake_git, "#!/bin/sh\nsleep 10\n")
+      File.chmod(0o700, fake_git)
+      projection = build_projection(root)
+      previous_path = ENV.fetch("PATH", "")
+      ENV["PATH"] = "#{bin}:#{previous_path}"
+
+      assert_raises(IOError) do
+        projection.send(:run_git, [ "status" ], 0)
+      end
+
+      pid = Process.spawn("/bin/sh", "-c", "sleep 10", pgroup: true)
+      assert_equal pid, projection.send(:terminate_process_group, pid)
+      assert_nil projection.send(:terminate_process_group, nil)
+      assert_nil projection.send(:terminate_process_group, 999_999_999)
+    ensure
+      ENV["PATH"] = previous_path if previous_path
     end
   end
 

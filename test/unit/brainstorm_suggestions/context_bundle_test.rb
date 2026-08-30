@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/brainstorm_suggestions/context_bundle"
 
 class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
+  include HiveTestHelper
+
   def git(root, *args)
     env = {
       "GIT_AUTHOR_NAME" => "Test", "GIT_AUTHOR_EMAIL" => "test@example.com",
@@ -146,6 +148,110 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
           )
         end
         assert_equal "unsafe_tracked_entry", error.code
+      end
+    end
+  end
+
+  def test_invalid_question_and_missing_roots_are_bounded_capture_errors
+    Dir.mktmpdir do |root|
+      missing = File.join(root, "missing")
+      error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+        Hive::BrainstormSuggestions::ContextBundle.new(
+          project_root: root, task_root: root, question_ordinal: "not-an-ordinal"
+        )
+      end
+      assert_equal "question_unavailable", error.code
+
+      error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+        Hive::BrainstormSuggestions::ContextBundle.new(
+          project_root: missing, task_root: root, question_ordinal: 1
+        )
+      end
+      assert_equal "project_unavailable", error.code
+    end
+  end
+
+  def test_validated_main_wiki_is_selected_and_invalid_config_is_ignored
+    with_repository do |root|
+      wiki_root = File.join(root, "shared-wiki")
+      FileUtils.mkdir_p([ File.join(root, ".llm-wiki"), wiki_root ])
+      File.write(File.join(wiki_root, "adapter.md"), "The repository adapter preserves the public API.\n")
+      config = File.join(root, ".llm-wiki", "config.json")
+      File.write(config, JSON.generate("main_wiki_path" => "shared-wiki"))
+
+      with_task(root) do |task|
+        bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        )
+
+        assert_includes bundle.source_classes, "main_wiki"
+        assert_includes bundle.render_context, "public API"
+
+        File.write(config, "{")
+        without_main_wiki = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        )
+        refute_includes without_main_wiki.source_classes, "main_wiki"
+      end
+    end
+  end
+
+  def test_stable_read_helpers_fail_closed_on_races_and_missing_files
+    with_repository do |root|
+      with_task(root) do |task|
+        bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        )
+        external = File.join(root, "external.md")
+        File.write(external, "adapter evidence\n")
+
+        assert_equal "adapter evidence\n",
+                     bundle.send(:stable_external_read, root, "external.md")
+        with_replaced_singleton_method(
+          bundle, :stable_regular_read, ->(*) { raise IOError, "race" }
+        ) do
+          assert_nil bundle.send(:stable_external_read, root, "external.md")
+        end
+        with_replaced_singleton_method(
+          bundle, :stable_regular_read, ->(*) { raise Errno::ENOENT }
+        ) do
+          assert_nil bundle.send(:stable_tracked_read, "lib/adapter.rb")
+        end
+
+        error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+          bundle.send(
+            :stable_read, File.join(root, "gone"), max_bytes: 10,
+            code: "fixture_unavailable"
+          )
+        end
+        assert_equal "fixture_unavailable", error.code
+      end
+    end
+  end
+
+  def test_process_failures_terminate_children_and_return_bounded_codes
+    with_repository do |root|
+      with_task(root) do |task|
+        bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        )
+        bundle.instance_variable_set(
+          :@deadline, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 1
+        )
+        timeout = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+          bundle.send(:run_process, [ "/bin/sh", "-c", "sleep 10" ])
+        end
+        assert_equal "capture_timeout", timeout.code
+
+        bundle.instance_variable_set(
+          :@deadline, Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+        )
+        unavailable = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+          bundle.send(:run_process, [ File.join(root, "missing-command") ])
+        end
+        assert_equal "repository_unavailable", unavailable.code
+        assert_nil bundle.send(:terminate_process_group, nil)
+        assert_nil bundle.send(:terminate_process_group, 999_999_999)
       end
     end
   end

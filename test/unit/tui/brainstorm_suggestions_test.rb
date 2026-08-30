@@ -4,6 +4,8 @@ require "test_helper"
 require "hive/tui/brainstorm_suggestions"
 
 class HiveTuiBrainstormSuggestionsTest < Minitest::Test
+  include HiveTestHelper
+
   def test_projection_is_parser_inert_and_untouched_envelope_preserves_candidate
     with_task do |task, path, store|
       lease = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
@@ -95,6 +97,46 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
       assert_nil record.fetch("text")
       assert_equal before, Hive::BrainstormParser.parse(path).map(&:answer)
     end
+  end
+
+  def test_projection_and_reconciliation_fail_closed_when_state_becomes_unsafe
+    with_task do |task, path, _store|
+      lease = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
+
+      replacement = ->(*) { raise Hive::BrainstormSuggestions::UnsafePath, "unsafe" }
+      with_replaced_singleton_method(
+        Hive::BrainstormSuggestions::Store, :new, replacement
+      ) do
+        empty = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
+        assert_empty empty.regions
+
+        result = Hive::Tui::BrainstormSuggestions.reconcile_editor_exit!(
+          task_root: task, path: path, lease: lease
+        )
+        assert_equal 0, result.adopted
+        assert_equal "unavailable", Hive::Tui::BrainstormSuggestions.restore!(task).fetch("status")
+      end
+    end
+  end
+
+  def test_projection_adds_a_newline_before_an_envelope_when_heading_lacks_one
+    question = "Question?"
+    record = fresh_record(question)
+    projected, regions = Hive::Tui::BrainstormSuggestions.send(
+      :insert_records, "### Q1. #{question}\n### A1.", [ record ]
+    )
+
+    assert_equal 1, regions.length
+    assert_includes projected, "### A1.\n<!-- hive-suggestion:v1"
+  end
+
+  def test_invalid_projection_path_is_inert
+    bad_path = Object.new
+    bad_path.define_singleton_method(:to_s) { raise ArgumentError, "bad path" }
+
+    refute Hive::Tui::BrainstormSuggestions.send(
+      :brainstorm_path?, "/tmp/task", bad_path
+    )
   end
 
   private

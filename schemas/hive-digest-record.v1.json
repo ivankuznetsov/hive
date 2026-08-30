@@ -5,8 +5,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "schema_version", "record_id", "local_date", "sequence",
-    "time_zone", "starts_at", "ends_at", "boundary_kind", "lifecycle",
+    "schema", "schema_version", "record_id", "interval_id", "local_date", "sequence",
+    "time_zone", "starts_at", "ends_at", "duration_seconds", "boundary_kind", "cutover", "lifecycle",
     "closed_at", "completeness", "content", "last_materialized_at",
     "projects", "items", "attention", "gaps", "source_frontiers"
   ],
@@ -14,12 +14,17 @@
     "schema": { "const": "hive-digest-record" },
     "schema_version": { "const": 1 },
     "record_id": { "$ref": "#/$defs/Sha256" },
+    "interval_id": { "$ref": "#/$defs/Sha256" },
     "local_date": { "$ref": "#/$defs/Date" },
     "sequence": { "type": ["integer", "null"], "minimum": 1 },
     "time_zone": { "type": "string", "minLength": 1 },
     "starts_at": { "$ref": "#/$defs/Timestamp" },
     "ends_at": { "$ref": "#/$defs/Timestamp" },
+    "duration_seconds": { "type": "integer", "minimum": 1 },
     "boundary_kind": { "enum": ["calendar_day", "zone_cutover"] },
+    "cutover": {
+      "anyOf": [{ "$ref": "#/$defs/Cutover" }, { "type": "null" }]
+    },
     "lifecycle": { "enum": ["open", "closed"] },
     "closed_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
     "completeness": { "enum": ["complete", "partial"] },
@@ -56,6 +61,9 @@
       "properties": {
         "fact_id": { "type": "string", "minLength": 1 },
         "kind": { "type": "string", "minLength": 1 },
+        "category": {
+          "enum": ["progress", "failure", "recovery", "attention", "completion"]
+        },
         "project_id": { "type": ["string", "null"] },
         "project": { "type": ["string", "null"] },
         "task_id": { "type": ["string", "integer", "null"] },
@@ -68,7 +76,7 @@
         "source": { "type": ["string", "null"] },
         "task_url": { "type": ["string", "null"] },
         "pr": { "anyOf": [{ "$ref": "#/$defs/PullRequest" }, { "type": "null" }] },
-        "details": { "type": "object", "additionalProperties": true }
+        "details": { "$ref": "#/$defs/FactDetails" }
       },
       "additionalProperties": false
     },
@@ -84,8 +92,10 @@
         "task_slug": { "type": ["string", "null"] },
         "stage": { "type": ["string", "null"] },
         "state": { "type": ["string", "null"] },
+        "since_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
         "waiting_since": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
         "waiting_age_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "task_path": { "type": ["string", "null"] },
         "task_url": { "type": ["string", "null"] }
       },
       "additionalProperties": false
@@ -99,6 +109,7 @@
         "scope": { "type": ["string", "null"] },
         "project_id": { "type": ["string", "null"] },
         "task_slug": { "type": ["string", "null"] },
+        "reason_code": { "type": "string", "minLength": 1, "maxLength": 80 },
         "reason": { "type": "string", "maxLength": 512 },
         "observed_at": { "$ref": "#/$defs/Timestamp" },
         "freshness_at": { "anyOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
@@ -106,6 +117,63 @@
       },
       "additionalProperties": false
     },
+    "Cutover": {
+      "type": "object",
+      "required": [
+        "requested_at", "effective_at", "previous_time_zone", "skipped_labels"
+      ],
+      "properties": {
+        "requested_at": { "$ref": "#/$defs/Timestamp" },
+        "effective_at": { "$ref": "#/$defs/Timestamp" },
+        "previous_time_zone": { "type": "string", "minLength": 1 },
+        "skipped_labels": {
+          "type": "array", "items": { "$ref": "#/$defs/Date" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FactDetails": {
+      "type": "object",
+      "properties": {
+        "transition": { "$ref": "#/$defs/DetailValue" },
+        "marker": { "$ref": "#/$defs/DetailValue" },
+        "to_stage": { "$ref": "#/$defs/DetailValue" },
+        "question_id": { "$ref": "#/$defs/DetailValue" },
+        "answer_id": { "$ref": "#/$defs/DetailValue" },
+        "approval": { "$ref": "#/$defs/DetailValue" },
+        "decision": { "$ref": "#/$defs/DetailValue" },
+        "outcome": { "$ref": "#/$defs/DetailValue" },
+        "retry_at": { "$ref": "#/$defs/DetailValue" },
+        "hold_kind": { "$ref": "#/$defs/DetailValue" },
+        "state": { "$ref": "#/$defs/DetailValue" },
+        "provider": { "$ref": "#/$defs/DetailValue" },
+        "resource_kind": { "$ref": "#/$defs/DetailValue" },
+        "kind": { "$ref": "#/$defs/DetailValue" },
+        "unit": { "$ref": "#/$defs/DetailValue" },
+        "health": { "$ref": "#/$defs/DetailValue" },
+        "timed_out": { "$ref": "#/$defs/DetailValue" },
+        "actual_provider": { "$ref": "#/$defs/DetailValue" },
+        "actual_model": { "$ref": "#/$defs/DetailValue" },
+        "commit_oid": { "$ref": "#/$defs/DetailValue" },
+        "branch": { "$ref": "#/$defs/DetailValue" },
+        "pr_number": { "$ref": "#/$defs/DetailValue" },
+        "pr_state": { "$ref": "#/$defs/DetailValue" },
+        "pr_url": { "$ref": "#/$defs/DetailValue" },
+        "head_oid": { "$ref": "#/$defs/DetailValue" },
+        "draft": { "$ref": "#/$defs/DetailValue" },
+        "check_state": { "$ref": "#/$defs/DetailValue" },
+        "conclusion": { "$ref": "#/$defs/DetailValue" },
+        "merge_state": { "$ref": "#/$defs/DetailValue" },
+        "merge_oid": { "$ref": "#/$defs/DetailValue" },
+        "merged_at": { "$ref": "#/$defs/DetailValue" },
+        "action": { "$ref": "#/$defs/DetailValue" },
+        "corrected_fact_id": { "$ref": "#/$defs/DetailValue" },
+        "correction_kind": { "$ref": "#/$defs/DetailValue" },
+        "workflow": { "$ref": "#/$defs/DetailValue" }
+      },
+      "additionalProperties": false
+    },
+    "DetailValue": { "type": ["string", "integer", "boolean"] },
     "PullRequest": {
       "type": "object",
       "properties": {

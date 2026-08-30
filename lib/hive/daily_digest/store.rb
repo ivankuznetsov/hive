@@ -103,7 +103,11 @@ module Hive
       def prune(local_date, pruned_at:, reason:)
         date = normalize_date(local_date)
         synchronize do
-          return read_json(tombstone_path(date)) if tombstone_exists?(date)
+          if tombstone_exists?(date)
+            tombstone = read_json(tombstone_path(date))
+            remove_projection(date)
+            return tombstone
+          end
 
           base = read_json(base_path(date))
           raise MissingRecord, "digest #{date} is missing" unless base
@@ -131,9 +135,7 @@ module Hive
           }
           payload["receipt_id"] = Record.content_id(payload)
           write_json(tombstone_path(date), payload)
-          projection = record_directory(date)
-          FileUtils.remove_entry_secure(projection) if File.directory?(projection)
-          Hive::AtomicFile.fsync_directory(File.dirname(projection))
+          remove_projection(date)
           payload
         end
       end
@@ -154,7 +156,7 @@ module Hive
           known = existing.to_h { |entry| [ entry.fetch("discard_id"), entry ] }
           normalized.each do |entry|
             current = known[entry.fetch("discard_id")]
-            if current && Record.canonical_json(current) != Record.canonical_json(entry)
+            if current && discard_identity(current) != discard_identity(entry)
               raise Conflict, "conflicting pruned digest discard #{entry.fetch('discard_id')}"
             end
             known[entry.fetch("discard_id")] ||= entry
@@ -211,10 +213,17 @@ module Hive
       private
 
       def effective(base, amendments, frontier_overlay = nil)
-        resolved = amendments.flat_map { |entry| entry.fetch("resolved_gap_ids") }.uniq
-        gaps = base.fetch("gaps").reject { |gap| resolved.include?(gap["gap_id"]) }
-        gaps.concat(amendments.flat_map { |entry| entry.fetch("gaps", []) })
-        gaps = gaps.uniq { |gap| gap.fetch("gap_id") }
+        amendments = amendments.sort_by do |entry|
+          [ entry.fetch("amended_at"), entry.fetch("amendment_id") ]
+        end
+        gaps_by_id = base.fetch("gaps").to_h { |gap| [ gap.fetch("gap_id"), gap ] }
+        amendments.each do |amendment|
+          amendment.fetch("gaps", []).each do |gap|
+            gaps_by_id[gap.fetch("gap_id")] ||= gap
+          end
+          amendment.fetch("resolved_gap_ids").each { |gap_id| gaps_by_id.delete(gap_id) }
+        end
+        gaps = gaps_by_id.values
         items = (base.fetch("items") + amendments.flat_map { |entry| entry.fetch("items") })
                 .uniq { |item| item.fetch("fact_id") }
         attention = (
@@ -256,13 +265,26 @@ module Hive
           "kind" => kind,
           "source" => source,
           "observed_at" => normalize_time(input["observed_at"] || discarded_at),
-          "discarded_at" => normalize_time(discarded_at),
           "reason" => input.fetch("reason", "projection was pruned").to_s.byteslice(0, 240)
         }
         row["discard_id"] = Record.content_id(row)
+        row["discarded_at"] = normalize_time(discarded_at)
         row
       rescue KeyError, NoMethodError
         raise InvalidRecord, "pruned discard must be an object with identity, source, and kind"
+      end
+
+      def discard_identity(entry)
+        Record.canonical_json(entry.reject do |key, _value|
+          key == "discard_id" || key == "discarded_at"
+        end)
+      end
+
+      def remove_projection(date)
+        projection = record_directory(date)
+        FileUtils.remove_entry_secure(projection) if File.exist?(projection)
+        parent = File.dirname(projection)
+        Hive::AtomicFile.fsync_directory(parent) if File.directory?(parent)
       end
 
       def merge_frontiers(existing, incoming)

@@ -9,6 +9,7 @@ require "hive/artifacts/capture_policy"
 require "hive/artifacts/capture_toolkit"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
+require "hive/artifacts/outcome_evidence/rework"
 require "hive/artifacts/outcome_evidence/store"
 require "hive/atomic_file"
 require "hive/markers"
@@ -101,13 +102,16 @@ module Hive
       end
 
       def run_outcome_evidence!(task, cfg, identity_resolver: nil, store: nil,
-                                capture_toolkit: nil)
+                                capture_toolkit: nil, rework_tracker: nil)
         project = File.basename(task.project_root)
         identity_resolver ||= Hive::Artifacts::OutcomeEvidence::Identity.new(
           task: task, project: project
         )
         identity = identity_resolver.resolve
         store ||= Hive::Artifacts::OutcomeEvidence::Store.new(task: task, project: project)
+        rework_tracker ||= Hive::Artifacts::OutcomeEvidence::Rework.new(
+          task: task, project: project
+        )
         capture_toolkit ||= Hive::Artifacts::CaptureToolkit.new
         if store.accepted_for_identity?(identity)
           publish_complete_marker!(task, store.current)
@@ -119,6 +123,11 @@ module Hive
             publish_blocked_marker!(task, blocked)
             return { commit: "error", status: :error }
           end
+        end
+        if store.respond_to?(:rework_for_identity?) && store.rework_for_identity?(identity)
+          pointer = store.current
+          publish_blocked_marker!(task, pointer)
+          return { commit: "error", status: :error }
         end
 
         requirement = store.requirement_for_identity(identity)
@@ -175,6 +184,11 @@ module Hive
 
         loop do
           prior = history.last
+          if prior&.fetch("status") == "rework"
+            return rework_from_review!(
+              task, store, requirement, history, prior, rework_tracker
+            )
+          end
           if prior&.fetch("status") == "blocked"
             return block_from_review!(task, store, requirement, history, prior)
           end
@@ -292,6 +306,11 @@ module Hive
           end
           if status == "blocked"
             return block_from_review!(task, store, requirement, history, attempt)
+          end
+          if status == "rework"
+            return rework_from_review!(
+              task, store, requirement, history, attempt, rework_tracker
+            )
           end
         end
       end
@@ -624,10 +643,11 @@ module Hive
 
       def semantic_review_status!(verdicts)
         values = Array(verdicts).map { |verdict| verdict.fetch("verdict").to_s }
-        unless values.any? && (values - %w[accepted revise blocked]).empty?
+        unless values.any? && (values - %w[accepted revise rework blocked]).empty?
           raise Hive::Artifacts::OutcomeEvidence::StoreError,
                 "semantic reviewer returned an unknown or empty verdict set"
         end
+        return "rework" if values.include?("rework")
         return "blocked" if values.include?("blocked")
         return "revise" if values.include?("revise")
 
@@ -681,6 +701,28 @@ module Hive
         failed = verdicts.reject { |verdict| verdict.fetch("verdict") == "accepted" }
         pointer = store.publish_blocked!(
           generation: requirement.fetch("generation"), reason: reason,
+          failed_targets: failed.map { |verdict| verdict.fetch("target_id") },
+          reviewer_reasons: failed.map { |verdict| verdict.fetch("reason") },
+          attempt_ids: history.map { |item| item.fetch("attempt_id") }
+        )
+        publish_blocked_marker!(task, pointer)
+        { commit: "error", status: :error }
+      end
+
+      def rework_from_review!(task, store, requirement, history, attempt,
+                              rework_tracker)
+        if rework_tracker.records.length >=
+           Hive::Artifacts::OutcomeEvidence::Rework::MAX_REWORKS
+          return block_from_review!(
+            task, store, requirement, history, attempt,
+            reason: "reworks_exhausted"
+          )
+        end
+
+        verdicts = attempt.dig("review", "verdicts").to_a
+        failed = verdicts.reject { |verdict| verdict.fetch("verdict") == "accepted" }
+        pointer = store.publish_rework!(
+          generation: requirement.fetch("generation"),
           failed_targets: failed.map { |verdict| verdict.fetch("target_id") },
           reviewer_reasons: failed.map { |verdict| verdict.fetch("reason") },
           attempt_ids: history.map { |item| item.fetch("attempt_id") }

@@ -1828,6 +1828,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_outcome_evidence_implementation_rework_dispatches_its_guarded_transition
+    command = "hive evidence rework s1 --stage 7-artifacts --generation #{'a' * 64} " \
+              "--recovery-digest #{'b' * 64}"
+    observed = row(
+      stage: "7-artifacts",
+      marker: "error",
+      action: "ready_to_develop",
+      command: command,
+      marker_attrs: {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64,
+        "recovery_digest" => "b" * 64
+      }
+    )
+    dispatcher, supervisor = make_dispatcher(rows: [])
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_equal [ command ], supervisor.spawned.map { |entry| entry.fetch(:command) }
+  end
+
   def test_error_retry_publishes_safety_block_instead_of_false_scheduler_ownership
     snapshot = FakeOperationalSnapshot.new
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)

@@ -244,6 +244,10 @@ module Hive
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
+          # This semantic ERROR is a scheduler-owned backward transition, not
+          # a request to replay the same frozen artifacts generation.
+          next if Hive::TerminalOutcome.outcome_evidence_rework?(row.marker_attrs)
+
           if Hive::Recovery.recoverable_marker?(row.marker)
             heal_recoverable_error_if_auto_recoverable(row, now: now) if
               daemon_enabled_for_row?(row, daemon_enabled_projects) &&

@@ -186,6 +186,26 @@ class OperationalActionTest < Minitest::Test
     refute action.fetch("confirmation_required")
   end
 
+  def test_outcome_evidence_rework_is_a_distinct_guarded_operational_action
+    observed = {
+      "project" => "demo", "slug" => "rework-task", "folder" => "/tmp/rework-task",
+      "workflow" => "coding", "stage" => "7-artifacts", "marker" => "error",
+      "attrs" => {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64, "recovery_digest" => "b" * 64
+      },
+      "mtime" => "2026-08-30T12:00:00.000000Z",
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "blocked" => false, "held" => nil
+    }
+
+    action = Hive::OperationalAction.descriptor(project: "demo", row: observed)
+
+    assert_equal Hive::OperationalAction::ACTION_ID, action.fetch("action_id")
+    assert_equal "demo:rework-task", action.fetch("target")
+    assert_match(/\A[0-9a-f]{64}\z/, action.fetch("observation_token"))
+  end
+
   def test_max_pass_review_escalation_is_not_a_confirmation_free_retry
     with_tmp_dir do |folder|
       reviews = File.join(folder, "reviews")
@@ -445,6 +465,41 @@ class OperationalActionTest < Minitest::Test
     end
 
     assert_match(/no confirmation-free operational action/, error.message)
+  end
+
+  def test_dispatch_routes_outcome_evidence_rework_through_the_exact_controller_command
+    require "hive/commands/evidence"
+    task = Struct.new(:folder).new("/tmp/rework-task")
+    observed = {
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "stage" => "7-artifacts",
+      "attrs" => { "generation" => "a" * 64, "recovery_digest" => "b" * 64 }
+    }
+    calls = []
+    command = Object.new
+    command.define_singleton_method(:call) { { "status" => "rework_started" } }
+
+    result = with_replaced_singleton_method(
+      Hive::Commands::Evidence, :new,
+      lambda { |*args, **kwargs|
+        calls << [ args, kwargs ]
+        command
+      }
+    ) do
+      Hive::OperationalAction::Executor.new.send(
+        :dispatch, task, observed, "demo", ->(_locked_task) { }
+      )
+    end
+
+    assert_equal({ "status" => "rework_started" }, result)
+    args, options = calls.fetch(0)
+    assert_equal [ "rework", task.folder ], args
+    assert_equal "demo", options.fetch(:project)
+    assert_equal "7-artifacts", options.fetch(:stage)
+    assert_equal "a" * 64, options.fetch(:generation)
+    assert_equal "b" * 64, options.fetch(:recovery_digest)
+    assert options.fetch(:quiet)
+    assert_same task, options.fetch(:task_resolver).call
   end
 
   def test_result_reports_archived_when_the_task_disappears_after_action

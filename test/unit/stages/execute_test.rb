@@ -359,6 +359,145 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_rejects_an_unchanged_reviewed_implementation
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      reviewed_head = "b" * 40
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "a" * 40
+      )
+      git = FakeGit.new(
+        head: reviewed_head, branch: task.slug, dirty: false,
+        ancestor_result: true
+      )
+      context = {
+        "feedback" => { "implementation_head" => reviewed_head },
+        "protected_paths" => []
+      }
+
+      result = with_fake_git_and_spawn(git, status: :ok) do
+        Hive::Stages::Execute.run_pass(
+          task, {}, File.join(dir, "worktree"), rework_context: context
+        )
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "outcome_evidence_rework_unchanged", status: :error }, result)
+      assert_equal :error, marker.name
+      assert_equal "outcome_evidence_rework_unchanged", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_rejects_an_empty_descendant_commit_as_unchanged_rework
+    with_tmp_git_repo do |worktree|
+      reviewed_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+      run!("git", "-C", worktree, "commit", "--allow-empty", "-m", "empty rework")
+      head_after = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+      task = build_task(worktree)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => reviewed_head
+      )
+      git = FakeGit.new(
+        head: head_after, branch: task.slug, dirty: false,
+        ancestor_result: true
+      )
+      context = {
+        "feedback" => { "implementation_head" => reviewed_head },
+        "protected_paths" => []
+      }
+
+      result = with_fake_git_and_spawn(git, status: :ok) do
+        Hive::Stages::Execute.run_pass(
+          task, {}, worktree, rework_context: context
+        )
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "outcome_evidence_rework_unchanged", status: :error }, result)
+      assert_equal "outcome_evidence_rework_unchanged", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_run_pass_accepts_a_descendant_with_real_implementation_changes
+    with_tmp_git_repo do |worktree|
+      reviewed_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+      File.write(File.join(worktree, "README.md"), "reworked\n")
+      run!("git", "-C", worktree, "commit", "-am", "rework implementation")
+      head_after = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+      task = build_task(worktree)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => worktree, "branch" => task.slug,
+        "execute_base_head" => reviewed_head
+      )
+      git = FakeGit.new(
+        head: head_after, branch: task.slug, dirty: false,
+        ancestor_result: true
+      )
+      context = {
+        "feedback" => { "implementation_head" => reviewed_head },
+        "protected_paths" => []
+      }
+
+      result = with_fake_git_and_spawn(git, status: :ok) do
+        Hive::Stages::Execute.run_pass(
+          task, {}, worktree, rework_context: context
+        )
+      end
+
+      assert_equal({ commit: "execute_complete", status: :execute_complete }, result)
+      assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_run_pass_fails_closed_when_the_rework_diff_cannot_be_read
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      reviewed_head = "a" * 40
+      head_after = "b" * 40
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"), "branch" => task.slug,
+        "execute_base_head" => reviewed_head
+      )
+      git = FakeGit.new(
+        head: head_after, branch: task.slug, dirty: false,
+        ancestor_result: true
+      )
+      context = {
+        "feedback" => { "implementation_head" => reviewed_head },
+        "protected_paths" => []
+      }
+      failed = Hive::AgentGitGate::ReadResult.new(
+        operation: :diff, stdout: "", stderr: "missing object",
+        exitstatus: 128, overflow: false
+      )
+
+      result = with_replaced_singleton_method(
+        Hive::AgentGitGate, :read, ->(*, **) { failed }
+      ) do
+        with_fake_git_and_spawn(git, status: :ok) do
+          Hive::Stages::Execute.run_pass(
+            task, {}, File.join(dir, "worktree"), rework_context: context
+          )
+        end
+      end
+
+      assert_equal({ commit: "execute_worktree_git_failed", status: :error }, result)
+      assert_equal "worktree_git_failed",
+                   Hive::Markers.current(task.state_file).attrs.fetch("reason")
+    end
+  end
+
   def test_run_pass_marks_error_when_ancestor_check_raises
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -1144,7 +1283,7 @@ class HiveStagesExecuteTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::GitOps, :new, ->(path) { path == dir ? project_git : worktree_git }) do
         with_replaced_singleton_method(Hive::Worktree, :new, ->(_project_root, _slug, worktree_root:) { fake_wt }) do
-          with_replaced_singleton_method(Hive::Stages::Execute, :run_pass, ->(_task, _cfg, _path, _identity) { { commit: nil, status: :ok } }) do
+          with_replaced_singleton_method(Hive::Stages::Execute, :run_pass, ->(_task, _cfg, _path, _identity, **) { { commit: nil, status: :ok } }) do
             Hive::Stages::Execute.run_init_pass(task, { "worktree_root" => File.join(dir, "worktrees") })
           end
         end
@@ -1314,6 +1453,189 @@ class HiveStagesExecuteTest < Minitest::Test
           )
         end
       end
+    end
+  end
+
+  def test_spawn_implementation_receives_reviewed_rework_feedback_as_untrusted_context
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      identity = Struct.new(:provider, :native_arguments) do
+        def routing_arguments(_profile) = nil
+      end.new("opencode", [])
+      spawned = nil
+      scope = {
+        add_dirs: [ task.folder ], permission_mode: "read-only",
+        allowed_tools: nil, disallowed_tools: nil, runtime_policy: nil,
+        additional_read_roots: [ task.folder ], additional_write_roots: []
+      }
+      feedback = {
+        "reviewed_generation" => "a" * 64,
+        "implementation_head" => "b" * 40,
+        "failed_targets" => [ "claim-attachments" ],
+        "reviewer_reasons" => [
+          "The overlay rail can obscure the selected annotation region."
+        ]
+      }
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :stage_permission_scope_or_mark!, ->(*, **) { scope }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :spawn_agent,
+          ->(*, **kwargs) { spawned = kwargs; { status: :ok } }
+        ) do
+          Hive::Stages::Execute.spawn_implementation(
+            task,
+            {
+              "agents" => { "opencode" => {} },
+              "execute" => { "agent" => "opencode" },
+              "budget_usd" => { "execute_implementation" => 1 },
+              "timeout_sec" => { "execute_implementation" => 5 }
+            },
+            File.join(dir, "worktree"), identity: identity,
+            rework_feedback: feedback
+          )
+        end
+      end
+
+      prompt = spawned.fetch(:prompt)
+      assert_includes prompt, "Required review-driven implementation rework"
+      assert_includes prompt, "claim-attachments"
+      assert_includes prompt, "overlay rail"
+      assert_includes prompt, "untrusted review data"
+    end
+  end
+
+  def test_outcome_evidence_rework_context_is_validated_and_fail_closed
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      tracker = Object.new
+      tracker.define_singleton_method(:records) { [ { "sequence" => 1 } ] }
+      expected = {
+        "feedback" => { "failed_targets" => [ "claim-a" ] },
+        "protected_paths" => [ "outcome-evidence/current.json" ]
+      }
+      tracker.define_singleton_method(:execution_context) do |package:, records:|
+        if records.empty?
+          next {
+            "feedback" => nil,
+            "protected_paths" => [
+              "outcome-evidence/reworks/rework-01.json",
+              "outcome-evidence/reworks/rework-02.json"
+            ]
+          }
+        end
+        raise "wrong package" unless package == { "current" => { "status" => "rework" } }
+        raise "wrong records" unless records == [ { "sequence" => 1 } ]
+
+        expected
+      end
+      store = Object.new
+      store.define_singleton_method(:package_metadata) do
+        { "current" => { "status" => "rework" } }
+      end
+
+      context = with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+        ) do
+          Hive::Stages::Execute.outcome_evidence_rework_context(task)
+        end
+      end
+      assert_equal expected, context
+
+      tracker.define_singleton_method(:records) { [] }
+      empty = with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
+      ) do
+        Hive::Stages::Execute.outcome_evidence_rework_context(task)
+      end
+      assert_equal(
+        {
+          "feedback" => nil,
+          "protected_paths" => [
+            "outcome-evidence/reworks/rework-01.json",
+            "outcome-evidence/reworks/rework-02.json"
+          ]
+        },
+        empty
+      )
+
+      tracker.define_singleton_method(:records) do
+        raise Hive::Artifacts::OutcomeEvidence::StoreError, "forged receipt"
+      end
+      error = with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
+      ) do
+        assert_raises(Hive::StageError) do
+          Hive::Stages::Execute.outcome_evidence_rework_context(task)
+        end
+      end
+      assert_match(/forged receipt/, error.message)
+    end
+  end
+
+  def test_execute_custody_protects_active_rework_package_bytes
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug)
+      FileUtils.mkdir_p(File.join(task.folder, "outcome-evidence"))
+      File.write(File.join(task.folder, "outcome-evidence", "current.json"), "{}\n")
+      representation = File.join(
+        "outcome-evidence", "generations", "a" * 64, "retained",
+        "attempt-01", "entry-01", "original.png"
+      )
+      representation_path = File.join(task.folder, representation)
+      FileUtils.mkdir_p(File.dirname(representation_path))
+      File.binwrite(representation_path, "trusted proof bytes")
+
+      manifest = Hive::Stages::Execute.execute_custody_manifest(
+        task, File.join(dir, "worktree"),
+        extra_protected: [ "outcome-evidence/current.json", representation ]
+      )
+
+      assert_equal File.join(task.folder, "outcome-evidence", "current.json"),
+                   manifest.protected_anchors.fetch("outcome-evidence/current.json")
+      assert_equal representation_path, manifest.protected_anchors.fetch(representation)
+
+      custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
+      custody.call { File.binwrite(representation_path, "tampered proof bytes") }
+
+      assert custody.report.tampered?
+      assert custody.report.restored?
+      assert_equal "trusted proof bytes", File.binread(representation_path)
+    end
+  end
+
+  def test_execute_custody_protects_future_rework_receipts_before_first_receipt
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      context = Hive::Stages::Execute.outcome_evidence_rework_context(task)
+
+      manifest = Hive::Stages::Execute.execute_custody_manifest(
+        task, File.join(dir, "worktree"),
+        extra_protected: context.fetch("protected_paths")
+      )
+
+      %w[rework-01.json rework-02.json].each do |name|
+        relative = File.join("outcome-evidence", "reworks", name)
+        assert_equal File.join(task.folder, relative),
+                     manifest.protected_anchors.fetch(relative)
+      end
+
+      first_slot = manifest.protected_anchors.fetch(
+        File.join("outcome-evidence", "reworks", "rework-01.json")
+      )
+      custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
+      custody.call { File.write(first_slot, "forged\n") }
+
+      assert custody.report.tampered?
+      assert custody.report.restored?
+      refute File.exist?(first_slot)
     end
   end
 

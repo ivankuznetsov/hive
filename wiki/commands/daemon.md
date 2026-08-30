@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-25
+updated: 2026-08-30
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -89,6 +89,7 @@ they never claim a later daemon tick will allocate the id.
 | `ready_to_brainstorm` | Dispatch `hive brainstorm <slug>` (1→2)      |
 | `ready_to_plan`       | Dispatch `hive plan <slug> --from 2-brainstorm` (2→3) |
 | `ready_to_develop`    | Dispatch `hive develop <slug> --from 3-plan` (3→4) |
+| `outcome_evidence_rework` | Validate and dispatch the row's exact digest-bound `hive evidence rework ... --stage 7-artifacts` command (7→4); never synthesize `develop` or `artifacts`. |
 | `ready_to_open_pr`    | Dispatch `hive open-pr <slug> --from 4-execute` (4→5) |
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |

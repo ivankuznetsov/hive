@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
 ---
 
@@ -554,11 +554,17 @@ advances a workflow stage directly:
    as hosted-CI polling presents `claude_pid_alive: nil` and cannot enter this
    dead-child recovery path.
 
-   Every `ERROR`, `REVIEW_ERROR`, and `REVIEW_CI_STALE` is a durable retry state, never a permanent
+   Every ordinary `ERROR`, `REVIEW_ERROR`, and `REVIEW_CI_STALE` is a durable retry state, never a permanent
    workflow terminal. The exact `terminal_outcome_blocked` and
    `terminal_outcome_invalid` reasons are operator-owned exceptions: the daemon
    does not schedule them automatically, while a fresh operational snapshot
-   still exposes their guarded `workflow.retry` action. Every other
+   still exposes their guarded `workflow.retry` action. Outcome-evidence
+   implementation rework is a second typed exception: the healer does not
+   replay `7-artifacts`; `TaskAction` instead supplies the exact digest-bound
+   controller transition back to `4-execute` under the distinct
+   `outcome_evidence_rework` action, which normal policy dispatches
+   automatically. Web, Telegram, and OperationalAction validate and submit the
+   same exact command rather than translating it back into a stage verb. Every other
    reason—including lost sessions,
    `unpushed_commits`, reviewer crashes, `agent_preflight_failed`,
    tampering/integrity classifications, dirty-worktree failures, unknown
@@ -886,6 +892,15 @@ The daemon tick consumes `DispatchRequestQueue.pending`, validates the argv
 allowlist, and resolves task verbs through durable admission. Request IDs stay
 on the delivery while attempt IDs own execution; receipt reconciliation
 unlinks the claim and logs completion.
+
+The allowlist has one controller-only backward transition: exact `hive evidence
+rework TARGET --stage 7-artifacts --generation SHA --recovery-digest SHA`
+(optional safe project and JSON flags). It cannot be widened into another
+evidence or stage command. `ConfiguredDispatcher` recognizes this exact verb as
+route-free because it only validates controller state, appends an authorization
+receipt, and rearms the task; queue/CLI validation still owns the complete argv
+shape. A missing or unhealthy model route therefore cannot strand a reviewed
+implementation repair before the next execute attempt.
 
 Current request schema is v5. It carries generation intent, predecessor
 attempt, inherited output references, and a restartable recovery object with

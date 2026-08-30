@@ -75,7 +75,10 @@ module Hive
         # aborting teardown before the unit can be deregistered and the later
         # config/cache/data cleanup can run.
         deregister_unit(
-          Hive::Commands::Web::ServiceInstaller.new(config: {}, **service_installer_options)
+          Hive::Commands::Web::ServiceInstaller.new(
+            config: Hive::Config::DEFAULTS.fetch("web"),
+            **service_installer_options
+          )
         )
       end
 

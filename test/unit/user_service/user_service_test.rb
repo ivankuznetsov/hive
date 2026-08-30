@@ -71,6 +71,103 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_apply_stops_a_legacy_process_under_the_target_lock_before_enabling
+    with_tmp_dir do |dir|
+      events = []
+      running = false
+      enabled = false
+      takeover = Object.new
+      takeover.define_singleton_method(:pending?) { true }
+      takeover.define_singleton_method(:stop!) do
+        events << :legacy_stopped
+        true
+      end
+      runner = lambda do |argv|
+        case argv
+        when %w[systemctl --user is-enabled hive-test] then enabled
+        when %w[systemctl --user is-active --quiet hive-test] then running
+        when %w[systemctl --user show-environment] then true
+        when %w[systemctl --user daemon-reload]
+          events << :reloaded
+          true
+        when %w[systemctl --user enable --now hive-test]
+          events << :enabled
+          enabled = running = true
+        else
+          true
+        end
+      end
+      service = build_service(dir, runner: runner, legacy_takeover: takeover)
+
+      result = service.apply(service.plan(autostart: true))
+
+      assert result.success?
+      assert_equal %i[legacy_stopped reloaded enabled], events
+      assert_equal :matching, result.final_status.content_state
+      assert result.final_status.running?
+    end
+  end
+
+  def test_apply_does_not_stop_a_legacy_pid_when_the_manager_already_owns_the_service
+    with_tmp_dir do |dir|
+      stopped = false
+      takeover = Object.new
+      takeover.define_singleton_method(:pending?) { true }
+      takeover.define_singleton_method(:stop!) { stopped = true }
+      service = build_service(
+        dir,
+        runner: ->(_argv) { true },
+        legacy_takeover: takeover
+      )
+
+      result = service.apply(service.plan(autostart: true))
+
+      assert result.success?
+      refute stopped
+    end
+  end
+
+  def test_failed_legacy_takeover_is_retained_and_replayed_by_a_fresh_owner
+    with_tmp_dir do |dir|
+      running = false
+      enabled = false
+      attempts = 0
+      takeover = Object.new
+      takeover.define_singleton_method(:pending?) { true }
+      takeover.define_singleton_method(:stop!) do
+        attempts += 1
+        raise "drain failed" if attempts == 1
+
+        true
+      end
+      runner = lambda do |argv|
+        case argv
+        when %w[systemctl --user is-enabled hive-test] then enabled
+        when %w[systemctl --user is-active --quiet hive-test] then running
+        when %w[systemctl --user show-environment] then true
+        when %w[systemctl --user enable --now hive-test]
+          enabled = running = true
+        else
+          true
+        end
+      end
+      first = build_service(dir, runner: runner, legacy_takeover: takeover)
+
+      failed = first.apply(first.plan(autostart: true))
+      assert_equal :failed, failed.kind
+      assert_includes failed.diagnostics, :legacy_takeover_failed
+      assert_equal 1, pending_journals(dir).size
+
+      replay = build_service(dir, runner: runner, legacy_takeover: takeover)
+      recovered = replay.apply(replay.plan(autostart: true))
+
+      assert recovered.success?
+      assert_equal 2, attempts
+      assert_empty pending_journals(dir)
+      assert_equal 1, applied_receipts(dir).size
+    end
+  end
+
   def test_drift_is_refused_without_force
     with_tmp_dir do |dir|
       path = definition_path(dir)

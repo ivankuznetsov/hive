@@ -237,7 +237,6 @@ module Hive
           installer = Hive::Commands::Babysit::ServiceInstaller.new(
             binary_path: Hive::InvokedBinary.path
           )
-          Hive::Commands::Babysit.prepare_service_takeover!(installer: installer)
           outcome = installer.install!(autostart: true, force: true)
           [ outcome.success?, {
             "outcome" => outcome.wire_outcome,

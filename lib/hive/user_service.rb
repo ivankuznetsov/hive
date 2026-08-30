@@ -20,12 +20,13 @@ module Hive
                    status_reader: nil, launchd_running_via_list: false,
                    writer: Hive::AtomicFile, clock: -> { Time.now.utc },
                    event_handler: nil, home: nil,
-                   lock_wait: Transaction::LOCK_WAIT_SEC)
+                   lock_wait: Transaction::LOCK_WAIT_SEC, legacy_takeover: nil)
       @definition = definition
       @runner = runner || ->(argv) { system(*argv, out: File::NULL) }
       @writer = writer
       @clock = clock
       @event_handler = event_handler
+      @legacy_takeover = legacy_takeover
       @manager = Manager.new(
         definition: definition,
         runner: @runner,
@@ -376,8 +377,13 @@ module Hive
       return stale_result(:apply, inspect_status(manager: plan.manager_observed)) if current.content_state != :absent && !prior_content
 
       legacy_match = plan.action == :noop && receipt.nil?
+      takeover_pending = @legacy_takeover&.pending?
       manager_intent = if plan.autostart && current.manager_available?
-        plan.action == :replace || legacy_match ? :restart : :enable
+        if takeover_pending && !current.running?
+          :takeover
+        else
+          plan.action == :replace || legacy_match ? :restart : :enable
+        end
       end
       document = transaction.journal.prepare(
         operation: :apply,
@@ -514,6 +520,37 @@ module Hive
       action = nil
       phase_proves_activation = transaction.journal.activation_recorded?(document)
       unless replay && phase_proves_activation && desired_endpoint?(status)
+        if intent == "takeover" && !status.running?
+          unless @legacy_takeover
+            return result(
+              :failed,
+              backup_path: backup_path,
+              final_status: status,
+              diagnostics: diagnostics + %i[legacy_takeover_failed recovery_pending]
+            )
+          end
+
+          begin
+            stopped = @legacy_takeover.stop!
+          rescue StandardError => error
+            return Result.new(
+              :failed,
+              backup_path: backup_path,
+              final_status: safe_inspect(manager: true),
+              diagnostics: diagnostics + %i[legacy_takeover_failed recovery_pending],
+              error: error
+            )
+          end
+          unless stopped
+            return result(
+              :failed,
+              backup_path: backup_path,
+              final_status: safe_inspect(manager: true),
+              diagnostics: diagnostics + %i[legacy_takeover_failed recovery_pending]
+            )
+          end
+        end
+
         action = @manager.apply_intent(intent || :enable)
         document = transaction.journal.advance(document, phase: :activated)
         transition_event(:after_activated)

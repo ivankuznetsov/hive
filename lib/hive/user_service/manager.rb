@@ -199,8 +199,9 @@ module Hive
 
         case @definition.platform
         when :linux
-          run_action(%w[systemctl --user daemon-reload]) if verb == :start
-          ok = run_action([ "systemctl", "--user", verb.to_s, @definition.service_name ])
+          reloaded = !%i[start restart].include?(verb) ||
+                     run_action(%w[systemctl --user daemon-reload])
+          ok = reloaded && run_action([ "systemctl", "--user", verb.to_s, @definition.service_name ])
         when :macos
           ok = if verb == :stop
             run_action([ "launchctl", "unload", @definition.target_path ])

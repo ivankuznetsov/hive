@@ -1025,19 +1025,15 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal [ "enabled" ], phase["messages"]
   end
 
-  def test_install_babysitter_records_a_failed_takeover_without_installing_unit
+  def test_install_babysitter_records_a_failed_owned_transition
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     installer = fake_installer
     installer.define_singleton_method(:install!) do |**|
-      raise "service install must not run after takeover failure"
+      raise Hive::Error, "ownership could not be verified"
     end
 
     with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
-      with_replaced_singleton_method(Hive::Commands::Babysit, :prepare_service_takeover!, lambda { |**|
-        raise Hive::Error, "ownership could not be verified"
-      }) do
-        setup.send(:install_babysitter)
-      end
+      setup.send(:install_babysitter)
     end
 
     phase = setup.instance_variable_get(:@phases).last

@@ -57,7 +57,8 @@ class BabysitServiceInstallerTest < Minitest::Test
         body
       )
       assert_includes body, '[ -x "$0" ] || exit 0; exec "$0" "$@"'
-      assert_equal [ [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) }
     end
   end
 

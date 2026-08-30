@@ -177,6 +177,9 @@ module Hive
 
           raise Invalid, "transition journal #{key} is invalid"
         end
+        unless data["manager_intent"].nil? || %w[enable restart takeover disable].include?(data["manager_intent"])
+          raise Invalid, "transition journal manager intent is invalid"
+        end
         data
       end
     end

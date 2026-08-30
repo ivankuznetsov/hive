@@ -285,11 +285,8 @@ module Hive
         root = self.class.validated_main_wiki_root(@project_root, configured)
         return [] unless root
         root = canonical_directory(root, "main_wiki_unavailable")
-        candidates = Dir.glob(File.join(root, "**", "*.md")).sort.first(MAX_CANDIDATE_FILES).filter_map do |path|
+        candidates = tracked_main_wiki_paths(root).first(MAX_CANDIDATE_FILES).filter_map do |relative|
           check_deadline!
-          relative = path.delete_prefix("#{root}/")
-          next unless safe_relative_path?(relative)
-
           content = stable_external_read(root, relative)
           next if content.nil? || content.include?("\0")
           content = content.dup.force_encoding(Encoding::UTF_8)
@@ -304,6 +301,22 @@ module Hive
         choose_bounded(candidates, max_files: MAX_MAIN_WIKI_FILES, max_bytes: MAX_SELECTED_BYTES / 4)
       rescue JSON::ParserError, CaptureError
         []
+      end
+
+      def tracked_main_wiki_paths(root)
+        run_process(
+          [ "git", "-C", root, "ls-files", "-s", "-z", "--", "*.md" ],
+          environment: { "GIT_OPTIONAL_LOCKS" => "0", "GIT_TERMINAL_PROMPT" => "0" }
+        ).split("\0", -1).filter_map do |row|
+          next if row.empty?
+
+          header, relative = row.split("\t", 2)
+          mode, _oid, stage = header.to_s.split(" ", 3)
+          next unless stage == "0" && %w[100644 100755].include?(mode)
+          next unless safe_relative_path?(relative)
+
+          relative
+        end.sort
       end
 
       def choose_bounded(candidates, max_files: MAX_SELECTED_FILES, max_bytes: MAX_SELECTED_BYTES)

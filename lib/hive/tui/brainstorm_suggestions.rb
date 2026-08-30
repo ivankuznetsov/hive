@@ -31,6 +31,7 @@ module Hive
         task_root = File.expand_path(task_root)
         return empty_lease(task_root, now) unless brainstorm_path?(task_root, path)
 
+        projection = suggestion_projection(task_root, path)
         lease = nil
         Hive::Lock.with_task_lock(
           task_root,
@@ -39,7 +40,7 @@ module Hive
         ) do
           store = Hive::BrainstormSuggestions::Store.new(task_root)
           document = store.read
-          records = current_records(document, path, task_root: task_root)
+          records = current_records(document, path, projection: projection)
           Hive::Markers.with_markers_lock(path, create: false, timeout: 1) do
             original = read_regular(path)
             stripped = Hive::BrainstormSuggestions::Envelope.strip(original).text
@@ -132,17 +133,22 @@ module Hive
         end
       end
 
-      def current_records(document, path, task_root:)
-        return [] if document["corrupt"]
-
+      def suggestion_projection(task_root, path)
         parsed = Hive::BrainstormParser.parse(path)
         task = Hive::Task.new(task_root)
-        projection = Hive::BrainstormSuggestions::Projection.call(
+        Hive::BrainstormSuggestions::Projection.call(
           task_root: task_root,
           project_root: task.project_root,
           questions: parsed,
           task_generation: Hive::Attempts::Generation.current_task_input_epoch(task)
         )
+      end
+      private_class_method :suggestion_projection
+
+      def current_records(document, path, projection:)
+        return [] if document["corrupt"]
+
+        parsed = Hive::BrainstormParser.parse(path)
         document.fetch("records").filter_map do |record|
           next unless record["state"] == "fresh" && record["dismissed"] == false
           next unless record["suggestion_binding"].to_s.match?(/\A[0-9a-f]{64}\z/)
@@ -237,7 +243,7 @@ module Hive
         end
         return { "status" => "not_found", "operation" => action } unless record
 
-        binding = record["suggestion_binding"]
+        binding = record["suggestion_binding"] || record["input_binding"]
         return { "status" => "not_found", "operation" => action } unless binding
         Hive::Commands::BrainstormSuggestion.new(
           action,

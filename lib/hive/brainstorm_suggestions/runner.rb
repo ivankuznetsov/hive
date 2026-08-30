@@ -195,7 +195,7 @@ module Hive
 
       def build_launch(runtime_root:, bundle_root:, auth_root:, executable:, bundle:)
         argv = [ @bwrap_path, "--die-with-parent", "--new-session",
-                 "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+                 "--unshare-pid", "--unshare-ipc", "--unshare-uts",
                  "--unshare-cgroup-try" ]
         argv.concat([ "--ro-bind", "/usr", "/usr" ])
         append_compatibility_mounts(argv)

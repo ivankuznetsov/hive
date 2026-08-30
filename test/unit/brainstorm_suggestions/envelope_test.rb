@@ -72,6 +72,41 @@ class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
     assert_equal "operator answer", parsed.last.answer
   end
 
+  def test_nested_closers_and_orphan_delimiters_consume_the_whole_corrupt_slot
+    [
+      <<~MARKDOWN,
+        <!-- hive-suggestion:v1 binding=#{BINDING} -->
+        outer candidate
+        <!-- hive-suggestion:v1 binding=#{"c" * 64} -->
+        nested candidate
+        <!-- /hive-suggestion:v1 -->
+        tail after nested close
+        <!-- /hive-suggestion:v1 -->
+      MARKDOWN
+      <<~MARKDOWN
+        <!-- /hive-suggestion:v1 -->
+        tail after orphan close
+      MARKDOWN
+    ].each do |corrupt_region|
+      source = <<~MARKDOWN
+        ## Round 1
+        ### Q1. First?
+        ### A1.
+        #{corrupt_region}### Q2. Second?
+        ### A2.
+        operator answer
+      MARKDOWN
+
+      stripped = Hive::BrainstormSuggestions::Envelope.strip(source)
+      parsed = Hive::BrainstormParser.parse_text(source)
+
+      assert stripped.corrupt?
+      refute_includes stripped.text, "tail after"
+      assert_nil parsed.first.answer
+      assert_equal "operator answer", parsed.last.answer
+    end
+  end
+
   def test_reserved_breakout_marker_cannot_make_candidate_actionable
     source = <<~MARKDOWN
       ## Round 1

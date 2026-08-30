@@ -98,6 +98,15 @@ class SecretPatternsTest < Minitest::Test
     assert_includes redacted, "[REDACTED:github_fine_grained_pat]"
   end
 
+  def test_gitlab_access_token_is_detected_and_redacted
+    token = "glpat-#{'AbC123_' * 5}"
+    assert_match_name("token=#{token}", :gitlab_access_token)
+
+    redacted = Hive::SecretPatterns.redact("token=#{token}")
+    refute_includes redacted, token
+    assert_includes redacted, "[REDACTED:gitlab_access_token]"
+  end
+
   def test_hyphenated_openai_project_credential_is_detected_and_redacted
     credential = "sk-proj-#{'AbC123_' * 6}"
 

@@ -1,12 +1,10 @@
 # frozen_string_literal: true
 
 require "digest"
-require "json"
 require "thread"
 require "hive/attempts/generation"
 require "hive/brainstorm_suggestions/binding"
 require "hive/brainstorm_suggestions/context_bundle"
-require "hive/brainstorm_suggestions/process_capture"
 require "hive/brainstorm_suggestions/store"
 require "hive/config"
 require "hive/task"
@@ -15,11 +13,10 @@ module Hive
   module BrainstormSuggestions
     # Produces the single fail-closed read contract shared by CLI and Web.
     # A task is observed once regardless of its number of questions. Cached
-    # results are keyed by the exact tracked diff/index, wiki bytes, task
-    # inputs, settled answers, recipe, and canonical sidecar generation.
+    # results are keyed by the task/sidecar lifecycle identity. Repository and
+    # wiki capture happens only on cache misses, never as a read-side key scan.
     class Projection
       MAX_OBSERVATION_SECONDS = 2.0
-      MAX_IDENTITY_BYTES = 8 * 1024 * 1024
       CACHE_LIMIT = 64
       STALE_REASON = "Suggestion inputs changed; a replacement is being prepared."
       UNAVAILABLE_REASON = "Suggestion freshness could not be verified; answer manually or retry."
@@ -36,7 +33,7 @@ module Hive
           @mutex = Mutex.new
         end
 
-        def fetch(key)
+        def fetch(key, cache_if: ->(_value) { true })
           owner = false
           loop do
             @mutex.synchronize do
@@ -59,9 +56,11 @@ module Hive
           completed = false
           value = yield
           @mutex.synchronize do
-            @entries.delete(key)
-            @entries[key] = value
-            @entries.shift while @entries.length > @limit
+            if cache_if.call(value)
+              @entries.delete(key)
+              @entries[key] = value
+              @entries.shift while @entries.length > @limit
+            end
             @inflight.delete(key)&.broadcast
             completed = true
           end
@@ -164,7 +163,7 @@ module Hive
         return replace_observable(result, observable, :stale) unless document_current?(document)
 
         identity = @identity_factory.call(document, observable, @deadline)
-        observation = @cache.fetch(identity) do
+        observation = @cache.fetch(identity, cache_if: ->(value) { value.error_code.nil? }) do
           @observer.call(
             project_root: @project_root,
             task_root: @task_root,
@@ -339,7 +338,7 @@ module Hive
         end.to_h.freeze
       end
 
-      def observation_identity(document, records, deadline)
+      def observation_identity(document, records, _deadline)
         Hive::BrainstormSuggestions::Binding.digest(
           "recipe" => Hive::BrainstormSuggestions::ContextBundle::RECIPE,
           "recipe_version" => Hive::BrainstormSuggestions::ContextBundle::RECIPE_VERSION,
@@ -348,77 +347,12 @@ module Hive
             "task_incarnation", "task_generation", "brainstorm_generation"
           ),
           "questions" => records.map do |record|
-            [ record["ordinal"], record["question_fingerprint"], record["input_binding"] ]
-          end,
-          "task_inputs" => task_input_identity,
-          "tracked_worktree" => tracked_worktree_identity(deadline),
-          "main_wiki" => main_wiki_identity(deadline)
+            record.slice(
+              "ordinal", "question_fingerprint", "input_binding", "suggestion_binding",
+              "state", "retryable", "dismissed", "attempt_id", "candidate_id", "updated_at"
+            )
+          end
         )
-      end
-
-      def task_input_identity
-        %w[idea.md brainstorm.md].to_h do |name|
-          path = File.join(@task_root, name)
-          [ name, digest_regular_file(path, max_bytes: Hive::BrainstormSuggestions::ContextBundle::MAX_FILE_BYTES) ]
-        end
-      end
-
-      def tracked_worktree_identity(deadline)
-        index = run_git([ "ls-files", "-s", "-z" ], deadline)
-        diff = run_git([ "diff", "--no-ext-diff", "--binary", "HEAD", "--" ], deadline)
-        Digest::SHA256.hexdigest(index.b + "\0" + diff.b)
-      end
-
-      def main_wiki_identity(deadline)
-        config_path = File.join(@project_root, ".llm-wiki", "config.json")
-        return nil unless File.file?(config_path) && !File.symlink?(config_path)
-
-        config = JSON.parse(File.read(config_path, 16 * 1024))
-        configured = config["main_wiki_path"] if config.is_a?(Hash)
-        return nil if configured.to_s.empty?
-
-        root = Hive::BrainstormSuggestions::ContextBundle.validated_main_wiki_root(
-          @project_root, configured
-        )
-        return "unavailable" unless root
-        entries = Dir.glob(File.join(root, "**", "*.md")).sort.first(
-          Hive::BrainstormSuggestions::ContextBundle::MAX_CANDIDATE_FILES
-        ).map do |path|
-          raise IOError, "suggestion observation timed out" if monotonic_now >= deadline
-
-          relative = path.delete_prefix("#{root}/")
-          [ relative, digest_regular_file(path, max_bytes: Hive::BrainstormSuggestions::ContextBundle::MAX_FILE_BYTES) ]
-        end
-        Hive::BrainstormSuggestions::Binding.digest(entries)
-      rescue JSON::ParserError, SystemCallError, IOError
-        "unavailable"
-      end
-
-      def digest_regular_file(path, max_bytes:)
-        status = File.lstat(path)
-        raise IOError, "unsafe suggestion observation input" unless
-          status.file? && !status.symlink? && status.size <= max_bytes
-
-        flags = File::RDONLY
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        File.open(path, flags) { |file| Digest::SHA256.hexdigest(file.read(max_bytes + 1).b) }
-      end
-
-      def run_git(arguments, deadline)
-        result = Hive::BrainstormSuggestions::ProcessCapture.call(
-          [ "git", "-C", @project_root, *arguments ],
-          environment: { "GIT_OPTIONAL_LOCKS" => "0", "GIT_TERMINAL_PROMPT" => "0" },
-          deadline: deadline, max_bytes: MAX_IDENTITY_BYTES, poll_interval: 0.01
-        )
-        raise IOError, "suggestion repository observation failed" unless result.status.success?
-
-        result.output
-      rescue Hive::BrainstormSuggestions::ProcessCapture::Timeout
-        raise IOError, "suggestion observation timed out"
-      rescue Hive::BrainstormSuggestions::ProcessCapture::TooLarge
-        raise IOError, "suggestion observation exceeded its bound"
-      rescue Hive::BrainstormSuggestions::ProcessCapture::SpawnFailed => error
-        raise IOError, error.message
       end
 
       def monotonic_now

@@ -66,7 +66,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       assert_equal "", launch.argv.fetch(tools_index + 1)
       assert_equal "", launch.argv.fetch(launch.argv.index("--allowedTools") + 1)
       refute_includes launch.argv, "--disallowedTools"
-      assert_includes launch.argv, "--unshare-net"
+      refute_includes launch.argv, "--unshare-net"
       assert_equal "", launch.argv.fetch(launch.argv.index("--setting-sources") + 1)
       assert_equal "{}", launch.argv.fetch(launch.argv.index("--settings") + 1)
       assert_equal "{}", launch.argv.fetch(launch.argv.index("--mcp-config") + 1)
@@ -197,6 +197,12 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       File.write(repository, "repository")
       File.write(task, "task")
       server = TCPServer.new("127.0.0.1", 0)
+      server_thread = Thread.new do
+        client = server.accept
+        client.readpartial(1024)
+        client.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        client.close
+      end
       probes = [ repository, task, alternate, server.local_address.ip_port ].join("\n") + "\n"
       probe_bundle = Class.new(Bundle) do
         define_method(:initialize) do |manifest, probes|
@@ -220,11 +226,12 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       result = runner.call(bundle: probe_bundle)
 
       assert_equal "fresh", result.fetch("state"), result.inspect
-      assert_equal "repository=false task=false shell=false network=false escape=false alternate=false",
+      assert_equal "repository=false task=false shell=false network=true escape=false alternate=false",
                    result.fetch("text")
       refute File.exist?(alternate)
     ensure
       server&.close
+      server_thread&.join(1)
     end
   end
 

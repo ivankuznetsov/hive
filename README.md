@@ -211,12 +211,29 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
-## PR Digests
+## Daily Activity Digest
 
-[PRDigest](https://github.com/ivankuznetsov/prdigest) is a separate tool. Use
-`prdigest facts` when an agent will write the final message, or schedule
-`prdigest prose --deliver` for a standalone daily Telegram digest. Hive does
-not configure, schedule, or deliver PR digests.
+Hive owns a durable cross-project daily activity record. After initializing its
+IANA time zone and coverage frontier with `hive migrate --all`, opt in with the
+global `daily_digest.enabled` setting. The daemon refreshes the open day and
+closes elapsed days; ordinary reads are side-effect free:
+
+```bash
+hive digest
+hive digest --date 2026-08-29 --project hive --json
+```
+
+The authenticated Web view groups attention and project activity, preserves
+source gaps and late amendments, and hands waiting items back to the existing
+task answer route without copying question text into the digest. Telegram recap
+delivery is a separate `daily_digest.telegram.enabled` opt-in. Complete empty
+days are recorded but not sent. See
+[wiki/commands/digest.md](wiki/commands/digest.md).
+
+[PRDigest](https://github.com/ivankuznetsov/prdigest) remains a separate tool
+for PR-only facts or prose. Hive's broader activity record has no PRDigest
+runtime dependency, never treats PRDigest as authority, and continues to reject
+the retired top-level `digest:` configuration block.
 
 ## Manage Hive From Telegram in 2 Minutes
 

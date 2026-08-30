@@ -1,13 +1,21 @@
 ---
 name: hive
-description: Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, discover or answer waiting brainstorm questions in Guided or explicit YOLO mode, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects.
+description: Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to read durable daily activity or history, answer current Hive or Hive-bench status, identify the exact active task and blocker owner, discover or answer waiting brainstorm questions in Guided or explicit YOLO mode, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects.
 ---
 
 # Hive Operations
 
 Use Hive as the control plane. Do not replace its status, watch, scheduler, or recovery machinery with shell polling, process discovery, or an agent-authored sidecar.
 
-## Operating loop
+## Request routing
+
+For daily-history questions such as what happened today, yesterday, on a
+persisted date, or in one project's daily activity, read
+[daily-digest.md](references/daily-digest.md) and use its pure JSON route
+immediately. Do not run the current operational-status loop first.
+
+For present operational state, task progress, blockers, or actions, use this
+loop:
 
 1. Request a fresh machine snapshot with `hive status --operational --json`.
 2. The normal `hive` command is the active installation. Inspect `runtime.channel`; when it is `dogfood`, report `runtime.display_version`, the full `runtime.build_sha`, and `runtime.deployment_id`. Do not bypass dogfood by locating another Hive binary, registry, daemon, or web service unless the operator explicitly asks: dogfood replaces the installed runtime rather than running beside it.
@@ -49,6 +57,7 @@ rollback without the operator's explicit direction.
 
 ## Load the relevant reference
 
+- Read [daily-digest.md](references/daily-digest.md) when asked what happened today, yesterday, on a persisted day, or in one project's durable daily activity; use `hive digest --json` and its interval navigation rather than reconstructing history or running status first.
 - Read [workflow-creator.md](references/workflow-creator.md) when ordinary language asks to create a new project-local workflow. This focused route is the `hive-workflow-creator` capability inside the single canonical `/hive` skill; it is not a second skill or package.
 - Read [workflow-creator-example.md](references/workflow-creator-example.md) for the accepted research → draft → approval editorial example.
 - Read [workflow-schema.md](references/workflow-schema.md), [workflow-stage-design.md](references/workflow-stage-design.md), [workflow-checkpoints.md](references/workflow-checkpoints.md), [workflow-permissions.md](references/workflow-permissions.md), [workflow-testing.md](references/workflow-testing.md), and [workflow-common-mistakes.md](references/workflow-common-mistakes.md) only as needed while authoring or diagnosing a newly scaffolded descriptor.

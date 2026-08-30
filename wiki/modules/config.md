@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-29
-tags: [config, yaml, validation, plan-review, opencode]
+updated: 2026-08-30
+tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, daily digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 The live project template includes a commented, copyable `models:` example.
 Exact and coarse entries inherit model and effort independently, never select an
@@ -493,9 +493,48 @@ instead of silently dropping that project. See [[commands/refactor-patrol]].
 
 ## Digest config
 
-Hive has no PR-digest configuration. A top-level `digest:` block in global
-config is rejected when the daemon starts, with guidance to schedule
-`prdigest prose --deliver` directly or use `prdigest facts` from an agent.
+Hive's broad activity record uses a new global `daily_digest:` namespace. The
+old top-level `digest:` PRDigest-adapter block remains rejected, so an upgraded
+configuration can never silently acquire new behavior.
+
+Defaults are deliberately effect-free:
+
+```yaml
+daily_digest:
+  enabled: false
+  time_zone: null
+  coverage_started_at: null
+  initial_membership: null
+  first_interval: null
+  materialization_interval_sec: 300
+  freshness_budget_sec: 900
+  telegram:
+    enabled: false
+    hour: 9
+```
+
+`hive setup`, `hive migrate`, and `hive migrate --all` call the idempotent
+`DailyDigest::Migration`. Under the global config lock it detects or validates
+an IANA zone, captures the exact UTC coverage-start instant and normalized
+registered-project membership, and persists the first interval atomically. It
+preserves an existing initialized block and never flips `enabled`. Detection
+failure leaves the feature disabled with exact remediation; unrelated daemon
+automation continues.
+
+When `enabled: true`, all four identity fields (`time_zone`,
+`coverage_started_at`, `initial_membership`, and `first_interval`) are required.
+The zone must exist in TZInfo, intervals must validate, cadence/freshness values
+must be positive integers, and the Telegram hour must be `0..23`. A disabled
+upgraded configuration may temporarily omit initialization fields so the daemon
+can omit only digest schedulers and continue other work.
+
+`daily_digest.enabled: false` stops refresh, catch-up, close, recovery, and
+scheduled delivery without deleting persisted records, frontiers, tombstones,
+or delivery receipts; pure CLI/Web reads remain available. Telegram requires
+both the parent feature and `daily_digest.telegram.enabled: true`. It uses the
+existing bot token environment and `Config.telegram_chat_id!`; the first
+positive ID in `bot.chat_id_allowlist` is the sole private recap destination.
+See [[modules/daily-digest]] and [[commands/digest]].
 
 ## Screenote config
 
@@ -540,7 +579,7 @@ they do not create a second writable copy of patrol checkpoints or ledgers.
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`, then refreshes the activated SQL projection. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
-| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; used by Hive's answer digest. |
+| `telegram_chat_id!` | Returns the first positive allowlisted Telegram chat or raises a configuration error; used as the sole private destination by Hive's answer digest and opt-in daily recap. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |

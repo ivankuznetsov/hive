@@ -65,6 +65,16 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  class FakeAdmissionView
+    def initialize(store)
+      @store = store
+    end
+
+    def find(attempt_id)
+      @store.fetch(attempt_id)
+    end
+  end
+
   def test_repeated_ticks_and_healer_restart_dispatch_exactly_one_budgeted_successor
     with_task do |task|
       with_tmp_dir do |root|
@@ -81,10 +91,16 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         )
 
         first = healer(store, outcomes, processor, dispatcher, logger)
-        first.heal_attempt_losses([ lost ], now: RETRY_AT)
-        first.heal_attempt_losses([ lost ], now: RETRY_AT + 1)
+        first.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT
+        )
+        first.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT + 1
+        )
         restarted = healer(store, outcomes, processor, dispatcher, logger)
-        restarted.heal_attempt_losses([ lost ], now: RETRY_AT + 2)
+        restarted.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT + 2
+        )
 
         assert_equal 1, dispatcher.calls.size
         call = dispatcher.calls.first
@@ -122,7 +138,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           admission_open: -> { admission_open }
         )
 
-        service.heal_attempt_losses(lost_attempts, now: RETRY_AT)
+        service.heal_attempt_losses(
+          lost_attempts, admission_view: admission_view(store), now: RETRY_AT
+        )
 
         assert_equal 1, dispatcher.calls.size,
                      "shutdown after one lost-attempt successor must suppress later successors"
@@ -149,6 +167,28 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_missing_tick_admission_view_skips_without_scanning_or_mutating
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_attempt(store, retry_charge: 0, task_folder: root)
+      store.define_singleton_method(:scan) { raise "global attempt scan must not run" }
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      dispatcher = FakeDispatcher.new
+      logger = FakeLogger.new
+      service = healer(
+        store, outcomes, FakeProcessor.new(outcomes, root), dispatcher, logger
+      )
+
+      assert_nil service.heal_attempt_losses([ lost ], now: RETRY_AT)
+
+      assert_empty dispatcher.calls
+      assert_nil outcomes.fetch(lost.attempt_id)
+      event = logger.events.find { |name, _attributes| name == :marker_heal_failed }
+      refute_nil event
+      assert_match(/current tick admission view/, event.last.fetch(:error))
+    end
+  end
+
   def test_retry_charge_is_lineage_evidence_not_an_exhaustion_budget
     with_task do |task|
       with_tmp_dir do |root|
@@ -160,7 +200,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         processor = FakeProcessor.new(outcomes, task.folder)
 
         healer(store, outcomes, processor, dispatcher, logger)
-          .heal_attempt_losses([ lost ], now: RETRY_AT)
+          .heal_attempt_losses(
+            [ lost ], admission_view: admission_view(store), now: RETRY_AT
+          )
 
         assert_equal 1, dispatcher.calls.size
         assert_equal 4, dispatcher.calls.first.fetch(:retry_charge)
@@ -190,18 +232,28 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         retry_delay = Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.first
         scheduled_at = NOW + 1 + retry_delay
 
-        service.heal_attempt_losses([ lost ], now: scheduled_at - 1)
+        service.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: scheduled_at - 1
+        )
         assert_empty dispatcher.calls
 
-        service.heal_attempt_losses([ lost ], now: scheduled_at)
+        service.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: scheduled_at
+        )
         assert_equal 1, dispatcher.calls.size
         first_retry_at = outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
 
-        service.heal_attempt_losses([ lost ], now: scheduled_at + retry_delay - 1)
+        service.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store),
+          now: scheduled_at + retry_delay - 1
+        )
         assert_equal 1, dispatcher.calls.size
         assert_equal first_retry_at, outcomes.fetch(lost.attempt_id).fetch("last_retry_at")
 
-        service.heal_attempt_losses([ lost ], now: scheduled_at + retry_delay)
+        service.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store),
+          now: scheduled_at + retry_delay
+        )
         assert_equal 2, dispatcher.calls.size
       end
     end
@@ -221,7 +273,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
-        ).heal_attempt_losses([ lost ], now: RETRY_AT)
+        ).heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT
+        )
 
         assert_equal worker_argv, dispatcher.calls.first.fetch(:argv)
       end
@@ -246,7 +300,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
-        ).heal_attempt_losses([ lost ], now: RETRY_AT)
+        ).heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT
+        )
 
         assert_equal [
           "hive", "brainstorm", task.folder, "--json",
@@ -271,12 +327,15 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           starting_revision: "abc", retry_charge: 2,
           inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
         )
+        store.decision_index.record_successor(successor)
         outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
         dispatcher = FakeDispatcher.new
         processor = FakeProcessor.new(outcomes, task.folder)
 
         healer(store, outcomes, processor, dispatcher, FakeLogger.new)
-          .heal_attempt_losses([ lost ], now: NOW + 3)
+          .heal_attempt_losses(
+            [ lost ], admission_view: admission_view(store), now: NOW + 3
+          )
 
         assert_empty dispatcher.calls
         outcome = outcomes.fetch(lost.attempt_id)
@@ -297,9 +356,13 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       service = healer(store, outcomes, processor, dispatcher, logger)
 
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { raise Hive::InvalidTaskPath }) do
-        service.heal_attempt_losses([ lost ], now: NOW + 2)
+        service.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: NOW + 2
+        )
         first_updated_at = outcomes.fetch(lost.attempt_id).fetch("updated_at")
-        service.heal_attempt_losses([ lost ], now: NOW + 3)
+        service.heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: NOW + 3
+        )
         assert_equal first_updated_at, outcomes.fetch(lost.attempt_id).fetch("updated_at"),
                      "an unchanged missing-task diagnostic must not rewrite the sidecar every tick"
       end
@@ -311,7 +374,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       broken_processor = Object.new
       broken_processor.define_singleton_method(:process) { |*_args, **_kwargs| raise "capture failed" }
       healer(store, outcomes, broken_processor, dispatcher, logger)
-        .heal_attempt_losses([ lost ], now: NOW + 3)
+        .heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: NOW + 3
+        )
       assert logger.events.any? { |name, attrs| name == :marker_heal_failed && attrs[:error].include?("capture failed") }
     end
   end
@@ -348,7 +413,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
           dispatcher, FakeLogger.new
-        ).heal_attempt_losses([ lost ], now: RETRY_AT)
+        ).heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT
+        )
 
         # There is no switch to hold this any more: a lost attempt is healed
         # like every other failure.
@@ -370,7 +437,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
           dispatcher, FakeLogger.new,
           project_daemon_enabled: ->(project) { project != "demo" }
-        ).heal_attempt_losses([ lost ], now: RETRY_AT)
+        ).heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT
+        )
 
         assert_empty dispatcher.calls
         assert_nil outcomes.fetch(lost.attempt_id),
@@ -413,7 +482,9 @@ class DaemonAttemptLossHealerTest < Minitest::Test
         healer(
           store, outcomes, FakeProcessor.new(outcomes, task.folder),
           dispatcher, FakeLogger.new
-        ).heal_attempt_losses([ lost ], admission_view: :tick, now: RETRY_AT)
+        ).heal_attempt_losses(
+          [ lost ], admission_view: admission_view(store), now: RETRY_AT
+        )
 
         assert_empty dispatcher.calls
         outcome = outcomes.fetch(lost.attempt_id)
@@ -424,6 +495,10 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   end
 
   private
+
+  def admission_view(store)
+    FakeAdmissionView.new(store)
+  end
 
   def healer(store, outcomes, processor, dispatcher, logger,
              project_daemon_enabled: ->(_project) { true },

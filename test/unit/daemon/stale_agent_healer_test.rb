@@ -183,6 +183,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_projection_repair_row_never_enters_error_recovery
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "error",
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+          "repair_command" => "hive repair-projection s --project p --stage 4-execute"
+        },
+        live_task_lock: false,
+        projection_repair: true
+      )
+
+      heal([ row ])
+
+      assert_empty @coordinator.requests
+      assert_empty @logger.events
+      assert_equal :agent_working, Hive::Markers.current(state_file).name
+    end
+  end
+
   def test_legacy_dirty_execute_wait_is_not_runtime_healer_vocabulary
     with_marker_file do |state_file|
       attrs = {
@@ -1135,7 +1157,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                project: "p", slug: "s", stage: "4-execute",
                marker: "agent_working", marker_attrs: {}, action: "error",
                live_task_lock: nil, workflow: nil, task_lock_pid: nil,
-               task_lock_process_start_time: nil, task_lock_id: nil)
+               task_lock_process_start_time: nil, task_lock_id: nil,
+               projection_repair: false)
     Row.new(
       project: project,
       slug: slug,
@@ -1144,6 +1167,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       workflow: workflow,
       marker: marker,
       marker_attrs: marker_attrs,
+      projection_repair: projection_repair,
       folder: File.dirname(state_file),
       state_file: state_file,
       state_file_mtime: mtime,

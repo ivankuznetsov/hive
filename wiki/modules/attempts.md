@@ -3,8 +3,8 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-27
-tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics]
+updated: 2026-08-29
+tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics, projection-repair]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and
@@ -56,18 +56,23 @@ It creates an in-monorepo seam that Hive can exercise first; a separately
 published package remains a later response to demonstrated non-Hive demand,
 not a requirement of the module design.
 
-Task-projection cache validation and journal replay use
-`Store#fetch_projection_binding`. Hot records still receive full schema
-validation because their lifecycle fields can
+Task-projection validation uses `Store#fetch_projection_binding`. Hot records
+still receive full schema validation because their lifecycle fields can
 change. Immutable permanent proofs take a narrower validated read of the exact
 identity, generation, state, outcome, lease, and lineage fields consumed by the
 projection. New permanent proofs publish that subset as a separate immutable
 point-addressed sidecar; older proofs fall back to the full document and can be
 backfilled without changing it. Full `Store#fetch` continues to validate
 receipts, diagnostics, and every output reference for consumers that use those
-domains. This prevents a status scan from repeatedly reading or walking
-cumulative inherited-output arrays while preserving fail-closed binding
-validation.
+domains.
+
+A routine task-graph scan opens one `Store::ProjectionReader` and passes it
+through every task projection and active closure check. Each task may bind at
+most 100 attempt IDs and point-fetch at most 32 predecessors; scan-wide cache
+hits avoid duplicate reads but never expand those task-local budgets. Status
+does not scan permanent proof directories or complete attempt history. A
+missing binding fails only that task into projection repair instead of opening
+an unbounded fallback.
 
 The component catalog keeps this admission slice as a guarded reference
 `candidate`. Its facade, result contracts, focused clean-process load, and
@@ -87,9 +92,10 @@ other candidate entry points.
 Hive still has narrow, cataloged internal construction sites: the daemon
 composition root wires reconciliation and loss processing, the private
 supervisor argv adapter starts the owner wrapper, module inspection and
-dry-run preview open the canonical store read-only, the `hive status` scan
-hoists one read-only store for the whole scan, and compatibility adapters
-plus `TaskClosure`'s active-attempt verification do the same. These sites are
+dry-run preview open the canonical store read-only, and a `hive status` scan
+hoists one read-only projection reader for the whole graph and passes it to
+active closure validation. Compatibility adapters retain their cataloged
+construction sites. These sites are
 not alternate admission producers. The component-boundary test pins each
 file/constant pair and rejects the same construction from any newly listed
 file even while Attempts remains a candidate. Authorization is file-granular,
@@ -373,6 +379,16 @@ IDs through `Store#fetch`, bounded to 100 seed IDs, 32 predecessors, and 512
 KiB. Only the canonical projection binding can mark an attempt current;
 overlapping live but unbound records are conflicting evidence.
 
+Routine status and daemon generation checks use the same task-local checkpoint
+and bounded suffix rather than replaying the full journal. If the current
+attempt lineage cannot be verified inside those limits, that task becomes
+operator-owned `condition_projection_repair_required`; no healing or admission
+path scans attempt history as a substitute. `hive repair-projection` is the
+only direct command that may replay the selected task's full journal, and even
+it point-reads only attempt IDs named by that journal. Attempt records and
+proofs remain read-only authority, so projection repair requires no Attempts
+migration or periodic monitor.
+
 Every actual child spawn receives a separate session/correlation ID beneath
 the attempt. Durable start/finish observations preserve role, requested
 provider/model/effort, provider-reported actual model when available, health,
@@ -529,6 +545,10 @@ lifecycle: `StaleAgentHealer#heal_attempt_losses` verifies orphan cleanup,
 captures dirty state, and asks the shared attempt dispatcher to admit a
 same-generation successor. Conditions and status may expose `attempt_lost` as
 read-only health, but marker recovery does not interpret attempt lineage.
+The healer receives the reconciler's bounded per-tick `AdmissionView` and uses
+its exact successor index plus point lookups. Without that view it performs no
+mutation and logs bounded unavailability; it never falls back to
+`Attempts::Store#scan`.
 
 `retry_charge` remains durable lineage/accounting evidence but is not an
 exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost

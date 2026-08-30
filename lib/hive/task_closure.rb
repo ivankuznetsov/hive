@@ -133,9 +133,11 @@ module Hive
         new.read(task, project: project, quarantine: quarantine)
       end
 
-      def projection(task, project: nil, attempt_store: nil)
+      def projection(task, project: nil, attempt_store: nil, task_projection: nil)
         service = new(attempt_store: attempt_store)
-        result = service.read(task, project: project)
+        result = service.read(
+          task, project: project, task_projection: task_projection
+        )
         return nil if result.absent?
         return result.receipt if result.valid?
 
@@ -194,7 +196,8 @@ module Hive
       end
 
       def task_generation(task, marker: Hive::Markers.current(task.state_file),
-                          attempt_store: nil)
+                          attempt_store: nil, projection: nil,
+                          condition_task_generation: nil, commit_generation: nil)
         markerless = if File.file?(task.state_file)
           Hive::Markers.without_markers(File.binread(task.state_file))
         else
@@ -203,9 +206,16 @@ module Hive
         meta = File.file?(task.meta_yml_path) ? File.binread(task.meta_yml_path) : ""
         pr_path = File.join(task.folder, "pr.md")
         pr_identity = File.file?(pr_path) ? File.binread(pr_path) : ""
-        store_options = { task_folder: task.folder }
-        store_options[:attempt_store] = attempt_store if attempt_store
-        projection = Hive::TaskProjection::Store.new(**store_options).read(marker: marker)
+        if projection
+          condition_task_generation = projection["identity"]["task_generation"]
+          commit_generation = projection["identity"]["commit_generation"]
+        elsif condition_task_generation.nil? || commit_generation.nil?
+          store_options = { task_folder: task.folder }
+          store_options[:attempt_store] = attempt_store if attempt_store
+          projection = Hive::TaskProjection::Store.new(**store_options).read(marker: marker)
+          condition_task_generation = projection["identity"]["task_generation"]
+          commit_generation = projection["identity"]["commit_generation"]
+        end
         digest(
           "slug" => task.slug,
           "id" => task.id&.to_s,
@@ -213,8 +223,8 @@ module Hive
           "state_without_markers_sha256" => ::Digest::SHA256.hexdigest(markerless),
           "meta_sha256" => ::Digest::SHA256.hexdigest(meta),
           "pr_identity_sha256" => ::Digest::SHA256.hexdigest(pr_identity),
-          "condition_task_generation" => projection["identity"]["task_generation"],
-          "commit_generation" => projection["identity"]["commit_generation"]
+          "condition_task_generation" => condition_task_generation,
+          "commit_generation" => commit_generation
         )
       end
 
@@ -242,13 +252,14 @@ module Hive
         end.first
       end
 
-      def validate_active_cas!(task, receipt, attempt_store: nil)
+      def validate_active_cas!(task, receipt, attempt_store: nil, projection: nil)
         observation = receipt.fetch("observation")
         current_stage = "#{task.stage_index}-#{task.stage_name}"
         marker = Hive::Markers.current(task.state_file)
         unless observation.fetch("stage") == current_stage &&
                observation.fetch("task_generation") == task_generation(
-                 task, marker: marker, attempt_store: attempt_store
+                 task, marker: marker, attempt_store: attempt_store,
+                 projection: projection
                ) &&
                observation.fetch("marker_generation") == marker_generation(marker)
           raise InvalidReceipt, "closure receipt no longer matches the active task generation"
@@ -412,7 +423,7 @@ module Hive
       end
     end
 
-    def read(task, project: nil, quarantine: true)
+    def read(task, project: nil, quarantine: true, task_projection: nil)
       path = File.join(task.folder, RECEIPT_BASENAME)
       unless File.file?(path)
         quarantined = latest_quarantine(task)
@@ -425,7 +436,10 @@ module Hive
 
       bytes = File.binread(path)
       receipt = JSON.parse(bytes)
-      validate_receipt!(receipt, task: task, project: project)
+      validate_receipt!(
+        receipt, task: task, project: project,
+        task_projection: task_projection
+      )
       ReadResult.new(status: "valid", receipt: receipt, error: nil, quarantine_path: nil)
     rescue JSON::ParserError, InvalidReceipt, KeyError, TypeError, ArgumentError => e
       quarantine_path = quarantine ? quarantine!(task, bytes || safe_read(path), e.message) : nil
@@ -972,7 +986,7 @@ module Hive
       receipt
     end
 
-    def validate_receipt!(receipt, task:, project:)
+    def validate_receipt!(receipt, task:, project:, task_projection: nil)
       raise InvalidReceipt, "closure receipt must be an object" unless receipt.is_a?(Hash)
       unless receipt.keys.sort == RECEIPT_KEYS.sort
         raise InvalidReceipt, "closure receipt fields do not match the v1 contract"
@@ -1028,7 +1042,10 @@ module Hive
       end
       validate_receipt_semantics!(receipt)
       unless self.class.terminal_task?(task)
-        self.class.validate_active_cas!(task, receipt, attempt_store: @attempt_store)
+        self.class.validate_active_cas!(
+          task, receipt, attempt_store: @attempt_store,
+          projection: task_projection
+        )
       end
       receipt
     end

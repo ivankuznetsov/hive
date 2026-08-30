@@ -66,7 +66,8 @@ module Hive
         generation = Hive::Attempts::Generation.resolve(
           task: task,
           project: project,
-          intended_stage: "7-artifacts" # coding-scoped: capture applies to the coding artifact stage
+          intended_stage: "7-artifacts", # coding-scoped: capture applies to the coding artifact stage
+          task_input_epoch: 0
         ).task_generation
         new(
           task: task, project: project, changed_paths: [],

@@ -616,8 +616,12 @@ class DropCommandTest < Minitest::Test
   end
 
   def wait_for_pid_file(path)
-    deadline = Time.now + 2
-    sleep 0.01 until File.exist?(path) || Time.now >= deadline
+    deadline = Time.now + 10
+    until File.exist?(path)
+      raise "nested agent fixture did not publish #{path} within 10s" if Time.now >= deadline
+
+      sleep 0.01
+    end
     Integer(File.read(path))
   end
 

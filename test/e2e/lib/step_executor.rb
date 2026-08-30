@@ -5,6 +5,7 @@ require "yaml"
 require "hive/lock"
 require "hive/markers"
 require "hive/stages"
+require "hive/task_projection/store"
 require_relative "artifact_capture"
 require_relative "background_process"
 require_relative "cli_driver"
@@ -233,6 +234,9 @@ module Hive
           FileUtils.mkdir_p(File.dirname(path))
           File.write(path, expand_string(file_spec.fetch("content", "")))
         end
+        Hive::TaskProjection::Store.new(task_folder: folder).initialize_pristine!(
+          marker: Hive::Markers.current(state_file)
+        )
       end
 
       def step_write_file(step)

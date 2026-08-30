@@ -1,4 +1,5 @@
 require "json"
+require "shellwords"
 require "hive/conditions/registry"
 require "hive/conditions/value"
 require "hive/conditions/policy"
@@ -13,9 +14,74 @@ module Hive
     SCHEMA = "hive-task-projection".freeze
     SCHEMA_VERSION = 1
     OPERATOR_ACTIONS_MAX = 20
+    REPAIR_REQUIRED_REASON = "condition_projection_repair_required".freeze
+    TERMINAL_REPAIR_REASONS = %w[
+      checkpoint_oversized attempt_ids_exhausted
+    ].freeze
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
+    class RoutineLockUnavailable < Error; end
+    class RoutineLockInvalid < RoutineLockUnavailable; end
+
+    # Projection repair is a producer-owned row classification. Marker attrs
+    # are agent-authored evidence and must never grant this control state.
+    def self.repair_required_row?(row)
+      value = if row.respond_to?(:projection_repair)
+        row.projection_repair
+      elsif row.is_a?(Hash)
+        row.key?(:projection_repair) ? row[:projection_repair] : row["projection_repair"]
+      end
+      value == true
+    end
+
+    def self.terminal_repair_reason?(reason)
+      TERMINAL_REPAIR_REASONS.include?(reason.to_s)
+    end
+
+    def self.repair_command(project:, slug:, stage:)
+      Shellwords.shelljoin([
+        "hive", "repair-projection", slug.to_s,
+        "--project", project.to_s, "--stage", stage.to_s
+      ])
+    end
+
+    def self.repair_marker_attrs(bounded:, project:, slug:, stage:)
+      diagnostic = bounded.diagnostics.first || {
+        "reason" => "bounded_projection_unavailable",
+        "message" => "bounded task projection is unavailable",
+        "details" => {}
+      }
+      reason = diagnostic.fetch("reason", "bounded_projection_unavailable").to_s
+      terminal = terminal_repair_reason?(reason)
+      transient = reason == "journal_lock_busy"
+      message = if transient
+        "task projection is locked by an exact-task repair; wait for it to finish"
+      elsif terminal
+        "#{diagnostic.fetch('message', 'bounded task projection exceeded its cap')}; " \
+          "compact this task's retained projection history before repair"
+      else
+        "#{diagnostic.fetch('message', 'bounded task projection is unavailable')}; " \
+          "run the exact-task projection repair"
+      end
+      attrs = {
+        "reason" => REPAIR_REQUIRED_REASON,
+        "owner" => "operator",
+        "projection_reason" => reason[0, 128],
+        "projection_state" => bounded.state.to_s[0, 64],
+        "message" => message.to_s[0, 500]
+      }
+      unless terminal || transient
+        attrs["repair_command"] = repair_command(
+          project: project, slug: slug, stage: stage
+        )
+      end
+      details = diagnostic["details"]
+      if details.is_a?(Hash) && details["cap"]
+        attrs["projection_cap"] = details["cap"].to_s[0, 128]
+      end
+      attrs
+    end
 
     INTERNAL_FACT_KEYS = %w[
       journal_index attempt_accepted_at durable_attempt_state

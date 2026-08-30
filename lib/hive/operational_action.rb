@@ -1,6 +1,7 @@
 require "digest"
 require "time"
 require "hive/recovery/api"
+require "hive/task_projection"
 require "hive/workflow_package/canonical_json"
 require "hive/task_closure"
 
@@ -91,6 +92,7 @@ module Hive
 
       def recoverable?(row)
         Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+          !Hive::TaskProjection.repair_required_row?(row) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
           !Hive::Recovery.intervention_required?(
             marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
@@ -141,10 +143,26 @@ module Hive
         else
           Hive::Markers.current(task.state_file)
         end
-        projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+        bounded = Hive::TaskProjection::Store.new(
+          task_folder: task.folder
+        ).read_routine(
+          marker: marker,
+          pristine: Hive::TaskProjection::Store.pristine_task?(task, marker)
+        )
+        if bounded.current?
+          projection = bounded.projection
+          action_marker = marker
+        else
+          attrs = Hive::TaskProjection.repair_marker_attrs(
+            bounded: bounded, project: project, slug: task.slug,
+            stage: "#{task.stage_index}-#{task.stage_name}"
+          )
+          action_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+          projection = Hive::TaskProjection.project(records: [], marker: action_marker)
+        end
         config = Hive::Config.load(task.project_root)
         action = Hive::TaskAction.for(
-          task, marker, projection: projection, config: config, project_name: project
+          task, action_marker, projection: projection, config: config, project_name: project
         )
         projection_data = projection.to_h
         {
@@ -154,8 +172,9 @@ module Hive
           "state_file" => task.state_file,
           "workflow" => task.workflow.id.to_s,
           "stage" => "#{task.stage_index}-#{task.stage_name}",
-          "marker" => marker.name.to_s,
-          "attrs" => marker.attrs,
+          "marker" => action_marker.name.to_s,
+          "attrs" => action_marker.attrs,
+          "projection_repair" => !bounded.current?,
           "mtime" => observation_mtime(task),
           "action" => action.key,
           "condition_task_generation" => projection_data.dig("identity", "task_generation"),

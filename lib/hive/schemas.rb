@@ -10,6 +10,7 @@ module Hive
       "hive-status" => 7,
       "hive-running-status" => 1,
       "hive-operational-status" => 4,
+      "hive-repair-projection" => 1,
       "hive-circuits" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,

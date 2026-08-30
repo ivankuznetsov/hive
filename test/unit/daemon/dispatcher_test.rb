@@ -788,6 +788,40 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  coordinator.resumes.map { |entry| entry.fetch(:admission_context) }
   end
 
+  def test_dispatch_request_scan_reuses_one_admission_context_for_all_bound_tasks
+    dispatcher, = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("s1", "s2")
+    requests.each { |request| request.recovery = nil }
+    rows = recovery_scan_rows("s1", "s2")
+    admission_context = Hive::DependencyAdmission::Context.new(projects: [])
+    context_builds = 0
+    observed_contexts = []
+    dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, **options|
+      observed_contexts << options.fetch(:admission_context)
+      false
+    end
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          lambda do |_projects|
+            context_builds += 1
+            admission_context
+          end
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_equal 1, context_builds
+    assert_equal [ admission_context, admission_context ], observed_contexts
+  end
+
   def test_empty_dispatch_request_scan_skips_global_index_work
     dispatcher, = make_dispatcher(rows: [])
     rows = Object.new
@@ -831,6 +865,37 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal 1, context_builds
     assert_empty coordinator.resumes
+    blocked = logger.events.filter_map do |name, attributes|
+      next unless name == :dispatch_request_blocked
+      next unless attributes[:reason] == "admission_context_unavailable"
+
+      attributes[:request_id]
+    end
+    assert_equal %w[recovery-s1 recovery-s2], blocked
+    refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
+  end
+
+  def test_bound_dispatch_requests_stay_queued_when_admission_context_is_unavailable
+    dispatcher, supervisor, _controller, logger = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("s1", "s2")
+    requests.each { |request| request.recovery = nil }
+    rows = recovery_scan_rows("s1", "s2")
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          ->(*) { raise "fleet snapshot unavailable" }
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_empty supervisor.spawned
     blocked = logger.events.filter_map do |name, attributes|
       next unless name == :dispatch_request_blocked
       next unless attributes[:reason] == "admission_context_unavailable"
@@ -1393,7 +1458,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
-          attempt_id: nil, task_generation: nil, id: 1)
+          attempt_id: nil, task_generation: nil,
+          condition_task_generation: nil, projection_repair: false, id: 1)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, id: id, stage: stage, workflow: workflow, marker: marker,
@@ -1405,7 +1471,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked,
       admission_error: admission_error,
-      attempt_id: attempt_id, task_generation: task_generation
+      attempt_id: attempt_id, task_generation: task_generation,
+      condition_task_generation: condition_task_generation,
+      projection_repair: projection_repair
     )
   end
 
@@ -1688,10 +1756,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, disposition.fetch(:retry_safe)
   end
 
+  def test_projection_repair_row_is_operator_owned_and_never_retried
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    observed = row(
+      marker: "error", action: "error", command: nil,
+      projection_repair: true,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "message" => "checkpoint missing",
+        "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"
+      }
+    )
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :projection_repair_required, disposition.fetch(:decision)
+    assert_equal "operator", disposition.fetch(:owner)
+    assert_equal "checkpoint missing", disposition.fetch(:reason)
+  end
+
+  def test_idle_projection_repair_does_not_block_ready_patrol_fix_in_same_tick
+    repair = row(
+      slug: "repair-me", marker: "error", action: "error", command: nil,
+      projection_repair: true,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
+      }
+    )
+    fix = row(
+      slug: "ready-fix", stage: "2-fix", workflow: "patrol-fix",
+      marker: "none", action: "ready_to_run", command: "hive run ready-fix"
+    )
+    dispatcher, supervisor = make_dispatcher(rows: [ repair, fix ])
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "ready-fix" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+  end
+
   # Exempting a class of error from automatic retry does not make it safe, it
   # makes it stuck: the exempt reason still needs the same retry, performed by
-  # hand at whatever delay a human happens to notice it. Every error marker is
-  # assessed now, and the assessment decides — not the reason string.
+  # hand at whatever delay a human happens to notice it. Every durable workflow
+  # error is assessed now, and the assessment decides — not the reason string.
+  # Producer-owned synthetic projection-repair rows are handled separately.
   def test_terminal_outcome_errors_are_assessed_for_automatic_retry
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       snapshot = FakeOperationalSnapshot.new
@@ -3839,6 +3949,34 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "global_cap", blocked[1][:reason]
   end
 
+  def test_live_projection_repair_row_still_reserves_real_capacity
+    rows = [
+      row(
+        slug: "repairing", marker: "error", action: "error", command: nil,
+        live_task_lock: true,
+        projection_repair: true,
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
+        }
+      ),
+      row(
+        slug: "ready-fix", stage: "2-fix", workflow: "patrol-fix",
+        marker: "none", action: "ready_to_run", command: "hive run ready-fix"
+      )
+    ]
+    dispatcher, supervisor, controller, logger = make_dispatcher(rows: rows)
+    controller.instance_variable_set(:@max_concurrent_runs, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    blocked = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "ready-fix"
+    end
+    refute_nil blocked
+    assert_equal "global_cap", blocked.last.fetch(:reason)
+  end
+
   def test_needs_input_rows_do_not_count_toward_project_cap
     rows = [
       row(slug: "waiting", stage: "2-brainstorm", action: "needs_input",
@@ -5641,6 +5779,37 @@ end
   # ── dispatch-request queue integration ───────────────────────────────
 
   Q = Hive::Daemon::DispatchRequestQueue
+
+  def test_projection_repair_row_blocks_durable_request_admission
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      repair = row(
+        project: "p1", slug: "s1", marker: "error", action: "error", command: nil,
+        projection_repair: true,
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+          "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"
+        }
+      )
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        rows: [ repair ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "REPAIR-BLOCKED")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned
+      blocked = logger.events.find do |name, attrs|
+        name == :dispatch_request_blocked && attrs[:request_id] == "REPAIR-BLOCKED"
+      end
+      refute_nil blocked
+      assert_equal "projection_repair_required", blocked.last.fetch(:reason)
+      assert_equal [ "REPAIR-BLOCKED" ], Q.pending(state_home: state_home).map(&:request_id)
+    end
+  end
 
   def test_attempt_reconciliation_precedes_status_healers_and_admission
     order = []
@@ -7721,6 +7890,64 @@ end
     end
   end
 
+  def test_bound_dispatch_request_reuses_projected_task_input_epoch
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug)
+      .new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "current-generation"
+    )
+    observed = row(
+      project: "p1", slug: "demo-task", condition_task_generation: 7
+    )
+    captured = nil
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      replacement = lambda do |**options|
+        captured = options
+        generation
+      end
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, replacement) do
+        assert dispatcher.send(:bound_task_request_current?, request, row: observed)
+      end
+    end
+
+    assert_equal 7, captured.fetch(:task_input_epoch)
+  end
+
+  def test_bound_dispatch_generation_reuses_the_supplied_admission_context
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug)
+      .new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "current-generation"
+    )
+    context = Object.new
+    captured = nil
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      replacement = lambda do |**options|
+        captured = options
+        generation
+      end
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, replacement) do
+        assert dispatcher.send(
+          :bound_task_request_current?, request, admission_context: context
+        )
+      end
+    end
+
+    assert_same context, captured.fetch(:admission_context)
+  end
+
   def test_dispatcher_removes_a_durable_request_with_stale_task_identity
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, = make_dispatcher(
@@ -7732,7 +7959,9 @@ end
         expected_stage: "4-execute", task_generation: "old-generation",
         state_home: state_home, now: T0
       )
-      dispatcher.define_singleton_method(:bound_task_request_current?) { |_request| false }
+      dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, row: nil, **|
+        false
+      end
       stub_find_project!(dispatcher, "p1")
       begin
         dispatcher.tick(now: T0)

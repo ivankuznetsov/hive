@@ -279,6 +279,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     folder = stage_folder(project_root, stage.dir)
     FileUtils.mkdir_p(folder)
     Hive::TaskMeta.write(folder, id: 101, slug: SLUG, display_name: "Generic Daemon", workflow: descriptor.id.to_s)
+    seed_task_projection(folder)
   end
 
   def seed_coding_task(project)

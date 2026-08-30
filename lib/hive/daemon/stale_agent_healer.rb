@@ -8,6 +8,7 @@ require "hive/process_kill"
 require "hive/workflows"
 require "hive/daemon/recovery_coordinator"
 require "hive/attempts/lost_outcome"
+require "hive/task_projection"
 require "hive/terminal_outcome"
 
 module Hive
@@ -112,17 +113,19 @@ module Hive
         return unless @attempt_store && @attempt_dispatcher &&
                       @lost_outcome_store && @lost_outcome_processor
 
+        unless admission_view&.respond_to?(:find)
+          @logger.event(
+            :marker_heal_failed,
+            stage: "attempt_loss", reason: "attempt_lost",
+            error: "bounded attempt-loss healing requires the current tick admission view"
+          )
+          return
+        end
+
         attempts = Array(attempts)
         return if attempts.empty?
 
-        successors = if admission_view
-          {}
-        else
-          @attempt_store.scan.records.each_with_object({}) do |candidate, index|
-            predecessor_id = candidate["predecessor_attempt_id"]
-            index[predecessor_id] ||= candidate if predecessor_id
-          end
-        end
+        successors = {}
 
         attempts.each do |attempt|
           break unless admission_open?
@@ -131,14 +134,11 @@ module Hive
           outcome = @lost_outcome_processor.process(attempt, now: now)
           next unless outcome["status"] == "ready"
 
-          existing = if admission_view
-            successor_id = @attempt_store.decision_index.successor_attempt_id(
-              predecessor_attempt_id: attempt.attempt_id
-            )
-            if successor_id
-              admission_view.respond_to?(:find) ? admission_view.find(successor_id) :
-                @attempt_store.fetch(successor_id)
-            end
+          successor_id = @attempt_store.decision_index.successor_attempt_id(
+            predecessor_attempt_id: attempt.attempt_id
+          )
+          existing = if successor_id
+            admission_view.respond_to?(:find) ? admission_view.find(successor_id) : nil
           else
             successors[attempt.attempt_id]
           end
@@ -240,6 +240,7 @@ module Hive
 
         rows.each do |row|
           break unless admission_open?
+          next if projection_repair_row?(row)
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
@@ -356,6 +357,10 @@ module Hive
         false
       end
 
+      def projection_repair_row?(row)
+        Hive::TaskProjection.repair_required_row?(row)
+      end
+
       def controller_workflow?(row)
         workflow = Hive::Workflows::Registry.fetch(row.workflow.to_s.to_sym)
         workflow.controller?
@@ -379,10 +384,9 @@ module Hive
         nil
       end
 
-      # No error reason is exempt from healing. Exempting one does not make it
-      # safe, it makes it stuck: it still needs the same retry, performed by
-      # hand at whatever delay someone happens to notice. Project scope still
-      # applies — a project the operator disabled is not worked on at all.
+      # Durable workflow errors are healed through the shared coordinator.
+      # Synthetic projection repair never reaches this helper because another
+      # provider run cannot reconstruct the missing derived checkpoint.
       def daemon_enabled_for_row?(row, projects)
         projects.nil? || projects.include?(row.project)
       end

@@ -191,7 +191,8 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
   def write_task(hive_state, stage, slug, state_file:, marker:, workflow: nil, completed_at: nil)
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
-    File.write(File.join(folder, state_file), "<!-- #{marker} -->\n")
+    state_path = File.join(folder, state_file)
+    File.write(state_path, "<!-- #{marker} -->\n")
     Hive::TaskMeta.write(
       folder,
       id: nil,
@@ -200,5 +201,6 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
       workflow: workflow,
       completed_at: completed_at
     )
+    seed_task_projection(folder, state_file: state_path)
   end
 end

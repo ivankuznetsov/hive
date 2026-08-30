@@ -146,6 +146,7 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
 
       <!-- WAITING -->
     MARKDOWN
+    seed_task_projection(folder, state_file: path)
     path
   end
 

@@ -33,10 +33,15 @@ class DailyDigestReaderTest < Minitest::Test
       assert_equal "missing", reader.read(date: "2026-08-30").fetch("reader_status")
 
       store.write_base(record)
+      assert_equal "2026-08-30", reader.read(date: "2026-08-29").fetch("next_date")
+      assert_equal "2026-08-30", reader.read(date: "2026-08-31").fetch("previous_date")
       assert_equal true, reader.read.fetch("stale")
       store.write_base(record.merge("lifecycle" => "closed", "closed_at" => "2026-08-31T00:00:00Z"))
       store.prune("2026-08-30", pruned_at: "2026-09-01T00:00:00Z", reason: "test")
-      assert_equal "pruned", reader.read(date: "2026-08-30").fetch("reader_status")
+      pruned = reader.read(date: "2026-08-30")
+      assert_equal "pruned", pruned.fetch("reader_status")
+      assert_nil pruned.fetch("previous_date")
+      assert_nil pruned.fetch("next_date")
     end
   end
 

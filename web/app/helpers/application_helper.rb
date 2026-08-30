@@ -1,8 +1,10 @@
 require "digest"
+require "time"
 
 module ApplicationHelper
   NAV_SECTIONS = {
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
+    digests: ->(c) { c == "digests" },
     repos: ->(c) { c == "repos" },
     workflows: ->(c) { c == "workflows" },
     modules: ->(c) { c == "modules" },
@@ -14,6 +16,20 @@ module ApplicationHelper
   def nav_class(section)
     active = NAV_SECTIONS.fetch(section).call(controller_path.split("/", 2).first)
     class_names("nav-link", "nav-link-active": active)
+  end
+
+  def digest_task_path(destination, anchor: nil)
+    options = {}
+    options[:source] = destination.fetch(:source) if destination[:source]
+    options[:anchor] = anchor if anchor
+    task_path(destination.fetch(:project), destination.fetch(:slug), **options)
+  end
+
+  def digest_time_tag(value)
+    timestamp = value.is_a?(String) ? Time.iso8601(value) : value
+    time_tag(timestamp)
+  rescue ArgumentError, TypeError
+    tag.span("Time unavailable", class: "digest-meta")
   end
 
   # Turbo morphs by DOM identity. Use a digest of the full raw tuple so

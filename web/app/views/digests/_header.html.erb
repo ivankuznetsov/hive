@@ -1,0 +1,49 @@
+<header class="digest-header">
+  <div>
+    <p class="digest-kicker">Daily activity</p>
+    <h1 id="digest-heading"><%= digest.local_date %></h1>
+    <div class="digest-badges" aria-label="Digest state">
+      <span class="digest-badge digest-badge-<%= digest.lifecycle %>"><%= digest.lifecycle.humanize %></span>
+      <span class="digest-badge digest-badge-<%= digest.completeness %>"><%= digest.completeness.humanize %></span>
+      <span class="digest-badge"><%= digest.content.humanize %></span>
+      <% if digest.attributes["time_zone"] %><span class="digest-badge"><%= digest.attributes["time_zone"] %></span><% end %>
+    </div>
+    <% if digest.attributes["starts_at"] && digest.attributes["ends_at"] %>
+      <p class="digest-meta">
+        <%= digest_time_tag(digest.attributes["starts_at"]) %> → <%= digest_time_tag(digest.attributes["ends_at"]) %>
+        <% if digest.attributes["last_materialized_at"] %>
+          · materialized <%= digest_time_tag(digest.attributes["last_materialized_at"]) %>
+        <% end %>
+      </p>
+    <% end %>
+  </div>
+
+  <nav class="digest-date-nav" aria-label="Digest date">
+    <% if digest.previous_date %>
+      <%= link_to "← Previous", digest_path(digest.previous_date, project: digest.selected_project), class: "digest-date-link" %>
+    <% else %>
+      <span class="digest-date-link" aria-disabled="true">← Previous</span>
+    <% end %>
+    <%= link_to "Current", digest_path("today", project: digest.selected_project), class: "digest-date-link" %>
+    <% if digest.next_date %>
+      <%= link_to "Next →", digest_path(digest.next_date, project: digest.selected_project), class: "digest-date-link" %>
+    <% else %>
+      <span class="digest-date-link" aria-disabled="true">Next →</span>
+    <% end %>
+  </nav>
+</header>
+
+<%= form_with url: digest_path(digest.local_date), method: :get,
+              class: "digest-filter", aria: { label: "Filter digest by project" } do %>
+  <label for="digest-project-filter">Project</label>
+  <select id="digest-project-filter" name="project">
+    <option value="" <%= "selected" if digest.selected_project.blank? %>>All projects</option>
+    <% digest.projects.each do |project| %>
+      <option class="digest-project-option" value="<%= project.fetch("name") %>"
+              <%= "selected" if digest.selected_project == project.fetch("name") %>>
+        <%= project.fetch("name") %><%= " · historical" if digest.historical_project?(project) %>
+      </option>
+    <% end %>
+  </select>
+  <button type="submit" class="btn btn-secondary btn-sm">Apply</button>
+<% end %>

@@ -2855,12 +2855,38 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ]
     dispatcher, = make_dispatcher
 
-    ordered = dispatcher.send(:dispatch_priority_order, rows)
+    ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
 
     assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
                  ordered.map(&:stage), "later stages first"
     assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
                  "stable within a stage — original status order preserved"
+  end
+
+  def test_dispatch_priority_ages_waiting_rows_past_fresh_later_stage_work
+    rows = [
+      row(slug: "fresh-finalize", stage: "8-finalize", mtime: T0 - 60),
+      row(slug: "old-plan", stage: "3-plan", mtime: T0 - (6 * 60 * 60))
+    ]
+    dispatcher, = make_dispatcher
+
+    ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
+
+    assert_equal %w[old-plan fresh-finalize], ordered.map(&:slug),
+                 "aging must prevent a stream of fresh later-stage work from starving old retries"
+  end
+
+  def test_dispatch_priority_does_not_age_missing_or_future_mtimes
+    rows = [
+      row(slug: "future-plan", stage: "3-plan", mtime: T0 + 60),
+      row(slug: "missing-review", stage: "6-review", mtime: nil),
+      row(slug: "fresh-finalize", stage: "8-finalize", mtime: T0 - 60)
+    ]
+    dispatcher, = make_dispatcher
+
+    ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
+
+    assert_equal %w[fresh-finalize missing-review future-plan], ordered.map(&:slug)
   end
 
   def test_advance_action_skips_when_task_folder_vanished_after_snapshot

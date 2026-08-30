@@ -247,6 +247,13 @@ fence only that project. Rows whose policy does not dispatch still run,
 preserving a complete operational disposition set, and the next authoritative
 full scan starts with no inherited fence and replaces the snapshot.
 
+Task-row priority still favors work closer to the end of its workflow, but it
+adds one priority step for every 30 minutes since the row's state-file mtime.
+Fresh rows therefore preserve the pipeline WIP limit, while an old eligible
+plan, retry, or generic-stage row eventually outranks a continuous stream of
+newer later-stage work instead of starving indefinitely. Rows with missing or
+future mtimes receive no aging boost, and equal scores retain source order.
+
 Chronological dispatch-request consumption applies the same rule within each
 queue scan. Once an older request observes the controller's global cap or a
 generic durable-attempt capacity deferral, the scan stops before a later

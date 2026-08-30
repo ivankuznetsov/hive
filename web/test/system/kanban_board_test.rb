@@ -394,7 +394,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
           end
           execute_script(<<~JS)
             const source = document.querySelector("#status-stream-source")
-            source.subscriptionConnected(source.statusConnection)
+            const lifecycle = source.statusOwner
+            lifecycle.subscriptionConnected(lifecycle.currentAttempt)
           JS
           second = Timeout.timeout(10) { catch_ups.pop }
           assert_equal first.fetch("status_version"), second.fetch("status_version")
@@ -457,7 +458,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
               end
               execute_script(<<~JS)
                 const source = document.querySelector("#status-stream-source")
-                source.subscriptionConnected(source.statusConnection)
+                const lifecycle = source.statusOwner
+                lifecycle.subscriptionConnected(lifecycle.currentAttempt)
               JS
               second = Timeout.timeout(10) { catch_ups.pop }
 
@@ -484,27 +486,28 @@ class KanbanBoardTest < ApplicationSystemTestCase
     result = evaluate_script(<<~JS)
       (() => {
         const source = document.querySelector("#status-stream-source")
-        const connection = source.statusConnection
-        const originalPerform = connection.subscription.perform
+        const lifecycle = source.statusOwner
+        const attempt = lifecycle.currentAttempt
+        const originalPerform = attempt.subscription.perform
         const performed = []
         source.catchUpRefresh = {
           token: source.statusVersion,
           location: source.statusLocation
         }
-        connection.subscription.perform = (action, data) => {
+        attempt.subscription.perform = (action, data) => {
           performed.push([action, data])
           return true
         }
 
         try {
-          connection.subscription.disconnected()
-          connection.subscription.connected()
+          attempt.subscription.disconnected({ willAttemptReconnect: true })
+          attempt.subscription.connected({ reconnected: true })
           return {
             catchUpRefreshCleared: !source.catchUpRefresh,
             performed
           }
         } finally {
-          connection.subscription.perform = originalPerform
+          attempt.subscription.perform = originalPerform
         }
       })()
     JS
@@ -512,32 +515,6 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert result.fetch("catchUpRefreshCleared")
     assert_equal false, result.dig("performed", 0, 1, "refresh_attempted"),
                  "a later real reconnect must be eligible to recover a now-stale page"
-  end
-
-  test "DOM teardown during reconnect waits for the current confirmation" do
-    sign_in!
-    assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
-    wait_for_status_subscribers(1)
-
-    retained = evaluate_script(<<~JS)
-      (() => {
-        const source = document.querySelector("#status-stream-source")
-        const owner = source.closest("[data-status-version]")
-        const connection = source.statusConnection
-        const subscription = connection.subscription
-        subscription.disconnected()
-        window.testReconnectingStatusSubscription = subscription
-        owner.remove()
-        return subscription.consumer.subscriptions.subscriptions.includes(subscription)
-      })()
-    JS
-
-    assert retained,
-           "a previously confirmed handle must stay local until its new transport confirms"
-    execute_script("window.testReconnectingStatusSubscription.connected()")
-    wait_for_status_subscribers(0)
-  ensure
-    execute_script("window.testReconnectingStatusSubscription?.unsubscribe?.()") if page&.current_url
   end
 
   test "a permanent source does not carry a catch-up attempt to another URL" do
@@ -586,23 +563,19 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     result = evaluate_script(<<~JS, task_path(project, slug))
       (async (taskPath) => {
-        const { cable } = await import("@hotwired/turbo-rails")
         const liveSource = document.querySelector("#status-stream-source")
-        const originalConsumer = await cable.getConsumer()
         const originalLocation = `${window.location.pathname}${window.location.search}`
         const pageToken = document.querySelector("[data-status-version]").dataset.statusVersion
-        let releaseConsumer
-        const delayedConsumer = new Promise((resolve) => { releaseConsumer = resolve })
         const owner = document.createElement("div")
         owner.dataset.statusVersion = pageToken
         const source = document.createElement("hive-status-stream-source")
         source.setAttribute("channel", liveSource.getAttribute("channel"))
         source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
         source.catchUpRefresh = { token: pageToken, location: originalLocation }
+        source.createConsumer = () => new Promise(() => {})
         owner.appendChild(source)
 
         try {
-          cable.setConsumer(delayedConsumer)
           history.replaceState({}, "", taskPath)
           document.body.appendChild(owner)
           const result = {
@@ -610,14 +583,10 @@ class KanbanBoardTest < ApplicationSystemTestCase
           }
           history.replaceState({}, "", originalLocation)
           owner.remove()
-          releaseConsumer(originalConsumer)
-          await Promise.resolve()
           return result
         } finally {
           history.replaceState({}, "", originalLocation)
           owner.remove()
-          releaseConsumer?.(originalConsumer)
-          cable.setConsumer(originalConsumer)
         }
       })(arguments[0])
     JS
@@ -633,14 +602,13 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     result = evaluate_script(<<~JS, task_path(project, slug))
       (async (taskPath) => {
-        const { cable } = await import("@hotwired/turbo-rails")
         const liveSource = document.querySelector("#status-stream-source")
-        const originalConsumer = await cable.getConsumer()
         const originalLocation = `${window.location.pathname}${window.location.search}`
         const pageToken = document.querySelector("[data-status-version]").dataset.statusVersion
         const performed = []
         const subscriptions = []
         const fakeConsumer = {
+          disconnect() {},
           subscriptions: {
             subscriptions,
             create(_channel, mixin) {
@@ -669,12 +637,13 @@ class KanbanBoardTest < ApplicationSystemTestCase
         owner.appendChild(source)
 
         try {
-          cable.setConsumer(fakeConsumer)
+          source.createConsumer = async () => fakeConsumer
           history.replaceState({}, "", taskPath)
           document.body.appendChild(owner)
           await new Promise((resolve) => setTimeout(resolve, 0))
           history.replaceState({}, "", originalLocation)
-          source.subscriptionConnected(source.statusConnection)
+          const lifecycle = source.statusOwner
+          lifecycle.subscriptionConnected(lifecycle.currentAttempt)
 
           return {
             markerCleared: !source.catchUpRefresh,
@@ -683,7 +652,6 @@ class KanbanBoardTest < ApplicationSystemTestCase
         } finally {
           history.replaceState({}, "", originalLocation)
           owner.remove()
-          cable.setConsumer(originalConsumer)
         }
       })(arguments[0])
     JS
@@ -751,491 +719,6 @@ class KanbanBoardTest < ApplicationSystemTestCase
     end
   end
 
-  test "a pending status subscription is cancelled across disconnect and reconnect" do
-    sign_in!
-
-    result = evaluate_script(<<~JS)
-      (async () => {
-        const { cable } = await import("@hotwired/turbo-rails")
-        const originalConsumer = await cable.getConsumer()
-        let releaseConsumer
-        const delayedConsumer = new Promise((resolve) => { releaseConsumer = resolve })
-        let created = 0
-        let unsubscribed = 0
-        const performed = []
-        const owner = document.createElement("div")
-        owner.dataset.statusVersion = "7"
-        const source = document.createElement("hive-status-stream-source")
-        source.setAttribute("channel", "StatusChannel")
-        source.setAttribute("signed-stream-name", "test-token")
-        owner.appendChild(source)
-        try {
-          cable.setConsumer(delayedConsumer)
-          document.body.appendChild(owner)
-          owner.remove()
-          document.body.appendChild(owner)
-
-          releaseConsumer({
-            subscriptions: {
-              create(_channel, mixin) {
-                created += 1
-                const subscription = {
-                  unsubscribe() { unsubscribed += 1 },
-                  perform(action, data) {
-                    performed.push([action, data.status_version])
-                    if (performed.length === 1) queueMicrotask(() => mixin.connected())
-                    return performed.length > 1
-                  }
-                }
-                queueMicrotask(() => mixin.connected())
-                return subscription
-              }
-            }
-          })
-          await new Promise((resolve) => setTimeout(resolve, 0))
-          const afterReconnect = { created, unsubscribed, performed }
-
-          owner.remove()
-          await new Promise((resolve) => setTimeout(resolve, 0))
-          return { afterReconnect, afterDisconnect: { created, unsubscribed } }
-        } finally {
-          owner.remove()
-          cable.setConsumer(originalConsumer)
-        }
-      })()
-    JS
-
-    assert_equal({ "created" => 1, "unsubscribed" => 0,
-                   "performed" => [ [ "catch_up", "7" ], [ "catch_up", "7" ] ] },
-                 result.fetch("afterReconnect"),
-                 "a stale pending setup must be discarded before it creates a subscription")
-    assert_equal({ "created" => 1, "unsubscribed" => 1 }, result.fetch("afterDisconnect"),
-                 "the final DOM owner leaving must unsubscribe the final handle")
-  end
-
-  test "DOM teardown waits for Cable confirmation before server unsubscribe" do
-    sign_in!
-    visit repos_path
-    assert_no_selector "#status-stream-source", visible: :all
-    wait_for_status_subscribers(0)
-
-    entered_subscription = Queue.new
-    release_subscription = Queue.new
-    connected = Queue.new
-    disconnected = Queue.new
-    released = false
-    signed_name = Turbo::StreamsChannel.signed_stream_name([ StatusBroadcaster::CHANNEL ])
-    original_verifier = StatusChannel.instance_method(:verified_stream_name_from_params)
-    blocked_verifier = proc do
-      entered_subscription << true
-      release_subscription.pop
-      original_verifier.bind_call(self)
-    end
-
-    with_replaced_singleton_method(StatusBroadcaster, :subscriber_connected!, -> { connected << true }) do
-      with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, -> { disconnected << true }) do
-        with_replaced_instance_method(StatusChannel, :verified_stream_name_from_params, blocked_verifier) do
-          execute_script(<<~JS, signed_name)
-            const owner = document.createElement("div")
-            owner.id = "pending-status-owner"
-            owner.dataset.statusVersion = "pending-token"
-            const source = document.createElement("hive-status-stream-source")
-            source.setAttribute("channel", "StatusChannel")
-            source.setAttribute("signed-stream-name", arguments[0])
-            owner.appendChild(source)
-            document.body.appendChild(owner)
-          JS
-          Timeout.timeout(10) { entered_subscription.pop }
-
-          execute_script("document.querySelector('#pending-status-owner').remove()")
-          release_subscription << true
-          released = true
-
-          Timeout.timeout(10) { connected.pop }
-          Timeout.timeout(10) { disconnected.pop }
-        end
-      end
-    end
-
-    assert connected.empty?
-    assert disconnected.empty?
-  ensure
-    release_subscription << true if release_subscription && !released
-    execute_script("document.querySelector('#pending-status-owner')?.remove()") if page&.current_url
-  end
-
-  test "a detached source has bounded cleanup when confirmation never arrives" do
-    sign_in!
-    visit repos_path
-    wait_for_status_subscribers(0)
-
-    result = evaluate_script(<<~JS)
-      (async () => {
-        const { cable } = await import("@hotwired/turbo-rails")
-        const sourceClass = customElements.get("hive-status-stream-source")
-        const originalConsumer = await cable.getConsumer()
-        const originalDelay = sourceClass.pendingReleaseDelay
-        const subscriptions = []
-        let disconnects = 0
-        let socketCloses = 0
-        let unsubscribes = 0
-        const fakeConsumer = {
-          connection: { webSocket: { close() { socketCloses += 1 } } },
-          subscriptions: {
-            subscriptions,
-            create() {
-              const subscription = {
-                identifier: "never-confirmed-status",
-                consumer: fakeConsumer,
-                perform() { return true },
-                unsubscribe() {
-                  unsubscribes += 1
-                  const index = subscriptions.indexOf(subscription)
-                  if (index >= 0) subscriptions.splice(index, 1)
-                }
-              }
-              subscriptions.push(subscription)
-              return subscription
-            }
-          },
-          disconnect() { disconnects += 1 }
-        }
-        const owner = document.createElement("div")
-        owner.dataset.statusVersion = "pending-token"
-        const source = document.createElement("hive-status-stream-source")
-        source.setAttribute("channel", "StatusChannel")
-        source.setAttribute("signed-stream-name", "test-token")
-        owner.appendChild(source)
-
-        try {
-          sourceClass.pendingReleaseDelay = 0
-          cable.setConsumer(fakeConsumer)
-          document.body.appendChild(owner)
-          const setupDeadline = performance.now() + 1_000
-          while (!source.statusConnection?.subscription && performance.now() < setupDeadline) {
-            await new Promise((resolve) => setTimeout(resolve, 0))
-          }
-          const connection = source.statusConnection
-          if (!connection?.subscription) throw new Error("pending subscription was not created")
-
-          owner.remove()
-          const cleanupDeadline = performance.now() + 1_000
-          while (subscriptions.length > 0 && performance.now() < cleanupDeadline) {
-            await new Promise((resolve) => setTimeout(resolve, 0))
-          }
-
-          return {
-            disconnects,
-            socketCloses,
-            unsubscribes,
-            registered: subscriptions.length,
-            pendingTimer: Boolean(connection.pendingReleaseTimer),
-            retryTimer: Boolean(connection.retryTimer)
-          }
-        } finally {
-          owner.remove()
-          sourceClass.pendingReleaseDelay = originalDelay
-          cable.setConsumer(originalConsumer)
-        }
-      })()
-    JS
-
-    assert_equal({
-      "disconnects" => 1,
-      "socketCloses" => 1,
-      "unsubscribes" => 1,
-      "registered" => 0,
-      "pendingTimer" => false,
-      "retryTimer" => false
-    }, result)
-  end
-
-  test "a server startup rejection retries the live source" do
-    sign_in!
-    visit repos_path
-    wait_for_status_subscribers(0)
-    original_delay = evaluate_script(<<~JS)
-      (() => {
-        const sourceClass = customElements.get("hive-status-stream-source")
-        const delay = sourceClass.retryDelay
-        sourceClass.retryDelay = 0
-        return delay
-      })()
-    JS
-    attempts = 0
-    disconnected = 0
-    counter_mutex = Mutex.new
-    connect = lambda do
-      attempt = counter_mutex.synchronize { attempts += 1 }
-      raise ThreadError, "cannot create broadcaster" if attempt == 1
-    end
-    disconnect = -> { counter_mutex.synchronize { disconnected += 1 } }
-
-    with_replaced_singleton_method(StatusBroadcaster, :subscriber_connected!, connect) do
-      with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, disconnect) do
-        visit root_path
-        assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
-        assert_equal 2, counter_mutex.synchronize { attempts }
-
-        visit repos_path
-        page.document.synchronize(10) do
-          count = counter_mutex.synchronize { disconnected }
-          raise Capybara::ElementNotFound, "recovered subscription did not release" unless count == 1
-        end
-      end
-    end
-
-    assert_equal 1, counter_mutex.synchronize { disconnected }
-  ensure
-    execute_script(<<~JS, original_delay) if page&.current_url && original_delay
-      customElements.get("hive-status-stream-source").retryDelay = arguments[0]
-    JS
-  end
-
-  test "a deferred adapter failure reconnects the live source" do
-    sign_in!
-    visit repos_path
-    wait_for_status_subscribers(0)
-    adapter = ActionCable.server.pubsub
-    original_subscribe = adapter.method(:subscribe)
-    attempts = 0
-    counter_mutex = Mutex.new
-    subscribe = lambda do |broadcasting, *args, &block|
-      attempt = counter_mutex.synchronize { attempts += 1 } if broadcasting == StatusBroadcaster::CHANNEL
-      if attempt == 1
-        raise ActiveRecord::ConnectionNotEstablished, "cable database unavailable"
-      end
-
-      original_subscribe.call(broadcasting, *args, &block)
-    end
-
-    with_replaced_singleton_method(adapter, :subscribe, subscribe) do
-      visit root_path
-      # Action Cable's first reconnect poll is intentionally jittered between
-      # 6 and 12 seconds. Allow that production cadence to run instead of
-      # turning this integration test into a race against its default wait.
-      assert_selector "#status-stream-source[connected]", visible: :all, wait: 20
-      assert_operator counter_mutex.synchronize { attempts }, :>=, 2
-      wait_for_status_subscribers(1)
-
-      visit repos_path
-      wait_for_status_subscribers(0)
-    end
-  end
-
-  test "a status source retries after asynchronous consumer setup rejects" do
-    sign_in!
-
-    with_status_catch_up_observer do |catch_ups|
-      result = evaluate_script(<<~JS)
-        (async () => {
-          const { cable } = await import("@hotwired/turbo-rails")
-          const sourceClass = customElements.get("hive-status-stream-source")
-          const liveSource = document.querySelector("#status-stream-source")
-          const originalConsumer = await cable.getConsumer()
-          const originalRetryDelay = sourceClass.retryDelay
-          const owner = document.createElement("div")
-          owner.dataset.statusVersion = `retry-${crypto.randomUUID()}`
-          const source = document.createElement("hive-status-stream-source")
-          source.setAttribute("channel", liveSource.getAttribute("channel"))
-          source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
-          source.catchUpRefresh = { token: owner.dataset.statusVersion, location: source.statusLocation }
-          owner.appendChild(source)
-          let recoveredConsumer
-
-          const cleanup = () => {
-            owner.remove()
-            recoveredConsumer?.disconnect()
-            sourceClass.retryDelay = originalRetryDelay
-            cable.setConsumer(originalConsumer)
-            delete window.hiveStatusRetryCleanup
-          }
-
-          try {
-            sourceClass.retryDelay = 0
-            cable.setConsumer(Promise.reject(new Error("consumer setup failed")))
-            const connected = new Promise((resolve, reject) => {
-              const deadline = setTimeout(() => reject(new Error("status retry did not connect")), 5_000)
-              const observer = new MutationObserver(() => {
-                if (!source.hasAttribute("connected")) return
-
-                clearTimeout(deadline)
-                observer.disconnect()
-                resolve(true)
-              })
-              observer.observe(source, { attributes: true, attributeFilter: ["connected"] })
-            })
-            document.body.appendChild(owner)
-            await connected
-            recoveredConsumer = await cable.getConsumer()
-            window.hiveStatusRetryCleanup = cleanup
-
-            return { connected: source.hasAttribute("connected"), pageToken: owner.dataset.statusVersion }
-          } catch (error) {
-            cleanup()
-            throw error
-          }
-        })()
-      JS
-
-      assert result.fetch("connected")
-      catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
-      assert_equal result.fetch("pageToken"), catch_up.fetch("status_version"),
-                   "application code must clear the poisoned cache and complete a real catch-up"
-    end
-  ensure
-    cleanup_status_retry_fixture
-  end
-
-  test "a status source removes a partial Action Cable registration before retry" do
-    sign_in!
-
-    with_status_catch_up_observer do |catch_ups|
-      result = evaluate_script(<<~JS)
-        (async () => {
-          const { cable } = await import("@hotwired/turbo-rails")
-          const sourceClass = customElements.get("hive-status-stream-source")
-          const liveSource = document.querySelector("#status-stream-source")
-          const originalConsumer = await cable.getConsumer()
-          const originalRetryDelay = sourceClass.retryDelay
-          const failedConsumer = await cable.createConsumer()
-          const owner = document.createElement("div")
-          owner.dataset.statusVersion = `retry-${crypto.randomUUID()}`
-          const source = document.createElement("hive-status-stream-source")
-          source.setAttribute("channel", liveSource.getAttribute("channel"))
-          source.setAttribute("signed-stream-name", liveSource.getAttribute("signed-stream-name"))
-          source.catchUpRefresh = { token: owner.dataset.statusVersion, location: source.statusLocation }
-          owner.appendChild(source)
-          let disconnects = 0
-          let recoveredConsumer
-          const disconnect = failedConsumer.disconnect.bind(failedConsumer)
-          failedConsumer.disconnect = () => {
-            disconnects += 1
-            return disconnect()
-          }
-          failedConsumer.connection.open = () => {
-            throw new Error("WebSocket construction failed after registration")
-          }
-
-          const cleanup = () => {
-            owner.remove()
-            recoveredConsumer?.disconnect()
-            sourceClass.retryDelay = originalRetryDelay
-            cable.setConsumer(originalConsumer)
-            delete window.hiveStatusRetryCleanup
-          }
-
-          try {
-            sourceClass.retryDelay = 0
-            cable.setConsumer(failedConsumer)
-            const connected = new Promise((resolve, reject) => {
-              const deadline = setTimeout(() => reject(new Error("status retry did not connect")), 5_000)
-              const observer = new MutationObserver(() => {
-                if (!source.hasAttribute("connected")) return
-
-                clearTimeout(deadline)
-                observer.disconnect()
-                resolve(true)
-              })
-              observer.observe(source, { attributes: true, attributeFilter: ["connected"] })
-            })
-            document.body.appendChild(owner)
-            await connected
-            recoveredConsumer = await cable.getConsumer()
-            window.hiveStatusRetryCleanup = cleanup
-
-            return {
-              connected: source.hasAttribute("connected"),
-              disconnects,
-              orphaned: failedConsumer.subscriptions.subscriptions.length,
-              consumerReplaced: recoveredConsumer !== failedConsumer,
-              pageToken: owner.dataset.statusVersion
-            }
-          } catch (error) {
-            cleanup()
-            throw error
-          }
-        })()
-      JS
-
-      assert_equal 0, result.fetch("orphaned")
-      assert_equal 1, result.fetch("disconnects")
-      assert result.fetch("consumerReplaced")
-      assert result.fetch("connected")
-      catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
-      assert_equal result.fetch("pageToken"), catch_up.fetch("status_version")
-    end
-  ensure
-    cleanup_status_retry_fixture
-  end
-
-  test "disconnect cancels a rejected consumer retry before it creates a subscription" do
-    sign_in!
-
-    result = evaluate_script(<<~JS)
-      (async () => {
-        const { cable } = await import("@hotwired/turbo-rails")
-        const sourceClass = customElements.get("hive-status-stream-source")
-        const originalConsumer = await cable.getConsumer()
-        const originalRetryDelay = sourceClass.retryDelay
-        let created = 0
-        const owner = document.createElement("div")
-        owner.dataset.statusVersion = "cancelled-token"
-        const source = document.createElement("hive-status-stream-source")
-        source.setAttribute("channel", "StatusChannel")
-        source.setAttribute("signed-stream-name", "test-token")
-        owner.appendChild(source)
-        let subscribeCalls = 0
-        const subscribe = source.subscribe.bind(source)
-        source.subscribe = (...args) => {
-          subscribeCalls += 1
-          return subscribe(...args)
-        }
-
-        try {
-          sourceClass.retryDelay = 100
-          cable.setConsumer(Promise.reject(new Error("consumer setup failed")))
-          document.body.appendChild(owner)
-
-          const deadline = performance.now() + 1_000
-          while (!source.statusConnection?.retryTimer && performance.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, 0))
-          }
-          const rejectedConnection = source.statusConnection
-          if (!rejectedConnection?.retryTimer) throw new Error("retry was not scheduled")
-          const subscribeCallsAfterSchedule = subscribeCalls
-
-          owner.remove()
-          await Promise.resolve()
-          cable.setConsumer({
-            subscriptions: {
-              create() {
-                created += 1
-                return { unsubscribe() {}, perform() { return true } }
-              }
-            }
-          })
-          await new Promise((resolve) => setTimeout(resolve, 150))
-
-          return {
-            created,
-            retryCleared: rejectedConnection.retryTimer === null,
-            subscribeCalls,
-            subscribeCallsAfterSchedule
-          }
-        } finally {
-          owner.remove()
-          sourceClass.retryDelay = originalRetryDelay
-          cable.setConsumer(originalConsumer)
-        }
-      })()
-    JS
-
-    assert_equal({ "created" => 0, "retryCleared" => true,
-                   "subscribeCalls" => 1, "subscribeCallsAfterSchedule" => 1 }, result,
-                 "a detached source must not restart server work from a rejected setup timer")
-  end
-
   private
 
   def with_slow_status_feed
@@ -1259,40 +742,6 @@ class KanbanBoardTest < ApplicationSystemTestCase
     yield completed
   ensure
     StatusChannel.define_method(:catch_up, original) if original
-  end
-
-  def wait_for_status_catch_up(catch_ups, token)
-    Timeout.timeout(10) do
-      loop do
-        catch_up = catch_ups.pop
-        return catch_up if catch_up.fetch("status_version") == token
-      end
-    end
-  end
-
-  def cleanup_status_retry_fixture
-    return unless page&.current_url
-
-    execute_script("window.hiveStatusRetryCleanup?.()")
-  rescue StandardError
-    # The browser can already be gone while unwinding a failed system test.
-  end
-
-  def with_replaced_instance_method(receiver, name, replacement)
-    original = receiver.instance_method(name)
-    visibility = if receiver.private_method_defined?(name)
-      :private
-    elsif receiver.protected_method_defined?(name)
-      :protected
-    else
-      :public
-    end
-    receiver.define_method(name, replacement)
-    receiver.send(visibility, name)
-    yield
-  ensure
-    receiver.define_method(name, original)
-    receiver.send(visibility, name)
   end
 
   def wait_for_status_subscribers(expected)

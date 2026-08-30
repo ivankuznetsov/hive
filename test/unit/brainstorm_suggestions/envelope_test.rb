@@ -79,6 +79,43 @@ class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
     assert Hive::BrainstormSuggestions::Envelope.strip(source).corrupt?
   end
 
+  def test_damaged_open_delimiter_keeps_its_body_inert
+    source = <<~MARKDOWN
+      ## Round 1
+      ### Q1. First?
+      ### A1.
+      <!-- hive-suggestion:v1 binding=#{BINDING} --> 
+      Use the repository adapter.
+      <!-- /hive-suggestion:v1 -->
+      ### Q2. Second?
+      ### A2.
+    MARKDOWN
+
+    stripped = Hive::BrainstormSuggestions::Envelope.strip(source)
+    parsed = Hive::BrainstormParser.parse_text(source)
+
+    assert stripped.corrupt?
+    refute_includes stripped.text, "Use the repository adapter."
+    refute parsed.first.answered?
+    assert_equal 2, parsed.length
+  end
+
+  def test_reserved_token_in_operator_question_is_preserved
+    source = <<~MARKDOWN
+      ## Round 1
+      ### Q1. First?
+      ### A1.
+      ### Q2. Should we keep hive-suggestion:v1 envelopes?
+      ### A2.
+    MARKDOWN
+
+    stripped = Hive::BrainstormSuggestions::Envelope.strip(source)
+
+    refute stripped.corrupt?
+    assert_includes stripped.text, "Should we keep hive-suggestion:v1 envelopes?"
+    assert_equal 2, Hive::BrainstormParser.parse_text(source).length
+  end
+
   def test_tui_completeness_and_writer_treat_envelope_as_an_empty_slot
     Dir.mktmpdir do |root|
       path = File.join(root, "brainstorm.md")

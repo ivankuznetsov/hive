@@ -35,7 +35,7 @@ module Hive
         return no_safe("unsafe_output") unless
           claims.is_a?(Array) && !claims.empty? && claims.all? { |claim| sources.include?(claim) }
 
-        text = value["text"]
+        text = canonical_text(value["text"])
         rationale = value["rationale"]
         return no_safe("unsafe_output") unless Safety.safe_text?(text)
         return no_safe("unsafe_output") unless Safety.safe_rationale?(rationale)
@@ -52,6 +52,14 @@ module Hive
       rescue JSON::ParserError, TypeError
         raise InvalidOutput, "provider result is not valid structured output"
       end
+
+      def canonical_text(value)
+        return value unless value.is_a?(String) && value.valid_encoding?
+        return value if value.match?(Safety::BARE_CR_RE)
+
+        value.gsub("\r\n", "\n").rstrip
+      end
+      private_class_method :canonical_text
 
       def normalize(raw)
         value = raw.is_a?(String) ? JSON.parse(raw) : raw

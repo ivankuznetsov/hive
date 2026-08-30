@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-brainstorm-suggestion-cleanup.v1.json",
+  "title": "hive brainstorm-suggestion cleanup receipt (v1)",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-brainstorm-suggestion-cleanup" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" }
+  }
+}

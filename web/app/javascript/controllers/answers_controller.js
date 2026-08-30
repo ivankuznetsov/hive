@@ -12,6 +12,7 @@ import { Controller } from "@hotwired/stimulus"
 // restore a draft onto a changed slot even when it reuses the question number.
 const drafts = new Map()
 const suggestionStates = new Map()
+const suggestionDrafts = new Map()
 let pendingFocus = null
 const MAX_SAVED_STATES = 100
 
@@ -76,7 +77,8 @@ export default class extends Controller {
     if (!card || !field || !card.dataset.suggestionText) return
 
     const state = this.suggestionState(card)
-    if (!state.approved) state.previousDraft = field.value
+    const fieldKey = this.fieldKey(field)
+    if (!state.approved && !suggestionDrafts.has(fieldKey)) suggestionDrafts.set(fieldKey, field.value)
     field.value = card.dataset.suggestionText
     field.dispatchEvent(new Event("input", { bubbles: true }))
     state.approved = true
@@ -92,10 +94,11 @@ export default class extends Controller {
     if (!card || !field) return
 
     const state = this.suggestionState(card)
-    field.value = state.previousDraft || ""
+    const fieldKey = this.fieldKey(field)
+    field.value = suggestionDrafts.get(fieldKey) || ""
     field.dispatchEvent(new Event("input", { bubbles: true }))
     state.approved = false
-    delete state.previousDraft
+    suggestionDrafts.delete(fieldKey)
     this.rememberSuggestion(card, state)
     this.renderSuggestion(card, state)
     field.focus()
@@ -119,6 +122,18 @@ export default class extends Controller {
     state.declined = false
     this.rememberSuggestion(card, state)
     this.renderSuggestion(card, state)
+  }
+
+  submitSuggestionRetry(event) {
+    const control = event.currentTarget
+    if (control.dataset.pending === "true") {
+      event.preventDefault()
+      return
+    }
+
+    control.dataset.pending = "true"
+    control.setAttribute("aria-disabled", "true")
+    control.setAttribute("aria-busy", "true")
   }
 
   trackFocus(event) {

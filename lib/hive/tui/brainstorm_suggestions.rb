@@ -6,6 +6,9 @@ require "time"
 require "hive/brainstorm_parser"
 require "hive/brainstorm_suggestions"
 require "hive/commands/brainstorm_suggestion"
+require "hive/attempts/generation"
+require "hive/brainstorm_suggestions/projection"
+require "hive/task"
 require "hive/lock"
 require "hive/markers"
 
@@ -36,7 +39,7 @@ module Hive
         ) do
           store = Hive::BrainstormSuggestions::Store.new(task_root)
           document = store.read
-          records = current_records(document, path)
+          records = current_records(document, path, task_root: task_root)
           Hive::Markers.with_markers_lock(path, create: false, timeout: 1) do
             original = read_regular(path)
             stripped = Hive::BrainstormSuggestions::Envelope.strip(original).text
@@ -89,12 +92,13 @@ module Hive
                 next
               end
 
-              if content.include?(region.source)
-                outcome[:untouched] += 1
-              elsif question.answered?
+              if question.answered?
+                content = remove_binding(content, region.binding)
                 document["records"].delete(record)
                 changed_store = true
                 outcome[:adopted] += 1
+              elsif envelope_unchanged?(content, region)
+                outcome[:untouched] += 1
               else
                 record["dismissed"] = true
                 record["updated_at"] = Time.now.utc.iso8601(6)
@@ -128,10 +132,17 @@ module Hive
         end
       end
 
-      def current_records(document, path)
+      def current_records(document, path, task_root:)
         return [] if document["corrupt"]
 
         parsed = Hive::BrainstormParser.parse(path)
+        task = Hive::Task.new(task_root)
+        projection = Hive::BrainstormSuggestions::Projection.call(
+          task_root: task_root,
+          project_root: task.project_root,
+          questions: parsed,
+          task_generation: Hive::Attempts::Generation.current_task_input_epoch(task)
+        )
         document.fetch("records").filter_map do |record|
           next unless record["state"] == "fresh" && record["dismissed"] == false
           next unless record["suggestion_binding"].to_s.match?(/\A[0-9a-f]{64}\z/)
@@ -140,11 +151,28 @@ module Hive
           next unless question && !question.answered?
           next unless Hive::BrainstormParser.question_fingerprint(question.text) ==
                       record["question_fingerprint"]
+          projected = projection[record.fetch("ordinal")]
+          next unless projected && projected["state"] == "fresh" &&
+                      projected["suggestion_binding"] == record["suggestion_binding"] &&
+                      projected["text"] == record["text"]
 
           record
         end.sort_by { |record| record.fetch("ordinal") }
       end
       private_class_method :current_records
+
+      def envelope_unchanged?(content, lease_region)
+        Hive::BrainstormSuggestions::Envelope.regions(content).any? do |current|
+          current.binding == lease_region.binding &&
+            normalize_editor_text(current.text) == normalize_editor_text(lease_region.text)
+        end
+      end
+      private_class_method :envelope_unchanged?
+
+      def normalize_editor_text(value)
+        value.to_s.gsub("\r\n", "\n").lines.map { |line| line.rstrip }.join("\n").rstrip
+      end
+      private_class_method :normalize_editor_text
 
       def insert_records(content, records)
         lines = content.lines
@@ -209,7 +237,8 @@ module Hive
         end
         return { "status" => "not_found", "operation" => action } unless record
 
-        binding = record["suggestion_binding"] || record["input_binding"]
+        binding = record["suggestion_binding"]
+        return { "status" => "not_found", "operation" => action } unless binding
         Hive::Commands::BrainstormSuggestion.new(
           action,
           target: root,

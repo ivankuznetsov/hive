@@ -19,6 +19,7 @@ require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
 require "tzinfo"
+require "hive/brainstorm_suggestions/envelope"
 
 module Hive
   module Config
@@ -108,7 +109,7 @@ module Hive
         "agent" => "claude",
         "skill" => "/ce-brainstorm",
         "suggestions" => {
-          "enabled" => true,
+          "enabled" => false,
           "agent" => "claude",
           "capture_timeout_sec" => 5,
           "timeout_sec" => 120,
@@ -3448,7 +3449,9 @@ module Hive
         unsafe = Dir.glob(File.join(stages, "*", "*", "brainstorm.md")).any? do |path|
           next true if File.symlink?(path) || !File.file?(path)
 
-          File.binread(path, 256 * 1024).include?("hive-suggestion:v1")
+          bytes = File.binread(path, Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES + 1)
+          bytes.bytesize > Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES ||
+            bytes.lines.any? { |line| line.match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE) }
         rescue SystemCallError, IOError
           true
         end

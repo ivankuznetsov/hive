@@ -6,6 +6,7 @@ require "thread"
 require "hive/attempts/generation"
 require "hive/brainstorm_suggestions/binding"
 require "hive/brainstorm_suggestions/context_bundle"
+require "hive/brainstorm_suggestions/process_capture"
 require "hive/brainstorm_suggestions/store"
 require "hive/task"
 
@@ -83,15 +84,25 @@ module Hive
         end
 
         def call(project_root:, task_root:, questions:, records:, document:, deadline:)
+          bundles = if @context_factory.respond_to?(:name) && @context_factory.name == :capture
+            Hive::BrainstormSuggestions::ContextBundle.capture_many(
+              project_root: project_root, task_root: task_root,
+              question_ordinals: records.map { |record| record.fetch("ordinal") },
+              deadline: deadline
+            )
+          else
+            records.to_h do |record|
+              ordinal = record.fetch("ordinal")
+              [ ordinal, @context_factory.call(
+                project_root: project_root, task_root: task_root,
+                question_ordinal: ordinal, deadline: deadline
+              ) ]
+            end
+          end
           bindings = records.to_h do |record|
             ordinal = record.fetch("ordinal")
             question = questions.fetch(ordinal - 1)
-            bundle = @context_factory.call(
-              project_root: project_root,
-              task_root: task_root,
-              question_ordinal: ordinal,
-              deadline: deadline
-            )
+            bundle = bundles.fetch(ordinal)
             binding = Hive::BrainstormSuggestions::Binding.input(
               task_incarnation: document.fetch("task_incarnation"),
               task_generation: document.fetch("task_generation"),
@@ -145,7 +156,7 @@ module Hive
         records = relevant_records(document)
         result = base_projection(records)
         observable = observable_records(records)
-        return result if observable.empty?
+        return result.freeze if observable.empty?
         return replace_observable(result, observable, :stale) unless document_current?(document)
 
         identity = @identity_factory.call(document, observable, @deadline)
@@ -208,7 +219,9 @@ module Hive
 
       def document_current?(document)
         document["recipe_version"] == Hive::BrainstormSuggestions::ContextBundle::RECIPE_VERSION &&
-          document["task_generation"] == current_task_generation
+          document["task_incarnation"] == current_task_incarnation &&
+          document["task_generation"] == current_task_generation &&
+          document["brainstorm_generation"] == current_brainstorm_generation
       end
 
       def current_task_generation
@@ -217,19 +230,49 @@ module Hive
         nil
       end
 
+      def current_task_incarnation
+        task = Hive::Task.new(@task_root)
+        status = File.stat(@task_root)
+        Digest::SHA256.hexdigest(
+          [ "hive-brainstorm-suggestion-incarnation-v1", task.id, task.slug,
+            status.dev, status.ino ].join("\0")
+        )
+      rescue Hive::Error, SystemCallError, IOError
+        nil
+      end
+
+      def current_brainstorm_generation
+        Hive::BrainstormSuggestions::Binding.digest(
+          "questions" => @questions.map do |question|
+            {
+              "round" => question.respond_to?(:round) ? question.round : nil,
+              "number" => question.respond_to?(:n) ? question.n : nil,
+              "text" => question.text,
+              "settled_answer" => question.answer
+            }
+          end
+        )
+      end
+
       def record_projection(record)
-        fresh = record["state"] == "fresh"
+        fresh = record["state"] == "fresh" && record["dismissed"] != true && fully_bound?(record)
         {
-          "state" => record.fetch("state"),
+          "state" => fresh || record["state"] != "fresh" ? record.fetch("state") : "unavailable",
           "text" => fresh ? record["text"] : nil,
           "rationale" => fresh ? record["rationale"] : nil,
           "provenance" => fresh ? Array(record["provenance"]).dup.freeze : [].freeze,
-          "safe_reason" => fresh ? nil : record["safe_reason"],
+          "safe_reason" => fresh ? nil : (record["safe_reason"] || UNAVAILABLE_REASON),
           "retryable" => retryable?(record),
           "dismissed" => record["dismissed"] == true,
           "input_binding" => record["input_binding"],
           "suggestion_binding" => record["suggestion_binding"]
         }.freeze
+      end
+
+      def fully_bound?(record)
+        %w[input_binding input_epoch suggestion_binding].all? do |key|
+          record[key].to_s.match?(/\A[0-9a-f]{64}\z/)
+        end
       end
 
       def missing_projection
@@ -290,7 +333,7 @@ module Hive
           "recipe_version" => Hive::BrainstormSuggestions::ContextBundle::RECIPE_VERSION,
           "task_generation" => @task_generation,
           "sidecar_generation" => document.slice(
-            "task_incarnation", "task_generation", "brainstorm_generation", "updated_at"
+            "task_incarnation", "task_generation", "brainstorm_generation"
           ),
           "questions" => records.map do |record|
             [ record["ordinal"], record["question_fingerprint"], record["input_binding"] ]
@@ -322,7 +365,10 @@ module Hive
         configured = config["main_wiki_path"] if config.is_a?(Hash)
         return nil if configured.to_s.empty?
 
-        root = File.realpath(File.expand_path(configured, @project_root))
+        root = Hive::BrainstormSuggestions::ContextBundle.validated_main_wiki_root(
+          @project_root, configured
+        )
+        return "unavailable" unless root
         entries = Dir.glob(File.join(root, "**", "*.md")).sort.first(
           Hive::BrainstormSuggestions::ContextBundle::MAX_CANDIDATE_FILES
         ).map do |path|
@@ -347,52 +393,20 @@ module Hive
       end
 
       def run_git(arguments, deadline)
-        reader, writer = IO.pipe
-        pid = Process.spawn(
-          { "GIT_OPTIONAL_LOCKS" => "0", "GIT_TERMINAL_PROMPT" => "0" },
-          "git", "-C", @project_root, *arguments,
-          pgroup: true, in: File::NULL, out: writer, err: writer
+        result = Hive::BrainstormSuggestions::ProcessCapture.call(
+          [ "git", "-C", @project_root, *arguments ],
+          environment: { "GIT_OPTIONAL_LOCKS" => "0", "GIT_TERMINAL_PROMPT" => "0" },
+          deadline: deadline, max_bytes: MAX_IDENTITY_BYTES, poll_interval: 0.01
         )
-        writer.close
-        output = +"".b
-        reading = Thread.new do
-          while (chunk = reader.read(65_536))
-            output << chunk
-            break if output.bytesize > MAX_IDENTITY_BYTES
-          end
-        end
-        status = nil
-        loop do
-          waited = Process.waitpid2(pid, Process::WNOHANG)
-          if waited
-            status = waited.last
-            break
-          end
-          raise IOError, "suggestion observation timed out" if monotonic_now >= deadline
+        raise IOError, "suggestion repository observation failed" unless result.status.success?
 
-          IO.select(nil, nil, nil, 0.01)
-        end
-        reading.join
-        raise IOError, "suggestion observation exceeded its bound" if output.bytesize > MAX_IDENTITY_BYTES
-        raise IOError, "suggestion repository observation failed" unless status.success?
-
-        output
-      rescue SystemCallError, IOError
-        terminate_process_group(pid)
-        raise
-      ensure
-        writer&.close unless writer&.closed?
-        reader&.close unless reader&.closed?
-        reading&.kill if reading&.alive?
-      end
-
-      def terminate_process_group(pid)
-        return unless pid
-
-        Process.kill("TERM", -pid)
-        Process.wait(pid)
-      rescue Errno::ESRCH, Errno::ECHILD
-        nil
+        result.output
+      rescue Hive::BrainstormSuggestions::ProcessCapture::Timeout
+        raise IOError, "suggestion observation timed out"
+      rescue Hive::BrainstormSuggestions::ProcessCapture::TooLarge
+        raise IOError, "suggestion observation exceeded its bound"
+      rescue Hive::BrainstormSuggestions::ProcessCapture::SpawnFailed => error
+        raise IOError, error.message
       end
 
       def monotonic_now

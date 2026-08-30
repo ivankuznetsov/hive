@@ -94,6 +94,41 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
+
+  def test_fresh_record_without_a_complete_input_epoch_never_exposes_text
+    with_task do |root|
+      record = fresh_record(1)
+      record["input_epoch"] = nil
+      write_document(root, [ record ])
+
+      suggestion = current_projection(root, questions: questions.first(1)).call.fetch(1)
+
+      assert_equal "unavailable", suggestion.fetch("state")
+      assert_nil suggestion.fetch("text")
+      assert suggestion.frozen?
+    end
+  end
+
+  def test_dismissed_fresh_record_hides_payload_server_side
+    with_task do |root|
+      record = fresh_record(1).merge("dismissed" => true)
+      write_document(root, [ record ])
+      observer = lambda do |records:, **|
+        Hive::BrainstormSuggestions::Projection::Observation.new(
+          bindings: { 1 => records.first.fetch("input_binding") }, error_code: nil
+        )
+      end
+
+      suggestion = current_projection(
+        root, questions: questions.first(1), observer: observer
+      ).call.fetch(1)
+
+      assert_nil suggestion.fetch("text")
+      assert_nil suggestion.fetch("rationale")
+      assert_empty suggestion.fetch("provenance")
+    end
+  end
+
   def test_explicit_identity_cache_is_shared_across_consumers_and_invalidates
     with_task do |root|
       write_document(root, [ fresh_record(1) ])
@@ -306,9 +341,9 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
       end
 
       pid = Process.spawn("/bin/sh", "-c", "sleep 10", pgroup: true)
-      assert_equal pid, projection.send(:terminate_process_group, pid)
-      assert_nil projection.send(:terminate_process_group, nil)
-      assert_nil projection.send(:terminate_process_group, 999_999_999)
+      assert_equal pid, Hive::BrainstormSuggestions::ProcessCapture.terminate(pid)
+      assert_nil Hive::BrainstormSuggestions::ProcessCapture.terminate(nil)
+      assert_nil Hive::BrainstormSuggestions::ProcessCapture.terminate(999_999_999)
     ensure
       ENV["PATH"] = previous_path if previous_path
     end

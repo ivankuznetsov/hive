@@ -1,8 +1,8 @@
 <% if suggestion %>
-  <% binding = suggestion["suggestion_binding"] || suggestion["input_binding"] %>
-  <% fresh = suggestion["state"] == "fresh" && suggestion["text"].present? %>
+  <% suggestion_binding = suggestion["suggestion_binding"] || suggestion["input_binding"] %>
+  <% fresh = suggestion["state"] == "fresh" && suggestion["text"].present? && suggestion["dismissed"] != true %>
   <aside class="brainstorm-suggestion"
-         data-suggestion-key="<%= binding %>"
+         data-suggestion-key="<%= suggestion_binding %>"
          data-suggestion-text="<%= fresh ? suggestion["text"] : nil %>"
          data-suggestion-initial-declined="<%= suggestion["dismissed"] == true %>">
     <div class="brainstorm-suggestion-heading">
@@ -34,13 +34,14 @@
         <button type="button" class="button-secondary"
                 data-suggestion-part="restore" hidden
                 data-action="click->answers#restoreSuggestion">Restore</button>
-        <% if suggestion["retryable"] && binding.present? %>
+        <% if suggestion["retryable"] && suggestion_binding.present? %>
           <%= link_to "Retry",
                 task_brainstorm_suggestion_retry_path(
                   @project.name, @task.slug, source: @task_source,
-                  question: question.fetch("ordinal"), binding: binding
+                  question: question.fetch("ordinal"), binding: suggestion_binding
                 ),
-                class: "button-secondary", data: { turbo_method: :post } %>
+                class: "button-secondary",
+                data: { turbo_method: :post, action: "click->answers#submitSuggestionRetry" } %>
         <% end %>
         <span class="muted" data-suggestion-part="approved" hidden>Copied into your editable answer.</span>
       </div>
@@ -48,13 +49,14 @@
       <p class="brainstorm-suggestion-reason">
         <%= suggestion["safe_reason"].presence || "A suggestion is being prepared. You can answer now without waiting." %>
       </p>
-      <% if suggestion["retryable"] && binding.present? %>
+      <% if suggestion["retryable"] && suggestion_binding.present? %>
         <%= link_to "Retry suggestion",
               task_brainstorm_suggestion_retry_path(
                 @project.name, @task.slug, source: @task_source,
-                question: question.fetch("ordinal"), binding: binding
+                question: question.fetch("ordinal"), binding: suggestion_binding
               ),
-              class: "button-secondary", data: { turbo_method: :post } %>
+              class: "button-secondary",
+              data: { turbo_method: :post, action: "click->answers#submitSuggestionRetry" } %>
       <% end %>
     <% end %>
   </aside>

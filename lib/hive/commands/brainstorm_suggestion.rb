@@ -8,6 +8,7 @@ require "hive/brainstorm_suggestions/store"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
+require "hive/schemas"
 
 module Hive
   module Commands
@@ -27,16 +28,15 @@ module Hive
         @target = target.to_s unless target.nil?
         @project = project.to_s unless project.nil?
         @task_roots = task_roots
-        @question = Integer(question) unless question.nil?
+        @question = question
         @binding = binding.to_s unless binding.nil?
         @json = json
         @output = output
         @clock = clock
-      rescue ArgumentError, TypeError
-        raise Hive::UsageError, "--question must be a positive integer"
       end
 
       def call
+        @question = Integer(@question) unless @question.nil? || @question.is_a?(Integer)
         unless ACTIONS.include?(@action)
           raise Hive::UsageError, "expected one of: #{ACTIONS.join(', ')}"
         end
@@ -46,7 +46,7 @@ module Hive
         results = tasks.map { |task_root| cleanup_task(task_root) }
         receipt = {
           "schema" => RECEIPT_SCHEMA,
-          "schema_version" => 1,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(RECEIPT_SCHEMA),
           "ok" => true,
           "operation" => "cleanup",
           "safe_to_disable" => results.all? { |result| result["status"] == "clean" },
@@ -58,6 +58,17 @@ module Hive
         }
         emit(receipt)
         receipt
+      rescue ArgumentError, TypeError
+        error = Hive::UsageError.new("--question must be a positive integer")
+        emit_error(error)
+        raise error
+      rescue Hive::Error => error
+        emit_error(error)
+        raise
+      rescue StandardError => error
+        wrapped = Hive::InternalError.new("internal error: #{error.class}: #{error.message}")
+        emit_error(wrapped)
+        raise wrapped
       end
 
       private
@@ -73,7 +84,7 @@ module Hive
         result = mutate_task(task_root)
         receipt = {
           "schema" => ACTION_RECEIPT_SCHEMA,
-          "schema_version" => 1,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(ACTION_RECEIPT_SCHEMA),
           "ok" => result.fetch("status") == "updated",
           "operation" => @action,
           "task" => File.basename(task_root),
@@ -122,11 +133,11 @@ module Hive
       end
 
       def binding_matches?(record)
-        [ record["suggestion_binding"], record["input_binding"] ].compact.include?(@binding)
+        record["suggestion_binding"] == @binding
       end
 
       def current_binding(record)
-        record["suggestion_binding"] || record["input_binding"]
+        record["suggestion_binding"]
       end
 
       def action_allowed?(record)
@@ -224,12 +235,13 @@ module Hive
       def cleanup_brainstorm(state_path, result)
         Hive::Markers.with_markers_lock(state_path, create: false, timeout: 5) do
           content = read_regular(state_path)
-          before = Hive::BrainstormParser.parse_text(content).map(&:answer)
           stripped = Hive::BrainstormSuggestions::Envelope.strip(content)
+          baseline = stripped.regions.reduce(content) { |body, region| body.sub(region.source, "") }
+          before = Hive::BrainstormSuggestions::Envelope.legacy_answers(baseline)
           result["envelopes_removed"] = stripped.regions.length
           result["envelopes_removed"] += 1 if stripped.corrupt? && content.match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE)
           Hive::Markers.write_atomic(state_path, stripped.text) if stripped.text != content
-          after = Hive::BrainstormParser.parse_text(stripped.text).map(&:answer)
+          after = Hive::BrainstormSuggestions::Envelope.legacy_answers(stripped.text)
           raise IOError, "brainstorm answers changed during suggestion cleanup" unless before == after
 
           result["parser_verified"] = true
@@ -305,6 +317,25 @@ module Hive
             "brainstorm suggestion #{@action}: #{receipt.fetch('status')} " \
             "for #{receipt.fetch('task')} question #{receipt.fetch('question')}"
           )
+        end
+      end
+
+      def emit_error(error)
+        return unless @json
+
+        schema = @action == "cleanup" ? RECEIPT_SCHEMA : ACTION_RECEIPT_SCHEMA
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: error_kind(error)
+        )
+        @output.puts(JSON.generate(payload))
+      end
+
+      def error_kind(error)
+        case error
+        when Hive::UsageError then "usage"
+        when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::ConcurrentRunError then "lock_busy"
+        else "internal"
         end
       end
     end

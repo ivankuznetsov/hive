@@ -5,12 +5,14 @@ module Hive
   class UserService
     class Status
       CONTENT_STATES = %i[absent matching drifted unsafe unreadable].freeze
+      MANAGER_AVAILABILITIES = %i[available conclusively_absent indeterminate].freeze
 
       attr_reader :platform, :unit_path, :content_state, :file_identity,
-                  :manager_available, :enabled, :running, :diagnostics
+                  :manager_available, :manager_availability, :enabled, :running, :diagnostics
 
       def initialize(platform:, unit_path:, content_state:, file_identity:,
-                     manager_available:, enabled:, running:, diagnostics: [])
+                     manager_available: nil, manager_availability: nil,
+                     enabled:, running:, diagnostics: [])
         @platform = platform.to_sym
         @unit_path = unit_path
         @content_state = content_state.to_sym
@@ -19,7 +21,17 @@ module Hive
         end
 
         @file_identity = file_identity&.transform_keys(&:to_sym)&.freeze
-        @manager_available = !!manager_available
+        @manager_availability = if manager_availability
+          manager_availability.to_sym
+        elsif manager_available
+          :available
+        else
+          :conclusively_absent
+        end
+        unless MANAGER_AVAILABILITIES.include?(@manager_availability)
+          raise ArgumentError, "unknown manager availability #{manager_availability.inspect}"
+        end
+        @manager_available = @manager_availability == :available
         @enabled = !!enabled
         @running = !!running
         @diagnostics = diagnostics.map(&:to_sym).uniq.freeze
@@ -29,7 +41,7 @@ module Hive
             unit_path: @unit_path,
             content_state: @content_state,
             file_identity: @file_identity,
-            manager_available: @manager_available,
+            manager_availability: @manager_availability,
             enabled: @enabled,
             running: @running,
             diagnostics: @diagnostics

@@ -149,10 +149,10 @@ module Hive
         end
 
         # A manually-started daemon must keep using the exact Hive CLI that
-        # launched it. Without an explicit HIVE_BIN, ChildSupervisor,
-        # StatusConsumer, and the display-name backfiller fall back to the
-        # first `hive` on PATH. That can silently mix a checkout daemon with
-        # an older packaged gem for every dispatched child. Service units
+        # launched it. Without an explicit HIVE_BIN, ChildSupervisor and the
+        # display-name backfiller fall back to the first `hive` on PATH. That
+        # can silently mix a checkout daemon with an older packaged gem for
+        # every dispatched child. StatusConsumer is in-process. Service units
         # already export HIVE_BIN; pin the equivalent value for foreground
         # and --detach starts while preserving an operator override.
         runtime_hive_bin_was_set = ENV.key?("HIVE_BIN")

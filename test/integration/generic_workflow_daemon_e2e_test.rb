@@ -115,19 +115,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
               max_concurrent_runs: 5, max_concurrent_per_project: 5,
               max_runs_per_day_per_project: 100
             )
-            consumer = LiveStatusConsumer.new(
-              fetch: lambda do
-                out, = capture_io do
-                  Hive::CLI.start([ "status", "--internal-task-graph", "--json" ])
-                end
-                doc = JSON.parse(out)
-                mapper = Hive::Daemon::StatusConsumer.new
-                Hive::Daemon::StatusConsumer::Result.new(
-                  ok: true, rows: mapper.send(:extract_rows, doc),
-                  projects: mapper.send(:extract_projects, doc), error: nil
-                )
-              end
-            )
+            consumer = Hive::Daemon::StatusConsumer.new
             dispatcher = Hive::Daemon::Dispatcher.new(
               # edit_debounce_sec: 0 so the generic ready_to_run debounce never
               # waits — the inline runner writes real file mtimes, and real
@@ -207,20 +195,6 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     end
 
     def close; end
-  end
-
-  # Status consumer that recomputes rows from a live in-process
-  # the internal task graph each fetch (via the injected lambda), reusing the
-  # real StatusConsumer's row/project mapping so the dispatcher sees on-disk
-  # state every tick.
-  class LiveStatusConsumer
-    def initialize(fetch:)
-      @fetch = fetch
-    end
-
-    def fetch
-      @fetch.call
-    end
   end
 
   # Supervisor stand-in that runs each dispatched command in-process and

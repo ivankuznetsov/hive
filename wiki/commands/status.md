@@ -27,10 +27,20 @@ terminal history. The former public full-fleet status surface is removed.
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
 
-The daemon and bot temporarily use a hidden `--internal-task-graph` transport
-while their purpose-built projections are extracted. It is not a public CLI
-contract and must not be used by plugins or agents. The end state removes that
-fleet-wide v7 transport after those consumers migrate.
+The daemon consumes the internal task graph directly from
+`Status#internal_task_graph_payload` in the same Ruby process. It does not invoke
+the CLI or serialize and parse the graph between producer and consumer. The bot
+temporarily retains the hidden `--internal-task-graph` transport while its
+purpose-built projection is extracted. That flag is not a public CLI contract
+and must not be used by plugins or agents.
+
+The daemon supplies a thread-scoped warning sink to the same producer. Status
+and every nested projection collaborator use the shared warning emitter, so
+task-metadata, workflow-descriptor, completion-time, deprecated-config, and
+managed-workflow breadcrumbs become one `status_warning` per tick instead of
+leaking to process stderr. Outside that scoped build the same warnings retain
+their ordinary stderr behavior. A failed scan retains warnings emitted before
+its final exception.
 
 ## Bounded running-task contract
 

@@ -162,15 +162,10 @@ module Hive
         @shutdown = false
         @reload = false
         @reexec_requested = false
-        # Baseline SHA-256 of the file that defines SCHEMA_VERSIONS. The
-        # daemon is a long-running process whose in-memory constants
-        # freeze at load time, while shelled-out `hive` subprocesses load
-        # fresh code on every invocation. After a `git pull` or gem
-        # upgrade that bumps a schema, the in-process consumer rejects
-        # every envelope (e.g. 8946 `got 2, want 1` events were logged
-        # over ~3 days between 2026-05-15 PR #78 and the next restart).
-        # Capturing the source digest here lets `run_forever` detect the
-        # drift and re-exec instead of hard-failing forever.
+        # Baseline SHA-256 over schema identity and the in-process status
+        # producer. A long-lived daemon keeps loaded code after an on-disk
+        # deployment update; capturing these source digests lets `run_forever`
+        # re-exec instead of mixing stale runtime behavior with new files.
         @code_fingerprint = compute_code_fingerprint
         @last_reexec_at = nil
         @started_at = nil
@@ -328,22 +323,11 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
-        # Non-fatal status advisory (logged once per tick). `result.warning`
-        # combines TWO sources: a tolerated forward schema-version skew (an
-        # updated `hive` binary emitted a newer hive-status envelope than this
-        # long-running daemon was built for, parsed best-effort) AND any
-        # status-command stderr breadcrumbs surfaced on an
-        # otherwise-successful fetch (fail-open dependency gate, dropped
-        # depends_on). The event name is deliberately NEUTRAL — not
-        # schema-skew-only — so an operator grepping daemon.log for
-        # dependency-gate degradation finds it here instead of being misled by
-        # a schema-version event name. Tick proceeds on the additive payload.
+        # Non-fatal projection advisory captured by the in-process producer.
+        # Log it once per tick while continuing with the valid graph.
         @logger.event(:status_warning, message: result.warning) if result.warning
         # Rebuild the per-tick set of half-migrated projects from the
-        # status snapshot. Stays empty when the daemon talks to an old
-        # status binary that didn't ship the field (Result#projects
-        # defaults to []) so old binaries stay forward-compatible.
-        # Issue #95.
+        # status snapshot. Issue #95.
         refresh_legacy_layout_projects(result.projects)
         refresh_active_agent_snapshot(result.rows)
 
@@ -581,7 +565,7 @@ module Hive
           now = Time.now
           full_tick = full_tick_due?(now)
 
-          # Schema-drift detection hashes the schema file (Digest::SHA256.file),
+          # Source-drift detection hashes the schema and status-entrypoint files,
           # so it is full-tick-only work. Running it every fast_poll_sec (~1s)
           # would execute the hash ~30x more often on the idle path and fight
           # the near-zero idle-CPU goal (Unit 2: the per-second probe is meant
@@ -727,18 +711,29 @@ module Hive
         @logger.event(:update_check_error, error_class: e.class.name, message: e.message)
       end
 
-      # SHA-256 of the file that owns Hive::Schemas (resolved through
-      # source_location so it follows the namespace; currently
-      # lib/hive/schemas.rb). Used as a cheap drift signal — if the
-      # on-disk file's digest no longer matches what we captured at
-      # startup, the loaded code is stale.
+      # SHA-256 over the files that own schema identity and the in-process
+      # status producer. Used as a cheap drift signal — if their on-disk
+      # digest no longer matches what we captured at startup, the loaded code
+      # is stale.
       # Returns nil on any failure; a nil baseline disables drift checks
       # so a transient read failure never re-execs.
       def compute_code_fingerprint
-        path = Hive::Schemas.method(:schema_path).source_location.first
-        ::Digest::SHA256.file(path).hexdigest
+        source_digests = code_fingerprint_paths.map do |path|
+          ::Digest::SHA256.file(path).hexdigest
+        end
+        ::Digest::SHA256.hexdigest(source_digests.join("\0"))
       rescue StandardError
         nil
+      end
+
+      def code_fingerprint_paths
+        [
+          Hive::Schemas.method(:schema_path).source_location.first,
+          Hive::Commands::Status
+            .instance_method(:internal_task_graph_payload)
+            .source_location
+            .first
+        ].uniq.freeze
       end
 
       # True iff a baseline fingerprint exists, a fresh fingerprint can

@@ -82,8 +82,8 @@ a busy exact-repair lock is transient and carries no command. There is no daemon
 automatic backfill, repair queue, or periodic projection watcher.
 
 `StatusConsumer` passes through the additive condition projection fields and
-the project-level `hidden_archived_task_count` from ordinary `hive status
---json`. Its result sums that count without copying hidden rows into daemon
+the project-level `hidden_archived_task_count` from the in-process internal
+task graph. Its result sums that count without copying hidden rows into daemon
 memory. Dispatch still consumes the canonical visible `action` and diagnostic
 calculated by `TaskAction`; dependency admission was evaluated against the
 complete graph before presentation filtering, so an expired completed
@@ -99,7 +99,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over action, admission/dependency state, stage/workflow context, mtime debounce, and the brainstorm `answers_pending` / `answers_complete` signals. Structured admission errors return `:admission_error` before every stage branch; ordinary blocked rows cannot dispatch or poll for merge. |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps the hidden internal task-graph transport and bounded `--daemon-task project:slug` reads. Both return typed visible rows including `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry the validated source payload, project information, and the summed `hidden_archived_task_count`. Each row retains the task payload's exact `mtime` separately from the local state file's precise stat: scheduler/status identity uses the former, while edit-resume and recovery policy use the latter. Bounded responses never carry a fleet payload: they must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape and hidden-count types are hard-validated while forward schema versions remain best-effort. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Maps `Status#internal_task_graph_payload` directly into typed visible rows without a child process or JSON round trip. Full and exact-task reads include `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry the validated source payload, project information, and summed `hidden_archived_task_count`. Each row retains the task payload's exact `mtime` separately from the local state file's precise stat: scheduler/status identity uses the former, while edit-resume and recovery policy use the latter. Bounded responses never carry a fleet payload: they must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state becomes `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Producer failures and malformed envelopes return a structured failed result instead of crashing the tick. |
 | `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery. Before the first successful reconciliation, `started` and `failed` remain explicit; afterward, an in-progress or failed tick cannot overwrite the same generation's still-valid completed scheduler authority. Scheduler task records bind to the exact source-payload `mtime`, including controller workflows whose folder and manifest mtimes differ, without changing the precise state-file timestamp used by recovery. Tick completion includes the final aggregate hidden-archive count. The large source `hive-status` graph is published once in a separate `StatusCache` file, so the ordinary scheduler `Reader`, web, and watch never parse or retain it; concise status explicitly reads and generation/tick/deadline-validates the cache. SIGHUP can only shorten retained authority to the reloaded poll interval; recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. Both stores atomically persist owner-private records. |
 | `Hive::Daemon::PatrolFixCandidateInventory` | `lib/hive/daemon/patrol_fix_candidate_inventory.rb` | Opens only exact `patrol-fix-manifest.json` files under workflow stage/task owners. It binds every owned manifest's canonical bytes into one full inventory count/digest, fails on owned corruption, ignores unrelated task metadata, and selects one deterministic relevance-ranked context of at most 64 rows and 192 KiB. Exact source identity, alias, and semantic-lineage overlap rank before path/lexical fallback; each selected row carries bounded secret-scanned remediation evidence and its own context digest. |
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
@@ -142,7 +142,7 @@ hive daemon start
             ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
-            ├─ Hive::Daemon::StatusConsumer      (hidden internal task graph)
+            ├─ Hive::Daemon::StatusConsumer      (in-process internal task graph)
             ├─ Hive::Daemon::OperationalSnapshot (atomic scheduler observation)
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::RecoveryCoordinator  (durable guarded recovery)
@@ -1219,20 +1219,21 @@ per-chat summary, so it can't flood Telegram.
 
 ## Self-reexec on source drift (ADR-031)
 
-The daemon is a long-running Ruby process whose in-memory constants
-(notably `Hive::Schemas::SCHEMA_VERSIONS`) freeze at load time, while
-shelled-out `hive` subprocesses load fresh code on every invocation.
-A `git pull` or gem upgrade that bumps a schema version between daemon
-restarts produces a producer/consumer mismatch where `StatusConsumer`
-rejects every envelope (historically: 8,946 `got 2, want 1` events
-were logged between PR #78 on 2026-05-15 and the next restart on
-2026-05-20).
+The daemon is a long-running Ruby process whose loaded code does not change
+when a deployment replaces files on disk. Historically, the daemon also
+shelled out for its status graph, so a schema update could put the old consumer
+and new producer in different processes; 8,946 `got 2, want 1` events were
+logged between PR #78 on 2026-05-15 and the next restart on 2026-05-20. The
+status graph is now produced and consumed in-process, eliminating that mismatch,
+but in-place schema or status-entrypoint changes still need prompt re-exec.
+Deployment-managed or manual restart remains the freshness boundary for other
+runtime source changes.
 
-At startup the dispatcher captures a SHA-256 fingerprint of the file
-that owns `Hive::Schemas` (resolved via
-`Hive::Schemas.method(:schema_path).source_location`, currently
-`lib/hive/schemas.rb` — the file holding `SCHEMA_VERSIONS`), so the
-fingerprint follows the namespace wherever it lives. On every **full** tick (the
+At startup the dispatcher captures one SHA-256 fingerprint over the files that
+own `Hive::Schemas` and `Status#internal_task_graph_payload`, resolving both via
+Ruby `source_location`. Watching the status producer is required now that it is
+loaded in-process; a checkout update to `status.rb` must trigger the same re-exec
+as a schema update. On every **full** tick (the
 `poll_interval_sec` ~30s cadence, not the `fast_poll_sec` ~1s cheap
 probe) it rehashes the file and compares — gating the hash behind
 `full_tick_due?` keeps the per-second idle path to cheap waitpid + stat
@@ -1249,64 +1250,36 @@ fingerprint flapping. Operators can disable the behavior entirely via
 `HIVE_DAEMON_NO_AUTO_REEXEC=1` (useful for tests and short-lived
 dev runs).
 
-## Forward-tolerant schema-version skew
+## In-process task-graph boundary
 
-`StatusConsumer#validate_envelope!` enforces only the envelope SHAPE
-(`schema == "hive-status"` and `ok == true`) as a hard error. The
-`schema_version` is NOT validated there — it is classified by
-`schema_skew(doc)` into `:match` / `:newer` / `:older` and handled
-tolerantly, because the long-running daemon holds an in-memory
-`SCHEMA_VERSIONS.fetch("hive-status")` that goes stale the moment the
-`hive` gem is updated under it without a restart. The pre-fix code raised
-`ArgumentError, "schema_version mismatch: got N, want M"` on any
-inequality; that same brittleness hard-crashed the Telegram bot's
-`/status` (`got 3, want 2`) after a schema bump until the bot was
-restarted.
+Every full daemon tick and changed-task refresh calls the status producer in
+the daemon process. `StatusConsumer` receives a Hash, validates the exact
+`hive-status` schema version, and maps it into typed rows. It does not fork a
+second Ruby runtime, reload RubyGems, materialize a JSON string, or parse that
+string back into the same object graph. Because producer and consumer share one
+loaded release, schema skew is impossible in normal daemon operation; a
+mismatch from an injected producer is a malformed internal boundary and fails
+the scan without crashing the daemon.
 
-Behavior by skew (both `StatusConsumer` and `Hive::Bot::StatusWatcher`):
+`Status` activates one thread-scoped warning sink around the complete graph
+build. The shared warning emitter therefore captures both direct status
+warnings and deeper task-metadata, descriptor-parser, completion-time,
+deprecated-config, and managed-workflow warnings without adding sink arguments
+to every intermediate API. Outside that scope the emitter keeps the existing
+stderr behavior. `StatusConsumer::Result#warning` preserves the dispatcher's
+once-per-tick `status_warning` event; if the producer fails after recording a
+warning, the failed result retains those breadcrumbs beside the final exception
+instead of dropping the earlier cause.
 
-- **`:newer`** (payload version > process version — an updated binary):
-  parse best-effort. `hive-status` envelopes are additive by contract
-  (see [[commands/status]] and ADR-028 carve-out in [[decisions]]), so a
-  newer payload is still readable. The consumer returns `ok: true` and
-  carries a non-fatal `Result#warning`; the dispatcher logs it once per
-  tick as `:status_warning` (a neutral name — the same channel also
-  carries status-command stderr breadcrumbs, so it is intentionally not
-  skew-specific)
-  and keeps dispatching. If best-effort
-  extraction (`extract_rows`/`extract_projects`) genuinely throws, it
-  degrades to the actionable failure `hive status: envelope schema vN is
-  newer than this process (vM); restart the hive daemon to pick up the new
-  version (underlying error: <Class>: <msg>)` — the **underlying exception
-  is preserved**, not swallowed, so a genuine extraction bug that merely
-  coincides with a newer schema stays diagnosable instead of being
-  relabeled "just restart" forever.
-- **`:older`** (payload version < process version — a stale binary on
-  PATH): not parsed as trustworthy. Returns `Result(ok: false)` with
-  `… is older than this process (vM); update/reinstall the hive binary on
-  PATH`.
-- **`:match`**: unchanged happy path; no warning.
+The source-drift fingerprint includes the status entrypoint, so an in-place
+update to that producer file cannot leave the long-lived daemon on its previous
+entrypoint. Other runtime files retain ADR-031's deployment-managed/manual
+restart contract.
 
-**Validation runs OUTSIDE the skew degrade (fix-forward on #416).**
-`validate_envelope!` (shape + `ok==true`) is called before the
-best-effort extraction block, and extraction is wrapped in its own
-`begin/rescue`. So an envelope that is both `:newer` AND `ok=false`
-surfaces its real `envelope ok=false: <reason>` message — never the skew
-restart hint. Only a throw inside extraction degrades, and only when
-`skew == :newer`; an equal/exact-version extraction throw re-raises to the
-outer rescue and surfaces the raw `#{e.class}: …` line (a real bug, not a
-skew).
-
-The contract: a long-running consumer must NEVER crash a tick (or the
-bot's `/status`) with a raw `ArgumentError` purely because a
-`schema_version` was bumped without a restart. It either keeps working
-(forward-compatible) or returns a clear "restart to pick up vN" message —
-without ever masking the real `ok=false` reason or a genuine extraction
-defect.
-
-`Hive::Bot::Supervisor#diagnose_reply_for_child` consumes the sibling
-`hive-status-diagnose` envelope but only checks `schema == ...` and never
-`schema_version`, so it did NOT share this brittleness and was left as-is.
+The Telegram bot remains a separate long-running process and temporarily uses
+the hidden CLI transport. Its `StatusWatcher` retains its own forward-skew
+handling until the bot receives a purpose-built projection; that compatibility
+code is not part of the daemon scan path.
 
 ## Backlinks
 

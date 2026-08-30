@@ -249,7 +249,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
   end
 
-  def test_start_wires_the_invoked_binary_into_runtime_collaborators_without_leaking_env
+  def test_start_wires_the_invoked_binary_only_into_child_launchers_without_leaking_env
     command = daemon("start", dry_run: true)
     invoked = File.join(@home, "checkout", "bin", "hive")
     command.define_singleton_method(:current_binary_path) { invoked }
@@ -262,7 +262,7 @@ class HiveCommandsDaemonTest < Minitest::Test
           with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
             captured_bins = [
               kwargs.fetch(:supervisor).instance_variable_get(:@hive_bin),
-              kwargs.fetch(:status_consumer).instance_variable_get(:@hive_bin)
+              kwargs.fetch(:status_consumer).instance_variable_defined?(:@hive_bin)
             ]
             dispatcher
           }) do
@@ -274,7 +274,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       refute ENV.key?("HIVE_BIN"), "a completed foreground run must restore its caller environment"
     end
 
-    assert_equal [ invoked, invoked ], captured_bins
+    assert_equal [ invoked, false ], captured_bins
   end
 
   def test_start_restores_explicit_hive_bin_after_foreground_run

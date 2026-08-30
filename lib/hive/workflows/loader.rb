@@ -2,6 +2,7 @@ require "hive/config"
 require "digest"
 require "hive/workflows/descriptor_parser"
 require "hive/workflow_package/managed_store"
+require "hive/warnings"
 
 module Hive
   module Workflows
@@ -35,12 +36,14 @@ module Hive
             workflow = Hive::Workflows::DescriptorParser.parse_file(path)
             loaded[workflow.id] = workflow
           rescue Hive::ConfigError => e
-            warn "hive: skipping #{e.message}"
+            Hive::Warnings.emit("hive: skipping #{e.message}")
           end
         end
         load_managed(workflows_dir).each do |id, workflow|
           if workflows.key?(id)
-            warn "hive: skipping managed workflow #{id.inspect}: owner-authored descriptor has priority"
+            Hive::Warnings.emit(
+              "hive: skipping managed workflow #{id.inspect}: owner-authored descriptor has priority"
+            )
           else
             workflows[id] = workflow
           end
@@ -66,7 +69,9 @@ module Hive
           )
           workflows[workflow.id] = workflow
         rescue Hive::ConfigError => e
-          warn "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+          Hive::Warnings.emit(
+            "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+          )
         end
       end
 

@@ -7,6 +7,7 @@ require "hive/workflows/project"
 require "hive/workflows/registry"
 require "hive/worktree"
 require "hive/workflow_package/managed_store"
+require "hive/warnings"
 
 module Hive
   class Task
@@ -332,8 +333,10 @@ module Hive
     rescue Hive::UnsupportedProjectConfigError
       raise
     rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-      warn "hive: task: failed to read default_workflow from #{config_path} " \
-           "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"
+      Hive::Warnings.emit(
+        "hive: task: failed to read default_workflow from #{config_path} " \
+        "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"
+      )
       Hive::Config::DEFAULTS["default_workflow"]
     end
 
@@ -347,9 +350,11 @@ module Hive
     def warn_if_unregistered_project_default(name)
       Hive::Workflows::Registry.fetch(name.to_sym)
     rescue Hive::Workflows::UnknownWorkflow
-      warn "hive: task: project default_workflow #{name.inspect} in " \
-           "#{File.join(@hive_state_path, "config.yml")} is not a registered workflow; " \
-           "every field-less task in this project will fail to load until it is fixed"
+      Hive::Warnings.emit(
+        "hive: task: project default_workflow #{name.inspect} in " \
+        "#{File.join(@hive_state_path, "config.yml")} is not a registered workflow; " \
+        "every field-less task in this project will fail to load until it is fixed"
+      )
     end
 
     # Takes the resolved workflow explicitly (rather than reading @workflow) so

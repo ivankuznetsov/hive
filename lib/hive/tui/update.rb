@@ -551,6 +551,7 @@ module Hive
       def apply_open_new_idea_prompt(model)
         fresh = model.with(
           new_idea_project_name: nil,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -585,6 +586,7 @@ module Hive
         fresh.with(
           mode: :new_idea_project,
           new_idea_project_cursor: nil,
+          new_idea_project_resolution: resolution,
           flash: new_idea_resolution_flash(resolution),
           flash_set_at: Time.now
         )
@@ -644,6 +646,7 @@ module Hive
           mode: :new_idea,
           new_idea_project_name: project.name,
           new_idea_project_cursor: cursor,
+          new_idea_project_resolution: nil,
           flash: nil,
           flash_set_at: nil
         )
@@ -743,6 +746,7 @@ module Hive
           mode: :grid,
           new_idea_project_name: nil,
           new_idea_project_cursor: 0,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],

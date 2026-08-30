@@ -2401,9 +2401,15 @@ module Hive
       # / `submit_rich_new_idea` (rescue + ensure) call-sites for the
       # branch-by-branch contract.
       def submit_new_idea
+        return [ @hive_model, nil ] unless @hive_model.mode == :new_idea
+
+        resolution = resolve_new_idea_project
+        return blocked_new_idea_submission(resolution) unless resolution.available?
+
+        project = resolution.name
         buffer = @hive_model.new_idea_buffer.to_s
         if rich_new_idea_buffer?(buffer)
-          return submit_rich_new_idea(buffer)
+          return submit_rich_new_idea(buffer, project: project)
         end
 
         title = buffer.strip
@@ -2421,37 +2427,6 @@ module Hive
           ]
         end
         @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
-
-        resolution = resolve_new_idea_project
-        unless resolution.available?
-          flash = new_idea_resolution_flash(resolution)
-          # If the operator had picked a concrete project via the picker
-          # and it later went stale (snapshot poll dropped it or marked
-          # it unhealthy), bounce back to the picker with the typed
-          # buffer preserved — the flash advises "choose another
-          # project", and Esc still cleanly discards everything. The
-          # plain "no-projects" / "no scope" cases (no chosen name in
-          # play) fall through to `reset_to_grid_with_flash` because
-          # there's nothing to re-pick.
-          chosen = @hive_model.new_idea_project_name.to_s
-          if !chosen.empty? && @hive_model.scope.zero?
-            return [
-              @hive_model.with(
-                mode: :new_idea_project,
-                new_idea_project_name: nil,
-                flash: flash,
-                flash_set_at: Time.now
-              ),
-              nil
-            ]
-          end
-          # `reset_to_grid_with_flash` clears `new_idea_staging_dir`
-          # on the model; clean the on-disk dir first so orphaned
-          # files don't leak after we drop the reference.
-          cleanup_new_idea_staging unless @hive_model.new_idea_staging_dir.to_s.empty?
-          return [ reset_to_grid_with_flash(flash), nil ]
-        end
-        project = resolution.name
 
         # argv[0] must be the executable name. `Subprocess.run_quiet!`
         # invokes Open3.popen3(*cmd) directly, so a missing "hive" prefix
@@ -2497,7 +2472,7 @@ module Hive
         @hive_model.new_idea_attachments.any? || extract_image_labels(buffer).any?
       end
 
-      def submit_rich_new_idea(buffer)
+      def submit_rich_new_idea(buffer, project:)
         # Staging-cleanup policy lives in this local flag so the
         # ensure-block has one source of truth: the happy path AND
         # any unexpected (programmer-error) exception both clean up;
@@ -2523,30 +2498,6 @@ module Hive
           ]
         end
         @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
-
-        resolution = resolve_new_idea_project
-        unless resolution.available?
-          preserve_staging = true
-          flash = new_idea_resolution_flash(resolution)
-          # Mirror the plain-text path: if the operator's picked project
-          # went stale mid-compose, bounce back to the picker so they
-          # can re-pick without losing the staged images. The flash
-          # tells them what happened; Esc still cleans everything.
-          chosen = @hive_model.new_idea_project_name.to_s
-          if !chosen.empty? && @hive_model.scope.zero?
-            return [
-              @hive_model.with(
-                mode: :new_idea_project,
-                new_idea_project_name: nil,
-                flash: flash,
-                flash_set_at: Time.now
-              ),
-              nil
-            ]
-          end
-          return [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
-        end
-        project = resolution.name
 
         title = derive_rich_new_idea_title(buffer)
         body = render_rich_new_idea_body(buffer)
@@ -2763,6 +2714,7 @@ module Hive
           mode: :grid,
           new_idea_project_name: nil,
           new_idea_project_cursor: 0,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -2779,7 +2731,29 @@ module Hive
         snapshot = @hive_model.snapshot
         return Hive::Tui::Snapshot::NewIdeaResolution.new(state: :no_projects) unless snapshot
 
+        if @hive_model.new_idea_project_name.to_s.empty?
+          blocked = @hive_model.new_idea_project_resolution
+          return blocked if blocked && !blocked.available?
+        end
+
         snapshot.resolve_new_idea_project(name: @hive_model.new_idea_project_name)
+      end
+
+      # Shared fail-closed transition for plain and rich submission. It
+      # clears only target intent, retains every composition/staging field,
+      # and records the typed reason until an explicit picker selection.
+      def blocked_new_idea_submission(resolution)
+        [
+          @hive_model.with(
+            mode: :new_idea_project,
+            new_idea_project_name: nil,
+            new_idea_project_cursor: nil,
+            new_idea_project_resolution: resolution,
+            flash: new_idea_resolution_flash(resolution),
+            flash_set_at: Time.now
+          ),
+          nil
+        ]
       end
 
       def new_idea_resolution_flash(resolution)

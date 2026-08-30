@@ -34,4 +34,17 @@ class TuiNewIdeaProjectResolutionBoundaryTest < Minitest::Test
     assert_includes bubble_model, "Views::HelpOverlay",
       "the regression must not forbid unrelated view use"
   end
+
+  def test_one_submit_preflight_precedes_plain_or_rich_validation
+    bubble_model = source("lib/hive/tui/bubble_model.rb")
+    submit = bubble_model[/      def submit_new_idea\n.*?(?=      def rich_new_idea_buffer\?)/m]
+    rich = bubble_model[/      def submit_rich_new_idea\(.*?\n.*?(?=      def )/m]
+
+    refute_nil submit
+    refute_nil rich
+    assert_equal 1, submit.scan(/resolve_new_idea_project/).size
+    assert_operator submit.index("resolve_new_idea_project"), :<,
+      submit.index("rich_new_idea_buffer?")
+    refute_includes rich, "resolve_new_idea_project"
+  end
 end

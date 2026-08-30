@@ -1377,6 +1377,7 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, moved.new_idea_project_cursor
     assert_equal :new_idea, selected.mode
     assert_equal "alpha", selected.new_idea_project_name
+    assert_nil selected.new_idea_project_resolution
     assert_equal 2, selected.scope,
       "the stale numeric scope may remain dashboard context but must not conflict with the pin"
   end
@@ -1401,6 +1402,8 @@ class HiveTuiUpdateTest < Minitest::Test
       assert_equal :new_idea_project, blocked.mode
       assert_nil blocked.new_idea_project_name
       assert_nil blocked.new_idea_project_cursor
+      assert_equal(scope == 9 ? :invalid_scope : :ambiguous,
+        blocked.new_idea_project_resolution.state)
       assert_match flash_pattern, blocked.flash.to_s
     end
   end
@@ -1440,6 +1443,7 @@ class HiveTuiUpdateTest < Minitest::Test
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
     assert_equal :new_idea, new_model.mode
     assert_equal "beta", new_model.new_idea_project_name
+    assert_nil new_model.new_idea_project_resolution
     assert_equal 0, new_model.scope
   end
 

@@ -29,6 +29,7 @@ module Hive
       :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
       :new_idea_project_name, # String or nil — explicit target chosen from ★ All
       :new_idea_project_cursor, # Integer or nil — nil means explicitly no highlighted project
+      :new_idea_project_resolution, # Snapshot::NewIdeaResolution retained until explicit selection
       :new_idea_buffer,  # String — typed text in :new_idea mode
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
       :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea
@@ -145,6 +146,7 @@ module Hive
           pane_focus: :right,
           new_idea_project_name: nil,
           new_idea_project_cursor: 0,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],

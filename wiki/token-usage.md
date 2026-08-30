@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/billing_evidence.rb, lib/hive/model_pricing.rb, lib/hive/task_workspace/resources.rb, lib/hive/task_workspace/usage.rb, config/model-pricing.v1.yml, lib/hive/patrol/launch_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [observability, usage, pricing, billing, tui, sqlite, agent]
 ---
 
@@ -93,11 +93,13 @@ failure raises a typed runtime-control-plane error and cannot be acknowledged
 as successful accounting.
 
 Conflicting non-unknown billing routes, attempt/generation ownership, or token
-inclusion flags cannot overwrite an existing exact session. Direct Claude,
-Codex, and Grok profiles can prove subscription semantics from their profile
-contract. Pi and OpenCode remain `unknown` unless an admitted provider-account
-configuration explicitly declares the route. Harness identity is never used as
-the billing provider.
+inclusion flags cannot overwrite an existing exact session. A profile that
+declares `subscription_backed` in its contract (Claude, Codex, Grok, and Pi)
+proves subscription semantics from that profile contract; OpenCode stays
+`unknown` unless an admitted provider-account configuration explicitly
+declares the route. `Hive::BillingEvidence.for_profile` reads only the declared
+profile contract and never re-derives admission from the adapter name. Harness
+identity is never used as the billing provider.
 
 ## Semantic task usage
 

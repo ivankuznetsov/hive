@@ -59,7 +59,7 @@ class ProviderRoutingConfigurationTest < Minitest::Test
                  configuration.routes.map { |candidate| candidate.model_routing.provenance[:effort].kind }
   end
 
-  def test_billing_route_is_closed_and_evidenced_without_inferring_from_ambiguous_harnesses
+  def test_billing_route_is_closed_and_evidenced_from_explicit_or_profile_contract_sources
     normalize = lambda do |id, value|
       Hive::ProviderRouting::Configuration.normalize_accounts(
         { id => value }, source: "global providers"
@@ -77,8 +77,8 @@ class ProviderRoutingConfigurationTest < Minitest::Test
         "codex-subscription",
         account("codex", binding: "default", models: %w[gpt-5.6-terra])
       ),
-      "pi-ambiguous" => normalize.call(
-        "pi-ambiguous",
+      "pi-contract" => normalize.call(
+        "pi-contract",
         account("pi", binding: "default", models: %w[provider/model])
       )
     }
@@ -89,8 +89,9 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     assert_equal "subscription", accounts.fetch("codex-subscription").billing_route
     assert_equal "agent_profile_contract",
                  accounts.fetch("codex-subscription").billing_evidence_source
-    assert_equal "unknown", accounts.fetch("pi-ambiguous").billing_route
-    assert_equal "unavailable", accounts.fetch("pi-ambiguous").billing_evidence_source
+    assert_equal "subscription", accounts.fetch("pi-contract").billing_route
+    assert_equal "agent_profile_contract",
+                 accounts.fetch("pi-contract").billing_evidence_source
 
     cfg = Hive::Config.merge_defaults(
       "execute" => {

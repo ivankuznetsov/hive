@@ -3,7 +3,7 @@ title: hive answer
 type: command
 source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/brainstorm_suggestions/projection.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
 created: 2026-08-10
-updated: 2026-08-30
+updated: 2026-08-31
 tags: [command, brainstorm, answers, bindings, concurrency, json, agents, suggestions]
 ---
 
@@ -66,11 +66,12 @@ unavailable, no-safe, corrupt, or unobservable state returns null text.
 
 Projection performs at most one deadline-bounded context observation for the
 task, shared across all unanswered slots. Its process-local cache is keyed by
-the explicit Git index/worktree identity, selection recipe, main-wiki
-identity, task/brainstorm generation, settled answers, and canonical sidecar
-generation; it never caches raw context or provider output. Observation
-failure fails closed without affecting the slot's normal `binding` or manual
-submission path.
+the canonical sidecar/candidate lifecycle identity; repository and wiki
+capture runs only on a cache miss, not before every read-side lookup. Failed
+observations are not retained, so a later same-input read can expose a newly
+verifiable candidate. The cache never stores raw context or provider output.
+Observation failure fails closed without affecting the slot's normal
+`binding` or manual submission path.
 
 The nested suggestion contract is read-only. No suggestion state, candidate
 binding, Retry, Restore, or client-side approval is accepted by the answer

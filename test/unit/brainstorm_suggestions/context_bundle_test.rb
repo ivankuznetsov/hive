@@ -191,6 +191,7 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
       wiki_root = File.join(root, "shared-wiki")
       FileUtils.mkdir_p([ File.join(root, ".llm-wiki"), wiki_root ])
       File.write(File.join(wiki_root, "adapter.md"), "The repository adapter preserves the public API.\n")
+      git(root, "add", "shared-wiki/adapter.md")
       config = File.join(root, ".llm-wiki", "config.json")
       File.write(config, JSON.generate("main_wiki_path" => "shared-wiki"))
 
@@ -219,6 +220,7 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
         File.join(wiki_root, "adapter.md"),
         "The repository adapter preserves the naïve public API.\n".b
       )
+      git(root, "add", "shared-wiki/adapter.md")
       File.write(
         File.join(root, ".llm-wiki", "config.json"),
         JSON.generate("main_wiki_path" => "shared-wiki")
@@ -231,6 +233,32 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
 
         assert_includes bundle.source_classes, "main_wiki"
         assert_includes bundle.render_context, "naïve public API"
+      end
+    end
+  end
+
+  def test_main_wiki_excludes_untracked_and_ignored_markdown
+    with_repository do |root|
+      wiki_root = File.join(root, "shared-wiki")
+      FileUtils.mkdir_p([ File.join(root, ".llm-wiki"), wiki_root ])
+      File.write(File.join(wiki_root, "tracked.md"), "The repository adapter is public.\n")
+      File.write(File.join(wiki_root, "private.md"), "private repository adapter note\n")
+      File.write(File.join(wiki_root, "ignored.md"), "ignored repository adapter note\n")
+      File.write(File.join(root, ".gitignore"), "shared-wiki/ignored.md\n")
+      git(root, "add", "shared-wiki/tracked.md", ".gitignore")
+      File.write(
+        File.join(root, ".llm-wiki", "config.json"),
+        JSON.generate("main_wiki_path" => "shared-wiki")
+      )
+
+      with_task(root) do |task|
+        context = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        ).render_context
+
+        assert_includes context, "repository adapter is public"
+        refute_includes context, "private repository adapter note"
+        refute_includes context, "ignored repository adapter note"
       end
     end
   end

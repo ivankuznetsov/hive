@@ -133,11 +133,11 @@ module Hive
       end
 
       def binding_matches?(record)
-        record["suggestion_binding"] == @binding
+        current_binding(record) == @binding
       end
 
       def current_binding(record)
-        record["suggestion_binding"]
+        record["suggestion_binding"] || record["input_binding"]
       end
 
       def action_allowed?(record)

@@ -91,7 +91,7 @@ module Hive
           unless match
             reserved = line.match?(RESERVED_RE)
             corrupt ||= reserved
-            if reserved && line.match?(RESERVED_OPEN_RE)
+            if reserved
               index, consumed = consume_corrupt_region(lines, index)
               offset += consumed
               next
@@ -113,7 +113,7 @@ module Hive
 
           while index < lines.length
             current = lines[index]
-            if CLOSE_RE.match?(current)
+            if CLOSE_RE.match?(current) && !region_corrupt
               region_lines << current
               offset += current.bytesize
               index += 1
@@ -160,9 +160,6 @@ module Hive
 
           bytes += current.bytesize
           index += 1
-          break if index > start_index + 1 &&
-                   (CLOSE_RE.match?(current) ||
-                    (current.match?(RESERVED_RE) && !current.match?(RESERVED_OPEN_RE)))
         end
         [ index, bytes ]
       end

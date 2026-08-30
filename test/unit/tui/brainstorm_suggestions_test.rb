@@ -23,6 +23,25 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
     end
   end
 
+  def test_repository_projection_runs_before_the_task_lock
+    with_task do |task, path, _store|
+      observed = []
+      original = Hive::BrainstormSuggestions::Projection.method(:call)
+      replacement = lambda do |**kwargs|
+        observed << Hive::Lock.task_lock_held?(task)
+        original.call(**kwargs)
+      end
+
+      with_replaced_singleton_method(
+        Hive::BrainstormSuggestions::Projection, :call, replacement
+      ) do
+        Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
+      end
+
+      assert_equal [ false ], observed
+    end
+  end
+
   def test_removing_only_delimiters_adopts_byte_identical_body_and_deletes_record
     with_task do |task, path, store|
       lease = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
@@ -96,6 +115,23 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
       assert_equal "stale", record.fetch("state")
       assert_nil record.fetch("text")
       assert_equal before, Hive::BrainstormParser.parse(path).map(&:answer)
+    end
+  end
+
+  def test_retry_uses_input_binding_when_retryable_record_has_no_candidate
+    with_task do |task, _path, store|
+      store.update do |document|
+        document.fetch("records").first.merge!(
+          "state" => "failed", "suggestion_binding" => nil, "text" => nil,
+          "rationale" => nil, "provenance" => [], "candidate_id" => nil
+        )
+        document
+      end
+
+      receipt = Hive::Tui::BrainstormSuggestions.retry!(task)
+
+      assert_equal "updated", receipt.fetch("status")
+      assert_equal "stale", store.read.dig("records", 0, "state")
     end
   end
 

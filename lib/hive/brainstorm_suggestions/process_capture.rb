@@ -6,6 +6,8 @@ module Hive
     # caller owns semantic error mapping; this helper owns concurrent draining,
     # deadlines, and unconditional process-group cleanup.
     module ProcessCapture
+      TERM_GRACE_SECONDS = 0.5
+      POLL_INTERVAL_SECONDS = 0.02
       Result = Data.define(:output, :status)
       class Timeout < StandardError; end
       class TooLarge < StandardError; end
@@ -59,7 +61,22 @@ module Hive
         return unless pid
 
         Process.kill("TERM", -pid)
-        Process.wait(pid)
+        deadline = monotonic_now + TERM_GRACE_SECONDS
+        reaped = false
+        loop do
+          reaped ||= !Process.waitpid2(pid, Process::WNOHANG).nil?
+          begin
+            Process.kill(0, -pid)
+          rescue Errno::ESRCH
+            return pid
+          end
+          break if monotonic_now >= deadline
+
+          IO.select(nil, nil, nil, POLL_INTERVAL_SECONDS)
+        end
+        Process.kill("KILL", -pid)
+        Process.waitpid(pid) unless reaped
+        pid
       rescue Errno::ESRCH, Errno::ECHILD
         nil
       end

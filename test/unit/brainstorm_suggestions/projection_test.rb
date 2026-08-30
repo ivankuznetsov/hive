@@ -109,6 +109,32 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
+  def test_failed_observation_is_not_cached
+    with_task do |root|
+      write_document(root, [ fresh_record(1) ])
+      calls = 0
+      observer = lambda do |records:, **|
+        calls += 1
+        Hive::BrainstormSuggestions::Projection::Observation.new(
+          bindings: calls == 1 ? {} : { 1 => records.first.fetch("input_binding") },
+          error_code: calls == 1 ? "capture_timeout" : nil
+        )
+      end
+      cache = Hive::BrainstormSuggestions::Projection::Cache.new
+
+      first = current_projection(
+        root, questions: questions.first(1), observer: observer, cache: cache
+      ).call.fetch(1)
+      second = current_projection(
+        root, questions: questions.first(1), observer: observer, cache: cache
+      ).call.fetch(1)
+
+      assert_equal "unavailable", first.fetch("state")
+      assert_equal "fresh", second.fetch("state")
+      assert_equal 2, calls
+    end
+  end
+
 
   def test_fresh_record_without_a_complete_input_epoch_never_exposes_text
     with_task do |root|
@@ -203,38 +229,33 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     second&.kill
   end
 
-  def test_default_observer_and_explicit_worktree_identity_invalidate_changed_content
+  def test_candidate_state_change_invalidates_the_read_cache
     with_task do |root|
-      source = File.join(root, "adapter.rb")
-      File.write(source, "class Adapter; end\n")
-      system("git", "init", "-q", root, exception: true)
-      system("git", "-C", root, "config", "user.email", "test@example.com", exception: true)
-      system("git", "-C", root, "config", "user.name", "Hive Test", exception: true)
-      system("git", "-C", root, "add", "adapter.rb", exception: true)
-      system("git", "-C", root, "commit", "-qm", "initial", exception: true)
-      bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
-        project_root: root, task_root: root, question_ordinal: 1
-      )
-      record = fresh_record(1)
-      binding = Hive::BrainstormSuggestions::Binding.input(
-        task_incarnation: "incarnation", task_generation: 0,
-        brainstorm_generation: "b" * 64, question_identity: record.fetch("question_id"),
-        question_text: "First?", manifest: bundle.manifest,
-        settled_answers: bundle.settled_answers
-      )
-      record["input_binding"] = binding
-      record["input_epoch"] = binding
-      write_document(root, [ record ])
+      failed = failed_record(1)
+      write_document(root, [ failed ])
+      calls = 0
+      observer = lambda do |records:, **|
+        calls += 1
+        Hive::BrainstormSuggestions::Projection::Observation.new(
+          bindings: { 1 => records.first.fetch("input_binding") }, error_code: nil
+        )
+      end
       cache = Hive::BrainstormSuggestions::Projection::Cache.new
 
-      first = default_projection(root, cache: cache).call.fetch(1)
-      File.write(source, "class Adapter; def changed = true; end; end\n")
-      second = default_projection(root, cache: cache).call.fetch(1)
+      first = current_projection(
+        root, questions: questions.first(1), observer: observer, cache: cache
+      ).call.fetch(1)
+      fresh = fresh_record(1)
+      fresh["input_binding"] = failed.fetch("input_binding")
+      fresh["input_epoch"] = failed.fetch("input_epoch")
+      write_document(root, [ fresh ])
+      second = current_projection(
+        root, questions: questions.first(1), observer: observer, cache: cache
+      ).call.fetch(1)
 
-      assert_equal "fresh", first.fetch("state")
-      assert_equal "Suggested answer", first.fetch("text")
-      assert_equal "stale", second.fetch("state")
-      assert_nil second.fetch("text")
+      assert_equal "failed", first.fetch("state")
+      assert_equal "fresh", second.fetch("state")
+      assert_equal 2, calls
     end
   end
 
@@ -321,72 +342,6 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
-  def test_main_wiki_identity_is_bounded_and_fails_closed
-    with_task do |root|
-      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
-      wiki = File.join(root, "shared-wiki")
-      FileUtils.mkdir_p(wiki)
-      File.write(File.join(wiki, "adapter.md"), "adapter evidence\n")
-      config = File.join(root, ".llm-wiki", "config.json")
-      File.write(config, JSON.generate("main_wiki_path" => "shared-wiki"))
-      projection = build_projection(root)
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
-
-      assert_match(/\A[0-9a-f]{64}\z/, projection.send(:main_wiki_identity, deadline))
-      assert_equal "unavailable", projection.send(:main_wiki_identity, 0)
-
-      File.write(config, "{")
-      assert_equal "unavailable", projection.send(:main_wiki_identity, deadline)
-    end
-  end
-
-  def test_git_identity_timeout_terminates_its_process_group
-    with_task do |root|
-      bin = File.join(root, "bin")
-      FileUtils.mkdir_p(bin)
-      fake_git = File.join(bin, "git")
-      File.write(fake_git, "#!/bin/sh\nsleep 10\n")
-      File.chmod(0o700, fake_git)
-      projection = build_projection(root)
-      previous_path = ENV.fetch("PATH", "")
-      ENV["PATH"] = "#{bin}:#{previous_path}"
-
-      assert_raises(IOError) do
-        projection.send(:run_git, [ "status" ], 0)
-      end
-
-      pid = Process.spawn("/bin/sh", "-c", "sleep 10", pgroup: true)
-      assert_equal pid, Hive::BrainstormSuggestions::ProcessCapture.terminate(pid)
-      assert_nil Hive::BrainstormSuggestions::ProcessCapture.terminate(nil)
-      assert_nil Hive::BrainstormSuggestions::ProcessCapture.terminate(999_999_999)
-    ensure
-      ENV["PATH"] = previous_path if previous_path
-    end
-  end
-
-  def test_git_identity_maps_bounded_capture_failures_to_io_errors
-    with_task do |root|
-      projection = build_projection(root)
-      failures = {
-        Hive::BrainstormSuggestions::ProcessCapture::TooLarge => "exceeded its bound",
-        Hive::BrainstormSuggestions::ProcessCapture::SpawnFailed.new("git unavailable") =>
-          "git unavailable"
-      }
-
-      failures.each do |failure, message|
-        replacement = ->(*) { raise failure }
-        with_replaced_singleton_method(
-          Hive::BrainstormSuggestions::ProcessCapture, :call, replacement
-        ) do
-          error = assert_raises(IOError) do
-            projection.send(:run_git, [ "status" ], Float::INFINITY)
-          end
-          assert_includes error.message, message
-        end
-      end
-    end
-  end
-
   private
 
   def with_task
@@ -426,16 +381,17 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
   def build_projection(root, questions: self.questions, observer: nil, identity_factory: nil,
                        enabled: true,
                        cache: Hive::BrainstormSuggestions::Projection::Cache.new)
-    Hive::BrainstormSuggestions::Projection.new(
+    arguments = {
       task_root: root,
       project_root: root,
       questions: questions,
       task_generation: "a" * 64,
       enabled: enabled,
       observer: observer,
-      cache: cache,
-      identity_factory: identity_factory || ->(*) { "identity" }
-    )
+      cache: cache
+    }
+    arguments[:identity_factory] = identity_factory if identity_factory
+    Hive::BrainstormSuggestions::Projection.new(**arguments)
   end
 
   def write_document(root, records)

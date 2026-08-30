@@ -144,6 +144,25 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
     end
   end
 
+  def test_retry_accepts_the_input_binding_when_no_candidate_binding_exists
+    Dir.mktmpdir do |root|
+      task = File.join(root, "2-brainstorm", "task-1")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "brainstorm.md"), "### Q1. Choose?\n### A1.\n")
+      record = fresh_record.merge(
+        "state" => "failed", "suggestion_binding" => nil, "text" => nil,
+        "rationale" => nil, "provenance" => [], "candidate_id" => nil
+      )
+      Hive::BrainstormSuggestions::Store.new(task).write("records" => [ record ])
+
+      result = action("retry", task, binding: "a" * 64)
+
+      assert_equal "updated", result.fetch("status")
+      assert_equal "stale",
+                   Hive::BrainstormSuggestions::Store.new(task).read.dig("records", 0, "state")
+    end
+  end
+
   def test_usage_validation_rejects_bad_actions_and_incomplete_candidate_requests
     assert_raises(Hive::UsageError) do
       Hive::Commands::BrainstormSuggestion.new("retry", question: "bad").call

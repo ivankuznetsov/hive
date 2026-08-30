@@ -98,7 +98,9 @@ The configured provider is launchable only when its profile proves the
 currently admits Claude only. Hive constructs a controller-owned Bubblewrap
 runtime with no live project/task mount, an immutable `/bundle`, empty
 settings/MCP configuration, disabled shell/network tools and slash commands,
-and one schema-constrained stdout result channel. Unsupported profiles,
+and one schema-constrained stdout result channel. The sandbox retains network
+transport only for the controller-owned Claude CLI to reach its provider API;
+the model receives no network tool. Unsupported profiles,
 missing Bubblewrap, missing binaries, or unavailable isolation become
 `unavailable` and are not launched. Runtime roots and directories are `0700`;
 bundle/auth files are `0400`; every success, failure, timeout, TERM/KILL, and

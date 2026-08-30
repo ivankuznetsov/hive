@@ -109,6 +109,29 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_proposal_usage_errors_select_the_read_or_mutation_contract
+    with_tmp_global_config do |home|
+      [
+        [ %w[proposal show --json], "hive-proposal-show" ],
+        [ %w[proposal decide prp-00000000-0000-4000-8000-000000000001 --json],
+          "hive-proposal-mutation" ]
+      ].each do |argv, schema|
+        out, _err, status = run_hive(home, *argv)
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal schema, payload.fetch("schema")
+        assert_equal "InvalidRecord", payload.fetch("error_class")
+        assert_equal "invalid", payload.fetch("error_kind")
+        schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema))))
+        assert_empty schemer.validate(payload).map { |error| error.fetch("error") }
+      end
+      assert_pre_dispatch_error(
+        home, %w[proposal filter too many arguments --json],
+        schema: "hive-proposal-list", error_kind: "usage"
+      )
+    end
+  end
+
   def test_act_json_usage_errors_preserve_required_action_identity
     cases = [
       [ %w[act --json], "", "" ],

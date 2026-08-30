@@ -511,6 +511,17 @@ module Hive
         submit TASK --input FILE
         evaluate TASK --input FILE
 
+      Live discovery reads canonical hive/state projections:
+        list [PROJECT_PATH]
+        show PROPOSAL_ID
+        filter [PROJECT_PATH] [--kind KIND] [--status STATUS]
+
+      Lifecycle actions are tracking-only and require a fresh observed head:
+        decide PROPOSAL_ID --input FILE --authority ID --policy-fingerprint SHA \
+          --expected-head-version N --expected-head-digest SHA
+        supersede PROPOSAL_ID ...
+        rollback PROPOSAL_ID ...
+
       Generated-view maintenance runs through the managed llm-wiki boundary:
         refresh [PROJECT_PATH]
         refresh [PROJECT_PATH] --check
@@ -518,8 +529,28 @@ module Hive
       --compile-only, --source-ref, and --output-root form the internal pinned
       compiler boundary used by the managed refresh worktree.
     DESC
-    option :input, type: :string, desc: "JSON candidate/evaluation artifact for submit/evaluate"
+    option :input, type: :string, desc: "JSON artifact for source or lifecycle mutation commands"
     option :project, type: :string, desc: "scope task lookup to one registered project"
+    option :kind, type: :string, desc: "filter by skill or workflow"
+    option :subject, type: :string, desc: "filter by exact subject reference"
+    option :revision, type: :string, desc: "filter by revision"
+    option :status, type: :string, desc: "filter by effective lifecycle status"
+    option :relation, type: :string, desc: "filter by related proposal ID"
+    option :evaluator, type: :string, desc: "filter by evaluator identity"
+    option :method, type: :string, desc: "filter by evaluation method"
+    option :include_drafts, type: :boolean, default: false,
+                            desc: "include valid drafts in discovery output"
+    option :include_quarantine, type: :boolean, default: false,
+                                desc: "include safe quarantine diagnostics"
+    option :expected_head_version, type: :string,
+                                   desc: "observed lifecycle head version"
+    option :expected_head_digest, type: :string,
+                                  desc: "observed lifecycle head digest"
+    option :considered_evaluations, type: :array, default: [],
+                                     desc: "evaluation IDs considered by a decision"
+    option :authority, type: :string, desc: "configured lifecycle authority identity"
+    option :policy_fingerprint, type: :string,
+                                desc: "observed lifecycle authority policy fingerprint"
     option :check, type: :boolean, default: false,
                    desc: "verify generated proposal views without publishing"
     option :compile_only, type: :boolean, default: false, hide: true
@@ -527,13 +558,19 @@ module Hive
     option :output_root, type: :string, hide: true
     def proposal(subcommand = nil, target = nil)
       require "hive/commands/proposal"
-      if Hive::Commands::Proposal::SOURCE_COMMANDS.include?(subcommand.to_s) && options[:input].to_s.empty?
-        raise Hive::UsageError, "hive proposal #{subcommand}: --input FILE is required"
-      end
+      filters = %i[kind subject revision status relation evaluator method].to_h do |key|
+        [ key.to_s, options[key] ]
+      end.compact
       Hive::Commands::Proposal.new(
         subcommand, target, input: options[:input], project: options[:project],
         json: options[:json], check: options[:check], compile_only: options[:compile_only],
-        source_ref: options[:source_ref], output_root: options[:output_root]
+        source_ref: options[:source_ref], output_root: options[:output_root],
+        project_root: Dir.pwd, filters:, include_drafts: options[:include_drafts],
+        include_quarantine: options[:include_quarantine],
+        expected_head_version: options[:expected_head_version],
+        expected_head_digest: options[:expected_head_digest],
+        considered_evaluation_ids: options[:considered_evaluations],
+        authority_identity: options[:authority], policy_fingerprint: options[:policy_fingerprint]
       ).call
     end
 

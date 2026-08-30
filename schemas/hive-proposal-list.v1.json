@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-list.v1.json",
+  "title": "Hive proposal list (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-proposal-list" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "filters": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 512 } },
+    "proposals": { "type": "array", "items": { "$ref": "#/$defs/Projection" } },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } },
+    "result_digest": { "$ref": "#/$defs/Digest" },
+    "error_class": { "type": "string" },
+    "error_kind": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "message": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "required": ["filters", "proposals", "diagnostics", "result_digest"] },
+      "else": { "required": ["error_class", "error_kind", "exit_code", "message"] }
+    }
+  ],
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Projection": {
+      "type": "object",
+      "required": ["proposal_id", "subject", "revision", "status", "lifecycle_head", "projection_digest"],
+      "properties": {
+        "proposal_id": { "type": "string", "pattern": "^prp-[0-9a-f-]{36}$" },
+        "subject": { "type": "object" },
+        "revision": { "type": "string" },
+        "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
+        "lifecycle_head": { "type": "object" },
+        "projection_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "code", "path", "sha256", "bytes", "proposal_id"],
+      "properties": {
+        "kind": { "const": "quarantine" },
+        "code": { "type": "string" },
+        "path": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "proposal_id": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

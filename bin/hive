@@ -288,6 +288,22 @@ def json_usage_error_contract(argv)
     return { schema: schema, error_kind: "invalid_arguments" }
   when "decide"
     return { schema: "hive-decide", error_kind: "invalid_task_path" }
+  when "proposal"
+    subcommand = json_usage_subcommand(
+      argv, command_index,
+      value_options: %w[
+        --input --project --kind --subject --revision --status --relation
+        --evaluator --method --expected-head-version --expected-head-digest
+        --considered-evaluations --authority --policy-fingerprint --source-ref
+        --output-root
+      ]
+    )
+    schema = case subcommand
+    when "list", "filter" then "hive-proposal-list"
+    when "show" then "hive-proposal-show"
+    else "hive-proposal-mutation"
+    end
+    return { schema:, error_kind: "usage" }
   when "refactor-patrol"
     if (jobs = refactor_patrol_jobs_argv(option_argv))
       return {

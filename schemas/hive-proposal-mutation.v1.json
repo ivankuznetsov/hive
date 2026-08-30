@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-mutation.v1.json",
+  "title": "Hive proposal mutation (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-proposal-mutation" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "action": { "enum": ["submit", "evaluate", "decide", "supersede", "rollback", "refresh"] },
+    "outcome": { "type": "string" },
+    "proposal_id": { "type": "string", "pattern": "^prp-[0-9a-f-]{36}$" },
+    "source_event_id": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+    "source_commit": { "type": ["string", "null"] },
+    "projection_count": { "type": ["integer", "null"], "minimum": 0 },
+    "diagnostic_count": { "type": ["integer", "null"], "minimum": 0 },
+    "mutation": { "type": "object" },
+    "event_id": { "type": "string", "pattern": "^pev-[0-9a-f-]{36}$" },
+    "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
+    "lifecycle_head": { "type": "object" },
+    "error": { "type": "object" },
+    "error_class": { "type": "string" },
+    "error_kind": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "message": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": false } } },
+      "then": { "required": ["error_class", "error_kind", "exit_code", "message"] }
+    }
+  ]
+}

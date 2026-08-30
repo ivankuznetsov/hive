@@ -127,4 +127,123 @@ class ProposalCommandTest < Minitest::Test
       assert_equal [ [ dir, ops.hive_state_path ] ], calls
     end
   end
+
+  def test_live_list_show_filter_and_authority_decision_share_one_projection
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      File.write(File.join(ops.hive_state_path, "config.yml"), <<~YAML)
+        proposals:
+          authorities:
+            proposal-operator:
+              kind: operator
+              capabilities: [decide, supersede, rollback]
+              version: 1
+              revoked: false
+      YAML
+      store = Hive::Proposals::Store.new(
+        root: File.join(ops.hive_state_path, "proposals", "v1")
+      )
+      proposal_id = "prp-00000000-0000-4000-8000-000000000001"
+      record = store.create_record!(
+        proposal_id:, subject_kind: "workflow", subject_ref: "coding", revision: "v2",
+        proposed_change: "Change planning\n# not a heading", motivation: "Improve target score",
+        evidence: [ { "label" => "score", "content" => "0.9", "media_type" => "text/plain" } ],
+        author: { "id" => "alice", "kind" => "proposer", "binding" => "team" },
+        provenance: proposal_provenance, source_event_id: "pse-#{'1' * 64}",
+        created_at: "2026-08-30T12:00:00Z"
+      )
+      evaluation = store.append_event!(
+        proposal_id:, type: "evaluation",
+        source_event_id: "pse-#{'2' * 64}", provenance: proposal_provenance,
+        occurred_at: "2026-08-30T12:01:00Z",
+        data: {
+          "evaluator" => { "id" => "reviewer", "binding_fingerprint" => "b" * 64 },
+          "method" => { "kind" => "benchmark", "label" => "cost-threshold" },
+          "result" => { "outcome" => "pass", "metrics" => { "score" => 0.9 } },
+          "rationale" => "Measured", "evidence" => [], "links" => []
+        }
+      )
+      ops.hive_commit(
+        stage_name: "test", slug: "proposal", action: "seeded proposal",
+        pathspecs: [
+          "config.yml", "proposals/v1/records/#{record.proposal_id}.json",
+          store.path_for_event(evaluation).delete_prefix("#{ops.hive_state_path}/")
+        ]
+      )
+
+      list_output = StringIO.new
+      Hive::Commands::Proposal.new(
+        "list", dir, input: nil, json: true, stdout: list_output,
+        project_root: dir
+      ).call
+      assert_empty JSON.parse(list_output.string).fetch("proposals"), "drafts are excluded by default"
+
+      filter_output = StringIO.new
+      Hive::Commands::Proposal.new(
+        "filter", dir, input: nil, json: true, stdout: filter_output,
+        project_root: dir, filters: { "method" => "cost-threshold" }, include_drafts: true
+      ).call
+      assert_equal proposal_id,
+                   JSON.parse(filter_output.string).fetch("proposals").first.fetch("proposal_id")
+
+      config = Hive::Config.load(dir)
+      authority = Hive::Proposals::Authority.new(config)
+      fingerprint = authority.fingerprint("proposal-operator")
+      observed = store.projection(proposal_id).lifecycle_head
+      decision_path = File.join(dir, "decision.json")
+      File.write(decision_path, JSON.generate(
+        "outcome" => "accepted", "rationale_category" => "evaluated",
+        "rationale" => "Threshold satisfied", "links" => [],
+        "idempotency_key" => "accept-v2"
+      ))
+      mutation_output = StringIO.new
+      Hive::Commands::Proposal.new(
+        "decide", proposal_id, input: decision_path, json: true, stdout: mutation_output,
+        project_root: dir, expected_head_version: observed.fetch("version"),
+        expected_head_digest: observed.fetch("digest"),
+        considered_evaluation_ids: [ evaluation.event_id ],
+        authority_identity: "proposal-operator", policy_fingerprint: fingerprint
+      ).call
+      mutation = JSON.parse(mutation_output.string)
+      assert_equal "accepted", mutation.fetch("status")
+      assert_equal "applied", mutation.fetch("outcome")
+
+      show_output = StringIO.new
+      Hive::Commands::Proposal.new(
+        "show", proposal_id, input: nil, json: true, stdout: show_output,
+        project_root: dir
+      ).call
+      shown = JSON.parse(show_output.string).fetch("proposal")
+      assert_equal "accepted", shown.fetch("status")
+      assert_equal %w[evaluation decision], shown.fetch("history").map { |row| row.fetch("type") }
+
+      File.write(decision_path, JSON.generate(
+        "outcome" => "rejected", "rationale_category" => "evaluated",
+        "rationale" => "Changed outcome", "links" => [],
+        "idempotency_key" => "conflicting-v2"
+      ))
+      assert_raises(Hive::Proposals::Conflict) do
+        Hive::Commands::Proposal.new(
+          "decide", proposal_id, input: decision_path, project_root: dir,
+          expected_head_version: observed.fetch("version"),
+          expected_head_digest: observed.fetch("digest"),
+          considered_evaluation_ids: [ evaluation.event_id ],
+          authority_identity: "proposal-operator", policy_fingerprint: fingerprint
+        ).call
+      end
+    end
+  end
+
+  private
+
+  def proposal_provenance
+    {
+      "task_id" => "43059", "task_generation" => 1,
+      "ownership_generation" => "owner", "attempt_id" => "attempt",
+      "workflow_id" => "coding", "stage" => "4-execute",
+      "actor" => { "id" => "alice", "kind" => "configured_identity" },
+      "source_commit" => "a" * 40
+    }
+  end
 end

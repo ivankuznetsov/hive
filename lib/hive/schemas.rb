@@ -98,6 +98,9 @@ module Hive
       "hive-proposal-event" => 1,
       "hive-proposal-source-event" => 1,
       "hive-proposal-index" => 1,
+      "hive-proposal-list" => 1,
+      "hive-proposal-show" => 1,
+      "hive-proposal-mutation" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared

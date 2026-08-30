@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-show.v1.json",
+  "title": "Hive proposal show (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-proposal-show" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "proposal": {
+      "type": "object",
+      "required": ["proposal_id", "subject", "revision", "status", "evaluations", "history", "lifecycle_head", "diagnostics", "result_digest"],
+      "properties": {
+        "proposal_id": { "type": "string", "pattern": "^prp-[0-9a-f-]{36}$" },
+        "subject": { "type": "object" },
+        "revision": { "type": "string" },
+        "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
+        "evaluations": { "type": "array" },
+        "history": { "type": "array" },
+        "lifecycle_head": { "type": "object" },
+        "diagnostics": { "type": "array" },
+        "result_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "error_class": { "type": "string" },
+    "error_kind": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "message": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "required": ["proposal"] },
+      "else": { "required": ["error_class", "error_kind", "exit_code", "message"] }
+    }
+  ]
+}

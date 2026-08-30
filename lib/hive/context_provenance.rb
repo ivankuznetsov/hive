@@ -72,6 +72,14 @@ module Hive
       return prompt unless compatible_context?(task, context)
 
       appendix = prompt_appendix(task, context)
+      remaining = MAX_PROMPT_APPENDIX_BYTES - appendix.bytesize - 2
+      proposal_selection = proposal_context_selection(
+        task, context, remaining_bytes: remaining
+      )
+      unless proposal_selection.empty?
+        appendix = "#{appendix}\n\n#{proposal_selection.text.rstrip}"
+        record_proposal_context_activity(task, context, proposal_selection)
+      end
       raise ArgumentError, "context receipt prompt appendix exceeds byte budget" if
         appendix.bytesize > MAX_PROMPT_APPENDIX_BYTES
 
@@ -232,6 +240,61 @@ module Hive
 
       context.task_slug.to_s == task.slug.to_s &&
         (context.project.to_s.empty? || context.project.to_s == ContextReceipt.task_project(task))
+    end
+
+    def proposal_context_selection(task, context, remaining_bytes:)
+      return unavailable_proposal_selection(remaining_bytes, "unbound") unless context.proposal_binding
+
+      require "hive/config"
+      require "hive/proposals/context_selector"
+      cfg = Hive::Config.load(task.project_root)
+      proposal_root = File.join(
+        File.expand_path(cfg.fetch("hive_state_path"), task.project_root),
+        "proposals", "v1"
+      )
+      return unavailable_proposal_selection(remaining_bytes, "empty_store") unless File.directory?(proposal_root)
+
+      selector = Hive::Proposals::ContextSelector.new(
+        query: Hive::Proposals::Query.new(
+          store: Hive::Proposals::Store.new(root: proposal_root)
+        )
+      )
+      context_cfg = cfg.dig("proposals", "context")
+      selector.select(
+        context:, max_items: context_cfg.fetch("max_items"),
+        max_bytes: context_cfg.fetch("max_bytes"), remaining_bytes:
+      )
+    rescue StandardError
+      unavailable_proposal_selection(remaining_bytes, "unavailable")
+    end
+
+    def unavailable_proposal_selection(remaining_bytes, reason)
+      require "hive/proposals/context_selector"
+      effective = [ Integer(remaining_bytes), 0 ].max
+      digest = Hive::Proposals.digest(
+        "items" => [], "configured_budget" => 0,
+        "effective_budget" => effective, "truncated" => false, "reason" => reason
+      )
+      Hive::Proposals::ContextSelection.new(
+        text: "", items: [], selected_ids: [], digest:,
+        configured_budget: 0, effective_budget: effective,
+        truncated: false, reason:
+      )
+    rescue ArgumentError, TypeError
+      unavailable_proposal_selection(0, reason)
+    end
+
+    def record_proposal_context_activity(task, context, selection)
+      record_activity(
+        activity_for_context(task, context, clock: -> { Time.now.utc }),
+        kind: "proposal_context_supplied",
+        operation_id: "proposal-context:#{context.attempt_id}:#{selection.digest}",
+        reason: "controller supplied closed typed proposal facts",
+        occurred_at: Time.now.utc.iso8601(6),
+        evidence: [], payload: selection.provenance
+      )
+    rescue StandardError
+      nil
     end
 
     def prompt_appendix(task, context)

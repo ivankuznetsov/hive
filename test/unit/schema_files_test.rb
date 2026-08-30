@@ -38,6 +38,7 @@ class SchemaFilesTest < Minitest::Test
   def test_proposal_record_and_event_schemas_are_registered_and_closed
     %w[
       hive-proposal-record hive-proposal-event hive-proposal-source-event hive-proposal-index
+      hive-proposal-list hive-proposal-show hive-proposal-mutation
     ].each do |name|
       path = Hive::Schemas.schema_path(name)
       document = JSON.parse(File.read(path))

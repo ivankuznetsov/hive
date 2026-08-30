@@ -100,8 +100,11 @@ requires the controller-owned worktree pointer, exact task branch, persisted
 `head_oid`, origin host/repository, and one OPEN PR observation whose
 URL/number/branch/head all match. A forged, stale, cross-repository, or
 head-drifted `pr.md` target is inert and local reviewer files remain
-authoritative. The publisher then skips duplicate headers on retry, scans for
-secrets before posting, and degrades transport failures to a stderr warning.
+authoritative. The publisher then skips duplicate headers on retry (the
+`gh pr view` dedupe probe routes through the same configured GitHub
+invocation path — including `gh.network_timeout_sec` — as the `gh pr comment`
+post), scans for secrets before posting, and degrades transport failures to a
+stderr warning.
 
 Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). `Hive::Reviewers::Base` owns the adapters' shared retry-budget parsing, including the warning and default used when a direct/custom adapter construction bypasses config validation. After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All ordinary reviewer failures produce `REVIEW_ERROR phase=reviewers reason=all_failed`; when every failure is a typed provider limit—including Grok's nested HTTP 402 balance exhaustion—the phase instead writes `reason=limits_reached` with its hourly retry hint and does not spend the per-reviewer transient retry budget. Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 

@@ -435,6 +435,26 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
+  def test_already_posted_forwards_cfg_to_configured_github_invocation
+    # Patrol regression: the duplicate-prevention `gh pr view` call used to
+    # omit cfg, so it ignored `gh.network_timeout_sec` while the adjacent
+    # `gh pr comment` call honored it. Both must route through the same
+    # configured invocation path.
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    observed_kwargs = nil
+    test_cfg = { "gh" => { "network_timeout_sec" => 7 } }
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_args, **kwargs|
+      observed_kwargs = kwargs
+      [ '{"comments":[]}', "", ok ]
+    }) do
+      assert_equal false, Hive::Stages::Review::GithubPublisher.already_posted?("https://example.com/pr/1", "header", cfg: test_cfg)
+    end
+
+    assert_equal test_cfg, observed_kwargs[:cfg],
+                 "duplicate-prevention lookup must pass cfg through to Hive::Gh.capture3"
+  end
+
   def test_already_posted_returns_false_when_view_fails_or_json_is_unusable
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     failed = Hive::Gh::CommandStatus.new(exitstatus: 1)

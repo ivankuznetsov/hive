@@ -105,7 +105,8 @@ module Hive
               pristine: Hive::TaskProjection::Store.pristine_task?(
                 locked_task, marker,
                 held_task_lock: Hive::Lock.task_lock_held?(locked_task.folder)
-              )
+              ),
+              historical_zero_history: true
             )
           rescue Hive::TaskProjection::InvalidJournal => e
             raise Hive::TaskProjection::InvalidJournal,

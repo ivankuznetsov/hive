@@ -212,7 +212,7 @@ module Hive
                   "pristine projection initialization requires empty task projection storage"
           end
 
-          publish_pristine!(marker: marker, limits: limits).projection
+          publish_zero_history!(marker: marker, limits: limits).projection
         end
       end
 
@@ -220,15 +220,20 @@ module Hive
       # The exclusive journal lock prevents a concurrent append from binding
       # the new derived files to two different authoritative cursors.
       def repair!(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
-                  pristine: false)
+                  pristine: false, historical_zero_history: false)
         with_journal_write_lock do
           stat = begin
             File.lstat(journal_path)
           rescue Errno::ENOENT
             nil
           end
-          return publish_pristine!(marker: marker, limits: limits) if
+          return publish_zero_history!(marker: marker, limits: limits) if
             stat.nil? && pristine
+          if stat.nil? && historical_zero_history &&
+             zero_history_storage?("checkpoint_missing")
+            ensure_journal_after_handoff!(snapshot: nil, marker: marker, bytes: "")
+            return publish_zero_history!(marker: marker, limits: limits)
+          end
           unless stat && stat.file? && !stat.symlink? && stat.size.positive?
             raise Hive::TaskProjection::InvalidJournal,
                   "authoritative task journal is missing, empty, or not a regular file"
@@ -298,7 +303,7 @@ module Hive
 
       private
 
-      def publish_pristine!(marker:, limits:)
+      def publish_zero_history!(marker:, limits:)
         binding = journal_binding("")
         projection = replay(binding, marker: marker)
         publish(projection)
@@ -311,7 +316,7 @@ module Hive
           reason = bounded.diagnostics.first&.fetch("reason", bounded.state) ||
                    bounded.state
           raise Hive::TaskProjection::InvalidJournal,
-                "pristine projection initialization did not produce a current checkpoint (#{reason})"
+                "zero-history projection publication did not produce a current checkpoint (#{reason})"
         end
 
         RepairResult.new(projection: projection, bounded: bounded)
@@ -330,7 +335,7 @@ module Hive
         unless checkpoint.fetch("valid")
           if require_checkpoint
             return pristine_bounded_read(marker: marker) if
-              pristine && pristine_storage?(checkpoint.fetch("reason"))
+              pristine && zero_history_storage?(checkpoint.fetch("reason"))
 
             return degraded_bounded_read(
               reason: checkpoint.fetch("reason"), state: "repair_required",
@@ -770,7 +775,7 @@ module Hive
         )
       end
 
-      def pristine_storage?(checkpoint_reason)
+      def zero_history_storage?(checkpoint_reason)
         checkpoint_reason == "checkpoint_missing" &&
           !path_entry?(journal_path) && !path_entry?(snapshot_path) &&
           !path_entry?(checkpoint_path)

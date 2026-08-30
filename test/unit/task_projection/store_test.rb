@@ -657,6 +657,41 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_historical_zero_history_repair_rejects_a_missing_durable_handoff_journal
+    with_tmp_dir do |dir|
+      marker = Hive::Markers::State.new(
+        name: :execute_complete,
+        attrs: { "attempt_id" => "attempt-1" },
+        raw: nil
+      )
+      store = projection_store(dir)
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.repair!(marker: marker, historical_zero_history: true)
+      end
+
+      assert_match(/missing or empty after durable handoff/, error.message)
+      refute File.exist?(store.snapshot_path)
+      refute File.exist?(store.checkpoint_path)
+    end
+  end
+
+  def test_historical_zero_history_repair_refuses_partial_projection_authority
+    with_tmp_dir do |dir|
+      marker = Hive::Markers::State.new(name: :complete, attrs: {}, raw: nil)
+      store = projection_store(dir)
+      original = "existing projection authority\n"
+      File.binwrite(store.snapshot_path, original)
+
+      assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.repair!(marker: marker, historical_zero_history: true)
+      end
+
+      assert_equal original, File.binread(store.snapshot_path)
+      refute File.exist?(store.checkpoint_path)
+    end
+  end
+
   def test_routine_read_degrades_immediately_while_exact_repair_holds_the_lock
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])

@@ -109,8 +109,12 @@ initial-stage zero-state may project as pristine without a checkpoint. The
 explicit [[commands/repair-projection]] command owns full replay for one exact
 task. It changes derived snapshot/checkpoint files only; it is neither a
 workflow retry nor a migration or watcher. The repair command may also restore
-missing derived files for a journal-less task only when the same shared
-creation-state predicate proves the canonical initial zero-history state.
+missing derived files for a journal-less task when either the shared
+creation-state predicate proves the canonical initial zero-history state or all
+three projection authority files are absent on a historical task whose marker
+does not prove a durable execute handoff. The latter publishes a marker-derived
+compatibility baseline without fabricating journal history; any partial,
+malformed, or post-handoff authority still fails closed.
 
 Selection proceeds by current task generation, then latest compatible attempt
 within each registry family, then exact commit generation/HEAD for branch facts.

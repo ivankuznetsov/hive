@@ -105,6 +105,7 @@ module Hive
       "hive-digest" => 1,
       "hive-digest-refresh" => 1,
       "hive-digest-prune" => 1,
+      "hive-digest-send" => 1,
       # Exact-slot brainstorm inventory/write boundary used by canonical-skill
       # conversations. Bindings are revalidated under a creation-disabled task
       # lock; the command never advances a workflow stage.

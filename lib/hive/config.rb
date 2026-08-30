@@ -437,15 +437,14 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # `answer-digest` ships a non-zero DEFAULT cap (every other verb stays
-        # at `child_timeout_sec`=0/disabled) because it holds the single global
-        # digest slot (can_dispatch_digest?). A black-holed Telegram socket
-        # would otherwise pin that slot and leave the scheduler pending until
-        # restart. A reaped child exits non-zero, so the scheduler retries the
-        # date on backoff.
+        # The daemon-owned digest command families ship non-zero DEFAULT caps
+        # (every other verb stays at child_timeout_sec=0/disabled). A
+        # black-holed Telegram socket must not pin answer, daily-record, or
+        # daily-delivery capacity until a restart; the ledger turns an
+        # interrupted daily recap into `unknown`.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "answer-digest" => 3600 },
+        "child_verb_timeouts" => { "answer-digest" => 3600, "digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },

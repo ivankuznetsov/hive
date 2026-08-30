@@ -58,6 +58,17 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   enabled: false
 #   hour: 9
 
+# Daemon-owned digest children have positive safety bounds even when ordinary
+# task children keep the historical unbounded default. `digest` covers both
+# record refresh/close and the opt-in Telegram delivery command.
+#
+# daemon:
+#   child_timeout_sec: 0
+#   child_kill_grace_sec: 30
+#   child_verb_timeouts:
+#     answer-digest: 3600
+#     digest: 3600
+
 # Hive-owned durable cross-project activity record. Disabled by default. Run
 # `hive migrate --all` before enabling so the IANA zone and coverage frontier
 # are persisted. Telegram recap delivery is a separate opt-in.

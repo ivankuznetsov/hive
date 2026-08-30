@@ -5,6 +5,8 @@ require "sequel"
 require "yaml"
 require "hive/runtime_control_plane"
 require "hive/attempts/record"
+require "hive/provider_health/event"
+require "hive/provider_health/circuit"
 
 module Hive
   module RuntimeControlPlane
@@ -14,6 +16,7 @@ module Hive
     class LegacyImport
       MAX_SOURCE_BYTES = 4 * 1024 * 1024
       TERMINAL_ATTEMPT_STATES = %w[lost terminal].freeze
+      DISPOSABLE_DOMAINS = %w[operational_projections].freeze
       ATTEMPT_ROOT_ENTRIES = %w[
         cold-logs decision-indexes generation-locks log-state logs maintenance
         outputs pending-finalization proof records routing-policies
@@ -56,7 +59,6 @@ module Hive
         Source.new("terminal_receipts", :state, "attempts/v4/proof", :tree),
         Source.new("terminal_pending", :state, "attempts/v4/pending-finalization", :tree),
         Source.new("routing_policies", :state, "attempts/v4/routing-policies", :tree),
-        Source.new("provider_health", :state, "provider-health/v1", :tree),
         Source.new("task_counters", :state, "task-counter.yml", :file),
         Source.new("task_leases", :state, ".task-counter.lock", :file),
         Source.new("patrol_allowances", :data, "usage.db.patrol-discovery-allowances", :tree),
@@ -68,23 +70,27 @@ module Hive
         [ "pr_merge_reconciliations", ".hive-state/daemon/pr-merge-reconciliation.json", :file ]
       ].freeze
       PROJECT_BASENAMES = {
-        "task-journal.jsonl" => "task_journals",
-        "task-projection.json" => "task_projections",
         ".lock" => "task_leases"
       }.freeze
 
-      attr_reader :state_home, :data_home, :project_roots, :attempt_root, :usage_path
+      attr_reader :state_home, :data_home, :project_roots, :attempt_root, :usage_path,
+                  :patrol_allowances_path, :project_names
 
-      def initialize(state_home:, data_home:, project_roots: [], attempt_root: nil, usage_path: nil)
+      def initialize(state_home:, data_home:, project_roots: [], attempt_root: nil, usage_path: nil,
+                     patrol_allowances_path: nil, project_names: {})
         @state_home = File.expand_path(state_home)
         @data_home = File.expand_path(data_home)
         @project_roots = Array(project_roots).map { |path| File.expand_path(path) }.uniq.sort.freeze
+        @project_names = project_names.to_h.transform_keys { |path| File.expand_path(path) }.freeze
         @attempt_root = File.expand_path(
           attempt_root || environment_path("HIVE_ATTEMPT_STORE_ROOT") ||
             File.join(@state_home, "attempts", "v4")
         )
         @usage_path = File.expand_path(
           usage_path || environment_path("HIVE_USAGE_DB_PATH") || File.join(@data_home, "usage.db")
+        )
+        @patrol_allowances_path = File.expand_path(
+          patrol_allowances_path || "#{@usage_path}.patrol-discovery-allowances"
         )
       end
 
@@ -94,6 +100,7 @@ module Hive
         @semantic_identities = {}
         validate_attempt_root_layout!
         GLOBAL_SOURCES.each { |source| decode_global(source) }
+        decode_provider_health(File.join(state_home, "provider-health", "v1"))
         project_roots.each { |root| decode_project(root) }
         normalized_records = @records.keys.sort.to_h do |domain|
           [ domain, @records.fetch(domain).sort_by { |record| canonical(record) }.freeze ]
@@ -123,7 +130,7 @@ module Hive
           return File.join(attempt_root, source.relative_path.delete_prefix("attempts/v4/"))
         end
         return usage_path if source.relative_path == "usage.db"
-        return "#{usage_path}.patrol-discovery-allowances" if
+        return patrol_allowances_path if
           source.relative_path == "usage.db.patrol-discovery-allowances"
 
         root = source.home == :state ? state_home : data_home
@@ -131,7 +138,7 @@ module Hive
       end
 
       def decode_project(root)
-        project = File.basename(root)
+        project = project_names.fetch(root, File.basename(root))
         PROJECT_SOURCES.each do |domain, relative, kind|
           path = File.join(root, relative)
           logical = "projects/#{project}/#{relative}"
@@ -219,20 +226,221 @@ module Hive
         )
       end
 
+      def decode_provider_health(root)
+        status = optional_lstat(root)
+        return record_empty("provider_health", "provider-health/v1") unless status
+        unsafe!(root, :unsafe_source, "legacy provider-health root must be a real directory") if
+          status.symlink? || !status.directory?
+        files = safe_files(root)
+        return record_empty("provider_health", "provider-health/v1") if files.empty?
+
+        scopes = Hash.new do |hash, key|
+          hash[key] = { journals: [], history: [], idempotency: {}, projection: nil }
+        end
+        files.each do |path|
+          relative = path.delete_prefix("#{root}#{File::SEPARATOR}")
+          if relative == "mutation.lock"
+            prove_lock_empty("provider_health", path, "provider-health/v1/#{relative}")
+          elsif relative.start_with?("intents/")
+            raise QuiescenceError.new(
+              "in-flight provider probe intent remains at #{path}",
+              code: :in_flight_probe, path: path
+            )
+          elsif relative.start_with?("quarantine/")
+            raise ClassificationError.new(
+              "quarantined provider-health evidence remains at #{path}",
+              code: :quarantined_source, path: path
+            )
+          elsif (match = relative.match(%r{\Ascopes/(provider-account|model)/([0-9a-f]{64})/(journal\.jsonl|current\.json)\z}))
+            key = [ match[1], match[2] ]
+            if match[3] == "journal.jsonl"
+              events = provider_events(path)
+              scopes[key][:journals] << [ path, events ]
+              provider_ledger(relative, "imported", events.map(&:to_h))
+            else
+              projection = provider_circuit(path)
+              scopes[key][:projection] = projection
+              provider_ledger(relative, "superseded", projection.to_h)
+            end
+          elsif (match = relative.match(%r{\Ahistory/(provider-account|model)/([0-9a-f]{64})/.+\.jsonl\z}))
+            key = [ match[1], match[2] ]
+            events = provider_events(path)
+            scopes[key][:history].concat(events)
+            provider_ledger(relative, "imported", events.map(&:to_h))
+          elsif (match = relative.match(%r{\Aidempotency/(provider-account|model)/([0-9a-f]{64})/(.+\.json)\z}))
+            key = [ match[1], match[2] ]
+            entries = provider_idempotency(path)
+            entries.each do |idempotency_key, event_id|
+              previous = scopes[key][:idempotency][idempotency_key]
+              if previous && previous != event_id
+                raise ClassificationError.new(
+                  "provider-health idempotency evidence conflicts at #{path}",
+                  code: :duplicate_source_identity, path: path
+                )
+              end
+              scopes[key][:idempotency][idempotency_key] = event_id
+            end
+            provider_ledger(relative, "imported", entries)
+          else
+            raise ClassificationError.new(
+              "legacy provider-health source is unattributed at #{path}",
+              code: :unattributed_source, path: path
+            )
+          end
+        end
+        scopes.sort.each do |(kind, key), state|
+          unless state[:journals].one?
+            raise ClassificationError.new(
+              "provider-health scope has no unique current journal",
+              code: :malformed_source, path: root
+            )
+          end
+          current_events = state[:journals].first.last
+          circuit = replay_provider_events(current_events, path: state[:journals].first.first)
+          unless circuit.scope.key == key &&
+                 (kind == "provider-account" ? circuit.scope.provider_account? : circuit.scope.model?)
+            raise ClassificationError.new(
+              "provider-health scope path does not match its journal", code: :cross_project_record,
+              path: state[:journals].first.first
+            )
+          end
+          if state[:projection] && state[:projection].to_h != circuit.to_h
+            raise ClassificationError.new(
+              "provider-health projection differs from its journal",
+              code: :source_changed, path: state[:journals].first.first
+            )
+          end
+          events_by_id = {}
+          (state[:history] + current_events).each do |event|
+            previous = events_by_id[event.event_id]
+            if previous && previous.to_h != event.to_h
+              raise ClassificationError.new(
+                "provider-health event identity conflicts across retained journals",
+                code: :duplicate_source_identity, path: root
+              )
+            end
+            events_by_id[event.event_id] = event
+          end
+          events = events_by_id.values
+          events.each do |event|
+            mapped = state[:idempotency][event.idempotency_key]
+            if mapped && mapped != event.event_id
+              raise ClassificationError.new(
+                "provider-health idempotency evidence differs from its event",
+                code: :malformed_source, path: root
+              )
+            end
+            state[:idempotency][event.idempotency_key] ||= event.event_id
+          end
+          missing = state[:idempotency].reject do |idempotency_key, event_id|
+            events.any? { |event| event.idempotency_key == idempotency_key && event.event_id == event_id }
+          end
+          unless missing.empty?
+            raise ClassificationError.new(
+              "provider-health idempotency evidence has no retained audit event",
+              code: :malformed_source, path: root
+            )
+          end
+          classify_provider_circuit!(circuit, state[:journals].first.first)
+          @records["provider_health"] << Codec.normalize(
+            "circuit" => circuit.to_h,
+            "events" => events.sort_by { |event| [ event.occurred_at, event.event_id ] }.map(&:to_h),
+            "idempotency" => state[:idempotency]
+          )
+        end
+      rescue Hive::ProviderHealth::Error, JSON::ParserError, KeyError, TypeError => error
+        raise ClassificationError.new(
+          "legacy provider-health state is malformed: #{error.message}",
+          code: :malformed_source, path: root, details: { error_class: error.class.name }
+        )
+      end
+
+      def provider_events(path)
+        status = secure_file_status(path)
+        lines = bounded_read(path, status).lines.reject { |line| line.strip.empty? }
+        raise JSON::ParserError, "empty provider journal" if lines.empty?
+        lines.map.with_index(1) do |line, sequence|
+          event = Hive::ProviderHealth::Event.from_h(JSON.parse(line))
+          raise Hive::ProviderHealth::Unavailable, "provider event sequence gap" unless
+            event.sequence == sequence
+          event
+        end
+      end
+
+      def provider_circuit(path)
+        Hive::ProviderHealth::Circuit.from_h(
+          JSON.parse(bounded_read(path, secure_file_status(path)))
+        )
+      end
+
+      def provider_idempotency(path)
+        document = JSON.parse(bounded_read(path, secure_file_status(path)))
+        entries = if document["schema"] == "hive-provider-health-idempotency-shard"
+          unless document.keys.sort == %w[entries schema schema_version] && document["schema_version"] == 1
+            raise JSON::ParserError, "invalid provider idempotency shard"
+          end
+          document.fetch("entries")
+        else
+          { document.fetch("idempotency_key") => document.fetch("event_id") }
+        end
+        unless entries.is_a?(Hash) && entries.all? do |key, event_id|
+          key.to_s.match?(Hive::ProviderHealth::SHA256_PATTERN) && !event_id.to_s.empty?
+        end
+          raise JSON::ParserError, "invalid provider idempotency evidence"
+        end
+        entries
+      end
+
+      def replay_provider_events(events, path:)
+        first = events.first
+        unless %w[reset snapshot].include?(first.kind) ||
+               (first.journal_epoch.zero? && first.previous_generation.zero?)
+          raise Hive::ProviderHealth::Unavailable, "invalid provider journal genesis"
+        end
+        circuit = Hive::ProviderHealth::Circuit.closed(
+          scope: first.scope, generation: first.previous_generation,
+          journal_epoch: first.journal_epoch
+        )
+        events.each { |event| circuit = event.apply(circuit) }
+        circuit
+      rescue Hive::ProviderHealth::Error => error
+        raise ClassificationError.new(
+          "provider-health journal cannot be replayed: #{error.message}",
+          code: :malformed_source, path: path
+        )
+      end
+
+      def classify_provider_circuit!(circuit, path)
+        if circuit.probe
+          raise QuiescenceError.new(
+            "in-flight provider probe remains at #{path}", code: :in_flight_probe, path: path
+          )
+        end
+        record_empty("provider_probes", "provider-health/v1/#{circuit.scope.key}#probe")
+      end
+
+      def provider_ledger(relative, disposition, value)
+        @ledger << ledger_entry(
+          "provider_health", "provider-health/v1/#{relative}", disposition, value
+        )
+      end
+
       def decode_dispatch_sequence(path, logical, status)
-        source = bounded_read(path, status).strip
-        sequence = Integer(source, 10)
-        raise ArgumentError if sequence.negative?
+        sequence = JSON.parse(bounded_read(path, status))
+        request_id = sequence.fetch("request_id").to_s
+        remaining = sequence.fetch("remaining_argvs")
+        unless !request_id.empty? && remaining.is_a?(Array) && remaining.all? do |argv|
+          argv.is_a?(Array) && !argv.empty? && argv.all? { |item| item.is_a?(String) }
+        end
+          raise ArgumentError
+        end
 
         record_document(
           "dispatch_sequence", logical,
-          {
-            "request_id" => File.basename(path, ".sequence"),
-            "sequence" => sequence
-          },
+          { "request_id" => request_id, "remaining_argvs" => remaining },
           path: path
         )
-      rescue ArgumentError
+      rescue ArgumentError, JSON::ParserError, KeyError
         raise ClassificationError.new(
           "dispatch sequence is malformed at #{path}", code: :malformed_source, path: path
         )
@@ -372,7 +580,11 @@ module Hive
           )
         end
         @semantic_identities[semantic] = path
-        disposition = superseded?(normalized) ? "superseded" : "imported"
+        disposition = if DISPOSABLE_DOMAINS.include?(domain) || superseded?(normalized)
+          "superseded"
+        else
+          "imported"
+        end
         @records[domain] << normalized unless disposition == "superseded"
         @ledger << ledger_entry(domain, logical, disposition, normalized)
         classify_probe(logical, normalized, path) if domain == "provider_health"
@@ -409,6 +621,12 @@ module Hive
           raise QuiescenceError.new(
             "active capacity reservation remains at #{path}",
             code: :active_capacity_reservation, path: path
+          )
+        when "terminal_pending"
+          return if superseded?(document)
+          raise QuiescenceError.new(
+            "pending task publication remains at #{path}",
+            code: :pending_terminal_publication, path: path
           )
         end
       end

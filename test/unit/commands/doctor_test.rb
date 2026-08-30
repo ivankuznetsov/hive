@@ -109,6 +109,29 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  def test_runtime_probe_reports_corrupt_active_manifest_even_without_database
+    with_tmp_dir do |root|
+      current = File.join(root, ".runtime-cutover", "current")
+      FileUtils.mkdir_p(current, mode: 0o700)
+      File.binwrite(File.join(current, "active.json"), "{\n")
+      File.chmod(0o600, File.join(current, "active.json"))
+      previous = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = root
+      doctor = Hive::Commands::Doctor.new(
+        config: base_config, project_root: root, inspector: ResolutionOnlyInspector.new(
+          config: base_config, project_root: root
+        )
+      )
+
+      row = doctor.send(:check_runtime_control_plane).fetch(0)
+
+      assert_equal "missing", row.fetch(:status)
+      assert_includes row.fetch(:message), "manifest_corrupt"
+    ensure
+      previous.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = previous
+    end
+  end
+
   def test_exit_missing_skill_when_one_missing
     with_fake_home do |home|
       write_file("#{home}/.claude/commands/plan.md")

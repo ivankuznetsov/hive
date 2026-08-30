@@ -1,6 +1,8 @@
 require "test_helper"
 require "digest"
 require "json"
+require "pty"
+require "rbconfig"
 require_relative "../../packaging/release_candidate/baseline_catalog"
 require_relative "../../packaging/release_candidate/installed_target"
 require_relative "../../packaging/release_candidate/upgrade_survivor"
@@ -300,7 +302,243 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     end
   end
 
+  def test_packaged_previous_update_enters_candidate_confirmation_and_retired_writers_hit_fences
+    previous_root = ENV["HIVE_RC_PREVIOUS_RELEASE_TARGET"]
+    candidate_root = ENV["HIVE_RC_CANDIDATE_RELEASE_TARGET"]
+    skip "CI-only: set both packaged release-candidate target roots" unless
+      previous_root && candidate_root
+
+    with_tmp_dir do |dir|
+      previous = HiveReleaseCandidate::InstalledTarget.new(
+        role: "baseline", root: previous_root, state_root: File.join(dir, "installed-state")
+      )
+      candidate = HiveReleaseCandidate::InstalledTarget.new(
+        role: "candidate", root: candidate_root, state_root: File.join(dir, "installed-state")
+      )
+      state = File.join(dir, "state")
+      data = File.join(dir, "data")
+      project = File.join(dir, "project")
+      task = File.join(project, ".hive-state", "stages", "1-inbox", "first-task")
+      FileUtils.mkdir_p([ state, data, task ])
+      File.binwrite(File.join(task, "meta.yml"), "---\nid: 7\nworkflow: coding\n")
+      File.binwrite(File.join(task, "idea.md"), "# First task\n")
+      projects = [ {
+        "name" => "project", "path" => project,
+        "hive_state_path" => File.join(project, ".hive-state"),
+        "project_id" => "11111111-1111-4111-a111-111111111111",
+        "registration_id" => "22222222-2222-4222-a222-222222222222",
+        "registered_at" => "2026-08-29T12:00:00.000000Z"
+      } ]
+      File.binwrite(File.join(state, "config.yml"), YAML.dump("registered_projects" => projects))
+      fake_bin = File.join(dir, "fake-bin")
+      FileUtils.mkdir_p(fake_bin)
+      File.binwrite(File.join(fake_bin, "brew"), "#!/bin/sh\nexit 0\n")
+      File.binwrite(File.join(fake_bin, "systemctl"), "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, Dir.glob(File.join(fake_bin, "*")))
+
+      receipt = File.join(dir, "old-update-argv.json")
+      driver = <<~RUBY
+        require "json"
+        require "hive/commands/update"
+        calls = []
+        begin
+          Hive::Commands::Update.new(
+            channel: "brew", env: ENV,
+            runner: ->(argv) { calls << argv; calls.length == 1 },
+            binary_resolver: -> { ENV.fetch("CANDIDATE_HIVE") }
+          ).call
+        rescue Hive::Error
+        end
+        File.binwrite(ENV.fetch("ARGV_RECEIPT"), JSON.generate(calls))
+        exit(calls.length == 2 ? 0 : 1)
+      RUBY
+      old_environment = previous.environment.merge(
+        "PATH" => "#{fake_bin}:#{previous.environment.fetch('PATH', ENV.fetch('PATH'))}",
+        "CANDIDATE_HIVE" => candidate.executable, "ARGV_RECEIPT" => receipt
+      )
+      _out, error, status = Open3.capture3(
+        old_environment, RbConfig.ruby, "-e", driver, unsetenv_others: true
+      )
+      assert status.success?, error
+      old_update_argv = JSON.parse(File.binread(receipt)).last
+      assert_equal [ candidate.executable, "migrate", "--all" ], old_update_argv
+
+      environment = candidate.environment.merge(
+        "HIVE_HOME" => state, "HOME" => File.join(dir, "home"),
+        "PATH" => "#{fake_bin}:#{candidate.environment.fetch('PATH', ENV.fetch('PATH'))}",
+        "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1",
+        "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
+        "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "1"
+      )
+      FileUtils.mkdir_p(environment.fetch("HOME"))
+      _out, refusal, status = Open3.capture3(
+        environment, *old_update_argv, unsetenv_others: true
+      )
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_includes refusal, "hive migrate --all --yes"
+
+      transcript = ""
+      confirmed = false
+      exitstatus = nil
+      PTY.spawn(environment, *old_update_argv) do |reader, writer, pid|
+        begin
+          loop do
+            transcript << reader.readpartial(4096)
+            if !confirmed && transcript.include?("Type 'yes' to continue")
+              writer.puts "yes"
+              confirmed = true
+            end
+          end
+        rescue EOFError, Errno::EIO
+          Process.wait(pid)
+          exitstatus = $?.exitstatus
+        end
+      end
+      assert confirmed, transcript
+      assert_equal 0, exitstatus, transcript
+      assert_path_exists Hive::Paths.runtime_control_plane_path(state)
+
+      inventory = YAML.safe_load_file(
+        File.join(ROOT, "test/fixtures/runtime_control_plane/affected_production.yml")
+      )
+      probes = previous_writer_probes
+      fence_paths = previous_writer_fence_paths(state, data, project, task)
+      assert_equal inventory.fetch("legacy_writers").sort, probes.keys.sort
+      assert_equal probes.keys.sort, fence_paths.keys.sort
+      writer_environment = previous.environment.merge(
+        "HIVE_HOME" => state, "HOME" => environment.fetch("HOME"),
+        "HIVE_ATTEMPT_STORE_ROOT" => File.join(state, "attempts", "v4"),
+        "HIVE_USAGE_DB_PATH" => File.join(data, "usage.db"),
+        "PROJECT_ROOT" => project, "TASK_FOLDER" => task
+      )
+      assert_equal inventory.fetch("path_overrides").sort,
+                   %w[HIVE_ATTEMPT_STORE_ROOT HIVE_USAGE_DB_PATH].select { |key| writer_environment[key] }.sort
+      probes.each do |writer, operation|
+        before = release_tree_snapshot(dir)
+        stdout, stderr, status = Open3.capture3(
+          writer_environment, RbConfig.ruby, "-e", previous_writer_script(operation),
+          unsetenv_others: true
+        )
+        receipt = JSON.parse(stdout.lines.last)
+        if status.exitstatus == 77
+          assert_equal "Hive::Patrol::LaunchBudget", writer
+          assert_equal "LoadError", receipt.fetch("error")
+        else
+          assert_equal 73, status.exitstatus, "#{writer}: #{stderr}"
+          refute_equal "writer unexpectedly completed", receipt.fetch("message")
+          refute_match(/(?:ArgumentError|KeyError|LoadError|NameError|NoMethodError)\z/,
+                       receipt.fetch("error"), writer)
+          assert_match(/\A(?:Errno::[A-Z0-9_]+|(?:Hive::|SQLite3::|Sequel::).*(?:Error|Exception))\z/,
+                       receipt.fetch("error"), writer)
+          diagnostic = "#{receipt.fetch('message')}\n#{stderr}"
+          assert fence_paths.fetch(writer).any? { |path| diagnostic.include?(path) },
+                 "#{writer} did not identify a fenced path: #{diagnostic}"
+        end
+        assert_equal before, release_tree_snapshot(dir), writer
+      end
+    end
+  end
+
   private
+
+  def previous_writer_script(operation)
+    <<~RUBY
+      require "json"
+      begin
+        #{operation}
+        raise "writer unexpectedly completed"
+      rescue Exception => error
+        puts JSON.generate("error" => error.class.name, "message" => error.message)
+        exit(error.is_a?(LoadError) ? 77 : 73)
+      end
+    RUBY
+  end
+
+  def previous_writer_probes
+    attempt_root = 'ENV.fetch("HIVE_ATTEMPT_STORE_ROOT")'
+    {
+      "Hive::Attempts::Store" =>
+        "require 'hive/attempts/store'; Hive::Attempts::Store.new(root: #{attempt_root})",
+      "Hive::Attempts::DecisionIndex" =>
+        "require 'hive/attempts/decision_index'; Hive::Attempts::DecisionIndex.new(root: File.join(#{attempt_root}, 'decision-indexes'))",
+      "Hive::Attempts::FinalizationMaintenance" => <<~RUBY,
+        require 'hive/attempts/finalization_maintenance'
+        store = Hive::Attempts::Store.new(root: #{attempt_root}, create_directories: false)
+        Hive::Attempts::FinalizationMaintenance.new(store: store).run_if_due
+      RUBY
+      "Hive::Daemon::DispatchRequestQueue" => <<~RUBY,
+        require 'hive/daemon/dispatch_request_queue'
+        Hive::Daemon::DispatchRequestQueue.write_request!(project: 'project', slug: 'first-task', argv: ['status'])
+      RUBY
+      "Hive::Daemon::DispatchResultQueue" => <<~RUBY,
+        require 'hive/daemon/dispatch_result_queue'
+        Hive::Daemon::DispatchResultQueue.write!(chat_id: '1', project: 'project', slug: 'first-task', request_id: 'r', exit_code: 0, command: 'status')
+      RUBY
+      "Hive::Daemon::OperationalSnapshot::Store" =>
+        "require 'hive/daemon/operational_snapshot'; Hive::Daemon::OperationalSnapshot::Store.new.write({})",
+      "Hive::Daemon::PrMergeReconciliationStore" => <<~RUBY,
+        require 'hive/daemon/pr_merge_reconciliation_store'
+        identity = { 'hive_state_path' => File.join(ENV.fetch('PROJECT_ROOT'), '.hive-state') }
+        Hive::Daemon::PrMergeReconciliationStore.new.transaction(identity) { }
+      RUBY
+      "Hive::ProviderHealth::Store" =>
+        "require 'hive/provider_health/store'; Hive::ProviderHealth::Store.new(root: File.join(ENV.fetch('HIVE_HOME'), 'provider-health', 'v1'))",
+      "Hive::ProviderRouting::PolicyStore" => <<~RUBY,
+        require 'hive/provider_routing/policy_store'
+        Hive::ProviderRouting::PolicyStore.new(root: File.join(#{attempt_root}, 'routing-policies')).fetch_snapshot(ownership_generation: 'g', subject: { 'kind' => 'task' })
+      RUBY
+      "Hive::Lock" =>
+        "require 'hive/lock'; Hive::Lock.acquire_task_lock(ENV.fetch('TASK_FOLDER'))",
+      "Hive::TaskCounter" =>
+        "require 'hive/task_counter'; Hive::TaskCounter.next!",
+      "Hive::Patrol::LaunchBudget" => <<~RUBY,
+        require 'hive/patrol/launch_budget'
+        budget = Hive::Patrol::LaunchBudget.new(ENV.fetch('PROJECT_ROOT'), cfg: { 'patrol' => { 'mode' => 'auto' } }, ledger_path: ENV.fetch('HIVE_USAGE_DB_PATH') + '.patrol-discovery-allowances')
+        budget.reserve_discovery!(engine: :ordinary, started_at: Time.now.utc, reservation_id: 'old-writer')
+      RUBY
+      "Hive::UsageDb" => <<~RUBY
+        require 'hive/usage_db'
+        ok = Hive::UsageDb.record!(agent: :codex, model: 'old', project_slug: 'project', task_slug: 'first-task', stage: 'execute', started_at: Time.now.utc, ended_at: Time.now.utc, input: 1, output: 1, cached: 0)
+        raise Errno::EISDIR, Hive::UsageDb.path unless ok
+      RUBY
+    }
+  end
+
+  def previous_writer_fence_paths(state, data, project, task)
+    attempts = File.join(state, "attempts")
+    {
+      "Hive::Attempts::Store" => [ attempts ],
+      "Hive::Attempts::DecisionIndex" => [ attempts ],
+      "Hive::Attempts::FinalizationMaintenance" => [ attempts ],
+      "Hive::Daemon::DispatchRequestQueue" => [ File.join(state, "dispatch_requests") ],
+      "Hive::Daemon::DispatchResultQueue" => [ File.join(state, "dispatch_results") ],
+      "Hive::Daemon::OperationalSnapshot::Store" => [ File.join(state, "operational") ],
+      "Hive::Daemon::PrMergeReconciliationStore" => [
+        File.join(project, ".hive-state", "daemon", "pr-merge-reconciliation.json.lock"),
+        File.join(project, ".hive-state", "daemon", "pr-merge-reconciliation.json")
+      ],
+      "Hive::ProviderHealth::Store" => [ File.join(state, "provider-health") ],
+      "Hive::ProviderRouting::PolicyStore" => [ attempts ],
+      "Hive::Lock" => [ File.join(task, ".lock.tmp.guard"), File.join(task, ".lock") ],
+      "Hive::TaskCounter" => [
+        File.join(state, ".task-counter.lock"), File.join(state, "task-counter.yml")
+      ],
+      "Hive::Patrol::LaunchBudget" => [ File.join(data, "usage.db.patrol-discovery-allowances") ],
+      "Hive::UsageDb" => [ File.join(data, "usage.db") ]
+    }
+  end
+
+  def release_tree_snapshot(root)
+    Digest::SHA256.hexdigest(
+      Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).sort.filter_map do |path|
+        next if %w[. ..].include?(File.basename(path))
+        relative = path.delete_prefix("#{root}/")
+        status = File.lstat(path)
+        status.file? ? "f\0#{relative}\0#{status.mode}\0#{File.binread(path)}" :
+          "d\0#{relative}\0#{status.mode}"
+      end.join("\0")
+    )
+  end
 
   def runner(dir, targets, executor, channel)
     HiveReleaseCandidate::UpgradeSurvivor.new(

@@ -76,7 +76,6 @@ legacy_writers:
   - Hive::TaskCounter
   - Hive::Patrol::LaunchBudget
   - Hive::UsageDb
-  - Hive::TaskJournal
 domains:
   dispatch_sequence: import_each_sidecar
   dispatch_requests: import_each_record
@@ -93,9 +92,7 @@ domains:
   terminal_pending: import_each_record
   routing_policies: import_each_record
   pr_merge_reconciliations: import_each_record
-  task_journals: import_each_line
-  task_projections: import_each_record
-  operational_projections: import_each_record
+  operational_projections: discard_derived
   retained_payloads: seal_each_file
 path_overrides:
   - HIVE_ATTEMPT_STORE_ROOT

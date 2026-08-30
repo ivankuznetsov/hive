@@ -84,7 +84,7 @@ module Hive
         raise IntegrityError.new(
           "runtime control-plane migration failed: #{error.message}",
           code: :migration_failed,
-          action: "restore the recovery set or rerun hive migrate --all after correcting storage",
+          action: "correct storage and resume the incomplete cutover; active recovery requires an external backup",
           details: { error_class: error.class.name }
         )
       end
@@ -115,6 +115,17 @@ module Hive
 
       def application_id
         diagnostics.application_id
+      end
+
+      # Activation checks need installation identity before ordinary startup
+      # is permitted. Keep this read-only so the gate cannot create WAL files
+      # or repair schema as a side effect.
+      def installation_identity
+        ProcessGuard.checkout do
+          diagnosis = diagnostics_uncoordinated
+          raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
+          inspect_database { |database| database[:installations].first }
+        end
       end
 
       def settings
@@ -171,7 +182,7 @@ module Hive
             error = IntegrityError.new(
               "runtime control-plane integrity check failed",
               code: :integrity_check_failed,
-              action: "stop Hive and restore a verified recovery set"
+              action: "stop Hive and recover from an external backup"
             )
             return diagnosis(
               :corrupt, application_id: application_id,
@@ -202,7 +213,7 @@ module Hive
         failure = IntegrityError.new(
           "runtime control-plane database is unreadable: #{error.message}",
           code: :database_corrupt,
-          action: "stop Hive and restore a verified recovery set",
+          action: "stop Hive and recover from an external backup",
           details: { error_class: error.class.name }
         )
         diagnosis(:corrupt, error: failure)

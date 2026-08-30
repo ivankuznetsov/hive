@@ -3,7 +3,7 @@ title: hive uninstall
 type: command
 source: lib/hive/commands/uninstall.rb, lib/hive/paths.rb
 created: 2026-05-21
-updated: 2026-07-26
+updated: 2026-08-30
 tags: [command, install, uninstall, xdg]
 ---
 
@@ -44,7 +44,11 @@ Service unit removal refuses to unlink symlinks, so a pre-planted launchd/system
 
 ## State preservation
 
-By default, uninstall prints the XDG state directory it is preserving and lists registered project `.hive-state` paths. Interactive runs may ask whether to remove those project state directories. `--purge` suppresses the prompt and preserves them. `--force-purge-state` removes them.
+By default, uninstall prints the XDG state directory it is preserving, names
+the retained runtime control plane and sealed cutover evidence, and lists registered
+project `.hive-state` paths. Interactive runs may ask whether to remove those
+project state directories. `--purge` suppresses the prompt and preserves the
+database/cutover state. `--force-purge-state` is the only path that removes it.
 
 When `HIVE_HOME` is set, `Hive::Paths.hive_home_collapsed?` is true. In that shape config, data, state, and cache all point at one directory, so uninstall skips broad config/cache/data deletion unless `--force-purge-state` is explicit.
 

@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -437,18 +437,23 @@ per hourly pass and expires them when the owning task is archived or three days
 after `ended_at`, whichever is earlier, unless recovery remains pinned. This
 retention does not delete the terminal attempt row or still-referenced payloads.
 
-The physical v3-to-v4 migration is forward-only and can consume a remaining
-supported v2 source. It quiesces the validated source tree, rejects live
-attempts, renames it to v4, converts valid schema-v3 records and proofs,
-publishes 0600 old-binary fences, verifies corpus and decision parity, promotes historical finals, and
-advances a `fenced → verified → complete` checkpoint before publishing
-`recovery-migration-v5.json`. Runtime has no v2/v3 reader or reverse hydration;
-any competing material root or changed corpus fails closed.
+The one-way installation cutover is offline and fleet-atomic. A durable
+`preparing → ready → intended → active` manifest binds the registered projects,
+task-authority fingerprints, strict immutable legacy inventory, consistent usage
+snapshot, closed database/payload candidate, and every path-shape fence. Before
+candidate startup mutation an early read-only gate refuses ordinary commands.
+Services stop and live owners are rejected before sealing. Once sealed, every
+retry consumes only the immutable source and candidate and converges forward;
+`active` is published only after current services start. There is no
+attempts-v4 migration state machine, dual reader/writer, reverse hydration,
+implicit database creation, rollback, or downgrade.
 
-One owner-private `maintenance/` status cell caches the latest migration and
-maintenance outcome. Operational status combines that cell with counts from
-the already-computed hot reconciliation snapshot. It does not traverse proof
-or cold logs and exposes last-run deltas rather than lifetime totals.
+The package manager publishes the candidate normally; Hive never renames
+package-owned launcher entries or retains the previous executable tree.
+`hive runtime` exposes only bounded status and forward resume. The sealed bundle
+is cutover evidence, not a user-selectable backup or restore source. Workflow
+files and task journal/projection files remain task authority and writable after
+activation; only genuinely retired runtime writer paths receive tombstones.
 
 ## Runtime dispatch queue and web snapshots
 

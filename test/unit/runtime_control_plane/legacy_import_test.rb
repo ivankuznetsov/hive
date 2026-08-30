@@ -31,7 +31,7 @@ class RuntimeControlPlaneLegacyImportTest < Minitest::Test
       assert_equal 1, first.records.fetch("attempts").length
       assert_equal 1, first.records.fetch("usage_sessions").length
       assert_equal 1, first.records.fetch("pr_merge_reconciliations").length
-      assert_equal 1, first.records.fetch("task_projections").length
+      refute first.records.key?("task_projections")
       assert_equal 2, first.records.fetch("retained_payloads").length
     end
   end
@@ -102,11 +102,9 @@ class RuntimeControlPlaneLegacyImportTest < Minitest::Test
       document["value"]["reservations"] = {}
       File.binwrite(capacity, JSON.generate(document))
 
-      health = File.join(state_home, "provider-health", "v1", "account.json")
-      document = JSON.parse(File.binread(health)).merge(
-        "probe" => { "attempt_id" => "attempt-1", "generation" => 2 }
-      )
-      File.binwrite(health, JSON.generate(document))
+      health = File.join(state_home, "provider-health", "v1", "intents", "probe.json")
+      FileUtils.mkdir_p(File.dirname(health))
+      File.binwrite(health, JSON.generate("intent_id" => "attempt-1"))
       error = assert_raises(Hive::RuntimeControlPlane::LegacyImport::QuiescenceError) do
         importer(state_home, data_home, project_root).call
       end
@@ -138,6 +136,29 @@ class RuntimeControlPlaneLegacyImportTest < Minitest::Test
       end
       assert_equal :in_flight_probe, error.code
       assert_equal path, error.path
+    end
+  end
+
+  def test_conflicting_provider_event_identity_fails_closed
+    with_fixture_home do |state_home, data_home, project_root|
+      journal = Dir.glob(
+        File.join(state_home, "provider-health", "v1", "scopes", "*", "*", "journal.jsonl")
+      ).fetch(0)
+      event = JSON.parse(File.binread(journal))
+      event["occurred_at"] = "2026-08-29T12:00:01.000000Z"
+      kind = File.basename(File.dirname(File.dirname(journal)))
+      key = File.basename(File.dirname(journal))
+      history = File.join(
+        state_home, "provider-health", "v1", "history", kind, key, "retained.jsonl"
+      )
+      FileUtils.mkdir_p(File.dirname(history))
+      File.binwrite(history, "#{JSON.generate(event)}\n")
+
+      error = assert_raises(Hive::RuntimeControlPlane::LegacyImport::ClassificationError) do
+        importer(state_home, data_home, project_root).call
+      end
+
+      assert_equal :duplicate_source_identity, error.code
     end
   end
 
@@ -180,7 +201,7 @@ class RuntimeControlPlaneLegacyImportTest < Minitest::Test
       error = assert_raises(Hive::RuntimeControlPlane::LegacyImport::ClassificationError) do
         importer(state_home, data_home, project_root).call
       end
-      assert_equal :malformed_source, error.code
+      assert_equal :unattributed_source, error.code
       assert_equal orphan, error.path
       File.unlink(orphan)
 

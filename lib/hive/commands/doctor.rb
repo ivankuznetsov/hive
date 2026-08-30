@@ -42,7 +42,7 @@ module Hive
 
       def call
         legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime +
-                      check_web_environment_aliases
+                      check_web_environment_aliases + check_runtime_control_plane
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -62,6 +62,36 @@ module Hive
       end
 
       private
+
+      def check_runtime_control_plane
+        require "hive/runtime_control_plane"
+        require "hive/runtime_control_plane/cutover"
+        path = Hive::Paths.runtime_control_plane_path
+        cutover = File.join(Hive::Paths.state_home, ".runtime-cutover", "current")
+        return [] unless File.exist?(path) || File.exist?(cutover)
+
+        status = Hive::RuntimeControlPlane::Cutover.inspect_status(
+          state_home: Hive::Paths.state_home,
+          database: Hive::RuntimeControlPlane::Database.new(path: path)
+        )
+        diagnosis = status.fetch("database")
+        healthy = status.fetch("phase") == "active" && diagnosis.fetch("status") == "ok"
+        [ {
+          kind: "runtime_control_plane", stage: "runtime", label: "runtime/sqlite",
+          agent: "hive", configured_skill: "schema #{Hive::RuntimeControlPlane::SCHEMA_VERSION}",
+          skill: "sqlite", status: healthy ? "ok" : "missing",
+          message: healthy ? "runtime control plane is healthy" :
+            "runtime control plane is #{status.fetch('phase')} (#{diagnosis.fetch('status')})",
+          remediation: healthy ? nil : "run hive runtime status before resuming or restoring"
+        } ]
+      rescue Hive::RuntimeControlPlane::Error => error
+        [ {
+          kind: "runtime_control_plane", stage: "runtime", label: "runtime/sqlite",
+          agent: "hive", configured_skill: "schema #{Hive::RuntimeControlPlane::SCHEMA_VERSION}",
+          skill: "sqlite", status: "missing", message: "#{error.code}: #{error.message}",
+          remediation: error.action
+        } ]
+      end
 
       def failing_status?(status)
         status == "missing" || status == "version_too_old"

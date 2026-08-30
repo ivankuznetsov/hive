@@ -26,7 +26,7 @@ module Hive
 
       def self.build(phase:, installation_id:, lineage_id:, source_release:, target_release:,
                      roots:, required_absences:, exclusions:, task_authority:, payloads:,
-                     created_at: Time.now.utc)
+                     evidence: {}, created_at: Time.now.utc)
         unless PHASES.include?(phase.to_s)
           raise InventoryError.new("cutover phase is invalid", code: :invalid_phase)
         end
@@ -43,7 +43,8 @@ module Hive
           "required_absences" => normalize_absences(required_absences),
           "exclusions" => normalize_objects(exclusions, "exclusions"),
           "task_authority" => normalize_objects(task_authority, "task authority"),
-          "payloads" => normalize_objects(payloads, "payloads")
+          "payloads" => normalize_objects(payloads, "payloads"),
+          "evidence" => normalize_object(evidence, "evidence")
         }
         Codec.normalize(document).freeze
       end
@@ -169,6 +170,13 @@ module Hive
         end.sort_by { |value| Codec.dump_json(value) }.freeze
       end
 
+      def self.normalize_object(value, label)
+        unless value.is_a?(Hash)
+          raise InventoryError.new("#{label} must be an object", code: :invalid_manifest_value)
+        end
+        Codec.normalize(value).freeze
+      end
+
       def initialize(path:, before_publish: nil)
         @path = File.expand_path(path)
         @before_publish = before_publish
@@ -260,7 +268,7 @@ module Hive
         required = %w[
           schema schema_version phase created_at installation_id lineage_id
           source_release target_release inventory required_absences exclusions
-          task_authority payloads
+          task_authority payloads evidence
         ]
         unless normalized.keys.sort == required.sort && normalized["schema"] == SCHEMA &&
                normalized["schema_version"] == SCHEMA_VERSION && PHASES.include?(normalized["phase"])
@@ -271,6 +279,7 @@ module Hive
           integrity!("cutover manifest #{key} must be an array", :manifest_invalid) unless
             normalized[key].is_a?(Array)
         end
+        self.class.normalize_object(normalized.fetch("evidence"), "evidence")
         validate_inventory!(normalized.fetch("inventory"))
         self.class.normalize_absences(normalized.fetch("required_absences"))
         %w[installation_id lineage_id source_release target_release].each do |key|

@@ -241,7 +241,7 @@ class HiveCliTest < Minitest::Test
 
     with_command_new_stub(Hive::Commands::Update) do |calls|
       Hive::CLI.start([ "update", "--dry-run" ])
-      assert_equal({ dry_run: true }, calls.first.fetch(:kwargs))
+      assert_equal({ dry_run: true, confirm: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Connect) do |calls|

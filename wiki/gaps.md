@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-28
+updated: 2026-08-30
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -1105,16 +1105,20 @@ version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
 the candidate blocked. No version choice, tag, publication, deployment, or
 release was authorized.
 
-## Automatic post-update migration needs installed-channel smoke (2026-08-03)
+## Confirmed fleet cutover needs installed-channel smoke (updated 2026-08-30)
 
-Focused source tests prove that brew, AUR, and bash update commands complete
-before the newly resolved Hive binary runs `hive migrate --all`; fleet tests
-prove visible progress, continue-after-project-failure behavior, readable
-errors, and exact recovery commands. No real package-manager installation was
-mutated during this implementation. Before calling the operational path proven
-on every channel, run one disposable installed upgrade for brew, AUR, and bash
-and retain the updater plus migration output. This gap does not weaken the
-local command contract or its deterministic tests.
+Focused source tests prove that brew, AUR, and bash update commands finish
+before the newly resolved Hive binary runs the confirmed, fleet-atomic
+`hive migrate --all --yes` cutover. The immediately previous packaged release
+and each enumerated retired writer have a release-candidate test that requires
+real extracted target roots; it remains an honest CI-only skip when those roots
+are absent locally. That test reaches the old Update-to-candidate invocation,
+the candidate's interactive/non-interactive confirmation boundary, activation,
+and exact writer tombstones. No real package-manager installation was mutated
+during this implementation. Before calling every installed channel
+operationally proven, run one disposable installed upgrade for brew, AUR, and
+bash and retain the updater, activation-gate, cutover, and resume output. This
+gap does not weaken the focused command or crash-forward cutover contracts.
 
 ## Provider transport coverage remains intentionally partial (2026-08-11)
 

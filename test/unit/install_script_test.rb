@@ -85,37 +85,32 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
-  def test_installer_migrates_all_projects_before_daemon_setup
+  def test_installer_leaves_control_plane_bootstrap_and_services_to_explicit_setup
     Dir.mktmpdir("hive-installer-migration") do |dir|
       _out, err, status = run_installer(dir, "none")
 
       assert status.success?, err
-      calls = File.readlines(File.join(dir, "hive-args"), chomp: true)
-      assert_equal "migrate --all", calls.fetch(0)
-      assert_equal "daemon install --json", calls.fetch(1)
+      assert_includes _out, "hive setup --yes"
+      refute_path_exists File.join(dir, "hive-args")
     end
   end
 
-  def test_installer_fails_closed_when_automatic_project_migration_fails
+  def test_installer_never_runs_runtime_migration_implicitly
     Dir.mktmpdir("hive-installer-migration-failure") do |dir|
       _out, err, status = run_installer(dir, "migration")
 
-      refute status.success?
-      assert_includes err, "automatic project migration failed"
-      assert_includes err, "hive migrate --all"
-      calls = File.readlines(File.join(dir, "hive-args"), chomp: true)
-      assert_equal [ "migrate --all" ], calls
+      assert status.success?, err
+      refute_path_exists File.join(dir, "hive-args")
     end
   end
 
-  def test_installer_skips_fleet_migration_when_installing_a_release_that_predates_it
+  def test_installer_does_not_probe_release_migration_capabilities
     Dir.mktmpdir("hive-installer-legacy-migration") do |dir|
       out, err, status = run_installer(dir, "legacy_migration")
 
       assert status.success?, err
-      assert_includes out, "predates fleet migration"
-      calls = File.readlines(File.join(dir, "hive-args"), chomp: true)
-      assert_equal [ "daemon install --json" ], calls
+      assert_includes out, "hive setup --yes"
+      refute_path_exists File.join(dir, "hive-args")
     end
   end
 

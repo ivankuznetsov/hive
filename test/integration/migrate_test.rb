@@ -79,6 +79,40 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_default_migration_refuses_a_missing_or_unactivated_control_plane
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          Hive::Commands::Migrate.new(dir).call
+        end
+        assert_equal :missing_database, error.code
+        refute_path_exists Hive::Paths.runtime_control_plane_path(home)
+
+        Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(home)
+        ).migrate!.disconnect
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          Hive::Commands::Migrate.new(dir).call
+        end
+        assert_equal :control_plane_inactive, error.code
+      end
+    end
+  end
+
+  def test_default_migration_continues_after_fleet_activation
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        activate_control_plane(home)
+
+        out, = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "hive: migrate"
+      end
+    end
+  end
+
   def test_explicit_migrate_rebuilds_the_patrol_fix_pending_index_once
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -1927,11 +1961,39 @@ class MigrateTest < Minitest::Test
 
   def migrate_command(project_path, display_name_generator: NoopDisplayNameGenerator,
                       **options)
+    prepare_test_runtime_project(project_path)
+    options[:global_migration] = -> { } unless options.key?(:global_migration)
     Hive::Commands::Migrate.new(
       project_path,
       display_name_generator: display_name_generator,
       **options
     )
+  end
+
+  def activate_control_plane(home)
+    epoch = 20260829120000
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(home)
+    ).migrate!
+    identity = database.read { |db| db[:installations].first }
+    database.transaction do |db|
+      db[:installations].update(
+        activation_epoch: epoch, activated_at: "2026-08-29T12:00:00.000000Z"
+      )
+    end
+    database.disconnect
+    root = File.join(home, ".runtime-cutover", "current")
+    FileUtils.mkdir_p(root)
+    document = Hive::RuntimeControlPlane::CutoverManifest.build(
+      phase: "active", installation_id: identity.fetch(:installation_id),
+      lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
+      target_release: Hive::VERSION, roots: { "state" => home },
+      required_absences: [], exclusions: [], task_authority: [], payloads: [],
+      evidence: { "activation_epoch" => epoch }
+    )
+    Hive::RuntimeControlPlane::CutoverManifest.new(
+      path: File.join(root, "active.json")
+    ).publish(document)
   end
 
   def patrol_fix_source_snapshot

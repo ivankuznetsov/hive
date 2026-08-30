@@ -1,344 +1,51 @@
 require "test_helper"
 require "hive/commands/migrate_all"
+require "hive/runtime_control_plane/cutover"
 
 class MigrateAllCommandTest < Minitest::Test
-  include HiveTestHelper
+  Result = Data.define(:phase)
 
-  Command = Struct.new(:callable) do
-    def call
-      callable.call
-    end
+  def test_delegates_one_irreversible_fleet_cutover_without_per_project_mutation
+    calls = []
+    projects = [ { "name" => "alpha" }, { "name" => "beta" } ]
+    output = StringIO.new
+    command = Hive::Commands::MigrateAll.new(
+      projects: projects, output: output, confirm: true, exclusions: [ "beta" ],
+      cutover: ->(**options) { calls << options; Result.new("active") }
+    )
+
+    assert_equal 0, command.call
+    assert_equal [ { confirm: true, exclusions: [ "beta" ], projects: projects } ], calls
+    assert_includes output.string, "preparing 2 registered projects"
+    assert_includes output.string, "irreversible"
+    assert_includes output.string, "migration: active"
   end
 
-  def test_migrates_every_registered_project_with_visible_progress
-    output = StringIO.new
-    error_output = StringIO.new
+  def test_interactive_previous_release_route_prompts_before_cutover
+    input = StringIO.new("yes\n")
+    input.define_singleton_method(:tty?) { true }
     calls = []
-    projects = [
-      { "name" => "alpha", "path" => "/tmp/alpha" },
-      { "name" => "beta", "path" => "/tmp/beta" }
-    ]
+    output = StringIO.new
 
     result = Hive::Commands::MigrateAll.new(
-      projects: projects,
-      output: output,
-      error_output: error_output,
-      global_migration: -> { },
-      binary: "hive",
-      command_factory: lambda { |path|
-        Command.new(-> { calls << path })
-      }
+      projects: [], input: input, output: output, confirm: false,
+      cutover: ->(**options) { calls << options; Result.new("active") }
     ).call
 
     assert_equal 0, result
-    assert_equal %w[/tmp/alpha /tmp/beta], calls
-    assert_includes output.string, "hive: migration: checking 2 registered projects"
-    assert_includes output.string, "hive: migration: [1/2] alpha (/tmp/alpha)"
-    assert_includes output.string, "hive: migration: [2/2] beta (/tmp/beta)"
-    assert_includes output.string, "hive: migration: complete (2 projects migrated, 0 failed)"
-    assert_empty error_output.string
+    assert_equal true, calls.first.fetch(:confirm)
+    assert_includes output.string, "cannot be rolled back"
   end
 
-  def test_continues_after_failure_and_prints_human_readable_recovery
-    output = StringIO.new
-    error_output = StringIO.new
-    calls = []
-    projects = [
-      { "name" => "broken project", "path" => "/tmp/broken project" },
-      { "name" => "healthy", "path" => "/tmp/healthy" }
-    ]
-
-    error = assert_raises(Hive::Error) do
+  def test_noninteractive_previous_release_route_refuses_with_exact_yes_command
+    error = assert_raises(Hive::RuntimeControlPlane::Cutover::ConfirmationRequired) do
       Hive::Commands::MigrateAll.new(
-        projects: projects,
-        output: output,
-        error_output: error_output,
-        global_migration: -> { },
-        binary: "hive",
-        command_factory: lambda { |path|
-          Command.new(lambda {
-            calls << path
-            raise Hive::ConfigError, "selected profile is unavailable\nrestore it first" if path.include?("broken")
-          })
-        }
+        projects: [], input: StringIO.new, output: StringIO.new, confirm: false,
+        cutover: ->(**) { flunk "cutover must not start" }
       ).call
     end
 
-    assert_equal [ "/tmp/broken project", "/tmp/healthy" ], calls
-    assert_includes error_output.string,
-                    "hive: migration: failed for broken project: selected profile is unavailable restore it first"
-    assert_includes error_output.string,
-                    "hive: migration: recovery: hive migrate /tmp/broken\\ project"
-    assert_includes error_output.string, "hive: migration: incomplete (1 project migrated, 1 project failed)"
-    assert_match(/1 of 2 registered projects failed/, error.message)
-    assert_match(/fix the errors above and run `hive migrate --all`/, error.message)
-  end
-
-  def test_no_registered_projects_still_checks_global_migration
-    output = StringIO.new
-    global_calls = 0
-
-    result = Hive::Commands::MigrateAll.new(
-      projects: [],
-      output: output,
-      binary: "hive",
-      global_migration: -> { global_calls += 1 }
-    ).call
-
-    assert_equal 0, result
-    assert_equal 1, global_calls
-    assert_includes output.string, "hive: migration: no registered projects; global state is current"
-  end
-
-  def test_global_migration_failure_is_human_readable
-    output = StringIO.new
-    error_output = StringIO.new
-
-    error = assert_raises(Hive::Error) do
-      Hive::Commands::MigrateAll.new(
-        projects: [],
-        output: output,
-        error_output: error_output,
-        binary: "hive",
-        global_migration: -> { raise Hive::ConfigError, "attempt store is locked\nretry after task 42" }
-      ).call
-    end
-
-    assert_includes output.string, "hive: migration: checking global state"
-    assert_includes error_output.string,
-                    "hive: migration: global state failed: attempt store is locked retry after task 42"
-    assert_includes error_output.string, "hive: migration: recovery: hive migrate --all"
-    assert_match(/global migration failed: attempt store is locked retry after task 42/, error.message)
-  end
-
-  def test_default_project_migration_does_not_repeat_the_global_migration
-    projects = [ { "name" => "alpha", "path" => "/tmp/alpha" } ]
-    global_calls = 0
-    child_global_migrations = []
-
-    replacement = lambda { |_path, global_migration:, daemon_restarter:, daemon_cutover:|
-      child_global_migrations << global_migration
-      Command.new(-> { global_migration.call })
-    }
-    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
-      Hive::Commands::MigrateAll.new(
-        projects: projects,
-        output: StringIO.new,
-        binary: "hive",
-        global_migration: -> { global_calls += 1 },
-        daemon_restarter: -> { }
-      ).call
-    end
-
-    assert_equal 1, global_calls
-    assert_equal [ Hive::Commands::MigrateAll::SKIP_GLOBAL_MIGRATION ], child_global_migrations
-  end
-
-  def test_default_project_migrations_coalesce_daemon_restarts
-    projects = [
-      { "name" => "alpha", "path" => "/tmp/alpha" },
-      { "name" => "beta", "path" => "/tmp/beta" }
-    ]
-    restart_calls = 0
-
-    replacement = lambda { |_path, global_migration:, daemon_restarter:, daemon_cutover:|
-      Command.new(lambda {
-        global_migration.call
-        daemon_restarter.call
-      })
-    }
-    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
-      Hive::Commands::MigrateAll.new(
-        projects: projects,
-        output: StringIO.new,
-        binary: "hive",
-        global_migration: -> { },
-        daemon_restarter: -> { restart_calls += 1 }
-      ).call
-    end
-
-    assert_equal 1, restart_calls
-  end
-
-  def test_immediate_patrol_cutover_replaces_the_daemon_only_once
-    projects = [
-      { "name" => "alpha", "path" => "/tmp/alpha" },
-      { "name" => "beta", "path" => "/tmp/beta" }
-    ]
-    project_cutovers = 0
-    cutovers = 0
-    restart_calls = 0
-
-    replacement = lambda { |_path, global_migration:, daemon_restarter:, daemon_cutover:|
-      Command.new(lambda {
-        global_migration.call
-        project_cutovers += 1
-        raise "expected immediate daemon cutover" unless daemon_cutover.call
-      })
-    }
-    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
-      Hive::Commands::MigrateAll.new(
-        projects: projects,
-        output: StringIO.new,
-        binary: "hive",
-        global_migration: -> { },
-        daemon_cutover: -> { cutovers += 1; true },
-        daemon_restarter: -> { restart_calls += 1 }
-      ).call
-    end
-
-    assert_equal 2, project_cutovers
-    assert_equal 1, cutovers
-    assert_equal 0, restart_calls
-  end
-
-  def test_partial_fleet_failure_does_not_restart_the_daemon
-    projects = [
-      { "name" => "alpha", "path" => "/tmp/alpha" },
-      { "name" => "broken", "path" => "/tmp/broken" }
-    ]
-    restart_calls = 0
-    error_output = StringIO.new
-
-    replacement = lambda { |path, global_migration:, daemon_restarter:, daemon_cutover:|
-      Command.new(lambda {
-        global_migration.call
-        daemon_restarter.call if path.end_with?("alpha")
-        raise Hive::ConfigError, "blocked migration" if path.end_with?("broken")
-      })
-    }
-    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
-      assert_raises(Hive::Error) do
-        Hive::Commands::MigrateAll.new(
-          projects: projects, output: StringIO.new, error_output: error_output,
-          binary: "hive", global_migration: -> { },
-          daemon_restarter: -> { restart_calls += 1 }
-        ).call
-      end
-    end
-
-    assert_equal 0, restart_calls
-    assert_includes error_output.string, "daemon restart deferred"
-  end
-
-  def test_successful_retry_restarts_after_an_earlier_deferred_config_migration
-    projects = [
-      { "name" => "alpha", "path" => "/tmp/alpha" },
-      { "name" => "broken", "path" => "/tmp/broken" }
-    ]
-    restart_calls = 0
-    phase = :first
-
-    replacement = lambda { |path, global_migration:, daemon_restarter:, daemon_cutover:|
-      Command.new(lambda {
-        global_migration.call
-        if phase == :first
-          daemon_restarter.call if path.end_with?("alpha")
-          raise Hive::ConfigError, "blocked migration" if path.end_with?("broken")
-        end
-      })
-    }
-    with_replaced_singleton_method(Hive::Commands::Migrate, :new, replacement) do
-      assert_raises(Hive::Error) do
-        Hive::Commands::MigrateAll.new(
-          projects: projects, output: StringIO.new, error_output: StringIO.new,
-          binary: "hive", global_migration: -> { },
-          daemon_restarter: -> { restart_calls += 1 }
-        ).call
-      end
-      assert_equal 0, restart_calls
-
-      phase = :retry
-      result = Hive::Commands::MigrateAll.new(
-        projects: projects, output: StringIO.new, error_output: StringIO.new,
-        binary: "hive", global_migration: -> { },
-        daemon_restarter: -> { restart_calls += 1 }
-      ).call
-
-      assert_equal 0, result
-      assert_equal 1, restart_calls
-    end
-  end
-
-  def test_default_daemon_restarter_delegates_to_migrate
-    restart_calls = 0
-    migrate = Object.new
-    migrate.define_singleton_method(:restart_daemon_if_running!) { restart_calls += 1 }
-
-    with_replaced_singleton_method(Hive::Commands::Migrate, :new, -> { migrate }) do
-      Hive::Commands::Migrate.restart_daemon_if_running!
-    end
-
-    assert_equal 1, restart_calls
-  end
-
-  def test_resolves_recovery_binary_from_the_active_invocation
-    error_output = StringIO.new
-    env = { "PATH" => "/usr/local/bin" }
-
-    with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(env:) { "/usr/local/bin/hv" }) do
-      assert_raises(Hive::Error) do
-        Hive::Commands::MigrateAll.new(
-          projects: [ { "name" => "alpha", "path" => "/tmp/alpha" } ],
-          output: StringIO.new,
-          error_output: error_output,
-          env: env,
-          global_migration: -> { },
-          command_factory: lambda { |_path|
-            Command.new(-> { raise Hive::ConfigError, "profile is unavailable" })
-          }
-        ).call
-      end
-    end
-
-    assert_includes error_output.string,
-                    "hive: migration: recovery: /usr/local/bin/hv migrate /tmp/alpha"
-  end
-
-  def test_missing_registered_project_prints_restore_and_registry_cleanup_commands
-    output = StringIO.new
-    error_output = StringIO.new
-    project = { "name" => "missing project", "path" => "/tmp/missing project" }
-
-    error = assert_raises(Hive::Error) do
-      Hive::Commands::MigrateAll.new(
-        projects: [ project ],
-        output: output,
-        error_output: error_output,
-        binary: "hv",
-        global_migration: -> { },
-        command_factory: lambda { |_path|
-          Command.new(-> { raise Hive::InvalidTaskPath, "not a hive project" })
-        }
-      ).call
-    end
-
-    assert_includes error_output.string,
-                    "registered path is missing or no longer contains a Hive project (/tmp/missing project)"
-    assert_includes error_output.string,
-                    "restore /tmp/missing project, then run hv migrate /tmp/missing\\ project"
-    assert_includes error_output.string,
-                    "remove the stale registration with hv forget missing\\ project"
-    assert_includes error_output.string, "remove all stale registrations with hv prune"
-    assert_match(/run `hv migrate --all`/, error.message)
-  end
-
-  def test_hv_binary_is_used_in_project_failure_recovery
-    error_output = StringIO.new
-
-    assert_raises(Hive::Error) do
-      Hive::Commands::MigrateAll.new(
-        projects: [ { "name" => "alpha", "path" => "/tmp/alpha" } ],
-        output: StringIO.new,
-        error_output: error_output,
-        binary: "hv",
-        global_migration: -> { },
-        command_factory: lambda { |_path|
-          Command.new(-> { raise Hive::ConfigError, "profile is unavailable" })
-        }
-      ).call
-    end
-
-    assert_includes error_output.string, "hive: migration: recovery: hv migrate /tmp/alpha"
+    assert_equal "hive migrate --all --yes", error.action
+    assert_includes error.message, "non-interactive"
   end
 end

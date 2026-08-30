@@ -9,6 +9,7 @@ require "hive/task_closure"
 require "hive/task_projection/reader"
 require "hive/task_resolver"
 require "hive/workflows"
+require "hive/task_activity"
 
 module Hive
   module Daemon
@@ -179,6 +180,7 @@ module Hive
           raise Hive::ConcurrentRunError, "task pull request binding changed before reconciliation"
         end
         result = remote_result(poll_facts(identity, candidate), candidate, now: now)
+        record_remote_activity(task, candidate, result, now: now)
         return result unless result.fetch(:status) == :merged
 
         unless Hive::TaskClosure.local_pr_head_binding(task, frontmatter: frontmatter) ==
@@ -218,6 +220,38 @@ module Hive
           cfg: cfg,
           timeout_sec: @poll_timeout_sec
         )
+      end
+
+      def record_remote_activity(task, candidate, result, now:)
+        remote = result[:remote]
+        return false unless remote
+
+        # TaskActivity deduplicates observations by operation ID across polls and restarts.
+        activity = Hive::TaskActivity.for_task(task, clock: -> { now.utc })
+        return false unless activity
+
+        number = candidate.dig("pull_request", "number")
+        state = remote.fetch("state")
+        kind = state == "merged" ? "merge_observed" : "pr_observed"
+        activity.record(
+          kind: kind,
+          operation_id: "github:pr:#{number}:#{state}:#{remote['merge_oid'] || 'none'}",
+          correlation_id: "publication:#{number}",
+          reason: "pull request outcome changed", source: "github",
+          occurred_at: remote["merged_at"] || now, observed_at: now,
+          payload: {
+            "pr_number" => number,
+            "pr_url" => candidate.dig("pull_request", "url"),
+            "pr_state" => state,
+            "head_oid" => candidate.dig("pull_request", "observed_head"),
+            "merge_oid" => remote["merge_oid"],
+            "merged_at" => remote["merged_at"],
+            "draft" => false
+          }
+        )
+        true
+      rescue Hive::TaskActivity::Error, SystemCallError, IOError
+        false
       end
 
       def remote_result(facts, candidate, now:)

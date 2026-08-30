@@ -152,12 +152,17 @@ module Hive
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
         if (context = Hive::Attempts::Context.current)
+          pr_identity = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))
           Hive::Stages::Base.record_task_activity(
             task, kind: "pr_observed",
             operation_id: "publication:#{context.attempt_id}:ready",
             correlation_id: "publication:#{context.attempt_id}",
             reason: "pull request marked ready", source: "finalize",
-            payload: { "pr_state" => "ready" }
+            payload: {
+              "pr_state" => "ready", "pr_url" => pr_url,
+              "pr_number" => pr_identity["pr_number"],
+              "head_oid" => pr_identity["head_oid"], "draft" => false
+            }
           )
         end
 

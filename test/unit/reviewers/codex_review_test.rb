@@ -299,6 +299,24 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
+  def test_failed_run_preserves_existing_successful_output
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "OpenAI Codex v0.139.0\nReview was interrupted.\n"
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+      prior = "## High\n- [ ] retained finding: prior successful review\n"
+      FileUtils.mkdir_p(File.dirname(reviewer.output_path))
+      File.write(reviewer.output_path, prior)
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert_equal reviewer.failure_output_path, result.output_path
+      assert_equal prior, File.read(reviewer.output_path)
+      refute File.exist?(reviewer.failure_output_path),
+             "failed native review must remove only its staged output"
+    end
+  end
+
   def test_empty_stdout_yields_error
     with_tmp_dir do |dir|
       ENV["HIVE_FAKE_CODEX_STDOUT"] = ""
@@ -969,18 +987,17 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
-  def test_delete_output_reraises_on_non_enoent_system_call_error
+  def test_delete_partial_output_reraises_on_non_enoent_system_call_error
     with_tmp_dir do |dir|
       reviewer = build_reviewer(dir)
-      # Point output_path at a directory; File.delete raises EISDIR/EPERM
-      # (a non-ENOENT SystemCallError) which must surface as a named
-      # Hive::Error rather than being swallowed like a missing file.
-      a_dir = File.join(dir, "a-directory")
-      FileUtils.mkdir_p(a_dir)
-      reviewer.define_singleton_method(:output_path) { a_dir }
+      # Point the staging path at a directory; File.delete raises EISDIR/EPERM
+      # (a non-ENOENT SystemCallError) which must surface as a named Hive::Error
+      # rather than being swallowed like a missing file.
+      FileUtils.mkdir_p(reviewer.failure_output_path)
 
-      err = assert_raises(Hive::Error) { reviewer.send(:delete_output!) }
+      err = assert_raises(Hive::Error) { reviewer.send(:delete_partial_output!) }
       assert_match(/failed to clear partial output_path/, err.message)
+      assert_includes err.message, reviewer.failure_output_path
     end
   end
 

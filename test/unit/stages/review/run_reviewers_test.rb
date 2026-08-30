@@ -589,6 +589,18 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class StagedRaisingReviewer < Hive::Reviewers::Base
+    def failure_output_path
+      "#{output_path}.partial"
+    end
+
+    def run!(deadline: nil)
+      ensure_reviews_dir!
+      File.write(failure_output_path, "incomplete replacement\n")
+      raise RuntimeError, "staged boom"
+    end
+  end
+
   # A reviewer whose run! returns :ok. Produces a stub findings file so
   # the test can verify both reviewers actually ran.
   class OkReviewer < Hive::Reviewers::Base
@@ -1211,6 +1223,30 @@ class RunReviewersTest < Minitest::Test
       assert_includes contents, "[raises] reviewer \"raises\" failed"
       assert_includes contents, "RuntimeError"
       assert_includes contents, "boom"
+    end
+  end
+
+  def test_raising_staged_reviewer_preserves_prior_successful_output
+    with_tmp_dir do |dir|
+      spec = { "name" => "staged", "output_basename" => "staged" }
+      adapter = StagedRaisingReviewer.new(spec, make_ctx(dir))
+      FileUtils.mkdir_p(File.dirname(adapter.output_path))
+      prior = "## High\n- [ ] retained finding: prior successful review\n"
+      File.write(adapter.output_path, prior)
+
+      with_stubbed_dispatch([ adapter ]) do
+        result = Hive::Stages::Review.run_reviewers(
+          { "review" => { "reviewers" => [ spec ] } },
+          make_ctx(dir),
+          Task.new(dir, File.join(dir, "task.md"))
+        )
+        assert_equal :all_failed, result
+      end
+
+      assert_equal prior, File.read(adapter.output_path)
+      refute File.exist?(adapter.failure_output_path),
+             "orchestrator cleanup must remove only the staged failure output"
+      assert_includes File.read(File.join(dir, "reviews", "errors-01.md")), "staged boom"
     end
   end
 

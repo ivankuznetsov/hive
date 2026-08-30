@@ -1896,7 +1896,7 @@ module Hive
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
-              output_path: adapter.output_path,
+              output_path: adapter.failure_output_path,
               status: :error,
               error_message: "#{e.class}: #{e.message}"
             )
@@ -1915,7 +1915,7 @@ module Hive
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
-              output_path: adapter.output_path,
+              output_path: adapter.failure_output_path,
               status: :error,
               error_message: "#{e.class}: #{e.message}"
             )

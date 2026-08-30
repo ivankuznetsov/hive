@@ -91,6 +91,7 @@ module Hive
         daily_digest_close_state_unreadable
         daily_digest_delivery_failure_backoff
         daily_digest_delivery_state_unreadable
+        daily_digest_scheduler_failure_backoff
         daily_digest_configuration_disabled
         architecture_patrol_opened
         architecture_patrol_progress

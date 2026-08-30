@@ -146,7 +146,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_usage_validation_rejects_bad_actions_and_incomplete_candidate_requests
     assert_raises(Hive::UsageError) do
-      Hive::Commands::BrainstormSuggestion.new("retry", question: "bad")
+      Hive::Commands::BrainstormSuggestion.new("retry", question: "bad").call
     end
     assert_raises(Hive::UsageError) do
       Hive::Commands::BrainstormSuggestion.new("unknown", task_roots: []).call

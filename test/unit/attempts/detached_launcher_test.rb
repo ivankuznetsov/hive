@@ -26,7 +26,9 @@ class AttemptsDetachedLauncherTest < Minitest::Test
         first_heartbeat_timeout_sec: 1, ready_timeout_sec: 2
       )
 
-      handoff = launcher.launch(attempt, claim_capability: CLAIM_CAPABILITY)
+      handoff = with_env("GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR)) do
+        launcher.launch(attempt, claim_capability: CLAIM_CAPABILITY)
+      end
       assert_equal true, handoff.fetch("claimed")
 
       terminal = wait_for_terminal(store, attempt.attempt_id)

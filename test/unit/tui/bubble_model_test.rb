@@ -4889,6 +4889,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_agent_steer_exited_cleans_suggestion_state_before_archiving
+    config = { "brainstorm" => { "suggestions" => { "enabled" => true } } }
+    with_manual_task_context(config: config) do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      brainstorm = File.join(folder, "brainstorm.md")
+      File.write(
+        brainstorm,
+        "### Q1. Scope?\n\n### A1.\n" \
+        "#{Hive::BrainstormSuggestions::Envelope.render(binding: 'b' * 64, text: 'Candidate')}" \
+        "\n<!-- WAITING -->\n"
+      )
+      sidecar = File.join(folder, Hive::BrainstormSuggestions::Store::FILENAME)
+      File.write(sidecar, "private suggestion state")
+      File.chmod(0o600, sidecar)
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug, folder: folder, exit_code: 0, worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      target = File.join(hive_state, "stages", "archived-manual", row.slug)
+      assert File.directory?(target), @model.hive_model.flash.to_s
+      refute_includes File.read(File.join(target, "brainstorm.md")), "hive-suggestion:v1"
+      refute File.exist?(File.join(target, Hive::BrainstormSuggestions::Store::FILENAME))
+    end
+  end
+
   def test_agent_steer_exited_archives_folder_on_nonzero_exit
     with_manual_task_context(slug: "failed-manual-task") do |_project_root, hive_state, folder, _state_file, worktree_path, row|
       message = Hive::Tui::Messages::AgentSteerExited.new(

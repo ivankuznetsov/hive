@@ -43,6 +43,29 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
       assert_field "Answer to question 1", with: suggestion_text
       assert_equal original, brainstorm.binread
 
+      replacement_text = "Use the replacement candidate."
+      page.execute_script(<<~JS)
+        (() => {
+          const card = document.querySelector("[data-suggestion-key]")
+          card.dataset.suggestionKey = "#{'c' * 64}"
+          card.dataset.suggestionText = #{replacement_text.to_json}
+          document.dispatchEvent(new Event("turbo:render"))
+        })()
+      JS
+      click_button "Approve"
+      assert_field "Answer to question 1", with: replacement_text
+      click_button "Undo"
+      assert_field "Answer to question 1", with: suggestion_text
+
+      page.execute_script(<<~JS)
+        (() => {
+          const card = document.querySelector("[data-suggestion-key]")
+          card.dataset.suggestionKey = "#{'b' * 64}"
+          card.dataset.suggestionText = #{suggestion_text.to_json}
+          document.dispatchEvent(new Event("turbo:render"))
+        })()
+      JS
+
       click_button "Undo"
       assert_field "Answer to question 1", with: "My draft"
       click_button "Decline"

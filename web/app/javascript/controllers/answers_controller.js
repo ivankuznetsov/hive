@@ -77,8 +77,10 @@ export default class extends Controller {
     if (!card || !field || !card.dataset.suggestionText) return
 
     const state = this.suggestionState(card)
-    const fieldKey = this.fieldKey(field)
-    if (!state.approved && !suggestionDrafts.has(fieldKey)) suggestionDrafts.set(fieldKey, field.value)
+    const draftKey = this.suggestionDraftKey(card, field)
+    if (!state.approved && !suggestionDrafts.has(draftKey)) {
+      this.rememberSuggestionDraft(draftKey, field.value)
+    }
     field.value = card.dataset.suggestionText
     field.dispatchEvent(new Event("input", { bubbles: true }))
     state.approved = true
@@ -94,11 +96,11 @@ export default class extends Controller {
     if (!card || !field) return
 
     const state = this.suggestionState(card)
-    const fieldKey = this.fieldKey(field)
-    field.value = suggestionDrafts.get(fieldKey) || ""
+    const draftKey = this.suggestionDraftKey(card, field)
+    field.value = suggestionDrafts.get(draftKey) || ""
     field.dispatchEvent(new Event("input", { bubbles: true }))
     state.approved = false
-    suggestionDrafts.delete(fieldKey)
+    suggestionDrafts.delete(draftKey)
     this.rememberSuggestion(card, state)
     this.renderSuggestion(card, state)
     field.focus()
@@ -187,6 +189,18 @@ export default class extends Controller {
     suggestionStates.set(key, state)
     if (suggestionStates.size > MAX_SAVED_STATES) {
       suggestionStates.delete(suggestionStates.keys().next().value)
+    }
+  }
+
+  suggestionDraftKey(card, field) {
+    return `${card.dataset.suggestionKey}:${this.fieldKey(field)}`
+  }
+
+  rememberSuggestionDraft(key, value) {
+    suggestionDrafts.delete(key)
+    suggestionDrafts.set(key, value)
+    if (suggestionDrafts.size > MAX_SAVED_STATES) {
+      suggestionDrafts.delete(suggestionDrafts.keys().next().value)
     }
   }
 

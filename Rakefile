@@ -1,5 +1,6 @@
 require "rake/testtask"
 require "fileutils"
+require "etc"
 require "securerandom"
 require_relative "test/support/coverage"
 require_relative "test/support/tmp_cleanup"
@@ -19,6 +20,13 @@ HIVE_CI_GATE_TEST_OPTIONS = {
   "test:babysitter_dry_run_security_matrix" =>
     "--include=test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands"
 }.freeze
+HIVE_SYSTEMD_USER_GATE_TESTS = %w[
+  test/unit/examples_systemd_user_templates_test.rb
+  test/unit/bot/supervisor_test.rb
+  test/unit/bot/telegram_test.rb
+  test/unit/babysitter/project_tick_test.rb
+  test/integration/systemd_user_service_offline_test.rb
+].freeze
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
@@ -307,6 +315,19 @@ end
 
 task "test:require_nonempty_ci_gate" do
   ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
+end
+
+task "test:enable_systemd_user_gate" => "test:require_nonempty_ci_gate" do
+  ENV["HIVE_REQUIRE_SYSTEMD_USER_GATE"] = "1"
+  ENV["HIVE_SYSTEMD_USER_HOME"] = Etc.getpwuid(Process.uid).dir
+end
+
+Rake::TestTask.new("test:systemd_user_service" => "test:enable_systemd_user_gate") do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = HIVE_SYSTEMD_USER_GATE_TESTS
+  t.warning = false
+  t.description = "Run required systemd user-template and offline reconnect proofs"
 end
 
 HIVE_CI_GATE_TESTS.each do |qualified_name, test_file|

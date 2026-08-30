@@ -3,8 +3,8 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-08-13
-tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
+updated: 2026-08-30
+tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr, brainstorm, suggestions]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
@@ -66,6 +66,8 @@ The dashboard intentionally has no persistent metadata header. Scope and filter 
 | `P` | run `hive open-pr` (capital so it doesn't collide with `plan`) |
 | `F` | run `hive finalize` |
 | `a` | run `hive archive` |
+| `u` | on a `2-brainstorm` `needs_input` row, restore the dismissed current repository-aware suggestion; advisory only |
+| `R` | on a `2-brainstorm` `needs_input` row, request a replacement for the current/retryable suggestion; advisory only |
 | `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), log tail on `agent_running`, red-status detail on every recoverable error/review row, direct retry/browse for the review-stale exceptions, and suggested-command dispatch for ready rows |
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `9-done` (or any stage). |
 | `i` | open the focused row's in-TUI info panel — no editor handoff, no marker change, no workflow dispatch. |
@@ -207,6 +209,34 @@ Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_co
 
 - `reason=fix_guardrail` rows open `reviews/fix-guardrail-NN.md` directly so a `[x]` tick of every line drives the U5 approval-on-resume in [[stages/review]] (Phase 4). Missing focal file falls back to the `reviews/` directory.
 - Escalations-only `:review_waiting` rows (no `reason` attr) open the single unresolved reviewer-authored file when there is one, else fall back to the `reviews/` directory.
+
+### Repository-aware suggestion lease
+
+Before opening `brainstorm.md`, the TUI briefly takes the exact task/marker
+locks, removes any old advisory regions, and inserts each current non-dismissed
+candidate as one exact `hive-suggestion:v1` HTML-comment envelope immediately
+after its `### A<n>.` heading. It then releases all locks and records a lease
+containing the exact question fingerprint, suggestion binding, and projected
+bytes; the external editor never runs under a Hive lock.
+
+On editor exit Hive compares the saved file with that lease:
+
+- removing only the two delimiters adopts the byte-identical candidate body as
+  an ordinary editable answer and deletes that sidecar record;
+- deleting the complete envelope dismisses the current candidate without
+  filling the slot;
+- preserving the exact envelope leaves both answer and candidate untouched;
+- a changed question/binding or a newer worker result strips the leased text
+  instead of inserting new bytes into the operator's old buffer.
+
+The shared parser, completeness check, answer writer, and first-pass brainstorm
+producer all treat the whole reserved region as empty advisory material.
+Malformed, nested, or breakout-looking reserved regions are inert/corrupt and
+cannot become an answer. Press `u` on the task row to Restore a dismissed
+current candidate, or `R` to Retry a fresh/stale/failed/unavailable/no-safe
+candidate. Both controls change only sidecar lifecycle state; manual answering
+remains available and only a saved adopted body can trigger the ordinary
+post-editor completeness path.
 
 The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash distinguishes a saved edit from a no-op cancel. It also samples the file's checkbox-count Hash (`{checked: N, unchecked: M}`) for `review_outcome`'s 6-review auto-continue gate — a separate signal from `changed:` because mtime-only is not strict enough to avoid no-op review re-runs.
 

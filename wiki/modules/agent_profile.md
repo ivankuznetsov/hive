@@ -3,8 +3,8 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-25
-tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
+updated: 2026-08-30
+tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb, brainstorm, sandbox]
 ---
 
 **TLDR**: `Hive::AgentRuntime` is the stable Hive facade over the published
@@ -151,7 +151,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `routed_effort_values:` | Optional profile-native allowlist for effective routed effort. A profile with no routed effort builder rejects every newly routed effort. |
 | `routing_argument_placement:` | `:subcommand` by default; `:global` for CLIs such as Codex whose model controls must precede `exec` or `review`. |
 | `launcher_identity:` | Stable profile/launcher version label stored in implementation identity events. |
-| `policy_capabilities:` | Optional symbols proving which managed-package controls the runner can enforce. Empty preserves custom-profile construction but makes managed admission fail closed. |
+| `policy_capabilities:` | Optional symbols proving which managed-package or auxiliary-worker controls the runner can enforce. Empty preserves custom-profile construction but makes managed admission fail closed. `brainstorm_suggestion_data_only` is the exact capability required by the repository-aware suggestion runner. |
 | `tool_scope_flags:` | Optional `:allowed` / `:disallowed` native flag map. Omission defaults to empty except for a profile named `claude`, where it preserves the legacy `--allowedTools` / `--disallowedTools` mapping; an explicit empty map opts out. |
 | `raw_cli_arguments_supported:` | Explicit opt-in for legacy provider-native argv passthrough. Defaults false; Claude enables it for existing MCP/settings/capability adapters. |
 
@@ -238,7 +238,7 @@ from their profile, so projection reads in `Store` and legacy reconstruction
 in `Reconstructor` cannot diverge from the resolver's routed-versus-flat
 representation decision.
 
-- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. Patrol retains usage counters for telemetry but uses the shared daily launch allowance for admission. A structured terminal `result/error_max_budget_usd` event is surfaced as the per-run `budget_exhausted` outcome, distinct from account/rate/quota `limits_reached` recovery; ordinary prose is never used to infer it. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
+- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode`, `brainstorm_suggestion_data_only`, and the minimal patrol review/fix contexts. The suggestion capability is consumed only by `Hive::BrainstormSuggestions::Runner`, which adds its own Bubblewrap filesystem, empty settings/MCP, disabled-tools, schema-output, cancellation, and cleanup policy; ordinary profile execution does not inherit that sandbox. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. Patrol retains usage counters for telemetry but uses the shared daily launch allowance for admission. A structured terminal `result/error_max_budget_usd` event is surfaced as the per-run `budget_exhausted` outcome, distinct from account/rate/quota `limits_reached` recovery; ordinary prose is never used to infer it. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and dedicated read-only/workspace-write sandbox bundles (approval policy `never`, ephemeral execution, and ignored user config/rules) for architecture discovery and fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag and no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018). The package probe checks for `auth.json` beneath the same validated `PI_CODING_AGENT_DIR` (or default `~/.pi/agent`) used by skill discovery. Min version `0.70.2`. `:output_file_exists`.
 - `grok` — headless via `-p <prompt>`, `--always-approve`, and
@@ -323,6 +323,10 @@ sanitized export supplied it.
   argv through `AgentRuntime.require_capability!`, while retaining the
   Claude-specific admission and turn-limit policy.
 - `Hive::RefactorPatrol::ReviewAgentRunner` — uses Claude's read-only permission scope or a profile-declared native read-only sandbox, and pins the resolved refactor model/effort arguments.
+- `Hive::BrainstormSuggestions::Runner` — admits only a profile carrying
+  `brainstorm_suggestion_data_only` plus explicit allowed/disallowed tool
+  controls. It currently accepts Claude and reports every other configured
+  profile as `unavailable` without launching it.
 - `Stages::Base.record_usage` — stores the package-normalized usage returned through `AgentRuntime.extract_usage` as per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
 - `Hive::WorkflowPackage::RuntimePolicy` — legacy packages can still compile

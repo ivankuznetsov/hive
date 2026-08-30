@@ -3,8 +3,8 @@ title: Hive::ModelRouting
 type: module
 source: lib/hive/model_routing.rb
 created: 2026-07-25
-updated: 2026-08-12
-tags: [config, models, routing, validation]
+updated: 2026-08-30
+tags: [config, models, routing, validation, brainstorm, suggestions]
 ---
 
 **TLDR**: `Hive::ModelRouting` is the pure, provider-neutral domain for the
@@ -25,12 +25,13 @@ compatibility metadata, and policy digests belong to
 
 The public keys are:
 
-`brainstorm`, `plan`, `plan_review`, `plan_review_adversarial`,
+`brainstorm`, `brainstorm_suggestion`, `plan`, `plan_review`, `plan_review_adversarial`,
 `plan_review_verification`, `execute`, `execute_implementation`, `rebase`,
 `diagnose`, `babysitter`, `review`, `review_ci`, `review_reviewers`,
 `review_triage`, `review_fix`, `review_browser`, `patrol`, `patrol_review`,
 `patrol_fix`, `open_pr`, `artifacts`, and `finalize`.
 
+`brainstorm_suggestion` inherits from `brainstorm`;
 `plan_review_adversarial` and `plan_review_verification` inherit from
 `plan_review`; `execute_implementation`, `rebase`, `diagnose`, and `babysitter`
 inherit from `execute`; every `review_*` key inherits from `review`; and every
@@ -86,7 +87,7 @@ surfaces unchanged.
 
 Non-durable built-in calls resolve immediately before their trusted launch
 seam through `Stages::Base.model_routing_arguments`. This covers brainstorm
-(headless and tmux), plan, reviewers (including direct Codex and shared Claude
+(headless and tmux), repository-aware brainstorm suggestions, plan, reviewers (including direct Codex and shared Claude
 sessions), triage, browser testing, rebase, diagnosis, babysitter, ordinary
 patrol, artifacts, and finalize. Architecture Patrol overlays
 `patrol_review`/`patrol_fix` while building its immutable review/fix identities,
@@ -99,6 +100,14 @@ It validates only routed effective fields after exact/coarse shadowing.
 Runtime helpers repeat validation at the launch boundary as defense in depth
 for callers that construct config hashes without `Config.load`; both layers
 use the same immutable resolution and profile-native renderer.
+
+The suggestion scheduler resolves `brainstorm_suggestion` immediately before
+building its auxiliary worker. An exact suggestion route may override the
+coarse `brainstorm` model/effort while the selected
+`brainstorm.suggestions.agent` remains fixed. Routing capability validation is
+conditional on `brainstorm.suggestions.enabled`; disabling the feature does not
+make an otherwise unreachable suggestion route a launch requirement. Provider
+selection and the data-only sandbox gate remain outside this module.
 
 ## OpenCode nested routes
 

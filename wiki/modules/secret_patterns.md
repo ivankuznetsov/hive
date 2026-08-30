@@ -4,7 +4,7 @@ type: module
 source: lib/hive/secret_scanner.rb, lib/hive/secret_patterns.rb, lib/hive/betterleaks.rb
 created: 2026-04-26
 updated: 2026-09-06
-tags: [security, secrets, betterleaks, redact]
+tags: [security, secrets, betterleaks, secret-scan, redact, brainstorm, suggestions]
 ---
 
 **TLDR**: Betterleaks is the sole credential detector. Hive selects exact inputs
@@ -44,6 +44,21 @@ redacts complete and truncated PEM blocks, and does not mutate its input.
 The former `scan`, `match?`, `match_diff?`, and password-reference APIs are gone.
 Existing diagnostic receipts retain their numeric redaction-version metadata;
 reading them still checks their contents with the current Betterleaks detector.
+
+## Brainstorm suggestion safety
+
+- `Hive::BrainstormSuggestions::ContextBundle` — excludes selected
+  repository/wiki entries containing a match and redacts the task request plus
+  settled operator answers before rendering them as untrusted evidence.
+- `Hive::BrainstormSuggestions::Safety` — applies `match?` again to candidate
+  text and rationale at provider admission and sidecar-read validation, so raw
+  secret material cannot become actionable through either a worker result or a
+  hand-edited persisted store. Rejected material is replaced by a bounded
+  static reason and is never copied into logs/state.
+
+Integration gap: these suggestion callers still use the removed
+`SecretPatterns.match?` API and need migration to `SecretScanner.match?`
+to enforce the filtering described above with the current detector.
 
 ## Distribution and tests
 

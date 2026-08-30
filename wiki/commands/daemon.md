@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
 updated: 2026-08-30
-tags: [command, daemon, automation, plan-review, json, dogfood]
+tags: [command, daemon, automation, plan-review, json, dogfood, brainstorm, suggestions]
 ---
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
@@ -152,6 +152,34 @@ arbitration, so a persistent capacity fence cannot retain stale queue work.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.
+
+### Brainstorm suggestion reconciliation
+
+Suggestion generation is ancillary work, not a workflow dispatch. On startup
+the daemon sweeps inactive owner-matching `hive-brainstorm-suggestion-*`
+runtime roots. Every complete or bounded task observation then gives
+`BrainstormSuggestionScheduler` the active rows it can safely reconcile. For
+each coding `2-brainstorm` `needs_input` task it inventories every unanswered
+physical slot, seeds missing `brainstorm-suggestions.json` records, captures
+bounded tracked context outside the task lock, and launches only a profile that
+proves the data-only worker capability.
+
+The scheduler coalesces launches across the whole task, admits only one active
+request per question/input binding, applies the configured minimum retry
+interval and bounded per-epoch attempt count, and cancels removed/answered or
+stage-exited work. `unavailable` is distinct from a provider/spawn `failed`
+attempt. Shutdown cooperatively cancels each worker and then owns its bounded
+process-group cleanup; no suggestion child is adopted as a workflow-stage
+attempt. Candidate completion can update only the exact still-current sidecar
+record and cannot create an answer, queue request, marker, or stage move.
+
+The controls live under `brainstorm.suggestions` (`enabled`, `agent`,
+`capture_timeout_sec`, `timeout_sec`, `coalesce_window_sec`,
+`min_retry_interval_sec`, and `max_automatic_attempts`). Disabling is rejected
+while any sidecar or reserved envelope remains; run
+`hive brainstorm-suggestion cleanup --json` and require
+`safe_to_disable: true` first. See [[stages/brainstorm]] for the context,
+sandbox, binding, surface, and downgrade contracts.
 
 ## Architecture-patrol dispatch
 

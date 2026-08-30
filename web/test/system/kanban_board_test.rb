@@ -871,6 +871,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
     release_subscription = Queue.new
     connected = Queue.new
     disconnected = Queue.new
+    lifecycle_events = []
+    lifecycle_mutex = Mutex.new
     released = false
     signed_name = Turbo::StreamsChannel.signed_stream_name([ StatusBroadcaster::CHANNEL ])
     original_verifier = StatusChannel.instance_method(:verified_stream_name_from_params)
@@ -879,35 +881,54 @@ class KanbanBoardTest < ApplicationSystemTestCase
       release_subscription.pop
       original_verifier.bind_call(self)
     end
+    confirmation_subscription = ActiveSupport::Notifications.subscribe(
+      "transmit_subscription_confirmation.action_cable"
+    ) do |*args|
+      payload = args.last
+      if payload[:channel_class] == "StatusChannel"
+        lifecycle_mutex.synchronize { lifecycle_events << :confirmation }
+      end
+    end
+    disconnect = lambda do
+      lifecycle_mutex.synchronize { lifecycle_events << :teardown }
+      disconnected << true
+    end
 
     with_replaced_singleton_method(StatusBroadcaster, :subscriber_connected!, -> { connected << true }) do
-      with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, -> { disconnected << true }) do
-        with_replaced_instance_method(StatusChannel, :verified_stream_name_from_params, blocked_verifier) do
-          execute_script(<<~JS, signed_name)
-            const owner = document.createElement("div")
-            owner.id = "pending-status-owner"
-            owner.dataset.statusVersion = "pending-token"
-            const source = document.createElement("hive-status-stream-source")
-            source.setAttribute("channel", "StatusChannel")
-            source.setAttribute("signed-stream-name", arguments[0])
-            owner.appendChild(source)
-            document.body.appendChild(owner)
-          JS
-          Timeout.timeout(10) { entered_subscription.pop }
+      with_replaced_singleton_method(StatusBroadcaster, :subscriber_disconnected!, disconnect) do
+        with_status_catch_up_observer do |catch_ups|
+          with_replaced_instance_method(StatusChannel, :verified_stream_name_from_params, blocked_verifier) do
+            execute_script(<<~JS, signed_name)
+              const owner = document.createElement("div")
+              owner.id = "pending-status-owner"
+              owner.dataset.statusVersion = "pending-token"
+              const source = document.createElement("hive-status-stream-source")
+              source.setAttribute("channel", "StatusChannel")
+              source.setAttribute("signed-stream-name", arguments[0])
+              owner.appendChild(source)
+              document.body.appendChild(owner)
+            JS
+            Timeout.timeout(10) { entered_subscription.pop }
 
-          execute_script("document.querySelector('#pending-status-owner').remove()")
-          release_subscription << true
-          released = true
+            execute_script("document.querySelector('#pending-status-owner').remove()")
+            release_subscription << true
+            released = true
 
-          Timeout.timeout(10) { connected.pop }
-          Timeout.timeout(10) { disconnected.pop }
+            Timeout.timeout(10) { connected.pop }
+            Timeout.timeout(10) { disconnected.pop }
+          end
+
+          assert catch_ups.empty?, "a disposed source must not send catch-up after late confirmation"
         end
       end
     end
 
     assert connected.empty?
     assert disconnected.empty?
+    assert_equal [ :confirmation, :teardown ], lifecycle_mutex.synchronize { lifecycle_events.dup },
+                 "confirmation may release a disposed handle, but none may arrive after server teardown"
   ensure
+    ActiveSupport::Notifications.unsubscribe(confirmation_subscription) if confirmation_subscription
     release_subscription << true if release_subscription && !released
     execute_script("document.querySelector('#pending-status-owner')?.remove()") if page&.current_url
   end

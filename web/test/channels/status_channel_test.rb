@@ -118,6 +118,11 @@ class StatusChannelAsyncStreamLifecycleTest < ActiveSupport::TestCase
 end
 
 class StatusChannelTest < ActionCable::Channel::TestCase
+  STRESS_ITERATIONS = Integer(ENV.fetch("STATUS_CHANNEL_STRESS_ITERATIONS", "0"), 10)
+  STRESS_SEED = Integer(ENV.fetch("STATUS_CHANNEL_STRESS_SEED", Random.new_seed.to_s), 10)
+
+  raise ArgumentError, "STATUS_CHANNEL_STRESS_ITERATIONS must not be negative" if STRESS_ITERATIONS.negative?
+
   test "a verified stream owns one broadcaster subscription for its lifetime" do
     connected = 0
     disconnected = 0
@@ -489,6 +494,36 @@ class StatusChannelTest < ActionCable::Channel::TestCase
       assert accepts_success_callback,
              "Action Cable adapter API changed: #{adapter_class}#subscribe must accept " \
              "(broadcasting, handler, success_callback)"
+    end
+  end
+
+  if STRESS_ITERATIONS.positive?
+    test "bounded stress repeats both teardown windows" do
+      windows = {
+        before_deferred_start: -> { exercise_teardown_before_deferred_start(StatusChannel) },
+        during_registration: -> { exercise_teardown_during_registration(StatusChannel) }
+      }
+      windows.each_key do |window|
+        puts "StatusChannel stress adapter=controlled window=#{window} " \
+          "iterations=#{STRESS_ITERATIONS} seed=#{STRESS_SEED}"
+      end
+      random = Random.new(STRESS_SEED)
+
+      STRESS_ITERATIONS.times do |iteration|
+        windows.keys.shuffle(random: random).each do |window|
+          channel, fixture = windows.fetch(window).call
+          assert_empty fixture.registrations
+          assert_empty fixture.confirmations
+          assert_empty channel.send(:streams)
+          assert_empty pending_stream_attempts(channel)
+          expected_unsubscribes = window == :during_registration ? 1 : 0
+          assert_equal expected_unsubscribes, fixture.raw_unsubscribes.length
+        rescue Exception
+          warn "StatusChannel stress failed adapter=controlled window=#{window} " \
+            "iteration=#{iteration + 1}/#{STRESS_ITERATIONS} seed=#{STRESS_SEED}"
+          raise
+        end
+      end
     end
   end
 

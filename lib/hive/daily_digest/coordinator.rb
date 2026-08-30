@@ -35,7 +35,7 @@ module Hive
         @clock = clock
       end
 
-      def refresh(date: nil)
+      def refresh(date: nil, attempted_gap_ids: nil)
         config = @config_loader.call
         validate_config!(config)
         now = utc(@clock.call)
@@ -47,14 +47,17 @@ module Hive
 
           [ interval ]
         else
-          intervals
+          intervals.select { |interval| due_for_materialization?(interval) }
         end
         coverage = Coverage.new(
           daily_config: config, membership_history: @history_loader.call,
           observed_at: @clock
         )
         selected.map do |interval|
-          materialize(interval, config: config, coverage: coverage, now: now)
+          materialize(
+            interval, config: config, coverage: coverage, now: now,
+            attempted_gap_ids: attempted_gap_ids
+          )
         end
       rescue Date::Error
         raise DailyDigest::InvalidRecord, "invalid digest local date #{date.inspect}"
@@ -151,7 +154,7 @@ module Hive
         end
       end
 
-      def materialize(interval, config:, coverage:, now:)
+      def materialize(interval, config:, coverage:, now:, attempted_gap_ids: nil)
         date = interval.fetch("local_date")
         membership = coverage.projects_for(
           starts_at: interval.fetch("starts_at"), ends_at: interval.fetch("ends_at")
@@ -173,7 +176,11 @@ module Hive
         )
         existing = read_optional(date)
         if existing&.fetch("lifecycle") == "pruned"
-          discarded = discard_entries(batch)
+          discarded = discard_entries(
+            batch, resolved_gaps: resolved_pruned_gaps(
+              existing, batch, attempted_gap_ids: attempted_gap_ids
+            ), observed_at: now
+          )
           @store.discard_pruned(
             date, entries: discarded, source_frontiers: batch.frontiers,
             discarded_at: now
@@ -193,7 +200,9 @@ module Hive
           end
         end
 
-        amendment = projector.amendment(existing: existing, batch: batch)
+        amendment = projector.amendment(
+          existing: existing, batch: batch, attempted_gap_ids: attempted_gap_ids
+        )
         if amendment
           begin
             written = @store.append_amendment(date, amendment)
@@ -203,7 +212,9 @@ module Hive
             # with a different wall-clock amended_at. Re-read and accept only
             # when no delta remains.
             latest = @store.read(date)
-            retry_amendment = projector.amendment(existing: latest, batch: batch)
+            retry_amendment = projector.amendment(
+              existing: latest, batch: batch, attempted_gap_ids: attempted_gap_ids
+            )
             raise if retry_amendment
 
             result_row(date, "unchanged")
@@ -220,7 +231,7 @@ module Hive
         nil
       end
 
-      def discard_entries(batch)
+      def discard_entries(batch, resolved_gaps: [], observed_at:)
         Array(batch.facts).map do |fact|
           {
             "identity" => fact.fetch("fact_id"), "kind" => fact.fetch("kind"),
@@ -233,7 +244,34 @@ module Hive
             "source" => gap.fetch("source"), "observed_at" => gap.fetch("observed_at"),
             "reason" => "digest projection was pruned"
           }
+        end + Array(resolved_gaps).map do |gap|
+          {
+            "identity" => gap.fetch("gap_id"), "kind" => "gap_resolution",
+            "source" => gap.fetch("source"), "observed_at" => timestamp(observed_at),
+            "reason" => "digest projection was pruned before source recovery"
+          }
         end
+      end
+
+      def due_for_materialization?(interval)
+        existing = read_optional(interval.fetch("local_date"))
+        return true if existing.nil? || existing.fetch("lifecycle") == "open"
+
+        existing.fetch("lifecycle") == "closed" &&
+          Array(existing["effective_gaps"] || existing["gaps"]).any?
+      end
+
+      def resolved_pruned_gaps(existing, batch, attempted_gap_ids:)
+        current = Array(existing["effective_gaps"])
+        attempted = attempted_gap_ids && Array(attempted_gap_ids).to_h { |id| [ id.to_s, true ] }
+        observed = Array(batch.gaps).to_h { |gap| [ gap.fetch("gap_id"), true ] }
+        current.select do |gap|
+          (!attempted || attempted[gap.fetch("gap_id")]) && !observed[gap.fetch("gap_id")]
+        end
+      end
+
+      def timestamp(value)
+        utc(value).iso8601(6)
       end
 
       def result_row(date, status, **attributes)

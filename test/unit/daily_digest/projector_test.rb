@@ -22,10 +22,31 @@ class DailyDigestProjectorTest < Minitest::Test
 
     assert_equal [ "fact:late" ], amendment.fetch("items").map { |item| item.fetch("fact_id") }
     assert_equal [ "gap:one" ], amendment.fetch("resolved_gap_ids")
+    assert_equal [ "gap:one" ], amendment.fetch("resolved_gaps").map { |row| row.fetch("gap_id") }
+    assert_equal "github", amendment.fetch("source")
     assert_equal amendment.fetch("amendment_id"),
                  projector.amendment(existing: base.merge(
                    "effective_gaps" => base.fetch("gaps"), "amendments" => []
                  ), batch: recovered).fetch("amendment_id")
+  end
+
+  def test_recovery_resolves_only_the_gap_ids_that_were_attempted
+    projector = Hive::DailyDigest::Projector.new(clock: -> { NOW })
+    github = gap
+    registry = gap.merge(
+      "gap_id" => "gap:registry", "source" => "registry_history", "scope" => "global"
+    )
+    existing = projector.base(
+      interval: interval, batch: batch(gaps: [ github, registry ], facts: []), lifecycle: "closed"
+    ).merge("effective_gaps" => [ github, registry ])
+
+    amendment = projector.amendment(
+      existing: existing, batch: batch(gaps: [], facts: []),
+      attempted_gap_ids: [ github.fetch("gap_id") ]
+    )
+
+    assert_equal [ "gap:one" ], amendment.fetch("resolved_gap_ids")
+    assert_equal [ "gap:one" ], amendment.fetch("resolved_gaps").map { |row| row.fetch("gap_id") }
   end
 
   def test_complete_no_activity_is_explicit_empty
@@ -38,16 +59,36 @@ class DailyDigestProjectorTest < Minitest::Test
     assert_nil base.fetch("closed_at")
   end
 
+  def test_amendment_deduplicates_attention_and_adds_new_gaps
+    projector = Hive::DailyDigest::Projector.new(clock: -> { NOW })
+    existing_attention = attention("existing")
+    existing = projector.base(
+      interval: interval,
+      batch: batch(gaps: [], facts: [], attention: [ existing_attention ]),
+      lifecycle: "closed"
+    ).merge("effective_gaps" => [])
+    amendment = projector.amendment(
+      existing: existing,
+      batch: batch(
+        gaps: [ gap ], facts: [],
+        attention: [ existing_attention, attention("new") ]
+      )
+    )
+
+    assert_equal [ "attention:new" ], amendment.fetch("attention").map { |row| row.fetch("attention_id") }
+    assert_equal [ "gap:one" ], amendment.fetch("gaps").map { |row| row.fetch("gap_id") }
+  end
+
   private
 
   def interval
     Hive::DailyDigest::Calendar.new(time_zone: "UTC").interval_for("2026-08-30", sequence: 1)
   end
 
-  def batch(gaps: [ gap ], facts: [ fact("first") ])
+  def batch(gaps: [ gap ], facts: [ fact("first") ], attention: [])
     Hive::DailyDigest::Collector::Result.new(
       projects: [ { "project_id" => "project-1", "name" => "demo" } ],
-      facts: facts, attention: [], gaps: gaps,
+      facts: facts, attention: attention, gaps: gaps,
       frontiers: { "project-1" => { "source" => "task_journal", "fingerprints" => [] } },
       completeness: gaps.empty? ? "complete" : "partial",
       content: facts.empty? ? (gaps.empty? ? "empty" : "unknown") : "non_empty"
@@ -69,6 +110,13 @@ class DailyDigestProjectorTest < Minitest::Test
       "reason_code" => "unavailable", "reason" => "unavailable",
       "observed_at" => NOW.iso8601(6), "freshness_at" => nil,
       "project_id" => "project-1", "task_slug" => nil
+    }
+  end
+
+  def attention(id)
+    {
+      "attention_id" => "attention:#{id}", "kind" => "blocked",
+      "project_id" => "project-1", "project" => "demo", "task_slug" => id
     }
   end
 end

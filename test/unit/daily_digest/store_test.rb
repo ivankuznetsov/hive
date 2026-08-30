@@ -154,7 +154,22 @@ class DailyDigestStoreTest < Minitest::Test
       refute File.exist?(store.base_path("2026-08-30"))
       assert_equal "pruned", store.read("2026-08-30").fetch("lifecycle")
       assert_equal receipt.fetch("receipt_id"), store.read("2026-08-30").fetch("receipt_id")
+      assert_equal "a" * 64, receipt.dig("interval", "interval_id")
+      assert_equal 86_400, receipt.dig("interval", "duration_seconds")
       assert_equal 0o600, File.stat(store.tombstone_path("2026-08-30")).mode & 0o777
+    end
+  end
+
+  def test_prune_preserves_unresolved_gap_evidence_for_late_recovery_audit
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(record("closed", completeness: "partial", content: "unknown", gaps: [ gap ]))
+
+      receipt = store.prune("2026-08-30", pruned_at: NOW, reason: "operator_confirmed")
+
+      assert_equal [ "gap:github:demo" ],
+                   receipt.fetch("effective_gaps").map { |entry| entry.fetch("gap_id") }
+      assert_equal 86_400, store.intervals.first.fetch("duration_seconds")
     end
   end
 

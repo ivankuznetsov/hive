@@ -124,9 +124,10 @@ module Hive
             "pruned_at" => normalize_time(pruned_at),
             "reason" => String(reason),
             "interval" => base.slice(
-              "local_date", "sequence", "time_zone", "starts_at", "ends_at",
-              "boundary_kind", "cutover"
+              "interval_id", "local_date", "sequence", "time_zone", "starts_at", "ends_at",
+              "duration_seconds", "boundary_kind", "cutover"
             ),
+            "effective_gaps" => projected.fetch("effective_gaps", []),
             "source_frontiers" => projected.fetch("effective_source_frontiers", {}),
             "discards" => [],
             "discarded_amendment_ids" => amendment_files(date).map do |path|
@@ -191,7 +192,7 @@ module Hive
 
           interval.slice(
             "local_date", "sequence", "time_zone", "starts_at", "ends_at",
-            "boundary_kind", "cutover", "interval_id"
+            "duration_seconds", "boundary_kind", "cutover", "interval_id"
           )
         end.sort_by do |interval|
           [ interval["sequence"] || Float::INFINITY, interval.fetch("starts_at") ]

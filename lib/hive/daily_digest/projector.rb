@@ -39,7 +39,7 @@ module Hive
         }
       end
 
-      def amendment(existing:, batch:)
+      def amendment(existing:, batch:, attempted_gap_ids: nil)
         existing_fact_ids = Array(existing["items"]).to_h { |item| [ item.fetch("fact_id"), true ] }
         existing_attention_ids = Array(existing["attention"]).to_h do |item|
           [ item.fetch("attention_id"), true ]
@@ -53,9 +53,12 @@ module Hive
         end
         known_gap_ids = current_gaps.to_h { |gap| [ gap.fetch("gap_id"), true ] }
         new_gaps = batch_gaps.reject { |gap| known_gap_ids[gap.fetch("gap_id")] }
-        resolved = current_gaps.filter_map do |gap|
-          gap.fetch("gap_id") unless batch_gap_ids[gap.fetch("gap_id")]
-        end.sort
+        attempted = attempted_gap_ids && Array(attempted_gap_ids).to_h { |id| [ id.to_s, true ] }
+        resolved_gaps = current_gaps.select do |gap|
+          gap_id = gap.fetch("gap_id")
+          (!attempted || attempted[gap_id]) && !batch_gap_ids[gap_id]
+        end
+        resolved = resolved_gaps.map { |gap| gap.fetch("gap_id") }.sort
         return nil if new_items.empty? && new_attention.empty? && new_gaps.empty? && resolved.empty?
 
         now = timestamp(@clock.call)
@@ -70,7 +73,7 @@ module Hive
         {
           "amendment_id" => "amendment:#{Record.content_id(identity)}",
           "kind" => resolved.any? ? "gap_resolution" : "late_observation",
-          "source" => "daily_digest",
+          "source" => amendment_source(resolved_gaps),
           "event_at" => event_at,
           "observed_at" => latest_observation(new_items, new_gaps) || now,
           "amended_at" => now,
@@ -78,6 +81,7 @@ module Hive
           "attention" => Record.canonical_object(new_attention),
           "gaps" => Record.canonical_object(new_gaps),
           "resolved_gap_ids" => resolved,
+          "resolved_gaps" => Record.canonical_object(resolved_gaps),
           "source_frontiers" => Record.canonical_object(batch.frontiers.to_h)
         }
       end
@@ -93,6 +97,11 @@ module Hive
 
       def latest_observation(items, gaps)
         (items + gaps).filter_map { |row| row["observed_at"] }.max
+      end
+
+      def amendment_source(resolved_gaps)
+        sources = resolved_gaps.filter_map { |gap| gap["source"] }.uniq
+        sources.one? ? sources.first : "daily_digest"
       end
 
       def timestamp(value)

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -147,6 +147,36 @@ Rails 8.1.3.1 is the minimum locked web release for the
 CVE-2026-66066 Active Storage/libvips security fix. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
+
+### Action Cable status-stream ownership
+
+The web lock resolves Rails and Action Cable `8.1.3.1` and Solid Cable
+`4.0.0`. For [issue #1143](https://github.com/ivankuznetsov/hive/issues/1143),
+`StatusChannel` remains the application-level owner of the subscription
+lifecycle race: no exact upstream merge plus first official released Rails gem
+containing the full Hive lifecycle contract has been established. The current
+dependency therefore remains a released gem; Hive does not use a Rails Git or
+prerelease pin, vendored framework file, monkey patch, or broad backport for
+this fix.
+
+The fence deliberately relies on the private Action Cable methods
+`worker_pool_stream_handler`, `defer_subscription_confirmation!`,
+`ensure_confirmation_sent`, and `streams`, plus the adapter call shape
+`pubsub.subscribe(broadcasting, handler, success_callback)`. The private-API
+guard in `web/test/channels/status_channel_test.rb` names any missing method or
+changed three-argument adapter shape, making an ordinary Rails update fail
+before runtime.
+
+A future ownership transfer is fail closed. Its provenance packet must name
+the upstream PR, merge commit, official Rails tag/release, first gem version,
+Hive lock resolution, and comparison with that released source. One atomic
+change must then raise the Rails floor, update every Rails lock component,
+remove only the obsolete application fence/helpers, and pass the unchanged
+mechanism-neutral Async/Solid Cable contract, deterministic/stress cases,
+browser/system suites, broad Web suite, golden path, and style checks. Any
+failure restores the prior released Rails declaration and lockfile together
+with the application fence; an issue, unreleased branch, or adjacent fix is
+not transfer evidence.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

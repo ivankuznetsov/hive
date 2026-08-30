@@ -98,4 +98,43 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       refute File.exist?(runtime)
     end
   end
+
+  def test_startup_sweep_removes_only_owned_prefixed_directories
+    Dir.mktmpdir do |root|
+      stale = File.join(root, "#{Hive::BrainstormSuggestions::Runner::RUNTIME_PREFIX}stale")
+      unrelated = File.join(root, "other-runtime")
+      FileUtils.mkdir_p(stale)
+      FileUtils.mkdir_p(unrelated)
+
+      assert_equal 1, Hive::BrainstormSuggestions::Runner.sweep_inactive!(root)
+      refute File.exist?(stale)
+      assert File.directory?(unrelated)
+    end
+  end
+
+  def test_cancelled_execution_discards_output_and_removes_runtime
+    token = Hive::BrainstormSuggestions::Runner::Cancellation.new
+    runtime = nil
+    executor = lambda do |launch, cancellation|
+      runtime = launch.runtime_root
+      cancellation.cancel!
+      Hive::BrainstormSuggestions::Runner::Execution.new(
+        stdout: JSON.generate("structured_output" => {
+          "disposition" => "suggestion", "text" => "Do not publish me.",
+          "rationale" => "Cancellation won.", "provenance" => [ "repository" ]
+        }),
+        exit_code: 0, timed_out: false
+      )
+    end
+    runner = Hive::BrainstormSuggestions::Runner.new(
+      profile: Hive::AgentProfiles.lookup(:claude), executor: executor,
+      bwrap_path: "/usr/bin/bwrap", executable_resolver: ->(*) { "/bin/true" }
+    )
+
+    result = runner.call(bundle: bundle, cancellation: token)
+
+    assert_equal "failed", result.fetch("state")
+    assert_equal "cancelled", result.fetch("error_code")
+    refute File.exist?(runtime)
+  end
 end

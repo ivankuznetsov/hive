@@ -21,6 +21,7 @@ require "hive/runtime_control_plane/dispatch_repository"
 
 require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
+require "hive/daemon/brainstorm_suggestion_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_fix_admission_scheduler"
@@ -82,7 +83,8 @@ module Hive
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
                      patrol_fix_admission_scheduler: nil,
-                     patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
+                     patrol_arbiter: nil, answer_digest_scheduler: nil,
+                     brainstorm_suggestion_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      dispatch_repository: nil,
@@ -105,6 +107,7 @@ module Hive
         @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
         @patrol_arbiter = patrol_arbiter
         @answer_digest_scheduler = answer_digest_scheduler
+        @brainstorm_suggestion_scheduler = brainstorm_suggestion_scheduler
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
         @attempt_reconciler = attempt_reconciler
@@ -339,6 +342,8 @@ module Hive
         refresh_legacy_layout_projects(result.projects)
         refresh_active_agent_snapshot(result.rows)
 
+        run_brainstorm_suggestion_scheduler(result.rows, now: now)
+
         apply_external_running_counts
 
         # Reconcile task-bound merged PRs before automatic error recovery.
@@ -541,6 +546,7 @@ module Hive
         return false unless admission_open?
 
         replace_incremental_status_rows(keys, result.rows)
+        run_brainstorm_suggestion_scheduler(result.rows, now: now, complete: false)
         apply_external_running_counts
 
         begin
@@ -578,6 +584,7 @@ module Hive
         # before the first tick, so a crash-restart neither re-dispatches
         # an already-run request nor retains stale SQL claims for dead owners.
         recover_dispatch_claims(now: Time.now)
+        @brainstorm_suggestion_scheduler&.startup!
         publish_runtime_readiness(now: Time.now)
         @runtime_ready_callback&.call
         @runtime_ready_callback = nil
@@ -625,6 +632,7 @@ module Hive
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
                                             grace_sec: @shutdown_grace_sec,
                                             reexec_requested: @reexec_requested)
+        @brainstorm_suggestion_scheduler&.shutdown
         shutdown_entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
         record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
@@ -679,6 +687,16 @@ module Hive
       def dispatch_repository
         @dispatch_repository ||= Hive::RuntimeControlPlane::DispatchRepository.open_default(
           state_home: @dispatch_state_home
+        )
+      end
+
+      def run_brainstorm_suggestion_scheduler(rows, now:, complete: true)
+        @brainstorm_suggestion_scheduler&.tick(rows: rows, now: now, complete: complete)
+      rescue StandardError => error
+        @logger.event(
+          :fatal,
+          message: "brainstorm suggestion scheduler raised: #{error.class}: #{error.message}".byteslice(0, 500),
+          keeping_previous: true
         )
       end
 

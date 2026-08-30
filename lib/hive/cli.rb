@@ -1211,8 +1211,8 @@ module Hive
       ).call
     end
 
-    desc "brainstorm-suggestion cleanup [TARGET]",
-         "Strip advisory brainstorm state before disabling or downgrading Hive"
+    desc "brainstorm-suggestion ACTION [TARGET]",
+         "Clean, retry, restore, or dismiss advisory brainstorm state"
     long_desc <<~DESC, wrap: false
       Acquires each exact task lock, removes `hive-suggestion:v1` envelopes and
       brainstorm-suggestions.json sidecars, then verifies parser-visible answers
@@ -1222,12 +1222,16 @@ module Hive
       repository-aware suggestions until a cleanup receipt is safe.
     DESC
     option :project, type: :string, desc: "scope cleanup to one registered project"
+    option :question, type: :numeric, desc: "task-local question ordinal for candidate actions"
+    option :binding, type: :string, desc: "current input or suggestion binding"
     def brainstorm_suggestion(action = nil, target = nil)
       require "hive/commands/brainstorm_suggestion"
       Hive::Commands::BrainstormSuggestion.new(
         action,
         target: target,
         project: options[:project],
+        question: options[:question],
+        binding: options[:binding],
         json: options[:json]
       ).call
     end

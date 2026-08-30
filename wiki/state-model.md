@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
 updated: 2026-08-30
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
@@ -579,23 +579,55 @@ delivers no refresh-only prefix; the self-healing retry cannot turn that
 failure into a periodic full-page request loop. Failed delivery remains
 pending across last-subscriber shutdown, and a
 replacement broadcaster retries the retained feed value before resuming normal
-deduplication. Status and task pages use Hive's cancellation-safe custom Turbo
-stream source: a subscription that finishes connecting after its DOM owner has
-left is unsubscribed from its confirmed callback, preserving server command
-order while still releasing the abandoned owner. Confirmation is scoped to the
-current transport; disconnect clears it so teardown during reconnect again
-waits for confirmation, rejection, or disconnect. If none arrives within five
-seconds, Hive closes an otherwise-unowned Cable transport to make server cleanup
-authoritative before local release. `StatusChannel` fences the deferred adapter
-subscribe before it begins and in its completion callback, removing a handler
-that finishes after teardown. An adapter exception after deferral releases the
-lease and reconnects the transport instead of stranding an active unconfirmed
-channel. A rejected server subscription is forgotten
-and retried. A rejected asynchronous consumer setup
-clears turbo-rails' rejected cached consumer promise before retrying at a
-bounded five-second cadence. A synchronous subscription-creation failure drops
-the partial registration and failed consumer before retrying; DOM disconnect
-cancels that retry. The task-page
+deduplication.
+
+Status and task pages use Hive's cancellation-safe custom Turbo stream source.
+Its element holds one current `StatusStreamOwner`; that owner contains the
+current identity-bearing application attempt, `retryTimer`,
+`pendingReleaseTimer` and its disposition, catch-up attempt, and one of
+`connecting`, `connected`, `reconnecting`, `retry_wait`, `disconnecting`, or
+`disconnected`. `disconnected` is terminal for that owner. A later DOM connect
+or attribute supersession installs a new owner; there is no `stopped` state.
+Every application setup or retry attempt creates a fresh dedicated Action Cable
+consumer. A transient `disconnected({ willAttemptReconnect: true })` transition
+moves `connected -> reconnecting` and later reconfirms the same consumer,
+subscription, and attempt. Setup/registration/rejection failures and
+`willAttemptReconnect: false` instead retire the attempt, enter `retry_wait`,
+and let the existing five-second retry create a new attempt and consumer.
+
+All connection `open`/`reopen` paths, callbacks, timer callbacks, setup promise
+continuations, and catch-up work require both the current owner and current
+attempt. Retirement disables opening before external cleanup, so a queued
+visibility-monitor callback or late consumer cannot revive the attempt or
+touch a successor; a late dedicated consumer is closed when it arrives. A
+subscription that confirms after its DOM owner has left is released from that
+confirmed callback, preserving server command order. An unconfirmed detached
+attempt remains only as the disconnected owner's bounded pending-release
+disposition until confirmation, rejection, or disconnect. If no disposition
+arrives within five seconds, the owner closes the dedicated transport before
+local unsubscribe/forgetting, making server connection cleanup authoritative
+without consulting turbo-rails' shared consumer or subscription registry.
+`StatusChannel` separately fences deferred adapter registration before it
+begins and at completion; a late handler removes itself, while a deferred
+adapter exception releases its lease and reconnects the same transport.
+
+Disconnect snapshots and clears owner/attempt slots before external calls,
+then records the first thrown value while still attempting each applicable
+timer cancellation, subscription release, consumer disconnect, conditional
+connection/socket fallback, and monitor stop. Consumer disconnect is primary;
+connection close with reconnect disabled and direct captured-socket close run
+only while the socket remains `OPEN` or `CONNECTING`, preventing a normal open
+socket from being closed twice. Final state is `disconnected` and a repeated
+disconnect performs no work. A direct internal caller receives the exact first
+error after finalization; DOM reactions and asynchronous failures warn after
+their cleanup/state obligations instead of leaking an uncaught reaction error.
+Attribute supersession clears the old reference and installs a successor even
+when old retirement fails, with the old failure retaining precedence and a
+successor setup failure routed to that new owner's `retry_wait`. One live
+source therefore intentionally owns one dedicated transport; supersession can
+temporarily own one successor plus one bounded retiring predecessor, detach
+returns to zero after any bounded pending-release custody, and simultaneous
+sources own isolated transports. The task-page
 owner includes all mutation forms, keeping their native submit events inside
 the same refresh-suppression boundary as the stream source; admission begins
 only after Turbo accepts any confirmation.

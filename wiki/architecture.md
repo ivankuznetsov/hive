@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-30
 tags: [architecture, overview]
 ---
 
@@ -379,19 +379,49 @@ property, so restoring a page after a source-less route cannot revive it.
 Later confirmations on that connection are bounded to one
 reconciliation GET instead of a refresh loop, while navigation cannot revive
 an old URL's latch. A real socket disconnect releases the connection-local
-latch so a later missed update can recover. Rejected lazy Action
-Cable consumer promises are removed from turbo-rails' cache before a bounded
-retry. A synchronous create failure also removes any partially registered
-subscription and replaces its failed consumer; detaching the source cancels
-the retry. A pre-confirmation detach waits for the current transport's
-confirmation, rejection, or disconnect before releasing the handle, preserving
-server subscribe/unsubscribe order across reconnects. A five-second fallback
-closes an otherwise-unowned transport that produces none of those callbacks,
-giving the server a connection-cleanup edge before local release. The channel
-also fences Action Cable's deferred adapter subscribe both before registration
-and at its completion; if teardown wins either race, no handler remains. A
-raising deferred adapter releases the broadcaster lease and reconnects the
-transport, so it cannot strand an active, unconfirmed channel. On task pages
+latch so a later missed update can recover. One `StatusStreamOwner` owns the
+current identity-bearing application attempt, retry timer, pending-release
+timer and disposition, catch-up attempt, and explicit lifecycle state. Each
+application setup or retry creates a dedicated consumer with
+`cable.createConsumer()`; an Action Cable transport reconnect remains on that
+consumer, subscription, and attempt, while setup, registration, rejection, or
+non-reconnecting transport failure fully retires the attempt, enters
+`retry_wait`, and starts a fresh attempt after the existing five-second bound.
+The owner never reads or mutates turbo-rails' shared consumer cache and never
+uses its subscription registry to decide whether cleanup is safe.
+
+The dedicated connection's `open` and `reopen` entry points, every callback,
+both timers, and asynchronous setup continuations are fenced by owner and
+attempt identity. Retiring an attempt first makes those entry points inert, so
+already-queued visibility-monitor work cannot open another socket or mutate a
+successor. A pre-confirmation detach leaves the disconnected owner as the sole
+bounded custodian until confirmation, rejection, or disconnect establishes the
+subscription's disposition. Confirmation still releases only after server
+registration; if none of those callbacks arrives within five seconds, timeout
+cleanup closes the dedicated transport before locally unsubscribing or
+forgetting the handle. This preserves server subscribe/unsubscribe order
+without a shared-registry scan. The channel also fences Action Cable's deferred
+adapter subscribe both before registration and at its completion; if teardown
+wins either race, no handler remains. A raising deferred adapter releases the
+broadcaster lease and reconnects the same transport, so it cannot strand an
+active, unconfirmed channel.
+
+Owner disconnect is an ordered best-effort transaction. It detaches private
+slots first, cancels the retry timer, attempts every applicable cleanup, and
+commits terminal `disconnected` even if an operation throws. Unsubscribe runs
+before transport cleanup for confirmed subscriptions. Consumer disconnect is
+the primary shutdown; reconnect-disabled connection close and captured-socket
+close are attempted only while that socket remains `OPEN` or `CONNECTING`, and
+the connection monitor is stopped even after earlier failures. The internal
+boundary rethrows the exact first thrown value after finalization, while custom-
+element disconnect, async-failure, and attribute-supersession paths warn only
+after their DOM and successor obligations finish. Repeated disconnect is a
+no-op, and supersession installs or retains a retrying successor even when old
+cleanup fails. Dedicated ownership intentionally allocates one Cable transport
+per simultaneously live status source; an unconfirmed retiring predecessor can
+briefly overlap one successor until the bounded pending release settles, and a
+detached source returns to zero transports after any bounded pending release.
+On task pages
 the status-refresh owner
 wraps the mutation forms as well as the stream source, so every task action
 crosses the same native submission guard before a filesystem broadcast can

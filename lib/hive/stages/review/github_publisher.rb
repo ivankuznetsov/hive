@@ -42,7 +42,7 @@ module Hive
             return :secret
           end
 
-          return :already_posted if already_posted?(pr_url, header)
+          return :already_posted if already_posted?(pr_url, header, cfg: cfg)
 
           with_body_file(body) do |file|
             failures = []
@@ -151,8 +151,11 @@ module Hive
         # does not silently accumulate repeated posts each pass.
         COMMENT_PAGE_CAP = 100
 
-        def already_posted?(pr_url, header)
-          out, _err, status = Hive::Gh.capture3("gh", "pr", "view", pr_url, "--json", "comments")
+        # `cfg` threads the configured GitHub invocation path through the
+        # dedupe probe (notably `gh.network_timeout_sec`) so it honors the
+        # same settings as the adjacent `gh pr comment` call.
+        def already_posted?(pr_url, header, cfg: nil)
+          out, _err, status = Hive::Gh.capture3("gh", "pr", "view", pr_url, "--json", "comments", cfg: cfg)
           return false unless status.success?
 
           parsed = JSON.parse(out)

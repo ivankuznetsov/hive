@@ -53,4 +53,54 @@ class DailyDigestMigrationTest < Minitest::Test
     )
     assert_raises(Hive::DailyDigest::Migration::InitializationError) { detector.call }
   end
+
+  def test_detector_reads_timezone_file_and_ignores_read_failures
+    with_tmp_dir do |dir|
+      timezone_file = File.join(dir, "timezone")
+      File.write(timezone_file, "Europe/London\n")
+      detector = Hive::DailyDigest::TimeZoneDetector.new(
+        environment: {}, timezone_file: timezone_file, localtime_file: "/missing"
+      )
+      assert_equal "Europe/London", detector.call
+
+      with_replaced_singleton_method(
+        File, :read, ->(*_args) { raise Errno::EACCES, "denied" }
+      ) do
+        unavailable = Hive::DailyDigest::TimeZoneDetector.new(
+          environment: {}, timezone_file: timezone_file, localtime_file: "/missing"
+        )
+        assert_raises(Hive::DailyDigest::Migration::InitializationError) { unavailable.call }
+      end
+    end
+  end
+
+  def test_migration_rejects_scalar_config_invalid_zone_and_clock
+    with_tmp_global_config do
+      File.write(Hive::Config.global_config_path, { "daily_digest" => "bad" }.to_yaml)
+      error = assert_raises(Hive::DailyDigest::Migration::InitializationError) do
+        Hive::DailyDigest::Migration.new.call
+      end
+      assert_match(/must be a Hash/, error.message)
+    end
+
+    with_tmp_global_config do
+      File.write(
+        Hive::Config.global_config_path,
+        { "daily_digest" => { "enabled" => false, "time_zone" => "Mars/Olympus" } }.to_yaml
+      )
+      error = assert_raises(Hive::DailyDigest::Migration::InitializationError) do
+        Hive::DailyDigest::Migration.new(now: -> { NOW }).call
+      end
+      assert_match(/unknown IANA time zone/, error.message)
+    end
+
+    with_tmp_global_config do
+      error = assert_raises(Hive::DailyDigest::Migration::InitializationError) do
+        Hive::DailyDigest::Migration.new(
+          detector: -> { "UTC" }, projects: -> { [ nil ] }, now: -> { "bad-time" }
+        ).call
+      end
+      assert_match(/migration clock is invalid/, error.message)
+    end
+  end
 end

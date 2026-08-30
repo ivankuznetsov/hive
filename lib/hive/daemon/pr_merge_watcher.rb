@@ -9,6 +9,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/task"
 require "hive/task_closure"
+require "hive/task_projection/store"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -21,6 +22,7 @@ module Hive
     # receipt live in PrMergeReconciliationStore, so daemon restart and a
     # transient GitHub or intake failure cannot silently forget a task.
     class PrMergeWatcher
+      PROJECTION_OUTAGE_PREFIX = "projection_unavailable: ".freeze
       SUPPORTED_STAGES = %w[open-pr review artifacts finalize].map do |verb|
         Hive::Workflows::VERBS.fetch(verb).fetch(:target)
       end.freeze
@@ -32,7 +34,8 @@ module Hive
                      gh: Hive::Gh, config_lookup: Hive::Config.method(:find_project),
                      config_loader: Hive::Config.method(:load),
                      task_factory: Hive::Task.method(:new),
-                     task_closure: Hive::TaskClosure, dry_run: false)
+                     task_closure: Hive::TaskClosure,
+                     attempt_store_factory:, dry_run: false)
         @poll_interval_sec = positive_number(poll_interval_sec, "poll interval", allow_zero: true)
         @poll_timeout_sec = positive_number(poll_timeout_sec, "poll timeout")
         @merge_intake = merge_intake
@@ -42,6 +45,7 @@ module Hive
         @config_loader = config_loader
         @task_factory = task_factory
         @task_closure = task_closure
+        @attempt_store_factory = attempt_store_factory
         @dry_run = dry_run
         @contexts = {}
         @last_observation_results = []
@@ -108,6 +112,10 @@ module Hive
       # consume every opportunity or permanently evict another task.
       def tick(now: Time.now.utc, projects: nil)
         selected = projects ? @contexts.keys & Array(projects).map(&:to_s) : @contexts.keys
+        attempt_store = nil
+        projection_reader = lambda do
+          attempt_store ||= @attempt_store_factory.call
+        end
         selected.sort.filter_map do |project|
           identity = @contexts.fetch(project)
           state = @store.load(identity)
@@ -116,7 +124,9 @@ module Hive
           candidate = @store.next_candidate(state, now: now)
           next unless candidate
 
-          process_and_record(identity, candidate, now: now)
+          process_and_record(
+            identity, candidate, now: now, projection_reader: projection_reader
+          )
         rescue StandardError => e
           {
             status: :blocked, project: project,
@@ -218,7 +228,11 @@ module Hive
       def candidate_for(row, identity, now:)
         task = @task_factory.call(row.folder)
         marker = Hive::Markers.current(task.state_file)
-        task_generation = Hive::TaskClosure.task_generation(task, marker: marker)
+        task_generation = Hive::TaskClosure.task_generation(
+          task, marker: marker,
+          condition_task_generation: row.condition_task_generation,
+          commit_generation: row.commit_generation
+        )
         pull_request = parse_pr_url(row.pr_url.to_s.empty? ? read_pr_url(task) : row.pr_url)
         unless pull_request
           issue = {
@@ -299,8 +313,10 @@ module Hive
         ]
       end
 
-      def process_and_record(identity, candidate, now:)
-        result = process_candidate(identity, candidate, now: now)
+      def process_and_record(identity, candidate, now:, projection_reader:)
+        result = process_candidate(
+          identity, candidate, now: now, projection_reader: projection_reader
+        )
         @store.transaction(identity, now: now) do |state|
           current = state.fetch("candidates")[candidate.fetch("key")]
           next unless current
@@ -332,21 +348,39 @@ module Hive
         }
       end
 
-      def process_candidate(identity, candidate, now:)
+      def process_candidate(identity, candidate, now:, projection_reader:)
         task = resolve_candidate_task(candidate)
         return terminal_result(task, identity, now: now) if Hive::TaskClosure.terminal_task?(task)
-        unless generation_current?(task, candidate)
+        generation = generation_status(
+          task, candidate, attempt_store: projection_reader.call
+        )
+        if generation.fetch(:status) == :unavailable
+          return {
+            status: :blocked,
+            archive: {
+              "status" => "blocked",
+              "last_error" => "#{PROJECTION_OUTAGE_PREFIX}#{generation.fetch(:reason)}"
+            },
+            next_poll_at: now + @poll_interval_sec
+          }
+        end
+        unless generation.fetch(:status) == :current
           return {
             status: :superseded,
             archive: { "status" => "superseded",
                        "last_error" => "task generation changed before reconciliation" }
           }
         end
+        recovered_archive = if candidate.dig("archive", "status") == "blocked" &&
+          candidate.dig("archive", "last_error").to_s.start_with?(PROJECTION_OUTAGE_PREFIX)
+          { "status" => "pending", "last_error" => nil }
+        end
 
         remote = candidate.fetch("remote")
         unless remote["state"] == "merged"
           facts = poll_facts(identity, candidate)
           remote_result = remote_result(facts, candidate, now: now)
+          remote_result[:archive] = recovered_archive if recovered_archive
           checkpoint!(identity, candidate, remote_result, now: now)
           return remote_result unless remote_result.fetch(:status) == :merged
 
@@ -369,6 +403,7 @@ module Hive
         architecture = ensure_architecture_intake(
           identity, candidate, remote, now: now
         )
+        architecture[:archive] = recovered_archive if recovered_archive
         checkpoint!(identity, candidate, architecture, now: now)
         return architecture if %i[deferred blocked].include?(architecture.fetch(:status))
         if @dry_run
@@ -376,7 +411,7 @@ module Hive
             status: :dry_run,
             remote: remote,
             architecture: architecture.fetch(:architecture),
-            archive: candidate.fetch("archive"),
+            archive: recovered_archive || candidate.fetch("archive"),
             next_poll_at: now + @poll_interval_sec
           }
         end
@@ -626,12 +661,26 @@ module Hive
         nil
       end
 
-      def generation_current?(task, candidate)
+      def generation_status(task, candidate, attempt_store:)
         marker = Hive::Markers.current(task.state_file)
-        Hive::TaskClosure.task_generation(task, marker: marker) ==
+        bounded = Hive::TaskProjection::Store.new(
+          task_folder: task.folder, attempt_store: attempt_store
+        ).read_routine(marker: marker)
+        unless bounded.current?
+          reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
+          return {
+            status: :unavailable,
+            reason: "task projection requires repair before reconciliation (#{reason})"
+          }
+        end
+
+        current = Hive::TaskClosure.task_generation(
+          task, marker: marker, projection: bounded.projection
+        ) ==
           candidate.dig("observation", "task_generation") &&
           Hive::TaskClosure.marker_generation(marker) ==
             candidate.dig("observation", "marker_generation")
+        { status: current ? :current : :changed }
       end
 
       def resolve_candidate_task(candidate)
@@ -675,7 +724,8 @@ module Hive
 
       def tracked_row?(row)
         SUPPORTED_STAGES.include?(row.stage.to_s) &&
-          row.workflow.to_s == "coding"
+          row.workflow.to_s == "coding" &&
+          !Hive::TaskProjection.repair_required_row?(row)
       end
 
       def backlog_outcome(row, task_generation, status:, reason:,

@@ -259,6 +259,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "retry count" => recovery_payload.merge("retry_count" => -1),
       "identical failure count" => recovery_payload.merge("identical_failure_count" => -1),
       "failure fingerprint" => recovery_payload.merge("failure_fingerprint" => "not-a-sha"),
+      "runtime digest" => recovery_payload.merge("runtime_digest" => "not-a-sha"),
       "failure attempt history" => recovery_payload.merge(
         "failure_attempt_history" => [ "" ]
       ),
@@ -1223,6 +1224,29 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       argv = [ "hive", verb, "slug" ]
       assert Q.valid_argv?(argv), "argv must accept #{verb}"
     end
+  end
+
+  def test_valid_argv_accepts_only_exact_digest_bound_evidence_rework
+    command = [
+      "hive", "evidence", "rework", "screenote-task",
+      "--project", "screenote", "--stage", "7-artifacts",
+      "--generation", "a" * 64, "--recovery-digest", "b" * 64
+    ]
+
+    assert Q.valid_argv?(command)
+    assert Q.valid_argv?(command + [ "--json" ])
+    assert Q.valid_argv?(command.reject.with_index { |_value, index| index.between?(4, 5) })
+
+    invalid = [
+      command.dup.tap { |value| value[value.index("7-artifacts")] = "4-execute" },
+      command.reject.with_index { |_value, index| index.between?(10, 11) },
+      command + [ "--generation", "c" * 64 ],
+      command + [ "--json", "--json" ],
+      [ "hive", "evidence", "recover", "screenote-task" ],
+      [ "hive", "evidence", "rework", "../screenote", "--stage", "7-artifacts",
+        "--generation", "a" * 64, "--recovery-digest", "b" * 64 ]
+    ]
+    invalid.each { |argv| refute Q.valid_argv?(argv), argv.inspect }
   end
 
   def test_valid_argv_rejects_non_allowlisted_verbs

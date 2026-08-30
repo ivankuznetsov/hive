@@ -1,6 +1,7 @@
 require "hive/attempts/lost_outcome"
 require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/store"
+require "hive/task_projection/store"
 require "json"
 require "psych"
 require "time"
@@ -186,6 +187,10 @@ module Hive
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
+        projection_reader = nil
+        projection_reader_loader = lambda do
+          projection_reader ||= @store.projection_reader
+        end
         page = @store.log_archive.cold_attempt_ids_page(
           cursor: @storage_health.cold_sweep_cursor,
           limit: COLD_SWEEP_LIMIT
@@ -194,7 +199,10 @@ module Hive
           record = @store.fetch(attempt_id)
           next unless record&.final?
           next if recovery_pinned?(record)
-          next unless retention_expired?(record, now: now) || task_archived?(record)
+          next unless retention_expired?(record, now: now) ||
+                      task_archived?(
+                        record, attempt_store: projection_reader_loader.call
+                      )
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
@@ -248,7 +256,7 @@ module Hive
         false
       end
 
-      def task_archived?(record)
+      def task_archived?(record, attempt_store: nil)
         return @task_archived.call(record) == true if @task_archived
 
         require "hive/config"
@@ -273,7 +281,18 @@ module Hive
         task = candidates.first
         marker = Hive::Markers.current(task.state_file)
         config = Hive::Config.load(task.project_root)
-        Hive::TaskAction.for(task, marker, config: config).key ==
+        bounded = Hive::TaskProjection::Store.new(
+          task_folder: task.folder,
+          attempt_store: attempt_store || @store.projection_reader
+        ).read_routine(
+          marker: marker,
+          pristine: Hive::TaskProjection::Store.pristine_task?(task, marker)
+        )
+        return false unless bounded.current?
+
+        Hive::TaskAction.for(
+          task, marker, config: config, projection: bounded.projection
+        ).key ==
           Hive::Schemas::TaskActionKind::ARCHIVED
       rescue Hive::Error, KeyError, Psych::Exception, SystemCallError, IOError
         false

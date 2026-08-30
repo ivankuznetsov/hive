@@ -381,9 +381,11 @@ module Hive
 
         record = decision_record(task, stage, outcome, decision_id)
         snapshot = nil
-        mutation = lambda do |locked|
+        observation = lambda do |locked|
           validate_current_decision!(locked, stage, decision_id)
           snapshot = snapshot_files(locked.folder, [ stage.state_file, target.state_file ])
+        end
+        mutation = lambda do |locked|
           write_decision_record(File.join(locked.folder, stage.state_file), record)
           Hive::Markers.set(File.join(locked.folder, target.state_file), :waiting)
         end
@@ -392,7 +394,8 @@ module Hive
           Hive::Lock.with_commit_lock(task.hive_state_path) do
             Hive::Commands::Approve.new(
               task.slug, to: target.dir, from: stage.dir, project: task.project_name,
-              force: true, quiet: true, observation_guard: mutation, commit_lock: false
+              force: true, quiet: true, observation_guard: observation,
+              post_rearm_mutation: mutation, commit_lock: false
             ).call
           end
         rescue Hive::WrongStage => error

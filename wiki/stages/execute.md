@@ -3,11 +3,11 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-28
+updated: 2026-08-30
 tags: [stage, execute, worktree, plan-review]
 ---
 
-**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached`; typed non-limit provider failures and agent-owned dirty progress also become recoverable errors. The daemon submits each exact error generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
+**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. A reviewed `7-artifacts` implementation defect can also rearm the same owned worktree into execute with digest-bound reviewer feedback and protected evidence receipts. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes`; a rework whose reviewed-to-final repository diff is empty is a recoverable `ERROR`, never a fresh artifacts submission. Provider quota walls write `ERROR reason=limits_reached`; typed non-limit provider failures and agent-owned dirty progress also become recoverable errors. The daemon submits ordinary exact error generations to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
 
 ## Condition boundary
 
@@ -77,6 +77,21 @@ The explicit `hive worktree commit-residue --complete-execute` recovery path can
 snapshot that whole implementation even when planned files fall outside the
 review-fix filename allowlist, while retaining staged-symlink, secret-content,
 signing, ownership, branch, ancestry, and cleanliness gates.
+
+A task rearmed from outcome-evidence review retains the rejected evidence
+package as audit history. Execute validates the append-only rework receipt,
+adds its failed targets and reviewer reasons to the implementation prompt, and
+extends the artifact-firewall manifest with `current.json`, the exact
+requirement/diff/attempt documents, every representation and project-provider
+manifest named by those attempts, both bounded receipt slots, and all existing
+receipts. The agent is told to repair and test the repository rather than
+recapture evidence. Both future receipt slots are protected even before the
+first authorization exists, and non-receipt siblings cannot poison inventory
+reads. If the reviewed-to-final repository diff is empty, including when the
+agent creates only an empty descendant commit, Execute writes
+`ERROR reason=outcome_evidence_rework_unchanged`; the ordinary retry ladder may
+give the implementation agent another turn, but the unchanged source cannot
+consume another evidence generation or rework authorization.
 
 ## Implementation sub-agent (`spawn_implementation`)
 

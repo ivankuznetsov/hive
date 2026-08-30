@@ -228,6 +228,7 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
+        attempt_store = Hive::Attempts::Store.open_default(state_home: @hive_home)
         Hive::Config.ensure_project_identities!
         module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
@@ -238,6 +239,7 @@ module Hive
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           merge_intake: refactor_patrol_merge_reconciler,
           store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
+          attempt_store_factory: -> { attempt_store.projection_reader },
           dry_run: @dry_run
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
@@ -269,7 +271,6 @@ module Hive
           logger: logger
         )
 
-        attempt_store = Hive::Attempts::Store.open_default(state_home: @hive_home)
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )

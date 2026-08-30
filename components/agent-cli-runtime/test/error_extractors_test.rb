@@ -87,6 +87,26 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     assert_equal "quota exhausted", error[:message]
   end
 
+  def test_grok_nested_402_error_is_a_provider_limit
+    event = {
+      "type" => "error",
+      "message" => <<~MESSAGE.strip
+        Internal error: {
+          "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",
+          "http_status": 402
+        }
+      MESSAGE
+    }
+
+    error = AgentCliRuntime.extract_provider_error(:grok, event)
+
+    refute_nil error, "Grok's dedicated error event must be extracted"
+    assert_equal :provider_limit, error[:kind]
+    assert_equal :grok, error[:provider]
+    assert_equal 402, error[:status_code]
+    assert_includes error[:message], "usage balance exhausted"
+  end
+
   def test_opencode_extractor_reads_nested_provider_rate_limit
     event = {
       "type" => "error",

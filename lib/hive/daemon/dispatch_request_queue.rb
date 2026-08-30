@@ -27,7 +27,7 @@ module Hive
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan plan-review-run review open-pr artifacts finalize
-        archive markers daemon
+        archive evidence markers daemon
       ].freeze
 
       DIRNAME = "dispatch_requests".freeze
@@ -56,7 +56,7 @@ module Hive
         blocked_reason blocked_remediation provider_hint attempt_id
         terminal_outcome terminal_at retry_count policy_digest source_receipt
         admission_observation failure_fingerprint identical_failure_count
-        failure_attempt_history
+        failure_attempt_history runtime_digest
       ].freeze
       SOURCE_RECEIPT_KEYS = %w[
         attempt_id receipt_version terminal_lease_version
@@ -611,12 +611,13 @@ module Hive
       # successful workflow transition starts a new failure series; plan-stage
       # recovery history must not put the first execute failure at the hourly
       # ceiling. Adapters still cannot supply or reset the ledger value.
-      def recovery_retry_count(project:, slug:, expected_stage: nil,
+      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil,
                                state_home: Hive::Paths.state_home)
         each_matching_request(state_home: state_home).filter_map do |parsed|
           next unless parsed.recovery.is_a?(Hash)
           next unless parsed.project.to_s == project.to_s && parsed.slug.to_s == slug.to_s
           next if expected_stage && parsed.expected_stage.to_s != expected_stage.to_s
+          next if runtime_digest && parsed.recovery["runtime_digest"] != runtime_digest
 
           count = parsed.recovery["retry_count"]
           count if count.is_a?(Integer) && count >= 0
@@ -804,6 +805,8 @@ module Hive
         verb = argv[1].to_s
         return false unless ALLOWED_VERBS.include?(verb)
 
+        return valid_evidence_rework_argv?(argv) if verb == "evidence"
+
         # The `daemon` verb runs host-global maintenance, not project-scoped
         # work. Constrain it to the explicit GLOBAL_MAINTENANCE_ARGVS allowlist
         # so a request carrying a real registered+enabled project can't smuggle
@@ -817,6 +820,32 @@ module Hive
         return true if verb == "markers"
 
         SLUG_RE.match?(argv[2])
+      end
+
+      def valid_evidence_rework_argv?(argv)
+        return false unless argv[2] == "rework" && SLUG_RE.match?(argv[3].to_s)
+
+        tail = argv.drop(4)
+        json_count = tail.count("--json")
+        return false if json_count > 1
+
+        tail = tail.reject { |token| token == "--json" }
+        return false unless tail.length.even?
+
+        pairs = tail.each_slice(2).to_a
+        keys = pairs.map(&:first)
+        return false unless keys.uniq.length == pairs.length
+
+        required = %w[--generation --recovery-digest --stage]
+        return false unless keys.sort == required || keys.sort == [ *required, "--project" ].sort
+
+        options = pairs.to_h
+        options.fetch("--stage") == "7-artifacts" && # coding-scoped: evidence rework starts at coding artifacts
+          Hive::Attempts::OutputReference::SHA256_PATTERN.match?(options.fetch("--generation")) &&
+          Hive::Attempts::OutputReference::SHA256_PATTERN.match?(
+            options.fetch("--recovery-digest")
+          ) &&
+          (!options.key?("--project") || PROJECT_RE.match?(options.fetch("--project")))
       end
 
       def filename_for(created_at:, request_id:)
@@ -1118,6 +1147,12 @@ module Hive
                recovery["failure_fingerprint"].to_s
              )
             raise ArgumentError, "failure_fingerprint must be a sha256 or null"
+          end
+          if recovery.key?("runtime_digest") &&
+             !Hive::Attempts::OutputReference::SHA256_PATTERN.match?(
+               recovery["runtime_digest"].to_s
+             )
+            raise ArgumentError, "runtime_digest must be a sha256"
           end
           if recovery.key?("failure_attempt_history") &&
              (!recovery["failure_attempt_history"].is_a?(Array) ||

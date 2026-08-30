@@ -78,6 +78,42 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
+  def test_outcome_evidence_implementation_rework_is_a_guarded_scheduler_action
+    task = fake_task(stage_name: "artifacts", stage_index: 7)
+    digest = "a" * 64
+    recovery_digest = "b" * 64
+    action = Hive::TaskAction.for(
+      task,
+      marker(
+        :error,
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => digest,
+        "recovery_digest" => recovery_digest
+      ),
+      project_name: "demo", project_count: 2
+    )
+
+    assert_equal Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK, action.key
+    assert_equal "Implementation rework required", action.label
+    assert_equal(
+      "hive evidence rework demo-260426-aaaa --project demo --stage 7-artifacts " \
+      "--generation #{digest} --recovery-digest #{recovery_digest}",
+      action.command
+    )
+
+    malformed = Hive::TaskAction.for(
+      task,
+      marker(
+        :error,
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "short",
+        "recovery_digest" => recovery_digest
+      )
+    )
+    assert_equal Hive::Schemas::TaskActionKind::ERROR, malformed.key
+    assert_nil malformed.command
+  end
+
   def test_disabled_plan_review_ignores_a_stale_review_projection
     task = fake_task(stage_name: "plan", stage_index: 3)
     action = Hive::TaskAction.for(

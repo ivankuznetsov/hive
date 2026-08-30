@@ -239,13 +239,20 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   test "task state keeps implementation lifecycle evidence out of normal HTML without mutating state" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
+    projection_files = %w[task-journal.jsonl task-projection.json task-projection.checkpoint.json]
+    before = projection_files.to_h do |name|
+      path = folder.join(name)
+      [ name, path.file? ? path.binread : nil ]
+    end
 
     get "/tasks/#{@project}/#{@slug}"
 
     assert_response :success
     assert_select "details.implementation-identity", 0
-    refute folder.join("events.jsonl").exist?
-    refute folder.join("task-projection.json").exist?
+    assert_equal before, projection_files.to_h { |name|
+      path = folder.join(name)
+      [ name, path.file? ? path.binread : nil ]
+    }
   end
 
   test "an unpassable stage offers Force approve, never a doomed Approve" do
@@ -1207,7 +1214,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     workspace = response.parsed_body
     operator_questions = workspace.dig("operator", "questions")
     assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
-    assert_equal "partial", workspace.dig("status", "state")
+    assert_equal "current", workspace.dig("status", "state")
     assert_equal "answer", workspace.dig("decision", "posture")
     assert workspace.dig("decision", "action", "enabled")
 

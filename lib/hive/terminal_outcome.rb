@@ -12,11 +12,16 @@ module Hive
       outcome_evidence_capability_blocked
       outcome_evidence_review_blocked
       outcome_evidence_recaptures_exhausted
+      outcome_evidence_reworks_exhausted
     ].freeze
     OUTCOME_EVIDENCE_REASONS = (
       OUTCOME_EVIDENCE_BLOCK_REASONS + [ "outcome_evidence_recovery_ready" ]
     ).freeze
-    ERROR_REASONS = ([ BLOCKED_REASON, INVALID_REASON ] + OUTCOME_EVIDENCE_REASONS).freeze
+    OUTCOME_EVIDENCE_REWORK_REASON = "outcome_evidence_implementation_rework".freeze
+    ERROR_REASONS = (
+      [ BLOCKED_REASON, INVALID_REASON, OUTCOME_EVIDENCE_REWORK_REASON ] +
+      OUTCOME_EVIDENCE_REASONS
+    ).freeze
 
     Classification = Data.define(:kind, :outcome)
     Normalization = Data.define(:result, :changed)
@@ -88,6 +93,10 @@ module Hive
 
     def outcome_evidence_blocker?(attrs)
       OUTCOME_EVIDENCE_BLOCK_REASONS.include?(error_reason(attrs))
+    end
+
+    def outcome_evidence_rework?(attrs)
+      error_reason(attrs) == OUTCOME_EVIDENCE_REWORK_REASON
     end
 
     def read_first_line(path)

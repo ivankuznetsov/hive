@@ -139,8 +139,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_operator all(".task-row").size, :>, row_count_before,
                     "the new row must arrive over the stream, not a reload"
 
-    # The task page must fail closed until exact attempt/resource evidence is
-    # available, even though the underlying force route remains a sharp tool.
+    # Canonical task creation publishes exact zero-history evidence, so the
+    # confirm-gated force route is available without a repair round trip.
     task_href = "/tasks/#{@project}/#{folder.basename}"
     assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
     visit task_href
@@ -151,8 +151,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Advanced section at the bottom, confirm-gated.
     assert_no_button "Approve", exact: true, wait: 0
     find(".advanced summary").click
-    within(".advanced") { assert_button "Force approve", disabled: true }
-    assert folder.directory?, "disabled controls must leave the inbox task in place"
+    within(".advanced") { assert_button "Force approve", disabled: false }
+    assert folder.directory?, "an untouched control must leave the inbox task in place"
   end
 
   test "plan review detail offers an exact decision but no force bypass" do

@@ -259,6 +259,9 @@ class FullFlowTest < Minitest::Test
         cfg["review"] ||= {}
         cfg["review"]["ci"] ||= {}
         cfg["review"]["ci"]["command"] = nil
+        # This fixture deliberately uses a local bare origin plus fake-gh; it
+        # proves the in-process pipeline, not hosted-check settlement.
+        cfg["review"]["github_checks"] = { "enabled" => false }
         cfg["review"]["reviewers"] = []
         cfg["review"]["browser_test"] ||= {}
         cfg["review"]["browser_test"]["enabled"] = false

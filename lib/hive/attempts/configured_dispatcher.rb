@@ -74,12 +74,25 @@ module Hive
           launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
           task_resolver: task_resolver,
           routing_policy_resolver: lambda do |_task, intended_stage|
+            if controller_only_command?(argv)
+              next Hive::ProviderRouting::Policy.legacy(
+                stage: routing_stage_name(intended_stage)
+              )
+            end
+
             Hive::ProviderRouting::Configuration.from(
               cfg: cfg,
               stage_name: routing_stage_name(intended_stage)
             ).policy
           end
         )
+      end
+
+      # The digest-bound rework command only moves controller-owned state and
+      # records an authorization receipt. It launches no model, so provider
+      # health and route capacity must not be prerequisites for admitting it.
+      def controller_only_command?(argv)
+        Array(argv).first(3) == %w[hive evidence rework]
       end
 
       def routing_stage_name(intended_stage)

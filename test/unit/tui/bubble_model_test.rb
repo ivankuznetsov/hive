@@ -2712,6 +2712,36 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_recover_review_stale_with_fresh_completion_receipt_uses_coordinator
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      escalations = File.join(reviews, "escalations-04.md")
+      fix_success = File.join(reviews, "fix-success-04.md")
+      File.write(escalations, "# Resolved\n")
+      File.write(fix_success, "complete\n")
+      File.utime(Time.now - 1, Time.now - 1, escalations)
+      File.utime(Time.now, Time.now, fix_success)
+      row = make_task_row(
+        action_key: "recover_review",
+        action_label: "Needs recovery",
+        slug: "stale-review",
+        stage: "6-review",
+        folder: dir,
+        marker: "review_stale",
+        attrs: { "pass" => "4" },
+        suggested_command: nil
+      )
+
+      @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      @model.wait_for_background_threads
+
+      assert_equal 1, @recovery_writer.calls.size
+      assert_same row, @recovery_writer.calls.fetch(0).fetch(:row)
+      assert_equal "Recovery queued — request tui-test", last_async_flash_text
+    end
+  end
+
   def test_recover_review_stale_does_not_treat_fix_success_as_reviewer_file
     # fix-success-NN.md is an orchestrator sentinel, not a reviewer
     # file — its presence must not trip retryable_incomplete_triage_pass?

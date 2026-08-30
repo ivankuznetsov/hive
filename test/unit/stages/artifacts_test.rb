@@ -1427,17 +1427,26 @@ class StagesArtifactsTest < Minitest::Test
   end
 
   def test_controller_replays_accepted_blocked_capability_and_attempt_terminal_states
-    scenarios = %i[accepted_identity blocked_identity accepted_generation accepted_attempt capability]
+    scenarios = %i[
+      accepted_identity blocked_identity rework_identity accepted_generation
+      accepted_attempt capability
+    ]
     scenarios.each do |scenario|
       Dir.mktmpdir("hive-artifacts-stage") do |dir|
         task = make_artifacts_task(dir)
         identity = outcome_identity
         resolver = Struct.new(:value) { def resolve = value }.new(identity)
         requirement = outcome_requirement(identity)
-        pointer = if scenario == :blocked_identity || scenario == :capability
+        pointer = if %i[blocked_identity rework_identity capability].include?(scenario)
           blocked_pointer(
             requirement.fetch("generation"),
-            reason: scenario == :blocked_identity ? "review_blocked" : "capability_blocked"
+            reason: if scenario == :blocked_identity
+                      "review_blocked"
+                    elsif scenario == :rework_identity
+                      "implementation_rework"
+                    else
+                      "capability_blocked"
+                    end
           )
         else
           accepted_pointer(requirement.fetch("generation"))
@@ -1448,6 +1457,7 @@ class StagesArtifactsTest < Minitest::Test
         store = Object.new
         store.define_singleton_method(:accepted_for_identity?) { |_value| scenario == :accepted_identity }
         store.define_singleton_method(:blocked_for_identity?) { |_value| scenario == :blocked_identity }
+        store.define_singleton_method(:rework_for_identity?) { |_value| scenario == :rework_identity }
         store.define_singleton_method(:current) { pointer }
         store.define_singleton_method(:requirement_for_identity) { |_value| requirement }
         store.define_singleton_method(:accepted?) do |generation:|
@@ -1483,7 +1493,7 @@ class StagesArtifactsTest < Minitest::Test
           task, cfg, identity_resolver: resolver, store: store
         )
 
-        expected = %i[blocked_identity capability].include?(scenario) ? :error : :complete
+        expected = %i[blocked_identity rework_identity capability].include?(scenario) ? :error : :complete
         assert_equal expected, result.fetch(:status), scenario
         assert_equal(expected == :error ? :error : :complete,
                      Hive::Markers.current(task.state_file).name, scenario)
@@ -1552,55 +1562,145 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_controller_publishes_a_fresh_blocked_review_attempt
+  def test_controller_routes_reviewed_implementation_defects_to_bounded_rework
+    attempt = {
+      "attempt_id" => "attempt-rework", "status" => "rework",
+      "review" => {
+        "verdicts" => [
+          {
+            "target_id" => "claim-flow", "verdict" => "rework",
+            "reason" => "The implementation must expose the completed state before proof can exist."
+          }
+        ]
+      }
+    }
+    [ 0, Hive::Artifacts::OutcomeEvidence::Rework::MAX_REWORKS ].each do |count|
+      Dir.mktmpdir("hive-artifacts-stage") do |dir|
+        task = make_artifacts_task(dir)
+        identity = outcome_identity
+        resolver = Struct.new(:value) { def resolve = value }.new(identity)
+        requirement = outcome_requirement(identity)
+        published = []
+        store = terminal_store(requirement, [ attempt ], published)
+        tracker = Struct.new(:records).new(Array.new(count) { {} })
+
+        result = Hive::Stages::Artifacts.run_outcome_evidence!(
+          task, {}, identity_resolver: resolver, store: store,
+          rework_tracker: tracker
+        )
+
+        assert_equal :error, result.fetch(:status)
+        publication = published.fetch(0)
+        if count.zero?
+          assert_equal :rework, publication.fetch(:publication)
+          assert_equal "implementation_rework", publication.fetch(:reason)
+          assert_equal "outcome_evidence_implementation_rework",
+                       Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        else
+          assert_equal :blocked, publication.fetch(:publication)
+          assert_equal "reworks_exhausted", publication.fetch(:reason)
+          assert_equal "outcome_evidence_reworks_exhausted",
+                       Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+      end
+    end
+  end
+
+  def test_controller_preserves_prior_recapture_attempts_when_later_review_requires_rework
+    revise = {
+      "attempt_id" => "attempt-revise", "status" => "revise",
+      "review" => {
+        "verdicts" => [
+          {
+            "target_id" => "claim-flow", "verdict" => "revise",
+            "reason" => "The evidence must show the completed state more directly."
+          }
+        ]
+      }
+    }
+    rework = {
+      "attempt_id" => "attempt-rework", "status" => "rework",
+      "review" => {
+        "verdicts" => [
+          {
+            "target_id" => "claim-flow", "verdict" => "rework",
+            "reason" => "The implementation must expose the completed state before proof can exist."
+          }
+        ]
+      }
+    }
+
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       identity = outcome_identity
       resolver = Struct.new(:value) { def resolve = value }.new(identity)
       requirement = outcome_requirement(identity)
       published = []
-      store = terminal_store(requirement, [], published)
-      store.define_singleton_method(:retain_candidate!) { |evidence:, **| evidence }
-      store.define_singleton_method(:append_attempt!) do |**input|
-        input.transform_keys(&:to_s).merge("attempt_id" => input.fetch(:attempt_id))
-      end
-      original = Hive::Stages::Artifacts.method(:run_role!)
-      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, task:, writable_root: nil, **|
-        if role == "producer"
-          relative = Pathname.new(writable_root).relative_path_from(Pathname.new(task.folder)).to_s
-          {
-            actor: { "context_id" => "producer-1", "agent" => "claude" },
-            output: {
-              "evidence" => [
-                {
-                  "kind" => "document", "claims" => [ "claim-flow" ],
-                  "representations" => [ { "path" => "#{relative}/proof.md" } ]
-                }
-              ]
-            }
-          }
-        else
-          {
-            actor: { "context_id" => "reviewer-1", "agent" => "claude" },
-            output: {
-              "verdicts" => [
-                {
-                  "target_id" => "claim-flow", "verdict" => "blocked",
-                  "reason" => "The runtime cannot render the required bounded state."
-                }
-              ]
-            }
-          }
-        end
-      end
+      store = terminal_store(requirement, [ revise, rework ], published)
 
       result = Hive::Stages::Artifacts.run_outcome_evidence!(
-        task, {}, identity_resolver: resolver, store: store
+        task, {}, identity_resolver: resolver, store: store,
+        rework_tracker: Struct.new(:records).new([])
       )
+
       assert_equal :error, result.fetch(:status)
-      assert_equal "review_blocked", published.first.fetch(:reason)
-    ensure
-      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+      assert_equal %w[attempt-revise attempt-rework],
+                   published.fetch(0).fetch(:attempt_ids)
+      assert_equal :rework, published.fetch(0).fetch(:publication)
+    end
+  end
+
+  def test_controller_publishes_fresh_blocked_and_rework_review_attempts
+    { "blocked" => "review_blocked", "rework" => "implementation_rework" }.each do |verdict, reason|
+      Dir.mktmpdir("hive-artifacts-stage") do |dir|
+        task = make_artifacts_task(dir)
+        identity = outcome_identity
+        resolver = Struct.new(:value) { def resolve = value }.new(identity)
+        requirement = outcome_requirement(identity)
+        published = []
+        store = terminal_store(requirement, [], published)
+        store.define_singleton_method(:retain_candidate!) { |evidence:, **| evidence }
+        store.define_singleton_method(:append_attempt!) do |**input|
+          input.transform_keys(&:to_s).merge("attempt_id" => input.fetch(:attempt_id))
+        end
+        original = Hive::Stages::Artifacts.method(:run_role!)
+        Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |role:, task:, writable_root: nil, **|
+          if role == "producer"
+            relative = Pathname.new(writable_root).relative_path_from(Pathname.new(task.folder)).to_s
+            {
+              actor: { "context_id" => "producer-1", "agent" => "claude" },
+              output: {
+                "evidence" => [
+                  {
+                    "kind" => "document", "claims" => [ "claim-flow" ],
+                    "representations" => [ { "path" => "#{relative}/proof.md" } ]
+                  }
+                ]
+              }
+            }
+          else
+            {
+              actor: { "context_id" => "reviewer-1", "agent" => "claude" },
+              output: {
+                "verdicts" => [
+                  {
+                    "target_id" => "claim-flow", "verdict" => verdict,
+                    "reason" => "The implementation or runtime cannot prove the bounded state."
+                  }
+                ]
+              }
+            }
+          end
+        end
+
+        result = Hive::Stages::Artifacts.run_outcome_evidence!(
+          task, {}, identity_resolver: resolver, store: store
+        )
+        assert_equal :error, result.fetch(:status)
+        assert_equal reason, published.first.fetch(:reason)
+      ensure
+        Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+      end
     end
   end
 
@@ -1982,6 +2082,9 @@ class StagesArtifactsTest < Minitest::Test
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         Hive::Stages::Artifacts.semantic_review_status!([])
       end
+      assert_equal "rework", Hive::Stages::Artifacts.semantic_review_status!(
+        [ { "verdict" => "blocked" }, { "verdict" => "rework" } ]
+      )
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         Hive::Stages::Artifacts.merge_candidate_evidence!(
           { "evidence" => [] },
@@ -2166,11 +2269,12 @@ class StagesArtifactsTest < Minitest::Test
     store = Object.new
     store.define_singleton_method(:accepted_for_identity?) { |_value| false }
     store.define_singleton_method(:blocked_for_identity?) { |_value| false }
+    store.define_singleton_method(:rework_for_identity?) { |_value| false }
     store.define_singleton_method(:requirement_for_identity) { |_value| requirement }
     store.define_singleton_method(:accepted?) { |generation:| false }
     store.define_singleton_method(:attempts) { |generation:| attempts }
     store.define_singleton_method(:publish_blocked!) do |**input|
-      published << input
+      published << input.merge(publication: :blocked)
       blocked_pointer = {
         "generation" => input.fetch(:generation), "reason" => input.fetch(:reason),
         "recovery_digest" => "d" * 64,
@@ -2178,6 +2282,19 @@ class StagesArtifactsTest < Minitest::Test
         "failed_targets" => input.fetch(:failed_targets)
       }
       blocked_pointer
+    end
+    store.define_singleton_method(:publish_rework!) do |**input|
+      published << input.merge(
+        publication: :rework,
+        reason: Hive::Artifacts::OutcomeEvidence::Store::REWORK_REASON
+      )
+      {
+        "generation" => input.fetch(:generation),
+        "reason" => Hive::Artifacts::OutcomeEvidence::Store::REWORK_REASON,
+        "recovery_digest" => "d" * 64,
+        "attempt_count" => input.fetch(:attempt_ids).length,
+        "failed_targets" => input.fetch(:failed_targets)
+      }
     end
     store
   end

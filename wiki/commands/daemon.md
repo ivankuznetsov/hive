@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-25
+updated: 2026-08-30
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -71,7 +71,13 @@ unbounded. Repetition is exposed as `escalation_tier=degraded`; after three
 identical failures at the ladder ceiling the request parks once with
 `reason=deterministic_failure`, its fingerprint, and bounded attempt history,
 so it stops consuming dispatch slots while other tasks continue. Terminal
-recovery cleanup is stage-scoped and cannot erase a prior stage's ladder.
+recovery cleanup is stage-scoped and cannot erase a prior stage's ladder. The
+ladder and repeated-failure evidence are also scoped to the validated Hive
+runtime source digest (channel, release version, and dogfood build SHA). A new
+build automatically resets a parked request once and runs one guarded probe;
+redeploying the same build does not. Legacy digest-less parks receive the same
+one-time compatibility rearm. A same-runtime repair to project input,
+credentials, or provider state still uses the fresh `workflow.retry` action.
 Daemon ticks never migrate task metadata. Missing task ids, display names, and
 legacy completion clocks are repaired only by the explicit [[commands/migrate]]
 command, so routine scheduling does not compete with stage commits. Recovery
@@ -83,6 +89,7 @@ they never claim a later daemon tick will allocate the id.
 | `ready_to_brainstorm` | Dispatch `hive brainstorm <slug>` (1→2)      |
 | `ready_to_plan`       | Dispatch `hive plan <slug> --from 2-brainstorm` (2→3) |
 | `ready_to_develop`    | Dispatch `hive develop <slug> --from 3-plan` (3→4) |
+| `outcome_evidence_rework` | Validate and dispatch the row's exact digest-bound `hive evidence rework ... --stage 7-artifacts` command (7→4); never synthesize `develop` or `artifacts`. |
 | `ready_to_open_pr`    | Dispatch `hive open-pr <slug> --from 4-execute` (4→5) |
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
@@ -107,6 +114,17 @@ live recorded Claude PID and rows with `live_task_lock: true` (a verified
 `hive run` task-lock holder before Claude has attached). This keeps a
 daemon restart during auto-rebase or other pre-agent work from spawning
 extra tasks past `max_concurrent_runs` / `max_concurrent_per_project`.
+
+The status-row scan keeps its later-stage-first ordering until the next
+authoritative full scan, not only at each individual admission call. If a
+higher-priority row reaches a global or durable-attempt capacity boundary,
+later dispatchable rows in that frame and in intervening changed-task ticks are
+priority-fenced instead of taking a slot that happens to reopen after the
+higher row was evaluated. The next full scan starts with no inherited fence
+and reconsiders the whole queue. Project and daily caps fence only later rows
+from that project, so unrelated projects can still use available global
+capacity. Non-dispatch policy rows are still classified and published in the
+operational snapshot.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.

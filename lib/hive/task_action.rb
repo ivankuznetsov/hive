@@ -57,6 +57,11 @@ module Hive
         label: "Ready to develop",
         command: "develop"
       },
+      artifacts_rework: {
+        key: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+        label: "Implementation rework required",
+        command: :outcome_evidence_rework
+      },
       plan_reviewing: {
         key: Hive::Schemas::TaskActionKind::PLAN_REVIEWING,
         label: "Plan review in progress",
@@ -265,7 +270,8 @@ module Hive
     # cannot drift from the command Hive actually reports for an action.
     READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
       key = action.fetch(:key)
-      commands[key] = action.fetch(:command) if key.start_with?("ready_")
+      command = action.fetch(:command)
+      commands[key] = command if key.start_with?("ready_") && command.is_a?(String)
     end.merge(
       Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED => "develop"
     ).freeze
@@ -340,6 +346,8 @@ module Hive
       stage = workflow_stage
       return nil unless stage
       stage_ref = command_stage_dir(stage)
+
+      return outcome_evidence_rework_command(stage_ref) if verb == :outcome_evidence_rework
 
       parts = command_prefix(verb)
       if verb == "approve"
@@ -450,6 +458,10 @@ module Hive
       end
       if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
         return ACTIONS.fetch(:recover_draft_pr)
+      end
+      if marker.name == :error && Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs)
+        return outcome_evidence_rework_marker_valid? ?
+          ACTIONS.fetch(:artifacts_rework) : ACTIONS.fetch(:error)
       end
       if marker.name == :error && Hive::TerminalOutcome.blocked_error?(marker.attrs)
         return ACTIONS.fetch(:blocked)
@@ -887,6 +899,27 @@ module Hive
       parts = [ "hive", verb, task.slug ]
       parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
       parts
+    end
+
+    def outcome_evidence_rework_command(stage_ref)
+      return nil unless outcome_evidence_rework_marker_valid?
+
+      parts = [ "hive", "evidence", "rework", task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts.concat(
+        [
+          "--stage", stage_ref,
+          "--generation", marker.attrs.fetch("generation"),
+          "--recovery-digest", marker.attrs.fetch("recovery_digest")
+        ]
+      )
+      parts.shelljoin
+    end
+
+    def outcome_evidence_rework_marker_valid?
+      %w[generation recovery_digest].all? do |field|
+        marker.attrs[field].to_s.match?(/\A[0-9a-f]{64}\z/)
+      end
     end
 
     def load_plan_review

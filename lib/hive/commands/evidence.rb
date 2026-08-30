@@ -2,7 +2,9 @@ require "json"
 require "securerandom"
 require "hive/artifacts/capture_mailbox"
 require "hive/artifacts/outcome_evidence/recovery"
+require "hive/artifacts/outcome_evidence/rework"
 require "hive/artifacts/outcome_evidence/store"
+require "hive/commands/approve"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
@@ -16,13 +18,14 @@ module Hive
     # it advances a separate epoch and leaves ordinary workflow.retry admission
     # to the existing status/action boundary.
     class Evidence
-      SUBCOMMANDS = %w[browser recover terminal].freeze
+      SUBCOMMANDS = %w[browser recover rework terminal].freeze
       GATEWAY_TIMEOUT_SECONDS = 65
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
 
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
                      generation: nil, recovery_digest: nil, task_resolver: nil,
-                     command: [], environment: ENV)
+                     command: [], environment: ENV, approve_factory: nil,
+                     quiet: false)
         @subcommand = subcommand.to_s
         @target = target.to_s
         @project_filter = project
@@ -33,6 +36,10 @@ module Hive
         @task_resolver = task_resolver
         @command = Array(command).map(&:to_s)
         @environment = environment.to_h
+        @approve_factory = approve_factory || lambda do |target, **options|
+          Hive::Commands::Approve.new(target, **options)
+        end
+        @quiet = quiet
       end
 
       def call
@@ -43,12 +50,16 @@ module Hive
         task = resolve_task
         project = task.respond_to?(:project_name) ? task.project_name.to_s : @project_filter.to_s
         project = File.basename(task.project_root) if project.empty?
+        return emit_rework(rework(task, project)) if @subcommand == "rework"
+
         payload = Hive::Lock.with_task_lock(
           task.folder, slug: task.slug, op: "outcome-evidence.recover"
         ) do
           recover(task, project)
         end
-        if @json
+        if @quiet
+          payload
+        elsif @json
           puts JSON.generate(payload)
         else
           puts "hive: outcome evidence recovery epoch advanced to #{payload.fetch('recovery_epoch')}"
@@ -64,7 +75,7 @@ module Hive
         unless SUBCOMMANDS.include?(@subcommand)
           raise Hive::UsageError,
                 "unknown evidence subcommand #{@subcommand.inspect} " \
-                "(expected: browser, recover, or terminal)"
+                "(expected: browser, recover, rework, or terminal)"
         end
         if @subcommand == "browser"
           raise Hive::UsageError, "hive evidence browser requires COMMAND" if @target.empty?
@@ -77,12 +88,13 @@ module Hive
           raise Hive::UsageError, "hive evidence terminal requires COMMAND after --" if @command.empty?
           return
         end
-        raise Hive::UsageError, "hive evidence recover requires TARGET" if @target.empty?
+        verb = @subcommand == "rework" ? "rework" : "recover"
+        raise Hive::UsageError, "hive evidence #{verb} requires TARGET" if @target.empty?
         unless @generation.match?(Hive::Artifacts::OutcomeEvidence::Proof::DIGEST)
-          raise Hive::UsageError, "hive evidence recover requires --generation SHA256"
+          raise Hive::UsageError, "hive evidence #{verb} requires --generation SHA256"
         end
         unless @recovery_digest.match?(Hive::Artifacts::OutcomeEvidence::Proof::DIGEST)
-          raise Hive::UsageError, "hive evidence recover requires --recovery-digest SHA256"
+          raise Hive::UsageError, "hive evidence #{verb} requires --recovery-digest SHA256"
         end
       end
 
@@ -243,6 +255,68 @@ module Hive
           "blocked_generation" => record.fetch("blocked_generation"),
           "recovery_epoch" => record.fetch("epoch")
         }
+      end
+
+      def rework(task, project)
+        package = nil
+        receipt = nil
+        observation_guard = lambda do |locked_task|
+          marker = Hive::Markers.current(locked_task.state_file)
+          unless marker.name == :error &&
+                 Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs) &&
+                 marker.attrs["generation"].to_s == @generation &&
+                 marker.attrs["recovery_digest"].to_s == @recovery_digest
+            raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                  "task is not at the exact observed outcome-evidence rework"
+          end
+          package = Hive::Artifacts::OutcomeEvidence::Store.new(
+            task: locked_task, project: project
+          ).package
+          pointer = package.fetch("current")
+          unless pointer.values_at("status", "reason", "generation", "recovery_digest") ==
+                 [ "rework", "implementation_rework", @generation, @recovery_digest ]
+            raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                  "current outcome evidence does not match the requested rework"
+          end
+        end
+        post_rearm_mutation = lambda do |locked_task|
+          receipt = Hive::Artifacts::OutcomeEvidence::Rework.new(
+            task: locked_task, project: project
+          ).record!(
+            package: package,
+            expected_generation: @generation,
+            expected_digest: @recovery_digest
+          )
+        end
+        @approve_factory.call(
+          task.folder,
+          from: "7-artifacts", to: "4-execute", project: project, # coding-scoped: outcome evidence reopens coding implementation
+          quiet: true, observation_guard: observation_guard,
+          post_rearm_mutation: post_rearm_mutation
+        ).call
+        unless receipt
+          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                "outcome-evidence rework transition did not record its authorization"
+        end
+        {
+          "status" => "rework_started",
+          "task" => task.slug.to_s,
+          "stage" => "4-execute", # coding-scoped: outcome evidence reopens coding implementation
+          "reviewed_generation" => receipt.fetch("generation"),
+          "rework_sequence" => receipt.fetch("sequence")
+        }
+      end
+
+      def emit_rework(payload)
+        if @quiet
+          return payload
+        elsif @json
+          puts JSON.generate(payload)
+        else
+          puts "hive: returned #{payload.fetch('task')} to 4-execute for reviewed implementation rework"
+          puts "  rework sequence: #{payload.fetch('rework_sequence')}"
+        end
+        payload
       end
     end
   end

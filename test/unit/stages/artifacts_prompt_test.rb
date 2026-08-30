@@ -115,7 +115,9 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_match(/Reject generated\s+slides/, reviewer)
       assert_includes reviewer, "do not echo or calculate"
       refute_includes reviewer, "`review_scope_hashes`"
-      assert_includes reviewer, "accepted`, `revise`, or `blocked"
+      assert_includes reviewer, "accepted`, `revise`, `rework`, or `blocked"
+      assert_includes reviewer, "source, configuration, tests, or repository documentation"
+      assert_includes reviewer, "operator-owned credential, decision, or environment"
       assert_includes reviewer, "Reserve enough output for the final JSON"
       [ inference, producer, reviewer ].each { |prompt| assert_includes prompt, "untrusted data" }
     end

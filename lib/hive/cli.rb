@@ -774,6 +774,7 @@ module Hive
     long_desc <<~DESC
       Subcommands:
         recover TARGET --generation SHA256 --recovery-digest SHA256
+        rework TARGET --generation SHA256 --recovery-digest SHA256
         terminal NAME -- COMMAND...
         browser COMMAND [ARG...]
 
@@ -781,6 +782,10 @@ module Hive
       blocked package and its semantic ERROR marker. It preserves the exhausted
       generation, advances a controller-owned epoch once, and instructs the
       operator to use the normal generation-guarded workflow.retry action.
+
+      Rework is daemon-runnable only for a reviewer-issued implementation
+      rework pointer. It exact-matches both digests, records one of two bounded
+      controller receipts, and returns the same task/worktree to 4-execute.
 
       `terminal` is a controller-scoped producer primitive. It is available
       only inside an outcome-evidence producer environment and records one argv
@@ -1309,6 +1314,35 @@ module Hive
         daemon_tasks: options[:daemon_task]
       ).call
     end
+
+    desc "repair-projection TARGET", "Rebuild one task's derived status projection"
+    long_desc <<~DESC
+      Replays the authoritative journal for exactly one registered task and
+      atomically replaces only its derived projection snapshot and checkpoint.
+      The task and journal are locked for the repair, then the new checkpoint
+      is verified through the same bounded reader used by routine status.
+
+      This is an explicit operator repair for a
+      `condition_projection_repair_required` status row. It does not retry the
+      workflow, change markers or stages, scan other tasks, migrate storage, or
+      install a periodic repair watcher.
+
+      Example:
+        hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
+    DESC
+    option :project, type: :string, desc: "scope lookup to one registered project"
+    option :stage, type: :string,
+                   desc: "scope lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
+    def repair_projection(target)
+      require "hive/commands/repair_projection"
+      Hive::Commands::RepairProjection.new(
+        target,
+        project: options[:project],
+        stage: options[:stage],
+        json: options[:json]
+      ).call
+    end
+    map "repair-projection" => :repair_projection
 
     desc "task TARGET", "Inspect one task through the semantic read-only workspace"
     long_desc <<~DESC

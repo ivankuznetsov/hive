@@ -26,6 +26,15 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive develop slug-a --from 3-plan")
   end
 
+  def test_outcome_evidence_rework_dispatches_only_with_a_command
+    command = "hive evidence rework slug-a --stage 7-artifacts " \
+              "--generation #{'a' * 64} --recovery-digest #{'b' * 64}"
+    assert_equal :dispatch,
+                 decide(action: "outcome_evidence_rework", command: command)
+    assert_equal :skip,
+                 decide(action: "outcome_evidence_rework", command: nil)
+  end
+
   def test_ready_for_review_dispatches
     assert_equal :dispatch, decide(action: "ready_for_review",
                                    command: "hive review slug-a --from 5-open-pr")

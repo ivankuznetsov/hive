@@ -43,6 +43,7 @@ module Hive
         @max_workers = Integer(max_workers)
         @jobs = {}
         @next_launch_at = {}
+        @task_next_launch_at = {}
         @mutex = Mutex.new
       end
 
@@ -87,7 +88,11 @@ module Hive
           job.thread&.join(remaining)
         end
         jobs.each { |job| job.thread&.kill if job.thread&.alive? }
-        @mutex.synchronize { @jobs.clear }
+        @mutex.synchronize do
+          @jobs.clear
+          @next_launch_at.clear
+          @task_next_launch_at.clear
+        end
       end
 
       private
@@ -124,6 +129,7 @@ module Hive
 
       def reconcile_row(row, cfg, now:)
         slots = inventory_slots(row.folder)
+        prune_removed_questions(row.folder, slots)
         unless slots.any?
           cleanup_task(row.folder)
           return
@@ -325,6 +331,7 @@ module Hive
               exhausted_record!(record, now: now)
               next document
             end
+            next document unless reserve_task_window(task_root, cfg, now: now)
 
             attempt_id = SecureRandom.uuid
             record.merge!(
@@ -546,6 +553,8 @@ module Hive
           @jobs.each do |(root, _question_id), job|
             job.token.cancel! if root == prefix
           end
+          @next_launch_at.delete_if { |(root, _question_id), _value| root == prefix }
+          @task_next_launch_at.delete(prefix)
         end
       end
 
@@ -555,7 +564,34 @@ module Hive
           @jobs.each do |(root, _question_id), job|
             job.token.cancel! unless allowed[root]
           end
+          @next_launch_at.delete_if { |(root, _question_id), _value| !allowed[root] }
+          @task_next_launch_at.delete_if { |root, _value| !allowed[root] }
         end
+      end
+
+      def prune_removed_questions(task_root, slots)
+        root = File.expand_path(task_root.to_s)
+        current_ids = slots.to_h { |slot| [ slot.question_id, true ] }
+        @mutex.synchronize do
+          @jobs.each do |(job_root, question_id), job|
+            job.token.cancel! if job_root == root && !current_ids[question_id]
+          end
+          @next_launch_at.delete_if do |(job_root, question_id), _value|
+            job_root == root && !current_ids[question_id]
+          end
+        end
+      end
+
+      def reserve_task_window(task_root, cfg, now:)
+        root = File.expand_path(task_root.to_s)
+        @mutex.synchronize do
+          next_at = @task_next_launch_at[root]
+          return false if next_at && now < next_at
+
+          window = cfg.dig("brainstorm", "suggestions", "coalesce_window_sec").to_i
+          @task_next_launch_at[root] = now + window
+        end
+        true
       end
 
       def envelope_present?(path)

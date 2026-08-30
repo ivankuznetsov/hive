@@ -172,23 +172,32 @@ module Hive
       end
 
       def validate_bounded_text(value)
-        text = value.to_s
+        raise InvalidState, "suggestion text must be a string" unless value.is_a?(String)
+
+        text = value
         raise InvalidState, "suggestion text must be valid UTF-8" unless text.valid_encoding?
         raise InvalidState, "suggestion text must not be empty" if text.strip.empty?
         raise InvalidState, "suggestion text exceeds character limit" if text.length > MAX_TEXT_CHARACTERS
         raise InvalidState, "suggestion text exceeds line limit" if text.lines.length > MAX_TEXT_LINES
+        raise InvalidState, "suggestion text failed safety policy" unless Safety.safe_content?(text)
       end
 
       def validate_rationale(value)
-        rationale = value.to_s
+        raise InvalidState, "suggestion rationale must be a string" unless value.is_a?(String)
+
+        rationale = value
         raise InvalidState, "fresh suggestion requires a rationale" if rationale.strip.empty?
         raise InvalidState, "suggestion rationale exceeds limit" if rationale.length > MAX_RATIONALE_CHARACTERS
+        raise InvalidState, "suggestion rationale failed safety policy" unless
+          Safety.safe_rationale?(rationale)
       end
 
       def validate_safe_reason(value)
         return if value.nil?
 
-        reason = value.to_s
+        raise InvalidState, "safe reason must be a string" unless value.is_a?(String)
+
+        reason = value
         raise InvalidState, "safe reason must not be empty" if reason.strip.empty?
         raise InvalidState, "safe reason exceeds limit" if reason.length > MAX_SAFE_REASON_CHARACTERS
       end

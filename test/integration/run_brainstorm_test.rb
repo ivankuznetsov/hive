@@ -3,6 +3,7 @@ require "json"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
+require "hive/brainstorm_suggestions/envelope"
 
 class RunBrainstormTest < Minitest::Test
   include HiveTestHelper
@@ -84,6 +85,38 @@ class RunBrainstormTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Requirements\n- foo\n<!-- COMPLETE -->\n"
         capture_io { Hive::Commands::Run.new(folder).call }
         assert_equal :complete, Hive::Markers.current(brainstorm_md).name
+      end
+    end
+  end
+
+  def test_real_brainstorm_stage_keeps_an_untouched_suggestion_unanswered
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = make_task_at_brainstorm(dir)
+        brainstorm_md = File.join(folder, "brainstorm.md")
+        envelope = Hive::BrainstormSuggestions::Envelope.render(
+          binding: "d" * 64, text: "Use the repository adapter."
+        )
+        content = <<~MARKDOWN
+          ## Round 1
+          ### Q1. Which adapter?
+          ### A1.
+          #{envelope}
+          <!-- WAITING -->
+        MARKDOWN
+        File.write(brainstorm_md, content)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = brainstorm_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = content
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        actual = File.read(brainstorm_md)
+        assert_equal content, actual
+        assert_equal :waiting, Hive::Markers.current(brainstorm_md).name
+        assert_nil Hive::BrainstormParser.parse(brainstorm_md).first.answer
+        refute_includes actual, "## Requirements"
+        refute_includes actual, "<!-- COMPLETE -->"
+        assert_equal "2-brainstorm", File.basename(File.dirname(folder))
       end
     end
   end

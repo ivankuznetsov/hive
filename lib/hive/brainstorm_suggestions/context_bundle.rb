@@ -14,7 +14,7 @@ module Hive
     # and already-settled operator context. It never enumerates untracked files.
     class ContextBundle
       RECIPE = "tracked-relevance"
-      RECIPE_VERSION = 1
+      RECIPE_VERSION = 2
       MAX_CAPTURE_SECONDS = 5
       MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
       MAX_CANDIDATE_FILES = 160
@@ -109,7 +109,8 @@ module Hive
 
         tokens = relevance_tokens([ @task_request, @question.fetch("text") ].join("\n"))
         index = tracked_index
-        repository_entries = select_repository_entries(index, tokens)
+        overlay_paths = tracked_overlay_paths
+        repository_entries = select_repository_entries(index, tokens, overlay_paths)
         main_wiki_entries = select_main_wiki_entries(tokens)
         @entries = fixed_context_entries + repository_entries + main_wiki_entries
         @entries = @entries.freeze
@@ -191,9 +192,17 @@ module Hive
         end
       end
 
-      def select_repository_entries(index, tokens)
+      def tracked_overlay_paths
+        git_output("diff", "--name-only", "-z", "HEAD", "--")
+          .split("\0", -1)
+          .filter_map { |path| path unless path.empty? || !safe_relative_path?(path) }
+          .to_h { |path| [ path, true ] }
+      end
+
+      def select_repository_entries(index, tokens, overlay_paths)
         candidates = index.sort_by do |row|
-          [ -path_score(row.fetch(:path), tokens), row.fetch(:path) ]
+          overlay = overlay_paths[row.fetch(:path)] ? 1_000 : 0
+          [ -(overlay + path_rank_score(row.fetch(:path), tokens)), row.fetch(:path) ]
         end.first(MAX_CANDIDATE_FILES).filter_map do |row|
           check_deadline!
           path = row.fetch(:path)
@@ -205,7 +214,10 @@ module Hive
           next if Hive::SecretPatterns.match?(content)
 
           source = path.start_with?("wiki/") ? "project_wiki" : "repository"
-          score = path_score(path, tokens) + content_score(content, tokens)
+          relevance = path_relevance_score(path, tokens) + content_score(content, tokens)
+          next unless overlay_paths[path] || relevance.positive?
+
+          score = relevance + path_type_bonus(path) + (overlay_paths[path] ? 1_000 : 0)
           [ score, build_entry(path, row.fetch(:mode), source, content) ]
         end
 
@@ -231,7 +243,10 @@ module Hive
           content = stable_external_read(root, relative)
           next if content.nil? || Hive::SecretPatterns.match?(content)
 
-          score = path_score(relative, tokens) + content_score(content, tokens)
+          relevance = path_relevance_score(relative, tokens) + content_score(content, tokens)
+          next unless relevance.positive?
+
+          score = relevance + path_type_bonus(relative)
           [ score, build_entry("main-wiki/#{relative}", "100400", "main_wiki", content) ]
         end
         choose_bounded(candidates, max_files: MAX_MAIN_WIKI_FILES, max_bytes: MAX_SELECTED_BYTES / 4)
@@ -337,10 +352,17 @@ module Hive
         text.downcase.scan(/[a-z0-9_]{3,}/).reject { |token| STOP_WORDS.include?(token) }.uniq.first(64)
       end
 
-      def path_score(path, tokens)
+      def path_relevance_score(path, tokens)
         normalized = path.downcase
-        score = tokens.sum { |token| normalized.include?(token) ? 20 : 0 }
-        score += 5 if path.start_with?("wiki/")
+        tokens.sum { |token| normalized.include?(token) ? 20 : 0 }
+      end
+
+      def path_rank_score(path, tokens)
+        path_relevance_score(path, tokens) + path_type_bonus(path)
+      end
+
+      def path_type_bonus(path)
+        score = path.start_with?("wiki/") ? 5 : 0
         score += 2 if TEXT_EXTENSIONS.include?(File.extname(path).downcase)
         score
       end

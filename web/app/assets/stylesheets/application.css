@@ -1157,6 +1157,26 @@ pre {
   margin-right: 8px;
 }
 .qa-item textarea { width: 100%; min-height: 64px; }
+.brainstorm-suggestion {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+}
+.brainstorm-suggestion-heading,
+.brainstorm-suggestion-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.brainstorm-suggestion-heading { justify-content: space-between; }
+.brainstorm-suggestion-text { margin: 10px 0 6px; white-space: pre-wrap; }
+.brainstorm-suggestion-rationale,
+.brainstorm-suggestion-reason { margin: 6px 0; color: var(--ink-muted); }
+.brainstorm-suggestion-sources { margin: 6px 0 10px; font-size: 0.82rem; }
+.suggestion-state { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
 
 /* ---- Repos ---- */
 

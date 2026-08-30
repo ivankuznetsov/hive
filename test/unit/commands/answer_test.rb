@@ -87,6 +87,9 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal 3, payload.fetch("unanswered_count")
       assert_equal false, payload.fetch("complete")
       assert payload.fetch("slots").all? { |slot| slot.fetch("binding").match?(/\A[A-Za-z0-9_-]+\z/) }
+      assert_equal %w[loading loading loading],
+                   payload.fetch("slots").map { |slot| slot.dig("suggestion", "state") }
+      assert payload.fetch("slots").all? { |slot| slot.dig("suggestion", "text").nil? }
       assert_equal before, File.binread(path)
       refute Hive::Lock.task_lock_held?(folder), "read-only inventory must not publish a task lease"
       assert_schema(payload)

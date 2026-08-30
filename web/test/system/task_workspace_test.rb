@@ -1,4 +1,5 @@
 require "application_system_test_case"
+require "hive/commands/answer"
 
 class TaskWorkspaceTest < ApplicationSystemTestCase
   setup do
@@ -11,6 +12,52 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
   end
 
   teardown { StatusBroadcaster.stop! }
+
+  test "suggestion approval and decline stay reversible until Send answers" do
+    destination = stage_dir(@project, "2-brainstorm").join(@slug)
+    destination.dirname.mkpath
+    FileUtils.mv(@folder, destination)
+    @folder = destination
+    brainstorm = @folder.join("brainstorm.md")
+    brainstorm.write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
+    inventory = Hive::Commands::Answer.inventory(@slug, project: @project)
+    suggestion_text = "Keep the tracked adapter.\nPreserve its public contract."
+    inventory.fetch("slots").first["suggestion"] = {
+      "state" => "fresh", "text" => suggestion_text,
+      "rationale" => "The repository already owns this boundary.",
+      "provenance" => [ "repository" ], "safe_reason" => nil,
+      "retryable" => true, "dismissed" => false,
+      "input_binding" => "a" * 64, "suggestion_binding" => "b" * 64
+    }
+    original = brainstorm.binread
+
+    with_replaced_singleton_method(
+      Hive::Commands::Answer, :inventory, ->(*_args, **_kwargs) { inventory }
+    ) do
+      sign_in!
+      visit task_path(@project, @slug)
+      assert_selector ".brainstorm-suggestion", wait: 10
+
+      fill_in "Answer to question 1", with: "My draft"
+      click_button "Approve"
+      assert_field "Answer to question 1", with: suggestion_text
+      assert_equal original, brainstorm.binread
+
+      click_button "Undo"
+      assert_field "Answer to question 1", with: "My draft"
+      click_button "Decline"
+      assert_no_selector ".brainstorm-suggestion-text", visible: true
+      assert_field "Answer to question 1", with: "My draft"
+      click_button "Restore"
+      assert_selector ".brainstorm-suggestion-text", visible: true
+
+      click_button "Approve"
+      click_button "Send answers"
+      assert_text "Recorded answer to Q1", wait: 10
+    end
+
+    assert_equal suggestion_text, Hive::BrainstormParser.parse(brainstorm.to_s).first.answer
+  end
 
   test "one semantic workspace reflows from wide desktop through actual 400 percent zoom" do
     sign_in!

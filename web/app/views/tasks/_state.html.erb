@@ -59,6 +59,9 @@
             <%# Single line: qa-question is pre-wrap, so template indentation
                 would render as a first-line indent. %>
             <p class="qa-question"><span class="qa-number">Q<%= question.fetch("n") %></span><%= question.fetch("text") %></p>
+            <%= render "tasks/brainstorm_suggestion",
+                  suggestion: @brainstorm_suggestions&.fetch(question.fetch("ordinal"), nil),
+                  question: question %>
             <%= text_area_tag "answers[#{question.fetch("binding")}]", "", placeholder: "Your answer…",
                   disabled: !@answer_input_enabled,
                   data: {

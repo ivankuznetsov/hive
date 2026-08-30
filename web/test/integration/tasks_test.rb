@@ -1216,6 +1216,84 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "form[id^='qa-form-'] input[type='submit']:not([disabled])", 1
   end
 
+  test "fresh brainstorm suggestions render escaped reversible advisory controls" do
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n")
+    inventory = Hive::Commands::Answer.inventory(@slug, project: @project)
+    candidate = {
+      "state" => "fresh",
+      "text" => "Use <script>alert('no')</script> the tracked adapter.",
+      "rationale" => "The repository already has the boundary.",
+      "provenance" => [ "repository", "project_wiki" ],
+      "safe_reason" => nil,
+      "retryable" => true,
+      "dismissed" => false,
+      "input_binding" => "a" * 64,
+      "suggestion_binding" => "b" * 64
+    }
+    inventory.fetch("slots").first["suggestion"] = candidate
+
+    with_replaced_singleton_method(
+      Hive::Commands::Answer, :inventory, ->(*_args, **_kwargs) { inventory }
+    ) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select ".brainstorm-suggestion", 1
+    assert_select ".brainstorm-suggestion-text", text: /Use <script>alert\('no'\)<\/script>/
+    assert_select ".brainstorm-suggestion script", 0, "candidate markup must be escaped"
+    assert_select "button", text: "Approve", count: 1
+    assert_select "button", text: "Undo", count: 1
+    assert_select "button", text: "Decline", count: 1
+    assert_select "button", text: "Restore", count: 1
+    assert_select "a[data-turbo-method='post']", text: "Retry", count: 1
+    assert_nil Hive::BrainstormParser.parse(folder.join("brainstorm.md").to_s).first.answer
+  end
+
+  test "retrying a bound suggestion changes only advisory state" do
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
+    brainstorm = folder.join("brainstorm.md")
+    brainstorm.write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
+    before = brainstorm.binread
+    input_binding = "a" * 64
+    suggestion_binding = "b" * 64
+    Hive::BrainstormSuggestions::Store.new(folder.to_s).write(
+      "task_incarnation" => "incarnation",
+      "task_generation" => 0,
+      "brainstorm_generation" => "c" * 64,
+      "recipe_version" => Hive::BrainstormSuggestions::ContextBundle::RECIPE_VERSION,
+      "records" => [ {
+        "question_id" => "question-1", "ordinal" => 1, "round" => 1,
+        "question_number" => 1,
+        "question_fingerprint" => Hive::BrainstormParser.question_fingerprint("Scope?"),
+        "input_binding" => input_binding, "input_epoch" => input_binding,
+        "suggestion_binding" => suggestion_binding, "state" => "fresh",
+        "text" => "Keep the existing boundary.", "rationale" => "It is already tested.",
+        "provenance" => [ "repository" ], "safe_reason" => nil,
+        "retryable" => false, "dismissed" => false,
+        "attempt_id" => "attempt-1", "candidate_id" => "candidate-1",
+        "requested_at" => "2026-08-30T12:00:00.000000Z",
+        "updated_at" => "2026-08-30T12:00:00.000000Z",
+        "next_retry_at" => nil, "automatic_attempts" => 1, "error_code" => nil
+      } ],
+      "updated_at" => "2026-08-30T12:00:00.000000Z"
+    )
+
+    post task_brainstorm_suggestion_retry_path(@project, @slug),
+         params: { question: 1, binding: suggestion_binding }
+
+    assert_redirected_to task_path(@project, @slug)
+    assert_equal before, brainstorm.binread
+    assert_nil Hive::BrainstormParser.parse(brainstorm.to_s).first.answer
+    record = Hive::BrainstormSuggestions::Store.new(folder.to_s).read.fetch("records").first
+    assert_equal "stale", record.fetch("state")
+    assert_nil record.fetch("text")
+    assert_nil record.fetch("suggestion_binding")
+  end
+
   test "submitted answers land under the right question headers" do
     post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
     folder = stage_dir(@project, "2-brainstorm").join(@slug)

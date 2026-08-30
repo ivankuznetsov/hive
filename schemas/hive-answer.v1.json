@@ -27,7 +27,7 @@
       "additionalProperties": false,
       "required": [
         "ordinal", "round", "question_number", "text", "answered",
-        "answer", "fingerprint", "binding"
+        "answer", "fingerprint", "binding", "suggestion"
       ],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1 },
@@ -37,7 +37,43 @@
         "answered": { "type": "boolean" },
         "answer": { "type": ["string", "null"] },
         "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "binding": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" }
+        "binding": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" },
+        "suggestion": {
+          "oneOf": [
+            { "$ref": "#/$defs/Suggestion" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "Suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state", "text", "rationale", "provenance", "safe_reason",
+        "retryable", "dismissed", "input_binding", "suggestion_binding"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["loading", "fresh", "stale", "no_safe_suggestion", "unavailable", "failed"]
+        },
+        "text": { "type": ["string", "null"], "maxLength": 1000 },
+        "rationale": { "type": ["string", "null"], "maxLength": 320 },
+        "provenance": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["request", "repository", "project_wiki", "main_wiki", "settled_answers"]
+          }
+        },
+        "safe_reason": { "type": ["string", "null"], "maxLength": 240 },
+        "retryable": { "type": "boolean" },
+        "dismissed": { "type": "boolean" },
+        "input_binding": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "suggestion_binding": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "InventoryPayload": {

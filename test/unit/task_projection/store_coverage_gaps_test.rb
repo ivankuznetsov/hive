@@ -269,6 +269,19 @@ class TaskProjectionStoreCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_journal_write_lock_rejects_a_non_regular_lock_path
+    with_tmp_dir do |dir|
+      store = projection_store(dir)
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+      FileUtils.mkdir(lock_path)
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.send(:with_journal_write_lock) { flunk "invalid lock must not yield" }
+      end
+      assert_match(/lock is not a regular file/, error.message)
+    end
+  end
+
   def test_checkpoint_seed_reconstructs_identity_operator_and_legacy_records
     with_tmp_dir do |dir|
       store = projection_store(dir)

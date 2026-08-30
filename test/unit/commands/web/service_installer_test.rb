@@ -38,6 +38,7 @@ class WebServiceInstallerTest < Minitest::Test
         "0.0.0.0" => "0"
       }.each do |bind, expected|
         home = File.join(dir, bind.tr(".", "-"))
+        FileUtils.mkdir_p(home)
         installer = Hive::Commands::Web::ServiceInstaller.new(
           host_os: "linux-gnu",
           home: home,
@@ -75,7 +76,7 @@ class WebServiceInstallerTest < Minitest::Test
         HIVE_WEB_APP_DIR HIVE_WEB_ORIGIN HIVE_WEB_STORAGE_DIR HIVE_WEB_LOCAL_LOOPBACK
         HIVE_WEB_DIFF_TIMEOUT_SEC HIVE_WEB_CLONE_TIMEOUT_SEC
       ].each { |name| assert_includes rendered, "<key>#{name}</key>" }
-      assert_equal [ [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "load", plist ] ], manager_mutations(commands)
     end
   end
 
@@ -124,24 +125,26 @@ class WebServiceInstallerTest < Minitest::Test
     assert_equal [
       %w[systemctl --user daemon-reload],
       %w[systemctl --user restart hive-web]
-    ], commands
+    ], manager_mutations(commands)
     assert_equal [ "restarted running web service to load the refreshed application bundle" ], installer.messages
   end
 
   def test_restart_on_macos_unloads_then_loads_plist
-    commands = []
-    installer = Hive::Commands::Web::ServiceInstaller.new(
-      host_os: "darwin23",
-      home: "/h",
-      runner: ->(argv) { commands << argv; true }
-    )
+    with_tmp_dir do |home|
+      commands = []
+      installer = Hive::Commands::Web::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: home,
+        runner: ->(argv) { commands << argv; true }
+      )
 
-    assert installer.restart!
-    assert_equal [
-      [ "launchctl", "unload", "/h/Library/LaunchAgents/local.hive-web.plist" ],
-      [ "launchctl", "load", "/h/Library/LaunchAgents/local.hive-web.plist" ]
-    ], commands
-    assert_equal [ "restarted running web service to load the refreshed application bundle" ], installer.messages
+      assert installer.restart!
+      assert_equal [
+        [ "launchctl", "unload", "#{home}/Library/LaunchAgents/local.hive-web.plist" ],
+        [ "launchctl", "load", "#{home}/Library/LaunchAgents/local.hive-web.plist" ]
+      ], manager_mutations(commands)
+      assert_equal [ "restarted running web service to load the refreshed application bundle" ], installer.messages
+    end
   end
 
   def test_restart_on_unsupported_platform_raises_without_running_command
@@ -174,32 +177,42 @@ class WebServiceInstallerTest < Minitest::Test
     assert_equal [
       %w[systemctl --user daemon-reload],
       %w[systemctl --user restart hive-web]
-    ], commands
+    ], manager_mutations(commands)
     assert_empty installer.messages
   end
 
   def test_restart_on_macos_raises_when_launchctl_load_fails
-    commands = []
-    installer = Hive::Commands::Web::ServiceInstaller.new(
-      host_os: "darwin23",
-      home: "/h",
-      runner: lambda do |argv|
-        commands << argv
-        argv[1] != "load"
-      end
-    )
+    with_tmp_dir do |home|
+      commands = []
+      installer = Hive::Commands::Web::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: home,
+        runner: lambda do |argv|
+          commands << argv
+          argv[1] != "load"
+        end
+      )
 
-    error = assert_raises(Hive::Error) { installer.restart! }
+      error = assert_raises(Hive::Error) { installer.restart! }
 
-    assert_equal "hive web: could not restart managed web service", error.message
-    assert_equal [
-      [ "launchctl", "unload", "/h/Library/LaunchAgents/local.hive-web.plist" ],
-      [ "launchctl", "load", "/h/Library/LaunchAgents/local.hive-web.plist" ]
-    ], commands
-    assert_empty installer.messages
+      assert_equal "hive web: could not restart managed web service", error.message
+      assert_equal [
+        [ "launchctl", "unload", "#{home}/Library/LaunchAgents/local.hive-web.plist" ],
+        [ "launchctl", "load", "#{home}/Library/LaunchAgents/local.hive-web.plist" ]
+      ], manager_mutations(commands)
+      assert_empty installer.messages
+    end
   end
 
   private
+
+  def manager_mutations(commands)
+    commands.select do |argv|
+      argv == %w[systemctl --user daemon-reload] ||
+        %w[start stop restart].include?(argv[2]) ||
+        %w[load unload].include?(argv[1])
+    end
+  end
 
   def service_web_config(bind)
     {

@@ -18,7 +18,11 @@ class HiveDaemonCommandTest < Minitest::Test
 
   def with_isolated_hive_home(&block)
     Dir.mktmpdir("hive-daemon-test") do |home|
-      env = ENV.to_h.merge("HIVE_HOME" => home, "HOME" => home)
+      env = ENV.to_h.merge(
+        "HIVE_HOME" => home,
+        "HOME" => home,
+        "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR)
+      )
       activate_test_control_plane(home)
       prepare_runtime_project(state_home: home, name: "hive", path: home).disconnect
       block.call(home, env)
@@ -1264,6 +1268,7 @@ class HiveDaemonCommandTest < Minitest::Test
       env = ENV.to_h.merge(
         "HOME" => home,
         "HIVE_HOME" => home,
+        "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR),
         "PATH" => [ bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
       )
       block.call(home, env)
@@ -1316,13 +1321,12 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_empty errors,
                    "install --force envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
 
-      # The on-disk write must have happened regardless of whether the
-      # service-manager call succeeded — `atomic_write` runs BEFORE the
-      # systemctl restart, so even on exit 70 the new template is in
-      # place. Pin this contract so a future install_linux! refactor
-      # that short-circuits before atomic_write fails this assertion.
+      # A successful envelope is only valid after the durable transition has
+      # freshly verified the desired file/manager endpoint. Manager failures
+      # now restore the prior endpoint or retain replay evidence instead of
+      # accepting desired bytes as a terminal partial install.
       assert_includes File.read(unit_path), "ExecStart=",
-                      "atomic write must land the new unit before systemctl is called, regardless of exit code"
+                      "a successful upgrade must finish with the desired unit bytes"
       backups = Dir["#{unit_path}.bak-*"]
       assert_equal 1, backups.size, "force must write exactly one timestamped backup"
       assert_equal "stale-pre-existing-content\n", File.read(backups.first)

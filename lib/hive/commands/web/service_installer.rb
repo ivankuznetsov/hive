@@ -30,20 +30,21 @@ module Hive
         end
 
         def restart!
-          ok = case envelope_platform
-          when "linux"
-            @runner.call(%w[systemctl --user daemon-reload]) &&
-              @runner.call([ "systemctl", "--user", "restart", service_name ])
-          when "macos"
-            @runner.call([ "launchctl", "unload", target_path ]) &&
-              @runner.call([ "launchctl", "load", target_path ])
-          else
-            false
-          end
-          raise Hive::Error, "hive web: could not restart managed web service" unless ok
-
+          super
           @messages << "restarted running web service to load the refreshed application bundle"
           true
+        end
+
+        def start!
+          super
+        rescue Hive::Error
+          raise Hive::Error, "hive web: could not start managed service"
+        end
+
+        def stop!
+          super
+        rescue Hive::Error
+          raise Hive::Error, "hive web: could not stop managed service"
         end
 
         private

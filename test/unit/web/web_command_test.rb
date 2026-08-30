@@ -751,79 +751,86 @@ class WebCommandTest < Minitest::Test
   # Build a Web command whose #run_service_action / #status_service internal
   # `ServiceInstaller.new(...)` yields a fake reporting the given platform.
   def with_fake_service_installer(platform:, target_path: "/tmp/hive-web.service",
-                                  service_name: "hive-web", state: nil)
+                                  service_name: "hive-web", state: nil,
+                                  action_error: nil)
     require "hive/commands/web/service_installer"
     fake = Object.new
+    actions = []
     fake.define_singleton_method(:envelope_platform) { platform }
     fake.define_singleton_method(:target_path) { target_path }
     fake.define_singleton_method(:service_name) { service_name }
     fake.define_singleton_method(:service_state) { state || { "service_installed" => false } }
+    fake.define_singleton_method(:start!) do
+      actions << :start
+      raise action_error if action_error
+
+      true
+    end
+    fake.define_singleton_method(:stop!) do
+      actions << :stop
+      raise action_error if action_error
+
+      true
+    end
     original = Hive::Commands::Web.const_get(:ServiceInstaller)
     Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
     Hive::Commands::Web.const_set(:ServiceInstaller, Class.new do
       define_singleton_method(:new) { |*_a, **_kw| fake }
     end)
     begin
-      yield fake
+      yield fake, actions
     ensure
       Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
       Hive::Commands::Web.const_set(:ServiceInstaller, original)
     end
   end
 
-  def capture_system_argv(command)
-    calls = []
-    command.define_singleton_method(:system) do |*argv|
-      calls << argv
-      true
-    end
-    calls
-  end
-
   def test_start_service_on_macos_issues_launchctl_load
     command = Hive::Commands::Web.new("start", detach: true)
-    calls = capture_system_argv(command)
-    with_fake_service_installer(platform: "macos", target_path: "/plist") do
+    actions = nil
+    with_fake_service_installer(platform: "macos", target_path: "/plist") do |_fake, recorded|
+      actions = recorded
       command.call
     end
-    assert_equal [ [ "launchctl", "load", "/plist" ] ], calls,
-                 "start on macOS must launchctl load the target plist"
+    assert_equal [ :start ], actions,
+                 "start on macOS must delegate to the UserService-owned lifecycle"
   end
 
   def test_stop_service_on_macos_issues_launchctl_unload
     command = Hive::Commands::Web.new("stop")
-    calls = capture_system_argv(command)
-    with_fake_service_installer(platform: "macos", target_path: "/plist") do
+    actions = nil
+    with_fake_service_installer(platform: "macos", target_path: "/plist") do |_fake, recorded|
+      actions = recorded
       command.call
     end
-    assert_equal [ [ "launchctl", "unload", "/plist" ] ], calls
+    assert_equal [ :stop ], actions
   end
 
   def test_start_service_on_linux_reloads_then_starts_unit
     command = Hive::Commands::Web.new("start", detach: true)
-    calls = capture_system_argv(command)
-    with_fake_service_installer(platform: "linux", service_name: "hive-web") do
+    actions = nil
+    with_fake_service_installer(platform: "linux", service_name: "hive-web") do |_fake, recorded|
+      actions = recorded
       command.call
     end
-    assert_equal [ %w[systemctl --user daemon-reload],
-                   %w[systemctl --user start hive-web] ], calls,
-                 "linux start must daemon-reload before starting so a freshly written unit is visible"
+    assert_equal [ :start ], actions,
+                 "linux start must delegate reload/start and verification to UserService"
   end
 
   def test_stop_service_on_linux_does_not_reload
     command = Hive::Commands::Web.new("stop")
-    calls = capture_system_argv(command)
-    with_fake_service_installer(platform: "linux", service_name: "hive-web") do
+    actions = nil
+    with_fake_service_installer(platform: "linux", service_name: "hive-web") do |_fake, recorded|
+      actions = recorded
       command.call
     end
-    assert_equal [ %w[systemctl --user stop hive-web] ], calls,
-                 "stop must not daemon-reload; only start needs the freshly-written-unit reload"
+    assert_equal [ :stop ], actions
   end
 
   def test_run_service_action_raises_when_system_fails
     command = Hive::Commands::Web.new("stop")
-    command.define_singleton_method(:system) { |*_argv| false }
-    error = with_fake_service_installer(platform: "linux") do
+    failure = Hive::Error.new("hive web: could not stop managed service")
+    error = with_fake_service_installer(platform: "linux", action_error: failure) do
       assert_raises(Hive::Error) { command.call }
     end
     assert_match(/could not stop managed service/, error.message)

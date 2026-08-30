@@ -711,6 +711,7 @@ module HiveTestHelper
       keys = %w[HOME HIVE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_BIN_HOME]
       old = keys.to_h { |key| [ key, ENV.fetch(key, nil) ] }
       ENV["HOME"] = File.join(dir, "home")
+      FileUtils.mkdir_p(ENV.fetch("HOME"))
       ENV.delete("HIVE_HOME")
       ENV["XDG_CONFIG_HOME"] = File.join(dir, "config")
       ENV["XDG_DATA_HOME"] = File.join(dir, "data")

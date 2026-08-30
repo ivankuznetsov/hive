@@ -26,7 +26,7 @@ module Hive
 
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
                        systemctl_available: nil, launchctl_available: nil, status_reader: nil,
-                       environment: ENV)
+                       environment: ENV, legacy_takeover: nil)
           @host_os = host_os
           # Anchor on the real user home for launchd/systemd paths —
           # HIVE_HOME is a config/test override that does not apply
@@ -41,6 +41,7 @@ module Hive
           @systemctl_available = systemctl_available
           @launchctl_available = launchctl_available
           @runtime_environment = environment
+          @legacy_takeover = legacy_takeover
           @messages = []
         end
 
@@ -139,8 +140,24 @@ module Hive
         end
 
         def remove!
-          service = user_service(definition: service_definition(include_content: false))
+          service = user_service
           service.remove(service.plan_remove)
+        end
+
+        def start!
+          perform_lifecycle!(:start)
+        end
+
+        def stop!
+          perform_lifecycle!(:stop)
+        end
+
+        def restart!
+          perform_lifecycle!(:restart)
+        end
+
+        def takeover!
+          perform_lifecycle!(:takeover)
         end
 
         # ── Subclass hooks ─────────────────────────────────────────────
@@ -185,10 +202,12 @@ module Hive
             definition: definition,
             runner: @runner,
             query_available: -> { manager_query_available? },
-            manager_available: -> { service_manager_available? },
+            manager_available: -> { service_manager_availability },
             status_reader: @status_reader,
             launchd_running_via_list: @runner_injected && !@status_reader,
-            event_handler: method(:handle_user_service_event)
+            event_handler: method(:handle_user_service_event),
+            home: @home,
+            legacy_takeover: @legacy_takeover
           )
         end
 
@@ -198,6 +217,15 @@ module Hive
           when :macos then launchctl_available?
           else false
           end
+        end
+
+        def perform_lifecycle!(operation)
+          result = user_service.public_send(operation)
+          record_user_service_messages(result) unless result.kind == :unsupported
+          return true if result.success? && result.kind != :unsupported
+
+          raise Hive::Error,
+                "hive #{cli_label}: could not #{operation} managed #{service_noun}"
         end
 
         def handle_user_service_event(event, _definition)
@@ -231,8 +259,8 @@ module Hive
                          "Enable systemd in WSL or run `hive #{cli_label} start` manually."
           end
           if result.diagnostics.include?(:systemd_apply_failed)
-            @messages << "systemctl --user enable failed; " \
-                         "run `systemctl --user enable --now #{service_name}` manually"
+            @messages << "systemctl --user could not apply #{service_name}; the previous state was restored " \
+                         "or recovery evidence was retained. Repair the user manager and re-run the install."
           end
           if result.diagnostics.include?(:launchd_unload_failed)
             @messages << "launchctl unload returned non-zero for #{path} (benign if plist " \
@@ -248,6 +276,27 @@ module Hive
           end
           if result.diagnostics.include?(:unsafe_unit_path)
             @messages << "refusing unsafe #{unit_noun} path at #{path}; remove it manually"
+          end
+          if result.diagnostics.include?(:operation_busy)
+            @messages << "another #{service_noun} operation owns #{path}; no changes were made. Retry shortly."
+          end
+          if result.diagnostics.include?(:manager_probe_indeterminate)
+            @messages << "the user service manager could not be inspected conclusively; no changes were made. " \
+                         "Restore the manager session and retry."
+          end
+          if result.diagnostics.include?(:legacy_takeover_failed)
+            @messages << "the detached #{service_noun} could not be stopped under the install lock; " \
+                         "the transition remains pending and can be retried safely."
+          end
+          if result.diagnostics.include?(:invalid_recovery_state)
+            @messages << "retained unverified recovery evidence for #{path}; inspect the UserService recovery " \
+                         "state and retry without deleting it."
+          elsif result.diagnostics.include?(:recovery_pending)
+            @messages << "the #{service_noun} transition is pending; its recovery evidence was retained. " \
+                         "Restore manager availability and retry."
+          end
+          if result.diagnostics.include?(:prior_state_restored)
+            @messages << "the requested transition could not be verified; the prior #{service_noun} state was restored."
           end
         end
 
@@ -450,15 +499,30 @@ module Hive
         end
 
         def service_manager_available?
+          service_manager_availability == :available
+        end
+
+        def service_manager_availability
           case platform
           when :linux
-            return @systemctl_available unless @systemctl_available.nil?
-            return false unless systemctl_available?
+            unless @systemctl_available.nil?
+              return :available if @systemctl_available == true
+              return :conclusively_absent if @systemctl_available == false
 
-            !!@runner.call(%w[systemctl --user show-environment])
-          when :macos then launchctl_available?
-          else false
+              state = @systemctl_available.to_sym
+              return state if Hive::UserService::Status::MANAGER_AVAILABILITIES.include?(state)
+              return :indeterminate
+            end
+            return :conclusively_absent unless systemctl_available?
+
+            @runner.call(%w[systemctl --user show-environment]) ? :available : :indeterminate
+          when :macos
+            launchctl_available? ? :available : :conclusively_absent
+          else
+            :conclusively_absent
           end
+        rescue StandardError
+          :indeterminate
         end
 
         # Mirror systemctl_available? for macOS: distinguish "launchctl
@@ -469,6 +533,7 @@ module Hive
         # not-loaded result. `which` is a pure PATH lookup, no spawn.
         def launchctl_available?
           return @launchctl_available unless @launchctl_available.nil?
+          return true if @runner_injected
 
           !!which("launchctl")
         end

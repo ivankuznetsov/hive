@@ -75,7 +75,7 @@ class UninstallCommandTest < Minitest::Test
       Hive::Commands::Uninstall.new(
         purge: true,
         output: out,
-        runner: ->(_argv) { false },
+        runner: manager_disable_failure_runner,
         host_os: "darwin"
       ).call
 
@@ -592,7 +592,7 @@ class UninstallCommandTest < Minitest::Test
       }) do
         status = Hive::Commands::Uninstall.new(
           purge: true, output: out,
-          runner: ->(_argv) { false }, host_os: "linux"
+          runner: manager_disable_failure_runner, host_os: "linux"
         ).call
 
         assert_equal 0, status
@@ -619,7 +619,7 @@ class UninstallCommandTest < Minitest::Test
       }) do
         status = Hive::Commands::Uninstall.new(
           purge: true, output: out,
-          runner: ->(_argv) { false }, host_os: "darwin"
+          runner: manager_disable_failure_runner, host_os: "darwin"
         ).call
 
         assert_equal 0, status
@@ -641,7 +641,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: out,
-        runner: ->(argv) { argv.include?("hive-bot") ? false : true }, host_os: "linux"
+        runner: manager_disable_failure_runner(service_name: "hive-bot"), host_os: "linux"
       ).call
 
       assert File.exist?(unit)
@@ -675,7 +675,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: out,
-        runner: ->(_argv) { false }, host_os: "darwin"
+        runner: manager_disable_failure_runner, host_os: "darwin"
       ).call
 
       assert File.exist?(plist), "a failed launchctl unload must leave the bot plist in place"
@@ -965,7 +965,7 @@ class UninstallCommandTest < Minitest::Test
       Hive::Commands::Uninstall.new(
         purge: true,
         output: out,
-        runner: ->(_argv) { false },
+        runner: manager_disable_failure_runner,
         host_os: "linux"
       ).call
 
@@ -1021,5 +1021,17 @@ class UninstallCommandTest < Minitest::Test
 
     assert_match(/changed while its service was being disabled/, out.string)
     assert_match(/could not remove .* leaving it in place/, out.string)
+  end
+
+  private
+
+  def manager_disable_failure_runner(service_name: nil)
+    lambda do |argv|
+      target_matches = service_name.nil? || argv.include?(service_name)
+      return false if target_matches && argv[0..2] == %w[systemctl --user disable]
+      return false if target_matches && argv[0..1] == %w[launchctl unload]
+
+      true
+    end
   end
 end

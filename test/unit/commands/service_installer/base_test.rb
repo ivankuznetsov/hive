@@ -28,7 +28,8 @@ class ServiceInstallerBaseTest < Minitest::Test
     def render_launchd = UNIT_BODY
 
     # Expose adapter helpers for direct unit testing.
-    public :ruby_shim_dir, :build_path_line, :service_manager_available?
+    public :ruby_shim_dir, :build_path_line, :service_manager_available?,
+           :service_manager_availability
   end
 
   def build(dir, **opts)
@@ -185,6 +186,56 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  def test_linux_indeterminate_manager_probe_refuses_before_file_mutation
+    with_tmp_dir do |dir|
+      calls = []
+      installer = TestInstaller.new(
+        host_os: "linux", home: dir,
+        runner: ->(argv) { calls << argv; false }
+      )
+      installer.define_singleton_method(:systemctl_available?) { true }
+
+      result = installer.install!(autostart: true)
+
+      assert_equal :indeterminate, installer.service_manager_availability
+      assert_equal :failed, result.kind
+      refute File.exist?(installer.target_path)
+      assert installer.messages.any? { |message| message.include?("could not be inspected conclusively") }
+      assert_operator calls.length, :>=, 2
+      assert calls.all? { |argv| argv == %w[systemctl --user show-environment] }
+    end
+  end
+
+  def test_nonzero_systemctl_version_probe_keeps_filesystem_only_compatibility
+    with_tmp_dir do |dir|
+      calls = []
+      installer = TestInstaller.new(
+        host_os: "linux", home: dir,
+        runner: ->(argv) { calls << argv; true }
+      )
+      installer.define_singleton_method(:system) { |*| false }
+
+      result = installer.install!(autostart: true)
+
+      assert_equal :autostart_unavailable, result.kind
+      assert_equal TestInstaller::UNIT_BODY, File.read(installer.target_path)
+      assert_empty calls
+    end
+  end
+
+  def test_arbitrary_systemctl_version_probe_error_is_indeterminate
+    with_tmp_dir do |dir|
+      installer = TestInstaller.new(host_os: "linux", home: dir)
+      installer.define_singleton_method(:system) { |*| raise Errno::EACCES }
+
+      result = installer.install!(autostart: true)
+
+      assert_equal :failed, result.kind
+      refute File.exist?(installer.target_path)
+      assert installer.messages.any? { |message| message.include?("could not be inspected conclusively") }
+    end
+  end
+
   def test_service_state_macos_uses_launchctl_list
     with_tmp_dir do |dir|
       seen = []
@@ -317,9 +368,15 @@ class ServiceInstallerBaseTest < Minitest::Test
         Hive::UserService::Result.new(:unsafe_path, diagnostics: [ :unsafe_unit_path ]),
         path: path
       )
+      installer.send(
+        :record_user_service_messages,
+        Hive::UserService::Result.new(:failed, diagnostics: [ :operation_busy ]),
+        path: path
+      )
 
       assert installer.messages.any? { |message| message.include?("changed after it was inspected") }
       assert installer.messages.any? { |message| message.include?("refusing unsafe test unit path") }
+      assert installer.messages.any? { |message| message.include?("operation owns") && message.include?("Retry") }
     end
   end
 

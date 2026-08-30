@@ -401,7 +401,8 @@ module Hive
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
               end
-              if task.stage_name == "brainstorm" && dest_stage != "2-brainstorm"
+              brainstorm_stage = task.workflow.stage_named("brainstorm")
+              if task.stage_name == brainstorm_stage&.name && dest_stage != brainstorm_stage.dir
                 Hive::BrainstormSuggestions::TransitionCleanup.call_under_lock(task.folder)
               end
               new_folder = move_task!(task, dest_stage)

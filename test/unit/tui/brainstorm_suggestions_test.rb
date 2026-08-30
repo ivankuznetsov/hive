@@ -158,6 +158,7 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
         path,
         "## Round 1\n\n### Q1. #{question}\n### A1.\n\n<!-- WAITING -->\n"
       )
+      seed_task_projection(task, state_file: path)
       task_object = Hive::Task.new(task)
       parsed = Hive::BrainstormParser.parse(path)
       bundle = Hive::BrainstormSuggestions::ContextBundle.capture(

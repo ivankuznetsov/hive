@@ -291,7 +291,9 @@ module Hive
           next unless safe_relative_path?(relative)
 
           content = stable_external_read(root, relative)
-          next if content.nil? || !safe_evidence?(content)
+          next if content.nil? || content.include?("\0")
+          content = content.dup.force_encoding(Encoding::UTF_8)
+          next unless content.valid_encoding? && safe_evidence?(content)
 
           relevance = path_relevance_score(relative, tokens) + content_score(content, tokens)
           next unless relevance.positive?
@@ -365,7 +367,7 @@ module Hive
         value = file.read(max_bytes + 1)
         raise CaptureError.new("capture_too_large") if value.bytesize > max_bytes
 
-        @session&.fetch(:files)&.store(cache_key, value.freeze)
+        @session&.fetch(:files)&.store(cache_key, value.dup.freeze)
         value
       ensure
         descriptors&.reverse_each { |descriptor| descriptor.close unless descriptor.closed? }

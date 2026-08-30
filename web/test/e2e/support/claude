@@ -33,24 +33,20 @@ case "$cwd" in
     ;;
   */stages/3-plan/*)
     emit_usage=1
-    cat > plan.md <<'PLAN'
-# Plan
-
-## Files
-
-- `implementation.txt`
-- `test/golden_path_test.rb`
-
-## Test scenarios
-
-- The sample implementation reaches the open-PR gate.
-
-## Rollback
-
-Revert `implementation.txt` if the sample implementation fails.
-
-<!-- COMPLETE -->
-PLAN
+    printf '%s\n' \
+      '# Plan' \
+      '' \
+      '## Files' \
+      '- `implementation.txt`' \
+      '- `test/implementation_test.rb`' \
+      '' \
+      '## Test scenarios' \
+      '- verifies the sample implementation marker is present' \
+      '' \
+      '## Rollback' \
+      'Revert the commit; this local fixture change is fully reversible.' \
+      '' \
+      '<!-- COMPLETE -->' > plan.md
     ;;
   */stages/5-open-pr/*)
     emit_usage=1
@@ -61,8 +57,11 @@ PLAN
   *worktrees/*)
     emit_usage=1
     # Execute runs in the project worktree: commit something real.
+    mkdir -p test
     printf 'implemented by golden-path e2e\n' > implementation.txt
-    git add implementation.txt
+    printf 'raise "missing implementation" unless File.read("implementation.txt").include?("implemented")\n' \
+      > test/implementation_test.rb
+    git add implementation.txt test/implementation_test.rb
     git -c user.email=e2e@test.invalid -c user.name="E2E" \
       commit -qm "feat: golden path sample implementation" || true
     ;;

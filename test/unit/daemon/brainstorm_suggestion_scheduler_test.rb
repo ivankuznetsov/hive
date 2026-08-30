@@ -79,6 +79,10 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
 
       digest = "b" * 64
       scheduler.tick(rows: [ row(folder) ], now: fixture_time + 10)
+      assert_equal first, record_for(folder).fetch("input_binding")
+      assert_equal 1, runner.calls
+
+      scheduler.tick(rows: [ row(folder) ], now: fixture_time + 301)
       second = record_for(folder)
 
       refute_equal first, second.fetch("input_binding")
@@ -481,7 +485,10 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
         state = File.join(project, ".hive-state")
         folder = File.join(state, "stages", "2-brainstorm", "suggestions-260830-abcd")
         FileUtils.mkdir_p(folder)
-        File.write(File.join(state, "config.yml"), {}.to_yaml)
+        File.write(
+          File.join(state, "config.yml"),
+          { "brainstorm" => { "suggestions" => { "enabled" => true } } }.to_yaml
+        )
         Hive::TaskMeta.write(
           folder, id: 43012, slug: File.basename(folder), display_name: "Suggestions",
           idempotency_key: "suggestions", input_fingerprint: "f" * 64
@@ -532,7 +539,9 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
   end
 
   def suggestion_config
-    Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    Marshal.load(Marshal.dump(Hive::Config::DEFAULTS)).tap do |config|
+      config.dig("brainstorm", "suggestions")["enabled"] = true
+    end
   end
 
   def row(folder)

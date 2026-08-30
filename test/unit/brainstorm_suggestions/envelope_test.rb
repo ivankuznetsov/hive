@@ -80,11 +80,12 @@ class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
   end
 
   def test_damaged_open_delimiter_keeps_its_body_inert
+    trailing_space = " "
     source = <<~MARKDOWN
       ## Round 1
       ### Q1. First?
       ### A1.
-      <!-- hive-suggestion:v1 binding=#{BINDING} --> 
+      <!-- hive-suggestion:v1 binding=#{BINDING} -->#{trailing_space}
       Use the repository adapter.
       <!-- /hive-suggestion:v1 -->
       ### Q2. Second?

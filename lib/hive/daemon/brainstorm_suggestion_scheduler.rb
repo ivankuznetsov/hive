@@ -10,6 +10,7 @@ require "hive/brainstorm_suggestions"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
+require "hive/stages"
 require "hive/stages/base"
 require "hive/task"
 
@@ -19,7 +20,7 @@ module Hive
     # slot. Context selection and provider execution happen outside the task
     # lock; only short inventory/CAS sections run while the lock is held.
     class BrainstormSuggestionScheduler
-      STAGE = "2-brainstorm"
+      STAGE = Hive::Stages::SHORT_TO_FULL.fetch("brainstorm")
       MAX_WORKERS = 4
       ORPHAN_GRACE_SEC = 30
       SHUTDOWN_GRACE_SEC = 5

@@ -3,7 +3,6 @@
 require "erb"
 require "fileutils"
 require "json"
-require "open3"
 require "tmpdir"
 require "hive/brainstorm_suggestions/validator"
 
@@ -308,11 +307,6 @@ module Hive
 
       def resolve_executable(profile)
         command = profile.bin.to_s
-        if profile.name.to_sym == :claude
-          output, _error, status = Open3.capture3("mise", "which", "claude")
-          candidate = output.strip
-          return candidate if status.success? && File.file?(candidate)
-        end
         return File.realpath(command) if command.include?(File::SEPARATOR)
 
         ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|

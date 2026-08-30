@@ -7,6 +7,7 @@ require "hive/brainstorm_suggestions"
 require "hive/config"
 require "hive/daemon/operational_snapshot"
 require "hive/secret_patterns"
+require "hive/stages"
 require "hive/tui/state_source"
 
 module Hive
@@ -451,7 +452,7 @@ module Hive
       def brainstorm_suggestion_identity(payload)
         Array(payload["projects"]).flat_map do |project|
           Array(project["tasks"]).filter_map do |task|
-            next unless task["stage"] == "2-brainstorm"
+            next unless task["stage"] == Hive::Stages::SHORT_TO_FULL.fetch("brainstorm")
 
             folder = task["folder"].to_s
             next if folder.empty?

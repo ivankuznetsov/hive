@@ -12,22 +12,6 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
 
   FAKE_HIVE = File.expand_path("../../fixtures/fake-hive-run.rb", __dir__)
 
-  def setup
-    @original_gem_path = ENV.key?("GEM_PATH") ? ENV["GEM_PATH"] : HiveTestHelper::UNSET_ENV
-    # test_helper deliberately replaces HOME. Preserve the already-resolved
-    # bundle paths for Ruby subprocess fixtures so their inherited RUBYOPT can
-    # still load Bundler from user-installed gems.
-    ENV["GEM_PATH"] = Gem.path.join(File::PATH_SEPARATOR)
-  end
-
-  def teardown
-    if @original_gem_path.equal?(HiveTestHelper::UNSET_ENV)
-      ENV.delete("GEM_PATH")
-    else
-      ENV["GEM_PATH"] = @original_gem_path
-    end
-  end
-
   def make(dry_run: false, log_dir: nil)
     log_lambda = log_dir ? lambda { |project, slug| File.join(log_dir, project, slug, "child.log") } : nil
     Hive::Daemon::ChildSupervisor.new(

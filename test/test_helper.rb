@@ -24,6 +24,7 @@ require "English"
 require_relative "support/tmp_cleanup"
 
 HIVE_TEST_SUITE_TMP_DIRS = []
+HIVE_TEST_PARENT_GEM_PATH = Gem.path.join(File::PATH_SEPARATOR).freeze
 
 # Never let a normal test subprocess inherit the operator's Hive state, home,
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
@@ -35,6 +36,10 @@ unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
   HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_USER_ROOT
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
+  # Bundler is activated before tests isolate HOME. Ruby subprocess fixtures
+  # inherit that activation, so preserve the parent's already-resolved locked
+  # gem path instead of making them rediscover gems beneath the throwaway HOME.
+  ENV["GEM_PATH"] = HIVE_TEST_PARENT_GEM_PATH if ENV["BUNDLE_GEMFILE"]
   ENV["HOME"] = test_home
   %w[
     HIVE_HOME

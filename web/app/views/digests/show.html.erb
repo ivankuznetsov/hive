@@ -9,7 +9,7 @@
       <% if @digest.attributes["precoverage"] %>
         <p>Daily digest coverage had not started. V1 does not reconstruct pre-feature history from logs or current status.</p>
       <% else %>
-        <p>No record exists for this identity. If it is inside feature-era coverage, run <code>hive digest refresh --date <%= @digest.local_date %></code>.</p>
+        <p>No record exists for this identity. If it is inside feature-era coverage, run <code><%= @digest.refresh_command %></code>.</p>
       <% end %>
       <%= render "digests/nearest", digest: @digest %>
     </section>

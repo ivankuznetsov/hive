@@ -69,9 +69,11 @@ class DigestFlowTest < ApplicationSystemTestCase
     start = Time.utc(2026, 8, 30)
     Hive::DailyDigest::Store.new.write_base(
       "schema" => "hive-digest-record", "schema_version" => 1,
+      "interval_id" => "a" * 64,
       "local_date" => @date, "sequence" => 1,
       "time_zone" => "UTC", "starts_at" => start.iso8601,
-      "ends_at" => (start + 86_400).iso8601, "boundary_kind" => "calendar_day",
+      "ends_at" => (start + 86_400).iso8601, "duration_seconds" => 86_400,
+      "boundary_kind" => "calendar_day", "cutover" => nil,
       "lifecycle" => "closed", "closed_at" => (start + 86_401).iso8601,
       "completeness" => "complete", "content" => "non_empty",
       "last_materialized_at" => (start + 86_401).iso8601,

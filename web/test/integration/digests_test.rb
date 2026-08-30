@@ -37,6 +37,8 @@ class DigestsTest < ActionDispatch::IntegrationTest
                   text: /Open answer flow/
     assert_select "a[href='https://github.com/acme/repo/pull/42']", text: /PR #42/
     assert_select ".digest-amendments", text: /Late amendments/
+    assert_select ".digest-amendment-details", text: /Late: Task stage changed/
+    assert_select ".digest-amendment-details", text: /Recovered: Github · recovered-source/
     assert_select ".digest-project-option[value='removed-project']", text: /removed-project/
     assert_select ".digest-historical", text: /Historical project/
     refute_includes response.body, "PRIVATE QUESTION TEXT"
@@ -70,6 +72,7 @@ class DigestsTest < ActionDispatch::IntegrationTest
     get digest_path("2026-08-26")
     assert_response :success
     assert_select ".digest-state-missing", text: /not persisted/
+    assert_select "code", text: "hive digest refresh --date 2026-08-26"
 
     get digest_path("2026-08-27")
     assert_select ".digest-state-pruned", text: /pruned/
@@ -121,9 +124,11 @@ class DigestsTest < ActionDispatch::IntegrationTest
     start = Time.utc(day.year, day.month, day.day)
     {
       "schema" => "hive-digest-record", "schema_version" => 1,
+      "interval_id" => "a" * 64,
       "local_date" => date, "sequence" => day.day,
       "time_zone" => "UTC", "starts_at" => start.iso8601,
-      "ends_at" => (start + 86_400).iso8601, "boundary_kind" => "calendar_day",
+      "ends_at" => (start + 86_400).iso8601, "duration_seconds" => 86_400,
+      "boundary_kind" => "calendar_day", "cutover" => nil,
       "lifecycle" => lifecycle,
       "closed_at" => lifecycle == "closed" ? (start + 86_401).iso8601 : nil,
       "completeness" => completeness, "content" => content,
@@ -159,7 +164,11 @@ class DigestsTest < ActionDispatch::IntegrationTest
       "event_at" => "2026-08-30T20:00:00Z", "observed_at" => "2026-08-31T08:00:00Z",
       "amended_at" => "2026-08-31T08:00:01Z",
       "items" => [ item("removed-id", "removed-project", "late-task") ],
-      "attention" => [], "gaps" => [], "resolved_gap_ids" => [], "source_frontiers" => {}
+      "attention" => [], "gaps" => [], "resolved_gap_ids" => [ "gap:recovered" ],
+      "resolved_gaps" => [
+        gap("recovered-source").merge("gap_id" => "gap:recovered")
+      ],
+      "source_frontiers" => {}, "private_payload" => "MUST NOT RENDER"
     }
   end
 end

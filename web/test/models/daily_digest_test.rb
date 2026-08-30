@@ -32,6 +32,53 @@ class DailyDigestTest < ActiveSupport::TestCase
     assert_equal 1, destinations.length
   end
 
+  test "recursively strips non-public item gap and amendment fields" do
+    view = raw_view
+    view["projects"][0]["path"] = "/private/project"
+    view["items"][0]["payload"] = "private item"
+    view["items"][0]["details"] = { "to_stage" => "3-plan", "prompt" => "private detail" }
+    view["gaps"] = view["effective_gaps"] = [ {
+      "gap_id" => "gap:one", "source" => "github", "scope" => "alpha",
+      "reason_code" => "offline", "reason" => "offline",
+      "observed_at" => "2026-08-30T20:00:00Z", "freshness_at" => nil,
+      "payload" => "private gap"
+    } ]
+    view["amendments"] = [ {
+      "amendment_id" => "amendment:one", "kind" => "gap_resolution",
+      "source" => "github", "event_at" => nil,
+      "observed_at" => "2026-08-31T08:00:00Z",
+      "amended_at" => "2026-08-31T08:00:01Z", "payload" => "private amendment",
+      "items" => view["items"], "attention" => view["attention"], "gaps" => [],
+      "resolved_gap_ids" => [ "gap:one" ], "resolved_gaps" => view["gaps"]
+    } ]
+
+    digest = DailyDigest.new(
+      view, requested_date: "2026-08-30",
+      link_resolver: ->(_project, _row) { nil }, current_projects: []
+    )
+
+    serialized = digest.attributes.to_json
+    [ "/private/project", "private item", "private detail", "private gap",
+      "private amendment", "private question", "secret binding" ].each do |secret|
+      refute_includes serialized, secret
+    end
+    assert_equal "3-plan", digest.items.first.dig("details", "to_stage")
+    assert_equal [ "gap:one" ], digest.amendments.first.fetch("resolved_gap_ids")
+  end
+
+  test "recovery command never turns the current identity into an invalid date flag" do
+    today = DailyDigest.new(
+      { "reader_status" => "missing", "local_date" => nil }, requested_date: "today"
+    )
+    historical = DailyDigest.new(
+      { "reader_status" => "missing", "local_date" => "2026-08-29" },
+      requested_date: "2026-08-29"
+    )
+
+    assert_equal "hive digest refresh", today.refresh_command
+    assert_equal "hive digest refresh --date 2026-08-29", historical.refresh_command
+  end
+
   test "retains historical projects but refuses unsafe PR and unresolved task links" do
     reader = Object.new
     view = raw_view

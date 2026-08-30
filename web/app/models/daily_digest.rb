@@ -1,4 +1,5 @@
 require "json"
+require "hive/daily_digest/public_view"
 require "hive/daily_digest/reader"
 require "hive/pr"
 require "hive/task_resolver"
@@ -7,10 +8,7 @@ require "hive/task_resolver"
 # It never materializes records or consults live GitHub. Privacy-sensitive
 # attention rows are reduced to a closed allowlist before a template sees them.
 class DailyDigest
-  ATTENTION_KEYS = %w[
-    attention_id kind project_id project task_id task_slug stage state
-    waiting_since waiting_age_seconds
-  ].freeze
+  ATTENTION_KEYS = Hive::DailyDigest::PublicView::ATTENTION_KEYS.freeze
 
   attr_reader :attributes, :requested_date
 
@@ -29,7 +27,7 @@ class DailyDigest
     @current_projects = Array(current_projects)
     @link_resolver = link_resolver || method(:resolve_task_destination)
     @destination_cache = {}
-    @attributes = deep_copy(attributes)
+    @attributes = Hive::DailyDigest::PublicView.sanitize_nested(deep_copy(attributes))
     sanitize_attention!
   end
 
@@ -62,6 +60,12 @@ class DailyDigest
   def amendments = Array(attributes["amendments"])
   def previous_date = attributes["previous_date"]
   def next_date = attributes["next_date"]
+
+  def refresh_command
+    return "hive digest refresh" if requested_date == "today" || attributes["local_date"].blank?
+
+    "hive digest refresh --date #{local_date}"
+  end
 
   def grouped_items
     order = projects.each_with_index.to_h { |project, index| [ project.fetch("project_id"), index ] }

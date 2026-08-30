@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/config"
 
 class HiveBrainstormSuggestionsConfigTest < Minitest::Test
+  include HiveTestHelper
+
   def with_project(config = "")
     Dir.mktmpdir do |root|
       state = File.join(root, ".hive-state")
@@ -47,6 +49,55 @@ class HiveBrainstormSuggestionsConfigTest < Minitest::Test
 
       File.delete(sidecar)
       assert_equal false, Hive::Config.load(root).dig("brainstorm", "suggestions", "enabled")
+    end
+  end
+
+  def test_closed_suggestion_schema_rejects_wrong_shape_unknown_keys_and_non_boolean_flag
+    base = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    invalid = [
+      [ [], "must be a Hash" ],
+      [ base.dig("brainstorm", "suggestions").merge("surprise" => true), "unknown keys" ],
+      [ base.dig("brainstorm", "suggestions").merge("enabled" => "yes"), "must be a boolean" ]
+    ]
+
+    invalid.each do |suggestions, message|
+      cfg = Marshal.load(Marshal.dump(base))
+      cfg["brainstorm"]["suggestions"] = suggestions
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:validate_brainstorm_suggestions!, cfg, "fixture.yml")
+      end
+      assert_includes error.message, message
+    end
+  end
+
+  def test_disable_check_treats_symlink_and_read_failure_as_unsafe
+    with_project do |root, state|
+      task = File.join(state, "stages", "2-brainstorm", "task-1")
+      FileUtils.mkdir_p(task)
+      brainstorm = File.join(task, "brainstorm.md")
+      cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+      cfg["project_root"] = root
+      cfg["hive_state_path"] = state
+      cfg["brainstorm"]["suggestions"]["enabled"] = false
+
+      File.symlink("missing", brainstorm)
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:validate_brainstorm_suggestion_disable!, cfg, "fixture.yml")
+      end
+
+      File.unlink(brainstorm)
+      File.write(brainstorm, "ordinary brainstorm\n")
+      original_binread = File.method(:binread)
+      replacement = lambda do |path, *args|
+        raise Errno::EIO, "read failed" if path == brainstorm
+
+        original_binread.call(path, *args)
+      end
+      with_replaced_singleton_method(File, :binread, replacement) do
+        assert_raises(Hive::ConfigError) do
+          Hive::Config.send(:validate_brainstorm_suggestion_disable!, cfg, "fixture.yml")
+        end
+      end
     end
   end
 end

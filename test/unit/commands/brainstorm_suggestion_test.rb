@@ -6,6 +6,8 @@ require "hive/brainstorm_suggestions/store"
 require_relative "../../fixtures/brainstorm_suggestions/pre_feature_parser"
 
 class HiveCommandsBrainstormSuggestionTest < Minitest::Test
+  include HiveTestHelper
+
   def test_cleanup_is_idempotent_and_preserves_parser_visible_answers
     Dir.mktmpdir do |root|
       task = File.join(root, "2-brainstorm", "task-1")
@@ -139,6 +141,117 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
       assert_equal "stale", result.fetch("status")
       assert_equal "binding_mismatch", result.fetch("reason")
       assert_equal before, File.binread(store.path)
+    end
+  end
+
+  def test_usage_validation_rejects_bad_actions_and_incomplete_candidate_requests
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::BrainstormSuggestion.new("retry", question: "bad")
+    end
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::BrainstormSuggestion.new("unknown", task_roots: []).call
+    end
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::BrainstormSuggestion.new("retry", task_roots: []).call
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::BrainstormSuggestion.new(
+        "retry", target: "missing", task_roots: [], question: 1,
+        binding: "a" * 64, json: true, output: StringIO.new
+      ).call
+    end
+  end
+
+  def test_invalid_state_plain_output_and_candidate_lock_contention_are_advisory
+    Dir.mktmpdir do |root|
+      task = File.join(root, "2-brainstorm", "task-1")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "brainstorm.md"), "### Q1. Choose?\n### A1.\n")
+      store = Hive::BrainstormSuggestions::Store.new(task)
+      store.write("records" => [ fresh_record.merge("dismissed" => true) ])
+
+      invalid = action("dismiss", task, binding: "b" * 64)
+      assert_equal "invalid_state", invalid.fetch("status")
+
+      output = StringIO.new
+      restored = Hive::Commands::BrainstormSuggestion.new(
+        "restore", target: task, task_roots: [ task ], question: 1,
+        binding: "b" * 64, output: output
+      ).call
+      assert_equal "updated", restored.fetch("status")
+      assert_includes output.string, "suggestion restore: updated"
+
+      busy = Hive::Lock.with_task_lock(task, op: "operator") do
+        action("retry", task, binding: "b" * 64)
+      end
+      assert_equal "lock_busy", busy.fetch("status")
+    end
+  end
+
+  def test_cleanup_without_brainstorm_has_plain_receipt_and_sidecar_unlink_is_idempotent
+    Dir.mktmpdir do |root|
+      task = File.join(root, "task-1")
+      FileUtils.mkdir_p(task)
+      store = Hive::BrainstormSuggestions::Store.new(task)
+      store.write("records" => [])
+      output = StringIO.new
+
+      receipt = Hive::Commands::BrainstormSuggestion.new(
+        "cleanup", task_roots: [ task ], output: output
+      ).call
+      assert receipt.fetch("safe_to_disable")
+      assert receipt.dig("tasks", 0, "parser_verified")
+      assert_includes output.string, "cleanup: safe"
+
+      store.write("records" => [])
+      command = Hive::Commands::BrainstormSuggestion.new("cleanup", task_roots: [ task ])
+      with_replaced_singleton_method(File, :unlink, ->(*) { raise Errno::ENOENT }) do
+        refute command.send(:remove_sidecar, task)
+      end
+    end
+  end
+
+  def test_registered_task_discovery_filters_projects_and_ignores_races
+    Dir.mktmpdir do |root|
+      state = File.join(root, ".hive-state")
+      task = File.join(state, "stages", "2-brainstorm", "task-1")
+      raced = File.join(state, "stages", "2-brainstorm", "raced")
+      FileUtils.mkdir_p(task)
+      entry = { "name" => "demo", "hive_state_path" => state }
+      other = { "name" => "other", "hive_state_path" => state }
+      command = Hive::Commands::BrainstormSuggestion.new("cleanup", project: "demo")
+      original_lstat = File.method(:lstat)
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ other, entry ] }) do
+        with_replaced_singleton_method(Dir, :glob, ->(*) { [ task, raced ] }) do
+          replacement = lambda do |path|
+            raise Errno::ENOENT, "raced" if path == raced
+
+            original_lstat.call(path)
+          end
+          with_replaced_singleton_method(File, :lstat, replacement) do
+            assert_equal [ task ], command.send(:registered_task_roots)
+            assert_equal [ task ], command.send(:discover_task_roots)
+          end
+        end
+      end
+    end
+  end
+
+  def test_cleanup_reports_an_unsafe_brainstorm_target
+    Dir.mktmpdir do |root|
+      task = File.join(root, "task-1")
+      FileUtils.mkdir_p(task)
+      target = File.join(root, "outside.md")
+      File.write(target, "## Round 1\n")
+      File.symlink(target, File.join(task, "brainstorm.md"))
+
+      receipt = Hive::Commands::BrainstormSuggestion.new(
+        "cleanup", task_roots: [ task ], json: true, output: StringIO.new
+      ).call
+
+      assert_equal "unsafe", receipt.dig("tasks", 0, "status")
+      refute receipt.fetch("safe_to_disable")
     end
   end
 

@@ -32,6 +32,26 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
+  def test_brainstorm_suggestion_action_flash_bounds_every_failure_state
+    row = make_task_row(slug: "suggestion-task")
+
+    assert_equal "no suggestion available to retry for suggestion-task",
+                 @model.send(
+                   :brainstorm_suggestion_action_flash, "retry", row,
+                   { "status" => "not_found" }
+                 )
+    assert_equal "suggestion retry deferred — task is busy",
+                 @model.send(
+                   :brainstorm_suggestion_action_flash, "retry", row,
+                   { "status" => "lock_busy" }
+                 )
+    assert_equal "suggestion retry unavailable for suggestion-task",
+                 @model.send(
+                   :brainstorm_suggestion_action_flash, "retry", row,
+                   { "status" => "unavailable" }
+                 )
+  end
+
   def key_message(key_type, runes: [])
     Bubbletea::KeyMessage.new(key_type: key_type, runes: runes)
   end

@@ -37,6 +37,7 @@ require "hive/commands/metrics"
 require "hive/commands/setup"
 require "hive/commands/setup_agents"
 require "hive/commands/evidence"
+require "hive/commands/brainstorm_suggestion"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -47,6 +48,25 @@ class HiveCliTest < Minitest::Test
 
       assert_equal [ "demo:task" ], calls.first.fetch(:args)
       assert_equal({ project: "demo" }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_brainstorm_suggestion_wires_candidate_identity_and_cleanup_scope
+    with_command_new_stub(Hive::Commands::BrainstormSuggestion) do |calls|
+      Hive::CLI.start([
+        "brainstorm-suggestion", "retry", "demo:task", "--project", "demo",
+        "--question", "2", "--binding", "a" * 64, "--json"
+      ])
+
+      assert_equal [ "retry" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          target: "demo:task", project: "demo", question: 2,
+          binding: "a" * 64, json: true
+        },
+        calls.first.fetch(:kwargs)
+      )
       assert_equal :call, calls.last
     end
   end

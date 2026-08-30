@@ -103,6 +103,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     Q.reset!
   end
 
+  def test_brainstorm_suggestion_scheduler_failure_is_isolated
+    dispatcher, _supervisor, _controller, logger, _merge_watcher = make_dispatcher
+    scheduler = Object.new
+    scheduler.define_singleton_method(:tick) { |**| raise IOError, "scheduler failed" }
+    dispatcher.instance_variable_set(:@brainstorm_suggestion_scheduler, scheduler)
+
+    dispatcher.send(:run_brainstorm_suggestion_scheduler, [], now: T0)
+
+    event = logger.events.find { |name, _payload| name == :fatal }
+    refute_nil event
+    assert_includes event.last.fetch(:message), "scheduler failed"
+  end
+
   # ── fakes ─────────────────────────────────────────────────────────────
 
   class FakeStatusConsumer

@@ -8,6 +8,18 @@ require "hive/daemon/status_consumer"
 class BrainstormSuggestionSchedulerTest < Minitest::Test
   include HiveTestHelper
 
+  class EventLogger
+    attr_reader :events
+
+    def initialize
+      @events = []
+    end
+
+    def event(name, **payload)
+      @events << [ name, payload ]
+    end
+  end
+
   FakeBundle = Struct.new(:manifest, :settled_answers, keyword_init: true)
 
   class FakeRunner
@@ -267,6 +279,197 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     ensure
       scheduler&.shutdown
     end
+  end
+
+  def test_startup_tick_and_row_classification_failures_are_bounded
+    logger = EventLogger.new
+    scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new(logger: logger)
+
+    with_replaced_singleton_method(
+      Hive::BrainstormSuggestions::Runner, :sweep_inactive!, ->(*) { 2 }
+    ) do
+      assert_equal 2, scheduler.startup!
+    end
+    assert logger.events.any? { |event, _| event == :brainstorm_suggestion_bundle_sweep }
+
+    bad_row = Object.new
+    bad_row.define_singleton_method(:folder) { raise IOError, "bad row" }
+    refute scheduler.send(:eligible_row?, bad_row)
+    refute scheduler.send(:brainstorm_worker_row?, bad_row)
+
+    bad_rows = Object.new
+    bad_rows.define_singleton_method(:to_ary) { raise IOError, "bad inventory" }
+    assert_equal 0, scheduler.tick(rows: bad_rows)
+    assert logger.events.any? { |event, _| event == :brainstorm_suggestion_scheduler_error }
+  ensure
+    scheduler&.shutdown
+  end
+
+  def test_disabled_and_unavailable_rows_cancel_work_without_exposing_errors
+    with_project do |_project, folder|
+      logger = EventLogger.new
+      disabled = suggestion_config
+      disabled["brainstorm"]["suggestions"]["enabled"] = false
+      scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new(
+        logger: logger, config_loader: ->(*) { disabled }
+      )
+      assert_equal 0, scheduler.tick(rows: [ row(folder) ], now: fixture_time)
+
+      unavailable = Hive::Daemon::BrainstormSuggestionScheduler.new(
+        logger: logger,
+        config_loader: ->(*) { raise Hive::ConfigError, "config unavailable" }
+      )
+      assert_nil unavailable.send(:config_for, row(folder))
+      assert logger.events.any? { |event, _| event == :brainstorm_suggestion_unavailable }
+    ensure
+      scheduler&.shutdown
+      unavailable&.shutdown
+    end
+  end
+
+  def test_reconcile_and_worker_launch_errors_are_logged_and_released
+    with_project do |_project, folder|
+      logger = EventLogger.new
+      current_row = row(folder)
+      slot_source = Hive::Daemon::BrainstormSuggestionScheduler.new
+      slot = slot_source.send(:inventory_slots, folder).first
+
+      locked = Hive::Daemon::BrainstormSuggestionScheduler.new(logger: logger)
+      locked.define_singleton_method(:inventory_slots) do |_root|
+        raise Hive::ConcurrentRunError, "busy"
+      end
+      locked.send(:reconcile_row, current_row, suggestion_config, now: fixture_time)
+
+      unavailable = Hive::Daemon::BrainstormSuggestionScheduler.new(logger: logger)
+      unavailable.define_singleton_method(:inventory_slots) do |_root|
+        raise Hive::Error, "unavailable"
+      end
+      unavailable.send(:reconcile_row, current_row, suggestion_config, now: fixture_time)
+
+      worker = Hive::Daemon::BrainstormSuggestionScheduler.new(
+        logger: logger, worker_launcher: ->(work) { work.call }
+      )
+      worker.define_singleton_method(:process_slot) do |*_args, **_kwargs|
+        raise IOError, "worker failed"
+      end
+      assert_nil worker.send(:schedule, current_row, suggestion_config, slot, now: fixture_time)
+
+      launcher = Hive::Daemon::BrainstormSuggestionScheduler.new(
+        worker_launcher: ->(*) { raise IOError, "launcher failed" }
+      )
+      assert_raises(IOError) do
+        launcher.send(:schedule, current_row, suggestion_config, slot, now: fixture_time)
+      end
+
+      assert logger.events.any? { |event, _| event == :brainstorm_suggestion_deferred }
+      assert logger.events.any? { |event, _| event == :brainstorm_suggestion_worker_error }
+    ensure
+      slot_source&.shutdown
+      locked&.shutdown
+      unavailable&.shutdown
+      worker&.shutdown
+      launcher&.shutdown
+    end
+  end
+
+  def test_changed_post_capture_binding_is_stale_and_coalesced
+    with_project do |_project, folder|
+      digests = [ "a" * 64, "b" * 64 ]
+      context_factory = ->(**) { bundle_for(-> { digests.shift || "b" * 64 }) }
+      runner = FakeRunner.new
+      scheduler = scheduler_for(
+        runner, -> { "unused" }, context_factory: context_factory
+      )
+
+      scheduler.tick(rows: [ row(folder) ], now: fixture_time)
+      record = record_for(folder)
+
+      assert_equal "stale", record.fetch("state")
+      assert_equal "selected_inputs_changed", record.fetch("error_code")
+      refute_nil record.fetch("next_retry_at")
+    ensure
+      scheduler&.shutdown
+    end
+  end
+
+  def test_capture_failure_is_published_but_late_or_locked_failures_are_discarded
+    with_project do |_project, folder|
+      error = Hive::BrainstormSuggestions::ContextBundle::CaptureError.new("capture_timeout")
+      scheduler = scheduler_for(
+        FakeRunner.new, -> { "a" * 64 }, context_factory: ->(**) { raise error }
+      )
+      current_row = row(folder)
+      scheduler.tick(rows: [ current_row ], now: fixture_time)
+      record = record_for(folder)
+      assert_equal "unavailable", record.fetch("state")
+      assert_equal "capture_timeout", record.fetch("error_code")
+
+      slot = scheduler.send(:inventory_slots, folder).first
+      path = File.join(folder, "brainstorm.md")
+      File.write(path, File.read(path).sub("### A1.\n", "### A1.\nOperator answer\n"))
+      assert_nil scheduler.send(
+        :publish_capture_failure, current_row, slot, "late", now: fixture_time
+      )
+
+      with_replaced_singleton_method(
+        Hive::Lock, :with_task_lock,
+        ->(*) { raise Hive::ConcurrentRunError, "busy" }
+      ) do
+        assert_nil scheduler.send(
+          :publish_capture_failure, current_row, slot, "busy", now: fixture_time
+        )
+      end
+
+      token = Hive::BrainstormSuggestions::Runner::Cancellation.new
+      scheduler.define_singleton_method(:capture) do |*|
+        raise Hive::ConcurrentRunError, "capture lock"
+      end
+      assert_nil scheduler.send(
+        :process_slot, current_row, suggestion_config, slot,
+        token: token, now: fixture_time
+      )
+    ensure
+      scheduler&.shutdown
+    end
+  end
+
+  def test_orphan_retry_backoff_cleanup_and_runtime_helpers_are_bounded
+    scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new
+    config = suggestion_config
+    binding = "a" * 64
+    loading = {
+      "input_epoch" => binding, "state" => "loading", "attempt_id" => "attempt",
+      "requested_at" => fixture_time.iso8601(6), "next_retry_at" => nil
+    }
+    refute scheduler.send(
+      :request_due?, loading, binding, config, now: fixture_time + 1
+    )
+
+    retry_at = scheduler.send(
+      :next_retry_at,
+      { "state" => "failed" },
+      { "automatic_attempts" => 1, "attempt_id" => "attempt-1" },
+      config,
+      now: fixture_time
+    )
+    assert_operator Time.iso8601(retry_at), :>, fixture_time
+    assert_instance_of Hive::BrainstormSuggestions::Runner,
+                       scheduler.send(:build_runner, config, "/tmp")
+    with_replaced_singleton_method(
+      Hive::Task, :new, ->(*) { raise Hive::Error, "missing task" }
+    ) do
+      assert_equal 0, scheduler.send(:task_generation, "/missing/task")
+    end
+    assert_nil scheduler.send(:parse_time, "invalid")
+    refute scheduler.send(:cleanup_task, "/missing/task")
+
+    with_replaced_singleton_method(File, :file?, ->(*) { true }) do
+      with_replaced_singleton_method(File, :read, ->(*) { raise Errno::EIO, "read failed" }) do
+        refute scheduler.send(:envelope_present?, "/missing/brainstorm.md")
+      end
+    end
+  ensure
+    scheduler&.shutdown
   end
 
   private

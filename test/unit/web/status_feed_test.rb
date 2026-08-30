@@ -69,6 +69,26 @@ class StatusFeedTest < Minitest::Test
     def max_active = @mutex.synchronize { @max_active }
   end
 
+  def test_suggestion_sidecar_read_error_has_a_bounded_identity
+    with_tmp_dir do |root|
+      path = File.join(root, Hive::BrainstormSuggestions::STORE_FILENAME)
+      File.write(path, "{}", mode: "w", perm: 0o600)
+      feed = Hive::Web::StatusFeed.new
+      original_open = File.method(:open)
+
+      replacement = lambda do |candidate, *args, **kwargs, &block|
+        raise Errno::EIO, "read failed" if candidate == path
+
+        original_open.call(candidate, *args, **kwargs, &block)
+      end
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_equal "unavailable", feed.send(:suggestion_sidecar_digest, root)
+      end
+    ensure
+      feed&.stop
+    end
+  end
+
   class CountingTokenFeed < Hive::Web::StatusFeed
     attr_reader :token_calls
 

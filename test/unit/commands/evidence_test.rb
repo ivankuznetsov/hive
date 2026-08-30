@@ -145,6 +145,179 @@ class CommandsEvidenceTest < Minitest::Test
     end
   end
 
+  def test_rework_exactly_revalidates_records_and_rewinds_through_approve
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      package = rework_package
+      pointer = package.fetch("current")
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_implementation_rework",
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+      store = Object.new
+      store.define_singleton_method(:package) { package }
+      approve_calls = []
+      approve_factory = lambda do |target, **options|
+        approve_calls << [ target, options ]
+        Object.new.tap do |command|
+          command.define_singleton_method(:call) do
+            options.fetch(:observation_guard).call(task)
+            options.fetch(:post_rearm_mutation).call(task)
+            { "ok" => true }
+          end
+        end
+      end
+      command = Hive::Commands::Evidence.new(
+        "rework", task.slug, json: true,
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest"),
+        task_resolver: -> { task }
+      )
+
+      out, = with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Commands::Approve, :new, approve_factory
+        ) do
+          capture_io { command.call }
+        end
+      end
+      payload = JSON.parse(out)
+
+      assert_equal "rework_started", payload.fetch("status")
+      assert_equal 1, payload.fetch("rework_sequence")
+      assert_equal "4-execute", payload.fetch("stage")
+      target, options = approve_calls.fetch(0)
+      assert_equal task.folder, target
+      assert_equal "7-artifacts", options.fetch(:from)
+      assert_equal "4-execute", options.fetch(:to)
+      assert options.fetch(:quiet)
+      receipt = JSON.parse(File.read(File.join(
+        task.folder, "outcome-evidence", "reworks", "rework-01.json"
+      )))
+      assert_equal pointer.fetch("generation"), receipt.fetch("generation")
+
+      plain = Hive::Commands::Evidence.new("rework", task.slug)
+      plain_out, = capture_io { plain.send(:emit_rework, payload) }
+      assert_includes plain_out, "returned #{task.slug} to 4-execute"
+      assert_includes plain_out, "rework sequence: 1"
+
+      quiet = Hive::Commands::Evidence.new("rework", task.slug, quiet: true)
+      assert_equal payload, quiet.send(:emit_rework, payload)
+    end
+  end
+
+  def test_rework_rejects_a_rotated_marker_before_recording_or_rewinding
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      package = rework_package
+      pointer = package.fetch("current")
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_review_blocked",
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+      store = Object.new
+      store.define_singleton_method(:package) { package }
+      approve_factory = lambda do |_target, **options|
+        Object.new.tap do |command|
+          command.define_singleton_method(:call) do
+            options.fetch(:observation_guard).call(task)
+          end
+        end
+      end
+      command = Hive::Commands::Evidence.new(
+        "rework", task.slug,
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest"),
+        task_resolver: -> { task }, approve_factory: approve_factory
+      )
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+      ) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { command.call }
+      end
+      refute File.exist?(File.join(task.folder, "outcome-evidence", "reworks"))
+    end
+  end
+
+  def test_rework_rejects_a_mismatched_pointer_and_a_missing_authorization
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      package = rework_package
+      pointer = package.fetch("current")
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_implementation_rework",
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+      store = Object.new
+      store.define_singleton_method(:package) do
+        package.merge("current" => pointer.merge("reason" => "review_blocked"))
+      end
+      approve_factory = lambda do |_target, **options|
+        Object.new.tap do |approve|
+          approve.define_singleton_method(:call) do
+            options.fetch(:observation_guard).call(task)
+          end
+        end
+      end
+      command = Hive::Commands::Evidence.new(
+        "rework", task.slug,
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest"),
+        task_resolver: -> { task }, approve_factory: approve_factory
+      )
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+      ) do
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { command.call }
+        assert_match(/does not match/, error.message)
+      end
+    end
+
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      package = rework_package
+      pointer = package.fetch("current")
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "outcome_evidence_implementation_rework",
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest")
+      )
+      store = Object.new
+      store.define_singleton_method(:package) { package }
+      approve_factory = lambda do |_target, **options|
+        Object.new.tap do |approve|
+          approve.define_singleton_method(:call) do
+            options.fetch(:observation_guard).call(task)
+          end
+        end
+      end
+      command = Hive::Commands::Evidence.new(
+        "rework", task.slug,
+        generation: pointer.fetch("generation"),
+        recovery_digest: pointer.fetch("recovery_digest"),
+        task_resolver: -> { task }, approve_factory: approve_factory
+      )
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+      ) do
+        error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { command.call }
+        assert_match(/did not record/, error.message)
+      end
+    end
+  end
+
   def test_terminal_capture_is_controller_scoped_and_returns_ready_descriptors
     requests = []
     response = {
@@ -314,6 +487,30 @@ class CommandsEvidenceTest < Minitest::Test
       reviewer_reasons: [ "The configured reviewer cannot inspect the required proof kind." ],
       attempt_ids: []
     )
+  end
+
+  def rework_package
+    {
+      "current" => {
+        "status" => "rework", "reason" => "implementation_rework",
+        "generation" => "a" * 64, "recovery_digest" => "b" * 64,
+        "failed_targets" => [ "claim-feature" ],
+        "reviewer_reasons" => [
+          "The implementation must expose the selected attachment state outside the overlay."
+        ],
+        "attempts" => [
+          { "attempt_id" => "attempt-01", "attempt_sha256" => "e" * 64 }
+        ]
+      },
+      "requirement" => {
+        "generation" => "a" * 64, "task_generation" => "3",
+        "implementation" => {
+          "implementation_base" => "a" * 40,
+          "implementation_head" => "b" * 40
+        }
+      },
+      "attempts" => [ { "attempt_id" => "attempt-01" } ]
+    }
   end
 
   def with_capture_mailbox(handler)

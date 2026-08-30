@@ -3726,11 +3726,15 @@ module Hive
         @external_active_agent_counts.fetch(project, 0)
       end
 
-      # Durable workflow errors remain retryable. Projection-repair rows are
-      # synthetic status results and cannot be fixed by another agent attempt.
+      # Ordinary ERROR markers replay their current stage through the recovery
+      # coordinator. Synthetic projection-repair rows cannot be fixed by an
+      # agent attempt. Outcome-evidence rework is the other typed exception:
+      # its TaskAction owns a digest-bound backward transition to execute, and
+      # same-stage recovery would only review the unchanged implementation.
       def retryable_error_row?(row)
         %w[error review_error].include?(row.marker.to_s) &&
-          !projection_repair_row?(row)
+          !projection_repair_row?(row) &&
+          !Hive::TerminalOutcome.outcome_evidence_rework?(row.marker_attrs)
       end
 
       def retry_disposition(row, assessment)

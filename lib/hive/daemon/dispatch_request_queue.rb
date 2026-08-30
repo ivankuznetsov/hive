@@ -27,7 +27,7 @@ module Hive
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan plan-review-run review open-pr artifacts finalize
-        archive markers daemon
+        archive evidence markers daemon
       ].freeze
 
       DIRNAME = "dispatch_requests".freeze
@@ -805,6 +805,8 @@ module Hive
         verb = argv[1].to_s
         return false unless ALLOWED_VERBS.include?(verb)
 
+        return valid_evidence_rework_argv?(argv) if verb == "evidence"
+
         # The `daemon` verb runs host-global maintenance, not project-scoped
         # work. Constrain it to the explicit GLOBAL_MAINTENANCE_ARGVS allowlist
         # so a request carrying a real registered+enabled project can't smuggle
@@ -818,6 +820,32 @@ module Hive
         return true if verb == "markers"
 
         SLUG_RE.match?(argv[2])
+      end
+
+      def valid_evidence_rework_argv?(argv)
+        return false unless argv[2] == "rework" && SLUG_RE.match?(argv[3].to_s)
+
+        tail = argv.drop(4)
+        json_count = tail.count("--json")
+        return false if json_count > 1
+
+        tail = tail.reject { |token| token == "--json" }
+        return false unless tail.length.even?
+
+        pairs = tail.each_slice(2).to_a
+        keys = pairs.map(&:first)
+        return false unless keys.uniq.length == pairs.length
+
+        required = %w[--generation --recovery-digest --stage]
+        return false unless keys.sort == required || keys.sort == [ *required, "--project" ].sort
+
+        options = pairs.to_h
+        options.fetch("--stage") == "7-artifacts" && # coding-scoped: evidence rework starts at coding artifacts
+          Hive::Attempts::OutputReference::SHA256_PATTERN.match?(options.fetch("--generation")) &&
+          Hive::Attempts::OutputReference::SHA256_PATTERN.match?(
+            options.fetch("--recovery-digest")
+          ) &&
+          (!options.key?("--project") || PROJECT_RE.match?(options.fetch("--project")))
       end
 
       def filename_for(created_at:, request_id:)

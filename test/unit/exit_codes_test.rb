@@ -74,7 +74,7 @@ class ExitCodesTest < Minitest::Test
 
   def test_task_action_kind_closed_enum_membership
     expected = %w[
-      ready_to_brainstorm ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
+      ready_to_brainstorm ready_to_plan ready_to_develop outcome_evidence_rework ready_to_open_pr ready_for_review
       ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance ready_to_run
       needs_input recover_draft_pr recover_execute recover_review agent_running archived manual_steering error
       review_parked admission_error plan_reviewing plan_review_retry plan_review_decision

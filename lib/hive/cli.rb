@@ -774,6 +774,7 @@ module Hive
     long_desc <<~DESC
       Subcommands:
         recover TARGET --generation SHA256 --recovery-digest SHA256
+        rework TARGET --generation SHA256 --recovery-digest SHA256
         terminal NAME -- COMMAND...
         browser COMMAND [ARG...]
 
@@ -781,6 +782,10 @@ module Hive
       blocked package and its semantic ERROR marker. It preserves the exhausted
       generation, advances a controller-owned epoch once, and instructs the
       operator to use the normal generation-guarded workflow.retry action.
+
+      Rework is daemon-runnable only for a reviewer-issued implementation
+      rework pointer. It exact-matches both digests, records one of two bounded
+      controller receipts, and returns the same task/worktree to 4-execute.
 
       `terminal` is a controller-scoped producer primitive. It is available
       only inside an outcome-evidence producer environment and records one argv

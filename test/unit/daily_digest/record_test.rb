@@ -3,6 +3,7 @@ require "hive/daily_digest/record"
 
 class DailyDigestRecordTest < Minitest::Test
   def test_rejects_every_invalid_base_axis
+    cutover = base.merge("boundary_kind" => "zone_cutover", "cutover" => valid_cutover)
     invalid = [
       [ [], /must be an object/ ],
       [ base.merge("schema_version" => 2), /unsupported/ ],
@@ -16,7 +17,13 @@ class DailyDigestRecordTest < Minitest::Test
       [ base.merge("interval_id" => "bad"), /interval_id/ ],
       [ base.merge("duration_seconds" => 1), /persisted interval/ ],
       [ base.merge("cutover" => {}), /calendar-day/ ],
-      [ base.merge("boundary_kind" => "zone_cutover"), /require cutover/ ]
+      [ base.merge("boundary_kind" => "zone_cutover"), /require cutover/ ],
+      [ cutover.merge("cutover" => valid_cutover.merge("effective_at" => "2026-08-30T01:00:00Z")),
+        /effective_at must equal starts_at/ ],
+      [ cutover.merge("cutover" => valid_cutover.merge("previous_time_zone" => "")),
+        /previous_time_zone must be non-empty/ ],
+      [ cutover.merge("cutover" => valid_cutover.merge("skipped_labels" => "2026-08-29")),
+        /skipped_labels must be an array/ ]
     ]
 
     invalid.each do |value, message|
@@ -39,6 +46,22 @@ class DailyDigestRecordTest < Minitest::Test
       Hive::DailyDigest::Record.prepare_amendment("2026-08-30", amendment)
     end
     assert_match(/source_frontiers/, error.message)
+
+    invalid_resolved_gaps = amendment.merge(
+      "source_frontiers" => {}, "resolved_gaps" => "not-an-array"
+    )
+    error = assert_raises(Hive::DailyDigest::InvalidRecord) do
+      Hive::DailyDigest::Record.prepare_amendment("2026-08-30", invalid_resolved_gaps)
+    end
+    assert_match(/resolved_gaps must be an array/, error.message)
+
+    mismatched_resolved_gaps = amendment.merge(
+      "source_frontiers" => {}, "resolved_gaps" => [ { "gap_id" => "gap-1" } ]
+    )
+    error = assert_raises(Hive::DailyDigest::InvalidRecord) do
+      Hive::DailyDigest::Record.prepare_amendment("2026-08-30", mismatched_resolved_gaps)
+    end
+    assert_match(/resolved_gaps must match resolved_gap_ids/, error.message)
 
     error = assert_raises(Hive::DailyDigest::InvalidRecord) do
       Hive::DailyDigest::Record.prepare("bad" => Float::NAN)
@@ -72,6 +95,15 @@ class DailyDigestRecordTest < Minitest::Test
       "last_materialized_at" => "2026-08-30T12:00:00Z",
       "projects" => [], "items" => [], "attention" => [], "gaps" => [],
       "source_frontiers" => {}
+    }
+  end
+
+  def valid_cutover
+    {
+      "requested_at" => "2026-08-29T12:00:00Z",
+      "effective_at" => "2026-08-30T00:00:00Z",
+      "previous_time_zone" => "Europe/London",
+      "skipped_labels" => []
     }
   end
 end

@@ -169,6 +169,43 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
     end
   end
 
+  def test_invalid_and_failed_sender_identity_checks_fail_safe
+    with_tmp_dir do |dir|
+      invalid = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "invalid"), process_identity: -> { [ "not-a-pid", nil ] }
+      )
+      invalid.prepare(**identity, now: NOW)
+      error = assert_raises(Hive::DailyDigest::DeliveryLedger::InvalidTransition) do
+        invalid.mark_sending(DATE, attempt: 1, now: NOW + 1)
+      end
+      assert_match(/sender identity is invalid/, error.message)
+
+      interrupted = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "interrupted"),
+        process_identity: -> { [ 321, "start-321" ] },
+        process_alive: ->(*) { raise IOError, "process table unavailable" }
+      )
+      interrupted.prepare(**identity, now: NOW)
+      interrupted.mark_sending(DATE, attempt: 1, now: NOW + 1)
+
+      preparation = interrupted.prepare(**identity, now: NOW + 2)
+      assert_equal :unknown, preparation.action
+      assert_equal "unknown", preparation.receipt.fetch("outcome")
+    end
+  end
+
+  def test_default_process_liveness_matches_pid_and_optional_start_time
+    ledger = Hive::DailyDigest::DeliveryLedger.new
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(pid) { pid != 10 }) do
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "start-20" }) do
+        refute ledger.send(:matching_process_alive?, 10, nil)
+        assert ledger.send(:matching_process_alive?, 20, nil)
+        assert ledger.send(:matching_process_alive?, 20, "start-20")
+        refute ledger.send(:matching_process_alive?, 20, "different-start")
+      end
+    end
+  end
+
   def test_symlinked_ledger_lock_is_rejected
     with_tmp_dir do |dir|
       root = File.join(dir, "deliveries")

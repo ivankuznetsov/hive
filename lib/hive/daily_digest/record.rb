@@ -190,8 +190,6 @@ module Hive
           raise InvalidRecord, "cutover.skipped_labels must be an array"
         end
         cutover.fetch("skipped_labels").each { |label| validate_date!(label) }
-      rescue KeyError
-        raise InvalidRecord, "cutover metadata is incomplete"
       end
       private_class_method :validate_cutover!
     end

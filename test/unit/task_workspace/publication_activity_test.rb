@@ -55,6 +55,28 @@ class TaskWorkspacePublicationActivityTest < Minitest::Test
                                                     .record(before: {}, after: merged)
   end
 
+  def test_defensive_observation_and_check_outcomes_are_closed
+    activity = Activity.new
+    observer = Hive::TaskWorkspace::PublicationActivity.new(activity: activity)
+    assert_nil observer.send(:observation, Object.new)
+
+    none = presented_observation.fetch("observation")
+    failing = presented_observation(
+      "checks" => [ { "status" => "COMPLETED", "conclusion" => "FAILURE" } ]
+    ).fetch("observation")
+    pending = presented_observation(
+      "checks" => [ { "status" => "IN_PROGRESS", "conclusion" => nil } ]
+    ).fetch("observation")
+    assert_equal "none", observer.send(:check_payload, none).fetch("check_state")
+    assert_equal "failing", observer.send(:check_payload, failing).fetch("check_state")
+    assert_equal "pending", observer.send(:check_payload, pending).fetch("check_state")
+
+    activity.define_singleton_method(:record) do |**|
+      raise Hive::TaskActivity::AppendFailed, "journal unavailable"
+    end
+    refute observer.record(before: nil, after: presented_observation("state" => "CLOSED"))
+  end
+
   private
 
   def presented_observation(overrides = {})

@@ -4510,6 +4510,14 @@ class ConfigTest < Minitest::Test
       YAML
       error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/child_stage_timeouts.*must be a Hash/, error.message)
+
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts:
+            daily_digest_close: forever
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daily_digest_close.*integer >= 0/, error.message)
     end
   end
 

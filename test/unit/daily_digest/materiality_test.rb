@@ -103,6 +103,21 @@ class DailyDigestMaterialityTest < Minitest::Test
     assert_equal "2026-08-30T11:00:00.000000Z", result.value.fetch("observed_at")
   end
 
+  def test_invalid_activity_without_any_valid_time_uses_observation_clock_fallback
+    malformed = activity("stage_transition", "transition" => "completed")
+    malformed["occurred_at"] = "not-a-time"
+    malformed["observed_at"] = "also-not-a-time"
+
+    result = Hive::DailyDigest::Materiality.classify(
+      malformed,
+      project: { "project_id" => "project-1", "name" => "demo" },
+      observed_at: "invalid-collector-time"
+    )
+
+    assert_equal :gap, result.disposition
+    assert_kind_of Time, Time.iso8601(result.value.fetch("observed_at"))
+  end
+
   def test_pull_request_activity_exposes_the_closed_direct_link_shape
     fact = classify(
       "pr_observed", "pr_number" => "42",

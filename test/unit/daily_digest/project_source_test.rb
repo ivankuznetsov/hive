@@ -45,7 +45,7 @@ class DailyDigestProjectSourceTest < Minitest::Test
       FileUtils.mkdir_p([ unknown, malformed ])
       File.write(File.join(unknown, "state.md"), "material\n")
       File.write(File.join(malformed, "task.md"), "# task\n")
-      File.write(File.join(malformed, "task-journal.jsonl"), "not-json\n")
+      File.write(File.join(malformed, "task-journal.jsonl"), "not-json\n[]\n")
 
       result = Hive::DailyDigest::ProjectSource.new(
         project: project_entry(project),
@@ -54,7 +54,7 @@ class DailyDigestProjectSourceTest < Minitest::Test
         known_stage_dirs: %w[4-execute]
       ).collect
 
-      assert_equal %w[malformed_journal unknown_stage],
+      assert_equal %w[malformed_journal malformed_journal unknown_stage],
                    result.gaps.map { |gap| gap.fetch("reason_code") }.sort
     end
   end
@@ -267,6 +267,43 @@ class DailyDigestProjectSourceTest < Minitest::Test
     end
   end
 
+  def test_stage_root_escape_and_realpath_races_fail_closed
+    with_tmp_dir do |project|
+      state = File.join(project, ".hive-state")
+      stages = File.join(state, "stages")
+      stage = File.join(stages, "4-execute")
+      FileUtils.mkdir_p(stage)
+      source = build_source(project, known_stage_dirs: %w[4-execute])
+      original = File.method(:realpath)
+
+      with_replaced_singleton_method(
+        File, :realpath,
+        ->(path) { path == stages ? File.join(project, "escaped-stages") : original.call(path) }
+      ) do
+        error = assert_raises(Hive::DailyDigest::ProjectSource::SourceUnavailable) do
+          source.send(:verified_stages_root!, File.realpath(state))
+        end
+        assert_match(/stages escape/, error.message)
+      end
+
+      with_replaced_singleton_method(
+        File, :realpath,
+        ->(path) { path == stages ? (raise Errno::ENOENT, "removed") : original.call(path) }
+      ) do
+        assert_raises(Hive::DailyDigest::ProjectSource::SourceUnavailable) do
+          source.send(:verified_stages_root!, File.realpath(state))
+        end
+      end
+
+      with_replaced_singleton_method(
+        File, :realpath,
+        ->(path) { path == stage ? (raise Errno::EACCES, "denied") : original.call(path) }
+      ) do
+        refute source.send(:safe_stage_root?, stage, stages)
+      end
+    end
+  end
+
   def test_symlinked_malformed_and_oversized_task_evidence_becomes_scoped_gaps
     with_tmp_dir do |project|
       stage = File.join(project, ".hive-state", "stages", "4-execute")
@@ -357,6 +394,26 @@ class DailyDigestProjectSourceTest < Minitest::Test
       assert_equal [ "check_observed" ], result.facts.map { |fact| fact.fetch("kind") }
       assert_equal [ "pr_evidence_incomplete" ], result.gaps.map { |gap| gap.fetch("reason_code") }
       assert_equal false, source.send(:before_boundary?, "bad-time")
+
+      review = activity(
+        "review_observed", "event-review", "pr_number" => 42,
+        "pr_url" => "https://github.com/acme/demo/pull/42", "head_oid" => "a" * 40
+      )
+      assert source.send(:incomplete_pr_evidence?, review)
+    end
+  end
+
+  def test_boundary_marker_read_errors_are_not_treated_as_attention
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "2-brainstorm", "task")
+      FileUtils.mkdir_p(task)
+      source = build_source(project, known_stage_dirs: %w[2-brainstorm])
+
+      with_replaced_singleton_method(
+        Hive::Markers, :current, ->(_path) { raise IOError, "marker unavailable" }
+      ) do
+        refute source.send(:boundary_marker?, task)
+      end
     end
   end
 

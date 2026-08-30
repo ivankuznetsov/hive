@@ -149,4 +149,45 @@ class HiveDaemonDailyDigestCloseSchedulerTest < Minitest::Test
       assert_raises(ArgumentError) { scheduler.reconfigure(enabled: true, interval_sec: value) }
     end
   end
+
+  def test_pending_cancellation_and_ambiguous_completion_are_typed
+    with_tmp_dir do |dir|
+      events = []
+      logger = Object.new
+      logger.define_singleton_method(:event) { |event, **payload| events << [ event, payload ] }
+      store = Object.new
+      store.define_singleton_method(:read) do |_date|
+        raise Hive::DailyDigest::Error, "missing"
+      end
+      now = Time.iso8601("2026-08-30T12:00:00Z")
+      scheduler = Hive::Daemon::DailyDigestCloseScheduler.new(
+        state_path: File.join(dir, "state.json"), enabled: true, interval_sec: 300,
+        logger: logger, store: store, date_resolver: ->(_instant) { "2026-08-30" }
+      )
+
+      scheduler.tick(now: now)
+      assert scheduler.pending?("2026-08-30")
+      scheduler.cancel(date: "2026-08-30", stage: "daily_digest_close")
+      refute scheduler.pending?("2026-08-30")
+
+      pending = scheduler.instance_variable_get(:@pending)
+      pending.fetch("daily_digest_refresh")["2026-08-30"] = true
+      pending.fetch("daily_digest_close")["2026-08-30"] = true
+      error = assert_raises(ArgumentError) do
+        scheduler.complete(date: "2026-08-30", exit_code: 0, now: now)
+      end
+      assert_match(/completion stage is ambiguous/, error.message)
+      assert_equal :daily_digest_scheduler_failure_backoff, events.last.fetch(0)
+      assert_equal 60, events.last.fetch(1).fetch(:retry_after_sec)
+
+      scheduler.cancel(date: "2026-08-30")
+      refute scheduler.pending?("2026-08-30")
+      assert_raises(ArgumentError) do
+        scheduler.cancel(date: "2026-08-30", stage: "unknown")
+      end
+
+      scheduler.complete(date: "2026-08-31", exit_code: 0, now: now + 1)
+      assert File.file?(File.join(dir, "state.json"))
+    end
+  end
 end

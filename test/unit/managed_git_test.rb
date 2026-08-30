@@ -80,6 +80,13 @@ class ManagedGitTest < Minitest::Test
                     "credential.https://github.com.helper=!/usr/bin/true auth git-credential"
   end
 
+  def test_default_gh_binary_is_embedded_in_credential_helper
+    command = Hive::ManagedGit.command("/tmp/repo", "status", env: {})
+
+    assert_includes command,
+                    "credential.https://github.com.helper=!gh auth git-credential"
+  end
+
   def test_gh_binary_override_must_be_an_absolute_executable
     error = assert_raises(ArgumentError) do
       Hive::ManagedGit.command(

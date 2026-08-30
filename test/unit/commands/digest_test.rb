@@ -299,6 +299,16 @@ class DigestCommandTest < Minitest::Test
     assert_equal "59s", command.send(:format_age, 59)
     assert_equal "age unknown", command.send(:format_age, "bad")
     assert_equal "", command.send(:date_flag, nil)
+
+    amendments = StringIO.new
+    command = Hive::Commands::Digest.new(stdout: amendments)
+    command.send(:render_amendments, [ {
+      "amended_at" => "2026-08-31T08:00:00Z", "kind" => "late_observation",
+      "items" => [ { "summary" => "Late completion", "project" => "demo", "task_slug" => "task" } ],
+      "resolved_gap_ids" => [ "gap-1" ], "resolved_gaps" => []
+    } ])
+    assert_includes amendments.string, "late: Late completion · demo:task"
+    assert_includes amendments.string, "recovered gap: gap-1"
   end
 
   def test_invalid_web_origins_and_unexpected_errors_emit_typed_json

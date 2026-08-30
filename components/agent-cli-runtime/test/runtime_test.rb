@@ -324,10 +324,14 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
   private
 
   def compile(provider, **options)
+    profile = AgentCliRuntime::Profiles.fetch(provider)
     AgentCliRuntime.compile(
       AgentCliRuntime::Request.new(
-        profile: AgentCliRuntime::Profiles.fetch(provider),
+        profile: profile,
         prompt: "hello",
+        # Prompt-transport tests exercise the built-in profile contract, not
+        # host-level executable overrides such as HIVE_CODEX_BIN.
+        executable: profile.bin_default,
         **options
       )
     )

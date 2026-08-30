@@ -2,6 +2,7 @@ require "test_helper"
 require "open3"
 require "rbconfig"
 require "securerandom"
+require "shellwords"
 require "socket"
 require "hive/user_service"
 
@@ -28,6 +29,7 @@ class SystemdUserServiceOfflineTest < Minitest::Test
     Dir.mktmpdir("hive-systemd-offline-") do |dir|
       attempts_path = File.join(dir, "attempts.log")
       success_path = File.join(dir, "success.log")
+      command_log_path = File.join(dir, "systemctl.log")
       port = unused_port
       definition = Hive::UserService::Definition.new(
         platform: :linux,
@@ -39,89 +41,94 @@ class SystemdUserServiceOfflineTest < Minitest::Test
           success_path: success_path
         )
       )
-      commands = []
-      service = build_service(definition, home: home, commands: commands)
+      shim_dir = provision_systemctl_shim(dir, command_log_path)
 
-      begin
-        result = service.apply(service.plan(autostart: true))
-        assert result.success?, "install failed: #{result.diagnostics.inspect} #{result.error_class}"
-        assert_equal :written, result.kind
+      with_env(
+        "PATH" => "#{shim_dir}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH', '')}",
+        "HIVE_SYSTEMD_COMMAND_LOG" => command_log_path
+      ) do
+        service = build_service(definition, home: home)
+        begin
+          result = service.apply(service.plan(autostart: true))
+          assert result.success?, "install failed: #{result.diagnostics.inspect} #{result.error_class}"
+          assert_equal :written, result.kind
 
-        wait_until(OFFLINE_TIMEOUT_SEC, "#{unit_name} did not remain alive for offline retries") do
-          record_count(attempts_path) >= OFFLINE_ATTEMPTS && active?(unit_name)
-        end
-        assert enabled?(unit_name)
-        assert_equal 0, integer_property(unit_name, "NRestarts")
-        original_pid = integer_property(unit_name, "MainPID")
-        assert_operator original_pid, :positive?
-        assert process_alive?(original_pid)
-        assert_equal [ original_pid ], live_cgroup_pids(unit_name)
-
-        server = TCPServer.new("127.0.0.1", port)
-        server_errors = Queue.new
-        server_thread = Thread.new do
-          client = server.accept
-          client.gets
-          client.puts("ready")
-        rescue IOError, Errno::EBADF
-          nil
-        rescue StandardError => error
-          server_errors << error
-        ensure
-          client&.close
-        end
-
-        wait_until(RECONNECT_TIMEOUT_SEC, "#{unit_name} did not become healthy after reconnect") do
-          record_count(success_path) == 1
-        end
-        server_thread.join(2)
-        raise server_errors.pop unless server_errors.empty?
-        assert_equal original_pid, integer_property(unit_name, "MainPID")
-        assert_equal [ original_pid ], live_cgroup_pids(unit_name)
-        assert_equal 1, unit_inventory(unit_name).size
-
-        mutations = commands.count { |argv| manager_mutation?(argv) }
-        replay = build_service(definition, home: home, commands: commands)
-        replay_result = replay.apply(replay.plan(autostart: true))
-        assert_equal :unchanged, replay_result.kind
-        assert_equal mutations, commands.count { |argv| manager_mutation?(argv) }
-        assert_equal original_pid, integer_property(unit_name, "MainPID")
-
-        busy_plan = replay.plan(autostart: true)
-        ready = Queue.new
-        release = Queue.new
-        holder_error = Queue.new
-        transaction = Hive::UserService::Transaction.new(
-          definition: definition,
-          home: home,
-          lock_wait: 0.05
-        )
-        holder = Thread.new do
-          transaction.with_lock do
-            ready << true
-            release.pop
+          wait_until(OFFLINE_TIMEOUT_SEC, "#{unit_name} did not remain alive for offline retries") do
+            record_count(attempts_path) >= OFFLINE_ATTEMPTS && active?(unit_name)
           end
-        rescue StandardError => error
-          holder_error << error
-        end
-        ready.pop
-        contender = build_service(definition, home: home, commands: commands, lock_wait: 0.05)
-        busy_result = contender.apply(busy_plan)
-        release << true
-        holder.join
-        raise holder_error.pop unless holder_error.empty?
+          assert enabled?(unit_name)
+          assert_equal 0, integer_property(unit_name, "NRestarts")
+          original_pid = integer_property(unit_name, "MainPID")
+          assert_operator original_pid, :positive?
+          assert process_alive?(original_pid)
+          assert_equal [ original_pid ], live_cgroup_pids(unit_name)
 
-        assert_equal :failed, busy_result.kind
-        assert_includes busy_result.diagnostics, :operation_busy
-        assert_equal mutations, commands.count { |argv| manager_mutation?(argv) }
-        assert_equal original_pid, integer_property(unit_name, "MainPID")
-        assert_equal [ original_pid ], live_cgroup_pids(unit_name)
-        assert_equal 1, record_count(success_path)
-        assert_equal 1, Dir[File.join(File.dirname(target_path), unit_name)].size
-      ensure
-        server&.close
-        server_thread&.join(2)
-        cleanup!(definition, home: home) if definition
+          server = TCPServer.new("127.0.0.1", port)
+          server_errors = Queue.new
+          server_thread = Thread.new do
+            client = server.accept
+            client.gets
+            client.puts("ready")
+          rescue IOError, Errno::EBADF
+            nil
+          rescue StandardError => error
+            server_errors << error
+          ensure
+            client&.close
+          end
+
+          wait_until(RECONNECT_TIMEOUT_SEC, "#{unit_name} did not become healthy after reconnect") do
+            record_count(success_path) == 1
+          end
+          server_thread.join(2)
+          raise server_errors.pop unless server_errors.empty?
+          assert_equal original_pid, integer_property(unit_name, "MainPID")
+          assert_equal [ original_pid ], live_cgroup_pids(unit_name)
+          assert_equal 1, unit_inventory(unit_name).size
+
+          mutations = manager_mutation_count(command_log_path)
+          replay = build_service(definition, home: home)
+          replay_result = replay.apply(replay.plan(autostart: true))
+          assert_equal :unchanged, replay_result.kind
+          assert_equal mutations, manager_mutation_count(command_log_path)
+          assert_equal original_pid, integer_property(unit_name, "MainPID")
+
+          busy_plan = replay.plan(autostart: true)
+          ready = Queue.new
+          release = Queue.new
+          holder_error = Queue.new
+          transaction = Hive::UserService::Transaction.new(
+            definition: definition,
+            home: home,
+            lock_wait: 0.05
+          )
+          holder = Thread.new do
+            transaction.with_lock do
+              ready << true
+              release.pop
+            end
+          rescue StandardError => error
+            holder_error << error
+          end
+          ready.pop
+          contender = build_service(definition, home: home, lock_wait: 0.05)
+          busy_result = contender.apply(busy_plan)
+          release << true
+          holder.join
+          raise holder_error.pop unless holder_error.empty?
+
+          assert_equal :failed, busy_result.kind
+          assert_includes busy_result.diagnostics, :operation_busy
+          assert_equal mutations, manager_mutation_count(command_log_path)
+          assert_equal original_pid, integer_property(unit_name, "MainPID")
+          assert_equal [ original_pid ], live_cgroup_pids(unit_name)
+          assert_equal 1, record_count(success_path)
+          assert_equal 1, Dir[File.join(File.dirname(target_path), unit_name)].size
+        ensure
+          server&.close
+          server_thread&.join(2)
+          cleanup!(definition, home: home) if definition
+        end
       end
     end
   end
@@ -174,21 +181,9 @@ class SystemdUserServiceOfflineTest < Minitest::Test
     %Q("#{escaped}")
   end
 
-  def build_service(definition, home:, commands:, lock_wait: Hive::UserService::Transaction::LOCK_WAIT_SEC)
+  def build_service(definition, home:, lock_wait: Hive::UserService::Transaction::LOCK_WAIT_SEC)
     Hive::UserService.new(
       definition: definition,
-      runner: lambda { |argv|
-        commands << argv
-        if argv == %w[systemctl --user daemon-reload] && File.file?(definition.target_path)
-          verify_output, verify_status = Open3.capture2e(
-            "systemd-analyze", "--user", "verify", definition.target_path
-          )
-          warn "systemd-analyze verify: #{verify_output.strip}" unless verify_status.success?
-        end
-        output, status = Open3.capture2e(*argv)
-        warn "#{argv.join(' ')}: #{output.strip}" if !status.success? && manager_mutation?(argv)
-        status.success?
-      },
       query_available: true,
       manager_available: :available,
       home: home,
@@ -197,8 +192,7 @@ class SystemdUserServiceOfflineTest < Minitest::Test
   end
 
   def cleanup!(definition, home:)
-    commands = []
-    service = build_service(definition, home: home, commands: commands)
+    service = build_service(definition, home: home)
     result = service.remove(service.plan_remove)
     return verify_removed!(definition) if %i[removed absent].include?(result.kind)
 
@@ -293,8 +287,38 @@ class SystemdUserServiceOfflineTest < Minitest::Test
     output.lines.select { |line| line.split.first == unit_name }
   end
 
-  def manager_mutation?(argv)
-    argv == %w[systemctl --user daemon-reload] ||
-      %w[enable disable start stop restart].include?(argv[2])
+  def provision_systemctl_shim(dir, command_log_path)
+    real_systemctl = executable_path("systemctl")
+    assert real_systemctl, "systemctl must be executable in PATH"
+    shim_dir = File.join(dir, "bin")
+    FileUtils.mkdir_p(shim_dir)
+    shim = File.join(shim_dir, "systemctl")
+    File.write(shim, <<~SH)
+      #!/bin/sh
+      printf '%s\\n' "$*" >> "$HIVE_SYSTEMD_COMMAND_LOG"
+      exec #{Shellwords.escape(real_systemctl)} "$@"
+    SH
+    FileUtils.chmod(0o755, shim)
+    File.write(command_log_path, "")
+    shim_dir
+  end
+
+  def executable_path(name)
+    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
+      candidate = File.join(directory, name)
+      return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
+    end
+    nil
+  end
+
+  def manager_mutation_count(path)
+    return 0 unless File.exist?(path)
+
+    File.foreach(path).count do |line|
+      arguments = line.split
+      arguments.first == "--user" &&
+        (arguments[1] == "daemon-reload" ||
+         %w[enable disable start stop restart].include?(arguments[1]))
+    end
   end
 end

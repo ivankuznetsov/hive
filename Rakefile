@@ -49,6 +49,17 @@ Rake::TestTask.new do |t|
   t.warning = false
 end
 
+# Direct root-Hive manifest without the standalone component prerequisite. This
+# is evidence only for the narrowly documented baseline comparison; ordinary
+# local and CI callers continue to use `rake test`.
+Rake::TestTask.new("test:hive") do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = HIVE_DEFAULT_TEST_FILES
+  t.warning = false
+  t.description = "Run the default Hive test-file manifest without component prerequisites"
+end
+
 Rake::TestTask.new("test:agent_cli_runtime") do |t|
   t.libs << "components/agent-cli-runtime/test"
   t.libs << "components/agent-cli-runtime/lib"

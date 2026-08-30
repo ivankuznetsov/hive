@@ -56,6 +56,8 @@ class CiTestPartitionTest < Minitest::Test
                    Rake::Task["test:systemd_user_service"].prerequisites
       assert_equal [ "test:require_nonempty_ci_gate" ],
                    Rake::Task["test:enable_systemd_user_gate"].prerequisites
+      assert_empty Rake::Task["test:hive"].prerequisites,
+                   "the R8 diagnostic task must bypass component prerequisites"
     end
   end
 

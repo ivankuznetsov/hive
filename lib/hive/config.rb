@@ -5,6 +5,7 @@ require "digest"
 require "time"
 require "pathname"
 require "set"
+require "json"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
@@ -1705,7 +1706,8 @@ module Hive
       def exit_code = Hive::ExitCodes::USAGE
     end
 
-    def register_project(name:, path:, repository_identity: :detect, replace_existing: true)
+    def register_project(name:, path:, repository_identity: :detect, replace_existing: true,
+                         now: Time.now.utc)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
@@ -1718,13 +1720,14 @@ module Hive
         else
           retired&.fetch(:project_id) || SecureRandom.uuid
         end
+        timestamp = normalize_membership_time(now)
         entry = {
           "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path,
           "project_id" => project_id,
           "registration_id" => existing&.fetch("registration_id", nil) ||
             retired&.fetch(:registration_id) || SecureRandom.uuid,
           "registered_at" => existing&.fetch("registered_at", nil) ||
-            retired&.fetch(:registered_at) || Time.now.utc.iso8601(6)
+            retired&.fetch(:registered_at) || timestamp
         }
         identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
         entry["repository_identity"] = identity if identity
@@ -1743,9 +1746,19 @@ module Hive
               name: name, existing_path: existing.fetch("path")
             )
           end
+          before = membership_snapshot(existing)
+          changed = membership_snapshot(entry) != before
           existing.replace(entry)
+          append_membership_history!(
+            data, kind: "replaced", occurred_at: timestamp,
+            before: before, after: membership_snapshot(entry)
+          ) if changed
         else
           data["registered_projects"] << entry
+          append_membership_history!(
+            data, kind: "registered", occurred_at: timestamp,
+            before: nil, after: membership_snapshot(entry)
+          )
         end
       end
       sync_runtime_projects!
@@ -1903,7 +1916,7 @@ module Hive
     # with the same name and content are equal under `Hash#==`, so
     # `entries - [removed]` would clear BOTH. delete_at on the matched
     # index removes exactly the row the operator named.
-    def unregister_project(name:)
+    def unregister_project(name:, now: Time.now.utc)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       return nil unless File.exist?(global_config_path)
@@ -1926,6 +1939,10 @@ module Hive
             remaining = entries.dup
             remaining.delete_at(idx)
             data["registered_projects"] = remaining
+            append_membership_history!(
+              data, kind: "unregistered", occurred_at: normalize_membership_time(now),
+              before: membership_snapshot(removed), after: nil
+            )
             write_global_config_atomic!(data)
           end
         end
@@ -1953,7 +1970,7 @@ module Hive
     # than re-reading via `registered_projects.size`) closes the
     # consistency window where a concurrent register/forget between the
     # two reads produced inconsistent counts.
-    def prune_missing_projects!(dry_run: false)
+    def prune_missing_projects!(dry_run: false, now: Time.now.utc)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       return { removed: [], kept_count: 0 } unless File.exist?(global_config_path)
@@ -1969,6 +1986,13 @@ module Hive
           result = { removed: removed, kept_count: kept.size }
           if removed.any? && !dry_run
             data["registered_projects"] = kept
+            occurred_at = normalize_membership_time(now)
+            removed.each do |entry|
+              append_membership_history!(
+                data, kind: "pruned", occurred_at: occurred_at,
+                before: membership_snapshot(entry), after: nil
+              )
+            end
             write_global_config_atomic!(data)
           end
         end
@@ -2009,6 +2033,57 @@ module Hive
       expanded == value ? expanded : nil
     rescue ArgumentError
       nil
+    end
+
+    MEMBERSHIP_FIELDS = %w[
+      name project_id registration_id path real_path hive_state_path
+      repository_identity registered_at
+    ].freeze
+
+    def membership_snapshot(entry)
+      return {} unless entry.is_a?(Hash)
+
+      MEMBERSHIP_FIELDS.each_with_object({}) do |key, out|
+        value = entry[key]
+        out[key] = value if value.is_a?(String) || value.is_a?(Numeric) ||
+                            value == true || value == false
+      end
+    end
+
+    def append_membership_history!(data, kind:, occurred_at:, before:, after:)
+      event = {
+        "schema" => "hive-project-membership",
+        "schema_version" => 1,
+        "kind" => kind,
+        "occurred_at" => occurred_at,
+        "before" => before,
+        "after" => after
+      }
+      event["event_id"] = Digest::SHA256.hexdigest(
+        JSON.generate(canonical_membership_value(event))
+      )
+      data["project_membership_history"] = Array(data["project_membership_history"])
+      data["project_membership_history"] << event unless
+        data["project_membership_history"].any? { |row| row.is_a?(Hash) && row["event_id"] == event["event_id"] }
+      event
+    end
+
+    def canonical_membership_value(value)
+      case value
+      when Hash
+        value.keys.map(&:to_s).sort.to_h do |key|
+          source = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
+          [ key, canonical_membership_value(value.fetch(source)) ]
+        end
+      when Array then value.map { |child| canonical_membership_value(child) }
+      else value
+      end
+    end
+
+    def normalize_membership_time(value)
+      (value.is_a?(Time) ? value : Time.iso8601(value.to_s)).utc.iso8601(6)
+    rescue ArgumentError, TypeError
+      raise ConfigError, "project membership time must be an ISO-8601 timestamp"
     end
 
     def realpath_or_nil(path)

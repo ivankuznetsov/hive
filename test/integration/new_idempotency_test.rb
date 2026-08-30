@@ -6,6 +6,7 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/workflow"
 require "hive/task_meta"
+require "hive/daily_digest/task_creation_receipt"
 
 class NewIdempotencyTest < Minitest::Test
   include HiveTestHelper
@@ -514,6 +515,31 @@ class NewIdempotencyTest < Minitest::Test
 
       refute_includes metadata, "idempotency_key"
       refute_includes metadata, "input_fingerprint"
+      receipt = Hive::DailyDigest::TaskCreationReceipt.read!(folder)
+      assert_equal "ordinary-task", receipt.fetch("task_slug")
+      assert_equal project, receipt.fetch("project_name")
+      assert_equal "coding", receipt.fetch("workflow")
+    end
+  end
+
+  def test_creation_receipt_failure_rolls_back_the_uncommitted_candidate
+    with_initialized_project do |project_root, project|
+      failure = lambda do |**|
+        raise Hive::DailyDigest::TaskCreationReceipt::Error, "injected receipt failure"
+      end
+      with_replaced_singleton_method(
+        Hive::DailyDigest::TaskCreationReceipt, :write!, failure
+      ) do
+        assert_raises(Hive::DailyDigest::TaskCreationReceipt::Error) do
+          Hive::Commands::New.new(
+            project, "must roll back", slug_override: "receipt-failure-task"
+          ).call!
+        end
+      end
+
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "receipt-failure-task")
+      )
     end
   end
 

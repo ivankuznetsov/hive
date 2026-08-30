@@ -348,7 +348,10 @@ module Hive
           reason: "pull request #{state}", source: "open_pr",
           payload: {
             "pr_number" => number, "pr_state" => state,
-            "commit_oid" => publication.fetch("head_oid")
+            "pr_url" => publication["url"],
+            "commit_oid" => publication.fetch("head_oid"),
+            "head_oid" => publication.fetch("head_oid"),
+            "draft" => state == "draft"
           }
         )
       end

@@ -139,8 +139,10 @@ legacy rows render unchanged.
 The internal task graph used by operational status and the daemon reads each
 task's derived condition projection through a strict bounded path. One
 scan-wide attempt projection reader is reused, while each task may read at
-most a 512 KiB checkpoint, a 1 MiB / 2,000-event journal suffix, 100 referenced
-attempt IDs, and 32 predecessor point fetches. Routine status never falls back
+most a 512 KiB checkpoint, a 1 MiB / 2,000-event journal suffix, 100 IDs across
+mutable checkpoint bindings plus that suffix, and 32 predecessor point fetches. Terminal
+bindings already sealed inside that byte-bounded checkpoint do not consume the
+mutable-ID budget. Routine status never falls back
 to the complete journal, rebuilds a projection, or enumerates permanent proof
 storage. Bytes before a valid checkpoint and unrelated proof count therefore
 do not increase routine work.
@@ -180,7 +182,9 @@ This is different from `workflow.retry`: retry reruns a workflow failure, but
 cannot reconstruct derived projection state. The terminal reasons
 `checkpoint_oversized` and `attempt_ids_exhausted` omit a repair command because
 repeating it cannot fit the current fixed bounds; compact that task's retained
-projection history first. `predecessor_fetches_exhausted` remains exact-task
+projection history first. `attempt_ids_exhausted` counts only mutable
+checkpoint bindings and IDs introduced by the bounded suffix, not terminal
+checkpoint history. `predecessor_fetches_exhausted` remains exact-task
 repairable. A transient `journal_lock_busy` row also omits the command and
 clears on the next scan after the writer releases its lock. See
 [[commands/repair-projection]]. No migration, daemon

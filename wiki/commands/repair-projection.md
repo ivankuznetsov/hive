@@ -63,9 +63,12 @@ These bounded reasons are terminal under the current limits:
 - `checkpoint_oversized`
 - `attempt_ids_exhausted`
 
-For those rows, repeating repair cannot make the projection fit. Compact that
-single task's retained projection history before repairing again; Hive does not
-raise the limits, create a migration, or run periodic repair machinery.
+For those rows, repeating repair cannot make the projection fit. The attempt-ID
+cap applies only to mutable checkpoint bindings and IDs introduced by the
+bounded suffix; immutable terminal bindings already sealed inside the
+byte-bounded checkpoint do not consume it. Compact that single task's retained
+projection history before repairing again; Hive does not raise the limits,
+create a migration, or run periodic repair machinery.
 `predecessor_fetches_exhausted` is repairable because exact replay can move the
 validated history behind a fresh checkpoint.
 

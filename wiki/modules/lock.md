@@ -3,7 +3,7 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb
 created: 2026-04-25
-updated: 2026-08-26
+updated: 2026-08-29
 tags: [lock, concurrency, flock, commit-lock]
 ---
 
@@ -35,11 +35,15 @@ recreating a task that moved or was deleted while the caller waited.
 The runner adds `slug:` and `stage:` to the payload. After launch, both the
 headless `Hive::Agent` writer and the tmux-backed `Hive::ClaudeLauncher` writer
 inject `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.
-`hive status` uses the child PID for liveness, while cleanup commands compare
-the recorded start time with the live process before signalling it so a reused
-PID cannot target an unrelated process. If the platform cannot read a start
-time, the field is nil and that child-specific PID-reuse guard degrades to its
-existing PID-only behavior.
+Those fields describe only the currently owned child: after a confirmed child
+exit or shared-session teardown, `clear_task_lock_child` removes both fields
+under the lock guard only when PID and start time still match. That
+compare-and-clear prevents an older completion from erasing a replacement
+child's liveness evidence. `hive status` uses the child PID for liveness, while
+cleanup commands compare the recorded start time with the live process before
+signalling it so a reused PID cannot target an unrelated process. If the
+platform cannot read a start time, the field is nil and that child-specific
+PID-reuse guard degrades to its existing PID-only behavior.
 
 The internal scheduler graph exposes the verified live holder's `task_lock_pid`,
 `task_lock_process_start_time`, and `task_lock_id`. Recovery consumers bind
@@ -114,7 +118,7 @@ Per-task lock is held for the entire `hive run`, including long execute/review p
 
 ## Tests
 
-- `test/unit/lock_test.rb` — happy path, complete-before-visible publication, generation-scoped release, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, process contention, same-thread reentrancy, fork-inherited ownership refusal, and kernel release after `SIGKILL`.
+- `test/unit/lock_test.rb` — happy path, complete-before-visible publication, generation-scoped release, child-identity compare-and-clear, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, process contention, same-thread reentrancy, fork-inherited ownership refusal, and kernel release after `SIGKILL`.
 - `test/integration/new_test.rb` — `hive new` wraps the captured-task hive-state commit in the project commit lock.
 
 ## Backlinks

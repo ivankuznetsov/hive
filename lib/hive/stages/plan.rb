@@ -2,6 +2,7 @@ require "hive/stages/base"
 require "hive/claude_launcher"
 require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/planner_identity"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
 require "hive/task_meta"
@@ -129,27 +130,10 @@ module Hive
       end
 
       def planner_identity(profile, cfg, result)
-        routing = Hive::ModelRouting.resolve(
-          models: cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS),
-          stage: "plan", provider: profile.name,
-          current: Hive::Stages::Base.model_routing_current(cfg["plan"]),
-          legacy: Hive::Stages::Base.model_routing_current(cfg["claude"])
+        Hive::PlanReview::PlannerIdentity.capture(
+          profile:, cfg:,
+          observed_model: result&.dig(:usage, :model)
         )
-        model = result&.dig(:usage, :model) || routing.model || cfg.dig("plan", "model") || "unknown"
-        effort = routing.effort || cfg.dig("plan", "effort") || cfg.dig("claude", "effort") || "unknown"
-        {
-          "provider" => profile.name.to_s,
-          "model" => model.to_s,
-          "family" => planner_family(profile.name),
-          "effort" => effort.to_s,
-          "route" => profile.launcher_identity.to_s
-        }.freeze
-      end
-
-      def planner_family(name)
-        {
-          claude: "anthropic", codex: "openai", grok: "grok", pi: "pi"
-        }.fetch(name.to_sym, "unknown")
       end
     end
   end

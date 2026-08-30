@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
@@ -725,13 +726,17 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if stale_planner_revision_contract?
+        if recoverable_planner_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_adversarial_identity_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_selected_lenses_contract_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_residual_evidence_contract_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -943,6 +948,14 @@ module Hive
       true
     end
 
+    def recoverable_planner_identity_review?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner"
+      end
+      identity = route&.fetch("actual", nil) || route&.fetch("requested", nil)
+      Hive::PlanReview::PlannerIdentity.recoverable?(identity)
+    end
+
     # An awaiting-decision projection normally belongs to the operator. A
     # gated finding already covered by an active approval policy is different:
     # the orchestrator owns consuming that durable authority. Classify the row
@@ -1008,6 +1021,12 @@ module Hive
     # orchestrator records its one-time contract recovery reset.
     def recoverable_selected_lenses_contract_review?
       !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
+        plan_review["routes"]
+      ).empty?
+    end
+
+    def recoverable_residual_evidence_contract_review?
+      !Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
         plan_review["routes"]
       ).empty?
     end

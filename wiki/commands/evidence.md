@@ -3,7 +3,7 @@ title: hive evidence
 type: command
 source: lib/hive/commands/evidence.rb, lib/hive/artifacts/browser_gateway.rb, lib/hive/artifacts/terminal_recorder.rb
 created: 2026-08-14
-updated: 2026-08-14
+updated: 2026-08-29
 tags: [command, artifacts, evidence, recovery]
 ---
 
@@ -11,6 +11,11 @@ tags: [command, artifacts, evidence, recovery]
 for a semantically blocked package. `hive evidence terminal` and
 `hive evidence browser` are the internal, controller-scoped capture boundaries
 given to an outcome-evidence producer.
+
+An ordinary paced daemon retry re-probes `capability_blocked` packages in their
+existing generation. Use `recover` when an operator deliberately wants a fresh
+generation, or for reviewer and recapture-exhaustion blockers that Hive must not
+reinterpret automatically.
 
 ## Usage
 
@@ -40,6 +45,9 @@ recorded in both the receipt and text rather than erasing the evidence. On Linux
 the recorder runs inside Hive's child-subreaper custody boundary; timeout,
 overflow, success, and failure all terminate and reap the complete descendant
 tree, and any detached child makes the capture invalid.
+The worker carries the exact already-loaded `agent-cli-runtime` require path;
+this works for both a packaged gem and a source checkout whose `bin/hive`
+loaded the monorepo component without activating a RubyGems specification.
 
 Both internal forms send bounded JSON through a controller-owned filesystem
 mailbox; the producer does not execute the PTY recorder or browser gateway.

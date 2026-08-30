@@ -908,11 +908,14 @@ module Hive
 
       # Top-level gate: a REVIEW_STALE row is retryable from the TUI
       # when any of the auto-recoverable shapes hold.
-      # Cases that fall through to the manual-cleanup message:
-      #   * max_passes hit with completed passes (the "trim reviewer
-      #     files" path) — neither sub-predicate matches.
+      # A max-pass row falls through to the manual browse path only when its
+      # escalation input is unresolved/newer than pass completion. A fresh
+      # completion receipt is restart recovery and uses the coordinator.
       def retryable_review_stale?(row)
-        wall_clock_stale?(row) || retryable_incomplete_triage_pass?(row)
+        wall_clock_stale?(row) || retryable_incomplete_triage_pass?(row) ||
+          Hive::Recovery.completed_review_stale?(
+            marker: row.marker, attrs: row.attrs, folder: row.folder
+          )
       end
 
       # `REVIEW_STALE reason=wall_clock` is set by the runner when the

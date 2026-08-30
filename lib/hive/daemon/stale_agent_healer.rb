@@ -243,10 +243,12 @@ module Hive
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
-          if %w[error review_error].include?(row.marker.to_s)
-            heal_recoverable_error_if_auto_recoverable(row, now: now) if daemon_enabled_for_row?(
-              row, daemon_enabled_projects
-            )
+          if Hive::Recovery.recoverable_marker?(row.marker)
+            heal_recoverable_error_if_auto_recoverable(row, now: now) if
+              daemon_enabled_for_row?(row, daemon_enabled_projects) &&
+              !Hive::Recovery.intervention_required?(
+                marker: row.marker, attrs: row.marker_attrs, folder: row.folder
+              )
             next
           end
 

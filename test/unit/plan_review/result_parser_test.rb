@@ -97,6 +97,32 @@ class PlanReviewResultParserTest < Minitest::Test
                  )
   end
 
+  def test_legacy_initial_residual_evidence_failure_recovers_once_per_initial_role
+    legacy = {
+      "role" => "primary", "outcome" => "terminal_failure",
+      "diagnostic" => "invalid plan review residual evidence entry",
+      "diagnostic_source" => "parser"
+    }
+    adversarial = legacy.merge("role" => "adversarial")
+
+    assert_equal [ adversarial, legacy ],
+                 Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
+                   [ legacy, adversarial ]
+                 )
+    assert_empty Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
+      [ legacy, legacy.merge(
+        "residual_evidence_contract_recovery" => true,
+        "residual_evidence_contract_version" => 1
+      ) ]
+    )
+    assert_empty Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
+      [ legacy.merge("role" => "verification") ]
+    )
+    assert_empty Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
+      [ legacy.merge("diagnostic_source" => "reviewer") ]
+    )
+  end
+
   def test_finding_anchor_must_match_the_immutable_snapshot
     snapshot = "one\ntwo\nthree\n"
     evidence = valid_result.fetch("findings").first.fetch("evidence").merge(

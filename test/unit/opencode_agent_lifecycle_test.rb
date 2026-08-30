@@ -102,6 +102,23 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_completed_native_child_clears_its_identity_from_the_live_task_lock
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "lock-clear-260829-aaaa")
+
+      Hive::Lock.with_task_lock(task.folder) do
+        result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(task, fixture).run!
+        end
+        lock = YAML.safe_load_file(File.join(task.folder, ".lock"))
+
+        assert_equal :ok, result.fetch(:status)
+        refute lock.key?("claude_pid")
+        refute lock.key?("claude_pid_start_time")
+      end
+    end
+  end
+
   def test_tool_only_terminal_step_is_a_completed_run
     with_fixture(mode: :tool_only) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "tool-only-260812-aaaa")

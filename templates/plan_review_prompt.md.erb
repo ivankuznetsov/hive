@@ -38,6 +38,8 @@ evidence, and one terminal adapter outcome. Free-form stdout is diagnostic
 only. Every newly emitted finding must use `"lifecycle": "open"`; Hive alone
 owns later lifecycle transitions, so never emit `closed` or another inferred
 disposition.
+This is an initial review, not disposition verification, so
+`residual_evidence` must be exactly an empty array.
 `selected_lenses` names may use lowercase letters, digits, hyphens, and underscores;
 each name must start with a letter and contain at most 64 characters.
 For each finding, set `anchor_digest` to the lowercase SHA-256 of the selected

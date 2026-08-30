@@ -2,6 +2,7 @@ require "hive/config"
 require "hive/lock"
 require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/planner_identity"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
 require "hive/plan_review/transition_guard"
@@ -47,11 +48,14 @@ module Hive
       end
 
       def planner_identity_for(current, cfg)
-        route = current && current["routes"].find { |entry| entry["role"] == "planner" }
-        route&.fetch("actual", nil) || route&.fetch("requested", nil) ||
-          TransitionGuard.reconstructed_planner_identity(cfg)
+        route = current && Array(current["routes"]).reverse.find do |entry|
+          entry["role"] == "planner"
+        end
+        captured = route&.fetch("actual", nil) || route&.fetch("requested", nil)
+        return TransitionGuard.reconstructed_planner_identity(cfg) unless captured
+
+        PlannerIdentity.repair(captured, cfg:) || captured
       end
-      private_class_method :planner_identity_for
     end
   end
 end

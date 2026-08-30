@@ -1,6 +1,8 @@
 require "hive/agent_support"
 
 module Hive::AgentSupport::Codex
+  LEGACY_CLAUDE_MODEL = /\A(?:claude-|anthropic\/claude-)/i.freeze
+
   autoload :ArtifactPolicy, "hive/agent_support/codex/artifact_policy"
   autoload :Reviewer, "hive/agent_support/codex/reviewer"
   autoload :Runtime, "hive/agent_support/codex/runtime"
@@ -11,6 +13,9 @@ module Hive::AgentSupport::Codex
 
   def credential_path(home: nil) = File.join(home || Dir.home, ".codex", "auth.json")
   def execution_identity(model) = [ "openai", model.to_s.empty? ? nil : model.to_s ]
+  def recoverable_planner_identity?(identity)
+    identity["model"].to_s.match?(LEGACY_CLAUDE_MODEL)
+  end
   def projection_sources = [ "agents/openai.yaml" ]
   def skill_invocation?(invocation) = invocation.match?(/\A\$[A-Za-z0-9_.-]+\z/)
 

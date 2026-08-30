@@ -38,6 +38,19 @@ module Hive
       prefix + generated_region + suffix
     end
 
+    # Refresh the repository page only after the complete binary input has
+    # validated and rendered successfully. A false result is a no-op: the
+    # file is not opened for writing and its metadata remains untouched.
+    def regenerate(project_root:, defaults: Hive::Config::DEFAULTS)
+      path = File.join(project_root, WIKI_PAGE)
+      content = File.binread(path)
+      updated = render(content, defaults:)
+      return false if updated == content
+
+      File.binwrite(path, updated)
+      true
+    end
+
     def validated_region(page)
       begin_line = "#{BEGIN_MARKER}\n".b
       end_line = "#{END_MARKER}\n".b

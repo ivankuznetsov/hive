@@ -26,9 +26,9 @@ hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
 
 The command resolves one task in the registered project set, takes its existing
 task lock, resolves it again under that lock, and excludes concurrent journal
-appends while rebuilding. It reads that task's complete authoritative journal
-and only the exact attempt proofs referenced by it; it does not enumerate the
-proof root or inspect other tasks.
+appends while rebuilding. When a journal exists, it reads that complete
+authoritative journal and only the exact attempt proofs referenced by it; it
+does not enumerate the proof root or inspect other tasks.
 
 The journal, attempt proofs, marker, stage, and worktree remain authority and
 are not changed. Repair atomically replaces each derived file—
@@ -40,7 +40,11 @@ For a task that still proves the canonical initial zero-history state, repair
 may republish those two derived files without creating an authoritative
 journal. The same shared pristine predicate used by status must prove that
 exception; only the task lock already owned by the command is ignored while
-making that decision. An arbitrary journal-less task is still rejected.
+making that decision. A pre-projection historical task may also establish the
+same marker-derived zero-history baseline, but only when the journal, snapshot,
+and checkpoint are all absent and the current marker does not prove a durable
+execute handoff. Existing or malformed authority is never replaced, and this
+compatibility baseline does not invent journal events.
 
 On success, human output names the task and journal cursor; `--json` emits
 `hive-repair-projection.v1` with `outcome: repaired` and the next action

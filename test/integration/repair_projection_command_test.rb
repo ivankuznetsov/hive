@@ -76,6 +76,32 @@ class RepairProjectionCommandTest < Minitest::Test
     end
   end
 
+  def test_historical_zero_history_task_repairs_from_its_current_marker
+    with_project_tasks(1) do |project, tasks|
+      original = tasks.first
+      done_folder = File.join(
+        original.project_root, ".hive-state", "stages", "9-done", original.slug
+      )
+      FileUtils.mkdir_p(File.dirname(done_folder))
+      FileUtils.mv(original.folder, done_folder)
+      File.write(File.join(done_folder, "task.md"), "# Completed task\n\n<!-- COMPLETE -->\n")
+
+      payload = cli_json(
+        "repair-projection", original.slug,
+        "--project", project, "--stage", "9-done", "--json"
+      )
+
+      assert_schema_valid(payload)
+      assert_equal true, payload.fetch("ok")
+      assert_equal "current", payload.fetch("checkpoint_state")
+      assert_equal "9-done", payload.fetch("stage")
+      refute File.exist?(File.join(done_folder, Hive::TaskJournal::JOURNAL_BASENAME)),
+             "historical repair must not invent authoritative journal history"
+      projection = JSON.parse(File.read(File.join(done_folder, "task-projection.json")))
+      assert_equal "complete", projection.dig("compatibility", "marker", "name")
+    end
+  end
+
   def test_corrupt_authority_emits_a_typed_bounded_error
     with_project_tasks(2) do |project, tasks|
       _unused, corrupt = tasks

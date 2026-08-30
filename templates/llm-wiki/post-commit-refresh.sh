@@ -148,6 +148,7 @@ remote_base_ref="refs/llm-wiki/remotes/base"
 lock_owner_oid=""
 global_lock_fd=""
 global_lock_keeper_pid=""
+BATCH_PROPOSAL_ONLY=0
 mkdir -p "$pending_dir" "$failed_dir"
 
 positive_integer_or_default() {
@@ -192,13 +193,16 @@ if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
   changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
   [ -n "$changed_files" ] || exit 0
 
-  # wiki/log.md is compiled from wiki/log.d fragments. A commit that only
-  # rewrites the compiled projection contains no new source for the wiki agent.
-  if ! printf '%s\n' "$changed_files" | grep -Fqvx 'wiki/log.md'; then
+  # Compiled projections contain no new source for either compiler. A commit
+  # that changes another path in the same batch still enters the queue.
+  if ! printf '%s\n' "$changed_files" | grep -Evqx \
+    '(wiki/log\.md|wiki/proposals\.json|wiki/proposals\.md)'; then
     exit 0
   fi
 
   if ! printf '%s\n' "$changed_files" | grep -Eq \
+    '^proposals/v1/(records/|events/)' && \
+     ! printf '%s\n' "$changed_files" | grep -Eq \
     '(^|/)(schema\.rb|structure\.sql|db/migrate/|migrations/|models/|entities/|prisma/schema\.prisma|routes|controllers|handlers|resolvers|app/|src/|lib/|test/|tests/|spec/|templates/|config/|bin/|README\.md|Gemfile|Gemfile\.lock|package\.json|package-lock\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|composer\.json|composer\.lock|docs/|wiki/|raw/notes/|plans/|todos/|CHANGELOG\.md|AGENTS\.md|CLAUDE\.md)'; then
     exit 0
   fi
@@ -358,6 +362,17 @@ pending_sources_present() {
   [ "$(pending_source_count)" -gt 0 ]
 }
 
+ordinary_pending_source_count() {
+  local path count=0
+  shopt -s nullglob
+  for path in "$pending_dir"/*; do
+    [ -f "$path" ] || continue
+    queue_file_proposal_only "$path" || count=$((count + 1))
+  done
+  shopt -u nullglob
+  printf '%s\n' "$count"
+}
+
 queue_temp_source_sha() {
   local name
   name="$(basename "$1")"
@@ -408,7 +423,7 @@ recover_queue_temps() {
 
 open_backlog_circuit_if_needed() {
   local count breaker_tmp
-  count="$(pending_source_count)"
+  count="$(ordinary_pending_source_count)"
   [ "$count" -gt "$max_auto_pending" ] || return 1
   breaker_tmp="$state_dir/.refresh-disabled.$$"
   printf 'backlog:%s\n' "$count" >"$breaker_tmp"
@@ -478,7 +493,7 @@ reconcile_circuit_after_success() {
   # hook that arrives after this removal will wait for this lock and perform its
   # own reconciliation.
   rm -f -- "$breaker_file"
-  pending_count="$(pending_source_count)"
+  pending_count="$(ordinary_pending_source_count)"
   failed_count="$(failed_source_count)"
   if [ "$failed_count" -gt 0 ]; then
     breaker_tmp="$state_dir/.refresh-disabled.$$"
@@ -841,6 +856,64 @@ snapshot_queue() {
   [ "${#QUEUE_FILES[@]}" -gt 0 ]
 }
 
+queue_file_proposal_only() {
+  local file="$1" path saw_canonical=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      proposals/v1/records/*|proposals/v1/events/*) saw_canonical=1 ;;
+      proposals/v1/*) ;;
+      *) return 1 ;;
+    esac
+  done < <(sed -n '2,$p' "$file")
+  [ "$saw_canonical" -eq 1 ]
+}
+
+queue_batch_proposal_only() {
+  local file
+  [ "${#QUEUE_FILES[@]}" -gt 0 ] || return 1
+  for file in "${QUEUE_FILES[@]}"; do
+    queue_file_proposal_only "$file" || return 1
+  done
+}
+
+latest_proposal_source() {
+  local file queued_sha queued_branch path saw_canonical rows=""
+  for file in "${QUEUE_FILES[@]}"; do
+    IFS=$'\t' read -r queued_sha queued_branch <"$file"
+    saw_canonical=0
+    while IFS= read -r path; do
+      case "$path" in
+        proposals/v1/records/*|proposals/v1/events/*) saw_canonical=1; break ;;
+      esac
+    done < <(sed -n '2,$p' "$file")
+    if [ "$saw_canonical" -eq 1 ]; then
+      rows+="$(git show -s --format='%ct %H' "$queued_sha")"$'\n'
+    fi
+  done
+  printf '%s' "$rows" | LC_ALL=C sort -k1,1n -k2,2 | tail -n 1 | awk '{print $2}'
+}
+
+compile_proposals() {
+  local source_commit="$1" owner_root compiler
+  [ -n "$source_commit" ] || return 0
+  owner_root="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+  [ -n "$owner_root" ] || {
+    log_line "ERROR: proposal compiler could not resolve the primary checkout"
+    return 1
+  }
+  compiler="${HIVE_PROPOSAL_COMPILER_BIN:-hive}"
+  (
+    cd "$owner_root"
+    run_with_timeout "${LLM_WIKI_PROPOSAL_COMPILE_TIMEOUT:-120}" \
+      "$compiler" proposal refresh --compile-only \
+      --source-ref "$source_commit" --output-root "$refresh_root"
+  ) >>"$log_file" 2>&1 || {
+    log_line "ERROR: deterministic proposal compilation failed; queue retained"
+    return 1
+  }
+}
+
 local_source_commit() {
   local queued_sha="$1"
   git -C "$refresh_root" log -n 1 --format=%H --fixed-strings \
@@ -974,13 +1047,20 @@ record_batch_failure() {
 
 process_queue_batch() {
   local sources="" file queued_sha queued_branch prompt short_source compile_runner
-  local path display_path path_count omitted_paths
+  local path display_path path_count omitted_paths proposal_source proposal_only=0
   local LC_ALL=C
   local commit_args=()
+  BATCH_PROPOSAL_ONLY=0
   prune_receipted_queue_files
   if [ "${#QUEUE_FILES[@]}" -eq 0 ]; then
     rm -f -- "$failure_count_file"
     return 0
+  fi
+  proposal_source="$(latest_proposal_source)"
+  if queue_batch_proposal_only; then
+    proposal_only=1
+    BATCH_PROPOSAL_ONLY=1
+    log_line "proposal-only batch skips the headless wiki agent"
   fi
   retained_status=0
   publish_retained_sources || retained_status=$?
@@ -1036,11 +1116,13 @@ qmd; the wrapper handles bounded index maintenance. Do not invent facts.
 PROMPT
 )"
 
-  if ! run_refresh_agent "$prompt"; then
-    log_line "ERROR: refresh agent failed; generated work discarded and queue retained"
-    return 1
+  if [ "$proposal_only" -eq 0 ]; then
+    if ! run_refresh_agent "$prompt"; then
+      log_line "ERROR: refresh agent failed; generated work discarded and queue retained"
+      return 1
+    fi
+    wiki_only_changes || return 1
   fi
-  wiki_only_changes || return 1
 
   compile_runner="$refresh_root/.llm-wiki/compile-log.sh"
   if [ ! -x "$compile_runner" ] && [ -x "$state_dir/compile-log.sh" ]; then
@@ -1054,6 +1136,7 @@ PROMPT
   else
     log_line "WARN: compile-log.sh missing; leaving wiki/log.md unchanged"
   fi
+  compile_proposals "$proposal_source" || return 1
   wiki_only_changes || return 1
 
   if [ -e "$refresh_root/wiki" ] || [ -n "$(git -C "$refresh_root" ls-files -- wiki)" ]; then
@@ -1138,13 +1221,19 @@ fi
 if ! pending_sources_present; then
   exit 0
 fi
-if ! acquire_global_provider_lock; then
-  log_line "refresh remains queued; machine-wide provider lock was busy"
-  if [ -n "$retry_selector" ]; then
-    printf 'llm-wiki: retry deferred; machine-wide refresh worker is busy\n' >&2
-    exit 1
+proposal_only_run=0
+if snapshot_queue && queue_batch_proposal_only; then
+  proposal_only_run=1
+fi
+if [ "$proposal_only_run" -eq 0 ]; then
+  if ! acquire_global_provider_lock; then
+    log_line "refresh remains queued; machine-wide provider lock was busy"
+    if [ -n "$retry_selector" ]; then
+      printf 'llm-wiki: retry deferred; machine-wide refresh worker is busy\n' >&2
+      exit 1
+    fi
+    exit 0
   fi
-  exit 0
 fi
 configure_qmd_environment
 if ! prepare_refresh_worktree; then
@@ -1176,7 +1265,11 @@ while snapshot_queue; do
     fi
     exit 0
   elif [ "$batch_status" -ne 0 ]; then
-    record_batch_failure
+    if [ "$BATCH_PROPOSAL_ONLY" -eq 1 ]; then
+      log_line "proposal-only compile failed; queue retained without opening the provider circuit"
+    else
+      record_batch_failure
+    fi
     if [ -n "$retry_selector" ]; then
       printf 'llm-wiki: retry failed; see %s\n' "$log_file" >&2
       exit 1

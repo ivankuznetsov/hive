@@ -78,4 +78,53 @@ class ProposalCommandTest < Minitest::Test
       end.message)
     end
   end
+
+  def test_refresh_compile_only_and_check_use_pinned_external_outputs
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      output = File.join(@tmpdir || Dir.tmpdir, "proposal-compiled-#{SecureRandom.hex(4)}")
+      command_output = StringIO.new
+      result = Hive::Commands::Proposal.new(
+        "refresh", dir, input: nil, compile_only: true,
+        source_ref: ops.hive_state_head_sha, output_root: output,
+        json: true, stdout: command_output
+      ).call
+
+      assert_equal ops.hive_state_head_sha, result.source_commit
+      assert File.file?(File.join(output, "wiki", "proposals.json"))
+      assert_equal "compiled", JSON.parse(command_output.string).fetch("outcome")
+      FileUtils.mkdir_p(File.join(dir, "wiki"))
+      FileUtils.cp(File.join(output, "wiki", "proposals.json"), File.join(dir, "wiki"))
+      FileUtils.cp(File.join(output, "wiki", "proposals.md"), File.join(dir, "wiki"))
+
+      checked = Hive::Commands::Proposal.new(
+        "refresh", dir, input: nil, check: true, stdout: StringIO.new
+      ).call
+      assert_equal ops.hive_state_head_sha, checked.source_commit
+
+      File.write(File.join(dir, "wiki", "proposals.md"), "stale\n")
+      assert_raises(Hive::Proposals::StaleObservation) do
+        Hive::Commands::Proposal.new(
+          "refresh", dir, input: nil, check: true, stdout: StringIO.new
+        ).call
+      end
+      refute Dir.children(dir).any? { |name| name.start_with?("hive-proposal-refresh-check-") }
+    end
+  end
+
+  def test_refresh_without_check_enters_the_managed_publication_boundary
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      calls = []
+      result = Hive::Commands::Proposal.new(
+        "refresh", dir, input: nil, stdout: StringIO.new,
+        refresh_runner: ->(project_root, git_ops) { calls << [ project_root, git_ops.hive_state_path ] }
+      ).call
+
+      assert_equal "queued", result.fetch("outcome")
+      assert_equal [ [ dir, ops.hive_state_path ] ], calls
+    end
+  end
 end

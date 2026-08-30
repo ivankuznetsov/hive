@@ -505,6 +505,38 @@ module Hive
       ).call
     end
 
+    desc "proposal SUBCOMMAND [TARGET]", "Track and inspect skill/workflow proposals"
+    long_desc <<~DESC
+      Source commands require a durable proposal-bound task attempt:
+        submit TASK --input FILE
+        evaluate TASK --input FILE
+
+      Generated-view maintenance runs through the managed llm-wiki boundary:
+        refresh [PROJECT_PATH]
+        refresh [PROJECT_PATH] --check
+
+      --compile-only, --source-ref, and --output-root form the internal pinned
+      compiler boundary used by the managed refresh worktree.
+    DESC
+    option :input, type: :string, desc: "JSON candidate/evaluation artifact for submit/evaluate"
+    option :project, type: :string, desc: "scope task lookup to one registered project"
+    option :check, type: :boolean, default: false,
+                   desc: "verify generated proposal views without publishing"
+    option :compile_only, type: :boolean, default: false, hide: true
+    option :source_ref, type: :string, hide: true
+    option :output_root, type: :string, hide: true
+    def proposal(subcommand = nil, target = nil)
+      require "hive/commands/proposal"
+      if Hive::Commands::Proposal::SOURCE_COMMANDS.include?(subcommand.to_s) && options[:input].to_s.empty?
+        raise Hive::UsageError, "hive proposal #{subcommand}: --input FILE is required"
+      end
+      Hive::Commands::Proposal.new(
+        subcommand, target, input: options[:input], project: options[:project],
+        json: options[:json], check: options[:check], compile_only: options[:compile_only],
+        source_ref: options[:source_ref], output_root: options[:output_root]
+      ).call
+    end
+
     desc "workflow SUBCOMMAND [ID]", "Manage project workflows and reviewed Honeycomb packages"
     long_desc <<~DESC
       Subcommands:

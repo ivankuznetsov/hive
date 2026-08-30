@@ -96,6 +96,73 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
                   "refs/heads/llm-wiki/refresh")
   end
 
+  def test_compiled_proposal_pair_only_commit_does_not_queue_or_launch_refresh
+    File.write(File.join(@wt, "wiki", "proposals.json"), "{}\n")
+    File.write(File.join(@wt, "wiki", "proposals.md"), "# Proposal History\n")
+    git(@wt, "add wiki/proposals.json wiki/proposals.md")
+    git(@wt, "commit -qm 'docs(wiki): compile proposal projection'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_proposal_inbox_only_commit_does_not_queue_a_wiki_refresh
+    receipt = File.join(@wt, "proposals", "v1", "inbox", "source.json")
+    FileUtils.mkdir_p(File.dirname(receipt))
+    File.write(receipt, "{}\n")
+    git(@wt, "add proposals/v1/inbox/source.json")
+    git(@wt, "commit -qm 'hive: admitted proposal source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_proposal_only_batch_compiles_without_launching_the_wiki_agent
+    compiler_calls = File.join(@dir, "proposal-compiler-calls")
+    compiler = File.join(@dir, "stub bin", "proposal-compiler")
+    File.write(compiler, <<~STUB)
+      #!/usr/bin/env bash
+      printf '%s\n' "$*" >>#{q(compiler_calls)}
+      output_root="${!#}"
+      mkdir -p "$output_root/wiki"
+      printf '{"schema":"hive-proposal-index"}\n' >"$output_root/wiki/proposals.json"
+      printf '# Proposal History\n' >"$output_root/wiki/proposals.md"
+    STUB
+    FileUtils.chmod("+x", compiler)
+    record = File.join(@wt, "proposals", "v1", "records", "candidate.json")
+    FileUtils.mkdir_p(File.dirname(record))
+    File.write(record, "{}\n")
+    git(@wt, "add proposals/v1/records/candidate.json")
+    git(@wt, "commit -qm 'hive: proposals fixture recorded candidate'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(
+      @wt,
+      "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+      "LLM_WIKI_REFRESH_CMD" => File.join(@dir, "missing-provider")
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal 1, File.readlines(compiler_calls).length
+    assert_includes File.read(compiler_calls), "--source-ref #{source_sha}"
+    assert_equal "{\"schema\":\"hive-proposal-index\"}\n",
+                 git(@main, "show llm-wiki/refresh:wiki/proposals.json") + "\n"
+    assert_equal "", git(@main, "status --porcelain")
+    assert_equal "", git(@wt, "status --porcelain")
+  end
+
   def test_refresh_branch_is_pushed_without_touching_main
     remote = File.join(@dir, "remote.git")
     sh "git init -q --bare #{q(remote)}"

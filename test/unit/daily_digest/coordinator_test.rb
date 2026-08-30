@@ -76,6 +76,209 @@ class DailyDigestCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_configuration_and_date_errors_are_typed
+    store = Object.new
+    store.define_singleton_method(:intervals) { [] }
+    [ {}, { "enabled" => true } ].each do |invalid|
+      coordinator = Hive::DailyDigest::Coordinator.new(
+        config_loader: -> { invalid }, history_loader: -> { [] }, store: store
+      )
+      assert_raises(Hive::DailyDigest::Error) { coordinator.refresh }
+    end
+
+    coordinator = Hive::DailyDigest::Coordinator.new(
+      config_loader: -> { config }, history_loader: -> { [] }, store: store
+    )
+    assert_raises(Hive::DailyDigest::InvalidRecord) { coordinator.refresh(date: "bad-date") }
+    assert_raises(Hive::DailyDigest::Coordinator::NotInitialized) do
+      coordinator.send(:normalize_first_interval, Object.new)
+    end
+  end
+
+  def test_first_interval_defaults_are_content_identified
+    coordinator = Hive::DailyDigest::Coordinator.new
+    interval = coordinator.send(:normalize_first_interval, {
+      "local_date" => "2026-08-30", "time_zone" => "UTC",
+      "starts_at" => "2026-08-30T00:00:00Z", "ends_at" => "2026-08-31T00:00:00Z"
+    })
+
+    assert_equal 86_400, interval.fetch("duration_seconds")
+    assert_equal "calendar_day", interval.fetch("boundary_kind")
+    assert_match(/\A[0-9a-f]{64}\z/, interval.fetch("interval_id"))
+    assert_instance_of Hive::DailyDigest::Collector,
+                       coordinator.instance_variable_get(:@collector_factory).call(
+                         projects: [], starts_at: Time.at(0), ends_at: Time.at(1)
+                       )
+    assert_instance_of Time, coordinator.instance_variable_get(:@clock).call
+  end
+
+  def test_next_interval_records_skipped_labels_and_rejects_discontinuity
+    coordinator = Hive::DailyDigest::Coordinator.new(clock: -> { Time.at(0) })
+    previous = {
+      "local_date" => "2011-12-29", "sequence" => 1, "time_zone" => "Pacific/Apia",
+      "starts_at" => "2011-12-29T10:00:00Z", "ends_at" => "2011-12-30T10:00:00Z"
+    }
+    next_interval = coordinator.send(:next_interval, previous, { "time_zone" => "Pacific/Apia" })
+    assert_equal "2011-12-31", next_interval.fetch("local_date")
+    assert_equal [ "2011-12-30" ], next_interval.fetch("skipped_labels")
+
+    discontinuous = previous.merge("ends_at" => "2011-12-30T09:00:00Z")
+    assert_raises(Hive::DailyDigest::InvalidRecord) do
+      coordinator.send(:next_interval, discontinuous, { "time_zone" => "Pacific/Apia" })
+    end
+  end
+
+  def test_selected_date_skipped_by_interval_sequence_is_missing
+    coordinator = Hive::DailyDigest::Coordinator.new(store: Object.new)
+    store = coordinator.instance_variable_get(:@store)
+    first = config.fetch("first_interval")
+    store.define_singleton_method(:intervals) { [ first ] }
+    jumped = Hive::DailyDigest::Calendar.new(time_zone: "UTC")
+                                        .interval_for("2026-09-01", sequence: 2)
+    coordinator.define_singleton_method(:next_interval) { |_previous, _config| jumped }
+
+    assert_raises(Hive::DailyDigest::MissingRecord) do
+      coordinator.send(
+        :intervals_through, config, now: Time.iso8601("2026-09-02T00:00:00Z"),
+        selected_date: "2026-08-31"
+      )
+    end
+  end
+
+  def test_concurrent_close_and_equivalent_amendment_conflict_are_accepted
+    now = Time.iso8601("2026-08-31T12:00:00Z")
+    interval = config.fetch("first_interval")
+    empty_batch = batch([])
+    fact_batch = batch([ fact("late", "2026-08-30T10:00:00Z") ])
+    projector = Hive::DailyDigest::Projector.new(clock: -> { now })
+    empty_closed = projector.base(interval: interval, batch: empty_batch, lifecycle: "closed")
+    latest = projector.base(interval: interval, batch: fact_batch, lifecycle: "closed")
+    membership = Struct.new(:projects, :gaps).new([ project ], [])
+    coverage = Object.new
+    coverage.define_singleton_method(:projects_for) { |**| membership }
+
+    close_store = Object.new
+    close_reads = 0
+    close_store.define_singleton_method(:read) do |_date|
+      close_reads += 1
+      raise Hive::DailyDigest::MissingRecord, "missing" if close_reads == 1
+
+      latest
+    end
+    close_store.define_singleton_method(:write_base) do |_base|
+      raise Hive::DailyDigest::Store::ImmutableRecord, "closed concurrently"
+    end
+    close_store.define_singleton_method(:advance_frontiers) { |_date, frontiers| frontiers }
+    close = Hive::DailyDigest::Coordinator.new(
+      store: close_store, collector_factory: ->(**) { FakeCollector.new(fact_batch) }, clock: -> { now }
+    )
+    assert_equal "unchanged",
+                 close.send(:materialize, interval, config: config, coverage: coverage, now: now)
+                      .fetch("status")
+
+    conflict_store = Object.new
+    conflict_reads = [ empty_closed, latest ]
+    conflict_store.define_singleton_method(:read) { |_date| conflict_reads.shift }
+    conflict_store.define_singleton_method(:append_amendment) do |*_args|
+      raise Hive::DailyDigest::Store::Conflict, "same semantic delta"
+    end
+    conflict = Hive::DailyDigest::Coordinator.new(
+      store: conflict_store, collector_factory: ->(**) { FakeCollector.new(fact_batch) },
+      clock: -> { now }
+    )
+    assert_equal "unchanged",
+                 conflict.send(:materialize, interval, config: config, coverage: coverage, now: now)
+                         .fetch("status")
+  end
+
+  def test_pruned_gap_is_recorded_as_a_discard
+    now = Time.iso8601("2026-08-31T12:00:00Z")
+    interval = config.fetch("first_interval")
+    gap = {
+      "gap_id" => "gap:github", "source" => "github", "scope" => "demo",
+      "reason_code" => "offline", "reason" => "offline", "observed_at" => now.iso8601(6)
+    }
+    collected = batch([], gaps: [ gap ])
+    membership = Struct.new(:projects, :gaps).new([ project ], [])
+    coverage = Object.new
+    coverage.define_singleton_method(:projects_for) { |**| membership }
+    store = Object.new
+    store.define_singleton_method(:read) do |_date|
+      { "lifecycle" => "pruned", "effective_gaps" => [] }
+    end
+    discards = nil
+    store.define_singleton_method(:discard_pruned) do |_date, entries:, **|
+      discards = entries
+    end
+    coordinator = Hive::DailyDigest::Coordinator.new(
+      store: store, collector_factory: ->(**) { FakeCollector.new(collected) }, clock: -> { now }
+    )
+
+    result = coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now)
+    assert_equal "pruned", result.fetch("status")
+    assert_equal [ "gap:github" ], discards.map { |row| row.fetch("identity") }
+  end
+
+  def test_automatic_refresh_skips_complete_closed_and_pruned_intervals
+    now = Time.iso8601("2026-09-01T12:00:00Z")
+    intervals = (0..2).map do |offset|
+      Hive::DailyDigest::Calendar.new(time_zone: "UTC")
+                                 .interval_for(Date.new(2026, 8, 30) + offset, sequence: offset + 1)
+    end
+    records = {
+      "2026-08-30" => { "lifecycle" => "closed", "effective_gaps" => [] },
+      "2026-08-31" => { "lifecycle" => "pruned" },
+      "2026-09-01" => { "lifecycle" => "open", "effective_gaps" => [] }
+    }
+    store = Object.new
+    store.define_singleton_method(:intervals) { intervals }
+    store.define_singleton_method(:read) { |date| records.fetch(date) }
+    coordinator = Hive::DailyDigest::Coordinator.new(
+      config_loader: -> { config }, history_loader: -> { [] }, store: store, clock: -> { now }
+    )
+    materialized = []
+    coordinator.define_singleton_method(:materialize) do |interval, **|
+      materialized << interval.fetch("local_date")
+    end
+
+    coordinator.refresh
+
+    assert_equal [ "2026-09-01" ], materialized
+  end
+
+  def test_pruned_gap_recovery_is_a_stable_discard_without_recreating_base
+    now = Time.iso8601("2026-08-31T12:00:00Z")
+    interval = config.fetch("first_interval")
+    old_gap = {
+      "gap_id" => "gap:github", "source" => "github", "scope" => "demo",
+      "reason_code" => "offline", "reason" => "offline",
+      "observed_at" => "2026-08-31T00:00:00Z"
+    }
+    collected = batch([])
+    membership = Struct.new(:projects, :gaps).new([ project ], [])
+    coverage = Object.new
+    coverage.define_singleton_method(:projects_for) { |**| membership }
+    store = Object.new
+    store.define_singleton_method(:read) do |_date|
+      { "lifecycle" => "pruned", "effective_gaps" => [ old_gap ] }
+    end
+    discards = nil
+    store.define_singleton_method(:discard_pruned) do |_date, entries:, **|
+      discards = entries
+    end
+    coordinator = Hive::DailyDigest::Coordinator.new(
+      store: store, collector_factory: ->(**) { FakeCollector.new(collected) }, clock: -> { now }
+    )
+
+    coordinator.send(
+      :materialize, interval, config: config, coverage: coverage, now: now,
+      attempted_gap_ids: [ "gap:github" ]
+    )
+
+    assert_equal [ [ "gap:github", "gap_resolution" ] ],
+                 discards.map { |row| [ row.fetch("identity"), row.fetch("kind") ] }
+  end
+
   private
 
   FakeCollector = Struct.new(:result) do
@@ -107,11 +310,12 @@ class DailyDigestCoordinatorTest < Minitest::Test
     }
   end
 
-  def batch(facts)
+  def batch(facts, gaps: [])
     Hive::DailyDigest::Collector::Result.new(
-      projects: [ project ], facts: facts, attention: [], gaps: [],
+      projects: [ project ], facts: facts, attention: [], gaps: gaps,
       frontiers: { "project-1" => { "source" => "task_journal", "fingerprints" => facts.map { |f| f["fact_id"] } } },
-      completeness: "complete", content: facts.empty? ? "empty" : "non_empty"
+      completeness: gaps.empty? ? "complete" : "partial",
+      content: facts.empty? ? (gaps.empty? ? "empty" : "unknown") : "non_empty"
     )
   end
 

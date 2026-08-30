@@ -22,13 +22,26 @@ class DailyDigestPrunerTest < Minitest::Test
     end
   end
 
+  def test_missing_candidates_are_skipped_and_invalid_dates_are_typed
+    store = Object.new
+    store.define_singleton_method(:dates) { [ "2026-08-29" ] }
+    store.define_singleton_method(:read) do |_date|
+      raise Hive::DailyDigest::MissingRecord, "gone"
+    end
+    pruner = Hive::DailyDigest::Pruner.new(store: store)
+    assert_empty pruner.call(before: "2026-08-30", dry_run: true).fetch("eligible")
+    assert_raises(Hive::DailyDigest::InvalidRecord) do
+      pruner.call(before: "not-a-date", dry_run: true)
+    end
+  end
+
   private
 
   def record(date, lifecycle)
     interval = Hive::DailyDigest::Calendar.new(time_zone: "UTC").interval_for(date, sequence: 1)
     {
       "schema" => "hive-digest-record", "schema_version" => 1,
-      **interval.slice("local_date", "sequence", "time_zone", "starts_at", "ends_at", "boundary_kind"),
+      **interval,
       "lifecycle" => lifecycle,
       "closed_at" => lifecycle == "closed" ? "2026-08-31T00:00:00Z" : nil,
       "completeness" => "complete", "content" => "empty",

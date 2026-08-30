@@ -29,11 +29,11 @@ module Hive
           }
         end
 
-        @coordinator.refresh(date: date)
+        attempted = selected.map { |gap| gap.fetch("gap_id") }.sort
+        @coordinator.refresh(date: date, attempted_gap_ids: attempted)
         after = @reader.read(date: date)
         remaining = Array(after["effective_gaps"] || after["gaps"])
                     .to_h { |gap| [ gap.fetch("gap_id"), true ] }
-        attempted = selected.map { |gap| gap.fetch("gap_id") }.sort
         {
           "local_date" => date.to_s,
           "status" => "retried",

@@ -421,6 +421,13 @@ cleanup fails. Dedicated ownership intentionally allocates one Cable transport
 per simultaneously live status source; an unconfirmed retiring predecessor can
 briefly overlap one successor until the bounded pending release settles, and a
 detached source returns to zero transports after any bounded pending release.
+Although the source is `data-turbo-permanent`, a cross-URL Turbo move invokes
+its disconnect/connect callbacks. Dedicated ownership therefore replaces the
+transport on every such navigation instead of reusing turbo-rails' cached
+consumer: the next `connected` state and catch-up wait for a fresh WebSocket
+and Action Cable subscription handshake. Repeated supersession force-retires
+the older pending predecessor before allocating another successor, so this
+navigation and retry cost never expands the two-transport overlap bound.
 On task pages
 the status-refresh owner
 wraps the mutation forms as well as the stream source, so every task action

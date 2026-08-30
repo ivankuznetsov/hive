@@ -416,7 +416,11 @@ Honeycomb projections.
   installs or leaves a fresh owner retrying. This ownership allocates one Cable
   transport per live source, with at most one bounded retiring predecessor
   overlapping its successor; two simultaneous sources intentionally use two
-  isolated transports. A server-side poller startup failure rejects the
+  isolated transports. Cross-URL Turbo navigation still runs the permanent
+  source's disconnect/connect callbacks, so it replaces the dedicated
+  transport and pays a fresh WebSocket plus Action Cable subscription handshake
+  before `connected` and catch-up complete; it does not reuse turbo-rails'
+  cached consumer. A server-side poller startup failure rejects the
   subscription and the rejected callback schedules the same bounded retry.
   Detaching the source cancels the retry. The task-page owner encloses every
   mutation form, so those submissions cross the same refresh guard as Board

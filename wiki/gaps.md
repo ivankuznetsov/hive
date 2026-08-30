@@ -565,8 +565,12 @@ Dedicated client ownership intentionally changes allocation from turbo-rails'
 shared consumer to one Cable connection per simultaneously live status source.
 Deterministic browser coverage proves one transport for one source, two
 isolated transports for two sources, at most a successor plus one bounded
-retiring predecessor during supersession, and zero after detach or its bounded
-pending-release timeout. The older
+retiring predecessor during repeated supersession, one replacement transport
+after cross-URL Turbo navigation, and zero after detach or its bounded pending-
+release timeout. Because a permanent element's cross-URL move still invokes
+disconnect/connect, every navigation now pays a fresh WebSocket and Action
+Cable subscription handshake before `connected` and catch-up instead of
+reusing turbo-rails' cached consumer. The older
 isolated four-tab profile against the real 15-project registry still confirms
 one shared server poller and no idle DOM/HTTP loop, but predates this client
 transport allocation and is not current connection-capacity evidence. A fresh

@@ -23,7 +23,6 @@ module Hive
       circuit_cooldown half_open_probe_owned provider_concurrency_saturated
       health_state_unavailable
     ].freeze
-    DIRECT_SUBSCRIPTION_ADAPTERS = Hive::BillingEvidence::DIRECT_SUBSCRIPTION_ADAPTERS
 
     ACCOUNT_HEALTH_CLASSES = %w[
       authentication

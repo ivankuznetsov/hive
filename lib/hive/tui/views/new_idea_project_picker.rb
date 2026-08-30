@@ -63,6 +63,8 @@ module Hive
             "Duplicate project name #{names} — disambiguate registry or run `hive forget <name>`"
           when :unhealthy
             "No healthy projects available"
+          when :invalid_identity
+            "Project registry has entries without names — repair invalid registry entries"
           when :no_projects
             "No projects registered — run `hive init <path>`"
           else

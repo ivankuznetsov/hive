@@ -18,6 +18,8 @@ class TuiNewIdeaProjectResolutionBoundaryTest < Minitest::Test
     assert_includes update, "new_idea_admission"
     assert_includes update, "resolve_new_idea_entry"
     assert_includes bubble_model, "resolve_new_idea_project"
+    refute_includes update, "unhealthy_errors"
+    refute_includes update, "missing_project_path"
 
     [ update, bubble_model ].each do |consumer|
       refute_match(/\bproject\.error\b/, consumer)

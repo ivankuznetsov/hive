@@ -587,7 +587,10 @@ module Hive
           mode: :new_idea_project,
           new_idea_project_cursor: nil,
           new_idea_project_resolution: resolution,
-          flash: new_idea_resolution_flash(resolution),
+          flash: new_idea_resolution_flash(
+            resolution,
+            admission: model.snapshot.new_idea_admission
+          ),
           flash_set_at: Time.now
         )
       end
@@ -1050,20 +1053,30 @@ end
         model.snapshot&.new_idea_admission&.projects || []
       end
 
-      def new_idea_resolution_flash(resolution)
+      def new_idea_resolution_flash(resolution, admission: nil)
         case resolution.state
         when :available
           nil
         when :unhealthy
           error = resolution.detail.to_s.tr("_", " ")
+          if admission&.projects&.empty?
+            return "project #{resolution.name.inspect} is #{error} — " \
+              "#{new_idea_admission_flash(admission)}"
+          end
           "project #{resolution.name.inspect} is #{error} — choose another project or re-init it"
         when :disappeared
+          if admission&.projects&.empty?
+            return "project #{resolution.name.inspect} disappeared — " \
+              "#{new_idea_admission_flash(admission)}"
+          end
           "project #{resolution.name.inspect} disappeared — choose another project"
         when :ambiguous
           "project #{resolution.name.inspect} is ambiguous — disambiguate duplicate registry entries"
         when :invalid_scope
           "project scope #{resolution.detail.inspect} is unavailable — choose a project"
         when :selection_required
+          return new_idea_admission_flash(admission) if admission&.projects&.empty?
+
           "choose a project for the new idea"
         when :no_projects
           "no projects — run `hive init <path>` first"
@@ -1079,11 +1092,16 @@ end
         when :ambiguous
           names = admission.ambiguous_names.map(&:inspect).join(", ")
           "duplicate project name #{names} — disambiguate the registry or use `hive forget <name>`"
+        when :invalid_identity
+          "project registry contains entries without names — repair or remove invalid registry entries"
         when :unhealthy
-          if admission.unhealthy_errors == [ "missing_project_path" ]
+          case admission.recovery
+          when :prune_missing
             "no healthy projects — run `hive prune` to drop missing entries"
-          else
+          when :repair_projects
             "no healthy projects — re-init broken projects or use `hive forget <name>`"
+          else
+            raise ArgumentError, "unknown new-idea recovery kind: #{admission.recovery.inspect}"
           end
         when :no_projects
           "no projects — run `hive init <path>` first"

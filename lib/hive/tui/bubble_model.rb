@@ -2401,6 +2401,9 @@ module Hive
       # / `submit_rich_new_idea` (rescue + ensure) call-sites for the
       # branch-by-branch contract.
       def submit_new_idea
+        # Defensive idempotency for directly delivered/replayed messages.
+        # KeyMap emits submit only in :new_idea, but a late duplicate after a
+        # successful reset must remain a no-op instead of reopening the picker.
         return [ @hive_model, nil ] unless @hive_model.mode == :new_idea
 
         resolution = resolve_new_idea_project
@@ -2731,11 +2734,9 @@ module Hive
         snapshot = @hive_model.snapshot
         return Hive::Tui::Snapshot::NewIdeaResolution.new(state: :no_projects) unless snapshot
 
-        if @hive_model.new_idea_project_name.to_s.empty?
-          blocked = @hive_model.new_idea_project_resolution
-          return blocked if blocked && !blocked.available?
-        end
-
+        # A missing pin is defensive-only: operator transitions enter the
+        # composer with an exact non-empty name. Still ask the latest snapshot
+        # to classify it; never replay an older entry-time resolution.
         snapshot.resolve_new_idea_project(name: @hive_model.new_idea_project_name)
       end
 
@@ -2758,11 +2759,7 @@ module Hive
 
       def new_idea_resolution_flash(resolution)
         admission = @hive_model.snapshot&.new_idea_admission
-        if resolution.state == :selection_required && admission && admission.projects.empty?
-          return Hive::Tui::Update.new_idea_admission_flash(admission)
-        end
-
-        Hive::Tui::Update.new_idea_resolution_flash(resolution)
+        Hive::Tui::Update.new_idea_resolution_flash(resolution, admission: admission)
       end
 
       def flashed(text)

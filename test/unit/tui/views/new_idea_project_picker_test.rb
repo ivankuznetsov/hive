@@ -96,6 +96,19 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     refute_match(/no healthy projects/i, out)
   end
 
+  def test_blank_registry_identity_has_distinct_repair_feedback
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => [ { "name" => nil, "tasks" => [] } ]
+    )
+    model = Hive::Tui::Model.initial.with(mode: :new_idea_project, snapshot: snap)
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model)
+
+    assert_match(/entries without names.*repair/i, out)
+    refute_match(/duplicate project name|no healthy projects/i, out)
+  end
+
   def test_empty_message_has_a_safe_fallback_for_nonempty_authority_states
     admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
       state: :available,

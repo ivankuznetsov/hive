@@ -1423,6 +1423,16 @@ class HiveTuiUpdateTest < Minitest::Test
       state: :no_projects,
       projects: []
     )
+    invalid_identity_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :invalid_identity,
+      projects: [],
+      recovery: :repair_registry
+    )
+    missing_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :unhealthy,
+      projects: [],
+      recovery: :prune_missing
+    )
     unknown = Struct.new(:state).new(:unknown)
 
     assert_nil Hive::Tui::Update.new_idea_resolution_flash(available)
@@ -1432,6 +1442,10 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Update.new_idea_admission_flash(ambiguous_admission))
     assert_match(/no projects.*hive init/i,
       Hive::Tui::Update.new_idea_admission_flash(empty_admission))
+    assert_match(/without names.*repair/i,
+      Hive::Tui::Update.new_idea_admission_flash(invalid_identity_admission))
+    assert_match(/hive prune/i,
+      Hive::Tui::Update.new_idea_admission_flash(missing_admission))
     assert_raises(ArgumentError) do
       Hive::Tui::Update.new_idea_resolution_flash(unknown)
     end

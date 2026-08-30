@@ -1330,7 +1330,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
-  def unavailable_new_idea_cases
+  def new_idea_submission_cases
     [
       {
         state: :disappeared,
@@ -1354,22 +1354,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
         ]),
         name: "duplicate",
         pattern: /"duplicate".*ambiguous/i
-      },
-      {
-        state: :invalid_scope,
-        snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
-        name: nil,
-        blocked: Hive::Tui::Snapshot::NewIdeaResolution.new(
-          state: :invalid_scope,
-          detail: 9
-        ),
-        pattern: /scope 9.*unavailable/i
-      },
-      {
-        state: :selection_required,
-        snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
-        name: nil,
-        pattern: /choose a project/i
       },
       {
         state: :no_projects,
@@ -1548,8 +1532,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal "", @model.hive_model.new_idea_buffer
   end
 
-  def test_plain_new_idea_preflight_blocks_every_unavailable_state_and_preserves_work
-    unavailable_new_idea_cases.each do |entry|
+  def test_plain_new_idea_preflight_blocks_each_submission_case_and_preserves_work
+    new_idea_submission_cases.each do |entry|
       @model = Hive::Tui::BubbleModel.new(
         hive_model: Hive::Tui::Model.initial.with(
           mode: :new_idea,
@@ -1578,8 +1562,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_rich_new_idea_preflight_blocks_every_unavailable_state_before_command_construction
-    unavailable_new_idea_cases.each do |entry|
+  def test_rich_new_idea_preflight_blocks_each_submission_case_before_command_construction
+    new_idea_submission_cases.each do |entry|
       with_staged_image_attachment do |staging_dir, staging_path, attachment|
         @model = Hive::Tui::BubbleModel.new(
           hive_model: Hive::Tui::Model.initial.with(
@@ -1618,6 +1602,51 @@ class HiveTuiBubbleModelTest < Minitest::Test
         assert_match entry.fetch(:pattern), @model.hive_model.flash.to_s
       end
     end
+  end
+
+  def test_defensive_missing_pin_revalidates_latest_snapshot_instead_of_replaying_entry_failure
+    stale_entry = Hive::Tui::Snapshot::NewIdeaResolution.new(
+      state: :invalid_scope,
+      detail: 9
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
+        new_idea_project_name: nil,
+        new_idea_project_resolution: stale_entry,
+        new_idea_buffer: "draft title"
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+    assert_equal :new_idea_project, @model.hive_model.mode
+    assert_equal :selection_required, @model.hive_model.new_idea_project_resolution.state
+    refute_same stale_entry, @model.hive_model.new_idea_project_resolution
+  end
+
+  def test_sole_pinned_project_removal_preserves_disappearance_and_truthful_empty_recovery
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([]),
+        new_idea_project_name: "alpha",
+        new_idea_buffer: "draft title"
+      ),
+      dispatch: @dispatch
+    )
+    dispatch_count = 0
+
+    with_run_quiet_stub(->(_argv) { dispatch_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal 0, dispatch_count
+    assert_equal :disappeared, @model.hive_model.new_idea_project_resolution.state
+    assert_match(/"alpha".*disappeared.*no projects.*hive init/i, @model.hive_model.flash.to_s)
+    refute_match(/choose another project/i, @model.hive_model.flash.to_s)
   end
 
   def test_rich_preflight_runs_before_broken_placeholder_validation

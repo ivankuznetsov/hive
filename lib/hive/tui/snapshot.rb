@@ -13,7 +13,10 @@ module Hive
     # thread for one frame at a time. Frozen: `#filter_by_slug` and
     # `#scope_to_project_index` return new instances rather than mutating.
     class Snapshot
-      NEW_IDEA_ADMISSION_STATES = %i[available ambiguous unhealthy no_projects].freeze
+      NEW_IDEA_ADMISSION_STATES = %i[
+        available ambiguous unhealthy invalid_identity no_projects
+      ].freeze
+      NEW_IDEA_RECOVERY_KINDS = %i[prune_missing repair_projects repair_registry].freeze
       NEW_IDEA_RESOLUTION_STATES = %i[
         available selection_required disappeared unhealthy ambiguous invalid_scope no_projects
       ].freeze
@@ -21,20 +24,23 @@ module Hive
 
       # Ordered projects that the new-idea picker may admit, plus the cause
       # needed to explain an empty collection without re-reading raw project
-      # errors in a view. Duplicate exact names never enter `projects`, even
-      # when one or all of their rows are healthy.
-      NewIdeaAdmission = Data.define(:state, :projects, :ambiguous_names, :unhealthy_errors) do
+      # errors in a consumer. Recovery is already classified here; duplicate
+      # exact names never enter `projects`, even when all rows are healthy.
+      NewIdeaAdmission = Data.define(:state, :projects, :ambiguous_names, :recovery) do
         def initialize(state:, projects:, ambiguous_names: [].freeze,
-                       unhealthy_errors: [].freeze)
+                       recovery: nil)
           unless Hive::Tui::Snapshot::NEW_IDEA_ADMISSION_STATES.include?(state)
             raise ArgumentError, "unknown new-idea admission state: #{state.inspect}"
+          end
+          if recovery && !Hive::Tui::Snapshot::NEW_IDEA_RECOVERY_KINDS.include?(recovery)
+            raise ArgumentError, "unknown new-idea recovery kind: #{recovery.inspect}"
           end
 
           super(
             state: state,
             projects: Array(projects).freeze,
             ambiguous_names: Array(ambiguous_names).freeze,
-            unhealthy_errors: Array(unhealthy_errors).freeze
+            recovery: recovery
           )
         end
       end
@@ -220,11 +226,16 @@ module Hive
 
       attr_reader :generated_at, :projects, :archive_projects, :new_idea_admission
 
-      def initialize(generated_at:, projects:, archive_projects: [].freeze)
+      def initialize(generated_at:, projects:, archive_projects: [].freeze,
+                     new_idea_admission: nil)
         @generated_at = generated_at
         @projects = projects.freeze
         @archive_projects = archive_projects.freeze
-        @new_idea_admission = build_new_idea_admission
+        # Admission is registry-wide authority. Derived scope/filter snapshots
+        # carry this exact value instead of recomputing policy over a visible
+        # subset, so a future projection consumer cannot silently admit from
+        # incomplete registry state.
+        @new_idea_admission = new_idea_admission || build_new_idea_admission
         freeze
       end
 
@@ -385,9 +396,8 @@ module Hive
       # deliberately accepts no numeric position, so reorder/removal cannot
       # reinterpret stale scope as a different target.
       def resolve_new_idea_project(name:)
-        return new_idea_resolution(:no_projects) if @projects.empty?
-
         candidate = name.to_s
+        return new_idea_resolution(:no_projects) if @projects.empty? && candidate.empty?
         return new_idea_resolution(:selection_required) if candidate.empty?
 
         matches = @projects.select { |project| project.name == candidate }
@@ -437,7 +447,8 @@ module Hive
         self.class.new(
           generated_at: @generated_at,
           projects: filtered,
-          archive_projects: @archive_projects
+          archive_projects: @archive_projects,
+          new_idea_admission: @new_idea_admission
         )
       end
 
@@ -452,10 +463,16 @@ module Hive
           self.class.new(
             generated_at: @generated_at,
             projects: [ @projects[n - 1] ],
-            archive_projects: [ @archive_projects[n - 1] ].compact
+            archive_projects: [ @archive_projects[n - 1] ].compact,
+            new_idea_admission: @new_idea_admission
           )
         else
-          self.class.new(generated_at: @generated_at, projects: [], archive_projects: [])
+          self.class.new(
+            generated_at: @generated_at,
+            projects: [],
+            archive_projects: [],
+            new_idea_admission: @new_idea_admission
+          )
         end
       end
 
@@ -488,7 +505,10 @@ module Hive
 
       def build_new_idea_admission
         groups = @projects.group_by(&:name)
-        ambiguous_groups = groups.select { |_name, projects| projects.size > 1 }
+        ambiguous_groups = groups.select do |name, projects|
+          !name.to_s.empty? && projects.size > 1
+        end
+        invalid_identity = @projects.any? { |project| project.name.to_s.empty? }
         projects = @projects.select do |project|
           !project.name.to_s.empty? && groups.fetch(project.name).one? && project.error.nil?
         end.freeze
@@ -496,27 +516,33 @@ module Hive
           value = name.to_s
           value.dup.freeze unless value.empty?
         end.first(NEW_IDEA_AMBIGUOUS_NAME_LIMIT).freeze
-        unhealthy_errors = @projects.filter_map do |project|
-          error = project.error.to_s
-          error.dup.freeze unless error.empty?
-        end.uniq.first(NEW_IDEA_AMBIGUOUS_NAME_LIMIT).freeze
 
         state =
           if projects.any?
             :available
           elsif @projects.empty?
             :no_projects
+          elsif invalid_identity
+            :invalid_identity
           elsif ambiguous_groups.any?
             :ambiguous
           else
             :unhealthy
+          end
+        recovery =
+          case state
+          when :unhealthy
+            @projects.all? { |project| project.error.to_s == "missing_project_path" } ?
+              :prune_missing : :repair_projects
+          when :invalid_identity
+            :repair_registry
           end
 
         NewIdeaAdmission.new(
           state: state,
           projects: projects,
           ambiguous_names: ambiguous_names,
-          unhealthy_errors: unhealthy_errors
+          recovery: recovery
         )
       end
 

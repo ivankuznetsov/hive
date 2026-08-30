@@ -652,8 +652,7 @@ class TuiSnapshotTest < Minitest::Test
 
     assert_equal :unhealthy, unhealthy.state
     assert_empty unhealthy.projects
-    assert_equal %w[missing_project_path not_initialised], unhealthy.unhealthy_errors
-    assert_predicate unhealthy.unhealthy_errors, :frozen?
+    assert_equal :repair_projects, unhealthy.recovery
     assert_equal :ambiguous, both_healthy.state
     assert_equal [ "duplicate" ], both_healthy.ambiguous_names
     assert_equal :ambiguous, mixed_health.state,
@@ -662,12 +661,64 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal :no_projects, empty.state
   end
 
+  def test_new_idea_admission_classifies_recovery_without_exposing_raw_errors
+    missing_only = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "broken-a", "error" => "missing_project_path", "tasks" => [] },
+      { "name" => "broken-b", "error" => "missing_project_path", "tasks" => [] }
+    ])).new_idea_admission
+    mixed = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "broken-a", "error" => "missing_project_path", "tasks" => [] },
+      { "name" => "broken-b", "error" => "not_initialised", "tasks" => [] }
+    ])).new_idea_admission
+
+    assert_equal :prune_missing, missing_only.recovery
+    assert_equal :repair_projects, mixed.recovery
+    refute_respond_to missing_only, :unhealthy_errors
+  end
+
+  def test_new_idea_admission_names_blank_registry_identity
+    [
+      [ { "name" => nil, "tasks" => [] } ],
+      [ { "name" => "", "tasks" => [] }, { "name" => nil, "tasks" => [] } ]
+    ].each do |projects|
+      admission = Hive::Tui::Snapshot.from_payload(sample_payload(projects)).new_idea_admission
+
+      assert_equal :invalid_identity, admission.state
+      assert_equal :repair_registry, admission.recovery
+      assert_empty admission.projects
+      assert_empty admission.ambiguous_names
+    end
+  end
+
+  def test_new_idea_admission_stays_registry_wide_on_scope_and_filter_projections
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [ { "slug" => "visible", "stage" => "1-inbox" } ] },
+      { "name" => "beta", "tasks" => [] }
+    ]))
+
+    scoped = snapshot.scope_to_project_index(1)
+    filtered = snapshot.filter_by_slug("visible")
+    empty_scope = snapshot.scope_to_project_index(99)
+
+    assert_same snapshot.new_idea_admission, scoped.new_idea_admission
+    assert_same snapshot.new_idea_admission, filtered.new_idea_admission
+    assert_same snapshot.new_idea_admission, empty_scope.new_idea_admission
+    assert_equal %w[alpha beta], scoped.new_idea_admission.projects.map(&:name)
+  end
+
   def test_new_idea_value_objects_reject_unknown_states
     assert_raises(ArgumentError) do
       Hive::Tui::Snapshot::NewIdeaAdmission.new(state: :unknown, projects: [])
     end
     assert_raises(ArgumentError) do
       Hive::Tui::Snapshot::NewIdeaResolution.new(state: :unknown)
+    end
+    assert_raises(ArgumentError) do
+      Hive::Tui::Snapshot::NewIdeaAdmission.new(
+        state: :unhealthy,
+        projects: [],
+        recovery: :unknown
+      )
     end
   end
 
@@ -698,10 +749,13 @@ class TuiSnapshotTest < Minitest::Test
     refute_predicate ambiguous, :available?
   end
 
-  def test_new_idea_resolution_reports_no_projects_for_an_empty_snapshot
+  def test_new_idea_resolution_preserves_pinned_disappearance_for_an_empty_snapshot
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([]))
 
-    assert_equal :no_projects, snapshot.resolve_new_idea_project(name: "ghost").state
+    disappeared = snapshot.resolve_new_idea_project(name: "ghost")
+
+    assert_equal :disappeared, disappeared.state
+    assert_equal "ghost", disappeared.name
     assert_equal :no_projects, snapshot.resolve_new_idea_project(name: nil).state
     assert_equal :no_projects, snapshot.resolve_new_idea_entry(scope: 1).state
   end

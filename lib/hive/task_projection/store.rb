@@ -47,7 +47,7 @@ module Hive
 
       RepairResult = Data.define(:projection, :bounded)
 
-      def self.pristine_task?(task, marker)
+      def self.pristine_task?(task, marker, held_task_lock: false)
         return false unless task.respond_to?(:workflow) && task.respond_to?(:stage_index) &&
                             task.respond_to?(:stage_name) && task.respond_to?(:folder) &&
                             task.respond_to?(:log_dir)
@@ -68,6 +68,8 @@ module Hive
         end
         return false unless marker.name == expected_marker
         PRISTINE_FORBIDDEN_ENTRIES.each do |basename|
+          next if basename == ".lock" && held_task_lock
+
           begin
             File.lstat(File.join(task.folder, basename))
             return false

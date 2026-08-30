@@ -53,16 +53,27 @@ class RepairProjectionCommandTest < Minitest::Test
     end
   end
 
-  def test_missing_and_corrupt_authority_emit_typed_bounded_errors
-    with_project_tasks(2) do |project, tasks|
-      missing, corrupt = tasks
-      missing_payload = command_error_payload(
-        missing.slug, project: project, stage: "1-inbox"
+  def test_pristine_zero_history_task_repairs_without_inventing_a_journal
+    with_project_tasks(1) do |project, tasks|
+      task = tasks.first
+
+      payload = cli_json(
+        "repair-projection", task.slug,
+        "--project", project, "--stage", "1-inbox", "--json"
       )
-      assert_schema_valid(missing_payload)
-      assert_equal "invalid_projection_authority", missing_payload.fetch("error_kind")
-      assert_equal missing.slug, missing_payload.fetch("slug")
-      refute File.exist?(File.join(missing.folder, "task-projection.json"))
+
+      assert_schema_valid(payload)
+      assert_equal true, payload.fetch("ok")
+      assert_equal "repaired", payload.fetch("outcome")
+      assert_equal "current", payload.fetch("checkpoint_state")
+      refute File.exist?(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)),
+             "zero-history repair must not invent authoritative journal history"
+    end
+  end
+
+  def test_corrupt_authority_emits_a_typed_bounded_error
+    with_project_tasks(2) do |project, tasks|
+      _unused, corrupt = tasks
 
       File.write(
         File.join(corrupt.folder, Hive::TaskJournal::JOURNAL_BASENAME),

@@ -39,7 +39,8 @@ newer than the other, but the next scan still fails closed as repair-required.
 For a task that still proves the canonical initial zero-history state, repair
 may republish those two derived files without creating an authoritative
 journal. The same shared pristine predicate used by status must prove that
-exception; an arbitrary journal-less task is still rejected.
+exception; only the task lock already owned by the command is ignored while
+making that decision. An arbitrary journal-less task is still rejected.
 
 On success, human output names the task and journal cursor; `--json` emits
 `hive-repair-projection.v1` with `outcome: repaired` and the next action

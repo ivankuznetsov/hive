@@ -102,7 +102,10 @@ module Hive
             options[:attempt_store] = @attempt_store if @attempt_store
             Hive::TaskProjection::Store.new(**options).repair!(
               marker: marker,
-              pristine: Hive::TaskProjection::Store.pristine_task?(locked_task, marker)
+              pristine: Hive::TaskProjection::Store.pristine_task?(
+                locked_task, marker,
+                held_task_lock: Hive::Lock.task_lock_held?(locked_task.folder)
+              )
             )
           rescue Hive::TaskProjection::InvalidJournal => e
             raise Hive::TaskProjection::InvalidJournal,

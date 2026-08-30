@@ -18,6 +18,32 @@
             <%= pluralize(Array(amendment["items"]).length, "late item") %> ·
             <%= pluralize(Array(amendment["resolved_gap_ids"]).length, "resolved gap") %>
           </p>
+          <% if Array(amendment["items"]).any? %>
+            <ul class="digest-amendment-details">
+              <% Array(amendment["items"]).each do |item| %>
+                <li>
+                  Late: <%= item["summary"].presence || item["kind"].to_s.humanize %>
+                  <% if item["project"] || item["task_slug"] %>
+                    · <%= [item["project"], item["task_slug"]].compact.join(":") %>
+                  <% end %>
+                </li>
+              <% end %>
+            </ul>
+          <% end %>
+          <% resolved = Array(amendment["resolved_gaps"]) %>
+          <% if resolved.any? %>
+            <ul class="digest-amendment-details">
+              <% resolved.each do |gap| %>
+                <li>Recovered: <%= gap["source"].to_s.humanize %> · <%= gap["scope"].presence || "global" %></li>
+              <% end %>
+            </ul>
+          <% elsif Array(amendment["resolved_gap_ids"]).any? %>
+            <ul class="digest-amendment-details">
+              <% Array(amendment["resolved_gap_ids"]).each do |gap_id| %>
+                <li>Recovered gap: <%= gap_id %></li>
+              <% end %>
+            </ul>
+          <% end %>
         </li>
       <% end %>
     </ol>

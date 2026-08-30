@@ -87,6 +87,11 @@ module Hive
         attempt_legacy_backfilled
         answer_digest_failure_backoff
         answer_digest_state_unreadable
+        brainstorm_suggestion_bundle_sweep
+        brainstorm_suggestion_scheduler_error
+        brainstorm_suggestion_unavailable
+        brainstorm_suggestion_deferred
+        brainstorm_suggestion_worker_error
         architecture_patrol_opened
         architecture_patrol_progress
         architecture_patrol_closed

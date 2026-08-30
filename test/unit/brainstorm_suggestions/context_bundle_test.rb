@@ -77,6 +77,21 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
     end
   end
 
+  def test_capture_many_returns_mutable_copies_of_cached_repository_content
+    with_repository do |root|
+      File.write(File.join(root, "wiki", "architecture.md"), "The naïve adapter boundary is stable.\n")
+
+      with_task(root) do |task|
+        bundles = Hive::BrainstormSuggestions::ContextBundle.capture_many(
+          project_root: root, task_root: task, question_ordinals: [ 1, 2 ]
+        )
+
+        assert_equal [ 1, 2 ], bundles.keys
+        assert bundles.values.all? { |bundle| bundle.render_context.include?("naïve adapter") }
+      end
+    end
+  end
+
   def test_empty_head_change_does_not_change_selected_identity
     with_repository do |root|
       with_task(root) do |task|
@@ -192,6 +207,30 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
           project_root: root, task_root: task, question_ordinal: 2
         )
         refute_includes without_main_wiki.source_classes, "main_wiki"
+      end
+    end
+  end
+
+  def test_main_wiki_utf8_bytes_are_normalized_before_safety_screening
+    with_repository do |root|
+      wiki_root = File.join(root, "shared-wiki")
+      FileUtils.mkdir_p([ File.join(root, ".llm-wiki"), wiki_root ])
+      File.binwrite(
+        File.join(wiki_root, "adapter.md"),
+        "The repository adapter preserves the naïve public API.\n".b
+      )
+      File.write(
+        File.join(root, ".llm-wiki", "config.json"),
+        JSON.generate("main_wiki_path" => "shared-wiki")
+      )
+
+      with_task(root) do |task|
+        bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
+          project_root: root, task_root: task, question_ordinal: 2
+        )
+
+        assert_includes bundle.source_classes, "main_wiki"
+        assert_includes bundle.render_context, "naïve public API"
       end
     end
   end

@@ -57,7 +57,8 @@ module Hive
 
       def tick(rows:, now: @clock.call, complete: true)
         active = []
-        Array(rows).each do |row|
+        inventory = Array(rows)
+        inventory.each do |row|
           begin
             if eligible_row?(row)
               cfg = config_for(row)
@@ -78,6 +79,9 @@ module Hive
         end
         cancel_missing(active.map { |row, _cfg| File.expand_path(row.folder.to_s) }) if complete
         active.length
+      rescue StandardError => error
+        log(:brainstorm_suggestion_scheduler_error, error: bounded_error(error))
+        0
       end
 
       def shutdown

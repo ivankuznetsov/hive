@@ -848,6 +848,9 @@ exponential jitter. Restarted `loading` records are reconciled rather than
 trusted as live processes. Missing isolation or routing is recorded as
 `unavailable`; timeout, provider exit, malformed structured output, and spawn
 failure are `failed`; safe suppression is `no_safe_suggestion`.
+Inventory conversion and per-row reconciliation are both failure-isolated: a
+malformed observation is logged through the scheduler's closed event enum and
+returns no launches instead of escaping the daemon tick.
 
 Answer persistence and stage transitions invoke the same task-locked cleanup
 boundary: matching jobs are cancelled, sidecar/envelope text is removed, and a

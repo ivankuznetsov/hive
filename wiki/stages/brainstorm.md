@@ -87,7 +87,10 @@ selected deterministically, while tracked overlay paths are prioritized within
 the same file/byte bounds. Conflicts, submodules, symlinks, special files,
 descriptor races, oversized/binary/non-UTF-8 content, and secret-bearing
 repository/wiki entries fail closed or are excluded. Task and settled-answer
-text is redacted before use. Every excerpt is labelled as untrusted data.
+text is redacted before use. External main-wiki reads are normalized to valid
+UTF-8 before safety screening, and capture-cache hits return independent
+mutable strings so selection cannot mutate or freeze another reader's value.
+Every excerpt is labelled as untrusted data.
 
 The configured provider is launchable only when its profile proves the
 `brainstorm_suggestion_data_only` capability. The shipped implementation

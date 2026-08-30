@@ -1354,12 +1354,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
         ]),
         name: "duplicate",
         pattern: /"duplicate".*ambiguous/i
-      },
-      {
-        state: :no_projects,
-        snapshot: new_idea_snapshot([]),
-        name: nil,
-        pattern: /no projects/i
       }
     ]
   end
@@ -1539,7 +1533,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
           mode: :new_idea,
           snapshot: entry.fetch(:snapshot),
           new_idea_project_name: entry.fetch(:name),
-          new_idea_project_resolution: entry[:blocked],
           new_idea_buffer: "draft title",
           new_idea_cursor: 5
         ),
@@ -1570,7 +1563,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
             mode: :new_idea,
             snapshot: entry.fetch(:snapshot),
             new_idea_project_name: entry.fetch(:name),
-            new_idea_project_resolution: entry[:blocked],
             new_idea_buffer: "draft [image1]",
             new_idea_cursor: 7,
             new_idea_attachments: [ attachment ],
@@ -1625,6 +1617,29 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :new_idea_project, @model.hive_model.mode
     assert_equal :selection_required, @model.hive_model.new_idea_project_resolution.state
     refute_same stale_entry, @model.hive_model.new_idea_project_resolution
+  end
+
+  def test_defensive_missing_pin_with_empty_registry_reports_no_projects
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([]),
+        new_idea_project_name: nil,
+        new_idea_buffer: "draft title"
+      ),
+      dispatch: @dispatch
+    )
+    dispatch_count = 0
+
+    with_run_quiet_stub(->(_argv) { dispatch_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal 0, dispatch_count
+    assert_equal :new_idea_project, @model.hive_model.mode
+    assert_equal :no_projects, @model.hive_model.new_idea_project_resolution.state
+    assert_match(/no projects/i, @model.hive_model.flash.to_s)
+    assert_equal "draft title", @model.hive_model.new_idea_buffer
   end
 
   def test_sole_pinned_project_removal_preserves_disappearance_and_truthful_empty_recovery

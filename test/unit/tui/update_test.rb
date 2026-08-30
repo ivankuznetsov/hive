@@ -194,6 +194,22 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "beta", reordered.new_idea_admission.projects.fetch(0).name
   end
 
+  def test_snapshot_arrived_with_nil_snapshot_keeps_picker_state_unchanged
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
+      new_idea_project_cursor: 0
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: nil)
+    )
+
+    assert_nil new_model.snapshot
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
   def test_snapshot_arrived_picker_invalidates_removed_project_without_later_auto_highlight
     original = new_idea_snapshot([
       { "name" => "alpha", "tasks" => [] },
@@ -1446,6 +1462,11 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Update.new_idea_admission_flash(invalid_identity_admission))
     assert_match(/hive prune/i,
       Hive::Tui::Update.new_idea_admission_flash(missing_admission))
+    assert_raises(ArgumentError) do
+      Hive::Tui::Update.new_idea_admission_flash(
+        Hive::Tui::Snapshot::NewIdeaAdmission.new(state: :unhealthy, projects: [])
+      )
+    end
     assert_raises(ArgumentError) do
       Hive::Tui::Update.new_idea_resolution_flash(unknown)
     end

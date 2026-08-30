@@ -1,4 +1,5 @@
 require "hive/tui/styles"
+require "hive/tui/update"
 require "hive/tui/views/format"
 
 module Hive
@@ -14,6 +15,9 @@ module Hive
 
         def render(model, width: model.cols.to_i)
           rows = [ "Choose project for new idea:" ]
+          if (message = retained_resolution_message(model))
+            rows << Styles::FLASH.render(message)
+          end
           projects = nil
           if model.snapshot.nil?
             rows << Styles::HINT.render("Loading projects...")
@@ -36,7 +40,7 @@ module Hive
           # loading + no-healthy-projects states used to render with no
           # exit affordance, making the mode look frozen.
           hint = if projects && !projects.empty?
-            cursor.nil? ? "j/k select  Esc cancel" : "Enter choose  Esc cancel"
+            cursor.nil? ? "j first / k last  Esc cancel" : "Enter choose  Esc cancel"
           else
             "Esc cancel"
           end
@@ -68,8 +72,23 @@ module Hive
           when :no_projects
             "No projects registered — run `hive init <path>`"
           else
-            "No selectable projects available"
+            raise ArgumentError, "unknown new-idea admission state: #{admission.state.inspect}"
           end
+        end
+
+        def retained_resolution_message(model)
+          resolution = model.new_idea_project_resolution
+          return unless resolution
+
+          message = Hive::Tui::Update.new_idea_resolution_flash(
+            resolution,
+            admission: model.snapshot&.new_idea_admission
+          )
+          return unless message
+
+          draft_kept = !model.new_idea_buffer.to_s.empty? ||
+            Array(model.new_idea_attachments).any?
+          draft_kept ? "#{message} — draft kept" : message
         end
 
         def visible_projects(projects, cursor)

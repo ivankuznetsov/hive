@@ -217,6 +217,8 @@ module Hive
       # refreshes until the operator moves. Loading/ordinary-empty states
       # retain their row-zero seed because no prior identity was invalidated.
       def apply_new_idea_project_snapshot(new_model, prior_model)
+        return new_model unless new_model.snapshot
+
         prior_cursor = prior_model.new_idea_project_cursor
         return new_model.with(new_idea_project_cursor: nil) if prior_cursor.nil?
 

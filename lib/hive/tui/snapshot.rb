@@ -227,14 +227,15 @@ module Hive
       attr_reader :generated_at, :projects, :archive_projects, :new_idea_admission
 
       def initialize(generated_at:, projects:, archive_projects: [].freeze,
-                     new_idea_admission: nil)
+                     new_idea_admission: nil, new_idea_registry_projects: nil)
         @generated_at = generated_at
         @projects = projects.freeze
         @archive_projects = archive_projects.freeze
+        @new_idea_registry_projects = (new_idea_registry_projects || @projects).freeze
         # Admission is registry-wide authority. Derived scope/filter snapshots
-        # carry this exact value instead of recomputing policy over a visible
-        # subset, so a future projection consumer cannot silently admit from
-        # incomplete registry state.
+        # carry this exact value and its source projects instead of recomputing
+        # policy over a visible subset, so every resolver answers from the same
+        # complete registry authority.
         @new_idea_admission = new_idea_admission || build_new_idea_admission
         freeze
       end
@@ -384,12 +385,15 @@ module Hive
         unless name.to_s.empty?
           return new_idea_resolution(:invalid_scope, name: name.to_s, detail: scope)
         end
-        return new_idea_resolution(:no_projects) if @projects.empty?
-        unless scope.is_a?(Integer) && scope.between?(1, @projects.size)
+        return new_idea_resolution(:no_projects) if @new_idea_registry_projects.empty?
+        unless scope.is_a?(Integer) && scope.between?(1, @new_idea_registry_projects.size)
           return new_idea_resolution(:invalid_scope, detail: scope)
         end
 
-        resolve_new_idea_project(name: @projects[scope - 1].name)
+        project = @new_idea_registry_projects[scope - 1]
+        return new_idea_resolution(:invalid_scope, detail: scope) if project.name.to_s.empty?
+
+        resolve_new_idea_project(name: project.name)
       end
 
       # Revalidate only the pinned exact name against this snapshot. This
@@ -397,10 +401,12 @@ module Hive
       # reinterpret stale scope as a different target.
       def resolve_new_idea_project(name:)
         candidate = name.to_s
-        return new_idea_resolution(:no_projects) if @projects.empty? && candidate.empty?
+        if @new_idea_registry_projects.empty? && candidate.empty?
+          return new_idea_resolution(:no_projects)
+        end
         return new_idea_resolution(:selection_required) if candidate.empty?
 
-        matches = @projects.select { |project| project.name == candidate }
+        matches = @new_idea_registry_projects.select { |project| project.name == candidate }
         return new_idea_resolution(:disappeared, name: candidate) if matches.empty?
         return new_idea_resolution(:ambiguous, name: candidate) if matches.size > 1
 
@@ -448,7 +454,8 @@ module Hive
           generated_at: @generated_at,
           projects: filtered,
           archive_projects: @archive_projects,
-          new_idea_admission: @new_idea_admission
+          new_idea_admission: @new_idea_admission,
+          new_idea_registry_projects: @new_idea_registry_projects
         )
       end
 
@@ -464,14 +471,16 @@ module Hive
             generated_at: @generated_at,
             projects: [ @projects[n - 1] ],
             archive_projects: [ @archive_projects[n - 1] ].compact,
-            new_idea_admission: @new_idea_admission
+            new_idea_admission: @new_idea_admission,
+            new_idea_registry_projects: @new_idea_registry_projects
           )
         else
           self.class.new(
             generated_at: @generated_at,
             projects: [],
             archive_projects: [],
-            new_idea_admission: @new_idea_admission
+            new_idea_admission: @new_idea_admission,
+            new_idea_registry_projects: @new_idea_registry_projects
           )
         end
       end
@@ -504,12 +513,12 @@ module Hive
       private
 
       def build_new_idea_admission
-        groups = @projects.group_by(&:name)
+        groups = @new_idea_registry_projects.group_by(&:name)
         ambiguous_groups = groups.select do |name, projects|
           !name.to_s.empty? && projects.size > 1
         end
-        invalid_identity = @projects.any? { |project| project.name.to_s.empty? }
-        projects = @projects.select do |project|
+        invalid_identity = @new_idea_registry_projects.any? { |project| project.name.to_s.empty? }
+        projects = @new_idea_registry_projects.select do |project|
           !project.name.to_s.empty? && groups.fetch(project.name).one? && project.error.nil?
         end.freeze
         ambiguous_names = ambiguous_groups.keys.filter_map do |name|
@@ -520,7 +529,7 @@ module Hive
         state =
           if projects.any?
             :available
-          elsif @projects.empty?
+          elsif @new_idea_registry_projects.empty?
             :no_projects
           elsif invalid_identity
             :invalid_identity
@@ -532,7 +541,7 @@ module Hive
         recovery =
           case state
           when :unhealthy
-            @projects.all? { |project| project.error.to_s == "missing_project_path" } ?
+            @new_idea_registry_projects.all? { |project| project.error.to_s == "missing_project_path" } ?
               :prune_missing : :repair_projects
           when :invalid_identity
             :repair_registry

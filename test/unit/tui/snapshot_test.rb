@@ -704,6 +704,26 @@ class TuiSnapshotTest < Minitest::Test
     assert_same snapshot.new_idea_admission, filtered.new_idea_admission
     assert_same snapshot.new_idea_admission, empty_scope.new_idea_admission
     assert_equal %w[alpha beta], scoped.new_idea_admission.projects.map(&:name)
+    assert_equal :available, scoped.resolve_new_idea_project(name: "beta").state
+    assert_equal :available, scoped.resolve_new_idea_entry(scope: 2).state
+    assert_equal :available, filtered.resolve_new_idea_project(name: "beta").state
+    assert_equal :available, filtered.resolve_new_idea_entry(scope: 2).state
+    assert_equal :available, empty_scope.resolve_new_idea_project(name: "beta").state
+    assert_equal :available, empty_scope.resolve_new_idea_entry(scope: 2).state
+  end
+
+  def test_new_idea_admission_bounds_distinct_ambiguous_names_in_registry_order
+    projects = %w[one two three four].flat_map do |name|
+      [
+        { "name" => name, "tasks" => [] },
+        { "name" => name, "tasks" => [] }
+      ]
+    end
+
+    admission = Hive::Tui::Snapshot.from_payload(sample_payload(projects)).new_idea_admission
+
+    assert_equal :ambiguous, admission.state
+    assert_equal %w[one two three], admission.ambiguous_names
   end
 
   def test_new_idea_value_objects_reject_unknown_states
@@ -791,6 +811,18 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal :unhealthy, snapshot.resolve_new_idea_entry(scope: 1).state
     assert_equal :ambiguous, snapshot.resolve_new_idea_entry(scope: 2).state
     assert_equal :ambiguous, snapshot.resolve_new_idea_entry(scope: 3).state
+  end
+
+  def test_new_idea_entry_resolution_rejects_a_scoped_blank_registry_identity
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => nil, "tasks" => [] },
+      { "name" => "healthy", "tasks" => [] }
+    ]))
+
+    resolution = snapshot.resolve_new_idea_entry(scope: 1)
+
+    assert_equal :invalid_scope, resolution.state
+    assert_equal 1, resolution.detail
   end
 
   def test_new_idea_numeric_scope_is_consumed_once_then_revalidates_only_the_pinned_name

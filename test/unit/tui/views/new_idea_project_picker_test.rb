@@ -109,14 +109,15 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     refute_match(/duplicate project name|no healthy projects/i, out)
   end
 
-  def test_empty_message_has_a_safe_fallback_for_nonempty_authority_states
+  def test_empty_message_rejects_nonempty_authority_states
     admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
       state: :available,
       projects: []
     )
 
-    assert_equal "No selectable projects available",
+    assert_raises(ArgumentError) do
       Hive::Tui::Views::NewIdeaProjectPicker.empty_message(admission)
+    end
   end
 
   def test_nil_cursor_renders_admissible_rows_without_a_highlight
@@ -131,7 +132,28 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     assert_includes out, "  hive"
     assert_includes out, "  writero"
     refute_match(/^> /, out)
-    assert_match(/j\/k select/i, out)
+    assert_match(/j first \/ k last/i, out)
+  end
+
+  def test_retained_resolution_remains_visible_after_flash_expires
+    resolution = Hive::Tui::Snapshot::NewIdeaResolution.new(
+      state: :disappeared,
+      name: "ghost"
+    )
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea_project,
+      snapshot: snapshot,
+      new_idea_project_cursor: nil,
+      new_idea_project_resolution: resolution,
+      new_idea_buffer: "draft title",
+      flash: nil,
+      flash_set_at: nil
+    )
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model, width: 120)
+
+    assert_match(/"ghost".*disappeared/i, out)
+    assert_match(/draft kept/i, out)
   end
 
   def test_nil_snapshot_renders_loading_message

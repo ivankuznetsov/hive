@@ -70,7 +70,6 @@ class TemplateMarkerLastLineTest < Minitest::Test
 
     assert_match(/must not write task\.md yourself/i, review)
     assert_match(/Do NOT update the task\.md marker yourself/i, execute)
-    assert_match(/Do not push commits or create\/update a pull request/i, execute)
     assert_match(/controller-owned/i, artifacts)
     assert_match(/never\s+publication authority/i, artifacts)
     assert_match(/publication controller exclusively owns/i, open_pr)

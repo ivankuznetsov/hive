@@ -84,7 +84,8 @@ repeat native web preparation at container startup.
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path. Its thin Hive installer owns
 web environment rendering and output policy while `Hive::UserService` owns
-file drift, plan revalidation, atomic replacement, and manager application.
+file drift, exclusive mutation, replay, and verified manager application; see
+[[modules/user_service]] for the shared transition and recovery contract.
 `--force` also forces an authenticated, rollback-safe managed-bundle
 reprovision before replacing the
 service, even when the installed bundle has a current version stamp and healthy
@@ -93,7 +94,8 @@ without a Hive version bump; ordinary foreground/start bootstrap remains a
 no-op for a healthy current bundle. If the service was already running, a
 successful refresh restarts it exactly once even when the unit file itself is
 unchanged. A service-unit upgrade that already restarted it is not restarted a
-second time.
+second time. The refresh restart is part of the recorded install intent, so the
+command does not release and reacquire service ownership between those effects.
 
 The default managed source is the signed release bundle, so a forced refresh can
 require network access and `cosign`; verification or preparation failure occurs
@@ -131,6 +133,11 @@ this status-specific runtime field. Bootstrap and service-install exceptions fro
 `install --json` likewise emit
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
+
+The local Rails service starts without a network-readiness dependency. Remote
+GitHub, clone, and provider operations report their own failures to the caller;
+local readiness and an active unit do not claim that those dependencies are
+healthy.
 
 ## Environment compatibility
 

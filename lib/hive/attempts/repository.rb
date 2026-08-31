@@ -105,6 +105,13 @@ module Hive
         @log_archive ||= LogArchive.new(store: self)
       end
 
+      # The one authoritative attempt-log read contract. Readers consume this
+      # instead of resolving hot/cold frame paths themselves; availability is
+      # the repository's custody-checked judgment, not a caller-side lstat.
+      def read_log(attempt_id, after_sequence: 0)
+        log_archive.read(attempt_id, after_sequence: after_sequence)
+      end
+
       def routing_policies
         require "hive/provider_routing/policy_repository"
         @routing_policies ||= Hive::ProviderRouting::PolicyRepository.new(store: self)

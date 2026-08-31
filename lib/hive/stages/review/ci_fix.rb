@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "shellwords"
 require "digest"
+require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/output_pulse"
 require "hive/agent_profiles"
@@ -45,8 +46,9 @@ module Hive
 
         module_function
 
-        def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil)
-          command = cfg.dig("review", "ci", "command")
+        def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
+                 command: nil, command_runner: nil)
+          command ||= cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
               status: :skipped,
@@ -91,10 +93,14 @@ module Hive
             end
 
             attempts += 1
-            run_result = run_ci_once(
-              command, ctx.worktree_path, max_bytes, timeout_sec,
-              idle_timeout_sec: idle_timeout_sec
-            )
+            run_result = if command_runner
+              command_runner.call(max_bytes: max_bytes, timeout_sec: timeout_sec)
+            else
+              run_ci_once(
+                command, ctx.worktree_path, max_bytes, timeout_sec,
+                idle_timeout_sec: idle_timeout_sec
+              )
+            end
             return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
 
             output = clean_output(run_result.combined, tail_lines)
@@ -112,6 +118,21 @@ module Hive
               error_message: nil,
               limit_text: nil
             ) if run_result.exit_code && run_result.exit_code.zero?
+
+            # Hosted check runners can report account, billing, or quota
+            # walls in their diagnostics. Those cannot be repaired by code,
+            # so return the existing typed limit result before spending an
+            # agent attempt. Local CI output is deliberately excluded: test
+            # suites can legitimately exercise and print limit-like strings.
+            if command_runner && Hive::AgentLimit.limit_reached?(output)
+              return Result.new(
+                status: :error,
+                attempts: attempts,
+                last_output: output,
+                error_message: Hive::AgentLimit.error_message(output, agent: "hosted-ci"),
+                limit_text: output
+              )
+            end
 
             if attempts >= max_attempts
               return Result.new(
@@ -193,7 +214,8 @@ module Hive
         # last `tail_lines` lines. Most agent prompts have a token
         # budget; sending megabytes of CI log fails the spawn.
         def clean_output(raw, tail_lines)
-          stripped = raw.to_s.gsub(ANSI_RE, "")
+          text = raw.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
+          stripped = text.gsub(ANSI_RE, "")
           lines = stripped.lines
           return stripped if lines.size <= tail_lines
 

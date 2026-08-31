@@ -233,6 +233,29 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_completed_child_clear_is_scoped_to_the_recorded_process_identity
+    folder = task_folder(16)
+    Hive::Lock.with_task_lock(folder) do
+      Hive::Lock.update_task_lock(
+        folder, claude_pid: 123, claude_pid_start_time: "first"
+      )
+
+      refute Hive::Lock.clear_task_lock_child(
+        folder, pid: 456, process_start_time: "first"
+      )
+      refute Hive::Lock.clear_task_lock_child(
+        folder, pid: 123, process_start_time: "replacement"
+      )
+      assert Hive::Lock.clear_task_lock_child(
+        folder, pid: 123, process_start_time: "first"
+      )
+
+      current = Hive::Lock.read_task_lock(folder)
+      refute current.key?("claude_pid")
+      refute current.key?("claude_pid_start_time")
+    end
+  end
+
   def test_oversized_payloads_are_rejected_without_mutating_the_lease
     folder = task_folder(9)
     assert_raises(Hive::RuntimeControlPlane::CodecError) do

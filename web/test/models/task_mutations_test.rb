@@ -39,6 +39,55 @@ class TaskMutationsTest < ActiveSupport::TestCase
     assert_equal %w[hive plan-review-run demo-task --project demo], result[:argv]
   end
 
+  test "queues outcome evidence rework from the exact projected command" do
+    generation = "a" * 64
+    recovery_digest = "b" * 64
+    command = "hive evidence rework demo-task --project demo --stage 7-artifacts " \
+              "--generation #{generation} --recovery-digest #{recovery_digest}"
+    subject = task(
+      "stage" => "7-artifacts", "workflow" => "coding",
+      "marker" => "error",
+      "attrs" => {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => generation, "recovery_digest" => recovery_digest
+      },
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "suggested_command" => command
+    )
+
+    result = subject.run!(
+      expected_action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      expected_stage: "7-artifacts"
+    )
+
+    assert_equal Shellwords.split(command) + [ "--json" ], result.fetch(:argv)
+    assert_equal "rework", subject.run_verb
+    assert_equal Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+                 subject.dispatch_action
+  end
+
+  test "rejects malformed outcome evidence rework commands before queueing" do
+    subject = task(
+      "stage" => "7-artifacts", "workflow" => "coding", "marker" => "error",
+      "attrs" => {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64, "recovery_digest" => "b" * 64
+      },
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "suggested_command" => "hive artifacts demo-task --from 7-artifacts"
+    )
+
+    error = assert_raises(Hive::Error) do
+      subject.run!(
+        expected_action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+        expected_stage: "7-artifacts"
+      )
+    end
+
+    assert_match(/reload the page/, error.message)
+    assert_empty queue_files
+  end
+
   test "rejects unknown and non-queueable actions before writing" do
     subject = task("stage" => "3-plan", "workflow" => "coding")
 

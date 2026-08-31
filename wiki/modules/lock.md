@@ -3,8 +3,8 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb, lib/hive/runtime_control_plane/task_lease_repository.rb, lib/hive/runtime_control_plane/process_guard.rb
 created: 2026-04-25
-updated: 2026-08-29
-tags: [lock, concurrency, sqlite, sequel, lease, fencing, commit-lock, fork]
+updated: 2026-08-30
+tags: [lock, concurrency, sqlite, sequel, lease, fencing, flock, commit-lock, fork]
 ---
 
 **TLDR**: Ordinary task coordination is a typed SQLite lease keyed by stable
@@ -47,6 +47,19 @@ needed, lock order is commit lock, task lease(s), then narrower marker/file
 mutexes. `hive new` and other true identity creators use the commit lock
 because no task subject exists yet. Explicit fleet cutover/bootstrap is the
 other identity-creation exception.
+
+The runner adds `slug:` and `stage:` to the payload. After launch, both the
+headless `Hive::Agent` writer and the tmux-backed `Hive::ClaudeLauncher` writer
+inject `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.
+Those fields describe only the currently owned child: after a confirmed child
+exit or shared-session teardown, `clear_task_lock_child` removes both fields
+in a fenced SQL update only when PID and start time still match. That
+compare-and-clear prevents an older completion from erasing a replacement
+child's liveness evidence. `hive status` uses the child PID for liveness, while
+cleanup commands compare the recorded start time with the live process before
+signalling it so a reused PID cannot target an unrelated process. If the
+platform cannot read a start time, the field is nil and that child-specific
+PID-reuse guard degrades to its existing PID-only behavior.
 
 ## Liveness
 
@@ -105,13 +118,15 @@ coordination, not task ownership authority.
 
 - `test/unit/lock_test.rb` — stable identity, contention, CAS fencing,
   reentrancy, dead/PID-reuse reclaim, moved/recreated/custom-root behavior,
-  oversized payload refusal, and commit-lock process contention.
+  oversized payload refusal, child-identity compare-and-clear, and commit-lock
+  process contention.
 - `test/unit/runtime_control_plane/process_guard_test.rb` — own-checkout and
   transaction rejection, blocked new checkouts, all-wrapper disconnect,
   diagnostics/fork race, mixed-database real fork, spawn, self-exec, and
   daemon/double-fork descriptor proofs.
 - `test/unit/task_counter_test.rb` and
   `test/unit/patrol/launch_budget_test.rb` — real multiprocess atomic mutation.
+- `test/integration/new_test.rb` — `hive new` wraps the captured-task hive-state commit in the project commit lock.
 
 ## Backlinks
 

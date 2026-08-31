@@ -429,6 +429,10 @@ class Task
     end
 
     projected = self["action"].to_s
+    if projected == TaskMutations::OUTCOME_EVIDENCE_REWORK_ACTION &&
+       self["stage"].to_s == "7-artifacts"
+      return projected
+    end
     if projected == Hive::Schemas::TaskActionKind::PLAN_REVIEWING ||
        projected == Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY &&
          self["suggested_command"].to_s.start_with?("hive plan-review-run ")
@@ -441,6 +445,7 @@ class Task
   def run_verb
     action = dispatch_action
     return unless action
+    return "rework" if action == TaskMutations::OUTCOME_EVIDENCE_REWORK_ACTION
 
     command = Hive::TaskAction::DISPATCH_COMMANDS.fetch(action)
     command == "run" ? "stage" : command

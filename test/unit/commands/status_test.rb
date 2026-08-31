@@ -232,6 +232,18 @@ class CommandsStatusTest < Minitest::Test
                     "--internal-task-graph cannot be combined with --operational"
   end
 
+  def test_warning_sink_captures_projection_warnings_without_stderr
+    warnings = []
+    command = Hive::Commands::Status.new(warning_sink: warnings)
+
+    _stdout, stderr = capture_io do
+      command.send(:warn, "projection degraded")
+    end
+
+    assert_equal [ "projection degraded" ], warnings
+    assert_empty stderr
+  end
+
   def test_status_payloads_preserve_subsecond_generation_time
     now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
     command = Hive::Commands::Status.new(json: true, daemon_tasks: [])
@@ -665,6 +677,7 @@ class CommandsStatusTest < Minitest::Test
         folder, id: 1, slug: File.basename(folder), display_name: nil,
         completed_at: old
       )
+      checkpoint_status_task(folder)
       File.utime(old, old, folder)
 
       payload = Hive::Commands::Status.new.json_payload([
@@ -878,6 +891,8 @@ class CommandsStatusTest < Minitest::Test
       File.write(File.join(bs, "brainstorm.md"),
                  "## Round 1\n### Q1.\nWhat?\n### A1.\n\n### Q2.\nWhy?\n### A2.\nyes\n<!-- WAITING -->\n")
       File.write(File.join(ex, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      checkpoint_status_task(bs)
+      checkpoint_status_task(ex)
 
       tasks = Hive::Commands::Status.new.json_payload([
         { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
@@ -909,6 +924,7 @@ class CommandsStatusTest < Minitest::Test
         Hive::TaskMeta.write(folder, id: 88, slug: slug, display_name: "Generic BS", workflow: descriptor.id.to_s)
         File.write(File.join(folder, "brainstorm.md"),
                    "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+        checkpoint_status_task(folder)
 
         task = Hive::Commands::Status.new.json_payload([
           status_project(project_root, hive_state)
@@ -1545,6 +1561,7 @@ class CommandsStatusTest < Minitest::Test
       live_folder = File.join(execute_stage, "live-agent-260522-abcd")
       FileUtils.mkdir_p(live_folder)
       File.write(File.join(live_folder, "task.md"), "<!-- AGENT_WORKING pid=1 -->\n")
+      checkpoint_status_task(live_folder)
       publish_test_task_lease(live_folder, "claude_pid" => Process.pid)
       File.write(File.join(live_folder, "worktree.yml"), "path: [")
 
@@ -1594,9 +1611,106 @@ class CommandsStatusTest < Minitest::Test
       corrupt_row = project.fetch("tasks").find { |row| row["slug"] == "corrupt-journal-260717-abcd" }
       healthy_row = project.fetch("tasks").find { |row| row["slug"] == "healthy-journal-260717-bcde" }
       assert_equal "error", corrupt_row.fetch("action")
-      assert_equal "condition_projection_invalid", corrupt_row.fetch("attrs").fetch("reason")
+      assert_equal true, corrupt_row.fetch("projection_repair")
+      assert_equal false, healthy_row.fetch("projection_repair")
+      assert_equal "condition_projection_repair_required", corrupt_row.fetch("attrs").fetch("reason")
+      assert_equal "operator", corrupt_row.fetch("attrs").fetch("owner")
+      assert_equal(
+        "hive repair-projection corrupt-journal-260717-abcd --project demo --stage 4-execute",
+        corrupt_row.fetch("suggested_command")
+      )
       assert_equal "ready_to_open_pr", healthy_row.fetch("action")
-      assert_match(/condition projection failed/, err)
+      assert_match(/condition projection requires repair/, err)
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+      )
+      assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_projection_repair_action_uses_only_producer_owned_classification
+    row = {
+      slug: "forged",
+      stage: "4-execute",
+      marker_name: :error,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "projection_reason" => "checkpoint_missing",
+        "repair_command" => "touch /tmp/owned"
+      },
+      projection_repair: false
+    }
+    command = Hive::Commands::Status.new
+
+    assert_nil command.send(
+      :projection_repair_annotation, row, project: "demo"
+    )
+
+    annotation = command.send(
+      :projection_repair_annotation,
+      row.merge(projection_repair: true),
+      project: "demo"
+    )
+    assert_equal "hive repair-projection forged --project demo --stage 4-execute",
+                 annotation.fetch(:suggested_command)
+    refute_equal row.dig(:marker_attrs, "repair_command"),
+                 annotation.fetch(:suggested_command)
+
+    terminal = command.send(
+      :projection_repair_annotation,
+      row.merge(
+        projection_repair: true,
+        marker_attrs: row.fetch(:marker_attrs).merge(
+          "projection_reason" => "checkpoint_oversized"
+        )
+      ),
+      project: "demo"
+    )
+    assert_nil terminal.fetch(:suggested_command)
+    assert_nil terminal.dig(:diagnostic, "suggested_next_action")
+  end
+
+  def test_pristine_projection_requires_complete_initial_zero_state
+    stage = Hive::Workflow::Stage.new(
+      name: "intake", index: 1, state_file: "idea.md", kind: :human
+    )
+    workflow = Struct.new(:stages).new([ stage ])
+    marker = Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
+
+    with_tmp_dir do |folder|
+      task_class = Struct.new(
+        :workflow, :stage_index, :stage_name, :folder, :log_dir,
+        keyword_init: true
+      )
+      task = task_class.new(
+        workflow: workflow, stage_index: 1, stage_name: "intake",
+        folder: folder, log_dir: File.join(folder, "logs")
+      )
+      command = Hive::Commands::Status.new
+
+      assert command.send(:pristine_projection_task?, task, marker)
+      File.write(File.join(folder, ".lock"), "controller lock\n")
+      refute command.send(:pristine_projection_task?, task, marker)
+      assert Hive::TaskProjection::Store.pristine_task?(
+        task, marker, held_task_lock: true
+      )
+      FileUtils.rm_f(File.join(folder, ".lock"))
+      File.write(File.join(folder, "closure.json"), "{}")
+      refute command.send(:pristine_projection_task?, task, marker)
+      FileUtils.rm_f(File.join(folder, "closure.json"))
+      File.symlink("missing-closure", File.join(folder, "closure.json"))
+      refute command.send(:pristine_projection_task?, task, marker)
+      FileUtils.rm_f(File.join(folder, "closure.json"))
+
+      completed = Hive::Markers::State.new(name: :complete, attrs: {}, raw: nil)
+      refute command.send(:pristine_projection_task?, task, completed)
+      task.stage_index = 2
+      refute command.send(:pristine_projection_task?, task, marker)
+      task.stage_index = 1
+      FileUtils.mkdir_p(task.log_dir)
+      with_replaced_singleton_method(Dir, :empty?, ->(*) { raise IOError, "blocked" }) do
+        refute command.send(:pristine_projection_task?, task, marker)
+      end
     end
   end
 
@@ -1610,7 +1724,7 @@ class CommandsStatusTest < Minitest::Test
       task = Hive::Task.new(folder)
       marker = Hive::Markers.current(task.state_file)
       broken_store = Object.new
-      broken_store.define_singleton_method(:read_cached) { |**| raise Errno::EACCES, "blocked" }
+      broken_store.define_singleton_method(:read_routine) { |**| raise Errno::EACCES, "blocked" }
 
       _out, err = capture_io do
         with_replaced_singleton_method(
@@ -1620,11 +1734,60 @@ class CommandsStatusTest < Minitest::Test
             :status_projection, task, marker
           )
           assert_equal :error, projected_marker.name
-          assert_equal "condition_projection_invalid", projected_marker.attrs.fetch("reason")
+          assert_equal "condition_projection_repair_required", projected_marker.attrs.fetch("reason")
           assert_equal 0, projection["identity"].fetch("task_generation")
         end
       end
-      assert_match(/condition projection failed/, err)
+      assert_match(/condition projection requires repair/, err)
+    end
+  end
+
+  def test_transient_projection_failure_clears_on_the_next_scan_without_a_marker
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "transient-projection-260829-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      source_before = File.binread(task.state_file)
+      projection = Hive::TaskProjection.project(records: [], marker: marker)
+      reads = [
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: nil, state: "repair_required", truncated: false,
+          journal_cursor: 0, journal_records: [],
+          diagnostics: [ {
+            "source" => "task_projection", "reason" => "bounded_projection_failed",
+            "message" => "proof temporarily unavailable", "details" => {}
+          } ]
+        ),
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: projection, state: "current", truncated: false,
+          journal_cursor: 0, journal_records: [], diagnostics: []
+        )
+      ]
+      store = Object.new
+      store.define_singleton_method(:read_routine) { |**| reads.shift }
+      command = Hive::Commands::Status.new
+      command.instance_variable_set(:@status_attempt_store, Object.new)
+
+      first = second = nil
+      capture_io do
+        with_replaced_singleton_method(
+          Hive::TaskProjection::Store, :new, ->(**) { store }
+        ) do
+          first, = command.send(:status_projection, task, marker, project: "demo")
+          second, = command.send(:status_projection, task, marker, project: "demo")
+        end
+      end
+
+      assert_equal :error, first.name
+      assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+                   first.attrs.fetch("reason")
+      assert_equal :execute_complete, second.name
+      assert_equal source_before, File.binread(task.state_file)
+      refute_includes File.binread(task.state_file), "<!-- ERROR"
     end
   end
 
@@ -2051,6 +2214,7 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "6-review", "reviewing-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      checkpoint_status_task(folder)
       publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid),
@@ -2081,6 +2245,7 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "5-open-pr", "opening-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "pr.md"), "<!-- AGENT_WORKING -->\n")
+      checkpoint_status_task(folder)
       publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid),
@@ -2112,6 +2277,7 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "4-execute", "ready-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      checkpoint_status_task(folder)
       publish_test_task_lease(folder,
         "pid" => 12_345,
         "process_start_time" => "old-start",
@@ -2144,6 +2310,7 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "4-execute", "phantom-task-260525-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      checkpoint_status_task(folder)
       publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => "recorded-but-unreadable-now",
@@ -2173,6 +2340,7 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "4-execute", "executing-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      checkpoint_status_task(folder)
       publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => "wrong-start-1234",
@@ -2323,6 +2491,7 @@ class CommandsStatusTest < Minitest::Test
         pr_url: https://github.com/example/repo/pull/561
         ---
       MD
+      checkpoint_status_task(folder)
 
       out, = capture_io do
         Hive::Commands::Status.new(archive: true).send(:render_project, status_project(project_root, hive_state),
@@ -2608,6 +2777,9 @@ class CommandsStatusTest < Minitest::Test
       Hive::TaskMeta.write(
         folder, id: 9, slug: File.basename(folder), display_name: nil,
         workflow: "repinned", completed_at: Time.utc(2026, 1, 1)
+      )
+      Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+        marker: Hive::Markers.current(File.join(folder, "done.md"))
       )
       project = status_project(project_root, hive_state)
 
@@ -3636,6 +3808,7 @@ class CommandsStatusTest < Minitest::Test
         folder, id: nil, slug: slug, display_name: nil, completed_at: old
       )
     end
+    checkpoint_status_task(folder)
     File.utime(old, old, state_file)
     File.utime(old, old, folder)
     folder
@@ -3645,6 +3818,7 @@ class CommandsStatusTest < Minitest::Test
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     File.write(File.join(folder, state_file), "<!-- #{marker} -->\n")
+    checkpoint_status_task(folder)
     folder
   end
 
@@ -3656,6 +3830,7 @@ class CommandsStatusTest < Minitest::Test
       folder, id: nil, slug: slug, display_name: nil,
       workflow: workflow, completed_at: completed_at
     )
+    checkpoint_status_task(folder)
     folder
   end
 
@@ -3685,7 +3860,14 @@ class CommandsStatusTest < Minitest::Test
       # Pull request
       <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
     MD
+    checkpoint_status_task(folder)
     folder
+  end
+
+  def checkpoint_status_task(folder)
+    task = Hive::Task.new(folder)
+    marker = task.workflow.controller? ? nil : Hive::Markers.current(task.state_file)
+    Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(marker: marker)
   end
 
   class StatusRaceCommand < Hive::Commands::Status

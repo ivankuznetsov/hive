@@ -28,6 +28,26 @@ Use the operational row’s liveness, reasons, scheduler freshness, provider hol
 
 Preserve the task folder, worktree, attempt records, queue entries, locks, markers, and daemon snapshots while investigating. A stale physical lock, a stale durable attempt, and a provider or global-cap wait are different conditions.
 
+## Keep projection repair separate from workflow retry
+
+An operational row whose `evidence.marker_attrs.reason` is
+`condition_projection_repair_required` is synthetic and operator-owned. It is
+not a persisted workflow failure, so `workflow.retry`, marker clearing, or
+rerunning the stage cannot repair it. For a repairable row, run only its exact
+`evidence.marker_attrs.repair_command`, for example:
+
+```bash
+hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
+```
+
+Then refresh `hive status --operational --json`; no daemon restart is needed.
+If `projection_reason` is `checkpoint_oversized`,
+`attempt_ids_exhausted`, or `predecessor_fetches_exhausted`, there is
+deliberately no repair command. Repeating repair cannot fit the fixed bound;
+compact that task's retained projection history first. Do not create a
+migration, backfill, polling script, or watcher. Hive isolates the row and
+continues unrelated work automatically.
+
 ## Respect recovery ownership
 
 - A provider reset hint is display evidence, not an embargo. Hive schedules the

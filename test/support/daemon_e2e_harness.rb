@@ -1,5 +1,3 @@
-require "json"
-require "hive/cli"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 
@@ -25,18 +23,6 @@ module HiveDaemonE2EHarness
     end
 
     def close; end
-  end
-
-  # Status-consumer double that defers to a fetch lambda each tick, letting the
-  # test feed the dispatcher a live internal task-graph snapshot.
-  class LiveStatusConsumer
-    def initialize(fetch:)
-      @fetch = fetch
-    end
-
-    def fetch
-      @fetch.call
-    end
   end
 
   # Supervisor double that runs each dispatched command inline (in-process)
@@ -99,20 +85,6 @@ module HiveDaemonE2EHarness
     now = Time.now
     supervisor.now = now
     dispatcher.tick(now: now)
-  end
-
-  # Build a StatusConsumer::Result from a live internal task-graph snapshot —
-  # the dispatcher's per-tick view of the queue.
-  def status_snapshot
-    out, = capture_io { Hive::CLI.start([ "status", "--internal-task-graph", "--json" ]) }
-    doc = JSON.parse(out)
-    mapper = Hive::Daemon::StatusConsumer.new
-    Hive::Daemon::StatusConsumer::Result.new(
-      ok: true,
-      rows: mapper.send(:extract_rows, doc),
-      projects: mapper.send(:extract_projects, doc),
-      error: nil
-    )
   end
 
   # Path of a task folder within the tmp project's `.hive-state` tree.

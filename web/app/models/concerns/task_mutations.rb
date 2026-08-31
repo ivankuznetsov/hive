@@ -17,6 +17,7 @@ require "hive/task"
 require "hive/task_action"
 require "hive/task_closure"
 require "hive/task_resolver"
+require "shellwords"
 
 module TaskMutations
   def closure_preview(input)
@@ -42,6 +43,8 @@ module TaskMutations
   STAGE_VERB_BY_ACTION = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
     Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb)
   end.freeze
+  OUTCOME_EVIDENCE_REWORK_ACTION =
+    Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
 
   def approve!(from: nil, to: nil, force: false)
     Hive::Commands::Approve.new(
@@ -63,7 +66,8 @@ module TaskMutations
   end
 
   def run!(expected_action:, expected_stage:)
-    unless STAGE_VERB_BY_ACTION.key?(expected_action.to_s)
+    unless STAGE_VERB_BY_ACTION.key?(expected_action.to_s) ||
+           expected_action.to_s == OUTCOME_EVIDENCE_REWORK_ACTION
       raise Hive::Error, "unknown dispatch action: #{expected_action.inspect}"
     end
 
@@ -73,10 +77,13 @@ module TaskMutations
       raise Hive::Error, "task state changed — reload the page before running this stage"
     end
 
-    verb = STAGE_VERB_BY_ACTION.fetch(action)
-    argv = [ "hive", verb, slug, "--project", project.name ]
-    unless verb == "plan-review-run"
-      argv += [ verb == "run" ? "--stage" : "--from", stage ]
+    argv = if action == OUTCOME_EVIDENCE_REWORK_ACTION
+      outcome_evidence_rework_argv(stage)
+    else
+      verb = STAGE_VERB_BY_ACTION.fetch(action)
+      parts = [ "hive", verb, slug, "--project", project.name ]
+      parts += [ verb == "run" ? "--stage" : "--from", stage ] unless verb == "plan-review-run"
+      parts
     end
     reference = Hive::Bot::DispatchRequestWriter.dispatch!(
       project: project.name,
@@ -177,6 +184,33 @@ module TaskMutations
   end
 
   private
+
+  def outcome_evidence_rework_argv(stage)
+    attrs = (self["attrs"] || {}).to_h.transform_keys(&:to_s)
+    generation = attrs["generation"].to_s
+    recovery_digest = attrs["recovery_digest"].to_s
+    unless [ generation, recovery_digest ].all? { |value| value.match?(/\A[0-9a-f]{64}\z/) }
+      raise Hive::Error, "task state changed — reload the page before starting rework"
+    end
+
+    argv = Shellwords.split(self["suggested_command"].to_s)
+    argv = argv[0...-1] if argv.last == "--json"
+    suffix = [
+      "--stage", stage, "--generation", generation,
+      "--recovery-digest", recovery_digest
+    ]
+    expected = [
+      [ "hive", "evidence", "rework", slug, *suffix ],
+      [ "hive", "evidence", "rework", slug, "--project", project.name, *suffix ]
+    ]
+    unless expected.include?(argv)
+      raise Hive::Error, "task state changed — reload the page before starting rework"
+    end
+
+    [ *argv, "--json" ]
+  rescue ArgumentError
+    raise Hive::Error, "task state changed — reload the page before starting rework"
+  end
 
   def assert_current_plan_review!(task)
     projection = Hive::PlanReview::Projection.load(task_folder: task.folder)

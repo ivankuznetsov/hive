@@ -79,6 +79,23 @@ module Hive
       task_lease_repository.read(task_folder_or_lock)
     end
 
+    # Drop a completed child only when the lease still names that exact
+    # process identity. A later child may already have replaced the recorded
+    # PID, so an unconditional update would erase the new owner's liveness
+    # evidence.
+    def clear_task_lock_child(task_folder, pid:, process_start_time:)
+      key = task_lease_repository.lease_key(task_folder)
+      entry = Thread.current[:hive_task_locks].to_h[key]
+      return false unless entry && entry[:pid] == Process.pid
+
+      task_lease_repository.clear_child(
+        task_folder, pid: pid, process_start_time: process_start_time,
+        lock_id: entry.fetch(:lock_id)
+      )
+    rescue RuntimeControlPlane::IdentityError
+      false
+    end
+
     COMMIT_LOCK_TIMEOUT_SEC = 30
 
     # Bounded acquire — flock(LOCK_EX) without timeout would hang forever if a

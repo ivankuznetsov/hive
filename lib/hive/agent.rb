@@ -222,6 +222,9 @@ module Hive
     end
 
     def spawn_and_wait
+      pid = nil
+      child_start_time = nil
+      child_finished = false
       support = Hive::AgentSupport.for(@profile)
       if support&.const_defined?(:Execution, false)
         return extend(support.const_get(:Execution, false)).run_supported
@@ -275,7 +278,7 @@ module Hive
         pid
       end
 
-      record_spawned_agent(pid)
+      child_start_time = record_spawned_agent(pid)
 
       old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
       old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
@@ -450,6 +453,7 @@ module Hive
           nil
         end
       end
+      child_finished = !status.nil?
       reader.join(2)
       reader.kill if reader.alive?
 
@@ -505,9 +509,17 @@ module Hive
       end
       result
     ensure
-      if stdin_file
-        stdin_file.close
-        stdin_file.unlink
+      begin
+        if stdin_file
+          stdin_file.close
+          stdin_file.unlink
+        end
+      ensure
+        if child_finished && pid
+          Hive::Lock.clear_task_lock_child(
+            @task.folder, pid: pid, process_start_time: child_start_time
+          )
+        end
       end
     end
 
@@ -598,11 +610,13 @@ module Hive
     def record_spawned_agent(pid)
       return unless Hive::Lock.task_lock_held?(@task.folder)
 
+      child_start_time = Hive::Lock.process_start_time(pid)
       Hive::Lock.update_task_lock(
         @task.folder,
         "claude_pid" => pid,
-        "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
+        "claude_pid_start_time" => child_start_time
       )
+      child_start_time
     end
 
     # Provider transactions decide which commands to run; Hive retains child
@@ -611,6 +625,9 @@ module Hive
                         stdin_data: nil, timeout_sec: @timeout_sec,
                         record_spawn: false, forward_signals: false,
                         drain_timeout: 2)
+      pid = nil
+      child_start_time = nil
+      child_finished = false
       stdin_file = stdin_file_for(stdin_data)
       stdout_reader, stdout_writer = IO.pipe
       stderr_reader, stderr_writer = IO.pipe
@@ -630,7 +647,7 @@ module Hive
       rescue Errno::ESRCH
         pid
       end
-      record_spawned_agent(pid) if record_spawn
+      child_start_time = record_spawned_agent(pid) if record_spawn
       cancellation = { cancelled: false }
       signals_installed = false
       if forward_signals
@@ -640,6 +657,7 @@ module Hive
         signals_installed = true
       end
       timed_out, status = wait_for_process(pid, pgid, timeout_sec)
+      child_finished = !status.nil?
       finish_capture_thread(
         stdout_thread, stdout_reader, timeout: drain_timeout, capture: stdout
       )
@@ -662,7 +680,15 @@ module Hive
       [ stdout_thread, stderr_thread ].each do |thread|
         thread.kill if thread&.alive?
       end
-      close_prompt_stdin_file(stdin_file)
+      begin
+        close_prompt_stdin_file(stdin_file)
+      ensure
+        if record_spawn && child_finished && pid
+          Hive::Lock.clear_task_lock_child(
+            @task.folder, pid: pid, process_start_time: child_start_time
+          )
+        end
+      end
     end
 
     def capture_process_files(argv:, environment:, file_limit:, stderr_limit:,

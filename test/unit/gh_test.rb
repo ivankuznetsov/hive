@@ -1539,6 +1539,112 @@ def test_retained_pr_status_and_failing_job_log_paths
   assert calls.any? { |cmd| cmd.include?("--job") && cmd.include?("11") }
 end
 
+def test_failing_job_logs_normalize_binary_transport_output_to_utf8
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  rollup = {
+    "statusCheckRollup" => [
+      { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" }
+    ]
+  }
+  raw_log = (("x" * 100) + " hosted \xE2\x80\x94 failure \xFF").b
+
+  with_replaced_singleton_method(
+    Hive::Gh, :capture3, ->(*_, **) { [ raw_log, "", status ] }
+  ) do
+    log = Hive::Gh.failing_jobs_with_logs(
+      "/tmp/repo", rollup, byte_cap: 40
+    ).first.fetch("log")
+
+    assert_equal Encoding::UTF_8, log.encoding
+    assert_predicate log, :valid_encoding?
+    assert_includes log, "hosted — failure ?"
+  end
+end
+
+def test_failing_job_log_fetch_errors_are_normalized_to_utf8
+  failure = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  rollup = {
+    "statusCheckRollup" => [
+      { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" }
+    ]
+  }
+
+  with_replaced_singleton_method(
+    Hive::Gh, :capture3,
+    ->(*_, **) { [ "", "transport \xE2\x80\x94 error \xFF".b, failure ] }
+  ) do
+    log = Hive::Gh.failing_jobs_with_logs(
+      "/tmp/repo", rollup, byte_cap: 1_024
+    ).first.fetch("log")
+
+    assert_equal Encoding::UTF_8, log.encoding
+    assert_predicate log, :valid_encoding?
+    assert_includes log, "transport — error ?"
+  end
+end
+
+def test_failing_job_log_fetch_falls_back_to_check_annotations
+  success = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  failure = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  rollup = {
+    "statusCheckRollup" => [
+      { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" }
+    ]
+  }
+  annotation = "The job was not started because recent account payments have failed " \
+               "or your spending limit needs to be increased."
+  calls = []
+  capture = lambda do |*cmd, **_kwargs|
+    calls << cmd
+    if cmd[1] == "run"
+      [ "", "log not found", failure ]
+    else
+      [ JSON.generate([ { "message" => annotation } ]), "", success ]
+    end
+  end
+
+  with_replaced_singleton_method(
+    Hive::Gh, :repository_identity,
+    ->(*, **) { { "host" => "github.com", "repository" => "acme/demo" } }
+  ) do
+    with_replaced_singleton_method(Hive::Gh, :capture3, capture) do
+      log = Hive::Gh.failing_jobs_with_logs(
+        "/tmp/repo", rollup, byte_cap: 2_048
+      ).first.fetch("log")
+
+      assert_includes log, annotation
+    end
+  end
+
+  assert calls.any? { |cmd| cmd[1] == "api" && cmd.join(" ").include?("check-runs/11/annotations") }
+end
+
+def test_failing_job_logs_support_check_urls_and_legacy_status_contexts
+  calls = []
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  rollup = {
+    "statusCheckRollup" => [
+      {
+        "name" => "unit", "state" => "FAILURE",
+        "detailsUrl" => "https://github.com/acme/demo/actions/runs/7/job/12345"
+      },
+      { "context" => "legacy-ci", "state" => "FAILURE", "targetUrl" => "https://ci.test/1" }
+    ]
+  }
+
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+    calls << cmd
+    [ "failed output", "", status ]
+  }) do
+    logs = Hive::Gh.failing_jobs_with_logs("/tmp/repo", rollup, byte_cap: 100)
+
+    assert_equal %w[unit legacy-ci], logs.map { |entry| entry.fetch("name") }
+    assert_includes logs.first.fetch("log"), "failed output"
+    assert_includes logs.last.fetch("log"), "no job id available"
+  end
+  assert calls.any? { |cmd| cmd.include?("--job") && cmd.include?("12345") }
+end
+
 def test_push_branch_rejects_conflicting_or_invalid_exact_leases
   conflicting = Hive::Gh.push_branch(
     "/tmp/worktree", "feature",

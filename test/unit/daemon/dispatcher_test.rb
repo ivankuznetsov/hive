@@ -864,6 +864,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  coordinator.resumes.map { |entry| entry.fetch(:admission_context) }
   end
 
+  def test_dispatch_request_scan_reuses_one_admission_context_for_all_bound_tasks
+    dispatcher, = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("s1", "s2").map do |request|
+      request.with(recovery: nil)
+    end
+    rows = recovery_scan_rows("s1", "s2")
+    admission_context = Hive::DependencyAdmission::Context.new(projects: [])
+    context_builds = 0
+    observed_contexts = []
+    dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, **options|
+      observed_contexts << options.fetch(:admission_context)
+      false
+    end
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          lambda do |_projects|
+            context_builds += 1
+            admission_context
+          end
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_equal 1, context_builds
+    assert_equal [ admission_context, admission_context ], observed_contexts
+  end
+
   def test_empty_dispatch_request_scan_skips_global_index_work
     dispatcher, = make_dispatcher(rows: [])
     rows = Object.new
@@ -907,6 +942,38 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal 1, context_builds
     assert_empty coordinator.resumes
+    blocked = logger.events.filter_map do |name, attributes|
+      next unless name == :dispatch_request_blocked
+      next unless attributes[:reason] == "admission_context_unavailable"
+
+      attributes[:request_id]
+    end
+    assert_equal %w[recovery-s1 recovery-s2], blocked
+    refute logger.events.any? { |name, _| name == :dispatch_request_rejected }
+  end
+
+  def test_bound_dispatch_requests_stay_queued_when_admission_context_is_unavailable
+    dispatcher, supervisor, _controller, logger = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("s1", "s2").map do |request|
+      request.with(recovery: nil)
+    end
+    rows = recovery_scan_rows("s1", "s2")
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "p1", "path" => "/tmp/p1" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_context,
+          ->(*) { raise "fleet snapshot unavailable" }
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+        end
+      end
+    end
+
+    assert_empty supervisor.spawned
     blocked = logger.events.filter_map do |name, attributes|
       next unless name == :dispatch_request_blocked
       next unless attributes[:reason] == "admission_context_unavailable"
@@ -1471,7 +1538,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
-          attempt_id: nil, task_generation: nil, id: 1)
+          attempt_id: nil, task_generation: nil,
+          condition_task_generation: nil, projection_repair: false, id: 1)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, id: id, stage: stage, workflow: workflow, marker: marker,
@@ -1483,7 +1551,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked,
       admission_error: admission_error,
-      attempt_id: attempt_id, task_generation: task_generation
+      attempt_id: attempt_id, task_generation: task_generation,
+      condition_task_generation: condition_task_generation,
+      projection_repair: projection_repair
     )
   end
 
@@ -1766,10 +1836,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, disposition.fetch(:retry_safe)
   end
 
+  def test_projection_repair_row_is_operator_owned_and_never_retried
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+    observed = row(
+      marker: "error", action: "error", command: nil,
+      projection_repair: true,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "message" => "checkpoint missing",
+        "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"
+      }
+    )
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_empty supervisor.spawned
+    disposition = snapshot.calls.last.last
+    assert_equal :projection_repair_required, disposition.fetch(:decision)
+    assert_equal "operator", disposition.fetch(:owner)
+    assert_equal "checkpoint missing", disposition.fetch(:reason)
+  end
+
+  def test_idle_projection_repair_does_not_block_ready_patrol_fix_in_same_tick
+    repair = row(
+      slug: "repair-me", marker: "error", action: "error", command: nil,
+      projection_repair: true,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
+      }
+    )
+    fix = row(
+      slug: "ready-fix", stage: "2-fix", workflow: "patrol-fix",
+      marker: "none", action: "ready_to_run", command: "hive run ready-fix"
+    )
+    dispatcher, supervisor = make_dispatcher(rows: [ repair, fix ])
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "ready-fix" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+  end
+
   # Exempting a class of error from automatic retry does not make it safe, it
   # makes it stuck: the exempt reason still needs the same retry, performed by
-  # hand at whatever delay a human happens to notice it. Every error marker is
-  # assessed now, and the assessment decides — not the reason string.
+  # hand at whatever delay a human happens to notice it. Every durable workflow
+  # error is assessed now, and the assessment decides — not the reason string.
+  # Producer-owned synthetic projection-repair rows are handled separately.
   def test_terminal_outcome_errors_are_assessed_for_automatic_retry
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       snapshot = FakeOperationalSnapshot.new
@@ -1794,6 +1906,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
       refute_equal :semantic_terminal_error,
                    snapshot.calls.last.last.fetch(:decision)
     end
+  end
+
+  def test_outcome_evidence_implementation_rework_dispatches_its_guarded_transition
+    command = "hive evidence rework s1 --stage 7-artifacts --generation #{'a' * 64} " \
+              "--recovery-digest #{'b' * 64}"
+    observed = row(
+      stage: "7-artifacts",
+      marker: "error",
+      action: "ready_to_develop",
+      command: command,
+      marker_attrs: {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64,
+        "recovery_digest" => "b" * 64
+      }
+    )
+    dispatcher, supervisor = make_dispatcher(rows: [])
+
+    dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_equal [ command ], supervisor.spawned.map { |entry| entry.fetch(:command) }
   end
 
   def test_error_retry_publishes_safety_block_instead_of_false_scheduler_ownership
@@ -2802,12 +2935,38 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ]
     dispatcher, = make_dispatcher
 
-    ordered = dispatcher.send(:dispatch_priority_order, rows)
+    ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
 
     assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
                  ordered.map(&:stage), "later stages first"
     assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
                  "stable within a stage — original status order preserved"
+  end
+
+  def test_dispatch_priority_ages_waiting_rows_past_fresh_later_stage_work
+    rows = [
+      row(slug: "fresh-finalize", stage: "8-finalize", mtime: T0 - 60),
+      row(slug: "old-plan", stage: "3-plan", mtime: T0 - (6 * 60 * 60))
+    ]
+    dispatcher, = make_dispatcher
+
+    ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
+
+    assert_equal %w[old-plan fresh-finalize], ordered.map(&:slug),
+                 "aging must prevent a stream of fresh later-stage work from starving old retries"
+  end
+
+  def test_dispatch_priority_does_not_age_missing_or_future_mtimes
+    rows = [
+      row(slug: "future-plan", stage: "3-plan", mtime: T0 + 60),
+      row(slug: "missing-review", stage: "6-review", mtime: nil),
+      row(slug: "fresh-finalize", stage: "8-finalize", mtime: T0 - 60)
+    ]
+    dispatcher, = make_dispatcher
+
+    ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
+
+    assert_equal %w[fresh-finalize missing-review future-plan], ordered.map(&:slug)
   end
 
   def test_advance_action_skips_when_task_folder_vanished_after_snapshot
@@ -3711,6 +3870,156 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "global_cap", blocked[1][:reason]
   end
 
+  def test_durable_capacity_deferral_fences_lower_priority_rows_for_the_tick
+    rows = [
+      row(slug: "lower", stage: "2-brainstorm", action: "ready_to_plan",
+          command: "hive plan lower --from 2-brainstorm"),
+      row(slug: "higher", stage: "6-review", action: "ready_to_plan",
+          command: "hive review higher --from 6-review")
+    ]
+    calls = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **_options|
+      calls << request.slug
+      Hive::Attempts::DispatchResult.new(
+        status: request.slug == "higher" ? :deferred : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil,
+        reason: request.slug == "higher" ? "capacity" : nil
+      )
+    end
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(
+      rows: rows, attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "higher" ], calls,
+                 "a lower-priority row must not take capacity that reopens later in the same tick"
+    lower_block = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "lower"
+    end
+    assert_equal "capacity", lower_block.last.fetch(:reason)
+    assert_equal true, lower_block.last.fetch(:priority_fence)
+  end
+
+  def test_project_capacity_fence_does_not_block_another_project
+    rows = [
+      row(project: "p1", slug: "first", stage: "6-review", action: "ready_to_plan",
+          command: "hive review first --from 6-review"),
+      row(project: "p1", slug: "second", stage: "2-brainstorm", action: "ready_to_plan",
+          command: "hive plan second --from 2-brainstorm"),
+      row(project: "p2", slug: "other", stage: "2-brainstorm", action: "ready_to_plan",
+          command: "hive plan other --from 2-brainstorm")
+    ]
+    dispatcher, supervisor, controller, logger = make_dispatcher(rows: rows)
+    original_gate = controller.method(:can_dispatch?)
+    controller.define_singleton_method(:can_dispatch?) do |project:, **options|
+      project == "p1" ? :project_cap : original_gate.call(project: project, **options)
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "other" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+    second_block = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "second"
+    end
+    assert_equal "project_cap", second_block.last.fetch(:reason)
+    assert_equal true, second_block.last.fetch(:priority_fence)
+  end
+
+  def test_full_tick_capacity_fence_blocks_incremental_successor_until_next_full_scan
+    waiting = row(
+      slug: "waiting", stage: "6-review", action: "ready_to_plan",
+      command: "hive review waiting --from 6-review"
+    )
+    calls = []
+    capacity_blocked = true
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **_options|
+      calls << request.slug
+      deferred = request.slug == "waiting" && capacity_blocked
+      Hive::Attempts::DispatchResult.new(
+        status: deferred ? :deferred : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil,
+        reason: deferred ? "capacity" : nil
+      )
+    end
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [ waiting ], attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [ row(
+        slug: "successor", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan successor --from 3-plan"
+      ) ]
+    )
+
+    assert dispatcher.tick_changed(
+      task_keys: [ [ "p1", "successor" ] ], now: T0 + 1
+    )
+
+    assert_equal [ "waiting" ], calls,
+                 "an incremental successor must not bypass the older full-scan queue"
+    successor_block = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "successor"
+    end
+    assert_equal "capacity", successor_block.last.fetch(:reason)
+    assert_equal true, successor_block.last.fetch(:priority_fence)
+
+    capacity_blocked = false
+    dispatcher.tick(now: T0 + 30)
+    assert_equal [ "waiting", "waiting" ], calls,
+                 "the next full scan must reconsider the older fenced row"
+  end
+
+  def test_full_tick_project_fence_persists_across_incremental_ticks_only_for_that_project
+    waiting = row(
+      project: "p1", slug: "waiting", stage: "6-review", action: "ready_to_plan",
+      command: "hive review waiting --from 6-review"
+    )
+    dispatcher, supervisor, controller = make_dispatcher(rows: [ waiting ])
+    original_gate = controller.method(:can_dispatch?)
+    project_blocked = true
+    controller.define_singleton_method(:can_dispatch?) do |project:, **options|
+      if project == "p1" && project_blocked
+        :project_cap
+      else
+        original_gate.call(project: project, **options)
+      end
+    end
+
+    dispatcher.tick(now: T0)
+    project_blocked = false
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [ row(
+        project: "p2", slug: "other", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan other --from 3-plan"
+      ) ]
+    )
+    assert dispatcher.tick_changed(
+      task_keys: [ [ "p2", "other" ] ], now: T0 + 1
+    )
+
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [ row(
+        project: "p1", slug: "successor", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan successor --from 3-plan"
+      ) ]
+    )
+    assert dispatcher.tick_changed(
+      task_keys: [ [ "p1", "successor" ] ], now: T0 + 2
+    )
+
+    assert_equal [ "other" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+  end
+
   def test_status_active_agent_row_counts_toward_project_cap
     rows = [
       row(slug: "running", stage: "6-review", marker: "review_working",
@@ -3765,6 +4074,34 @@ class HiveDaemonDispatcherTest < Minitest::Test
     blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
     refute_nil blocked, "live_task_lock=true row must consume a global cap slot"
     assert_equal "global_cap", blocked[1][:reason]
+  end
+
+  def test_live_projection_repair_row_still_reserves_real_capacity
+    rows = [
+      row(
+        slug: "repairing", marker: "error", action: "error", command: nil,
+        live_task_lock: true,
+        projection_repair: true,
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
+        }
+      ),
+      row(
+        slug: "ready-fix", stage: "2-fix", workflow: "patrol-fix",
+        marker: "none", action: "ready_to_run", command: "hive run ready-fix"
+      )
+    ]
+    dispatcher, supervisor, controller, logger = make_dispatcher(rows: rows)
+    controller.instance_variable_set(:@max_concurrent_runs, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    blocked = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:slug] == "ready-fix"
+    end
+    refute_nil blocked
+    assert_equal "global_cap", blocked.last.fetch(:reason)
   end
 
   def test_needs_input_rows_do_not_count_toward_project_cap
@@ -3845,24 +4182,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :status_failure)
   end
 
-  # A forward schema-version skew (newer binary, daemon not restarted) is
-  # tolerated: the consumer returns ok=true with a non-fatal `warning`,
-  # the tick proceeds and dispatches, and the dispatcher logs the warning
-  # once (under the neutral :status_warning event — the channel also carries
-  # status-stderr breadcrumbs, so the name is deliberately not skew-specific)
-  # instead of crashing the tick.
-  def test_forward_schema_skew_warning_is_logged_and_tick_proceeds
+  # A non-fatal projection warning does not invalidate the graph: the tick
+  # logs it once, continues, and dispatches eligible work.
+  def test_projection_warning_is_logged_and_tick_proceeds
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
     project = Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "p1", legacy_stage_dirs: [])
     dispatcher.instance_variable_get(:@status_consumer).next_result =
       Hive::Daemon::StatusConsumer::Result.new(
         ok: true, rows: rows, projects: [ project ], error: nil,
-        warning: "envelope schema v99 is newer than this process (v3); parsing best-effort. " \
-                 "Restart the hive daemon to pick up the new schema."
+        warning: "dependency admission degraded for one task"
       )
     dispatcher.tick(now: T0)
-    assert_equal 1, sup.spawned.size, "forward-skew tick must still dispatch"
+    assert_equal 1, sup.spawned.size, "warning-only tick must still dispatch"
     assert events_include?(logger, :status_warning)
   end
 
@@ -5568,6 +5900,36 @@ end
 
   # ── dispatch-request queue integration ───────────────────────────────
 
+  def test_projection_repair_row_blocks_durable_request_admission
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      repair = row(
+        project: "p1", slug: "s1", marker: "error", action: "error", command: nil,
+        projection_repair: true,
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+          "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"
+        }
+      )
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        rows: [ repair ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "REPAIR-BLOCKED")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned
+      blocked = logger.events.find do |name, attrs|
+        name == :dispatch_request_blocked && attrs[:request_id] == "REPAIR-BLOCKED"
+      end
+      refute_nil blocked
+      assert_equal "projection_repair_required", blocked.last.fetch(:reason)
+      assert_equal [ "REPAIR-BLOCKED" ], Q.pending(state_home: state_home).map(&:request_id)
+    end
+  end
   def test_attempt_reconciliation_precedes_status_healers_and_admission
     order = []
     admission_view = Object.new
@@ -6202,6 +6564,117 @@ end
     end
   end
 
+  def test_durable_capacity_deferral_fences_later_queue_requests_for_the_scan
+    Dir.mktmpdir("hive-dispatch-capacity-fence") do |state_home|
+      calls = []
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **_options|
+        calls << request.slug
+        Hive::Attempts::DispatchResult.new(
+          status: :deferred, attempt: nil, receipt: nil,
+          attach_descriptor: nil, reason: "capacity"
+        )
+      end
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher
+      )
+      Q.write_request!(
+        project: "p1", slug: "older", argv: %w[hive run older],
+        request_id: "older-capacity", state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "later", argv: %w[hive run later],
+        request_id: "later-capacity", state_home: state_home, now: T0 + 1
+      )
+      stub_find_project!(dispatcher, "p1")
+
+      begin
+        dispatcher.send(:process_dispatch_requests, now: T0 + 2, rows: [])
+      ensure
+        restore_find_project!
+      end
+
+      assert_equal [ "older" ], calls,
+                   "a later request must not steal capacity that reopens during the scan"
+      assert_equal %w[older-capacity later-capacity],
+                   Q.pending(state_home: state_home).map(&:request_id)
+    end
+  end
+
+  def test_global_cap_fences_later_queue_request_when_the_gate_reopens
+    Dir.mktmpdir("hive-dispatch-global-fence") do |state_home|
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      gates = [ :global_cap, :ok ]
+      controller.define_singleton_method(:can_dispatch?) { |**| gates.shift || :ok }
+      Q.write_request!(
+        project: "p1", slug: "older", argv: %w[hive run older],
+        request_id: "older-global", state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "later", argv: %w[hive run later],
+        request_id: "later-global", state_home: state_home, now: T0 + 1
+      )
+      stub_find_project!(dispatcher, "p1")
+
+      begin
+        dispatcher.send(:process_dispatch_requests, now: T0 + 2, rows: [])
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned,
+                   "a later request must wait even if the controller gate reopens"
+      assert_equal [ :ok ], gates
+      assert_equal %w[older-global later-global],
+                   Q.pending(state_home: state_home).map(&:request_id)
+    end
+  end
+
+  def test_project_cap_fences_only_later_requests_for_the_same_project
+    Dir.mktmpdir("hive-dispatch-project-fence") do |state_home|
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      controller.define_singleton_method(:can_dispatch?) do |project:, **|
+        project == "p1" ? :project_cap : :ok
+      end
+      Q.write_request!(
+        project: "p1", slug: "older", argv: %w[hive run older],
+        request_id: "older-project", state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "later", argv: %w[hive run later],
+        request_id: "later-project", state_home: state_home, now: T0 + 1
+      )
+      Q.write_request!(
+        project: "p2", slug: "other", argv: %w[hive run other],
+        request_id: "other-project", state_home: state_home, now: T0 + 2
+      )
+      projects = %w[p1 p2].map do |name|
+        {
+          "name" => name, "path" => "/tmp/#{name}",
+          "hive_state_path" => "/tmp/#{name}/.hive-state"
+        }
+      end
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_replaced_singleton_method(
+          Hive::Config, :find_project,
+          ->(name) { projects.find { |project| project.fetch("name") == name } }
+        ) do
+          dispatcher.send(:process_dispatch_requests, now: T0 + 3, rows: [])
+        end
+      end
+
+      assert_equal [ "other" ], supervisor.spawned.map { |entry| entry.fetch(:slug) }
+      blocked = Q.pending(state_home: state_home).map(&:request_id)
+      assert_equal %w[older-project later-project], blocked
+    end
+  end
+
   def test_deferred_recovery_delivery_advances_hourly_pacing_before_releasing_claim
     Dir.mktmpdir("hive-recovery-deferred") do |state_home|
       result = Hive::Attempts::DispatchResult.new(
@@ -6745,6 +7218,18 @@ end
     )
   end
 
+  def write_recovery_request(dir, project:, slug:, request_id:, created_at: T0)
+    Q.write_request!(
+      project: project, slug: slug,
+      argv: [ "hive", "run", slug, "--stage", "4-execute", "--project", project, "--json" ],
+      requestor: "healer", trigger: "recovery", request_id: request_id,
+      task_generation: "c" * 64, task_id: 817,
+      expected_stage: "4-execute", expected_marker_name: "error",
+      expected_marker_id: "marker-1", recovery: dispatcher_recovery,
+      state_home: dir, now: created_at
+    )
+  end
+
   def stub_find_project!(dispatcher, project_name)
     Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
     Hive::Config.singleton_class.alias_method(:__orig_registered_projects, :registered_projects) unless Hive::Config.singleton_class.method_defined?(:__orig_registered_projects)
@@ -6771,6 +7256,21 @@ end
       Hive::Config.define_singleton_method(
         :registered_projects, Hive::Config.method(:__orig_registered_projects)
       )
+    end
+  end
+
+  def with_registered_projects(*names)
+    projects = names.map do |name|
+      {
+        "name" => name, "path" => "/tmp/#{name}",
+        "hive_state_path" => "/tmp/#{name}/.hive-state"
+      }
+    end
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        ->(name) { projects.find { |project| project.fetch("name") == name } }
+      ) { yield }
     end
   end
 
@@ -7360,6 +7860,66 @@ end
     end
   end
 
+  def test_bound_dispatch_request_reuses_projected_task_input_epoch
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug)
+      .new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      request_id: "epoch-request", created_at: T0, requestor: "web",
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "current-generation"
+    )
+    observed = row(
+      project: "p1", slug: "demo-task", condition_task_generation: 7
+    )
+    captured = nil
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      replacement = lambda do |**options|
+        captured = options
+        generation
+      end
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, replacement) do
+        assert dispatcher.send(:bound_task_request_current?, request, row: observed)
+      end
+    end
+
+    assert_equal 7, captured.fetch(:task_input_epoch)
+  end
+
+  def test_bound_dispatch_generation_reuses_the_supplied_admission_context
+    dispatcher, = make_dispatcher(rows: [])
+    task = Struct.new(:id, :stage_index, :stage_name, :slug)
+      .new(42, 4, "execute", "demo-task")
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { task }
+    request = Q::Request.new(
+      request_id: "context-request", created_at: T0, requestor: "web",
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+      task_id: 42, expected_stage: "4-execute", task_generation: "current-generation"
+    )
+    context = Object.new
+    captured = nil
+    generation = Struct.new(:task_generation).new("current-generation")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      replacement = lambda do |**options|
+        captured = options
+        generation
+      end
+      with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, replacement) do
+        assert dispatcher.send(
+          :bound_task_request_current?, request, admission_context: context
+        )
+      end
+    end
+
+    assert_same context, captured.fetch(:admission_context)
+  end
+
   def test_dispatcher_removes_a_durable_request_with_stale_task_identity
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, = make_dispatcher(
@@ -7371,7 +7931,9 @@ end
         expected_stage: "4-execute", task_generation: "old-generation",
         state_home: state_home, now: T0
       )
-      dispatcher.define_singleton_method(:bound_task_request_current?) { |_request| false }
+      dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, row: nil, **|
+        false
+      end
       stub_find_project!(dispatcher, "p1")
       begin
         dispatcher.tick(now: T0)
@@ -7747,7 +8309,8 @@ end
       # must consult the controller and refuse rather than spawn a
       # second child against the same task.
       row_for_same_slug = row(slug: "s1", action: "ready_to_plan",
-                              command: "hive plan s1 --from 2-brainstorm")
+                              command: "hive plan s1 --from 2-brainstorm",
+                              mtime: T0 - (6 * 60 * 60))
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
         rows: [ row_for_same_slug ], dispatch_request_state_home: state_home
       )
@@ -7764,6 +8327,406 @@ end
         refute_nil blocked, "row scan must log :blocked reason=in_flight when slug is already running"
       ensure
         restore_find_project!
+      end
+    end
+  end
+
+  def test_older_direct_row_out_ranks_newer_request_for_the_last_task_slot
+    Dir.mktmpdir("hive-cross-source-dispatch-priority") do |state_home|
+      older_row = row(
+        slug: "older-plan", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan older-plan --from 2-brainstorm",
+        mtime: T0 - (6 * 60 * 60)
+      )
+      request_row = row(
+        slug: "newer-request", stage: "4-execute", action: nil,
+        command: nil, mtime: T0 - 60
+      )
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: [ older_row, request_row ], dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(
+        state_home, slug: "newer-request", request_id: "NEWER",
+        created_at: T0 - 60
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_equal [ "older-plan" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "an active request backlog must not starve older direct task rows"
+    end
+  end
+
+  def test_older_direct_row_capacity_fence_applies_to_newer_request
+    Dir.mktmpdir("hive-cross-source-row-fence") do |state_home|
+      rows = [
+        row(
+          slug: "older-plan", stage: "3-plan", action: "ready_to_plan",
+          command: "hive plan older-plan --from 2-brainstorm",
+          mtime: T0 - (6 * 60 * 60)
+        ),
+        row(
+          slug: "newer-request", stage: "4-execute", action: nil,
+          command: nil, mtime: T0 - 60
+        )
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      gate_calls = []
+      gates = [ :global_cap, :ok ]
+      controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+        gate_calls << [ project, slug ]
+        gates.shift || :ok
+      end
+      write_request_file(
+        state_home, slug: "newer-request", request_id: "NEWER",
+        created_at: T0 - 60
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned
+      assert_equal [ [ "p1", "older-plan" ] ], gate_calls
+      assert_equal [ :ok ], gates,
+                   "the request must inherit the older row's global capacity fence"
+    end
+  end
+
+  def test_request_capacity_fence_applies_to_lower_priority_direct_row
+    Dir.mktmpdir("hive-cross-source-request-fence") do |state_home|
+      rows = [
+        row(
+          slug: "lower-plan", stage: "3-plan", action: "ready_to_plan",
+          command: "hive plan lower-plan --from 2-brainstorm",
+          mtime: T0 - 60
+        ),
+        row(
+          slug: "higher-request", stage: "8-finalize", action: nil,
+          command: nil, mtime: T0 - 60
+        )
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      gate_calls = []
+      gates = [ :global_cap, :ok ]
+      controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+        gate_calls << [ project, slug ]
+        gates.shift || :ok
+      end
+      write_request_file(
+        state_home, slug: "higher-request", request_id: "HIGHER",
+        created_at: T0 - 60
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned
+      assert_equal [ [ "p1", "higher-request" ] ], gate_calls
+      assert_equal [ :ok ], gates,
+                   "the direct row must inherit the request's global capacity fence"
+    end
+  end
+
+  def test_equal_priority_request_precedes_unrelated_direct_row
+    Dir.mktmpdir("hive-cross-source-equal-priority") do |state_home|
+      rows = [
+        row(project: "p1", slug: "request", stage: "3-plan",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p2", slug: "direct", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct",
+            mtime: T0, id: 2)
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "request",
+        request_id: "EQUAL", created_at: T0
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0) }
+
+      assert_equal [ "request" ], supervisor.spawned.map { |entry| entry.fetch(:slug) }
+    end
+  end
+
+  def test_fifo_request_head_precedes_later_higher_priority_request
+    Dir.mktmpdir("hive-cross-source-request-fifo") do |state_home|
+      rows = [
+        row(project: "p1", slug: "older-low", stage: "2-brainstorm",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p2", slug: "later-high", stage: "8-finalize",
+            action: nil, command: nil, mtime: T0, id: 2),
+        row(project: "p3", slug: "direct-middle", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct-middle",
+            mtime: T0, id: 3)
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "older-low",
+        request_id: "OLDER", created_at: T0
+      )
+      write_request_file(
+        state_home, project: "p2", slug: "later-high",
+        request_id: "LATER", created_at: T0 + 1
+      )
+
+      with_registered_projects("p1", "p2", "p3") { dispatcher.tick(now: T0 + 2) }
+
+      assert_equal [ "older-low" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "a later request must not leapfrog the durable FIFO head"
+    end
+  end
+
+  def test_later_request_priority_is_inherited_by_blocked_fifo_head
+    Dir.mktmpdir("hive-cross-source-request-priority-inheritance") do |state_home|
+      rows = [
+        row(project: "p1", slug: "later-high", stage: "8-finalize",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p2", slug: "direct", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct",
+            mtime: T0, id: 2)
+      ]
+      dispatcher, supervisor, controller, logger = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_recovery_request(
+        state_home, project: "retired", slug: "blocked-head",
+        request_id: "BLOCKED"
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "later-high",
+        request_id: "LATER", created_at: T0 + 1
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0 + 2) }
+
+      assert_equal [ "later-high" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "a blocked FIFO head must not hide a later request behind direct rows"
+      assert(logger.events.any? { |name, attrs|
+        name == :dispatch_request_blocked && attrs[:request_id] == "BLOCKED" &&
+          attrs[:reason] == "unknown_project"
+      })
+    end
+  end
+
+  def test_inherited_priority_stops_after_the_high_priority_request
+    Dir.mktmpdir("hive-cross-source-request-priority-suffix") do |state_home|
+      rows = [
+        row(project: "retired-high", slug: "blocked-high", stage: "8-finalize",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p1", slug: "low-tail", stage: "2-brainstorm",
+            action: nil, command: nil, mtime: T0, id: 2),
+        row(project: "p2", slug: "direct-middle", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct-middle",
+            mtime: T0, id: 3)
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_recovery_request(
+        state_home, project: "retired-low", slug: "blocked-low",
+        request_id: "BLOCKED-LOW", created_at: T0
+      )
+      write_recovery_request(
+        state_home, project: "retired-high", slug: "blocked-high",
+        request_id: "BLOCKED-HIGH", created_at: T0 + 1
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "low-tail",
+        request_id: "LOW-TAIL", created_at: T0 + 2
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0 + 3) }
+
+      assert_equal [ "direct-middle" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "a low-priority tail must not inherit an earlier request's peak priority"
+    end
+  end
+
+  def test_non_admission_request_cleanup_precedes_interleaved_row_fence
+    Dir.mktmpdir("hive-cross-source-request-cleanup") do |state_home|
+      older_row = row(
+        slug: "older-plan", stage: "8-finalize", action: "ready_to_plan",
+        command: "hive finalize older-plan --from 8-finalize",
+        mtime: T0 - (6 * 60 * 60)
+      )
+      dispatcher, supervisor, controller, logger = make_dispatcher(
+        rows: [ older_row ], dispatch_request_state_home: state_home
+      )
+      gate_calls = []
+      controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+        gate_calls << [ project, slug ]
+        :global_cap
+      end
+      write_request_file(
+        state_home, slug: "expired", request_id: "EXPIRED",
+        created_at: T0 - (11 * 60)
+      )
+      write_request_file(
+        state_home, slug: "invalid", request_id: "INVALID",
+        argv: [ "hive", "run", "invalid" ]
+      )
+      repository = Q.repository(state_home)
+      repository.database.transaction do |db|
+        row = db[:dispatch_requests].where(request_id: "INVALID").first
+        payload = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:payload_json))
+        payload["argv"] = [ "hive", "doctor" ]
+        db[:dispatch_requests].where(request_id: "INVALID").update(
+          payload_json: Hive::RuntimeControlPlane::Codec.dump_json(payload)
+        )
+      end
+
+      dispatcher.tick(now: T0)
+
+      assert_empty supervisor.spawned
+      assert_equal [ [ "p1", "older-plan" ] ], gate_calls
+      assert(logger.events.any? { |name, attrs|
+        name == :dispatch_request_expired && attrs[:request_id] == "EXPIRED"
+      })
+      assert(logger.events.any? { |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "INVALID" &&
+          attrs[:reason] == "invalid_argv"
+      })
+      assert_empty Q.pending(state_home: state_home),
+                   "capacity fences must not retain expired or invalid requests"
+    end
+  end
+
+  def test_non_admission_request_cleanup_failure_keeps_request_for_retry
+    Dir.mktmpdir("hive-cross-source-request-cleanup-failure") do |state_home|
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "retry", request_id: "RETRY")
+
+      with_replaced_singleton_method(
+        Q, :valid_argv?, ->(*) { raise Errno::EAGAIN, "validation unavailable" }
+      ) { dispatcher.tick(now: T0) }
+
+      assert_empty supervisor.spawned
+      failure = logger.events.find { |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "RETRY"
+      }
+      assert_match(/spawn_failure: Errno::EAGAIN/, failure.last.fetch(:reason))
+      assert_equal [ "RETRY" ], Q.pending(state_home: state_home).map(&:request_id),
+                   "cleanup failures must preserve the durable request for retry"
+    end
+  end
+
+  def test_row_project_fence_applies_to_requests_without_blocking_other_projects
+    %i[project_cap daily_cap].each do |capacity_outcome|
+      Dir.mktmpdir("hive-cross-source-row-project-fence") do |state_home|
+        rows = [
+          row(
+            project: "p1", slug: "older-row", stage: "8-finalize",
+            action: "ready_to_plan", command: "hive finalize older-row",
+            mtime: T0 - (6 * 60 * 60), id: 1
+          ),
+          row(project: "p1", slug: "p1-request", stage: "3-plan",
+              action: nil, command: nil, mtime: T0 - 60, id: 2),
+          row(project: "p2", slug: "p2-request", stage: "3-plan",
+              action: nil, command: nil, mtime: T0 - 60, id: 3)
+        ]
+        dispatcher, supervisor, controller = make_dispatcher(
+          rows: rows, dispatch_request_state_home: state_home
+        )
+        gate_calls = []
+        controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+          gate_calls << [ project, slug ]
+          slug == "older-row" ? capacity_outcome : :ok
+        end
+        write_request_file(
+          state_home, project: "p1", slug: "p1-request",
+          request_id: "P1-#{capacity_outcome}", created_at: T0 - 60
+        )
+        write_request_file(
+          state_home, project: "p2", slug: "p2-request",
+          request_id: "P2-#{capacity_outcome}", created_at: T0 - 59
+        )
+
+        with_registered_projects("p1", "p2") { dispatcher.tick(now: T0) }
+
+        assert_equal [ "p2-request" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                     capacity_outcome.to_s
+        assert_equal [ [ "p1", "older-row" ], [ "p2", "p2-request" ] ], gate_calls,
+                     capacity_outcome.to_s
+      end
+    end
+  end
+
+  def test_request_project_fence_applies_to_rows_without_blocking_other_projects
+    %i[project_cap daily_cap].each do |capacity_outcome|
+      Dir.mktmpdir("hive-cross-source-request-project-fence") do |state_home|
+        rows = [
+          row(project: "p1", slug: "higher-request", stage: "8-finalize",
+              action: nil, command: nil, mtime: T0 - 60, id: 1),
+          row(
+            project: "p1", slug: "p1-row", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan p1-row",
+            mtime: T0 - 60, id: 2
+          ),
+          row(
+            project: "p2", slug: "p2-row", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan p2-row",
+            mtime: T0 - 60, id: 3
+          )
+        ]
+        dispatcher, supervisor, controller = make_dispatcher(
+          rows: rows, dispatch_request_state_home: state_home
+        )
+        gate_calls = []
+        controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+          gate_calls << [ project, slug ]
+          slug == "higher-request" ? capacity_outcome : :ok
+        end
+        write_request_file(
+          state_home, project: "p1", slug: "higher-request",
+          request_id: "HIGHER-#{capacity_outcome}", created_at: T0 - 60
+        )
+
+        with_registered_projects("p1", "p2") { dispatcher.tick(now: T0) }
+
+        assert_equal [ "p2-row" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                     capacity_outcome.to_s
+        assert_equal [ [ "p1", "higher-request" ], [ "p2", "p2-row" ] ], gate_calls,
+                     capacity_outcome.to_s
       end
     end
   end

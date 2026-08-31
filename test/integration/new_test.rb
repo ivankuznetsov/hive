@@ -43,11 +43,21 @@ class NewTest < Minitest::Test
         refute_includes File.read(File.join(glob.first, "meta.yml")), "workflow:"
         refute File.directory?(File.join(glob.first, "assets")),
                "plain CLI-compatible ideas must not create an empty assets directory"
+        marker = Hive::Markers.current(File.join(glob.first, "idea.md"))
+        projection = Hive::TaskProjection::Store.new(
+          task_folder: glob.first
+        ).read_routine(marker: marker)
+        assert projection.current?
+        assert File.file?(File.join(glob.first, "task-projection.json"))
+        assert File.file?(File.join(glob.first, "task-projection.checkpoint.json"))
+        refute File.exist?(File.join(glob.first, "task-journal.jsonl"))
 
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
         assert_match(%r{\Ahive: 1-inbox/add-inbox-filter-\d{6}-[0-9a-f]{4} captured\z}, log)
         diff_files = run!("git", "-C", File.join(dir, ".hive-state"), "show", "--name-only", "--format=")
         assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/meta.yml"
+        assert_includes diff_files,
+                        "stages/1-inbox/#{File.basename(glob.first)}/task-projection.checkpoint.json"
       end
     end
   end

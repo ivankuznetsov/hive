@@ -312,9 +312,11 @@ module Hive
         end
       end
 
-      def recovery_retry_count(project:, slug:, expected_stage: nil, **)
+      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil, **)
         matching_recoveries(project, slug).filter_map do |request|
           next if expected_stage && request.expected_stage.to_s != expected_stage.to_s
+          next if runtime_digest && request.recovery["runtime_digest"] != runtime_digest
+
           request.recovery["retry_count"]
         end.max.to_i
       end

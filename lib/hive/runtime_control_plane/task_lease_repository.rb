@@ -71,6 +71,26 @@ module Hive
         end
       end
 
+      def clear_child(task_folder, pid:, process_start_time:, lock_id:)
+        subject = subject_for(File.expand_path(task_folder))
+        observed = read_row(subject.fetch(:task_id))
+        return false unless observed&.fetch(:holder_id, nil) == lock_id.to_s
+
+        data = payload_from(observed)
+        return false unless data["claude_pid"] == pid
+        return false unless data["claude_pid_start_time"].to_s == process_start_time.to_s
+
+        data.delete("claude_pid")
+        data.delete("claude_pid_start_time")
+        payload_json = dump_payload(data)
+        @database.transaction do |db|
+          db[:task_leases].where(
+            task_id: subject.fetch(:task_id), holder_id: lock_id.to_s,
+            lease_version: observed.fetch(:lease_version)
+          ).update(payload_json: payload_json) == 1
+        end
+      end
+
       def read(task_folder_or_lock)
         folder = File.expand_path(task_folder_or_lock.to_s)
         subject = subject_for(folder)

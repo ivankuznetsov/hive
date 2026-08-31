@@ -45,6 +45,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
       <!-- WAITING -->
     MARKDOWN
+    seed_task_projection(File.dirname(brainstorm), state_file: brainstorm)
     File.write(File.join(@home, "config.yml"), {
       "bot" => { "chat_id_allowlist" => [ 12345 ] }
     }.to_yaml)

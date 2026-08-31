@@ -139,7 +139,9 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     retained = inventory.fetch("paths").filter_map do |entry|
       entry.fetch("path") if File.file?(File.join(ROOT, entry.fetch("path")))
     end
-    added = changed_production_files(inventory).filter_map do |status_code, path|
+    added = changed_production_files(
+      inventory, from: inventory.fetch("outside_inventory_reference_commit")
+    ).filter_map do |status_code, path|
       path if status_code == "A" && File.file?(File.join(ROOT, path))
     end
     (retained + added).uniq.sort
@@ -152,13 +154,15 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
       next 0 if classified.include?(path)
 
       current = File.file?(File.join(ROOT, path)) ? File.foreach(File.join(ROOT, path)).count : 0
-      current - base_line_count(inventory.fetch("base_commit"), path)
+      current - base_line_count(
+        inventory.fetch("outside_inventory_reference_commit"), path
+      )
     end
   end
 
-  def changed_production_files(inventory)
+  def changed_production_files(inventory, from: inventory.fetch("base_commit"))
     output, error, status = Open3.capture3(
-      "git", "diff", "--name-status", "--no-renames", inventory.fetch("base_commit"),
+      "git", "diff", "--name-status", "--no-renames", from,
       "--", *PRODUCTION_PATHS, chdir: ROOT
     )
     assert status.success?, error

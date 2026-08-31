@@ -4,6 +4,8 @@ require "open3"
 require "hive/github_publication"
 
 class GithubPublicationTest < Minitest::Test
+  include HiveTestHelper
+
   class FakeGithub
     attr_reader :creates
     attr_accessor :records, :crash_after_create, :fail_before_create,
@@ -97,6 +99,7 @@ class GithubPublicationTest < Minitest::Test
       end
       gateway = Hive::GithubPublication::GithubGateway.new(transport: transport)
 
+      assert gateway.authenticate!(host: request.host)
       records = gateway.list_pull_requests(
         repository: request.repository, host: request.host,
         branch: request.branch
@@ -117,6 +120,35 @@ class GithubPublicationTest < Minitest::Test
       assert_includes create_args, "github.com/acme/demo"
       assert_includes create_args, request.branch
       assert_includes create_args, request.base_branch
+    end
+  end
+
+  def test_git_gateway_reports_false_and_unverifiable_ancestry
+    with_local_remote do |repo, remote, head|
+      gateway = Hive::GithubPublication::GitGateway.new(
+        remote: remote, allow_local_transport: true
+      )
+      base = capture("git", "-C", repo, "rev-parse", "HEAD~1").strip
+
+      refute gateway.ancestor?(
+        worktree_path: repo, ancestor_oid: head, head_oid: base
+      )
+      assert_raises(Hive::AgentGitGate::PublicationFailed) do
+        gateway.ancestor?(
+          worktree_path: repo, ancestor_oid: "f" * 40, head_oid: head
+        )
+      end
+
+      expected = { "host" => "github.com", "repository" => "acme/demo" }
+      calls = []
+      resolver = lambda do |path, cfg:, managed:|
+        calls << [ path, cfg, managed ]
+        expected
+      end
+      with_replaced_singleton_method(Hive::Gh, :repository_identity, resolver) do
+        assert_equal expected, gateway.repository_identity(worktree_path: repo)
+      end
+      assert_equal [ [ repo, nil, true ] ], calls
     end
   end
 
@@ -308,6 +340,150 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_controller_owned_draft_accepts_only_a_fast_forward_revision
+    with_local_remote do |repo, remote, head|
+      github = FakeGithub.new
+      git = CountingGit.new(remote)
+      controller = controller_for(repo, remote, github, git_gateway: git)
+      original = request_for(repo, head)
+
+      published = controller.publish!(original, revalidate: ->(_phase) { true })
+      original_state = File.binread(state_path(repo))
+      assert_equal head, published.fetch("head_oid")
+
+      revised_head = commit(repo, "follow-up.txt", "follow-up\n", "follow-up")
+      revised = revised_request(repo, original, revised_head)
+      publication = controller.publish!(revised, revalidate: ->(_phase) { true })
+
+      assert_equal revised_head, publication.fetch("head_oid")
+      assert_equal original.publication_id, publication.fetch("publication_id")
+      assert_equal revised_head, remote_oid(remote, revised.branch)
+      assert_equal 2, git.pushes
+      assert_equal 1, github.creates
+      assert_equal original_state, File.binread(state_path(repo)),
+                   "the first exact publication remains the immutable ownership anchor"
+
+      github.records.first["head_oid"] = revised_head
+      replay = controller.publish!(revised, revalidate: ->(_phase) { true })
+      assert_equal revised_head, replay.fetch("head_oid")
+      assert_equal 2, git.pushes
+      assert_equal 1, github.creates
+
+      phases = []
+      github.records.first["state"] = "MERGED"
+      merged = controller.publish!(revised, revalidate: ->(phase) { phases << phase; true })
+      assert_equal "merged", merged.fetch("hosted_state")
+      assert_equal revised_head, merged.fetch("head_oid")
+      assert_equal [ :final ], phases
+    end
+  end
+
+  def test_controller_owned_draft_refuses_a_non_fast_forward_revision
+    with_local_remote do |repo, remote, head|
+      github = FakeGithub.new
+      controller = controller_for(repo, remote, github)
+      original = request_for(repo, head)
+      controller.publish!(original, revalidate: ->(_phase) { true })
+
+      revised_head = commit(repo, "follow-up.txt", "follow-up\n", "follow-up")
+      revised = revised_request(repo, original, revised_head)
+      git = CountingGit.new(remote)
+      ancestry = [ true, false ]
+      git.define_singleton_method(:ancestor?) { |**| ancestry.shift }
+
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller_for(repo, remote, github, git_gateway: git)
+          .publish!(revised, revalidate: ->(_phase) { true })
+      end
+      assert_equal "revision_non_fast_forward", error.code
+      assert_equal head, remote_oid(remote, revised.branch)
+      assert_equal 0, git.pushes
+      assert_equal 1, github.creates
+    end
+  end
+
+  def test_revision_reconciliation_fails_closed_for_identity_remote_terminal_and_ancestry_conflicts
+    with_published_revision do |_repo, _remote, original, revised, controller, github|
+      github.records.first["body"] = "edited by somebody else"
+      assert_revision_error("revision_identity_conflict", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, _original, revised, controller, _github|
+      controller.instance_variable_set(
+        :@git, sequence_git([ remote_observation("f" * 40) ])
+      )
+      assert_revision_error("revision_remote_conflict", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, _original, revised, controller, github|
+      github.records.first["head_oid"] = "f" * 40
+      controller.instance_variable_set(
+        :@git, sequence_git([ remote_observation("f" * 40) ], ancestor: false)
+      )
+      assert_revision_error("revision_history_rewritten", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, _original, revised, controller, github|
+      github.records.first["state"] = "MERGED"
+      assert_revision_error("revision_hosted_terminal", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, original, revised, controller, _github|
+      controller.instance_variable_set(
+        :@git,
+        sequence_git([ remote_observation(original.head_oid) ], ancestor: :error)
+      )
+      assert_revision_error("revision_ancestry_unavailable", controller, revised)
+    end
+  end
+
+  def test_revision_push_reconciles_lost_responses_and_blocks_unknown_outcomes
+    with_published_revision do |_repo, _remote, original, revised, controller, _github|
+      controller.instance_variable_set(
+        :@git, sequence_git([ remote_observation(original.head_oid) ], push: {})
+      )
+      assert_revision_error("revision_push_outcome_unknown", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, original, revised, controller, _github|
+      controller.instance_variable_set(
+        :@git,
+        sequence_git(
+          [ remote_observation(original.head_oid), remote_observation(original.head_oid) ],
+          push_error: true
+        )
+      )
+      assert_revision_error("revision_push_outcome_unknown", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, original, revised, controller, _github|
+      controller.instance_variable_set(
+        :@git,
+        sequence_git(
+          [ remote_observation(original.head_oid), remote_observation(original.head_oid) ],
+          push: revision_push_observation(original, revised)
+        )
+      )
+      assert_revision_error("revision_push_not_observed", controller, revised)
+    end
+
+    with_published_revision do |_repo, _remote, original, revised, controller, _github|
+      controller.instance_variable_set(
+        :@git,
+        sequence_git(
+          [
+            remote_observation(original.head_oid),
+            remote_observation(revised.head_oid),
+            remote_observation(revised.head_oid)
+          ],
+          push_error: true
+        )
+      )
+      publication = controller.publish!(revised, revalidate: ->(*) { true })
+      assert_equal revised.head_oid, publication.fetch("head_oid")
+    end
+  end
+
   def test_preexisting_branch_without_exact_owned_pr_is_never_adopted_or_replaced
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)
@@ -448,6 +624,53 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_secret_scan_classifies_runtime_password_references_in_a_native_diff
+    with_local_remote do |repo, remote, head|
+      clean = request_for(repo, head)
+      diff = <<~DIFF
+        diff --git a/app/services/setup.rb b/app/services/setup.rb
+        --- a/app/services/setup.rb
+        +++ b/app/services/setup.rb
+        @@ -1 +1 @@
+        -operator.name = name
+        +operator.password = password
+      DIFF
+      request = Hive::GithubPublication::Request.new(
+        **clean.to_h.merge(diff: diff, diff_digest: Digest::SHA256.hexdigest(diff))
+      )
+
+      result = controller_for(repo, remote, FakeGithub.new).publish!(
+        request, revalidate: ->(_phase) { true }
+      )
+
+      assert_equal request.head_oid, result.fetch("head_oid")
+    end
+  end
+
+  def test_secret_scan_blocks_literals_inside_shell_command_substitutions
+    with_local_remote do |repo, remote, head|
+      clean = request_for(repo, head)
+      diff = <<~DIFF
+        diff --git a/.kamal/secrets b/.kamal/secrets
+        --- /dev/null
+        +++ b/.kamal/secrets
+        @@ -0,0 +1 @@
+        +ROOT_PASSWORD=$(printf %s s3cretpassphrase42)
+      DIFF
+      request = Hive::GithubPublication::Request.new(
+        **clean.to_h.merge(diff: diff, diff_digest: Digest::SHA256.hexdigest(diff))
+      )
+
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller_for(repo, remote, FakeGithub.new).publish!(
+          request, revalidate: ->(_phase) { true }
+        )
+      end
+
+      assert_equal "secret_detected", error.code
+    end
+  end
+
   def test_creation_base_is_immutable_even_when_the_base_branch_later_advances
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)
@@ -583,7 +806,7 @@ class GithubPublicationTest < Minitest::Test
       assert_raises(Hive::GithubPublication::Blocked) { controller.send(:observe, request) }
 
       assert_raises(Hive::GithubPublication::Blocked) do
-        controller.send(:validate_push_receipt!, {}, base, request)
+        controller.send(:validate_push_receipt!, {}, nil, request)
       end
       bad_pr = pr.merge("observed_at" => "bad")
       refute controller.send(:valid_pr_observation?, bad_pr, base.merge("phase" => "pr_observed"))
@@ -691,6 +914,11 @@ class GithubPublicationTest < Minitest::Test
         controller.send(:reconcile, request, { "phase" => "unknown" }, ->(*) { true })
       end
       assert_equal "invalid_phase", error.code
+
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.send(:revalidate!, ->(*) { raise "failed" }, :final)
+      end
+      assert_equal "stale_authority", error.code
     end
   end
 
@@ -707,6 +935,7 @@ class GithubPublicationTest < Minitest::Test
     end
 
     def observe(**values) = @delegate.observe(**values)
+    def ancestor?(**values) = @delegate.ancestor?(**values)
 
     def push_exact(**values)
       @pushes += 1
@@ -739,6 +968,19 @@ class GithubPublicationTest < Minitest::Test
       branch: "hive/patrol-fix/repair-one/g1", head_oid: head,
       diff_digest: Digest::SHA256.hexdigest(diff), title: "Fix the patrol finding",
       body: "## Fix\n\nValidated exact patch.\n", diff: diff, draft: true
+    )
+  end
+
+  def revised_request(repo, original, head)
+    diff = capture(
+      "git", "-C", repo, "diff", "#{original.creation_base_oid}..#{head}"
+    )
+    Hive::GithubPublication::Request.new(
+      **original.to_h.merge(
+        head_oid: head,
+        diff: diff,
+        diff_digest: Digest::SHA256.hexdigest(diff)
+      )
     )
   end
 
@@ -786,14 +1028,47 @@ class GithubPublicationTest < Minitest::Test
     )
   end
 
-  def sequence_git(observations, push: nil, push_error: false)
+  def sequence_git(observations, push: nil, push_error: false, ancestor: true)
     Object.new.tap do |git|
       git.define_singleton_method(:observe) { |**| observations.shift || raise("unexpected observation") }
+      git.define_singleton_method(:ancestor?) do |**|
+        raise "ancestry failed" if ancestor == :error
+
+        ancestor
+      end
       git.define_singleton_method(:push_exact) do |**|
         raise "push failed" if push_error
         push
       end
     end
+  end
+
+  def revision_push_observation(original, revised)
+    {
+      "expected_oid" => original.head_oid,
+      "before_oid" => original.head_oid,
+      "after_oid" => revised.head_oid,
+      "remote_fingerprint" => "9" * 64
+    }
+  end
+
+  def with_published_revision
+    with_local_remote do |repo, remote, head|
+      github = FakeGithub.new
+      controller = controller_for(repo, remote, github)
+      original = request_for(repo, head)
+      controller.publish!(original, revalidate: ->(*) { true })
+      revised_head = commit(repo, "follow-up.txt", "follow-up\n", "follow-up")
+      revised = revised_request(repo, original, revised_head)
+      yield repo, remote, original, revised, controller, github
+    end
+  end
+
+  def assert_revision_error(code, controller, request)
+    error = assert_raises(Hive::GithubPublication::Blocked) do
+      controller.publish!(request, revalidate: ->(*) { true })
+    end
+    assert_equal code, error.code
   end
 
   def with_local_remote

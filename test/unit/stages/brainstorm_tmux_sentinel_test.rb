@@ -309,8 +309,11 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       prepare_test_task_lease_repository(task.folder)
 
       lock = nil
+      identity = nil
       Hive::Lock.with_task_lock(task.folder, "stage" => "2-brainstorm") do
-        with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-time-#{pid}" }) do
+        identity = with_replaced_singleton_method(
+          Hive::Lock, :process_start_time, ->(pid) { "start-time-#{pid}" }
+        ) do
           Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
         end
         lock = Hive::Lock.read_task_lock(task.folder)
@@ -318,6 +321,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
       assert_equal 12_345, lock.fetch("claude_pid")
       assert_equal "start-time-12345", lock.fetch("claude_pid_start_time")
+      assert_equal({ pid: 12_345, process_start_time: "start-time-12345" }, identity)
       assert_nil Hive::Lock.read_task_lock(task.folder)
     end
   end

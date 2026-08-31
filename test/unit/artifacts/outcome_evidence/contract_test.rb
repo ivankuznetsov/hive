@@ -127,6 +127,21 @@ class OutcomeEvidenceContractTest < Minitest::Test
     )
     assert_equal "blocked", blocked.fetch("status")
 
+    rework = Contract.review!(
+      requirement: requirement, evidence: evidence,
+      producer: producer, reviewer: reviewer,
+      output: output.merge(
+        "verdicts" => [
+          {
+            "target_id" => "claim-flow", "verdict" => "rework",
+            "reason" => "The implementation obscures the confirmation state and needs a source change."
+          }
+        ]
+      )
+    )
+    refute rework.fetch("accepted")
+    assert_equal "rework", rework.fetch("status")
+
     assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
       Contract.review!(
         requirement: requirement, evidence: evidence,

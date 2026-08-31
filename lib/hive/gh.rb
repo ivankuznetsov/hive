@@ -11,6 +11,7 @@ module Hive
   module Gh
     NETWORK_TIMEOUT_SEC = 60
     POLL_INTERVAL_SEC = 0.05
+    CHECK_ANNOTATIONS_MAX_BYTES = 64 * 1024
 
     # Leading YAML frontmatter block of a hive-authored pr.md. Capture group
     # 1 is the YAML body (used by #pr_frontmatter); #pr_body strips the whole
@@ -617,8 +618,13 @@ module Hive
       # cap makes short jobs underspend while truncating the large failing
       # job more aggressively than the budget allows (plan IU-8).
       raw = jobs.map do |job|
-        job_id = job["databaseId"] || job["id"]
-        { "name" => job["name"].to_s, "job_id" => job_id, "log" => fetch_job_log(worktree_path, job_id, cfg: cfg) }
+        job_id = job["databaseId"] || job["id"] ||
+                 job["detailsUrl"].to_s[%r{/job/(\d+)(?:\z|[/?#])}, 1]
+        {
+          "name" => utf8_text(job["name"] || job["context"]),
+          "job_id" => job_id,
+          "log" => fetch_job_log(worktree_path, job_id, cfg: cfg)
+        }
       end
 
       caps = allocate_log_budget(raw.map { |entry| entry["log"].bytesize }, byte_cap)
@@ -631,9 +637,50 @@ module Hive
       return "[hive-babysitter: no job id available, cannot fetch log]" unless job_id
 
       fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
-      return fetch_result[:log] if fetch_result[:success]
+      return utf8_text(fetch_result[:log]) if fetch_result[:success]
 
-      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
+      annotations = fetch_check_annotations(worktree_path, job_id, cfg: cfg)
+      return annotations unless annotations.empty?
+
+      error = utf8_text(fetch_result[:error])
+      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{error}]"
+    end
+
+    # GitHub creates a failed check with no job log when Actions cannot start
+    # the runner (for example an account billing or spending-limit hold). The
+    # check-run annotation is then the only useful diagnostic. Keep this a
+    # best-effort fallback so an annotation transport failure never masks the
+    # original log-fetch error.
+    def fetch_check_annotations(worktree_path, check_run_id, cfg: nil)
+      id = Integer(check_run_id, exception: false)
+      return "" unless id&.positive?
+
+      identity = repository_identity(worktree_path, cfg: cfg)
+      endpoint = "repos/#{identity.fetch('repository')}/check-runs/#{id}/annotations?per_page=100"
+      out, _err, status = capture3(
+        "gh", "api", "--hostname", identity.fetch("host"), endpoint,
+        chdir: worktree_path, cfg: cfg,
+        max_stdout_bytes: CHECK_ANNOTATIONS_MAX_BYTES
+      )
+      return "" unless status.success?
+
+      document = JSON.parse(out)
+      return "" unless document.is_a?(Array)
+
+      lines = document.filter_map do |annotation|
+        next unless annotation.is_a?(Hash)
+
+        parts = %w[title message raw_details]
+                .map { |key| utf8_text(annotation[key]).strip }
+                .reject(&:empty?)
+                .uniq
+        parts.join(" — ") unless parts.empty?
+      end
+      return "" if lines.empty?
+
+      "[hive-babysitter: GitHub check annotations]\n#{lines.join("\n")}"
+    rescue Hive::GhError, JSON::ParserError, KeyError, ArgumentError, TypeError
+      ""
     end
 
     # Max-min fair allocation: repeatedly hand out an even share of the
@@ -709,7 +756,9 @@ module Hive
 
         conclusion = entry["conclusion"].to_s.upcase
         status = entry["status"].to_s.upcase
-        conclusion == "FAILURE" || conclusion == "TIMED_OUT" || conclusion == "CANCELLED" || status == "FAILURE"
+        state = entry["state"].to_s.upcase
+        conclusion == "FAILURE" || conclusion == "TIMED_OUT" ||
+          conclusion == "CANCELLED" || status == "FAILURE" || state == "FAILURE"
       end
     end
 
@@ -736,6 +785,10 @@ module Hive
       tail = text.byteslice(-byte_cap, byte_cap).to_s
       tail.scrub!("")
       "\n...[truncated, #{elided} bytes elided]\n#{tail}"
+    end
+
+    def utf8_text(value)
+      value.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
     end
 
     def lookup_merged_pr(worktree_path, branch, cfg: nil, head_oid: nil)

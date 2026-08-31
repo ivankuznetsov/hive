@@ -8,6 +8,7 @@ require "base64"
 require "json"
 require "hive/task_closure"
 require "hive/task_resolver"
+require "hive/terminal_outcome"
 
 module Hive
   module Bot
@@ -38,6 +39,7 @@ module Hive
           data = update.callback_data.to_s
           case intent
           when :callback_approve then approve(data)
+          when :callback_rework then outcome_evidence_rework(data)
           when :callback_approve_plan then approve_plan(data)
           when :callback_rerun then rerun(data)
           when :callback_reject then @result_class.new(action: :reply, text: "Left unchanged.")
@@ -72,6 +74,33 @@ module Hive
         end
 
         private
+
+        def outcome_evidence_rework(data)
+          _prefix, project, slug, stage = split_callback(data, 4)
+          row = status_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.") unless row
+
+          attrs = row.attrs.to_h.transform_keys(&:to_s)
+          digests_valid = %w[generation recovery_digest].all? do |field|
+            attrs[field].to_s.match?(/\A[0-9a-f]{64}\z/)
+          end
+          unless row.action.to_s == Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK &&
+                 stage == "7-artifacts" && # coding-scoped: outcome evidence reopens coding implementation
+                 row.marker.to_s == "error" &&
+                 Hive::TerminalOutcome.outcome_evidence_rework?(attrs) && digests_valid
+            return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.")
+          end
+
+          @result_class.new(
+            action: :dispatch_then_reply, project: project, slug: slug,
+            command_argv: [
+              "hive", "evidence", "rework", slug,
+              "--project", project, "--stage", stage,
+              "--generation", attrs.fetch("generation"),
+              "--recovery-digest", attrs.fetch("recovery_digest"), "--json"
+            ]
+          )
+        end
 
         def closure_preview(data)
           payload = decode_closure_callback(data, "closure_preview")

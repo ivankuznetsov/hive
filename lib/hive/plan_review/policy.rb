@@ -113,6 +113,16 @@ module Hive
         ].to_h do |key|
           [ key, settings[key] ]
         end
+        # Planner-revision fallback is an operational recovery route, not a
+        # reviewer or verdict change. Keeping it outside the fingerprint lets
+        # an operator recover a provider-limited revision without discarding
+        # the findings and decisions already bound to this review lineage.
+        routes = configured["routes"]
+        if routes.is_a?(Hash)
+          configured["routes"] = routes.reject do |key, _value|
+            key.to_s == "planner_revision_fallback"
+          end
+        end
         return configured if model_routing.empty?
 
         configured.merge("model_routing" => model_routing)

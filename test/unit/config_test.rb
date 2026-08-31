@@ -12,6 +12,7 @@ class ConfigTest < Minitest::Test
       assert_equal "skip", review.dig("coding", "minimum_level")
       assert_equal 5, review.dig("skip", "max_files")
       assert_equal 2, review.dig("attempts", "max_transient")
+      assert_equal 1800, review.dig("attempts", "timeout_sec")
       assert_equal "ce_doc_review", review.fetch("adapter")
       assert_equal "grok-4.6", review.dig("routes", "adversarial", "model")
       assert_equal "native_grok_build", review.dig("routes", "adversarial", "route")
@@ -93,6 +94,7 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    primary: nope\n" => /routes\.primary.*must be a Hash/i,
         "plan_review:\n  routes:\n    fallbacks: nope\n" => /fallbacks.*must be an Array/i,
         "plan_review:\n  routes:\n    fallbacks: [nope]\n" => /fallbacks\[0\].*must be a Hash/i,
+        "plan_review:\n  routes:\n    planner_revision_fallback: nope\n" => /planner_revision_fallback.*must be a Hash/i,
         "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
@@ -115,6 +117,21 @@ class ConfigTest < Minitest::Test
       YAML
       assert_equal "fallback-codex",
                    Hive::Config.load(dir).dig("plan_review", "routes", "fallbacks", 0, "route")
+
+      File.write(config_path, <<~YAML)
+        plan_review:
+          routes:
+            planner_revision_fallback:
+              agent: codex
+              model: gpt-5.6-sol
+              family: openai
+              effort: high
+              route: native_codex
+      YAML
+      assert_equal "gpt-5.6-sol",
+                   Hive::Config.load(dir).dig(
+                     "plan_review", "routes", "planner_revision_fallback", "model"
+                   )
 
       policy = {
         "id" => "bounded_policy", "version" => 1, "action" => "approve_finding",
@@ -507,6 +524,8 @@ class ConfigTest < Minitest::Test
             effort: high
           review_fix:
             effort: high
+          review_ci:
+            effort: high
       YAML
 
       cfg = Hive::Config.load(dir)
@@ -524,6 +543,8 @@ class ConfigTest < Minitest::Test
           review:
             effort: minimal
           review_triage:
+            effort: high
+          review_ci:
             effort: high
       YAML
 
@@ -561,6 +582,28 @@ class ConfigTest < Minitest::Test
         assert_match(/models\.review_ci\.effort/i, error.message)
         assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
       end
+    end
+  end
+
+  def test_load_treats_hosted_checks_as_reachable_without_a_local_ci_command
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(
+        config_path,
+        {
+          "review" => {
+            "ci" => { "agent" => "pi", "command" => nil },
+            "github_checks" => { "enabled" => true }
+          },
+          "models" => { "review_ci" => { "effort" => "high" } }
+        }.to_yaml
+      )
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.review_ci\.effort/i, error.message)
+      assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
     end
   end
 

@@ -589,6 +589,18 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class StagedRaisingReviewer < Hive::Reviewers::Base
+    def failure_output_path
+      "#{output_path}.partial"
+    end
+
+    def run!(deadline: nil)
+      ensure_reviews_dir!
+      File.write(failure_output_path, "incomplete replacement\n")
+      raise RuntimeError, "staged boom"
+    end
+  end
+
   # A reviewer whose run! returns :ok. Produces a stub findings file so
   # the test can verify both reviewers actually ran.
   class OkReviewer < Hive::Reviewers::Base
@@ -1214,6 +1226,30 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_raising_staged_reviewer_preserves_prior_successful_output
+    with_tmp_dir do |dir|
+      spec = { "name" => "staged", "output_basename" => "staged" }
+      adapter = StagedRaisingReviewer.new(spec, make_ctx(dir))
+      FileUtils.mkdir_p(File.dirname(adapter.output_path))
+      prior = "## High\n- [ ] retained finding: prior successful review\n"
+      File.write(adapter.output_path, prior)
+
+      with_stubbed_dispatch([ adapter ]) do
+        result = Hive::Stages::Review.run_reviewers(
+          { "review" => { "reviewers" => [ spec ] } },
+          make_ctx(dir),
+          Task.new(dir, File.join(dir, "task.md"))
+        )
+        assert_equal :all_failed, result
+      end
+
+      assert_equal prior, File.read(adapter.output_path)
+      refute File.exist?(adapter.failure_output_path),
+             "orchestrator cleanup must remove only the staged failure output"
+      assert_includes File.read(File.join(dir, "reviews", "errors-01.md")), "staged boom"
+    end
+  end
+
   def test_reviewer_without_deadline_kwarg_still_runs
     with_tmp_dir do |dir|
       cfg = {
@@ -1725,6 +1761,23 @@ class RunReviewersTest < Minitest::Test
 
       assert_equal 5, Hive::Stages::Review.next_pass_for(task, marker),
                    "fix-success-04.md sentinel proves pass 4 finished cleanly; advance to 5"
+    end
+  end
+
+  def test_fix_success_head_reads_binding_and_fails_closed_on_io_error
+    Dir.mktmpdir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      head = "a" * 40
+      File.write(
+        File.join(reviews, "fix-success-04.md"),
+        "<!-- HIVE: fix-success sentinel; head=#{head} -->\n"
+      )
+
+      assert_equal head, Hive::Stages::Review.fix_success_head(dir, 4)
+      with_replaced_singleton_method(File, :open, ->(*) { raise IOError, "unreadable" }) do
+        assert_nil Hive::Stages::Review.fix_success_head(dir, 4)
+      end
     end
   end
 

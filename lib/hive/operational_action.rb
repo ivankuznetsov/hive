@@ -1,8 +1,10 @@
 require "digest"
 require "time"
 require "hive/recovery/api"
+require "hive/task_projection"
 require "hive/workflow_package/canonical_json"
 require "hive/task_closure"
+require "hive/terminal_outcome"
 
 module Hive
   # Closed, non-shell recommendations emitted by the operational status
@@ -20,6 +22,7 @@ module Hive
       ready_to_brainstorm
       ready_to_plan
       ready_to_develop
+      outcome_evidence_rework
       ready_to_open_pr
       ready_for_review
       ready_to_artifacts
@@ -91,6 +94,8 @@ module Hive
 
       def recoverable?(row)
         Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+          !Hive::TaskProjection.repair_required_row?(row) &&
+          !Hive::TerminalOutcome.outcome_evidence_rework?(row["attrs"] || {}) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
           !Hive::Recovery.intervention_required?(
             marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
@@ -141,10 +146,26 @@ module Hive
         else
           Hive::Markers.current(task.state_file)
         end
-        projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+        bounded = Hive::TaskProjection::Store.new(
+          task_folder: task.folder
+        ).read_routine(
+          marker: marker,
+          pristine: Hive::TaskProjection::Store.pristine_task?(task, marker)
+        )
+        if bounded.current?
+          projection = bounded.projection
+          action_marker = marker
+        else
+          attrs = Hive::TaskProjection.repair_marker_attrs(
+            bounded: bounded, project: project, slug: task.slug,
+            stage: "#{task.stage_index}-#{task.stage_name}"
+          )
+          action_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+          projection = Hive::TaskProjection.project(records: [], marker: action_marker)
+        end
         config = Hive::Config.load(task.project_root)
         action = Hive::TaskAction.for(
-          task, marker, projection: projection, config: config, project_name: project
+          task, action_marker, projection: projection, config: config, project_name: project
         )
         projection_data = projection.to_h
         {
@@ -154,8 +175,9 @@ module Hive
           "state_file" => task.state_file,
           "workflow" => task.workflow.id.to_s,
           "stage" => "#{task.stage_index}-#{task.stage_name}",
-          "marker" => marker.name.to_s,
-          "attrs" => marker.attrs,
+          "marker" => action_marker.name.to_s,
+          "attrs" => action_marker.attrs,
+          "projection_repair" => !bounded.current?,
           "mtime" => observation_mtime(task),
           "action" => action.key,
           "condition_task_generation" => projection_data.dig("identity", "task_generation"),
@@ -296,6 +318,8 @@ module Hive
         action = observed.fetch("action")
         if (verb = OperationalAction::STAGE_ACTIONS[action])
           dispatch_stage_action(verb, task, project_name, observed.fetch("stage"), guard)
+        elsif action == Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
+          dispatch_outcome_evidence_rework(task, project_name, observed)
         elsif action == "ready_to_run"
           dispatch_run(task, project_name, observed.fetch("stage"), guard)
         elsif action == "ready_to_advance"
@@ -311,6 +335,17 @@ module Hive
         Hive::Commands::StageAction.new(
           verb, task.folder, project: project_name, from: stage,
           quiet: true, observation_guard: guard
+        ).call
+      end
+
+      def dispatch_outcome_evidence_rework(task, project_name, observed)
+        require "hive/commands/evidence"
+        attrs = observed.fetch("attrs")
+        Hive::Commands::Evidence.new(
+          "rework", task.folder, project: project_name,
+          stage: observed.fetch("stage"), generation: attrs.fetch("generation"),
+          recovery_digest: attrs.fetch("recovery_digest"),
+          task_resolver: -> { task }, quiet: true
         ).call
       end
 

@@ -1,20 +1,21 @@
 schema: hive-runtime-control-plane-affected-production
 schema_version: 1
 base_commit: 1eab41d6b4bdac6664dc1e94ad1ccfb6ef604dd1
+outside_inventory_reference_commit: 9bc035f8960aae6ba3feb44be607fa8493e49b81
 baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 9119
-outside_inventory_net_lines: -3016
-final_lines: 6103
+final_inventory_lines: 9171
+outside_inventory_net_lines: -3054
+final_lines: 6117
 final_paths:
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 104
 - path: lib/hive/attempts/coordination.rb
   lines: 451
 - path: lib/hive/attempts/finalization_maintenance.rb
-  lines: 337
+  lines: 350
 - path: lib/hive/attempts/publication.rb
   lines: 299
 - path: lib/hive/attempts/repository.rb
@@ -26,7 +27,7 @@ final_paths:
 - path: lib/hive/daemon/pr_merge_repository.rb
   lines: 342
 - path: lib/hive/lock.rb
-  lines: 225
+  lines: 242
 - path: lib/hive/metrics.rb
   lines: 85
 - path: lib/hive/patrol/launch_budget.rb
@@ -54,7 +55,7 @@ final_paths:
 - path: lib/hive/runtime_control_plane/database.rb
   lines: 366
 - path: lib/hive/runtime_control_plane/dispatch_repository.rb
-  lines: 691
+  lines: 693
 - path: lib/hive/runtime_control_plane/maintenance.rb
   lines: 113
 - path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
@@ -66,7 +67,7 @@ final_paths:
 - path: lib/hive/runtime_control_plane/process_guard.rb
   lines: 171
 - path: lib/hive/runtime_control_plane/task_lease_repository.rb
-  lines: 296
+  lines: 316
 - path: lib/hive/task_counter.rb
   lines: 62
 - path: lib/hive/task_journal.rb

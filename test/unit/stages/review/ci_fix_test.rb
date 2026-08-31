@@ -122,6 +122,58 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_command_runner_reuses_the_bounded_ci_fix_loop
+    with_ci_dir do |dir, task_folder|
+      calls = []
+      runner = lambda do |max_bytes:, timeout_sec:|
+        calls << [ max_bytes, timeout_sec ]
+        Hive::Stages::Review::CiFix::Run.new("hosted checks green\n", 0)
+      end
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+        command: "hosted checks", command_runner: runner
+      )
+
+      assert_equal :green, result.status
+      assert_equal [ [ Hive::Stages::Review::CiFix::DEFAULT_MAX_LOG_BYTES, 5 ] ], calls
+      assert_equal "hosted checks green\n", result.last_output
+    end
+  end
+
+  def test_command_runner_provider_limit_stops_before_spawning_a_fix_agent
+    with_ci_dir do |dir, task_folder|
+      limit = "The job was not started because recent account payments have failed " \
+              "or your spending limit needs to be increased."
+      calls = 0
+      runner = lambda do |**|
+        calls += 1
+        Hive::Stages::Review::CiFix::Run.new(limit, 1)
+      end
+      fix_spawned = false
+      unexpected_fix = lambda do |**|
+        fix_spawned = true
+        { status: :error, error_message: "unexpected fix spawn" }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Review::CiFix, :spawn_fix_agent, unexpected_fix
+      ) do
+        Hive::Stages::Review::CiFix.run!(
+          cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+          command: "hosted checks", command_runner: runner
+        )
+      end
+
+      assert_equal :error, result.status
+      assert_equal 1, result.attempts
+      assert_equal 1, calls
+      refute fix_spawned, "a hosted provider limit must not spawn a code-fix agent"
+      assert_equal limit, result.limit_text
+      assert_match(/limits reached/, result.error_message)
+    end
+  end
+
   # --- green after fix --------------------------------------------------
 
   def test_returns_green_after_fix_agent_recovers_failing_ci
@@ -328,6 +380,38 @@ class CiFixTest < Minitest::Test
       assert_includes result.last_output, "test FAILED"
       refute_includes result.last_output, "\e[", "ANSI escape sequences must be stripped"
       refute_includes result.last_output, "\033[", "ANSI escape sequences must be stripped (octal form)"
+    end
+  end
+
+  def test_binary_command_runner_output_is_normalized_before_the_fix_prompt
+    with_ci_dir do |dir, task_folder|
+      calls = 0
+      runner = lambda do |**|
+        calls += 1
+        if calls == 1
+          Hive::Stages::Review::CiFix::Run.new(
+            "hosted \xE2\x80\x94 failure \xFF\n".b, 1
+          )
+        else
+          Hive::Stages::Review::CiFix::Run.new("hosted checks green\n", 0)
+        end
+      end
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+        command: "hosted checks", command_runner: runner
+      )
+
+      assert_equal :green, result.status
+      assert_equal 2, result.attempts
+      prompt = File.binread(File.join(log_dir, "fake-claude-argv.log"))
+        .force_encoding(Encoding::UTF_8)
+      assert_predicate prompt, :valid_encoding?
+      assert_includes prompt, "hosted — failure ?"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
     end
   end
 

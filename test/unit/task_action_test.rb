@@ -78,6 +78,42 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
+  def test_outcome_evidence_implementation_rework_is_a_guarded_scheduler_action
+    task = fake_task(stage_name: "artifacts", stage_index: 7)
+    digest = "a" * 64
+    recovery_digest = "b" * 64
+    action = Hive::TaskAction.for(
+      task,
+      marker(
+        :error,
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => digest,
+        "recovery_digest" => recovery_digest
+      ),
+      project_name: "demo", project_count: 2
+    )
+
+    assert_equal Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK, action.key
+    assert_equal "Implementation rework required", action.label
+    assert_equal(
+      "hive evidence rework demo-260426-aaaa --project demo --stage 7-artifacts " \
+      "--generation #{digest} --recovery-digest #{recovery_digest}",
+      action.command
+    )
+
+    malformed = Hive::TaskAction.for(
+      task,
+      marker(
+        :error,
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "short",
+        "recovery_digest" => recovery_digest
+      )
+    )
+    assert_equal Hive::Schemas::TaskActionKind::ERROR, malformed.key
+    assert_nil malformed.command
+  end
+
   def test_disabled_plan_review_ignores_a_stale_review_projection
     task = fake_task(stage_name: "plan", stage_index: 3)
     action = Hive::TaskAction.for(
@@ -2162,6 +2198,31 @@ class TaskActionTest < Minitest::Test
     assert_nil standard.command
   end
 
+  def test_plan_review_recovers_a_blocked_transient_planner_revision
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    exhausted = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "outcome" => "blocked",
+        "required_action" => "repair the planner route and start a linked plan generation",
+        "blockers" => [
+          { "owner" => "planner", "reason" => "planner_revision_retryable_failure" }
+        ],
+        "routes" => [
+          {
+            "role" => "planner_revision", "outcome" => "retryable_failure",
+            "attempt_id" => "pra-legacy",
+            "planner_revision_contract_version" =>
+              Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", exhausted.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", exhausted.command
+  end
+
   def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
     task = fake_task(stage_name: "plan", stage_index: 3)
     routes = [
@@ -2229,6 +2290,34 @@ class TaskActionTest < Minitest::Test
 
     assert_equal "plan_reviewing", legacy.key
     assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
+  end
+
+  def test_plan_review_recovers_a_runner_checkpoint_custody_false_positive
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    false_positive = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "routes" => [
+          {
+            "role" => "adversarial", "outcome" => "terminal_failure",
+            "attempt_id" => "pra-checkpoint", "diagnostic_source" => "runner",
+            "diagnostic" =>
+              "reviewer modified protected artifacts: task-projection.checkpoint.json"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", false_positive.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", false_positive.command
+
+    reviewer_authored = Marshal.load(Marshal.dump(false_positive.plan_review))
+    reviewer_authored.fetch("routes").first["diagnostic_source"] = "reviewer"
+    terminal = Hive::TaskAction.for(task, marker(:waiting), plan_review: reviewer_authored)
+    assert_equal "plan_review_unsupported", terminal.key
+    assert_nil terminal.command
   end
 
   def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair

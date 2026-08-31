@@ -149,10 +149,10 @@ module Hive
         end
 
         # A manually-started daemon must keep using the exact Hive CLI that
-        # launched it. Without an explicit HIVE_BIN, ChildSupervisor,
-        # StatusConsumer, and the display-name backfiller fall back to the
-        # first `hive` on PATH. That can silently mix a checkout daemon with
-        # an older packaged gem for every dispatched child. Service units
+        # launched it. Without an explicit HIVE_BIN, ChildSupervisor and the
+        # display-name backfiller fall back to the first `hive` on PATH. That
+        # can silently mix a checkout daemon with an older packaged gem for
+        # every dispatched child. StatusConsumer is in-process. Service units
         # already export HIVE_BIN; pin the equivalent value for foreground
         # and --detach starts while preserving an operator override.
         runtime_hive_bin_was_set = ENV.key?("HIVE_BIN")
@@ -228,6 +228,7 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
+        attempt_store = Hive::Attempts::Repository.open_default(state_home: @hive_home)
         Hive::Config.ensure_project_identities!
         module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
@@ -238,6 +239,7 @@ module Hive
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           merge_intake: refactor_patrol_merge_reconciler,
           store: Hive::Daemon::PrMergeRepository.new(dry_run: @dry_run),
+          attempt_store_factory: -> { attempt_store },
           dry_run: @dry_run
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
@@ -269,7 +271,6 @@ module Hive
           logger: logger
         )
 
-        attempt_store = Hive::Attempts::Repository.open_default(state_home: @hive_home)
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )

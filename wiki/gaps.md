@@ -1303,3 +1303,26 @@ not stored in this repository, so this remains unproven as an end-to-end
 installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
+
+## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
+
+Backward `hive approve --to` now rearms descriptor-owned state files across the
+destination-through-source interval and has focused coding-workflow integration
+coverage, including exact rollback and shared-file scoping. The algorithm is
+descriptor-driven and therefore also applies to project-authored and managed
+workflows, but no live managed-workflow task has yet been rewound through a
+deployed daemon. Keep this gap open until such a workflow proves that its
+destination reruns and later revisited stages do not consume prior terminal
+markers.
+
+## Durable capacity deferrals do not expose their limiting scope (2026-08-29)
+
+`Hive::Attempts::Dispatcher` currently returns the generic reason `capacity`
+when any global, per-project, or daily attempt limit closes between the
+daemon's controller precheck and durable admission. The daemon therefore
+conservatively treats that result as a global priority fence through the next
+authoritative full scan, including intervening changed-task ticks. This
+prevents lower-priority leapfrogging, but a rare project-only race can leave an
+unrelated slot unused for the full-scan interval plus scan time. Keep this gap
+open until durable admission emits a typed capacity scope that the row
+scheduler can preserve directly.

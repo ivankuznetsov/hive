@@ -9,6 +9,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/transaction"
 require "hive/workflow_package/validator"
+require "hive/warnings"
 
 module Hive
   module WorkflowPackage
@@ -142,7 +143,9 @@ module Hive
             name = File.basename(File.dirname(path))
             selected_unlocked(name, cfg: cfg)
           rescue Hive::ConfigError => e
-            warn "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+            Hive::Warnings.emit(
+              "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+            )
             nil
           end
         end

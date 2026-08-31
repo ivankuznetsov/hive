@@ -3,6 +3,7 @@ require "securerandom"
 require "time"
 require "yaml"
 require "hive/dependencies"
+require "hive/warnings"
 
 module Hive
   module TaskMeta
@@ -82,10 +83,12 @@ module Hive
       # `workflow` selector (read as "use the project default"). Narrow the
       # rescue (matching Worktree.read_pointer) and log so the dropped fields
       # are observable instead of failing the gate open in silence.
-      warn "hive: task_meta: failed to read #{path(task_folder)} " \
-           "(#{e.class}: #{e.message}); treating meta as empty " \
-           "(depends_on, workflow, base_branch dropped; idempotency dropped; " \
-           "managed provenance dropped; completed_at and plan-review requirement dropped)"
+      Hive::Warnings.emit(
+        "hive: task_meta: failed to read #{path(task_folder)} " \
+        "(#{e.class}: #{e.message}); treating meta as empty " \
+        "(depends_on, workflow, base_branch dropped; idempotency dropped; " \
+        "managed provenance dropped; completed_at and plan-review requirement dropped)"
+      )
       empty
     end
 
@@ -352,7 +355,9 @@ module Hive
 
       raise ArgumentError, "#{label} must be true when present" if strict
 
-      warn "hive: task_meta: invalid plan_review_required in #{label}; treating metadata as legacy"
+      Hive::Warnings.emit(
+        "hive: task_meta: invalid plan_review_required in #{label}; treating metadata as legacy"
+      )
       nil
     end
 
@@ -368,12 +373,20 @@ module Hive
       return parsed.utc.iso8601 if parsed
 
       raise ArgumentError, "#{label} must be a UTC ISO 8601 timestamp" if strict
-      warn "hive: task_meta: invalid completed_at in #{label}; keeping task visible" if warn_on_invalid
+      if warn_on_invalid
+        Hive::Warnings.emit(
+          "hive: task_meta: invalid completed_at in #{label}; keeping task visible"
+        )
+      end
       nil
     rescue ArgumentError
       raise ArgumentError, "#{label} must be a UTC ISO 8601 timestamp" if strict
 
-      warn "hive: task_meta: invalid completed_at in #{label}; keeping task visible" if warn_on_invalid
+      if warn_on_invalid
+        Hive::Warnings.emit(
+          "hive: task_meta: invalid completed_at in #{label}; keeping task visible"
+        )
+      end
       nil
     end
 

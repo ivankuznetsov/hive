@@ -4,7 +4,7 @@ type: module
 source: lib/hive/attempts/
 created: 2026-07-16
 updated: 2026-08-30
-tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics]
+tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics, projection-repair]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and one
@@ -66,6 +66,12 @@ sidecar. Bounded indexed columns answer hot, terminal, successor, request, and
 capacity queries; full `Repository#fetch` still validates receipts,
 diagnostics, and every output-reference shape.
 
+A routine task-graph scan shares that repository across task projections and
+active-closure checks. Each task may bind at most 100 attempt IDs and
+point-fetch at most 32 predecessors; reuse never expands those task-local
+budgets. A missing binding fails only that task into projection repair instead
+of opening an unbounded fallback.
+
 The component catalog keeps this admission slice as a guarded reference
 `candidate`. Its facade, result contracts, focused clean-process load, and
 exact internal-construction sites are enforced now. U8 removed the former
@@ -84,9 +90,10 @@ other candidate entry points.
 Hive still has narrow, cataloged internal construction sites: the daemon
 composition root wires reconciliation and loss processing, the private
 supervisor argv adapter starts the owner wrapper, module inspection and
-dry-run preview open the canonical store read-only, the `hive status` scan
-hoists one read-only store for the whole scan, and compatibility adapters
-plus `TaskClosure`'s active-attempt verification do the same. These sites are
+dry-run preview open the canonical store read-only, and a `hive status` scan
+hoists one read-only projection reader for the whole graph and passes it to
+active closure validation. Compatibility adapters retain their cataloged
+construction sites. These sites are
 not alternate admission producers. The component-boundary test pins each
 file/constant pair and rejects the same construction from any newly listed
 file even while Attempts remains a candidate. Authorization is file-granular,
@@ -226,11 +233,13 @@ explicit operator recovery request may claim that probe early, but cannot
 bypass global, project, task, or daily limits, and a second
 release cannot overlap it. A successful probe closes the cohort; a failed
 probe reopens it, and a failed pre-persistence or definitively unstarted
-handoff releases only its matching probe fence. The runtime digest uses the
-validated channel, release version, and dogfood build SHA; deployment identity
-alone cannot reset pacing. A different validated runtime build digest or the
-next UTC date starts open, so repaired deployed code and daily rollover do not
-inherit stale pacing.
+handoff releases only its matching probe fence. The shared runtime-source
+digest uses the validated channel, release version, and dogfood build SHA;
+deployment identity alone cannot reset pacing. Recovery requests use this same
+identity so a replacement runtime also starts their retry ladder and
+repeated-failure evidence fresh. A different validated runtime build digest or
+the next UTC shard starts Patrol pacing open, so repaired deployed code and
+daily rollover do not inherit stale pacing.
 Only a retry with its own receipt-bound matching failure identity is held;
 unrelated Patrol codes and healthy stages continue.
 
@@ -359,6 +368,16 @@ IDs through `Repository#fetch`, bounded to 100 seed IDs, 32 predecessors, and 51
 KiB. Only the canonical projection binding can mark an attempt current;
 overlapping live but unbound records are conflicting evidence.
 
+Routine status and daemon generation checks use the same task-local checkpoint
+and bounded suffix rather than replaying the full journal. If the current
+attempt lineage cannot be verified inside those limits, that task becomes
+operator-owned `condition_projection_repair_required`; no healing or admission
+path scans attempt history as a substitute. `hive repair-projection` is the
+only direct command that may replay the selected task's full journal, and even
+it point-reads only attempt IDs named by that journal. Attempt records and
+proofs remain read-only authority, so projection repair requires no Attempts
+migration or periodic monitor.
+
 Every actual child spawn receives a separate session/correlation ID beneath
 the attempt. Durable start/finish observations preserve role, requested
 provider/model/effort, provider-reported actual model when available, health,
@@ -474,6 +493,10 @@ Supervisor gives an authenticated explicit Hive worker one additional
 write-only descriptor. `Attempts::Context` installs it only after the ordinary
 claim capability, worker argv, task binding, process identity, and released
 gate all match, then marks it close-on-exec before any provider child starts.
+Task binding understands both ordinary `hive VERB TARGET` workers and the
+controller-only nested `hive evidence rework TARGET` worker; the latter resolves
+the fourth argument and authenticates the current artifacts stage instead of
+mistaking `rework` for a task slug.
 The channel accepts at most one bounded strict safe signal. Empty, malformed,
 oversized, duplicate, broken-pipe, and wrong-route values become no signal;
 stdout and stderr are never parsed by Supervisor as provider evidence.
@@ -529,6 +552,10 @@ lifecycle: `StaleAgentHealer#heal_attempt_losses` verifies orphan cleanup,
 captures dirty state, and asks the shared attempt dispatcher to admit a
 same-generation successor. Conditions and status may expose `attempt_lost` as
 read-only health, but marker recovery does not interpret attempt lineage.
+The healer receives the reconciler's bounded per-tick `AdmissionView` and uses
+its exact successor index plus point lookups. Without that view it performs no
+mutation and logs bounded unavailability; it never falls back to
+`Attempts::Store#scan`.
 
 `retry_charge` remains durable lineage/accounting evidence but is not an
 exhaustion budget. Unsafe cleanup, temporarily missing task lookup, and lost

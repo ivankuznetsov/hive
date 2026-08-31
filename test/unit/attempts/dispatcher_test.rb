@@ -1367,11 +1367,13 @@ class AttemptsDispatcherTest < Minitest::Test
     FileUtils.mkdir_p(folder)
     state_file = File.join(folder, "state.md")
     File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
-    FakeTask.new(
+    task = FakeTask.new(
       id: id, slug: slug, state_file: state_file,
       stage_index: Integer(stage.split("-", 2).first), stage_name: stage.split("-", 2).last,
       project_root: File.dirname(state_root), folder: folder
     )
+    seed_task_projection(folder, state_file: state_file)
+    task
   end
 
   def project_state_root(root, project)

@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb, lib/hive/agent_git_gate.rb
 created: 2026-06-08
-updated: 2026-08-13
+updated: 2026-08-31
 tags: [github, gh, module, pr, closure, evidence]
 ---
 
@@ -31,7 +31,7 @@ tags: [github, gh, module, pr, closure, evidence]
 | `list_open_prs(worktree_path, cfg: nil)` | Runs `gh pr list --state open --limit 1000` and includes `mergeStateStatus`; [[modules/babysitter]] uses that field to prioritize dirty/conflicted PRs before age. |
 | `repository_identity(worktree_path, cfg: nil, timeout_sec: nil)` | Parse the actual origin push URL into canonical `owner/repo` plus host. It does not trust ambient `GH_REPO` or `gh repo view`, so GitHub Enterprise, duplicate registration, and repository drift gates bind to the Git target. The optional timeout is threaded through the underlying origin lookup. |
 | `Gh::RepositoryIdentity.validated_repository_slug` / `validated_github_host` / `github_repository_target` | Enforce one strict owner/name and hostname-only policy for both normal GitHub transport and architecture-patrol remote operations. Invalid values retain the established `Hive::GhError` messages. |
-| `pr_status_rollup` / `failing_jobs_with_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter repair context. |
+| `pr_status_rollup` / `failing_jobs_with_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter and review repair context. Job names and logs cross the binary subprocess boundary as scrubbed valid UTF-8 before byte allocation or prompt rendering. |
 | `pr_diff_stat` / `pr_base_divergence` | Fetch base and compute diff/divergence context for babysitter prompts. `pr_base_divergence` is best-effort and returns blank fields on git hiccups. |
 | `pr_frontmatter(path)` | Safe YAML frontmatter reader for `pr.md`; malformed YAML warns and returns `{}`. |
 | `scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)` | Scans local state-file text plus remote PR body for `Hive::SecretPatterns`; returns `ScanResult` with `fetch_failed` instead of silently treating remote fetch errors as clean. |
@@ -91,12 +91,17 @@ is a conflict. After a push or create call, a fresh observation must prove the
 exact remote OID and hosted PR identity. Definite failures may retry only when
 the remote still proves absence; unknown attempted outcomes are
 reconciliation-only. Coding Open PR and Patrol Fix Publish share this one
-controller.
+controller. Before authentication or mutation, title and body bytes use the
+conservative raw secret matcher; the exact native Git patch is classified by
+changed path and added hunk line. Removed base bytes do not block publication,
+and a password-shaped Ruby runtime reference is not treated as a
+literal credential. Unparsed patches and actual literal/token matches still
+fail closed.
 
 ## Tests
 
 - `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, managed remote observations, exact-OID/absence publication delegation, restrictive draft-PR body tempfiles, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
-- `test/unit/github_publication_test.rb` pins exact absence/OID leases, branch-scoped inventory, adoption, retry-safe definite failures, and reconciliation-only unknown outcomes.
+- `test/unit/github_publication_test.rb` pins exact absence/OID leases, branch-scoped inventory, adoption, retry-safe definite failures, reconciliation-only unknown outcomes, and source-aware diff secret classification.
 - `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/integration/run_stage_action_test.rb` cover the merged-finalize-error archive path that uses `pr_state`.
 
 ## Backlinks

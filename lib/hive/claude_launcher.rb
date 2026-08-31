@@ -201,6 +201,7 @@ module Hive
       preflight!(profile, runner)
 
       settings_paths = []
+      recorded_child = nil
       begin
         # Install the Stop hook under task.folder (orchestrator-owned)
         # AND the launch cwd. Claude resolves `.claude/settings.json`
@@ -232,7 +233,7 @@ module Hive
         establish = lambda do
           runner.start_detached(command: launch_command)
           wait_until_session_exists!(runner)
-          record_claude_pid(task, runner)
+          recorded_child = record_claude_pid(task, runner)
         end
         establish.call
         prepare_claude_session!(runner)
@@ -247,6 +248,11 @@ module Hive
         safe_with_log(task, "shutdown_claude") { shutdown_claude(runner) }
         safe_with_log(task, "kill_session") { runner.kill_session if runner }
         safe_with_log(task, "sweep_orphan_processes") { sweep_orphan_processes(task) }
+        if recorded_child
+          safe_with_log(task, "clear_claude_pid") do
+            Hive::Lock.clear_task_lock_child(task.folder, **recorded_child)
+          end
+        end
         Array(settings_paths).each do |path|
           safe_with_log(task, "cleanup_scratch") { cleanup_scratch(path) }
         end
@@ -468,11 +474,13 @@ module Hive
       end
       return unless pid
 
-      Hive::Lock.update_task_lock(
+      started_at = Hive::Lock.process_start_time(pid)
+      updated = Hive::Lock.update_task_lock(
         task.folder,
         "claude_pid" => pid,
-        "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
+        "claude_pid_start_time" => started_at
       )
+      { pid: pid, process_start_time: started_at } if updated
     rescue Hive::TmuxError => e
       # Losing the pid means `hive lock` can no longer kill claude
       # cleanly; warn so an operator running interactively sees the

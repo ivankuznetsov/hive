@@ -109,6 +109,17 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_repair_projection_missing_target_uses_its_versioned_error_contract
+    with_tmp_global_config do |home|
+      assert_pre_dispatch_error(
+        home,
+        %w[repair-projection --json],
+        schema: "hive-repair-projection",
+        error_kind: "invalid_arguments"
+      )
+    end
+  end
+
   def test_act_json_usage_errors_preserve_required_action_identity
     cases = [
       [ %w[act --json], "", "" ],

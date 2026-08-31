@@ -349,6 +349,28 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_evidence_rework_binds_its_nested_task_target_to_artifacts
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 7, stage_name: "artifacts")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    record = {
+      "project" => "demo", "task_id" => "42", "task_slug" => "task",
+      "intended_stage" => "7-artifacts"
+    }
+    argv = [
+      "hive", "evidence", "rework", "task", "--stage", "7-artifacts",
+      "--generation", "a" * 64, "--recovery-digest", "b" * 64
+    ]
+    test_case = self
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, lambda { |target, **options|
+      test_case.assert_equal "task", target
+      test_case.assert_equal({ project_filter: "demo" }, options)
+      resolver
+    }) do
+      assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
+    end
+  end
+
   def test_module_hook_binding_uses_its_authenticated_subject_without_task_resolution
     subject = {
       "kind" => "module_hook", "project_id" => "project-1", "module" => "patrol",

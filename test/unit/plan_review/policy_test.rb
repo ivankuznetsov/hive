@@ -132,6 +132,29 @@ class PlanReviewPolicyTest < Minitest::Test
     assert_equal first.policy_fingerprint, second.policy_fingerprint
   end
 
+  def test_planner_revision_fallback_does_not_discard_the_current_review
+    review_route = {
+      "agent" => "codex", "model" => "gpt-5.6-sol", "family" => "openai",
+      "effort" => "high", "route" => "native_codex"
+    }
+    routes = { "primary" => review_route }
+    recovered = routes.merge(
+      "planner_revision_fallback" => review_route.merge("route" => "recovery_codex")
+    )
+    first = config.merge("routes" => routes)
+    second = config.merge("routes" => recovered)
+
+    fingerprint = ->(cfg) do
+      Hive::PlanReview::Policy.evaluate(
+        workflow_id: "coding", signals: signals(skip: false), config: cfg
+      ).policy_fingerprint
+    end
+
+    assert_equal fingerprint.call(first), fingerprint.call(second)
+    assert_equal Hive::PlanReview::Policy.configuration_fingerprint(first),
+                 Hive::PlanReview::Policy.configuration_fingerprint(second)
+  end
+
   def test_reviewer_or_adapter_change_rekeys_a_review
     base = config.merge(
       "adapter" => "ce_doc_review",

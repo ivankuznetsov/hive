@@ -350,6 +350,31 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
+  def test_projection_repair_is_operator_owned_even_when_daemon_is_enabled
+    repair = task(
+      action: "error",
+      slug: "projection-repair",
+      stage: "4-execute",
+      marker: "error",
+      attrs: {
+        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "owner" => "operator",
+        "message" => "bounded task projection needs exact-task repair"
+      },
+      projection_repair: true
+    )
+
+    projected = project(
+      status_payload(repair),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "task_repair", projected.dig("reasons", 0, "code")
+    assert_nil projected.fetch("action")
+  end
+
   def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid
@@ -1560,7 +1585,8 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
-           admission_error: nil, closure: nil, plan_review: nil)
+           admission_error: nil, closure: nil, plan_review: nil,
+           projection_repair: false)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -1582,6 +1608,7 @@ class OperationalStatusTest < Minitest::Test
       "pr_url" => nil,
       "marker" => marker,
       "attrs" => attrs,
+      "projection_repair" => projection_repair,
       "mtime" => "2026-07-20T10:00:00.000000Z",
       "folder_mtime" => "2026-07-20T10:00:00.000000Z",
       "age_seconds" => 2,

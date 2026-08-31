@@ -40,10 +40,13 @@ Reject generated slides, diagrams, narrated summaries, or pictures of test
 output when the claim requires actual screenshot, flow, or terminal behavior.
 
 Return only one JSON object with `verdicts` (exactly one object per claim and exclusion, with `target_id`,
-`verdict` of `accepted`, `revise`, or `blocked`, and a concrete `reason`). Use
+`verdict` of `accepted`, `revise`, `rework`, or `blocked`, and a concrete `reason`). Use
 `revise` only when targeted replacement proof could resolve the concern. Use
-`blocked` when recapture cannot resolve it, including an invalid exclusion or a
-missing operator-only environment. Hive records the exact immutable representation
+`rework` when source, configuration, tests, or repository documentation must
+change before truthful proof can exist; if any target needs such a repository
+change, prefer `rework` over another non-accepted verdict. Use `blocked` only
+for an operator-owned credential, decision, or environment that repository
+work cannot resolve. Hive records the exact immutable representation
 scope exposed to this context; do not echo or calculate hashes. Uncertainty cannot count as accepted. Do not
 wrap JSON in Markdown and do not write any file or Hive marker. Do not narrate
 your inspection. Reserve enough output for the final JSON, emit it immediately

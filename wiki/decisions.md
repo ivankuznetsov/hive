@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-30
 tags: [decisions, adr, plan-review]
 ---
 
@@ -228,8 +228,17 @@ The allowlist is closed: `run develop brainstorm plan review open-pr artifacts f
 
 **Status:** Active
 **Context:** The daemon is a long-running Ruby process whose in-memory constants freeze at load time, while shelled-out `hive` subprocesses load fresh code on every invocation. PR #78 (2026-05-15) bumped `SCHEMA_VERSIONS["hive-status"]` from 1 to 2 in `lib/hive.rb`. Because the daemon process loaded before that bump and was not restarted, `StatusConsumer#validate_envelope!` (in-memory `expected=1`) kept rejecting every status envelope the subprocess emitted (`got 2, want 1`) — 8,946 events over ~3 days until the operator manually restarted on 2026-05-20. Every future schema bump silently reproduces the same incident without a restart-in-lockstep discipline.
-**Decision:** The dispatcher captures a SHA-256 fingerprint of `lib/hive.rb` at startup and rehashes the file on every tick. On mismatch it logs a `version_drift` event with both digests, sets `reexec_requested?`, and breaks the run loop. `Hive::Commands::Daemon#start_daemon` then calls `Kernel#exec` to replace the process with a fresh `hive daemon start` invocation — same PID (so the PID file stays valid), fresh code on both sides. `--detach` is omitted from the re-exec argv because we are already the daemonized child. Rate-limited to one re-exec per 60s. Operators can disable via `HIVE_DAEMON_NO_AUTO_REEXEC=1`.
-**Consequences:** Schema bumps no longer require a coordinated daemon restart — the next tick after `git pull` self-heals. The blast radius is bounded by `@shutdown_grace_sec` (existing terminate_all path runs before re-exec, so in-flight children are properly drained). The `dispatcher_started` event now carries `code_fingerprint` and `dispatcher_stopping` carries `reexec_requested`, both for observability. Detection is file-mtime/hash based on `lib/hive.rb`; edits that don't touch that file (e.g. dispatcher-only changes) DO NOT trigger re-exec, so reload semantics for non-schema code changes still require a manual restart — fine because the schema-version mismatch was the only failure mode that hard-blocked operation.
+**Decision:** The dispatcher captures one SHA-256 fingerprint over the source files that own schema identity and the in-process status producer, resolving both through Ruby `source_location`. It recomputes the fingerprint on every full tick. On mismatch it logs a `version_drift` event with both digests, sets `reexec_requested?`, and breaks the run loop. `Hive::Commands::Daemon#start_daemon` then calls `Kernel#exec` to replace the process with a fresh `hive daemon start` invocation — same PID (so the PID file stays valid), fresh code on both sides. `--detach` is omitted from the re-exec argv because we are already the daemonized child. Rate-limited to one re-exec per 60s. Operators can disable via `HIVE_DAEMON_NO_AUTO_REEXEC=1`.
+**Consequences:** Schema or status-producer updates no longer require a coordinated daemon restart — the next full tick after an in-place checkout update self-heals. The blast radius is bounded by `@shutdown_grace_sec` (existing terminate_all path runs before re-exec, so in-flight children are properly drained). The `dispatcher_started` event now carries `code_fingerprint` and `dispatcher_stopping` carries `reexec_requested`, both for observability. Other source-file edits still require deployment-managed restart or manual restart.
+
+**2026-08-30 amendment:** `StatusConsumer` now calls the status graph producer in
+the daemon process. This removes the subprocess/JSON boundary and makes the
+original producer-consumer schema mismatch impossible on daemon scans. Source
+drift re-exec remains active for in-place schema and status-entrypoint updates.
+Its fingerprint covers both schema identity and the in-process status producer;
+other runtime source changes retain the deployment-managed/manual restart
+contract above. The bot's separate `StatusWatcher` compatibility policy is
+unchanged.
 
 ## ADR-032: Release artifacts are the `hive-cli` rubygem; brew + AUR publish from CI
 

@@ -38,7 +38,7 @@ module Hive
             timeout_sec: spawn_timeout || configured_timeout,
             log_label: build_log_label(attempts),
             profile: profile,
-            expected_output: output_path,
+            expected_output: staged_output_path,
             cfg: @cfg,
             **Hive::Stages::Base.model_launch_arguments(
               @cfg || {}, "review_reviewers", profile,
@@ -61,13 +61,20 @@ module Hive
 
           handle.send_and_wait!(
             prompt: prompt,
-            expected_output: output_path,
+            expected_output: staged_output_path,
             timeout_sec: spawn_timeout || configured_timeout,
             status_mode: :output_file_exists,
             log_label: build_log_label(attempts),
             deadline: deadline
           )
         end
+      end
+
+      # Agent reviewers write into a staging path and publish only after a
+      # successful exit. Orchestrator cleanup must therefore target the staging
+      # file, never an earlier successful findings artifact at output_path.
+      def failure_output_path
+        staged_output_path
       end
 
       private
@@ -79,7 +86,7 @@ module Hive
         profile_name = context&.explicit_routing? ? context.adapter : spec.fetch("agent")
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: @cfg)
         skill = spec.fetch("skill")
-        prompt = render_prompt(profile, skill)
+        prompt = render_prompt(profile, skill, reviewer_output_path: staged_output_path)
         max_attempts = max_attempts_from_spec
         configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
 
@@ -104,7 +111,7 @@ module Hive
         result = nil
         loop do
           attempts += 1
-          # ce-review P1 #3 (round 2): clear stale output_path before
+          # ce-review P1 #3 (round 2): clear stale staged output before
           # every attempt so a partial file from a prior crashed
           # attempt cannot satisfy the next attempt's
           # :output_file_exists check.
@@ -136,8 +143,16 @@ module Hive
           backoff(sleep_seconds)
         end
 
+        if result[:status] == :ok
+          begin
+            promote_staged_output!
+          rescue Hive::Error => e
+            result = { status: :error, error_message: e.message }
+          end
+        end
+
         # ce-review P1 #3 (final-failure cleanup): the last attempt may
-        # have left a partial output_path file behind. Triage's
+        # have left a staged output file behind. Triage's
         # discover_reviewer_files would otherwise find it and treat it
         # as real reviewer output. Final failures must surface only
         # through reviews/errors-NN.md (written by the orchestrator's
@@ -149,20 +164,20 @@ module Hive
       end
 
       # pr-review-toolkit round-5 M2: TOCTOU-safe wrapper for the two
-      # `File.delete(output_path)` sites in the retry loop. Distinguishes
+      # staging-path deletion sites in the retry loop. Distinguishes
       # ENOENT (file may not exist on first attempt — normal) from
       # other SystemCallError (perms / read-only mount — diagnostic).
       # The `stage` label lets the resulting `errors-NN.md` line name
       # which delete failed (pre-attempt clear vs. final-failure
       # cleanup).
       def clear_partial_output!(stage)
-        File.delete(output_path)
+        File.delete(staged_output_path)
       rescue Errno::ENOENT
         nil
       rescue SystemCallError => e
         raise Hive::Error,
               "reviewer #{name.inspect}: failed to clear partial output_path " \
-              "(#{stage}) #{output_path}: #{e.class}: #{e.message}"
+              "(#{stage}) #{staged_output_path}: #{e.class}: #{e.message}"
       end
 
       def build_log_label(attempt)
@@ -196,7 +211,7 @@ module Hive
           msg = max_attempts > 1 ? "#{base_msg} after #{attempts} attempt(s)" : base_msg
           Result.new(
             name: name,
-            output_path: output_path,
+            output_path: failure_output_path,
             status: :error,
             error_message: msg,
             limit_text: spawn_result[:limit_text]
@@ -204,7 +219,7 @@ module Hive
         end
       end
 
-      def render_prompt(profile, skill)
+      def render_prompt(profile, skill, reviewer_output_path: output_path)
         template_path = Hive::Stages::Base.resolve_template_path(
           spec.fetch("prompt_template"),
           hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
@@ -224,7 +239,7 @@ module Hive
             task_folder: ctx.task_folder,
             default_branch: ctx.default_branch,
             pass: ctx.pass,
-            output_path: output_path,
+            output_path: reviewer_output_path,
             skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
               profile, skill, project_root: ctx.worktree_path
             ),

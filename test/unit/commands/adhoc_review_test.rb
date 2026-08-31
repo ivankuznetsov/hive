@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/adhoc_review"
+require "hive/commands/repair_projection"
 
 class AdhocReviewCommandTest < Minitest::Test
   include HiveTestHelper
@@ -97,6 +98,20 @@ class AdhocReviewCommandTest < Minitest::Test
       assert_equal "head-197", worktree.fetch("execute_base_head")
       assert_equal now.utc.iso8601, worktree.fetch("created_at")
       assert_empty Dir.children(File.join(task_folder, "reviews"))
+
+      journal_path = File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      journal_before = File.binread(journal_path)
+      File.delete(File.join(task_folder, Hive::TaskProjection::Store::SNAPSHOT_BASENAME))
+      File.delete(File.join(task_folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME))
+      capture_io do
+        Hive::Commands::RepairProjection.new(
+          "adhoc-review-pr-197", project: "demo", stage: "6-review"
+        ).call
+      end
+      assert_equal journal_before, File.binread(journal_path)
+      assert_equal "current", Hive::TaskProjection::Store.new(
+        task_folder: task_folder
+      ).read_routine(marker: Hive::Markers.current(File.join(task_folder, "task.md"))).state
     end
   end
 

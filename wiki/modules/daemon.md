@@ -234,10 +234,14 @@ the hold.
 Dispatch requests and unrelated direct task rows share the same
 stage-plus-age priority. A request ages from its queue `created_at`; when its
 task is present in the status frame it also receives that row's workflow-stage
-rank. Request FIFO remains intact, but an older higher-priority direct row can
-run before the next request instead of losing every newly opened slot to a
-durable backlog. Equal scores favor the request. A request always precedes the
-direct row for the same project/slug, so the row's per-slug in-flight gate
+rank. Request FIFO remains intact. For comparison with unrelated direct rows,
+later request priority is inherited backward through the FIFO prefix; this
+prevents a blocked low-rank head from hiding a higher-priority request behind
+direct rows without letting the later request leapfrog older requests. An
+older higher-priority direct row can still run before the whole request lane
+instead of losing every newly opened slot to a durable backlog. Equal scores
+favor the request. A request always precedes the direct row for the same
+project/slug, so the row's per-slug in-flight gate
 (`controller.running_task?`) still prevents a same-tick double spawn.
 
 The per-row scan also carries a full-scan capacity fence. Durable admission

@@ -128,11 +128,14 @@ operational snapshot.
 
 Durable dispatch requests and unrelated status rows use that same
 stage-plus-age ordering. Requests age from queue creation and retain FIFO plus
-same-task precedence; direct rows age from their state-file mtime. This lets an
-old runnable plan or retry claim a newly opened slot ahead of a younger request
-backlog without allowing the request and automatic row for one task to launch
-twice. Global and project capacity fences propagate in both directions across
-the two sources for the rest of the scan.
+same-task precedence; direct rows age from their state-file mtime. A later
+request lends its priority backward through the FIFO prefix when Hive compares
+the request lane with direct rows. Older requests still run first, but a
+blocked low-priority head cannot make the higher-priority suffix invisible.
+This lets an old runnable plan or retry claim a newly opened slot ahead of a
+younger request backlog without allowing the request and automatic row for one
+task to launch twice. Global and project capacity fences propagate in both
+directions across the two sources for the rest of the scan.
 Invalid and expired request files are rejected or pruned before that admission
 arbitration, so a persistent capacity fence cannot retain stale queue work.
 

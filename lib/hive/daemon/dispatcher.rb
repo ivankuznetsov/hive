@@ -2502,6 +2502,16 @@ module Hive
         priority_rows = ordered_rows.reject do |row|
           pending_task_keys.key?([ row.project.to_s, row.slug.to_s ])
         end
+        fifo_priority_ceilings = []
+        priority_ceiling = -Float::INFINITY
+        pending.reverse_each do |request|
+          request_priority = dispatch_request_priority(
+            request, row_index: rows_by_task, now: now
+          )
+          priority_ceiling = request_priority if request_priority > priority_ceiling
+          fifo_priority_ceilings << priority_ceiling
+        end
+        fifo_priority_ceilings.reverse!
         priority_row_cursor = 0
         processed_row_ids = {}
         admission_context = nil
@@ -2532,12 +2542,14 @@ module Hive
         # iterations of this loop too.
         global_capacity_fence = nil
         project_capacity_fences = {}
-        pending.each do |req|
+        pending.each_with_index do |req, request_index|
           break unless admission_open?
 
-          request_priority = dispatch_request_priority(
-            req, row_index: rows_by_task, now: now
-          )
+          # FIFO is a precedence constraint, so later high-priority requests
+          # lend their priority to the older requests ahead of them. This
+          # keeps those requests in chronological order without letting an
+          # unrelated direct row hide the higher-priority FIFO suffix.
+          request_priority = fifo_priority_ceilings.fetch(request_index)
           leading_rows = []
           while (priority_row = priority_rows[priority_row_cursor]) &&
                 dispatch_priority(priority_row, now: now) > request_priority

@@ -20,6 +20,7 @@ retry semantics.
 
 **Evidence:** Attempts tests prove a second automatic request replays one failed
 attempt while a healer recovery request launches a successor, and the public
-attempts API test pins forwarding of the semantic-replay control. Daemon tests
+attempts API tests pin forwarding of the semantic-replay control through the
+configured per-project adapter to the durable dispatcher. Daemon tests
 prove the terminal replay writes the recoverable error, records the
 attempt-bound stall event, and does not spawn a second worker.

@@ -119,8 +119,11 @@ module Hive
             # The wrapper re-enters Hive itself. It must not inherit the
             # caller's Bundler loader, which can point at a different checkout
             # or an ephemeral test HOME before the supervisor reports ready.
-            # RUBYLIB is retained: source-tree and harness launches use its
-            # resolved require paths to load Hive's declared dependencies.
+            # A bare Ruby self-reentry still needs the already-activated Hive
+            # dependencies. Build that path from RubyGems instead of inheriting
+            # the caller's RUBYLIB or Bundler configuration, either of which
+            # can select a different checkout.
+            "RUBYLIB" => trusted_runtime_load_path,
             "RUBYOPT" => nil,
             "BUNDLE_GEMFILE" => nil, "BUNDLE_BIN_PATH" => nil,
             "BUNDLER_SETUP" => nil, "BUNDLER_VERSION" => nil,
@@ -147,6 +150,16 @@ module Hive
           "--unit=#{unit}", "--description=Hive durable attempt #{record.attempt_id}",
           *command
         ]
+      end
+
+      def trusted_runtime_load_path
+        Gem.loaded_specs.values.flat_map(&:full_require_paths)
+          .select { |path| File.directory?(path) }
+          .map { |path| File.realpath(path) }
+          .uniq
+          .join(File::PATH_SEPARATOR)
+      rescue SystemCallError
+        ""
       end
     end
   end

@@ -163,7 +163,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
-  def test_wrapper_exec_retains_rubylib_for_hive_self_reentry
+  def test_wrapper_exec_constructs_trusted_rubylib_for_hive_self_reentry
     launcher = Hive::Attempts::DetachedLauncher.new(
       store: Struct.new(:root).new("/attempts"), systemd_scope: -> { false }
     )
@@ -176,12 +176,17 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     launcher.define_singleton_method(:exec) { |*args, **kwargs| executed = [ args, kwargs ] }
     reader, writer = IO.pipe
 
-    with_env("RUBYLIB" => "/resolved/hive/dependencies") do
+    with_env(
+      "RUBYLIB" => "/untrusted/checkout/lib",
+      "BUNDLE_GEMFILE" => "/untrusted/checkout/Gemfile"
+    ) do
       launcher.send(:fork_wrapper, record, CLAIM_CAPABILITY, writer)
     end
 
-    refute executed.first.first.key?("RUBYLIB"),
-           "exec inherits RUBYLIB unless the overlay explicitly unsets it"
+    environment = executed.first.first
+    assert_equal launcher.send(:trusted_runtime_load_path), environment.fetch("RUBYLIB")
+    refute_includes environment.fetch("RUBYLIB"), "/untrusted/checkout/lib"
+    assert_nil environment.fetch("BUNDLE_GEMFILE")
   ensure
     reader&.close unless reader&.closed?
     writer&.close unless writer&.closed?

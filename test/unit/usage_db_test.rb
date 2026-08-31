@@ -48,7 +48,8 @@ class UsageDbTest < Minitest::Test
       { "attempt-1" => 3, "attempt-2" => 3, "attempt-direct" => 4, "attempt" => 1 }.each do |id, generation|
         document = Hive::RuntimeControlPlane::Codec.dump_json("attempt_id" => id)
         db[:attempts].insert(
-          attempt_id: id, task_id: "usage-task", subject_kind: "task_stage",
+          attempt_id: id, project_id: "usage-project", task_id: "usage-task",
+          subject_kind: "task_stage",
           subject_key: "4-execute", task_generation: generation.to_s,
           ownership_generation: "owner-#{id}", state: "terminal", outcome: "succeeded",
           lease_version: 1, routing_json: "{}", source_fingerprint: "f" * 64,

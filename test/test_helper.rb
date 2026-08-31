@@ -226,7 +226,10 @@ module HiveTestAttemptRepository
   end
 
   def create_launching(source_fingerprint: nil, **attributes)
-    register_test_subject(attributes, source_fingerprint) if @hive_test_register_subjects
+    subject = attributes[:subject]
+    fixture_task = !subject.is_a?(Hash) || subject["kind"] != "module_hook"
+    register_test_subject(attributes, source_fingerprint) if
+      @hive_test_register_subjects && fixture_task
     super(source_fingerprint: source_fingerprint, **attributes)
   end
 

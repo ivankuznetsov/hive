@@ -76,7 +76,8 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
       ids = seed_project_and_task(database)
       database.transaction do |connection|
         base = {
-          task_id: ids.fetch(:task_id), subject_kind: "task_stage", subject_key: "4-execute",
+          project_id: ids.fetch(:project_id), task_id: ids.fetch(:task_id),
+          subject_kind: "task_stage", subject_key: "4-execute",
           task_generation: "task:v1", ownership_generation: "owner:v1",
           state: "running", lease_version: 0, routing_json: "{}",
           source_fingerprint: "sha256:source", record_json: "{}",

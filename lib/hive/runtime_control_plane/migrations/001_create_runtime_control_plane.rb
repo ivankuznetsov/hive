@@ -129,8 +129,10 @@ Sequel.migration do
       String :attempt_id, primary_key: true, null: false
       foreign_key :request_id, :dispatch_requests, type: String, key: :request_id,
                   on_delete: :set_null, on_update: :cascade
-      foreign_key :task_id, :task_subjects, type: String, key: :task_id,
+      foreign_key :project_id, :projects, type: String, key: :project_id,
                   null: false, on_delete: :cascade, on_update: :cascade
+      foreign_key :task_id, :task_subjects, type: String, key: :task_id,
+                  on_delete: :cascade, on_update: :cascade
       %i[subject_kind subject_key task_generation ownership_generation state].each do |column|
         String column, null: false
       end
@@ -149,6 +151,10 @@ Sequel.migration do
       %i[created_at accepted_at].each { |column| String column, null: false }
       check Sequel.lit("lease_version >= 0")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
+      check Sequel.lit(
+        "(subject_kind = 'task_stage' AND task_id IS NOT NULL) OR " \
+        "(subject_kind = 'module_hook' AND task_id IS NULL)"
+      )
       check Sequel.lit("state IN ('launching', 'running', 'terminal', 'lost')")
       check Sequel.lit("outcome IS NULL OR outcome IN ('succeeded', 'failed', 'cancelled')")
       check Sequel.lit("(state = 'terminal' AND outcome IS NOT NULL) OR (state != 'terminal' AND outcome IS NULL)")

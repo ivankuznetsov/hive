@@ -9,7 +9,7 @@ require "hive/atomic_file"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_SCHEMA_SHA256 = "670fd5ca1a3916115a210e2db2e5cdcc067b66aafcf486ee079b3bd21c21adb7".freeze
+    EXPECTED_SCHEMA_SHA256 = "34e12e7c8303f7b6f21c00cd0019fe96aaf80bc4679db90034b2a0b931ae1355".freeze
 
     class Database
       MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze

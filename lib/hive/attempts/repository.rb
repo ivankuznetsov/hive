@@ -293,9 +293,14 @@ module Hive
       def projection_reader = ProjectionReader.new(self)
 
       # Internal seams used only by AdmissionTransition's one SQL transaction.
-      def admission_subject_in(db, record, source_fingerprint:) =
+      def admission_subject_in(db, record, source_fingerprint:)
+        return ensure_module_subject!(db, record) if record.module_hook?
+
         ensure_subject!(db, record, source_fingerprint: source_fingerprint)
+      end
       def admission_validate_subject_in(db, task_id:, source_fingerprint:, generation:)
+        return true unless task_id
+
         row = db[:task_subjects].where(task_id: task_id).first
         unless row && row[:source_fingerprint].to_s == source_fingerprint.to_s &&
                row.fetch(:generation) == Integer(generation)
@@ -305,8 +310,11 @@ module Hive
       rescue ArgumentError, TypeError
         raise StaleTaskSource, "attempt task source generation is invalid"
       end
-      def admission_row(record, task_id:, source_fingerprint:) =
-        row_for(record, task_id: task_id, source_fingerprint: source_fingerprint)
+      def admission_row(record, task_id:, project_id:, source_fingerprint:) =
+        row_for(
+          record, task_id: task_id, project_id: project_id,
+          source_fingerprint: source_fingerprint
+        )
       def admission_validate_capacity_in(db, record, limits) = validate_capacity!(db, record, limits)
       def admission_reservation(record, admission) = live_reservation(
         project: record["project"], task_slug: record["task_slug"], admission: admission
@@ -547,10 +555,11 @@ module Hive
         raise RepositoryError, "attempt immutable identity changed: #{changed.join(', ')}" unless changed.empty?
       end
 
-      def row_for(record, task_id:, source_fingerprint:)
+      def row_for(record, task_id:, project_id:, source_fingerprint:)
         payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
         {
-          attempt_id: record.attempt_id, request_id: record["request_id"], task_id: task_id,
+          attempt_id: record.attempt_id, request_id: record["request_id"],
+          project_id: project_id, task_id: task_id,
           subject_kind: record.subject_kind, subject_key: digest(record.subject),
           task_generation: record.task_generation,
           ownership_generation: record.ownership_generation, state: record.state,
@@ -611,6 +620,17 @@ module Hive
         task = db[:task_subjects].where(task_id: record["task_id"].to_s).first
         raise RepositoryError, "attempt task identity is not registered in the runtime control plane" unless task
         [ task.fetch(:task_id), task.fetch(:project_id) ]
+      end
+
+      def ensure_module_subject!(db, record)
+        project_id = record.subject.fetch("project_id").to_s
+        project = db[:projects].where(project_id: project_id, active: 1).first
+        unless project && project.fetch(:name) == record["project"]
+          raise RepositoryError,
+                "attempt module project identity is not registered in the runtime control plane"
+        end
+
+        [ nil, project.fetch(:project_id) ]
       end
 
       def json(value) = value && RuntimeControlPlane::Codec.dump_json(value)

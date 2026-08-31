@@ -1,10 +1,12 @@
 require "fileutils"
+require "digest"
 require "json"
 require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
 require "hive/stages"
+require "hive/task_meta"
 require "hive/task_projection/store"
 require_relative "artifact_capture"
 require_relative "background_process"
@@ -227,6 +229,12 @@ module Hive
         @ctx.slug_default!(slug)
         folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
         FileUtils.mkdir_p(folder)
+        task_id = Digest::SHA256.hexdigest(
+          [ @scenario.name, step.position, step.args["project"], stage, slug ].join("\0")
+        )[0, 12].to_i(16)
+        Hive::TaskMeta.write(
+          folder, id: task_id, slug: slug, display_name: slug, workflow: "coding"
+        )
         state_file = contained_relative_path(folder, step.args["state_file"] || default_state_file(stage), "seed_state state_file")
         File.write(state_file, expand_string(step.args["content"] || default_state_content(slug, stage)))
         Array(step.args["files"]).each do |file_spec|

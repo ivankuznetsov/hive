@@ -6,9 +6,9 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 9174
+final_inventory_lines: 9203
 outside_inventory_net_lines: -3001
-final_lines: 6173
+final_lines: 6202
 final_paths:
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 104
@@ -19,7 +19,7 @@ final_paths:
 - path: lib/hive/attempts/publication.rb
   lines: 299
 - path: lib/hive/attempts/repository.rb
-  lines: 665
+  lines: 685
 - path: lib/hive/attempts/storage_status.rb
   lines: 20
 - path: lib/hive/commands/runtime.rb
@@ -45,7 +45,7 @@ final_paths:
 - path: lib/hive/runtime_control_plane/activation_gate.rb
   lines: 113
 - path: lib/hive/runtime_control_plane/admission_transition.rb
-  lines: 262
+  lines: 265
 - path: lib/hive/runtime_control_plane/codec.rb
   lines: 92
 - path: lib/hive/runtime_control_plane/cutover.rb
@@ -59,7 +59,7 @@ final_paths:
 - path: lib/hive/runtime_control_plane/maintenance.rb
   lines: 113
 - path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
-  lines: 486
+  lines: 492
 - path: lib/hive/runtime_control_plane/operational_repository.rb
   lines: 77
 - path: lib/hive/runtime_control_plane/payload_store.rb

@@ -13,7 +13,9 @@ require "hive/markers"
 require "hive/provider_health/attempt_observer"
 require "hive/provider_health/repository"
 require "hive/provider_routing"
+require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/task_meta"
 
 module Hive
   module E2E
@@ -26,7 +28,9 @@ module Hive
       ACTOR = "uid:1000"
       CLAIM_CAPABILITY = "c" * 64
       FakeGeneration = Data.define(:progress_token, :task_generation)
-      FakeTask = Data.define(:id, :slug, :folder, :state_file, :stage_index, :stage_name)
+      FakeTask = Data.define(
+        :id, :slug, :folder, :state_file, :stage_index, :stage_name, :workflow
+      )
 
       class Launcher
         attr_reader :launched
@@ -53,12 +57,16 @@ module Hive
       end
 
       def run!
+        previous_leases = Hive::Lock.task_lease_repository
         half_open_restart_and_fencing!
         strict_pin_and_capacity!
         exhaustion_reuses_recovery!
         operator_and_corruption!
         implicit_and_explicit_one_route!
         true
+      ensure
+        @store&.database&.disconnect
+        Hive::Lock.task_lease_repository = previous_leases if previous_leases
       end
 
       private
@@ -224,16 +232,6 @@ module Hive
         routed = dispatch_task(task, policy: policy, generation: generation.task_generation)
         assert!(routed.status == :no_route, "AE6 exhaustion did not cross durable admission")
         assert_decision_persisted!(routed)
-        @store.database.transaction do |db|
-          installation = db[:installations].first.fetch(:installation_id)
-          db[:projects].insert_conflict.insert(
-            project_id: "matrix-demo", installation_id: installation,
-            registration_id: "matrix-demo", name: "demo",
-            observed_path: root, state_root_path: root,
-            active: 1, registered_at: NOW.iso8601(6), last_observed_at: NOW.iso8601(6)
-          )
-        end
-
         coordinator = Hive::Daemon::RecoveryCoordinator.new(
           state_home: root,
           task_resolver: ->(**) { task },
@@ -335,8 +333,22 @@ module Hive
       end
 
       def restart_cell!
+        @store&.database&.disconnect
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: File.join(@cell_root, "runtime-control-plane.sqlite3")
+        ).migrate!
         @store = Hive::Attempts::Repository.new(
-          root: File.join(@cell_root, "attempts"), migrate: true
+          root: File.join(@cell_root, "attempts"), database: database
+        )
+        register_project!
+        Hive::Lock.task_lease_repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+          database: database,
+          process_start_time: Hive::Lock.method(:process_start_time),
+          process_alive: lambda do |pid, recorded_start_time:|
+            Hive::Lock.send(
+              :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+            )
+          end
         )
         @health = Hive::ProviderHealth::Repository.new(
           database: @store.database, clock: -> { NOW }
@@ -371,6 +383,11 @@ module Hive
 
       def dispatch_task(task, policy:, generation: nil, dispatcher: @dispatcher,
                         argv: [ "/bin/true" ])
+        generation = Hive::Attempts::Generation.resolve(
+          task: task, project: "demo", intended_stage: "4-execute",
+          progress_token: Hive::Attempts::Generation.artifact_token(task),
+          task_generation: generation, task_input_epoch: 0, attempt_store: @store
+        )
         dispatcher.dispatch(
           task: task, project: "demo", intended_stage: "4-execute",
           argv: argv, request_id: "request-#{task.slug}", provider: "codex",
@@ -380,14 +397,33 @@ module Hive
 
       def build_task(slug)
         @task_counter += 1
-        folder = File.join(@cell_root, "tasks", slug)
+        folder = File.join(@cell_root, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(folder)
         state_file = File.join(folder, "task.md")
         File.binwrite(state_file, "# Task\n\n<!-- WAITING -->\n")
+        Hive::TaskMeta.write(
+          folder, id: @task_counter, slug: slug,
+          display_name: slug, workflow: "coding"
+        )
         FakeTask.new(
           id: @task_counter, slug: slug, folder: folder,
-          state_file: state_file, stage_index: 4, stage_name: "execute"
+          state_file: state_file, stage_index: 4, stage_name: "execute",
+          workflow: "coding"
         )
+      end
+
+      def register_project!
+        @store.database.transaction do |db|
+          installation = db[:installations].first.fetch(:installation_id)
+          db[:projects].insert_conflict.insert(
+            project_id: "matrix-demo", installation_id: installation,
+            registration_id: "matrix-demo", name: "demo",
+            observed_path: @cell_root,
+            state_root_path: File.join(@cell_root, ".hive-state"),
+            active: 1, registered_at: NOW.iso8601(6),
+            last_observed_at: NOW.iso8601(6)
+          )
+        end
       end
 
       def open_scopes(entries)

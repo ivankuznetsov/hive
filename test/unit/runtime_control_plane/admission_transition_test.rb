@@ -125,6 +125,35 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_module_hook_binds_to_registered_project_without_fabricating_a_task
+    with_control_plane(task_ids: []) do |attempts, _dispatch, _health|
+      subject = {
+        "kind" => "module_hook", "project_id" => "project-1", "module" => "demo",
+        "hook" => "task", "event_id" => "event-1", "occurrence_id" => "event-1",
+        "event_name" => "task.completed", "module_generation" => "a" * 40,
+        "configuration_digest" => "b" * 64, "grant_digest" => "c" * 64
+      }
+      record = attempts.create_launching(
+        attempt_id: "module-attempt", request_id: "module-request",
+        predecessor_attempt_id: nil, task_id: nil, project: "demo",
+        task_slug: "module-demo-task-event-1", intended_stage: "module-hook",
+        task_generation: "module-generation", ownership_generation: "module-owner",
+        task_input_epoch: 1, progress_token: "event-1", provider: "module",
+        worker_argv: %w[hive __module-hook demo task],
+        claim_capability_digest: CLAIM_DIGEST, starting_revision: nil,
+        retry_charge: 0, inherited_outputs: [], subject: subject,
+        launch_timeout_sec: 30, now: NOW
+      )
+
+      row = attempts.database.read do |db|
+        db[:attempts].where(attempt_id: record.attempt_id).first
+      end
+      assert_nil row.fetch(:task_id)
+      assert_equal "project-1", row.fetch(:project_id)
+      assert_equal 0, attempts.database.read { |db| db[:task_subjects].count }
+    end
+  end
+
   def test_provider_capacity_is_revalidated_inside_the_admission_transaction
     with_control_plane(task_ids: %w[task-1 task-2]) do |attempts, dispatch, health|
       policy = explicit_policy(max_concurrent: 1)

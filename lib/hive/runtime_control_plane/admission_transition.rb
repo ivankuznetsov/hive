@@ -51,7 +51,10 @@ module Hive
           @repository.admission_validate_capacity_in(db, record, limits) if limits
           validate_provider_capacity_in(db, decision) if decision
           db[:attempts].insert(
-            @repository.admission_row(record, task_id: task_id, source_fingerprint: source_fingerprint)
+            @repository.admission_row(
+              record, task_id: task_id, project_id: project_id,
+              source_fingerprint: source_fingerprint
+            )
           )
           if decision
             claimed = @health.claim_probe_bindings_in(

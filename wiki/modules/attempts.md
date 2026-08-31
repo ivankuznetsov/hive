@@ -115,7 +115,10 @@ readers accept v4 only. Repository, API, status, daemon, bot, CLI-log, and
 Web-log paths open the activated state-home database and never reinterpret a
 retired attempt-store path as a runtime home.
 
-Both subjects share the same SQL-backed CAS repository, leases, capabilities,
+The SQL row binds every attempt directly to its registered project. Task-stage
+rows additionally require a `task_subjects` identity; module-hook rows require
+no task identity and therefore never fabricate a task folder. Both subjects
+share the same SQL-backed CAS repository, leases, capabilities,
 heartbeats, detached ownership, bounded retry accounting, receipts, output
 references, reconciliation, and capacity accounting. A module hook retry stays
 attached to its admitted occurrence; disabling or uninstalling the module

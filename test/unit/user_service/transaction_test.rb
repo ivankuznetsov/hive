@@ -219,20 +219,45 @@ class UserServiceTransactionTest < Minitest::Test
 
   def test_locked_stale_and_unprovable_records_fail_closed
     with_tmp_dir do |dir|
-      %i[stale unprovable].each do |state|
+      %i[live stale unprovable].each do |state|
         transaction = build_transaction(dir, lock_wait: 0)
         transaction.with_lock { nil }
         File.open(transaction.lock_path, File::RDWR) do |holder|
           holder.flock(File::LOCK_EX)
           transaction.define_singleton_method(:holder_state) { |_lock| state }
 
-          error = assert_raises(Hive::UserService::Transaction::Unsafe) do
+          expected_error = state == :live ?
+            Hive::UserService::Transaction::Busy :
+            Hive::UserService::Transaction::Unsafe
+          error = assert_raises(expected_error) do
             transaction.with_lock { flunk "kernel-locked target must not be entered" }
           end
-          expected = state == :stale ? /remains kernel-locked/ : /cannot be proven/
+          expected = case state
+                     when :live then /target is busy/
+                     when :stale then /remains kernel-locked/
+                     else /cannot be proven/
+                     end
           assert_match expected, error.message
         end
       end
+    end
+  end
+
+  def test_holder_lock_waits_for_a_short_lived_kernel_owner
+    with_tmp_dir do |dir|
+      transaction = build_transaction(dir, lock_wait: 0.2)
+      transaction.with_lock { nil }
+      entered = false
+
+      File.open(transaction.lock_path, File::RDWR) do |holder|
+        holder.flock(File::LOCK_EX)
+        contender = Thread.new { transaction.with_lock { entered = true } }
+        sleep 0.05
+        holder.flock(File::LOCK_UN)
+        contender.join
+      end
+
+      assert entered
     end
   end
 
@@ -300,6 +325,142 @@ class UserServiceTransactionTest < Minitest::Test
       %i[rewind truncate flush].each { |method| lock.define_singleton_method(method) { |*| nil } }
       lock.define_singleton_method(:fsync) { raise IOError }
       assert_nil transaction.send(:clear_holder, lock)
+    end
+  end
+
+  def test_guard_and_lock_storage_failures_are_typed_and_preserved
+    with_tmp_dir do |dir|
+      transaction = build_transaction(dir)
+      unsafe_directory = Object.new
+      unsafe_directory.define_singleton_method(:with_lock) do |*, **|
+        raise Hive::ManagedDirectory::UnsafeError, "replaced"
+      end
+      transaction.instance_variable_set(:@directory, unsafe_directory)
+
+      error = assert_raises(Hive::UserService::Transaction::Unsafe) do
+        transaction.send(:with_target_guard) { flunk "unsafe guard must not enter" }
+      end
+      assert_match(/unsafe user-service target guard/, error.message)
+
+      transaction = build_transaction(dir)
+      transaction.with_lock { nil }
+      File.unlink(transaction.lock_path)
+      File.symlink(File.join(dir, "foreign-lock"), transaction.lock_path)
+      error = assert_raises(Hive::UserService::Transaction::Unsafe) do
+        transaction.send(:with_holder_lock) { flunk "symlinked lock must not enter" }
+      end
+      assert_match(/unsafe user-service lock/, error.message)
+      assert File.symlink?(transaction.lock_path)
+    end
+  end
+
+  def test_target_home_fallback_and_unavailable_or_uncanonical_target_are_bounded
+    with_tmp_dir do |dir|
+      local = Hive::UserService::Definition.new(
+        platform: :linux,
+        service_name: "hive-test",
+        target_path: File.join(dir, "hive-test.service"),
+        content: "desired\n"
+      )
+      transaction = Hive::UserService::Transaction.new(definition: local, home: dir)
+      assert_equal File.join(dir, "hive-test.service"),
+                   transaction.instance_variable_get(:@canonical_target_path)
+
+      unavailable = Hive::UserService::Definition.new(
+        platform: :linux,
+        service_name: "hive-test",
+        target_path: File.join(dir, "missing", "hive-test.service"),
+        content: "desired\n"
+      )
+      error = assert_raises(Hive::UserService::Transaction::Unsafe) do
+        Hive::UserService::Transaction.new(definition: unavailable, home: dir)
+      end
+      assert_match(/target home is unavailable/, error.message)
+
+      original = File.method(:realpath)
+      inaccessible_parent = File.join(dir, ".config", "systemd", "user")
+      failing = lambda do |path|
+        raise Errno::EACCES if path == inaccessible_parent
+
+        original.call(path)
+      end
+      error = with_replaced_singleton_method(File, :realpath, failing) do
+        assert_raises(Hive::UserService::Transaction::Unsafe) { build_transaction(dir) }
+      end
+      assert_match(/target cannot be canonicalized/, error.message)
+    end
+  end
+
+  def test_bootstrap_wait_and_invalid_bootstrap_or_coordination_locks_fail_closed
+    with_tmp_dir do |dir|
+      transaction = build_transaction(dir, lock_wait: 0.03)
+      busy_bootstrap = Object.new
+      busy_bootstrap.define_singleton_method(:read_with_metadata) { |*, **| nil }
+      busy_bootstrap.define_singleton_method(:with_lock) { |*, **| false }
+      transaction.instance_variable_set(:@bootstrap_directory, busy_bootstrap)
+
+      error = assert_raises(Hive::UserService::Transaction::Busy) do
+        transaction.send(:ensure_root!)
+      end
+      assert_match(/bootstrap is busy/, error.message)
+
+      bootstrap = File.join(dir, Hive::UserService::Transaction::BOOTSTRAP_LOCK_NAME)
+      Dir.mkdir(bootstrap)
+      transaction = build_transaction(dir)
+      error = assert_raises(Hive::UserService::Transaction::Unsafe) do
+        transaction.send(:validate_bootstrap_lock!)
+      end
+      assert_match(/unsafe user-service bootstrap lock/, error.message)
+
+      busy_directory = Object.new
+      busy_directory.define_singleton_method(:entry_type) { |*, **| nil }
+      busy_directory.define_singleton_method(:with_lock) { |*, **| false }
+      transaction.instance_variable_set(:@directory, busy_directory)
+      error = assert_raises(Hive::UserService::Transaction::Busy) do
+        transaction.send(:ensure_coordination_lock_exists!, "busy.lock")
+      end
+      assert_match(/lock bootstrap is busy/, error.message)
+    end
+  end
+
+  def test_lock_binding_and_holder_validation_cover_unavailable_evidence
+    with_tmp_dir do |dir|
+      transaction = build_transaction(dir)
+      transaction.with_lock { nil }
+
+      File.open(transaction.lock_path, File::RDWR) do |lock|
+        stat = lock.stat
+        unsafe_bound = Object.new
+        %i[dev ino nlink uid mode].each do |field|
+          unsafe_bound.define_singleton_method(field) { stat.public_send(field) }
+        end
+        unsafe_bound.define_singleton_method(:file?) { false }
+        unsafe_bound.define_singleton_method(:symlink?) { false }
+        original = File.method(:lstat)
+        error = with_replaced_singleton_method(
+          File,
+          :lstat,
+          ->(path) { path == transaction.lock_path ? unsafe_bound : original.call(path) }
+        ) do
+          assert_raises(Hive::UserService::Transaction::Unsafe) do
+            transaction.send(:validate_lock_binding!, lock)
+          end
+        end
+        assert_match(/unsafe user-service lock file/, error.message)
+      end
+
+      closed = File.open(transaction.lock_path, File::RDWR)
+      closed.close
+      refute transaction.send(:lock_binding_valid?, closed)
+
+      File.write(transaction.lock_path, "{not-json")
+      File.open(transaction.lock_path, File::RDWR) do |lock|
+        error = assert_raises(Hive::UserService::Transaction::Unsafe) do
+          transaction.send(:read_holder, lock)
+        end
+        assert_match(/invalid user-service lock holder record/, error.message)
+      end
+      refute transaction.send(:valid_time?, "not-a-time")
     end
   end
 

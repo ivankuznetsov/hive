@@ -134,6 +134,27 @@ class WebServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_install_restart_if_running_reports_the_bundle_refresh
+    with_tmp_dir do |home|
+      commands = []
+      installer = Hive::Commands::Web::ServiceInstaller.new(
+        host_os: "linux",
+        home: home,
+        systemctl_available: true,
+        runner: ->(argv) { commands << argv; true }
+      )
+      installer.install!(autostart: true)
+      commands.clear
+
+      outcome = installer.install!(autostart: true, restart_if_running: true)
+
+      assert outcome.restarted
+      assert_includes commands, %w[systemctl --user restart hive-web]
+      assert_includes installer.messages,
+                      "restarted running web service to load the refreshed application bundle"
+    end
+  end
+
   def test_start_and_stop_delegate_to_the_shared_owner
     running = false
     commands = []

@@ -43,6 +43,15 @@ class UserServiceTransactionJournalTest < Minitest::Test
     assert_match(/invalid user-service transition/, error.message)
   end
 
+  def test_activation_recorded_only_after_the_activation_boundary
+    journal = fake_journal(writer: ->(*) { nil })
+    prepared = prepared_document(journal)
+
+    refute journal.activation_recorded?(prepared)
+    assert journal.activation_recorded?(prepared.merge("phase" => "activated"))
+    refute journal.activation_recorded?(prepared.merge("direction" => "rollback"))
+  end
+
   def test_prior_content_translates_a_non_string_payload
     encoded = Object.new
     encoded.define_singleton_method(:match?) { |_pattern| true }
@@ -241,6 +250,176 @@ class UserServiceTransactionJournalTest < Minitest::Test
 
     assert_raises(Hive::UserService::TransactionJournal::Invalid) { journal.delete }
     refute unlinked
+
+    malformed = fake_journal(
+      reader: -> { { bytes: "{not-json", mode: 0o600 } },
+      unlinker: ->(*) { flunk "malformed evidence must be preserved" }
+    )
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) { malformed.delete }
+    assert_match(/invalid user-service transition journal/, error.message)
+  end
+
+  def test_prepare_rejects_an_unknown_operation_before_publication
+    journal = fake_journal(writer: ->(*) { flunk "invalid operation must not be written" })
+
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.prepare(
+        operation: :bogus,
+        prior_content: nil,
+        prior_digest: nil,
+        prior_enabled: false,
+        prior_running: false,
+        desired_digest: nil,
+        backup_path: nil,
+        manager_intent: nil,
+        result_kind: :absent,
+        autostart: true
+      )
+    end
+
+    assert_match(/operation is invalid/, error.message)
+  end
+
+  def test_prior_state_process_and_timestamp_validation_is_exhaustive
+    base = prepared_document(fake_journal(writer: ->(*) { nil }))
+    prior = "legacy\n"
+    prior_digest = Digest::SHA256.hexdigest(prior)
+    invalid = [
+      [ base.merge("prior_content" => "not-hex"), /prior content is invalid/ ],
+      [ base.merge("prior_content" => prior.unpack1("H*")), /content and digest disagree/ ],
+      [ base.merge("prior_digest" => prior_digest), /content and digest disagree/ ],
+      [ base.merge("prior_process_start" => 123), /process start is invalid/ ],
+      [ base.merge("created_at" => "not-a-time"), /created_at is invalid/ ]
+    ]
+
+    invalid.each do |document, message|
+      error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        readable_journal(document).read
+      end
+      assert_match message, error.message
+    end
+
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      fake_journal.send(:validate_operation!, base.merge("operation" => "bogus"))
+    end
+    assert_match(/operation is invalid/, error.message)
+  end
+
+  def test_operation_specific_invalid_endpoint_shapes_are_rejected
+    base = prepared_document(fake_journal(writer: ->(*) { nil }))
+    prior = "legacy\n"
+    prior_digest = Digest::SHA256.hexdigest(prior)
+    prior_fields = {
+      "prior_content" => prior.unpack1("H*"),
+      "prior_digest" => prior_digest
+    }
+    remove = base.merge(
+      "operation" => "remove",
+      "direction" => "forward",
+      "phase" => "removal_prepared",
+      "desired_digest" => nil,
+      "backup_path" => nil,
+      "manager_intent" => "disable",
+      "result_kind" => "removed",
+      "autostart" => true
+    )
+    lifecycle = base.merge(
+      "operation" => "lifecycle",
+      "direction" => "forward",
+      "phase" => "lifecycle_prepared",
+      "desired_digest" => "not-a-digest",
+      "backup_path" => nil,
+      "manager_intent" => "restart",
+      "result_kind" => "unchanged",
+      "autostart" => true
+    )
+    invalid = [
+      base.merge("autostart" => false, "manager_intent" => "enable"),
+      base.merge("phase" => "manager_reloaded", "manager_intent" => nil),
+      base.merge("backup_path" => "#{definition.target_path}.bak-20260830T120000Z"),
+      base.merge(prior_fields).merge("result_kind" => "written"),
+      base.merge("result_kind" => "unchanged"),
+      remove,
+      remove.merge(prior_fields).merge("result_kind" => "absent"),
+      lifecycle
+    ]
+
+    invalid.each do |document|
+      assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        readable_journal(document).read
+      end
+    end
+
+    refute fake_journal.send(:valid_backup_path?, "\0")
+  end
+
+  def test_target_observation_rejects_unknown_unsafe_changing_and_unreadable_targets
+    journal = fake_journal
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.send(
+        :validate_target_observation!,
+        "operation" => "bogus", "direction" => "forward"
+      )
+    end
+    assert_match(/conflicts with phase/, error.message)
+
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target")
+      Dir.mkdir(target)
+      local_definition = Hive::UserService::Definition.new(
+        platform: :linux,
+        service_name: "hive-test",
+        target_path: target,
+        content: "desired\n"
+      )
+      local = Hive::UserService::TransactionJournal.new(
+        directory: FakeDirectory.new(dir, nil, nil, nil),
+        name: "journal.json",
+        definition: local_definition
+      )
+      error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        local.send(:observed_target_digest)
+      end
+      assert_match(/target is unsafe/, error.message)
+
+      FileUtils.rm_rf(target)
+      File.write(target, "desired\n")
+      first = File.stat(target)
+      changed = first.dup
+      changed.define_singleton_method(:size) { first.size + 1 }
+      fake_file = Object.new
+      observations = [ first, changed ]
+      fake_file.define_singleton_method(:stat) { observations.shift || changed }
+      fake_file.define_singleton_method(:read) { |_size| "desired\n" }
+      original = File.method(:open)
+      error = with_replaced_singleton_method(
+        File,
+        :open,
+        lambda do |path, *args, &block|
+          if path == target
+            block.call(fake_file)
+          else
+            original.call(path, *args, &block)
+          end
+        end
+      ) do
+        assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+          local.send(:observed_target_digest)
+        end
+      end
+      assert_match(/changed during observation/, error.message)
+
+      error = with_replaced_singleton_method(
+        File,
+        :open,
+        ->(path, *) { (path == target) ? (raise Errno::EACCES) : original.call(path) }
+      ) do
+        assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+          local.send(:observed_target_digest)
+        end
+      end
+      assert_match(/target is unsafe/, error.message)
+    end
   end
 
   def test_prepare_does_not_overwrite_existing_transition_evidence

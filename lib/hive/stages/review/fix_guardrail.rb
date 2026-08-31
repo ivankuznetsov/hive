@@ -62,7 +62,9 @@ module Hive
         def capture_diff(worktree_path, base, head)
           out, err, status = Open3.capture3("git", "-c", "core.quotePath=false",
                                             "-C", worktree_path,
-                                            "diff", "--unified=0", "#{base}..#{head}")
+                                            "diff", "--unified=0",
+                                            "--src-prefix=a/", "--dst-prefix=b/",
+                                            "#{base}..#{head}")
           unless status.success?
             raise Hive::AgentError,
                   "git diff failed in #{worktree_path}: #{err.to_s.strip}"

@@ -718,6 +718,19 @@ configured caps. Rows with no live Claude PID and no live task lock do
 not consume capacity; if they are stale `AGENT_WORKING` rows, the healer
 will rewrite them on the same tick or a later retry.
 
+Markerless pure-advance rows need terminal evidence rather than the generic
+mtime brake. Each daemon scan creates a fresh delivery request, but for a row
+that still has no marker the dispatcher asks the attempts layer to treat that
+request as the same automatic action when its semantic task generation is
+unchanged. If the latest attempt failed or was cancelled, admission returns its
+terminal receipt. The dispatcher records
+`markerless_stalled` with the attempt identity and calls
+`StaleAgentHealer#heal_markerless_stall`: marker-driven workflows atomically
+enter `ERROR reason=agent_exited_without_terminal_marker`, while controller
+workflows enter the generation-bound recovery queue. Explicit recovery requests
+remain eligible for a new attempt after cooldown. Marked advance rows do not use
+this replay mode.
+
 TERM and INT close daemon admission as soon as the dispatcher observes the
 shutdown flag. One `admission_open?` predicate is rechecked after durable
 attempt reconciliation and other blocking work, between lost-attempt

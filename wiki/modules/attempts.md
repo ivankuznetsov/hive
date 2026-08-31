@@ -442,6 +442,15 @@ false/malformed handoff or launcher exception marks the unclaimed reservation
 `lost` and returns a retryable deferral; if the wrapper won the claim race, the
 dispatcher re-reads and adopts it instead of creating an overlapping owner.
 
+Request IDs normally distinguish an explicit retry from a duplicate delivery:
+the same request replays any terminal receipt, while a new request may retry a
+failed generation. Daemon-owned markerless advance deliveries are narrower.
+Because the row scan mints a new delivery request on every tick, the daemon asks
+admission to replay the latest failed terminal attempt for the unchanged
+generation. This prevents an invalid markerless workflow command from consuming
+a new slot forever. Marked advance rows and recovery requests retain ordinary
+fresh retry semantics.
+
 An explicit-policy initial admission that returns no route has no attempt to
 attach. The foreground adapter therefore hands that markerless result directly
 to `RecoveryCoordinator`, which creates the same single pending request and

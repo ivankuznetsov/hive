@@ -345,6 +345,9 @@ class AttemptsRepositoryTest < Minitest::Test
       end
 
       assert repository.pre_activation_projection?("2026-07-16T11:59:59.999999Z")
+      assert repository.projection_reader.pre_activation_projection?(
+        "2026-07-16T11:59:59.999999Z"
+      )
       refute repository.pre_activation_projection?(activated_at)
       refute repository.pre_activation_projection?("2026-07-16T12:00:00.000001Z")
       refute repository.pre_activation_projection?("invalid")

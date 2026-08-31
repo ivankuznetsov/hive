@@ -58,6 +58,9 @@ module Hive
         def read_output(reference, max_bytes:)
           @repository.read_output(reference, max_bytes: max_bytes)
         end
+
+        def pre_activation_projection?(observed_at) =
+          @repository.pre_activation_projection?(observed_at)
       end
 
       attr_reader :database

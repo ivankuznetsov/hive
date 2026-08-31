@@ -19,6 +19,7 @@ recovery request. Marked advances and explicit recovery requests retain fresh
 retry semantics.
 
 **Evidence:** Attempts tests prove a second automatic request replays one failed
-attempt while a healer recovery request launches a successor. Daemon tests prove
-the terminal replay writes the recoverable error, records the attempt-bound
-stall event, and does not spawn a second worker.
+attempt while a healer recovery request launches a successor, and the public
+attempts API test pins forwarding of the semantic-replay control. Daemon tests
+prove the terminal replay writes the recoverable error, records the
+attempt-bound stall event, and does not spawn a second worker.

@@ -57,9 +57,15 @@ module Hive
           writer = Hive::TaskJournal::Writer.new(
             task_folder: task.folder, attempt_store: @store, clock: -> { now }
           )
-          records = Hive::TaskProjection.read_journal(
-            writer.path, attempt_store: @store
+          projection_store = Hive::TaskProjection::Store.new(
+            task_folder: task.folder, attempt_store: @store
           )
+          bounded = projection_store.read_bounded(require_checkpoint: true)
+          records = if bounded.current?
+            bounded.projection["conditions"].values.flatten + [ bounded.projection["identity"] ]
+          else
+            Hive::TaskProjection.read_journal(writer.path, attempt_store: @store)
+          end
           if observed?(records, attempt)
             @delivered.add(key)
             next :acknowledged
@@ -67,9 +73,7 @@ module Hive
 
           writer.append(observation(task, attempt, status, records))
           marker = Hive::Markers.current(task.state_file)
-          Hive::TaskProjection::Store.new(
-            task_folder: task.folder, attempt_store: @store
-          ).rebuild!(marker: marker)
+          projection_store.refresh_after_append!(marker: marker)
           @delivered.add(key)
           :delivered
         end
@@ -90,9 +94,10 @@ module Hive
 
       def observed?(records, attempt)
         records.any? do |record|
-          record["event_type"] == "condition_observed" &&
-            record["attempt_id"] == attempt.attempt_id &&
-            record.dig("payload", "condition") == "AgentHealthy" &&
+          record["attempt_id"] == attempt.attempt_id &&
+            (record["condition"] == "AgentHealthy" ||
+             (record["event_type"] == "condition_observed" &&
+              record.dig("payload", "condition") == "AgentHealthy")) &&
             record.fetch("evidence", []).any? do |entry|
               entry["type"] == "attempt_lease" &&
                 entry["state"] == attempt.state &&

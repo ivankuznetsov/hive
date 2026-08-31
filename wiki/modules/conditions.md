@@ -94,6 +94,13 @@ for malformed storage. Exact repair also takes its exclusive journal lock
 nonblockingly and fails with a bounded retryable error when another writer owns
 it; it never waits indefinitely.
 
+Terminal-attempt reconciliation uses that same authenticated checkpoint before
+it appends `AgentHealthy`. The checkpoint projection supplies restart
+idempotency and commit-generation facts, the new observation is validated
+against its SQLite attempt, and `refresh_after_append!` advances only the
+bounded suffix. If no valid checkpoint exists, the historical strict replay
+path remains fail closed.
+
 Canonical initial-stage task creation publishes a zero-history snapshot and
 checkpoint before the task is committed or admitted. The checkpoint is valid
 without creating an empty authoritative journal, then moves with the task and

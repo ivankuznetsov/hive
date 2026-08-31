@@ -54,7 +54,8 @@ checkpoint can retain its authenticated pre-activation prefix as lost legacy
 execution while validating every appended record against SQLite. Missing
 post-activation attempts and unknown attempts during strict full replay remain
 integrity failures; Hive inserts no fabricated legacy row and does not rewrite
-the journal.
+the journal. Daemon terminal-attempt observation also advances from that
+checkpoint rather than replaying the discarded prefix.
 
 ## Task-folder renames
 

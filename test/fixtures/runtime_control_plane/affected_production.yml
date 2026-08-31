@@ -7,8 +7,8 @@ counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
 final_inventory_lines: 9213
-outside_inventory_net_lines: -2962
-final_lines: 6251
+outside_inventory_net_lines: -2957
+final_lines: 6256
 final_paths:
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 104

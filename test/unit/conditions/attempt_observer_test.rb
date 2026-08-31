@@ -43,6 +43,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
                    File.binread(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME))
       assert_equal 1, locator_calls, "delivered terminal attempts must be skipped before task lookup"
 
+      FileUtils.rm(File.join(task.folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME))
       restarted = Hive::Conditions::AttemptObserver.new(
         store: store, task_locator: ->(_attempt) { task }
       )
@@ -50,6 +51,73 @@ class ConditionsAttemptObserverTest < Minitest::Test
       refute restarted.call(status, now: NOW + 5)
       assert_equal before,
                    File.binread(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME))
+    end
+  end
+
+  def test_post_cutover_attempt_advances_from_the_retained_projection_checkpoint
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      legacy_store = Hive::Attempts::Repository.new(
+        root: File.join(dir, "legacy-attempts"), migrate: true
+      )
+      legacy = terminalize(legacy_store, create_attempt(legacy_store), outcome: "failed")
+      legacy_status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: legacy, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+      assert_equal :delivered, Hive::Conditions::AttemptObserver.new(
+        store: legacy_store, task_locator: ->(_attempt) { task }
+      ).observe(legacy_status, now: NOW + 3)
+
+      store = Hive::Attempts::Repository.new(
+        root: File.join(dir, "current-attempts"), migrate: true
+      )
+      activated_at = NOW + 10
+      store.database.transaction do |database|
+        database[:installations].update(
+          activated_at: Hive::RuntimeControlPlane::Codec.dump_time(activated_at)
+        )
+      end
+      current = terminalize(
+        store,
+        create_attempt(
+          store, attempt_id: "attempt-2", request_id: "request-2",
+          now: activated_at + 1
+        ),
+        outcome: "succeeded", now: activated_at + 1
+      )
+      status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: current, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+
+      observer = Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      )
+      assert_equal :delivered, observer.observe(status, now: activated_at + 4)
+
+      projection = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: store
+      ).read_routine
+      assert_equal "current", projection.state
+      assert_equal "attempt-2",
+                   projection.projection.current_condition("AgentHealthy").fetch("attempt_id")
+      journal = File.binread(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
+      assert_equal :acknowledged, Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      ).observe(status, now: activated_at + 5)
+      assert_equal journal, File.binread(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
+      strict = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::TaskProjection.read_journal(
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME),
+          attempt_store: store
+        )
+      end
+      assert_includes strict.message, "unknown durable attempt attempt-1"
     end
   end
 

@@ -426,6 +426,10 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         now: NOW - 60
       )
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      register_runtime_project(
+        database: attempt_store.database, name: "demo", path: File.join(root, "project"),
+        state_root_path: state, project_id: "project-1"
+      )
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,
         capability_generator: -> { CAPABILITY }
@@ -481,6 +485,10 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      register_runtime_project(
+        database: attempt_store.database, name: "demo", path: File.join(root, "project"),
+        state_root_path: state, project_id: "project-1"
+      )
       counter = 0
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,

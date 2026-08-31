@@ -21,3 +21,6 @@ date: 2026-08-31
   depends on a test-only fabricated task identity.
 - Made real-process scenario seeds publish stable task metadata and converted
   the remaining module/provider helpers to explicit activated SQL repositories.
+- Registered command and daemon module projects in the same isolated SQL
+  repository used by their hook attempts, instead of relying on file-only
+  project fixtures that the production admission contract correctly rejects.

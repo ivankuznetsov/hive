@@ -59,6 +59,11 @@ class CommandsModuleHookTest < Minitest::Test
           idempotency_key: "task-1", payload: {}, recorded_at: NOW
         ).event
         attempt_store = Hive::Attempts::Repository.new(root: File.join(project, "attempts"), migrate: true)
+        register_runtime_project(
+          database: attempt_store.database, name: "demo", path: project,
+          state_root_path: state, project_id: entry.fetch("project_id"),
+          registration_id: entry.fetch("registration_id")
+        )
         launcher = Launcher.new
         attempts = Hive::Attempts::Dispatcher.new(
           store: attempt_store, launcher: launcher,

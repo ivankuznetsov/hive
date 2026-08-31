@@ -6,6 +6,15 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 29, 12)
 
+  def test_only_the_evidence_rework_subcommand_is_dispatchable
+    assert Hive::RuntimeControlPlane::DispatchRepository.valid_argv?(
+      %w[hive evidence rework task-260831-abcd --stage 7-artifacts]
+    )
+    refute Hive::RuntimeControlPlane::DispatchRepository.valid_argv?(
+      %w[hive evidence terminal task-260831-abcd]
+    )
+  end
+
   def test_request_claim_sequence_and_outbox_are_transactional_and_idempotent
     with_repository do |repository|
       id = repository.write_request!(

@@ -61,7 +61,7 @@ module Hive
           # not by a dedicated attempt-context override. This prevents supported
           # launch/inheritance paths from redirecting context installation; it
           # is not privilege separation from hostile same-UID process state.
-          record = Repository.new.fetch(attempt_id)
+          record = Repository.open_default.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
           evidence_writer = if record["routing"]["mode"] == "explicit"
             EvidenceChannel::Writer.for_fd(

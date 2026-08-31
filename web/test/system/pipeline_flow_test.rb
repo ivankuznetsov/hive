@@ -532,21 +532,13 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   test "receipt-correlated log pane follows, pauses, resumes, and morphs in place" do
     slug = create_task!(@project, "Receipt log probe")
-    root = Dir.mktmpdir("hive-web-receipt-log")
-    previous_home = ENV["HIVE_HOME"]
-    ENV["HIVE_HOME"] = root
-    store = Hive::Attempts::Repository.new(
-      root: Hive::Paths.runtime_payload_root(root),
-      database: Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path(root)
-      ),
-      migrate: true
-    )
-    writer = store.log_archive.open_writer("receipt-attempt")
+    store = Hive::Attempts::Repository.open_default
+    attempt_id = "receipt-attempt-#{SecureRandom.hex(4)}"
+    writer = store.log_archive.open_writer(attempt_id)
     writer.append("stdout", (1..120).map { |n| "line #{n}" }.join("\n") + "\n")
     writer.close
     reference = Hive::OutputReference.build(
-      store.log_archive.hot_path("receipt-attempt"), root: store.root
+      store.log_archive.hot_path(attempt_id), root: store.root
     )
     original = Hive::TaskWorkspace::Builder.instance_method(:semantic)
     replacement = lambda do
@@ -594,8 +586,6 @@ class PipelineFlowTest < ApplicationSystemTestCase
   ensure
     Hive::TaskWorkspace::Builder.define_method(:semantic, original) if original
     writer&.close unless writer&.closed?
-    ENV["HIVE_HOME"] = previous_home
-    FileUtils.rm_rf(root) if root
   end
 
   test "artifact open state survives a pushed morph while content stays live" do

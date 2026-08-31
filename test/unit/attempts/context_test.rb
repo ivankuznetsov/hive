@@ -510,7 +510,7 @@ class AttemptsContextTest < Minitest::Test
     gate_w.write(gate) unless gate.empty?
     gate_w.close
     test_case = self
-    with_replaced_singleton_method(Hive::Attempts::Repository, :new, lambda { |**options|
+    with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, lambda { |**options|
       test_case.assert_empty options, "worker context must not accept an environment-selected store root"
       store
     }) do

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-08-31
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage]
 ---
 
@@ -133,6 +133,10 @@ bundle exec ruby -Itest test/unit/agent_skills/canonical_skill_test.rb
 From `web/`, run the Rails task integration/helper/model tests with
 `bundle exec ruby bin/rails test ...` and the focused Playwright file with
 `bundle exec ruby bin/rails test:system test/system/task_workspace_test.rb`.
+The shared Rails test home explicitly bootstraps a real migrated and activated
+SQLite runtime control plane before tests create projects. E2E sandboxes do the
+same before invoking `hive init`; tests do not rely on an implicit repository
+migration path that production forbids.
 
 Do not run the full suite after every commit. Use the default suite as a broad
 local checkpoint, normally once before handoff:
@@ -807,10 +811,10 @@ task creation. Generated task slugs use a 16-bit random suffix, so the helper
 retries rare `SlugCollisionError` cases and identifies the created folder by
 comparing inbox children before/after the command instead of relying on mtime
 ordering. Playwright examples share a process but not project state:
-`ApplicationSystemTestCase` stops the subscriber-owned feed, clears only the
-throwaway sandbox's canonical `repos/` tree, clears its registry through the
-locked atomic config updater, and resets workflow descriptor caches before each
-example. This keeps later refresh assertions
+`ApplicationSystemTestCase` stops the subscriber-owned feed, deregisters every
+throwaway project through the ordinary Hive registry API so its SQL identity is
+retired, clears only the sandbox's canonical `repos/` tree, and resets workflow
+descriptor caches before each example. This keeps later refresh assertions
 independent of test order and prevents a synthetic fleet accumulated by prior
 examples from dominating browser timing. Tests that mutate the filesystem and
 expect a Cable refresh first wait for the browser's confirmed subscription.
@@ -1142,6 +1146,10 @@ task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
 The final browser wait targets that durable PR-gate result rather than the
 transient `execute` badge: a fast daemon may complete execute between two
 Turbo renders, while the real worktree commit proves the stage ran.
+The fake plan declares its production/test files, a test scenario, and an
+explicit rollback, so the real plan-review classifier admits its local
+skip-review path. The provider-free golden test therefore cannot accidentally
+launch an installed Codex or Grok reviewer.
 The first task-page navigation deliberately re-resolves the grid link through
 brief row-lookup misses or Playwright "not attached to the DOM" click errors
 because Turbo can replace the row while the daemon advances the task from

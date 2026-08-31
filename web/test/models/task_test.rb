@@ -7,12 +7,12 @@ class TaskTest < ActiveSupport::TestCase
     root = Dir.mktmpdir("hive-web-attempt-log")
     previous_home = ENV["HIVE_HOME"]
     ENV["HIVE_HOME"] = root
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(root)
+    ).migrate!
     store = Hive::Attempts::Repository.new(
       root: Hive::Paths.runtime_payload_root(root),
-      database: Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path(root)
-      ),
-      migrate: true
+      database: database
     )
     writer = store.log_archive.open_writer("attempt-web-log")
     writer.append("stdout", "receipt-correlated line\n")
@@ -465,6 +465,7 @@ class TaskTest < ActiveSupport::TestCase
   end
 
   test "queues a run through the task resource instead of a web dispatcher" do
+    dispatched = nil
     task = Task.new(
       project: Project.new("name" => "alpha"),
       attributes: {
@@ -474,11 +475,23 @@ class TaskTest < ActiveSupport::TestCase
       }
     )
 
-    result = task.run!(expected_action: "ready_to_plan", expected_stage: "3-plan")
+    replacement = lambda do |**attributes|
+      dispatched = attributes
+      Hive::Bot::DispatchRequestWriter::DispatchReference.new(
+        request_id: "request-1", attempt_id: nil, state: "queued",
+        status: :queued, argv: attributes.fetch(:argv)
+      )
+    end
+    result = with_replaced_singleton_method(
+      Hive::Bot::DispatchRequestWriter, :dispatch!, replacement
+    ) do
+      task.run!(expected_action: "ready_to_plan", expected_stage: "3-plan")
+    end
 
     assert_equal [ "hive", "plan", task.slug, "--project", "alpha", "--from", "3-plan" ], result[:argv]
-  ensure
-    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
+    assert_equal "alpha", dispatched.fetch(:project)
+    assert_equal task.slug, dispatched.fetch(:slug)
+    assert_equal "web", dispatched.fetch(:trigger)
   end
 
   test "refuses a stale run form before writing to the daemon queue" do

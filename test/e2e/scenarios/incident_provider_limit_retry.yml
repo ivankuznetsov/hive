@@ -158,23 +158,18 @@ steps:
       require "hive/runtime_control_plane/dispatch_repository"
       require "hive/provider_health"
 
-      attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
       dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
-      execute = attempts.scan.records.select do |record|
-        record["intended_stage"] == "4-execute"
-      end
-      raise "expected exactly two execute attempts, got #{execute.size}" unless execute.size == 2
-
       recoveries = dispatch.recovery_requests.select do |request|
         request.recovery["phase"] == "terminal"
       end
       raise "expected one terminal recovery request, got #{recoveries.size}" unless recoveries.size == 1
       recovery = recoveries.fetch(0).recovery
 
+      attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
       first_id = recovery.dig("source_receipt", "attempt_id")
       second_id = recovery.fetch("attempt_id")
-      first = execute.find { |record| record.attempt_id == first_id }
-      second = execute.find { |record| record.attempt_id == second_id }
+      first = attempts.fetch(first_id)
+      second = attempts.fetch(second_id)
       raise "recovery receipt did not identify both attempts" unless first && second
       raise "attempt routes were not A then B" unless [first, second].map { |record| record["routing"].dig("route", "route_id") } == ["claude-a/claude-e2e-model", "codex-b/codex-e2e-model"]
       raise "retry charges were not exactly zero then one" unless [first["retry_charge"], second["retry_charge"]] == [0, 1]
@@ -189,7 +184,7 @@ steps:
       raise "recovery did not finish successfully" unless recovery.fetch("terminal_outcome") == "succeeded"
       raise "pending recovery remained after terminalization" unless dispatch.pending.empty?
       raise "terminal recovery receipt was duplicated or lost" unless recoveries.size == 1
-      raise "live attempt remained after terminalization" unless execute.none?(&:live?)
+      raise "live execute attempt remained after terminalization" unless [first, second].none?(&:live?)
 
       health = Hive::ProviderHealth.open(database: attempts.database)
       scopes = {

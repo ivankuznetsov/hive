@@ -19,6 +19,7 @@ module Hive
       ].freeze
       GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
       GLOBAL_MAINTENANCE_ARGVS = [ %w[hive daemon install --force] ].freeze
+      EVIDENCE_VERBS = %w[rework].freeze
       RECOVERY_PHASES = %w[admitted cleared dispatched terminal].freeze
       DELIVERY_STATES = %w[claimed admitted awaiting_delivery].freeze
       EXPIRY_SEC = 600
@@ -74,6 +75,8 @@ module Hive
         values = Array(argv)
         return false unless values.length >= 2 && values[0] == "hive"
         return GLOBAL_MAINTENANCE_ARGVS.include?(values) if values[1] == "daemon"
+        return values.length >= 3 && EVIDENCE_VERBS.include?(values[2]) &&
+          values.all? { |item| item.is_a?(String) } if values[1] == "evidence"
         ALLOWED_VERBS.include?(values[1]) && values.all? { |item| item.is_a?(String) }
       end
 

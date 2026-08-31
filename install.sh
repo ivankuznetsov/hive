@@ -22,9 +22,9 @@ is signed with cosign keyless attestation against this repo's release
 workflow; verification always fails closed when cosign is unavailable.
 
 After install the \`hive\` and \`hv\` executables are symlinked into
-\${XDG_BIN_HOME:-~/.local/bin}. The installer also runs \`hive daemon install\`
-to write and enable the per-user daemon autostart unit when the host supports
-it. The gem and its runtime dependencies (bubbletea, lipgloss, thor,
+\${XDG_BIN_HOME:-~/.local/bin}. Run \`hive setup --yes\` after installation to
+bootstrap the runtime control plane and install the per-user services. The gem
+and its runtime dependencies (bubbletea, lipgloss, thor,
 telegram-bot-ruby) live under \${HIVE_PREFIX:-~/.local/share}/hive/gems so an
 uninstall is a clean \`rm -rf\` plus symlink removal.
 

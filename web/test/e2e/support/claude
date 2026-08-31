@@ -33,7 +33,24 @@ case "$cwd" in
     ;;
   */stages/3-plan/*)
     emit_usage=1
-    printf '# Plan\n\n1. Implement the sample feature.\n\n<!-- COMPLETE -->\n' > plan.md
+    cat > plan.md <<'PLAN'
+# Plan
+
+## Files
+
+- `implementation.txt`
+- `test/golden_path_test.rb`
+
+## Test scenarios
+
+- The sample implementation reaches the open-PR gate.
+
+## Rollback
+
+Revert `implementation.txt` if the sample implementation fails.
+
+<!-- COMPLETE -->
+PLAN
     ;;
   */stages/5-open-pr/*)
     emit_usage=1

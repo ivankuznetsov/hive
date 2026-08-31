@@ -328,7 +328,7 @@ module Hive
         json
       end
 
-      def deep_copy(value) = Marshal.load(Marshal.dump(value))
+      def deep_copy(value) = JSON.parse(JSON.generate(value))
 
       def positive_number(value, label)
         number = Float(value)

@@ -7309,6 +7309,18 @@ end
     path
   end
 
+  def write_recovery_request(dir, project:, slug:, request_id:, created_at: T0)
+    Q.write_request!(
+      project: project, slug: slug,
+      argv: [ "hive", "run", slug, "--stage", "4-execute", "--project", project, "--json" ],
+      requestor: "healer", trigger: "recovery", request_id: request_id,
+      task_generation: "c" * 64, task_id: 817,
+      expected_stage: "4-execute", expected_marker_name: "error",
+      expected_marker_id: "marker-1", recovery: dispatcher_recovery,
+      state_home: dir, now: created_at
+    )
+  end
+
   def stub_find_project!(dispatcher, project_name)
     Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
     Hive::Config.singleton_class.alias_method(:__orig_registered_projects, :registered_projects) unless Hive::Config.singleton_class.method_defined?(:__orig_registered_projects)
@@ -8610,7 +8622,10 @@ end
         row(project: "p1", slug: "older-low", stage: "2-brainstorm",
             action: nil, command: nil, mtime: T0, id: 1),
         row(project: "p2", slug: "later-high", stage: "8-finalize",
-            action: nil, command: nil, mtime: T0, id: 2)
+            action: nil, command: nil, mtime: T0, id: 2),
+        row(project: "p3", slug: "direct-middle", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct-middle",
+            mtime: T0, id: 3)
       ]
       dispatcher, supervisor, controller = make_dispatcher(
         rows: rows, dispatch_request_state_home: state_home
@@ -8628,10 +8643,84 @@ end
         request_id: "LATER", created_at: T0 + 1
       )
 
-      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0 + 2) }
+      with_registered_projects("p1", "p2", "p3") { dispatcher.tick(now: T0 + 2) }
 
       assert_equal [ "older-low" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
                    "a later request must not leapfrog the durable FIFO head"
+    end
+  end
+
+  def test_later_request_priority_is_inherited_by_blocked_fifo_head
+    Dir.mktmpdir("hive-cross-source-request-priority-inheritance") do |state_home|
+      rows = [
+        row(project: "p1", slug: "later-high", stage: "8-finalize",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p2", slug: "direct", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct",
+            mtime: T0, id: 2)
+      ]
+      dispatcher, supervisor, controller, logger = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_recovery_request(
+        state_home, project: "retired", slug: "blocked-head",
+        request_id: "BLOCKED"
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "later-high",
+        request_id: "LATER", created_at: T0 + 1
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0 + 2) }
+
+      assert_equal [ "later-high" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "a blocked FIFO head must not hide a later request behind direct rows"
+      assert(logger.events.any? { |name, attrs|
+        name == :dispatch_request_blocked && attrs[:request_id] == "BLOCKED" &&
+          attrs[:reason] == "unknown_project"
+      })
+    end
+  end
+
+  def test_inherited_priority_stops_after_the_high_priority_request
+    Dir.mktmpdir("hive-cross-source-request-priority-suffix") do |state_home|
+      rows = [
+        row(project: "retired-high", slug: "blocked-high", stage: "8-finalize",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p1", slug: "low-tail", stage: "2-brainstorm",
+            action: nil, command: nil, mtime: T0, id: 2),
+        row(project: "p2", slug: "direct-middle", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct-middle",
+            mtime: T0, id: 3)
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_recovery_request(
+        state_home, project: "retired-low", slug: "blocked-low",
+        request_id: "BLOCKED-LOW", created_at: T0
+      )
+      write_recovery_request(
+        state_home, project: "retired-high", slug: "blocked-high",
+        request_id: "BLOCKED-HIGH", created_at: T0 + 1
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "low-tail",
+        request_id: "LOW-TAIL", created_at: T0 + 2
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0 + 3) }
+
+      assert_equal [ "direct-middle" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "a low-priority tail must not inherit an earlier request's peak priority"
     end
   end
 

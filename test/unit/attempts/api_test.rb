@@ -192,4 +192,38 @@ class AttemptsAPITest < Minitest::Test
       assert_equal({ "path" => "log", "sealed" => true }, resolver.call("path" => "log"))
     end
   end
+
+  def test_read_only_attempt_bindings_stay_behind_the_api
+    record = Object.new
+    store = Object.new
+    calls = []
+    store.define_singleton_method(:fetch) do |attempt_id|
+      calls << [ :fetch, attempt_id ]
+      record
+    end
+    store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+      calls << [ :fetch_projection_binding, attempt_id ]
+      { "attempt_id" => attempt_id }
+    end
+    api = Hive::Attempts::API.new(store: store)
+
+    assert_same record, api.fetch("attempt-1")
+    assert_equal({ "attempt_id" => "attempt-1" },
+                 api.fetch_projection_binding("attempt-1"))
+    assert_equal [
+      [ :fetch, "attempt-1" ],
+      [ :fetch_projection_binding, "attempt-1" ]
+    ], calls
+  end
+
+  def test_default_read_facade_uses_the_repository_binding
+    runtime_store = Object.new
+    runtime_store.define_singleton_method(:fetch) { |attempt_id| "record:#{attempt_id}" }
+
+    with_replaced_singleton_method(
+      Hive::Attempts::Repository, :open_default, -> { runtime_store }
+    ) do
+      assert_equal "record:attempt-1", Hive::Attempts::API.new.fetch("attempt-1")
+    end
+  end
 end

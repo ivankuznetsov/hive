@@ -100,11 +100,60 @@ class ProposalEventTest < Minitest::Test
     assert_equal event.to_h, Hive::Proposals::Event.new(event.to_h).to_h
   end
 
+  def test_rejects_invalid_versions_and_closed_replay_envelopes
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      build_event(version: "not-a-version", type: "evaluation", data: evaluation_data)
+    end
+
+    canonical = build_event(type: "evaluation", data: evaluation_data).to_h
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.new(canonical.merge("extra" => true))
+    end
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.new(canonical.merge("version" => 0))
+    end
+  end
+
+  def test_decision_snapshots_categories_and_authority_are_closed
+    data = evaluated_decision_data
+
+    invalid = Marshal.load(Marshal.dump(data))
+    invalid["considered_evaluations"][0]["outcome"] = "unknown"
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.normalize_data("decision", invalid)
+    end
+
+    invalid = Marshal.load(Marshal.dump(data))
+    invalid["considered_evaluation_ids"] = []
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.normalize_data("decision", invalid)
+    end
+
+    invalid = Marshal.load(Marshal.dump(data))
+    invalid["rationale_category"] = "no_evaluation"
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.normalize_data("decision", invalid)
+    end
+
+    invalid = Marshal.load(Marshal.dump(data))
+    invalid["authority"]["kind"] = "evaluator"
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.normalize_data("decision", invalid)
+    end
+
+    invalid = Marshal.load(Marshal.dump(data))
+    invalid["observed_head"]["version"] = -1
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals::Event.normalize_data("decision", invalid)
+    end
+  end
+
   private
 
   def build_event(version: 1, type:, data:, policy: Hive::Proposals::DEFAULT_POLICY)
+    event_number = [ version.to_i, 1 ].max
     Hive::Proposals::Event.build(
-      event_id: "pev-00000000-0000-4000-8000-%012d" % version,
+      event_id: "pev-00000000-0000-4000-8000-%012d" % event_number,
       proposal_id: "prp-00000000-0000-4000-8000-000000000001",
       version:, type:, data:, source_event_id: "pse-#{'a' * 64}",
       provenance: {
@@ -122,6 +171,32 @@ class ProposalEventTest < Minitest::Test
     {
       "id" => "operator", "kind" => "operator",
       "policy_fingerprint" => "a" * 64
+    }
+  end
+
+  def evaluation_data
+    {
+      "evaluator" => { "id" => "reviewer", "binding_fingerprint" => "b" * 64 },
+      "method" => { "kind" => "benchmark", "label" => "held-out-recall" },
+      "result" => { "outcome" => "pass", "metrics" => { "recall" => 0.91 } },
+      "rationale" => "Improved recall", "evidence" => [], "links" => []
+    }
+  end
+
+  def evaluated_decision_data
+    evaluation_id = "pev-00000000-0000-4000-8000-000000000001"
+    {
+      "outcome" => "accepted", "considered_evaluation_ids" => [ evaluation_id ],
+      "considered_evaluations" => [
+        {
+          "evaluation_id" => evaluation_id, "evaluator_id" => "reviewer",
+          "method" => "held-out-recall", "outcome" => "pass",
+          "result_digest" => "c" * 64
+        }
+      ],
+      "rationale_category" => "evaluated", "rationale" => "Thresholds passed",
+      "authority" => authority, "links" => [],
+      "observed_head" => { "version" => 0, "digest" => "d" * 64 }
     }
   end
 end

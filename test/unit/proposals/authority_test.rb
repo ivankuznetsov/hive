@@ -61,6 +61,61 @@ class ProposalAuthorityTest < Minitest::Test
     end
   end
 
+  def test_rejects_malformed_authority_rows_and_expired_validity_windows
+    invalid_rows = [
+      { "kind" => "agent", "capabilities" => [ "decide" ], "version" => 1, "revoked" => false },
+      { "kind" => "operator", "capabilities" => [ "unknown" ], "version" => 1, "revoked" => false },
+      { "kind" => "operator", "capabilities" => [ "decide" ], "version" => 0, "revoked" => false },
+      { "kind" => "operator", "capabilities" => [ "decide" ], "version" => 1, "revoked" => "no" }
+    ]
+    invalid_rows.each do |row|
+      authority = Hive::Proposals::Authority.new({ "authorities" => { "broken" => row } })
+      assert_raises(Hive::Proposals::InvalidRecord) { authority.fingerprint("broken") }
+    end
+
+    clock = -> { Time.utc(2026, 8, 30, 12, 0, 0) }
+    not_yet = authority_with_window(valid_from: "2026-08-30T12:01:01.000000Z", clock:)
+    expired = authority_with_window(valid_until: "2026-08-30T12:00:00.000000Z", clock:)
+
+    assert_raises(Hive::Proposals::Unauthorized) do
+      not_yet.authorize!(
+        identity: "windowed", capability: "decide",
+        expected_policy_fingerprint: not_yet.fingerprint("windowed")
+      )
+    end
+    assert_raises(Hive::Proposals::Unauthorized) do
+      expired.authorize!(
+        identity: "windowed", capability: "decide",
+        expected_policy_fingerprint: expired.fingerprint("windowed")
+      )
+    end
+  end
+
+  def test_policy_receipt_must_match_and_not_be_future_dated
+    clock = -> { Time.utc(2026, 8, 30, 12, 0, 0) }
+    authority = Hive::Proposals::Authority.new(config, clock:)
+    fingerprint = authority.fingerprint("acceptance-policy")
+    base = {
+      "authority_id" => "acceptance-policy", "capability" => "decide",
+      "policy_fingerprint" => fingerprint, "issued_at" => "2026-08-30T12:00:00Z"
+    }
+
+    assert_raises(Hive::Proposals::Unauthorized) do
+      authority.authorize!(
+        identity: "acceptance-policy", capability: "decide",
+        expected_policy_fingerprint: fingerprint,
+        receipt: base.merge("authority_id" => "another-policy")
+      )
+    end
+    assert_raises(Hive::Proposals::Unauthorized) do
+      authority.authorize!(
+        identity: "acceptance-policy", capability: "decide",
+        expected_policy_fingerprint: fingerprint,
+        receipt: base.merge("issued_at" => "2026-08-30T12:02:00Z")
+      )
+    end
+  end
+
   private
 
   def config
@@ -80,5 +135,13 @@ class ProposalAuthorityTest < Minitest::Test
         }
       }
     }
+  end
+
+  def authority_with_window(clock:, **window)
+    row = {
+      "kind" => "operator", "capabilities" => [ "decide" ],
+      "version" => 1, "revoked" => false
+    }.merge(window.transform_keys(&:to_s))
+    Hive::Proposals::Authority.new({ "authorities" => { "windowed" => row } }, clock:)
   end
 end

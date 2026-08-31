@@ -36,6 +36,32 @@ class AttemptsRecordTest < Minitest::Test
     assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(spoofed) }
   end
 
+  def test_proposal_binding_replay_rejects_version_identity_evaluator_and_policy_drift
+    canonical = record_with_proposal.to_h
+    mutations = [
+      ->(proposal) { proposal["schema_version"] = 2 },
+      ->(proposal) { proposal["subject"]["proposal_id"] = "not-an-id" },
+      lambda do |proposal|
+        proposal["evaluator"] = {
+          "id" => "reviewer", "fingerprint" => "a" * 64,
+          "configuration_fingerprint" => "b" * 64,
+          "admission" => {
+            "workflows" => %w[coding coding], "stages" => [ "4-execute" ],
+            "agent_profiles" => [ "codex" ]
+          }
+        }
+      end,
+      ->(proposal) { proposal["policy"]["visibility"] = "public" },
+      ->(proposal) { proposal["policy"]["allowed_link_schemes"] = [ "not valid" ] }
+    ]
+
+    mutations.each do |mutate|
+      invalid = Marshal.load(Marshal.dump(canonical))
+      mutate.call(invalid.dig("subject", "proposal"))
+      assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(invalid) }
+    end
+  end
+
   def test_launching_record_exposes_unclaimed_deadline_and_immutable_identity
     record = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
 
@@ -476,6 +502,29 @@ class AttemptsRecordTest < Minitest::Test
   end
 
   private
+
+  def record_with_proposal
+    proposal = {
+      "schema_version" => 1,
+      "subject" => {
+        "kind" => "skill", "reference" => "agent-skills/reviewer",
+        "revision" => "v2", "proposal_id" => nil
+      },
+      "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+      "evaluator" => nil, "configuration_fingerprint" => "c" * 64,
+      "policy" => {
+        "visibility" => "restricted", "retention" => "task",
+        "allowed_link_schemes" => [ "https" ]
+      }
+    }
+    subject = Hive::Attempts::Record.task_stage_subject(
+      task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", proposal:
+    )
+    Hive::Attempts::Record.launching(
+      **identity.merge(task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", subject:),
+      now: NOW, launch_timeout_sec: 30
+    )
+  end
 
   def identity
     {

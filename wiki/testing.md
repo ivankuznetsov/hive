@@ -1285,10 +1285,44 @@ claims, and checks the published state words against the native web/status
 source strings. The fixture suite is structural evidence only; clean live
 provider replays and timing remain separate verification gates.
 
+## Proposal tracking verification
+
+Proposal coverage proceeds from independently validated immutable files through
+the production task-bound transaction and outward consumers. Focused unit tests
+under `test/unit/proposals/` own schemas, redaction/classification, per-file
+quarantine, replay, quotas, historical evaluator admission, lifecycle CAS,
+lineage, context budgets, and deterministic compilation. CLI, attempt,
+activity, GitOps, schema, and llm-wiki tests own the surrounding boundaries.
+
+`test/integration/proposal_tracking_test.rb` drives the curated lifecycle using
+a real durable attempt, committed inbox, ingestor, lifecycle authority, live
+query, typed context selector, and pinned compiler. It accepts a review-prompt
+candidate, rejects a planning-prompt candidate while retaining positive and
+negative evaluations, exercises authority-only `no_evaluation`, links a
+distinct successor, records rollback without executing it, isolates a malformed
+neighbor, and proves the active skill/workflow fixtures stay byte-identical
+after each lifecycle, context, and compile boundary. It also compares every
+pinned compiler row with the live normalized projection by identity and digest,
+and proves read-only discovery neither imports a pre-feature task journal nor
+initializes `proposals/v1`; the first new typed source event does.
+
+```bash
+bundle exec ruby -Itest test/integration/proposal_tracking_test.rb
+bundle exec ruby -Itest test/unit/commands/proposal_test.rb
+bundle exec rake coverage:changed
+bundle exec rake test
+```
+
+Wiki-refresh integration separately proves pinned-source, provider-free
+proposal-only compilation and one-commit publication. The generated pair is
+never used as canonical test input, and no live provider, activation,
+publication, deployment, or compensating revert is part of the gate.
+
 ## Backlinks
 
 - [[architecture]]
 - [[modules/agent]]
 - [[modules/task_workspace]]
+- [[modules/proposals]] · [[commands/proposal]]
 - [[e2e]]
 - [[gaps]]

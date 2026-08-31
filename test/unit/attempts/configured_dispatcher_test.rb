@@ -242,4 +242,27 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal %w[hive module-hook], call.fetch(:argv)
     assert_equal "request-1", call.fetch(:request_id)
   end
+
+  def test_proposal_reconciliation_is_lazy_and_fail_soft
+    with_tmp_git_repo do |project|
+      ops = Hive::GitOps.new(project)
+      ops.hive_state_init
+      task = FakeTask.new(slug: "task", project_root: project)
+      adapter = Hive::Attempts::ConfiguredDispatcher.new(store: :store)
+
+      assert_nil adapter.send(:reconcile_proposals, task)
+
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, "proposals", "v1"))
+      result = adapter.send(:reconcile_proposals, task)
+      assert_equal 0, result.processed
+
+      erroring = ->(**_options) { raise Hive::Proposals::InvalidRecord, "bad receipt" }
+      _stdout, stderr = capture_io do
+        with_replaced_singleton_method(Hive::Proposals::Reconciler, :new, erroring) do
+          assert_nil adapter.send(:reconcile_proposals, task)
+        end
+      end
+      assert_includes stderr, "proposal reconciliation deferred"
+    end
+  end
 end

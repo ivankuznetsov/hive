@@ -1,6 +1,6 @@
 require "digest"
 require "securerandom"
-require "hive/attempts/store"
+require "hive/attempts/api"
 require "hive/config"
 require "hive/git_ops"
 require "hive/proposals/ingestor"
@@ -24,12 +24,12 @@ module Hive
     # independent rollback scopes by design.
     class Producer
       class << self
-        def for_task(project_root:, task:, attempt_store: Hive::Attempts::Store.runtime,
+        def for_task(project_root:, task:, attempts: Hive::Attempts::API.new,
                      git_ops: Hive::GitOps.new(project_root), config: nil)
-          activity = Hive::TaskActivity.for_task(task, attempt_store: attempt_store)
+          activity = Hive::TaskActivity.for_task(task, attempt_store: attempts)
           raise Unauthorized, "proposal command requires a durable task attempt" unless activity
 
-          attempt = attempt_store.fetch(activity.binding.fetch("attempt_id"))
+          attempt = attempts.fetch(activity.binding.fetch("attempt_id"))
           raise Unauthorized, "proposal command has no admitted attempt" unless attempt
 
           new(
@@ -99,8 +99,9 @@ module Hive
 
       def produce!(event)
         commit_source_receipt!(event)
-        receipt_path = relative_state_path(
-          @source_store.paths_for_admission(event.source_event_id).first
+        receipt_path = Proposals.hive_state_relative_path(
+          @git_ops, @source_store.paths_for_admission(event.source_event_id).first,
+          label: "proposal producer path"
         )
         source_commit = @git_ops.hive_state_commit_for_path(receipt_path)
         unless source_commit && committed_receipt_matches?(event, source_commit, receipt_path)
@@ -115,8 +116,12 @@ module Hive
 
       def commit_source_receipt!(event)
         paths = @source_store.paths_for_admission(event.source_event_id)
-        relative_paths = paths.map { |path| relative_state_path(path) }
-        task_relative = relative_state_path(@activity.task_folder)
+        relative_paths = paths.map do |path|
+          Proposals.hive_state_relative_path(@git_ops, path, label: "proposal producer path")
+        end
+        task_relative = Proposals.hive_state_relative_path(
+          @git_ops, @activity.task_folder, label: "proposal producer path"
+        )
         snapshot = nil
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
           snapshot = Ingestor::PathSnapshot.capture(snapshot_roots(paths))
@@ -133,7 +138,7 @@ module Hive
             )
           rescue StandardError
             snapshot.restore!
-            unstage!([ task_relative, *relative_paths ])
+            Proposals.unstage_hive_state_paths(@git_ops, [ task_relative, *relative_paths ])
             raise
           end
         end
@@ -201,19 +206,6 @@ module Hive
           Hive::TaskProjection::Store::CHECKPOINT_BASENAME
         ].map { |basename| File.join(@activity.task_folder, basename) }
         (source_paths + projection_files).uniq
-      end
-
-      def relative_state_path(path)
-        prefix = "#{File.expand_path(@git_ops.hive_state_path)}/"
-        absolute = File.expand_path(path)
-        raise Error, "proposal producer path is outside hive state" unless absolute.start_with?(prefix)
-        absolute.delete_prefix(prefix)
-      end
-
-      def unstage!(paths)
-        @git_ops.run_git!("-C", @git_ops.hive_state_path, "reset", "-q", "HEAD", "--", *paths)
-      rescue Hive::GitError
-        nil
       end
     end
   end

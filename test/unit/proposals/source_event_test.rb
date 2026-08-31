@@ -57,6 +57,65 @@ class ProposalSourceEventTest < Minitest::Test
     end
   end
 
+  def test_binding_artifact_and_payload_validation_is_closed
+    binding = Marshal.load(Marshal.dump(proposal_binding))
+    binding["schema_version"] = 2
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_proposal_binding(binding)
+    end
+
+    subject = proposal_binding.fetch("subject").merge("kind" => "prompt")
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_subject(subject)
+    end
+
+    invalid_task = task_binding.merge("task_generation" => [])
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_task_binding(invalid_task)
+    end
+
+    evaluator = Marshal.load(Marshal.dump(proposal_binding.fetch("evaluator")))
+    evaluator.dig("admission")["workflows"] = %w[coding coding]
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_evaluator(evaluator)
+    end
+
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_payload(
+        "future_event", {}, policy: proposal_binding.fetch("policy")
+      )
+    end
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_artifact(
+        { "reference" => "artifact.json", "digest" => "d" * 64,
+          "bytes" => -1, "media_type" => "application/json" },
+        policy: proposal_binding.fetch("policy")
+      )
+    end
+  end
+
+  def test_replay_rejects_open_envelopes_subject_mismatch_and_lost_evaluator_binding
+    submission = submission_event.to_h
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.new(submission.merge("extra" => true))
+    end
+
+    mismatch = Marshal.load(Marshal.dump(submission))
+    mismatch.dig("subject")["proposal_id"] = "prp-00000000-0000-4000-8000-000000000009"
+    assert_raises(Hive::Proposals::InvalidRecord) { Hive::Proposals::SourceEvent.new(mismatch) }
+
+    evaluation = Hive::Proposals::SourceEvent.evaluation(
+      source_event_id: source_id("e"), proposal_id: proposal_id,
+      proposal_binding: proposal_binding, task_binding: task_binding,
+      method: method_fact, result: result_fact, rationale: "pass",
+      evidence: [ evidence ], links: [], created_at: "2026-08-30T12:00:00Z"
+    ).to_h
+    evaluation["evaluator"] = nil
+    assert_raises(Hive::Proposals::Unauthorized) do
+      Hive::Proposals::SourceEvent.new(evaluation)
+    end
+  end
+
   private
 
   def source_id(character) = "pse-#{character * 64}"
@@ -106,5 +165,14 @@ class ProposalSourceEventTest < Minitest::Test
 
   def result_fact
     { "outcome" => "pass", "metrics" => { "recall" => 0.91 } }
+  end
+
+  def submission_event
+    Hive::Proposals::SourceEvent.submission(
+      source_event_id: source_id("d"), proposal_id: proposal_id,
+      proposal_binding: proposal_binding, task_binding: task_binding,
+      proposed_change: "Change review", motivation: "Improve recall",
+      evidence: [ evidence ], created_at: "2026-08-30T12:00:00Z"
+    )
   end
 end

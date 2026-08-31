@@ -89,6 +89,33 @@ class ProposalRecordTest < Minitest::Test
     assert_equal record.to_h, Hive::Proposals::Record.new(record.to_h).to_h
   end
 
+  def test_replay_rejects_invalid_subject_and_persisted_evidence_shapes
+    canonical = Hive::Proposals::Record.build(**build_attributes).to_h
+
+    invalid = Marshal.load(Marshal.dump(canonical))
+    invalid["subject"]["kind"] = "prompt"
+    assert_raises(Hive::Proposals::InvalidRecord) { Hive::Proposals::Record.new(invalid) }
+
+    invalid = Marshal.load(Marshal.dump(canonical))
+    invalid["evidence"] = []
+    assert_raises(Hive::Proposals::InvalidRecord) { Hive::Proposals::Record.new(invalid) }
+
+    {
+      "bytes" => -1,
+      "visibility" => "public",
+      "retention" => { "policy" => "project", "enforcement" => "delete" }
+    }.each do |field, value|
+      invalid = Marshal.load(Marshal.dump(canonical))
+      invalid["evidence"][0][field] = value
+      assert_raises(Hive::Proposals::InvalidRecord) { Hive::Proposals::Record.new(invalid) }
+    end
+
+    invalid = Marshal.load(Marshal.dump(canonical))
+    invalid["evidence"][0]["visibility"] = "private"
+    invalid["evidence"][0]["summary"] = "must remain digest-only"
+    assert_raises(Hive::Proposals::InvalidRecord) { Hive::Proposals::Record.new(invalid) }
+  end
+
   private
 
   def build_attributes

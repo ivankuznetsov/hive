@@ -74,6 +74,24 @@ module Hive
     def canonical(value) = Hive::CanonicalJSON.generate(value)
     def digest(value) = Hive::CanonicalJSON.digest(value)
 
+    def hive_state_relative_path(git_ops, path, label: "proposal path")
+      prefix = "#{File.expand_path(git_ops.hive_state_path)}/"
+      absolute = File.expand_path(path)
+      raise Error, "#{label} is outside hive state" unless absolute.start_with?(prefix)
+
+      absolute.delete_prefix(prefix)
+    end
+
+    def unstage_hive_state_paths(git_ops, paths)
+      paths = Array(paths)
+      return if paths.empty?
+
+      git_ops.run_git!("-C", git_ops.hive_state_path, "reset", "-q", "HEAD", "--", *paths)
+      nil
+    rescue Hive::GitError
+      nil
+    end
+
     def deep_copy_freeze(value)
       copy = JSON.parse(JSON.generate(value))
       deep_freeze(copy)

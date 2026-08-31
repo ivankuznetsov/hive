@@ -49,6 +49,7 @@ module Hive
         end.first(max_items)
         truncated = ranked.count { |_rank, projection| projection.terminal? } > candidates.length
         items = []
+        lines = []
         bytes = HEADER.bytesize
         candidates.each do |_rank, item|
           line = "- #{JSON.generate(item)}\n"
@@ -57,9 +58,10 @@ module Hive
             next
           end
           items << item
+          lines << line
           bytes += line.bytesize
         end
-        text = items.empty? ? "" : HEADER + items.map { |item| "- #{JSON.generate(item)}\n" }.join
+        text = lines.empty? ? "" : HEADER + lines.join
         ids = items.map { |item| item.fetch("proposal_id") }
         digest = Proposals.digest(
           "items" => items, "configured_budget" => configured_budget,
@@ -94,8 +96,6 @@ module Hive
           "proposal_id" => raw["proposal_id"] && Proposals.proposal_id!(raw["proposal_id"])
         }
         subject
-      rescue KeyError
-        nil
       end
 
       def ranked_candidates(projections, subject)

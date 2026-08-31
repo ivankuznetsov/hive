@@ -1,0 +1,27 @@
+{
+  "method": {
+    "kind": "benchmark",
+    "label": "held-out-review-recall",
+    "reference": "benchmarks/review-recall.json"
+  },
+  "result": {
+    "outcome": "pass",
+    "metrics": {
+      "recall": 0.91,
+      "protected_regression": false
+    }
+  },
+  "rationale": "Recall improved and the protected set remained stable.",
+  "evidence": [
+    {
+      "label": "benchmark-result",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 128,
+      "media_type": "application/json",
+      "visibility": "restricted",
+      "retention": "task"
+    }
+  ],
+  "links": [],
+  "idempotency_key": "accepted-review-prompt-evaluation"
+}

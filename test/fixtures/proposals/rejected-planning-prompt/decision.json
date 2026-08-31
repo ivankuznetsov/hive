@@ -1,0 +1,7 @@
+{
+  "outcome": "rejected",
+  "rationale_category": "evaluated",
+  "rationale": "The cost regression outweighs the target-score improvement.",
+  "links": [],
+  "idempotency_key": "rejected-planning-prompt-decision"
+}

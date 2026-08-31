@@ -7,9 +7,10 @@ class ProposalDecisionServiceTest < Minitest::Test
   class FakeGitOps
     attr_reader :hive_state_path, :commits
 
-    def initialize(hive_state_path, fail_commit: false)
+    def initialize(hive_state_path, fail_commit: false, fail_reset: false)
       @hive_state_path = hive_state_path
       @fail_commit = fail_commit
+      @fail_reset = fail_reset
       @commits = []
     end
 
@@ -19,7 +20,10 @@ class ProposalDecisionServiceTest < Minitest::Test
       :committed
     end
 
-    def run_git!(*_arguments) = true
+    def run_git!(*_arguments)
+      raise Hive::GitError, "simulated reset failure" if @fail_reset
+      true
+    end
   end
 
   def setup
@@ -150,6 +154,13 @@ class ProposalDecisionServiceTest < Minitest::Test
     )
     assert_equal "superseded", supersession.projection.status
     assert_equal proposal_id, @store.projection(successor).supersedes.first
+    replay = @service.supersede(
+      proposal_id:, successor_id: successor,
+      expected_head: { "version" => 0,
+                       "digest" => Hive::Proposals::Projection.empty_head_digest(proposal_id) },
+      **authority_args("supersede-v2")
+    )
+    assert replay.noop?
 
     accepted = "prp-00000000-0000-4000-8000-000000000003"
     create_record(accepted)
@@ -169,6 +180,98 @@ class ProposalDecisionServiceTest < Minitest::Test
     assert_equal "rolled_back", rollback.projection.status
     assert_equal "accepted", rollback.projection.decision.fetch("outcome")
     assert_equal "d" * 40, rollback.projection.rollback.dig("external_revert", "reference")
+    rollback_replay = @service.rollback(
+      proposal_id: accepted, reverted_revision: "v2", reason: "production regression",
+      external_revert: { "kind" => "commit", "reference" => "d" * 40 },
+      expected_head: rollback.event.data.fetch("observed_head"),
+      **authority_args("rollback-v2")
+    )
+    assert rollback_replay.noop?
+  end
+
+  def test_lifecycle_rejects_duplicate_evidence_missing_candidates_and_changed_idempotency
+    evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
+    head = @store.projection(proposal_id).lifecycle_head
+    assert_raises(Hive::Proposals::StaleObservation) do
+      decide(
+        outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id, evaluation.event_id ],
+        expected_head: head, idempotency_key: "duplicate-evidence"
+      )
+    end
+
+    decide(
+      outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+      expected_head: head, idempotency_key: "immutable-decision"
+    )
+    assert_raises(Hive::Proposals::Conflict) do
+      @service.decide(
+        proposal_id:, outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+        rationale_category: "evaluated", rationale: "changed rationale", links: [],
+        expected_head: head, **authority_args("immutable-decision")
+      )
+    end
+
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      @service.decide(
+        proposal_id: "prp-00000000-0000-4000-8000-000000000099", outcome: "rejected",
+        considered_evaluation_ids: [], rationale_category: "no_evaluation", rationale: "missing",
+        links: [], expected_head: head, **authority_args("missing-candidate")
+      )
+    end
+  end
+
+  def test_rollback_requires_acceptance_and_the_exact_accepted_revision
+    head = @store.projection(proposal_id).lifecycle_head
+    assert_raises(Hive::Proposals::Conflict) do
+      @service.rollback(
+        proposal_id:, reverted_revision: "v2", reason: "not accepted",
+        external_revert: { "kind" => "commit", "reference" => "d" * 40 },
+        expected_head: head, **authority_args("draft-rollback")
+      )
+    end
+
+    evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
+    @service.decide(
+      proposal_id:, outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+      rationale_category: "evaluated", rationale: "accepted", links: [],
+      expected_head: head, **authority_args("accept-for-wrong-revision")
+    )
+    assert_raises(Hive::Proposals::Conflict) do
+      @service.rollback(
+        proposal_id:, reverted_revision: "v3", reason: "wrong revision",
+        external_revert: { "kind" => "commit", "reference" => "d" * 40 },
+        expected_head: @store.projection(proposal_id).lifecycle_head,
+        **authority_args("wrong-revision")
+      )
+    end
+  end
+
+  def test_supersession_requires_matching_subjects_and_immutable_retry_data
+    mismatch = "prp-00000000-0000-4000-8000-000000000002"
+    create_record(mismatch, requested_supersedes: proposal_id, subject_ref: "agent-skills/planner")
+    assert_raises(Hive::Proposals::Conflict) do
+      @service.supersede(
+        proposal_id:, successor_id: mismatch,
+        expected_head: @store.projection(proposal_id).lifecycle_head,
+        **authority_args("mismatched-subject")
+      )
+    end
+
+    successor = "prp-00000000-0000-4000-8000-000000000003"
+    other = "prp-00000000-0000-4000-8000-000000000004"
+    create_record(successor, requested_supersedes: proposal_id)
+    create_record(other, requested_supersedes: proposal_id)
+    head = @store.projection(proposal_id).lifecycle_head
+    @service.supersede(
+      proposal_id:, successor_id: successor, expected_head: head,
+      **authority_args("immutable-supersession")
+    )
+    assert_raises(Hive::Proposals::Conflict) do
+      @service.supersede(
+        proposal_id:, successor_id: other, expected_head: head,
+        **authority_args("immutable-supersession")
+      )
+    end
   end
 
   def test_evaluator_only_identity_cannot_change_lifecycle
@@ -249,7 +352,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     failing_evaluation = append_evaluation(failing_id, source: "h", outcome: "pass", metric: 0.9)
     failing = Hive::Proposals::DecisionService.new(
       store: @store, authority: @authority,
-      git_ops: FakeGitOps.new(@tmp, fail_commit: true),
+      git_ops: FakeGitOps.new(@tmp, fail_commit: true, fail_reset: true),
       clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
     )
     assert_raises(Hive::GitError) do
@@ -269,9 +372,9 @@ class ProposalDecisionServiceTest < Minitest::Test
 
   def proposal_id = "prp-00000000-0000-4000-8000-000000000001"
 
-  def create_record(id, requested_supersedes: nil)
+  def create_record(id, requested_supersedes: nil, subject_ref: "agent-skills/reviewer")
     @store.create_record!(
-      proposal_id: id, subject_kind: "skill", subject_ref: "agent-skills/reviewer",
+      proposal_id: id, subject_kind: "skill", subject_ref:,
       revision: "v2", proposed_change: "Change review", motivation: "Improve recall",
       evidence: [ evidence ], author: author,
       lineage: { "requested_supersedes" => requested_supersedes },

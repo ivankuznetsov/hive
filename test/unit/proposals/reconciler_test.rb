@@ -63,6 +63,56 @@ class ProposalReconcilerTest < Minitest::Test
     end
   end
 
+  def test_failed_quarantine_commit_restores_pending_state_and_tolerates_reset_failure
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      event = submission
+      source_store.admit!(event)
+      commit_admission(ops, source_store, event)
+      reconciler = reconciler(ops, source_store, store)
+      ops.define_singleton_method(:hive_commit) do |**_options|
+        raise Hive::GitError, "simulated quarantine commit failure"
+      end
+      ops.define_singleton_method(:run_git!) do |*_arguments|
+        raise Hive::GitError, "simulated reset failure"
+      end
+
+      assert_raises(Hive::GitError) do
+        reconciler.send(
+          :quarantine_source!, event.source_event_id,
+          Hive::Proposals::InvalidRecord.new("bad receipt")
+        )
+      end
+      assert_equal "pending", source_store.status(event.source_event_id).fetch("state")
+    end
+  end
+
+  def test_cleanup_restores_tracked_paths_and_removes_untracked_directories_idempotently
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      relative = "proposals/v1/records/tracked.txt"
+      path = File.join(ops.hive_state_path, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "committed\n")
+      ops.hive_commit(
+        stage_name: "proposals", slug: "fixture", action: "recorded tracked fixture",
+        pathspecs: [ relative ]
+      )
+      File.write(path, "dirty\n")
+      reconciler = reconciler(ops, source_store, store)
+
+      assert_equal 1, reconciler.send(:clean_uncommitted_state!)
+      assert_equal "committed\n", File.read(path)
+
+      directory = File.join(ops.hive_state_path, "proposals", "v1", "scratch")
+      FileUtils.mkdir_p(directory)
+      File.write(File.join(directory, "temporary"), "temporary")
+      reconciler.send(:remove_untracked!, "proposals/v1/scratch")
+      refute File.exist?(directory)
+      assert_nil reconciler.send(:remove_untracked!, "proposals/v1/missing")
+    end
+  end
+
   private
 
   def stores(dir)

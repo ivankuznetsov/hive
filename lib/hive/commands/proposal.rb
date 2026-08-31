@@ -171,7 +171,7 @@ module Hive
             raise Hive::Proposals::InvalidRecord,
                   "proposal refresh --compile-only requires --output-root and cannot use --check"
           end
-          result = Hive::Proposals::Compiler.compile_pinned(
+          result = Hive::Proposals::Compiler.compile_at_ref(
             git_ops: ops, source_ref:, output_root: @output_root
           )
           return render_refresh("compiled", result)
@@ -190,7 +190,7 @@ module Hive
         result = nil
         matches = nil
         Dir.mktmpdir("hive-proposal-refresh-check-", Dir.tmpdir) do |scratch|
-          result = Hive::Proposals::Compiler.compile_pinned(
+          result = Hive::Proposals::Compiler.compile_at_ref(
             git_ops: ops, source_ref:, output_root: scratch
           )
           matches = result.paths.all? do |generated|
@@ -228,10 +228,9 @@ module Hive
           raise Hive::Proposals::SourceUnavailable,
                 "proposal command requires an initialized hive/state worktree"
         end
-        Hive::Proposals::Reconciler.new(git_ops: ops).reconcile!
-        store = Hive::Proposals::Store.new(
-          root: File.join(ops.hive_state_path, "proposals", "v1")
-        )
+        proposal_root = File.join(ops.hive_state_path, "proposals", "v1")
+        Hive::Proposals::Reconciler.new(git_ops: ops).reconcile! if File.exist?(proposal_root)
+        store = Hive::Proposals::Store.new(root: proposal_root)
         [ ops, store, Hive::Proposals::Query.new(store:), config ]
       end
 

@@ -78,6 +78,69 @@ class ProposalProjectionTest < Minitest::Test
     end
   end
 
+  def test_rejects_cross_proposal_events_and_invalid_rollbacks
+    record = build_record
+    foreign = build_event(1, "evaluation", evaluation_data("pass", 0.9))
+    foreign_data = foreign.to_h.merge(
+      "proposal_id" => "prp-00000000-0000-4000-8000-000000000002"
+    )
+    foreign = Hive::Proposals::Event.new(foreign_data)
+    assert_raises(Hive::Proposals::InconsistentHistory) do
+      Hive::Proposals::Projection.new(record:, events: [ foreign ])
+    end
+
+    rejection = build_event(
+      1, "decision",
+      {
+        "outcome" => "rejected", "considered_evaluation_ids" => [],
+        "considered_evaluations" => [], "rationale_category" => "no_evaluation",
+        "rationale" => "Not worth evaluating", "authority" => authority, "links" => [],
+        "observed_head" => {
+          "version" => 0, "digest" => Hive::Proposals::Projection.empty_head_digest(record.proposal_id)
+        }
+      }
+    )
+    rollback = build_event(
+      2, "rollback",
+      {
+        "reverted_revision" => "v2", "reason" => "Regression",
+        "external_revert" => { "kind" => "commit", "reference" => "f" * 40 },
+        "authority" => authority, "observed_head" => { "version" => 1, "digest" => "d" * 64 }
+      }
+    )
+    assert_raises(Hive::Proposals::InconsistentHistory) do
+      Hive::Proposals::Projection.new(record:, events: [ rejection, rollback ])
+    end
+
+    evaluation = build_event(1, "evaluation", evaluation_data("pass", 0.9))
+    acceptance = build_event(
+      2, "decision",
+      {
+        "outcome" => "accepted", "considered_evaluation_ids" => [ evaluation.event_id ],
+        "considered_evaluations" => [
+          {
+            "evaluation_id" => evaluation.event_id, "evaluator_id" => "reviewer",
+            "method" => "recall", "outcome" => "pass", "result_digest" => "c" * 64
+          }
+        ],
+        "rationale_category" => "evaluated", "rationale" => "Passed",
+        "authority" => authority, "links" => [],
+        "observed_head" => { "version" => 0, "digest" => "d" * 64 }
+      }
+    )
+    wrong_revision = build_event(
+      3, "rollback",
+      {
+        "reverted_revision" => "v3", "reason" => "Regression",
+        "external_revert" => { "kind" => "commit", "reference" => "f" * 40 },
+        "authority" => authority, "observed_head" => { "version" => 2, "digest" => "e" * 64 }
+      }
+    )
+    assert_raises(Hive::Proposals::InconsistentHistory) do
+      Hive::Proposals::Projection.new(record:, events: [ evaluation, acceptance, wrong_revision ])
+    end
+  end
+
   private
 
   def build_record

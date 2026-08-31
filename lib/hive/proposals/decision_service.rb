@@ -93,9 +93,12 @@ module Hive
               provenance: lifecycle_provenance(provenance, authority, "supersede"),
               occurred_at: @clock.call, event_id: nil, policy: @policy
             )
-            updated = transaction.snapshot
             LifecycleResult.new(
-              applied: true, event:, projection: projection!(updated, proposal_id)
+              applied: true, event:,
+              projection: Projection.new(
+                record: projection.record, events: projection.events + [ event ],
+                supersedes: projection.supersedes
+              )
             )
           end
         end
@@ -242,12 +245,15 @@ module Hive
 
       def with_lifecycle_commit(proposal_id, action)
         runner = lambda do
-          snapshot = Ingestor::PathSnapshot.capture(
-            [ File.join(@store.events_root, proposal_id) ]
+          snapshot = Ingestor::ImmutableAppendSnapshot.capture(
+            File.join(@store.events_root, proposal_id)
           )
           result = yield
           if result.applied && @git_ops
-            path = relative_state_path(@store.path_for_event(result.event))
+            path = Proposals.hive_state_relative_path(
+              @git_ops, @store.path_for_event(result.event),
+              label: "proposal lifecycle path"
+            )
             begin
               @git_ops.hive_commit(
                 stage_name: "proposals", slug: proposal_id,
@@ -255,7 +261,7 @@ module Hive
               )
             rescue StandardError
               snapshot.restore!
-              unstage!([ path ])
+              Proposals.unstage_hive_state_paths(@git_ops, [ path ])
               raise
             end
           end
@@ -264,19 +270,6 @@ module Hive
         return runner.call unless @git_ops
 
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) { runner.call }
-      end
-
-      def relative_state_path(path)
-        prefix = "#{File.expand_path(@git_ops.hive_state_path)}/"
-        absolute = File.expand_path(path)
-        raise Error, "proposal lifecycle path is outside hive state" unless absolute.start_with?(prefix)
-        absolute.delete_prefix(prefix)
-      end
-
-      def unstage!(paths)
-        @git_ops.run_git!("-C", @git_ops.hive_state_path, "reset", "-q", "HEAD", "--", *paths)
-      rescue Hive::GitError
-        nil
       end
     end
   end

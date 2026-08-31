@@ -16,6 +16,7 @@ class ProposalQueryTest < Minitest::Test
     assert_equal [ @rejected ], result.proposals.map(&:proposal_id)
     assert_empty result.diagnostics
     assert_match(/\A[0-9a-f]{64}\z/, result.digest)
+    assert_equal [ @rejected ], result.to_h.fetch("proposals").map { |item| item.fetch("proposal_id") }
 
     filtered = @query.list(
       filters: { "status" => "rejected", "evaluator" => "benchmark-reviewer", "method" => "cost" },

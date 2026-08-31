@@ -29,6 +29,31 @@ class TaskActivityTest < Minitest::Test
     end
   end
 
+  def test_records_bounded_proposal_context_selection_provenance
+    with_activity do |activity, dir|
+      activity.record(
+        kind: "proposal_context_supplied",
+        operation_id: "proposal-context/attempt-1/selection",
+        reason: "proposal context selected",
+        source: "context_provenance",
+        payload: {
+          "configured_budget" => 2_048,
+          "effective_budget" => 1_024,
+          "selected_ids" => [ "prp-12345678-1234-1234-1234-123456789abc" ],
+          "selected_digest" => "a" * 64,
+          "truncated" => false
+        }
+      )
+
+      record = JSON.parse(File.read(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)))
+      assert_equal "proposal_context_supplied", record.dig("payload", "activity_kind")
+      assert_equal 1_024, record.dig("payload", "effective_budget")
+      assert_equal [ "prp-12345678-1234-1234-1234-123456789abc" ],
+                   record.dig("payload", "selected_ids")
+      assert_equal false, record.dig("payload", "truncated")
+    end
+  end
+
   def test_duplicate_operation_is_idempotent_and_conflicting_duplicate_is_rejected
     with_activity do |activity, dir|
       attributes = {

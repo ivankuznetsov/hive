@@ -33,8 +33,13 @@ module Hive
           @store = store
         end
 
-        def snapshot = @store.send(:load_unlocked)
-        def append_event!(**attributes) = @store.send(:append_event_unlocked!, **attributes)
+        def snapshot = @snapshot ||= @store.send(:load_unlocked)
+
+        def append_event!(**attributes)
+          event = @store.send(:append_event_unlocked!, snapshot:, **attributes)
+          @snapshot = nil
+          event
+        end
       end
 
       def initialize(root:, id_generator: -> { SecureRandom.uuid })
@@ -70,13 +75,14 @@ module Hive
 
       def fetch_record(proposal_id)
         id = Proposals.proposal_id!(proposal_id)
-        bytes = safe_read(record_path(id), logical_path: "records/#{id}.json")
+        path = record_path(id)
+        return nil unless path_exists?(path)
+
+        bytes = safe_read(path, logical_path: "records/#{id}.json")
         return nil if bytes.nil?
         raise InvalidRecord, "proposal record is quarantined" if bytes.is_a?(Diagnostic)
 
         parse_record(bytes, expected_id: id)
-      rescue Errno::ENOENT
-        nil
       end
 
       def append_event!(proposal_id:, type:, data:, source_event_id:, provenance:,
@@ -96,7 +102,7 @@ module Hive
 
       def fetch_event(event_id)
         id = Proposals.event_id!(event_id)
-        load.events.each_value.flatten.find { |event| event.event_id == id }
+        load.events.values.flatten.find { |event| event.event_id == id }
       end
 
       def load
@@ -119,9 +125,9 @@ module Hive
       private
 
       def append_event_unlocked!(proposal_id:, type:, data:, source_event_id:, provenance:,
-                                 occurred_at:, event_id:, policy:)
+                                 occurred_at:, event_id:, policy:, snapshot: nil)
         raise InvalidEvent, "proposal does not exist" unless fetch_record_unlocked(proposal_id)
-        existing = find_by_source_event_unlocked(source_event_id)
+        existing = find_by_source_event_unlocked(source_event_id, snapshot:)
         if existing
           unless existing.is_a?(Event) && existing.proposal_id == proposal_id && existing.type == type.to_s
             raise Conflict, "proposal source event already belongs to another mutation"
@@ -197,7 +203,6 @@ module Hive
       def load_records(diagnostics)
         return [] unless safe_directory?(records_root)
 
-        seen = {}
         children(records_root).filter_map do |basename|
           logical_path = "records/#{basename}"
           path = File.join(records_root, basename)
@@ -211,11 +216,6 @@ module Hive
             next
           end
           record = parse_record(bytes, expected_id: File.basename(basename, ".json"))
-          if seen.key?(record.proposal_id)
-            diagnostics << diagnostic("duplicate_record", path, bytes:, logical_path:, proposal_id: record.proposal_id)
-            next
-          end
-          seen[record.proposal_id] = true
           record
         rescue JSON::ParserError
           diagnostics << diagnostic("invalid_json", path, bytes:, logical_path:)
@@ -347,9 +347,9 @@ module Hive
         cycles.uniq.sort
       end
 
-      def find_by_source_event_unlocked(source_event_id)
+      def find_by_source_event_unlocked(source_event_id, snapshot: nil)
         id = Proposals.source_event_id!(source_event_id)
-        snapshot = load_unlocked
+        snapshot ||= load_unlocked
         snapshot.records.find { |record| record.source_event_id == id } ||
           snapshot.events.values.flatten.find { |event| event.source_event_id == id }
       end

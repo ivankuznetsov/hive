@@ -55,11 +55,19 @@ module Hive
         result = nil
         staged_paths = []
         snapshot = nil
+        event_snapshot = nil
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
           snapshot = PathSnapshot.capture(snapshot_roots(source))
+          event_snapshot = ImmutableAppendSnapshot.capture(
+            File.join(@store.events_root, source.proposal_id)
+          )
           begin
             result, paths = mutate!(source, source_commit:)
-            staged_paths = paths.map { |path| relative_state_path(path) }
+            staged_paths = paths.map do |path|
+              Proposals.hive_state_relative_path(
+                @git_ops, path, label: "proposal transaction path"
+              )
+            end
             @git_ops.hive_commit(
               stage_name: source.to_h.dig("binding", "stage"),
               slug: source.to_h.dig("binding", "task_slug"),
@@ -68,7 +76,8 @@ module Hive
             )
           rescue StandardError
             snapshot.restore!
-            unstage!(staged_paths)
+            event_snapshot.restore!
+            Proposals.unstage_hive_state_paths(@git_ops, staged_paths)
             raise
           end
         end
@@ -148,23 +157,60 @@ module Hive
       def snapshot_roots(source)
         [
           *@store.paths_for_record(source.proposal_id),
-          File.join(@store.events_root, source.proposal_id),
           *@source_store.paths_for_terminal(source.source_event_id, state: "consumed")
         ].uniq
       end
 
-      def relative_state_path(path)
-        prefix = "#{File.expand_path(@git_ops.hive_state_path)}/"
-        absolute = File.expand_path(path)
-        raise Error, "proposal transaction path is outside hive state" unless absolute.start_with?(prefix)
-        absolute.delete_prefix(prefix)
-      end
+      # Proposal event directories are append-only. Rollback therefore needs
+      # only the original directory membership, not copies of every retained
+      # event byte. Existing entries are never rewritten or removed here.
+      class ImmutableAppendSnapshot
+        def self.capture(path)
+          new(path).tap(&:capture!)
+        end
 
-      def unstage!(paths)
-        return if paths.empty?
-        @git_ops.run_git!("-C", @git_ops.hive_state_path, "reset", "-q", "HEAD", "--", *paths)
-      rescue Hive::GitError
-        nil
+        def initialize(path)
+          @path = File.expand_path(path)
+          @existed = false
+          @children = []
+        end
+
+        def capture!
+          stat = File.lstat(@path)
+          raise Error, "proposal append path is not a directory" unless stat.directory? && !stat.symlink?
+
+          @existed = true
+          @children = Dir.children(@path).sort
+          self
+        rescue Errno::ENOENT
+          self
+        end
+
+        def restore!
+          unless @existed
+            remove(@path)
+            return
+          end
+
+          Dir.children(@path).each do |child|
+            remove(File.join(@path, child)) unless @children.include?(child)
+          end
+        rescue Errno::ENOENT
+          nil
+        end
+
+        private
+
+        def remove(path)
+          stat = File.lstat(path)
+          if stat.directory? && !stat.symlink?
+            FileUtils.rm_rf(path)
+          else
+            File.unlink(path)
+          end
+        rescue Errno::ENOENT
+          nil
+        end
       end
 
       class PathSnapshot

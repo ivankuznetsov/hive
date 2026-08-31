@@ -351,6 +351,16 @@ class ContextProvenanceTest < Minitest::Test
     end
   end
 
+  def test_proposal_context_fallbacks_are_bounded_and_advisory
+    selection = Hive::ContextProvenance.unavailable_proposal_selection("not-an-integer", "invalid")
+    assert_equal 0, selection.effective_budget
+    assert_equal "invalid", selection.reason
+
+    assert_nil Hive::ContextProvenance.record_proposal_context_activity(
+      Object.new, Object.new, selection
+    )
+  end
+
   private
 
   def with_fixture(wiki: true)

@@ -31,6 +31,18 @@ class ProposalEvaluatorAuthorityTest < Minitest::Test
     end
   end
 
+  def test_rejects_unbounded_or_duplicate_evaluator_admission_lists
+    malformed = config
+    malformed["evaluators"]["benchmark-reviewer"]["workflows"] = [ "coding", "coding" ]
+
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::EvaluatorAuthority.new(malformed).bind!(
+        identity: "benchmark-reviewer", workflow: "coding",
+        stage: "4-execute", agent_profile: "codex"
+      )
+    end
+  end
+
   private
 
   def config

@@ -74,14 +74,18 @@ module Hive
             reason: "committed proposal source failed permanent validation"
           )
           paths = @source_store.paths_for_terminal(source_event_id, state: "quarantine")
-                       .map { |path| relative_state_path(path) }
+                       .map do |path|
+                         Proposals.hive_state_relative_path(
+                           @git_ops, path, label: "proposal reconciliation path"
+                         )
+                       end
           @git_ops.hive_commit(
             stage_name: "proposal-reconcile", slug: source_event_id,
             action: "quarantined proposal source", pathspecs: paths
           )
         rescue StandardError
           snapshot.restore!
-          unstage!(paths || [])
+          Proposals.unstage_hive_state_paths(@git_ops, paths || [])
           raise
         end
       end
@@ -131,20 +135,6 @@ module Hive
       def safe_proposal_path?(path)
         path.is_a?(String) && path.start_with?("proposals/v1/") &&
           !path.split("/").include?("..")
-      end
-
-      def relative_state_path(path)
-        prefix = "#{File.expand_path(@git_ops.hive_state_path)}/"
-        absolute = File.expand_path(path)
-        raise Error, "proposal reconciliation path is outside hive state" unless absolute.start_with?(prefix)
-        absolute.delete_prefix(prefix)
-      end
-
-      def unstage!(paths)
-        return if paths.empty?
-        @git_ops.run_git!("-C", @git_ops.hive_state_path, "reset", "-q", "HEAD", "--", *paths)
-      rescue Hive::GitError
-        nil
       end
     end
   end

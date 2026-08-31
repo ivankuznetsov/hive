@@ -69,12 +69,53 @@ class ProposalCompilerTest < Minitest::Test
         pathspecs: [ "proposals/v1/records/#{rejected_id}.json" ]
       )
 
-      result = Hive::Proposals::Compiler.compile_pinned(
+      result = Hive::Proposals::Compiler.compile_at_ref(
         git_ops: ops, source_ref: pinned, output_root: File.join(project, "compiled")
       )
 
       assert_equal pinned, result.source_commit
       assert_equal [ draft_id ], result.index.fetch("proposals").map { |row| row.fetch("proposal_id") }
+    end
+  end
+
+  def test_rejects_unavailable_pins_and_output_roots_that_cannot_contain_the_pair
+    compiler = Hive::Proposals::Compiler.new(store: @store)
+    assert_raises(Hive::Proposals::Error) do
+      compiler.send(:write_pair, "/", json: "{}", markdown: "# Proposals\n")
+    end
+
+    with_tmp_git_repo do |project|
+      ops = Hive::GitOps.new(project)
+      ops.hive_state_init
+      assert_raises(Hive::Proposals::Error) do
+        Hive::Proposals::Compiler.compile_at_ref(
+          git_ops: ops, source_ref: "missing-ref", output_root: File.join(project, "compiled")
+        )
+      end
+    end
+  end
+
+  def test_pinned_compilation_materializes_symlinks_for_logical_quarantine
+    with_tmp_git_repo do |project|
+      ops = Hive::GitOps.new(project)
+      ops.hive_state_init
+      relative = "proposals/v1/records/#{draft_id}.json"
+      path = File.join(ops.hive_state_path, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(File.join(File.dirname(path), "missing-record.json"), "target")
+      File.symlink("missing-record.json", path)
+      ops.hive_commit(
+        stage_name: "proposals", slug: "fixture", action: "recorded malformed candidate",
+        pathspecs: [ relative ]
+      )
+
+      result = Hive::Proposals::Compiler.compile_at_ref(
+        git_ops: ops, source_ref: ops.hive_state_head_sha,
+        output_root: File.join(project, "compiled")
+      )
+
+      assert_equal 0, result.projection_count
+      assert_equal [ "symlink" ], result.index.fetch("diagnostics").map { |item| item.fetch("code") }
     end
   end
 

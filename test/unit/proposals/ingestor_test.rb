@@ -4,6 +4,22 @@ require "hive/proposals/ingestor"
 class ProposalIngestorTest < Minitest::Test
   include HiveTestHelper
 
+  class FailingGitOps
+    attr_reader :hive_state_path
+
+    def initialize(hive_state_path)
+      @hive_state_path = hive_state_path
+    end
+
+    def hive_commit(**)
+      raise Hive::GitError, "simulated canonical commit failure"
+    end
+
+    def run_git!(*_arguments)
+      raise Hive::GitError, "simulated reset failure"
+    end
+  end
+
   def test_ingests_a_submission_once_and_marks_the_source_consumed
     with_tmp_dir do |dir|
       source_store, store, ingestor = stores(dir)
@@ -41,6 +57,141 @@ class ProposalIngestorTest < Minitest::Test
       assert_equal 1, projection.evaluations.length
       assert_equal "benchmark-reviewer", projection.evaluations.first.dig("evaluator", "id")
       assert_equal "b" * 40, projection.evaluations.first.dig("provenance", "source_commit")
+    end
+  end
+
+  def test_terminal_quarantine_and_unknown_source_kinds_fail_closed
+    with_tmp_dir do |dir|
+      source_store, store, ingestor = stores(dir)
+      source_store.admit!(submission)
+      source_store.quarantine!(submission.source_event_id, code: "invalid", reason: "invalid source")
+
+      assert_raises(Hive::Proposals::QuarantinedSource) do
+        ingestor.ingest!(submission.source_event_id, source_commit: "a" * 40)
+      end
+
+      unsupported = Struct.new(:kind).new("future_kind")
+      assert_raises(Hive::Proposals::InvalidRecord) do
+        ingestor.send(:mutate!, unsupported, source_commit: "a" * 40)
+      end
+      assert_nil store.projection(proposal_id)
+    end
+  end
+
+  def test_failed_canonical_commit_restores_record_status_and_staging
+    with_tmp_dir do |dir|
+      root = File.join(dir, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
+      source_store.admit!(submission)
+      ingestor = Hive::Proposals::Ingestor.new(
+        source_store:, store:, git_ops: FailingGitOps.new(dir)
+      )
+
+      assert_raises(Hive::GitError) do
+        ingestor.ingest!(submission.source_event_id, source_commit: "a" * 40)
+      end
+      assert_nil store.projection(proposal_id)
+      assert_equal "pending", source_store.status(submission.source_event_id).fetch("state")
+    end
+  end
+
+  def test_evaluation_subject_must_match_the_immutable_candidate
+    with_tmp_dir do |dir|
+      source_store, store, ingestor = stores(dir)
+      source_store.admit!(submission)
+      ingestor.ingest!(submission.source_event_id, source_commit: "a" * 40)
+      binding = Marshal.load(Marshal.dump(proposal_binding(evaluator: evaluator)))
+      binding.dig("subject")["reference"] = "agent-skills/planner"
+      mismatched = Hive::Proposals::SourceEvent.evaluation(
+        source_event_id: "pse-#{'c' * 64}", proposal_id: proposal_id,
+        proposal_binding: binding, task_binding: task_binding,
+        method: { "kind" => "benchmark", "label" => "held-out recall" },
+        result: { "outcome" => "pass", "metrics" => { "recall" => 0.91 } },
+        rationale: "No protected regression", evidence: [ evidence ], links: [],
+        created_at: "2026-08-30T12:05:00Z"
+      )
+      source_store.admit!(mismatched)
+
+      assert_raises(Hive::Proposals::Conflict) do
+        ingestor.ingest!(mismatched.source_event_id, source_commit: "b" * 40)
+      end
+      assert_equal "pending", source_store.status(mismatched.source_event_id).fetch("state")
+    end
+  end
+
+  def test_path_snapshot_restores_symlinks_exactly
+    with_tmp_dir do |dir|
+      path = File.join(dir, "receipt")
+      File.symlink("target.json", path)
+      snapshot = Hive::Proposals::Ingestor::PathSnapshot.capture([ path ])
+      File.unlink(path)
+      File.write(path, "replacement")
+
+      snapshot.restore!
+
+      assert File.symlink?(path)
+      assert_equal "target.json", File.readlink(path)
+    end
+  end
+
+  def test_immutable_append_snapshot_removes_only_new_event_entries
+    with_tmp_dir do |dir|
+      event_dir = File.join(dir, "events", proposal_id)
+      FileUtils.mkdir_p(event_dir)
+      existing = File.join(event_dir, "1-existing.json")
+      File.write(existing, "immutable")
+      snapshot = Hive::Proposals::Ingestor::ImmutableAppendSnapshot.capture(event_dir)
+
+      File.write(File.join(event_dir, "2-new.json"), "new")
+      snapshot.restore!
+
+      assert_equal "immutable", File.read(existing)
+      refute File.exist?(File.join(event_dir, "2-new.json"))
+
+      absent_dir = File.join(dir, "events", "new-proposal")
+      absent = Hive::Proposals::Ingestor::ImmutableAppendSnapshot.capture(absent_dir)
+      FileUtils.mkdir_p(absent_dir)
+      File.write(File.join(absent_dir, "1-new.json"), "new")
+      absent.restore!
+      refute File.exist?(absent_dir)
+    end
+  end
+
+  def test_immutable_append_snapshot_rejects_non_directories_and_tolerates_missing_restore
+    with_tmp_dir do |dir|
+      path = File.join(dir, "event-path")
+      File.write(path, "not a directory")
+      assert_raises(Hive::Proposals::Error) do
+        Hive::Proposals::Ingestor::ImmutableAppendSnapshot.capture(path)
+      end
+
+      File.unlink(path)
+      snapshot = Hive::Proposals::Ingestor::ImmutableAppendSnapshot.capture(path)
+      assert_nil snapshot.restore!
+
+      FileUtils.mkdir_p(path)
+      existing = Hive::Proposals::Ingestor::ImmutableAppendSnapshot.capture(path)
+      FileUtils.rm_rf(path)
+      assert_nil existing.restore!
+    end
+  end
+
+  def test_path_snapshot_restores_directory_trees
+    with_tmp_dir do |dir|
+      root = File.join(dir, "state")
+      nested = File.join(root, "nested")
+      FileUtils.mkdir_p(nested)
+      File.write(File.join(nested, "record.json"), "original")
+      snapshot = Hive::Proposals::Ingestor::PathSnapshot.capture([ root ])
+
+      FileUtils.rm_rf(root)
+      FileUtils.mkdir_p(root)
+      File.write(File.join(root, "replacement.json"), "replacement")
+      snapshot.restore!
+
+      assert_equal "original", File.read(File.join(nested, "record.json"))
+      refute File.exist?(File.join(root, "replacement.json"))
     end
   end
 

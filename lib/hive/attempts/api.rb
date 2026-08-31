@@ -69,6 +69,18 @@ module Hive
         )
       end
 
+      # Read-only durable bindings for consumers that must correlate a task
+      # projection with the exact attempt admitted by this subsystem. Keeping
+      # these reads on the facade prevents consumers from constructing the
+      # internal Repository while preserving TaskJournal's strict validation seam.
+      def fetch(attempt_id)
+        store.fetch(attempt_id)
+      end
+
+      def fetch_projection_binding(attempt_id)
+        store.fetch_projection_binding(attempt_id)
+      end
+
       private
 
       def foreground

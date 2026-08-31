@@ -15,7 +15,7 @@ module Hive
       MARKDOWN_PATH = "wiki/proposals.md".freeze
       PINNED_PREFIXES = %w[proposals/v1/records/ proposals/v1/events/].freeze
 
-      def self.compile_pinned(git_ops:, source_ref:, output_root:)
+      def self.compile_at_ref(git_ops:, source_ref:, output_root:)
         PinnedSource.new(git_ops:, source_ref:).with_store do |store, source_commit|
           new(store:).compile(output_root:, source_commit:)
         end

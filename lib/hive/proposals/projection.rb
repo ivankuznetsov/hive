@@ -89,11 +89,7 @@ module Hive
             raise InconsistentHistory, "proposal history contains multiple #{type} events"
           end
         end
-        decisions = events.select { |event| event.type == "decision" }
-        if decisions.length > 1
-          raise InconsistentHistory, "proposal history contains multiple decisions"
-        end
-        decision_event = decisions.first
+        decision_event = events.find { |event| event.type == "decision" }
         if decision_event
           known = events.select { |event| event.type == "evaluation" && event.version < decision_event.version }
                         .to_h { |event| [ event.event_id, event ] }

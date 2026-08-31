@@ -60,6 +60,10 @@ class ProposalContextSelectorTest < Minitest::Test
       context: malformed, max_items: 2, max_bytes: 100, remaining_bytes: 100
     ).reason
 
+    invalid = context("not-a-proposal-id")
+    selection = selector.select(context: invalid, max_items: 2, max_bytes: 100, remaining_bytes: 100)
+    assert_equal "invalid_binding", selection.reason
+
     stale = context(proposal_id(99))
     result = selector.select(context: stale, max_items: 2, max_bytes: 100, remaining_bytes: 100)
     assert result.empty?

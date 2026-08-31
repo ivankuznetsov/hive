@@ -290,6 +290,23 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_state_commit_queries_and_additive_staging_reject_ambiguous_paths
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+
+      assert_nil ops.hive_state_commit_for_path("proposals/v1/missing.json")
+      assert_raises(ArgumentError) do
+        ops.hive_commit(
+          stage_name: "proposals", slug: "fixture", action: "ambiguous",
+          pathspecs: [ "proposals/v1/records" ],
+          additional_pathspecs: [ "proposals/v1/inbox/receipt.json" ]
+        )
+      end
+      assert_raises(Hive::GitError) { ops.hive_state_commit_for_path("../outside") }
+    end
+  end
+
   def test_hive_commit_serializes_staging_callback_and_commit
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

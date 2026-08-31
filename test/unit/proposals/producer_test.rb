@@ -47,6 +47,7 @@ class ProposalProducerTest < Minitest::Test
       assert_equal result, replay
       assert_equal proposal_id, result.proposal_id
       assert_equal "record", result.ingestion.kind
+      assert_equal proposal_id, result.to_h.fetch("proposal_id")
       assert_equal 1, activity.records.length
 
       log = run!("git", "-C", ops.hive_state_path, "log", "--format=%H%x09%s")
@@ -75,6 +76,9 @@ class ProposalProducerTest < Minitest::Test
         options.fetch(:before_stage).call
         raise Hive::GitError, "simulated source commit failure"
       end
+      ops.define_singleton_method(:run_git!) do |*_arguments|
+        raise Hive::GitError, "simulated reset failure"
+      end
 
       assert_raises(Hive::GitError) do
         producer.submit(
@@ -88,6 +92,37 @@ class ProposalProducerTest < Minitest::Test
       refute File.exist?(
         File.join(ops.hive_state_path, "proposals", "v1", "inbox", "pse-#{'b' * 64}.json")
       )
+    end
+  end
+
+  def test_requires_the_committed_receipt_to_match_before_ingestion
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      activity = activity_for(ops)
+      producer = producer_for(ops, activity: activity)
+      ops.define_singleton_method(:hive_state_commit_for_path) { |_path| nil }
+
+      assert_raises(Hive::Proposals::SourceUnavailable) do
+        producer.submit(
+          proposed_change: "Change review", motivation: "Improve recall",
+          evidence: [ evidence ], source_event_id: "pse-#{'c' * 64}"
+        )
+      end
+    end
+  end
+
+  def test_accepts_the_durable_binding_from_a_hash_backed_attempt
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      producer = Hive::Proposals::Producer.new(
+        project_root: ops.project_root, git_ops: ops, activity: activity_for(ops),
+        attempt: { "subject" => { "proposal" => proposal_binding } },
+        proposal_id_generator: -> { proposal_id }
+      )
+
+      assert_instance_of Hive::Proposals::Producer, producer
     end
   end
 

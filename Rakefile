@@ -272,7 +272,7 @@ namespace :coverage do
   end
 end
 
-# Smoke suite — opt-in, runs against real agent CLIs and tmp homes/repos.
+# Smoke suite — opt-in, runs against real agent CLIs and tmp Hive homes/repos.
 # Some Claude cases cost roughly $0.25 per invocation. Excluded from the
 # default suite so CI without authenticated agent binaries does not run it.
 #
@@ -280,13 +280,10 @@ end
 #
 # Per project CLAUDE.md (Ivan's rule "use real APIs, make real requests"):
 # this is the test bed where claude actually gets called.
-task "test:allow_real_user_environment" do
-  ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] = "1"
-end
-
-Rake::TestTask.new(smoke: "test:allow_real_user_environment") do |t|
+Rake::TestTask.new(:smoke) do |t|
   t.libs << "test"
   t.libs << "lib"
+  t.ruby_opts << "-r#{File.expand_path('test/support/allow_real_user_environment', __dir__)}"
   t.test_files = FileList["test/smoke/**/*_test.rb"]
   t.warning = false
   t.description = "Run authenticated live-agent smoke tests (real subprocesses; may incur API cost)"

@@ -10,7 +10,7 @@ set -euo pipefail
 # Ruby executes only the first file argument; the rest become ARGV and are not
 # loaded. Use one tiny loader so every leading test file is required while the
 # remaining flags stay available to Minitest.
-runner='files = ARGV.take_while { |arg| !arg.start_with?("-") }; abort "bin/test: provide at least one test file" if files.empty?; ARGV.shift(files.length); files.each { |path| require File.expand_path(path) }'
+runner='files = ARGV.take_while { |arg| !arg.start_with?("-") }; abort "bin/test: provide at least one test file" if files.empty?; ARGV.shift(files.length); Thread.current[:hive_test_requested_files] = files; files.each { |path| require File.expand_path(path) }'
 
 if command -v bundle >/dev/null 2>&1 && bundle check >/dev/null 2>&1; then
   exec bundle exec ruby -Itest -Ilib -e "$runner" "$@"

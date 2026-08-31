@@ -41,6 +41,11 @@ class PlanReviewCheckpointCustodyTest < Minitest::Test
       .map { |route| route.fetch("role") }
     assert_equal [ "adversarial" ], malformed_roles
 
+    stale = recovered.last.merge("checkpoint_custody_contract_version" => 0)
+    stale_roles = Hive::PlanReview::CheckpointCustody.recoverable_routes(recoverable + [ stale ])
+      .map { |route| route.fetch("role") }
+    assert_equal %w[primary adversarial], stale_roles
+
     superseded = [
       recoverable.first,
       recoverable.first.merge("outcome" => "success", "diagnostic" => nil)

@@ -436,7 +436,10 @@ class ServiceInstallerBaseTest < Minitest::Test
         :record_user_service_messages,
         Hive::UserService::Result.new(
           :failed,
-          diagnostics: %i[legacy_takeover_failed invalid_recovery_state prior_state_restored]
+          diagnostics: %i[
+            legacy_takeover_failed invalid_recovery_state prior_state_restored
+            systemd_apply_failed
+          ]
         ),
         path: path
       )
@@ -448,6 +451,9 @@ class ServiceInstallerBaseTest < Minitest::Test
       assert installer.messages.any? { |message| message.include?("retained unverified recovery evidence") }
       assert installer.messages.any? do |message|
         message.include?("previous state was restored for test service")
+      end
+      assert installer.messages.any? do |message|
+        message.include?("systemctl --user could not apply hive-test")
       end
     end
   end

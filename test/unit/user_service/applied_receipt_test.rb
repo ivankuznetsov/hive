@@ -61,6 +61,33 @@ class UserServiceAppliedReceiptTest < Minitest::Test
     assert_match(/receipt digest does not match/, error.message)
   end
 
+  def test_write_translates_malformed_existing_and_unsafe_publication
+    malformed = fake_receipt(
+      reader: -> { { bytes: "{not-json", mode: 0o600 } },
+      writer: ->(*) { flunk "malformed evidence must not be overwritten" }
+    )
+    error = assert_raises(Hive::UserService::AppliedReceipt::Invalid) do
+      malformed.write(
+        digest: Digest::SHA256.hexdigest(definition.content),
+        mode: :managed,
+        manager_intent: :enable
+      )
+    end
+    assert_match(/invalid user-service receipt/, error.message)
+
+    unsafe = fake_receipt(
+      writer: ->(*) { raise Hive::ManagedDirectory::UnsafeError, "changed" }
+    )
+    error = assert_raises(Hive::UserService::AppliedReceipt::Invalid) do
+      unsafe.write(
+        digest: Digest::SHA256.hexdigest(definition.content),
+        mode: :managed,
+        manager_intent: :enable
+      )
+    end
+    assert_match(/unsafe user-service receipt/, error.message)
+  end
+
   def test_read_accepts_a_valid_receipt_for_a_prior_definition
     document = valid_document.merge("desired_digest" => "b" * 64)
     receipt = fake_receipt(reader: -> { { bytes: JSON.generate(document), mode: 0o600 } })
@@ -92,6 +119,26 @@ class UserServiceAppliedReceiptTest < Minitest::Test
 
     assert_raises(Hive::UserService::AppliedReceipt::Invalid) { receipt.delete }
     refute unlinked
+  end
+
+  def test_delete_compare_binds_valid_evidence_and_translates_malformed_json
+    deleted = nil
+    bytes = JSON.generate(valid_document)
+    receipt = fake_receipt(
+      reader: -> { { bytes: bytes, mode: 0o600 } },
+      unlinker: ->(*args, **kwargs) { deleted = [ args, kwargs ]; true }
+    )
+
+    assert receipt.delete
+    assert_equal [ "receipt.json" ], deleted.first
+    assert_equal Digest::SHA256.hexdigest(bytes), deleted.last.fetch(:expected_digest)
+
+    malformed = fake_receipt(
+      reader: -> { { bytes: "{not-json", mode: 0o600 } },
+      unlinker: ->(*) { flunk "malformed evidence must be preserved" }
+    )
+    error = assert_raises(Hive::UserService::AppliedReceipt::Invalid) { malformed.delete }
+    assert_match(/invalid user-service receipt/, error.message)
   end
 
   private

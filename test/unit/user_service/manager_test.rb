@@ -216,6 +216,46 @@ class UserServiceManagerTest < Minitest::Test
     assert_equal [ %w[systemctl --user daemon-reload] ], calls
   end
 
+  def test_apply_intent_compatibility_wrapper_covers_each_platform
+    linux_calls = []
+    linux = build_manager(:linux, runner: ->(argv) { linux_calls << argv; true })
+    assert linux.apply_intent(:enable).ok
+    assert_equal [
+      %w[systemctl --user daemon-reload],
+      %w[systemctl --user enable --now hive-test]
+    ], linux_calls
+
+    macos_calls = []
+    macos = build_manager(:macos, runner: ->(argv) { macos_calls << argv; true })
+    assert macos.apply_intent(:enable).ok
+    assert_equal [ [ "launchctl", "load", "/tmp/hive-test.plist" ] ], macos_calls
+
+    assert build_manager(:unsupported).apply_intent(:enable).ok
+    assert build_manager(:unsupported).activate(:enable).ok
+    unavailable = build_manager(
+      :linux,
+      manager_available: -> { raise "probe failed" }
+    ).activate(:restart)
+    refute unavailable.ok
+    assert unavailable.restarted
+    assert_includes unavailable.diagnostics, :autostart_unavailable
+  end
+
+  def test_inspection_rescues_missing_probe_and_rejects_invalid_systemd_properties
+    missing = build_manager(
+      :linux,
+      query_available: -> { raise Errno::ENOENT }
+    ).inspect
+    assert_equal :conclusively_absent, missing.availability
+
+    invalid = build_manager(
+      :linux,
+      status_reader: ->(_argv) { [ systemd_status(need_daemon_reload: "maybe"), true ] }
+    ).inspect
+    assert_equal :indeterminate, invalid.availability
+    assert_includes invalid.diagnostics, :manager_probe_failed
+  end
+
   def test_multi_command_actions_stop_after_the_first_failure
     calls = []
     manager = build_manager(
@@ -245,6 +285,66 @@ class UserServiceManagerTest < Minitest::Test
     assert_equal :timeout, command.failure
     pid = Integer(command.output.lines.first)
     assert_raises(Errno::ECHILD) { Process.waitpid(pid, Process::WNOHANG) }
+  end
+
+  def test_production_runner_classifies_missing_and_internal_failures
+    manager = build_manager(:linux, runner: nil)
+
+    missing = manager.send(:run_production, [ "/definitely/missing/hive-command" ], timeout: 0.1)
+    refute missing.ok
+    assert_equal :missing, missing.failure
+
+    failed = manager.send(:run_production, [ "/bin/true" ], timeout: Object.new)
+    refute failed.ok
+    assert_equal :failed, failed.failure
+
+    assert manager.send(:run_injected_or_production_query, [ "/bin/true" ]).ok
+    assert manager.send(:run_launchd_status_command, [ "/bin/true" ]).ok
+    assert manager.send(:run_query_command, [ "/bin/true" ]).ok
+    assert manager.send(:run_action_command, [ "/bin/true" ]).ok
+
+    injected = build_manager(:linux, runner: ->(_argv) { true })
+    assert injected.send(:run_query_command, [ "ignored" ]).ok
+  end
+
+  def test_production_cleanup_escalates_and_tolerates_already_reaped_processes
+    manager = build_manager(:linux, runner: nil)
+    reader, writer = IO.pipe
+    pid = Process.spawn(
+      "/bin/sh", "-c", 'trap "" TERM; echo ready; exec sleep 30',
+      out: writer,
+      pgroup: true
+    )
+    writer.close
+    assert_equal "ready\n", reader.gets
+
+    status = manager.send(:terminate_and_reap, pid)
+    assert status.signaled?
+    assert_equal Signal.list.fetch("KILL"), status.termsig
+    assert_nil manager.send(:terminate_and_reap, pid)
+    assert_nil manager.send(:signal_process_group, 999_999_999, "TERM")
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+    begin
+      Process.kill("KILL", -pid) if pid
+    rescue Errno::ESRCH
+      nil
+    end
+    begin
+      Process.wait(pid) if pid
+    rescue Errno::ECHILD
+      nil
+    end
+  end
+
+  def test_command_diagnostics_distinguish_timeout_and_failed_commands
+    manager = build_manager(:linux)
+    timeout = Hive::UserService::Manager::Command.new(ok: false, failure: :timeout)
+    failed = Hive::UserService::Manager::Command.new(ok: false, failure: :failed)
+
+    assert_equal [ :manager_action_timeout ], manager.send(:command_diagnostics, timeout)
+    assert_equal [ :manager_command_failed ], manager.send(:command_diagnostics, failed)
   end
 
   def test_system_call_failures_are_observed_for_queries_and_actions

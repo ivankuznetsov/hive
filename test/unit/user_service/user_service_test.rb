@@ -2636,7 +2636,1270 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_remove_replans_after_apply_recovery_and_validates_receipt_only_state
+    with_tmp_dir do |root|
+      pending_dir = File.join(root, "pending")
+      receipt_dir = File.join(root, "receipt")
+      [ pending_dir, receipt_dir ].each { |dir| FileUtils.mkdir_p(dir) }
+      runner = lambda do |argv|
+        ![
+          %w[systemctl --user is-enabled hive-test],
+          %w[systemctl --user is-active --quiet hive-test]
+        ].include?(argv)
+      end
+
+      interrupted = build_service(
+        pending_dir,
+        runner: runner,
+        event_handler: lambda do |event, _definition|
+          raise "interrupt" if event == :after_committed
+        end
+      )
+      assert_equal :failed, interrupted.apply(interrupted.plan(autostart: false)).kind
+      recovered = build_service(pending_dir, runner: runner)
+      removed = recovered.remove(recovered.plan_remove)
+      assert_equal :removed, removed.kind
+      refute File.exist?(definition_path(pending_dir))
+      assert_empty pending_journals(pending_dir)
+      assert_empty applied_receipts(pending_dir)
+
+      receipt_only = build_service(receipt_dir, runner: runner)
+      assert receipt_only.apply(receipt_only.plan(autostart: false)).success?
+      File.unlink(definition_path(receipt_dir))
+      absent_plan = receipt_only.plan_remove(inspect_absent_manager: false)
+      refute absent_plan.manager_observed
+      absent = receipt_only.remove(absent_plan)
+      assert_equal :absent, absent.kind
+      assert_empty applied_receipts(receipt_dir)
+    end
+  end
+
+  def test_remove_rechecks_receipt_only_file_identity_and_indeterminate_manager
+    with_tmp_dir do |root|
+      stale_dir = File.join(root, "stale")
+      indeterminate_dir = File.join(root, "indeterminate")
+      [ stale_dir, indeterminate_dir ].each { |dir| FileUtils.mkdir_p(dir) }
+
+      stale = build_service(stale_dir, runner: ->(_argv) { false })
+      plan = stale.plan_remove(inspect_absent_manager: false)
+      changed = synthetic_status(stale_dir, content_state: :matching)
+      observations = [ plan.status, changed ]
+      stale.define_singleton_method(:inspect_status) { |manager:| observations.shift || changed }
+      result = stale.send(
+        :remove_current,
+        plan,
+        stale.instance_variable_get(:@transaction),
+        receipt: { "mode" => "no_autostart" }
+      )
+      assert_equal :stale, result.kind
+
+      path = definition_path(indeterminate_dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      indeterminate = Hive::UserService.new(
+        definition: service_definition(indeterminate_dir),
+        runner: ->(_argv) { true },
+        query_available: true,
+        manager_available: :indeterminate,
+        home: indeterminate_dir
+      )
+      result = indeterminate.remove(indeterminate.plan_remove)
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_probe_indeterminate
+      assert File.exist?(path)
+    end
+  end
+
+  def test_remove_detects_a_vanished_bound_file_and_mismatched_unlink_identity
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      service = build_service(dir, runner: ->(_argv) { false })
+      plan = service.plan_remove
+      service.define_singleton_method(:bound_file_content) { |_identity| nil }
+
+      result = service.remove(plan)
+      assert_equal :stale, result.kind
+      assert File.exist?(path)
+
+      error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        service.send(:unlink_target, expected_identity: { digest: "foreign" })
+      end
+      assert_match(/changed before unlink/, error.message)
+      assert File.exist?(path)
+    end
+  end
+
+  def test_pending_reconciliation_rejects_mismatched_ambiguous_and_regressed_files
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { false })
+      desired_digest = Digest::SHA256.hexdigest("desired\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+
+      mismatch = apply_document(
+        phase: "prepared",
+        desired_digest: "b" * 64,
+        prior_digest: nil,
+        prior_content: nil
+      )
+      result = service.send(:reconcile_pending, fake_transition_transaction(mismatch))
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "alien\n")
+      ambiguous = apply_document(
+        phase: "prepared",
+        desired_digest: desired_digest,
+        prior_digest: prior_digest,
+        prior_content: "legacy\n"
+      )
+      result = service.send(:reconcile_pending, fake_transition_transaction(ambiguous))
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+
+      File.write(path, "legacy\n")
+      regressed = ambiguous.merge("phase" => "manager_reloaded")
+      result = service.send(:reconcile_pending, fake_transition_transaction(regressed))
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+    end
+  end
+
+  def test_recorded_missing_manager_intent_is_retained_or_rolled_back_by_fresh_probe
+    with_tmp_dir do |root|
+      pending_dir = File.join(root, "pending")
+      rollback_dir = File.join(root, "rollback")
+      [ pending_dir, rollback_dir ].each { |dir| FileUtils.mkdir_p(dir) }
+
+      [ pending_dir, rollback_dir ].each do |dir|
+        unavailable = Hive::UserService.new(
+          definition: service_definition(dir),
+          runner: ->(_argv) { false },
+          query_available: true,
+          manager_available: false,
+          home: dir,
+          event_handler: lambda do |event, _definition|
+            raise "interrupt" if event == :after_unit_published
+          end
+        )
+        assert_equal :failed, unavailable.apply(unavailable.plan(autostart: true)).kind
+      end
+
+      indeterminate = Hive::UserService.new(
+        definition: service_definition(pending_dir),
+        runner: ->(_argv) { false },
+        query_available: true,
+        manager_available: :indeterminate,
+        home: pending_dir
+      )
+      pending = indeterminate.apply(indeterminate.plan(autostart: true))
+      assert_equal :failed, pending.kind
+      assert_includes pending.diagnostics, :recorded_manager_intent_unavailable
+      assert File.exist?(definition_path(pending_dir))
+
+      available = build_service(rollback_dir, runner: ->(_argv) { false })
+      rolled_back = available.apply(available.plan(autostart: true))
+      assert_equal :failed, rolled_back.kind
+      assert_includes rolled_back.diagnostics, :prior_state_restored
+      refute File.exist?(definition_path(rollback_dir))
+    end
+  end
+
+  def test_reload_failure_distinguishes_manager_loss_from_verified_rollback
+    with_tmp_dir do |root|
+      lost_dir = File.join(root, "lost")
+      failed_dir = File.join(root, "failed")
+      [ lost_dir, failed_dir ].each { |dir| FileUtils.mkdir_p(dir) }
+
+      availability = :available
+      lost = Hive::UserService.new(
+        definition: service_definition(lost_dir),
+        runner: lambda do |argv|
+          if argv == %w[systemctl --user daemon-reload]
+            availability = :indeterminate
+            false
+          else
+            false
+          end
+        end,
+        query_available: true,
+        manager_available: -> { availability },
+        home: lost_dir
+      )
+      pending = lost.apply(lost.plan(autostart: true))
+      assert_equal :failed, pending.kind
+      assert_includes pending.diagnostics, :recovery_pending
+      assert File.exist?(definition_path(lost_dir))
+
+      failed = build_service(
+        failed_dir,
+        runner: ->(argv) { argv != %w[systemctl --user daemon-reload] && false }
+      )
+      rolled_back = failed.apply(failed.plan(autostart: true))
+      assert_equal :failed, rolled_back.kind
+      assert_includes rolled_back.diagnostics, :prior_state_restored
+      refute File.exist?(definition_path(failed_dir))
+    end
+  end
+
+  def test_replayed_reload_requires_current_definition_evidence
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      service = build_service(dir, runner: ->(_argv) { true })
+      stale = synthetic_status(
+        dir,
+        enabled: false,
+        running: false,
+        definition_current: false,
+        manager_evidence_source: :injected
+      )
+      current = synthetic_status(
+        dir,
+        manager_evidence_source: :injected,
+        process_start: "injected"
+      )
+      observations = [ stale, current ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || current }
+      manager = Object.new
+      manager.define_singleton_method(:reload) do
+        Hive::UserService::Manager::Action.new(
+          ok: false,
+          restarted: false,
+          diagnostics: [ :daemon_reload_failed ]
+        )
+      end
+      service.instance_variable_set(:@manager, manager)
+      document = apply_document(
+        phase: "manager_reloaded",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: nil,
+        prior_content: nil,
+        manager_intent: "enable"
+      )
+
+      result = service.send(
+        :complete_apply_transition,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :daemon_reload_failed
+      assert_includes result.diagnostics, :recovery_pending
+    end
+  end
+
+  def test_apply_replay_handles_ambiguous_unavailable_and_regressed_activation
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      desired_digest = Digest::SHA256.hexdigest("desired\n")
+
+      ambiguous = build_service(dir, runner: ->(_argv) { true })
+      ambiguous_status = synthetic_status(dir, main_pid: 42, process_start: "current")
+      ambiguous.define_singleton_method(:inspect_status) { |manager:| ambiguous_status }
+      ambiguous_document = apply_document(
+        phase: "manager_reloaded",
+        desired_digest: desired_digest,
+        prior_digest: desired_digest,
+        prior_content: "desired\n",
+        manager_intent: "restart",
+        prior_running: true,
+        prior_main_pid: 0,
+        prior_process_start: nil
+      )
+      result = ambiguous.send(
+        :complete_apply_transition,
+        ambiguous_document,
+        fake_transition_transaction(ambiguous_document),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_effect_ambiguous
+
+      unavailable = build_service(dir, runner: ->(_argv) { true })
+      unavailable_status = synthetic_status(
+        dir,
+        manager_availability: :indeterminate,
+        definition_current: true
+      )
+      unavailable.define_singleton_method(:inspect_status) { |manager:| unavailable_status }
+      activated_document = ambiguous_document.merge("phase" => "activated", "manager_intent" => "enable")
+      result = unavailable.send(
+        :complete_apply_transition,
+        activated_document,
+        fake_transition_transaction(activated_document),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+
+      [ true, false ].each do |converges|
+        candidate = build_service(dir, runner: ->(_argv) { true })
+        stopped = synthetic_status(
+          dir,
+          enabled: false,
+          running: false,
+          definition_current: true
+        )
+        desired = synthetic_status(dir, main_pid: 84, process_start: "new")
+        observations = [ stopped, (converges ? desired : stopped) ]
+        candidate.define_singleton_method(:inspect_status) do |manager:|
+          observations.shift || (converges ? desired : stopped)
+        end
+        manager = Object.new
+        manager.define_singleton_method(:activate) do |_intent|
+          Hive::UserService::Manager::Action.new(
+            ok: false,
+            restarted: false,
+            diagnostics: [ :systemd_apply_failed ]
+          )
+        end
+        candidate.instance_variable_set(:@manager, manager)
+        candidate.define_singleton_method(:finalize_apply) { |*args, **kwargs| :finalized }
+
+        result = candidate.send(
+          :complete_apply_transition,
+          activated_document,
+          fake_transition_transaction(activated_document),
+          replay: true
+        )
+        if converges
+          assert_equal :finalized, result
+        else
+          assert_equal :failed, result.kind
+          assert_includes result.diagnostics, :recovery_pending
+        end
+      end
+
+      candidate = build_service(dir, runner: ->(_argv) { true })
+      stopped = synthetic_status(
+        dir,
+        enabled: false,
+        running: false,
+        definition_current: true
+      )
+      desired = synthetic_status(dir, main_pid: 85, process_start: "activated")
+      lost = synthetic_status(
+        dir,
+        manager_availability: :indeterminate,
+        definition_current: true
+      )
+      observations = [ stopped, desired, lost ]
+      candidate.define_singleton_method(:inspect_status) { |manager:| observations.shift || lost }
+      manager = Object.new
+      manager.define_singleton_method(:activate) do |_intent|
+        Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
+      end
+      candidate.instance_variable_set(:@manager, manager)
+      result = candidate.send(
+        :complete_apply_transition,
+        ambiguous_document.merge("manager_intent" => "enable"),
+        fake_transition_transaction(ambiguous_document),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+    end
+  end
+
+  def test_finalize_apply_rejects_a_regressed_precommit_endpoint
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { true })
+      unavailable = synthetic_status(
+        dir,
+        manager_availability: :indeterminate,
+        definition_current: true
+      )
+      service.define_singleton_method(:inspect_status) { |manager:| unavailable }
+      document = apply_document(
+        phase: "activated",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: nil,
+        prior_content: nil,
+        manager_intent: "enable"
+      )
+
+      result = service.send(
+        :finalize_apply,
+        document,
+        fake_transition_transaction(document),
+        mode: :managed,
+        kind: :written,
+        status: unavailable,
+        diagnostics: []
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :verification_failed
+    end
+  end
+
+  def test_rollback_rejects_ambiguous_or_unrestored_files_and_manager_loss
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      service = build_service(dir, runner: ->(_argv) { true })
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      desired_digest = Digest::SHA256.hexdigest("desired\n")
+      document = apply_document(
+        phase: "rollback_selected",
+        direction: "rollback",
+        desired_digest: desired_digest,
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: "restart",
+        prior_enabled: false,
+        prior_running: false
+      )
+
+      File.write(path, "alien\n")
+      result = service.send(
+        :rollback_apply,
+        document,
+        fake_transition_transaction(document),
+        diagnostics: []
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+
+      File.write(path, "desired\n")
+      service.define_singleton_method(:restore_prior_file) { |*args, **kwargs| nil }
+      result = service.send(
+        :rollback_apply,
+        document,
+        fake_transition_transaction(document),
+        diagnostics: []
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :rollback_file_unverified
+
+      File.write(path, "legacy\n")
+      lost = build_service(dir, runner: ->(_argv) { true })
+      unavailable = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        manager_availability: :indeterminate,
+        enabled: false,
+        running: false,
+        definition_current: true
+      )
+      lost.define_singleton_method(:inspect_status) { |manager:| unavailable }
+      manager_document = document.merge("phase" => "prior_file_restored")
+      result = lost.send(
+        :rollback_apply,
+        manager_document,
+        fake_transition_transaction(manager_document),
+        diagnostics: []
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+    end
+  end
+
+  def test_rollback_fresh_verification_guards_each_durable_boundary
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      base = apply_document(
+        phase: "prior_file_restored",
+        direction: "rollback",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: "restart",
+        prior_enabled: false,
+        prior_running: false
+      )
+      good = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        enabled: false,
+        running: false,
+        definition_current: true
+      )
+      bad = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        manager_availability: :indeterminate,
+        enabled: false,
+        running: false,
+        definition_current: true
+      )
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ good, bad ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || bad }
+      result = service.send(
+        :rollback_apply,
+        base,
+        fake_transition_transaction(base),
+        diagnostics: []
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :rollback_verification_failed
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ good, good, bad ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || bad }
+      after_manager = base.merge("phase" => "prior_manager_restored")
+      result = service.send(
+        :rollback_apply,
+        after_manager,
+        fake_transition_transaction(after_manager),
+        diagnostics: []
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :rollback_verification_failed
+    end
+  end
+
+  def test_removal_replay_rejects_impossible_file_phase_combinations
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      service = build_service(dir, runner: ->(_argv) { true })
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      base = remove_document(
+        phase: "removal_prepared",
+        prior_digest: prior_digest,
+        prior_content: "legacy\n"
+      )
+
+      File.write(path, "alien\n")
+      result = service.send(
+        :complete_removal,
+        base,
+        fake_transition_transaction(base),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+
+      File.write(path, "legacy\n")
+      removed_phase = base.merge("phase" => "unit_removed")
+      result = service.send(
+        :complete_removal,
+        removed_phase,
+        fake_transition_transaction(removed_phase),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+
+      File.unlink(path)
+      result = service.send(
+        :complete_removal,
+        base,
+        fake_transition_transaction(base),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+    end
+  end
+
+  def test_removal_replay_retains_manager_loss_and_unverified_unlink
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      intent = remove_document(
+        phase: "removal_prepared",
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: "disable"
+      )
+      unavailable = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        manager_availability: :indeterminate,
+        enabled: true,
+        running: true,
+        definition_current: true
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| unavailable }
+      result = service.send(
+        :complete_removal,
+        intent,
+        fake_transition_transaction(intent),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+
+      no_intent = intent.merge("manager_intent" => nil)
+      absent_manager = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        manager_availability: :conclusively_absent,
+        enabled: false,
+        running: false,
+        definition_current: false
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| absent_manager }
+      service.define_singleton_method(:unlink_target) { |expected_identity:| nil }
+      result = service.send(
+        :complete_removal,
+        no_intent,
+        fake_transition_transaction(no_intent),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :remove_failed
+      assert File.exist?(path)
+    end
+  end
+
+  def test_filesystem_only_removal_advances_reload_without_manager_mutation
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { raise "manager must not mutate" })
+      document = remove_document(
+        phase: "unit_removed",
+        prior_digest: nil,
+        prior_content: nil,
+        manager_intent: nil,
+        result_kind: "absent"
+      )
+      absent = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        manager_availability: :conclusively_absent,
+        enabled: false,
+        running: false,
+        definition_current: false
+      )
+      service.define_singleton_method(:inspect_status) { |manager:| absent }
+
+      result = service.send(
+        :complete_removal,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :absent, result.kind
+      assert result.success?
+    end
+  end
+
+  def test_removal_reload_replay_handles_manager_loss_and_failed_reconciliation
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { true })
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      available = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        enabled: false,
+        running: false,
+        definition_current: false,
+        load_state: "not-found"
+      )
+      unavailable = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        manager_availability: :indeterminate,
+        enabled: false,
+        running: false,
+        definition_current: false
+      )
+      intent = remove_document(
+        phase: "unit_removed",
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: "disable"
+      )
+      observations = [ available, unavailable ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || unavailable }
+      result = service.send(
+        :complete_removal,
+        intent,
+        fake_transition_transaction(intent),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+
+      reloaded = intent.merge("phase" => "removal_reloaded")
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ available, unavailable ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || unavailable }
+      result = service.send(
+        :complete_removal,
+        reloaded,
+        fake_transition_transaction(reloaded),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+
+      stale_loaded = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        enabled: false,
+        running: false,
+        definition_current: true,
+        load_state: "loaded"
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ available, stale_loaded, stale_loaded ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || stale_loaded }
+      manager = Object.new
+      manager.define_singleton_method(:reload_after_remove) do
+        Hive::UserService::Manager::Action.new(ok: false, restarted: false, diagnostics: [ :daemon_reload_failed ])
+      end
+      service.instance_variable_set(:@manager, manager)
+      result = service.send(
+        :complete_removal,
+        reloaded,
+        fake_transition_transaction(reloaded),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :daemon_reload_failed
+      assert_includes result.diagnostics, :recovery_pending
+    end
+  end
+
+  def test_removal_verification_is_repeated_before_and_after_commit
+    with_tmp_dir do |dir|
+      good = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        manager_availability: :conclusively_absent,
+        enabled: false,
+        running: false,
+        definition_current: false
+      )
+      bad = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        manager_availability: :available,
+        enabled: false,
+        running: false,
+        definition_current: false
+      )
+      document = remove_document(
+        phase: "removal_reloaded",
+        prior_digest: nil,
+        prior_content: nil,
+        manager_intent: nil,
+        result_kind: "absent"
+      )
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ good, good, bad ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || bad }
+      result = service.send(
+        :complete_removal,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :verification_failed
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ good, good, good, bad ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || bad }
+      result = service.send(
+        :complete_removal,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :verification_failed
+    end
+  end
+
+  def test_lifecycle_refuses_missing_unit_and_invalid_or_unavailable_replay
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { false })
+      missing = service.start
+      assert_equal :failed, missing.kind
+      assert_includes missing.diagnostics, :manager_action_unverified
+
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      desired_digest = Digest::SHA256.hexdigest("desired\n")
+      document = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: "b" * 64,
+        manager_intent: "start"
+      )
+      result = service.send(
+        :complete_lifecycle,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+
+      unavailable = synthetic_status(
+        dir,
+        manager_availability: :indeterminate,
+        enabled: false,
+        running: false,
+        definition_current: true
+      )
+      service.define_singleton_method(:inspect_status) { |manager:| unavailable }
+      valid = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: desired_digest,
+        manager_intent: "start"
+      )
+      result = service.send(
+        :complete_lifecycle,
+        valid,
+        fake_transition_transaction(valid),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_action_unavailable
+    end
+  end
+
+  def test_lifecycle_replay_retains_ambiguous_restart_evidence
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      service = build_service(dir, runner: ->(_argv) { true })
+      running = synthetic_status(dir, main_pid: 42, process_start: "current")
+      service.define_singleton_method(:inspect_status) { |manager:| running }
+      document = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        manager_intent: "restart",
+        prior_running: true,
+        prior_main_pid: 0,
+        prior_process_start: nil
+      )
+
+      result = service.send(
+        :complete_lifecycle,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_effect_ambiguous
+    end
+  end
+
+  def test_lifecycle_retries_a_regressed_endpoint_and_trusts_observed_effects
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      stopped = synthetic_status(
+        dir,
+        enabled: true,
+        running: false,
+        definition_current: true
+      )
+      running = synthetic_status(dir, main_pid: 43, process_start: "new")
+      document = lifecycle_document(
+        phase: "lifecycle_acted",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        manager_intent: "start"
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ stopped, stopped, running, running, running ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || running }
+      manager = Object.new
+      manager.define_singleton_method(:start) do
+        Hive::UserService::Manager::Action.new(
+          ok: false,
+          restarted: false,
+          diagnostics: [ :manager_action_failed ]
+        )
+      end
+      service.instance_variable_set(:@manager, manager)
+
+      result = service.send(
+        :complete_lifecycle,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :unchanged, result.kind
+      assert_includes result.diagnostics, :manager_effect_verified
+    end
+  end
+
+  def test_lifecycle_action_and_retry_fail_closed_when_the_endpoint_never_changes
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      stopped = synthetic_status(
+        dir,
+        enabled: true,
+        running: false,
+        definition_current: true
+      )
+      manager = Object.new
+      manager.define_singleton_method(:start) do
+        Hive::UserService::Manager::Action.new(
+          ok: false,
+          restarted: false,
+          diagnostics: [ :manager_action_failed ]
+        )
+      end
+      digest = Digest::SHA256.hexdigest("desired\n")
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| stopped }
+      service.instance_variable_set(:@manager, manager)
+      prepared = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: digest,
+        manager_intent: "start"
+      )
+      result = service.send(
+        :complete_lifecycle,
+        prepared,
+        fake_transition_transaction(prepared),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_action_unverified
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| stopped }
+      service.instance_variable_set(:@manager, manager)
+      acted = prepared.merge("phase" => "lifecycle_acted")
+      result = service.send(
+        :complete_lifecycle,
+        acted,
+        fake_transition_transaction(acted),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_action_unverified
+    end
+  end
+
+  def test_lifecycle_verification_catches_regression_after_each_phase
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      running = synthetic_status(dir, main_pid: 43, process_start: "new")
+      stopped = synthetic_status(
+        dir,
+        enabled: true,
+        running: false,
+        definition_current: true
+      )
+      digest = Digest::SHA256.hexdigest("desired\n")
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ running, running, stopped ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || stopped }
+      acted = lifecycle_document(
+        phase: "lifecycle_acted",
+        desired_digest: digest,
+        manager_intent: "start"
+      )
+      result = service.send(
+        :complete_lifecycle,
+        acted,
+        fake_transition_transaction(acted),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_action_unverified
+
+      service = build_service(dir, runner: ->(_argv) { true })
+      observations = [ running, running, stopped ]
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || stopped }
+      verified = acted.merge("phase" => "lifecycle_verified")
+      result = service.send(
+        :complete_lifecycle,
+        verified,
+        fake_transition_transaction(verified),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_action_unverified
+    end
+  end
+
+  def test_endpoint_helpers_fail_closed_for_ambiguous_and_unknown_modes
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { true })
+      running = synthetic_status(dir, main_pid: 42, process_start: "current")
+      apply = apply_document(
+        phase: "manager_reloaded",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_content: "desired\n",
+        manager_intent: "restart",
+        prior_running: true,
+        prior_main_pid: 0,
+        prior_process_start: nil
+      )
+      assert_equal :ambiguous, service.send(:activation_effect, running, apply)
+      refute service.send(:apply_endpoint_for_mode?, running, apply, :unknown)
+
+      restart = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        manager_intent: "restart",
+        prior_running: true,
+        prior_main_pid: 0,
+        prior_process_start: nil
+      )
+      assert_equal :ambiguous, service.send(:lifecycle_effect, running, restart)
+      assert_equal :ambiguous,
+                   service.send(:lifecycle_effect, running, restart.merge("manager_intent" => "bogus"))
+
+      absent = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        manager_availability: :conclusively_absent,
+        enabled: false,
+        running: false,
+        definition_current: false
+      )
+      removal = remove_document(
+        phase: "removal_reloaded",
+        prior_digest: nil,
+        prior_content: nil,
+        manager_intent: nil,
+        result_kind: "absent"
+      )
+      assert service.send(:removal_manager_endpoint?, absent, removal)
+
+      unsupported = Hive::UserService.new(
+        definition: Hive::UserService::Definition.new(
+          platform: :unsupported,
+          service_name: "hive-test",
+          target_path: nil,
+          content: nil
+        )
+      )
+      assert unsupported.send(:canonical_plan?, unsupported.plan_remove)
+    end
+  end
+
+  def test_injected_writer_is_durable_and_publication_is_freshly_verified
+    with_tmp_dir do |root|
+      success_dir = File.join(root, "success")
+      failure_dir = File.join(root, "failure")
+      [ success_dir, failure_dir ].each { |dir| FileUtils.mkdir_p(dir) }
+      writer = Object.new
+      writer.define_singleton_method(:write) do |path, content, mode:|
+        FileUtils.mkdir_p(File.dirname(path))
+        File.open(path, File::WRONLY | File::CREAT | File::TRUNC, mode) do |file|
+          file.write(content)
+        end
+      end
+      success = Hive::UserService.new(
+        definition: service_definition(success_dir),
+        runner: ->(_argv) { false },
+        writer: writer,
+        home: success_dir
+      )
+      result = success.apply(success.plan(autostart: false))
+      assert_equal :written, result.kind
+      assert_equal "desired\n", File.read(definition_path(success_dir))
+
+      no_op_writer = Object.new
+      no_op_writer.define_singleton_method(:write) do |path, _content, **_kwargs|
+        FileUtils.mkdir_p(File.dirname(path))
+      end
+      failure = Hive::UserService.new(
+        definition: service_definition(failure_dir),
+        runner: ->(_argv) { false },
+        writer: no_op_writer,
+        home: failure_dir
+      )
+      result = failure.apply(failure.plan(autostart: false))
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :invalid_recovery_state
+      refute File.exist?(definition_path(failure_dir))
+    end
+  end
+
+  def test_backup_creation_revalidates_content_and_target_endpoint
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "alien\n")
+      service = build_service(dir, runner: ->(_argv) { true })
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      document = apply_document(
+        phase: "prepared",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: nil,
+        backup_path: "#{path}.bak-20260830T120000Z",
+        result_kind: "upgraded",
+        autostart: false
+      )
+      transaction = fake_transition_transaction(document)
+
+      error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        service.send(:ensure_recorded_backup, document, transaction, "wrong\n")
+      end
+      assert_match(/prior content does not match/, error.message)
+
+      error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        service.send(:ensure_recorded_backup, document, transaction, "legacy\n")
+      end
+      assert_match(/target changed before backup/, error.message)
+      assert_equal "alien\n", File.read(path)
+    end
+  end
+
   private
+
+  def apply_document(phase:, desired_digest:, prior_digest:, prior_content:,
+                     direction: "forward", manager_intent: "enable",
+                     backup_path: nil, result_kind: "written", autostart: true,
+                     prior_enabled: false, prior_running: false,
+                     prior_main_pid: 0, prior_process_start: nil)
+    {
+      "operation" => "apply",
+      "direction" => direction,
+      "phase" => phase,
+      "prior_content" => prior_content,
+      "prior_digest" => prior_digest,
+      "prior_enabled" => prior_enabled,
+      "prior_running" => prior_running,
+      "prior_main_pid" => prior_main_pid,
+      "prior_process_start" => prior_process_start,
+      "desired_digest" => desired_digest,
+      "backup_path" => backup_path,
+      "manager_intent" => manager_intent,
+      "result_kind" => result_kind,
+      "autostart" => autostart
+    }
+  end
+
+  def remove_document(phase:, prior_digest:, prior_content:, manager_intent: nil,
+                      result_kind: "removed", prior_enabled: false,
+                      prior_running: false)
+    {
+      "operation" => "remove",
+      "direction" => "forward",
+      "phase" => phase,
+      "prior_content" => prior_content,
+      "prior_digest" => prior_digest,
+      "prior_enabled" => prior_enabled,
+      "prior_running" => prior_running,
+      "prior_main_pid" => 0,
+      "prior_process_start" => nil,
+      "desired_digest" => nil,
+      "backup_path" => nil,
+      "manager_intent" => manager_intent,
+      "result_kind" => result_kind,
+      "autostart" => true
+    }
+  end
+
+  def lifecycle_document(phase:, desired_digest:, manager_intent:,
+                         prior_running: false, prior_main_pid: 0,
+                         prior_process_start: nil)
+    {
+      "operation" => "lifecycle",
+      "direction" => "forward",
+      "phase" => phase,
+      "prior_content" => nil,
+      "prior_digest" => desired_digest,
+      "prior_enabled" => true,
+      "prior_running" => prior_running,
+      "prior_main_pid" => prior_main_pid,
+      "prior_process_start" => prior_process_start,
+      "desired_digest" => desired_digest,
+      "backup_path" => nil,
+      "manager_intent" => manager_intent,
+      "result_kind" => "unchanged",
+      "autostart" => true
+    }
+  end
+
+  def fake_transition_transaction(document)
+    journal = Object.new
+    journal.define_singleton_method(:read) { document }
+    journal.define_singleton_method(:prior_content) { |candidate| candidate["prior_content"] }
+    journal.define_singleton_method(:phase?) do |candidate, phase|
+      candidate.fetch("phase") == phase.to_s
+    end
+    journal.define_singleton_method(:advance) do |candidate, phase:, direction: candidate.fetch("direction")|
+      candidate.merge("phase" => phase.to_s, "direction" => direction.to_s)
+    end
+    journal.define_singleton_method(:delete) { true }
+
+    receipt = Object.new
+    receipt.define_singleton_method(:read) { nil }
+    receipt.define_singleton_method(:write) { |**| true }
+    receipt.define_singleton_method(:delete) { true }
+
+    transaction = Object.new
+    transaction.define_singleton_method(:journal) { journal }
+    transaction.define_singleton_method(:receipt) { receipt }
+    transaction.define_singleton_method(:clear_after_verified_removal) { true }
+    transaction
+  end
+
+  def synthetic_status(dir, content_state: :matching,
+                       digest: Digest::SHA256.hexdigest("desired\n"),
+                       manager_availability: :available,
+                       enabled: true, running: true,
+                       definition_current: true, load_state: nil,
+                       main_pid: 41, process_start: "current",
+                       manager_evidence_source: :observed)
+    Hive::UserService::Status.new(
+      platform: :linux,
+      unit_path: definition_path(dir),
+      content_state: content_state,
+      file_identity: digest && { digest: digest },
+      manager_availability: manager_availability,
+      enabled: enabled,
+      running: running,
+      load_state: load_state || (definition_current ? "loaded" : "not-found"),
+      fragment_path: definition_current ? definition_path(dir) : nil,
+      need_daemon_reload: false,
+      main_pid: main_pid,
+      process_start: process_start,
+      manager_evidence_source: manager_evidence_source,
+      diagnostics: manager_availability == :indeterminate ? [ :manager_probe_failed ] : []
+    )
+  end
 
   def definition_path(dir)
     File.join(dir, ".config/systemd/user/hive-test.service")

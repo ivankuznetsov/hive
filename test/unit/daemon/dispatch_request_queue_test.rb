@@ -1858,7 +1858,8 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       assert_nil Q.update_claim("missing", pid: 123, state_home: "/tmp/missing")
       refute Q.release_claim("missing", state_home: "/tmp/missing")
       refute Q.requeue_recovery!(
-        "missing", expected_phase: "terminal", changes: {}, state_home: "/tmp/missing"
+        "missing", expected_phase: "terminal", changes: {},
+        known_path: "/tmp/missing/request.json.claimed", state_home: "/tmp/missing"
       )
       refute Q.discard_sequence("missing-seq", state_home: "/tmp/missing")
     end

@@ -955,24 +955,28 @@ The dispatcher materializes pending and claimed rows once per tick and reuses
 that immutable queue state for both operational counters and recovery
 receipts. A `retry_pending` projection is `queued` only when a matching
 canonical request has a request ID; malformed or absent queue evidence leaves
-the ordinary retry action available instead of inventing a request. Terminal
-recovery receipts remain durable for history, while filesystem pruning is
-throttled to one pass per hour so a five-second dispatcher loop does not
-rescan and rewrite retention state continuously.
+the ordinary retry action available instead of inventing a request. The latest
+terminal recovery receipt remains durable until it is superseded or reaches
+bounded retention, while filesystem pruning is throttled to one pass per hour
+so a five-second dispatcher loop does not rescan and rewrite retention state
+continuously.
 
-Retrying a terminal markerless recovery is one queue transaction: the queue
-moves any `<id>.json.claimed` receipt back to `<id>.json`, removes its claim
-sidecar, and only then changes `terminal` to `admitted`. The ordering is
-crash-safe because interruption before the phase rewrite leaves a terminal
-pending receipt, which remains invisible to dispatch. Startup claim recovery
-also recognizes the older invalid `admitted` + claimed combination and
-requeues it without following or deleting the stale terminal attempt. Its
-targeted queue lookup accepts only the claimed receipt path; pending or
-out-of-directory hints fail closed instead of synthesizing a sibling claim
-path. During terminal delivery reconciliation, a rejected durable phase
-transition emits `dispatch_request_reconciliation_failed`; it is not
-acknowledged, written as a result, or reported as
-`dispatch_request_completed`.
+Retrying a terminal markerless recovery creates a deterministic fresh delivery
+request from the prior request id and next retry count, copies the bounded
+recovery ledger into it, and removes the superseded terminal queue receipt.
+The attempt proof remains immutable. This preserves ordinary request
+idempotency—replaying one request still returns its first receipt—while an
+authorized cooled retry can launch a new worker for the unchanged controller
+generation. Writing the replacement before pruning the old receipt is
+restart-safe: after an interruption, the same deterministic replacement is
+rediscovered and duplicate writes are idempotent. Startup claim recovery still
+recognizes the older invalid `admitted` + claimed combination and requeues it
+without following or deleting the stale terminal attempt. Its targeted queue
+lookup accepts only the claimed receipt path; pending or out-of-directory hints
+fail closed instead of synthesizing a sibling claim path. During terminal
+delivery reconciliation, a rejected durable phase transition emits
+`dispatch_request_reconciliation_failed`; it is not acknowledged, written as a
+result, or reported as `dispatch_request_completed`.
 
 Recovery generation checks also share one immutable dependency-admission
 context per queue scan. The dispatcher creates it lazily only when a recovery

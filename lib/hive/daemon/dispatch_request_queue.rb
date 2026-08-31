@@ -735,18 +735,14 @@ module Hive
       # retried, move it back to the pending filename before changing its
       # phase. A crash between those operations therefore leaves a safe,
       # invisible terminal receipt instead of an admitted claimed split.
-      def requeue_recovery!(request_id, expected_phase:, changes:,
-                            state_home: Hive::Paths.state_home, known_path: nil)
+      def requeue_recovery!(request_id, expected_phase:, changes:, known_path:,
+                            state_home: Hive::Paths.state_home)
         with_request_lock(request_id, state_home: state_home) do |dir|
-          paths = if known_path
-            expanded = File.expand_path(known_path)
-            next false unless File.dirname(expanded) == File.expand_path(dir)
-            next false unless expanded.end_with?(CLAIMED_SUFFIX)
+          expanded = File.expand_path(known_path)
+          next false unless File.dirname(expanded) == File.expand_path(dir)
+          next false unless expanded.end_with?(CLAIMED_SUFFIX)
 
-            [ expanded, expanded.delete_suffix(CLAIMED_SUFFIX) ]
-          else
-            request_files(dir)
-          end
+          paths = [ expanded, expanded.delete_suffix(CLAIMED_SUFFIX) ]
           matches = paths.filter_map do |path|
             data = parse_json_hash(path)
             [ path, data ] if data && data["request_id"].to_s == request_id.to_s

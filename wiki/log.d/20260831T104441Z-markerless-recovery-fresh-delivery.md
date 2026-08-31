@@ -16,10 +16,13 @@ delivery request for the next retry count, copies its bounded recovery ledger,
 and removes the superseded terminal queue receipt. The immutable attempt proof
 is retained. Duplicate observation before terminalization still returns the
 same request, and repeated failures still stop at the existing deterministic
-failure ceiling.
+failure ceiling. The obsolete whole-queue fallback in the startup-only claimed
+receipt repair was removed; that repair now requires its already-known claimed
+path and remains directory-bound.
 
 **Evidence:** Recovery coordinator tests prove a terminal controller failure
 rearms as one new pending delivery, removes the old claimed receipt and claim
 sidecar, preserves the retry count, and never mutates the controller manifest.
 Attempts tests continue to prove that a new recovery request can launch a fresh
-attempt while replaying the same request remains idempotent.
+attempt while replaying the same request remains idempotent. Queue tests cover
+the path-bound repair and its missing-directory failure mode.

@@ -2292,6 +2292,34 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
   end
 
+  def test_plan_review_recovers_a_runner_checkpoint_custody_false_positive
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    false_positive = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked",
+        "required_action" => "waive named coverage or restore required reviewer capability",
+        "routes" => [
+          {
+            "role" => "adversarial", "outcome" => "terminal_failure",
+            "attempt_id" => "pra-checkpoint", "diagnostic_source" => "runner",
+            "diagnostic" =>
+              "reviewer modified protected artifacts: task-projection.checkpoint.json"
+          }
+        ]
+      }
+    )
+
+    assert_equal "plan_reviewing", false_positive.key
+    assert_equal "hive plan-review-run demo-260426-aaaa", false_positive.command
+
+    reviewer_authored = Marshal.load(Marshal.dump(false_positive.plan_review))
+    reviewer_authored.fetch("routes").first["diagnostic_source"] = "reviewer"
+    terminal = Hive::TaskAction.for(task, marker(:waiting), plan_review: reviewer_authored)
+    assert_equal "plan_review_unsupported", terminal.key
+    assert_nil terminal.command
+  end
+
   def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair
     Dir.mktmpdir("task-action-stale-plan-review") do |root|
       task = fake_task(stage_name: "plan", stage_index: 3, project_root: root)

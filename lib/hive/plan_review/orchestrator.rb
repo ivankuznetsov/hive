@@ -9,6 +9,7 @@ require "hive/lock"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
+require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/clearance"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
@@ -132,6 +133,7 @@ module Hive
         record = refresh_planner_identity_contract(record)
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
+        record = refresh_checkpoint_custody_contract(record)
         record = refresh_adversarial_identity_contract(record)
         record = refresh_selected_lenses_contract(record)
         record = refresh_residual_evidence_contract(record)
@@ -415,6 +417,22 @@ module Hive
         )
       end
 
+      # A projection-checkpoint rollout briefly placed Hive's own
+      # review-session write inside reviewer custody. Retry each exact,
+      # runner-authored false positive once after the custody exclusion ships.
+      def refresh_checkpoint_custody_contract(record)
+        routes = CheckpointCustody.recoverable_routes(record["routes"])
+        refresh_route_contract(
+          record, routes:,
+          recovery_attributes: {
+            "checkpoint_custody_recovery" => true,
+            "checkpoint_custody_contract_version" =>
+              CheckpointCustody::CONTRACT_VERSION
+          },
+          diagnostic: "retry reviewer after repairing review-session checkpoint custody"
+        )
+      end
+
       # Older parsers rejected lowercase specialist names such as
       # `product-lens` and persisted the otherwise valid reviewer response as a
       # terminal failure. Re-run that exact legacy diagnostic once under the
@@ -422,7 +440,7 @@ module Hive
       # genuinely malformed result produced by the current parser.
       def refresh_selected_lenses_contract(record)
         routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
-        refresh_parser_contract(
+        refresh_route_contract(
           record, routes:,
           recovery_attributes: {
             "selected_lenses_contract_recovery" => true,
@@ -439,7 +457,7 @@ module Hive
       # initial role once under the explicit empty-array contract.
       def refresh_residual_evidence_contract(record)
         routes = ResultParser.recoverable_residual_evidence_routes(record["routes"])
-        refresh_parser_contract(
+        refresh_route_contract(
           record, routes:,
           recovery_attributes: {
             "residual_evidence_contract_recovery" => true,
@@ -449,7 +467,7 @@ module Hive
         )
       end
 
-      def refresh_parser_contract(record, routes:, recovery_attributes:, diagnostic:)
+      def refresh_route_contract(record, routes:, recovery_attributes:, diagnostic:)
         return record if routes.empty?
 
         resets = routes.map do |route|

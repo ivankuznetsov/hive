@@ -14,6 +14,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
     refute_includes anchored, "task-journal.jsonl"
     refute_includes anchored, "task-projection.json"
+    refute_includes anchored, "task-projection.checkpoint.json"
     # The reviewer's actual input must still be protected.
     assert_includes anchored, "plan.md"
   end

@@ -13,6 +13,7 @@ require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
+require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/planner_revision"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
@@ -748,6 +749,8 @@ module Hive
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_adversarial_identity_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_checkpoint_custody_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_selected_lenses_contract_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_residual_evidence_contract_review?
@@ -1068,6 +1071,14 @@ module Hive
       !Hive::PlanReview::RouteResolver.recoverable_identity_route(
         routes:, planner_identity:
       ).nil?
+    end
+
+    # Builds that first protected the bounded projection checkpoint included
+    # Hive's own session write in reviewer custody. Surface only the adapter's
+    # exact runner-provenance false positive as runnable until the orchestrator
+    # records its versioned one-time reset.
+    def recoverable_checkpoint_custody_review?
+      Hive::PlanReview::CheckpointCustody.recoverable?(plan_review["routes"])
     end
 
     # The old selected-lens grammar rejected natural lowercase kebab-case

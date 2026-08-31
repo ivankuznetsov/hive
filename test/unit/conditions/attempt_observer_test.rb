@@ -43,6 +43,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
                    File.binread(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME))
       assert_equal 1, locator_calls, "delivered terminal attempts must be skipped before task lookup"
 
+      FileUtils.rm(File.join(task.folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME))
       restarted = Hive::Conditions::AttemptObserver.new(
         store: store, task_locator: ->(_attempt) { task }
       )

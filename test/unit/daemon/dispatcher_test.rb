@@ -2237,6 +2237,78 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :dispatched)
   end
 
+  def test_failed_automatic_advance_replay_enters_markerless_recovery_without_respawning
+    attempt = Struct.new(:attempt_id, :task_generation, :state, :outcome)
+    accepted_attempt = attempt.new("attempt-1", "generation-1", "running", nil)
+    failed_attempt = attempt.new("attempt-1", "generation-1", "terminal", "failed")
+    results = [
+      Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: accepted_attempt, receipt: nil,
+        attach_descriptor: nil, reason: nil
+      ),
+      Hive::Attempts::DispatchResult.new(
+        status: :terminal_replay, attempt: failed_attempt,
+        receipt: { "outcome" => "failed", "exit_status" => 1 },
+        attach_descriptor: nil, reason: nil
+      )
+    ]
+    replay_modes = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **options|
+      replay_modes << options.fetch(:replay_semantic_terminal)
+      results.shift || raise("unexpected third automatic admission")
+    end
+    observed = row(
+      stage: "6-review", marker: "none", action: "ready_for_review",
+      command: "hive review s1 --from 6-review"
+    )
+    File.write(observed.state_file, "# review\n")
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [ observed ], attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+    dispatcher.tick(now: T0 + 30)
+
+    assert_empty supervisor.spawned
+    marker = Hive::Markers.current(observed.state_file)
+    assert_equal :error, marker.name
+    assert_equal "agent_exited_without_terminal_marker", marker.attrs.fetch("reason")
+    stalled = logger.events.find { |name, _attributes| name == :markerless_stalled }
+    refute_nil stalled
+    assert_equal "attempt-1", stalled.last.fetch(:attempt_id)
+    assert_equal "failed", stalled.last.fetch(:attempt_outcome)
+    assert stalled.last.fetch(:healed)
+    assert_equal [ true, true ], replay_modes
+    assert_equal 1, logger.events.count { |name, _attributes| name == :dispatched }
+  end
+
+  def test_marked_advance_keeps_fresh_retry_semantics
+    attempt = Struct.new(:attempt_id, :task_generation, :state, :outcome)
+                    .new("attempt-1", "generation-1", "running", nil)
+    result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil
+    )
+    replay_modes = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **options|
+      replay_modes << options.fetch(:replay_semantic_terminal)
+      result
+    end
+    observed = row(
+      stage: "6-review", marker: "review_complete", action: "ready_to_artifacts",
+      command: "hive artifacts s1 --from 6-review"
+    )
+    dispatcher, = make_dispatcher(
+      rows: [ observed ], attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ false ], replay_modes
+  end
+
   # A generic-workflow row (`workflow: "research"`, `action: "ready_to_run"`)
   # must dispatch `hive run` on first sight through the real tick loop — the
   # generic dispatch path was previously only asserted via direct CLI calls,

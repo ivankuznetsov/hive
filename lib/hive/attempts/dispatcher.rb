@@ -58,7 +58,8 @@ module Hive
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
                    interactive: false, generation: nil, predecessor_attempt_id: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
-                   admission_view: nil, routing_policy: nil, cohort_release: false)
+                   admission_view: nil, routing_policy: nil, cohort_release: false,
+                   replay_semantic_terminal: false)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage,
@@ -71,7 +72,8 @@ module Hive
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           successor_of: nil, now: now, admission_view: admission_view,
-          routing_policy: policy, cohort_release: cohort_release
+          routing_policy: policy, cohort_release: cohort_release,
+          replay_semantic_terminal: replay_semantic_terminal
         )
         return result unless superseding_loss?(result)
 
@@ -147,7 +149,7 @@ module Hive
       end
 
       def dispatch_request(request, interactive: false, now: @clock.call,
-                           admission_view: nil)
+                           admission_view: nil, replay_semantic_terminal: false)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
@@ -173,7 +175,8 @@ module Hive
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
-          cohort_release: explicit_cohort_release?(request)
+          cohort_release: explicit_cohort_release?(request),
+          replay_semantic_terminal: replay_semantic_terminal
         )
       end
 
@@ -181,7 +184,8 @@ module Hive
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
-                subject: nil, admission_view: nil, routing_policy:, cohort_release: false)
+                subject: nil, admission_view: nil, routing_policy:, cohort_release: false,
+                replay_semantic_terminal: false)
         result = nil
         created = nil
         claim_capability = nil
@@ -213,7 +217,8 @@ module Hive
             terminal = if successor_of.nil?
               replayable_terminal(
                 exact, request_id, task: task, admission_view: view,
-                generation: generation, subject: subject
+                generation: generation, subject: subject,
+                replay_semantic_terminal: replay_semantic_terminal
               )
             end
             if terminal
@@ -498,15 +503,25 @@ module Hive
 
       # Request IDs own delivery idempotency: replaying the same request must
       # keep returning its original receipt, including a failure. A different
-      # request is a deliberate retry, so only a successful terminal receipt
-      # remains the semantic owner of the unchanged generation.
+      # request is normally a deliberate retry, so only a successful terminal
+      # receipt remains the semantic owner of the unchanged generation. The
+      # daemon's automatic advance scan is the exception: it creates a fresh
+      # delivery request on every tick, so an unchanged failed generation must
+      # replay instead of spending on the same broken command forever.
       def replayable_terminal(records, request_id, task:, admission_view: nil,
-                              generation: nil, subject: nil)
+                              generation: nil, subject: nil,
+                              replay_semantic_terminal: false)
         terminals = records.select { |record| record.state == "terminal" }
+        semantic_terminal = nil
         if admission_view
           point_subject = subject || task_subject(generation)
+          semantic_terminal = admission_view.latest_terminal_attempt(
+            task_generation: generation.task_generation,
+            subject: point_subject
+          )
           terminals |= [
             admission_view.terminal_attempt(request_id: request_id),
+            semantic_terminal,
             admission_view.successful_attempt(
               task_generation: generation.task_generation,
               subject: point_subject
@@ -526,6 +541,10 @@ module Hive
           newest = same_request.last
           return newest unless newest.outcome == "succeeded"
           return newest if required_artifact_valid?(task, newest)
+        end
+
+        if replay_semantic_terminal && semantic_terminal&.outcome != "succeeded"
+          return semantic_terminal
         end
 
         terminals.reverse.find do |record|

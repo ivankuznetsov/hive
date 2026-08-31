@@ -337,6 +337,20 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_projection_cutover_boundary_accepts_only_pre_activation_history
+    with_repository do |repository|
+      activated_at = "2026-07-16T12:00:00.000000Z"
+      repository.database.transaction do |db|
+        db[:installations].update(activated_at: activated_at)
+      end
+
+      assert repository.pre_activation_projection?("2026-07-16T11:59:59.999999Z")
+      refute repository.pre_activation_projection?(activated_at)
+      refute repository.pre_activation_projection?("2026-07-16T12:00:00.000001Z")
+      refute repository.pre_activation_projection?("invalid")
+    end
+  end
+
   private
 
   def with_repository

@@ -198,6 +198,37 @@ module Hive
         projection
       end
 
+      # Advance from an authenticated checkpoint prefix after an ordinary
+      # append. Full replay remains the fallback when no trusted checkpoint is
+      # available.
+      def refresh_after_append!(marker: nil,
+                                limits: Hive::TaskWorkspace::Limits.new)
+        with_journal_write_lock do
+          bounded = read_bounded_unlocked(
+            marker: marker, limits: limits, require_checkpoint: true,
+            pristine: false
+          )
+          return rebuild!(marker: marker) unless bounded.current?
+
+          bytes = journal_bytes
+          unless bounded.journal_cursor == bytes.bytesize
+            raise Hive::TaskProjection::InvalidJournal,
+                  "journal changed while advancing its projection checkpoint"
+          end
+          data = bounded.projection.to_h
+          binding = {
+            "cursor" => bytes.bytesize,
+            "hash" => ::Digest::SHA256.hexdigest(bytes),
+            "event_id" => data.dig("journal", "event_id")
+          }
+          data["journal"].merge!(binding)
+          projection = Hive::TaskProjection.from_data(data)
+          publish(projection)
+          publish_checkpoint(binding: binding, bytes: bytes, projection: projection)
+          projection
+        end
+      end
+
       # Canonical task creators publish a zero-history checkpoint before the
       # task becomes visible. This is not a repair path: any pre-existing
       # journal or derived projection is refused, leaving historical tasks to
@@ -1005,9 +1036,12 @@ module Hive
           next binding if Hive::Attempts::Record::FINAL_STATES.include?(binding["state"])
 
           attempt = fetch_attempt_binding(binding["attempt_id"])
-          return nil unless attempt
-
-          current = Hive::TaskProjection.durable_attempt_metadata(attempt)
+          current = if attempt
+            Hive::TaskProjection.durable_attempt_metadata(attempt)
+          elsif pre_activation_projection?(binding["accepted_at"])
+            binding.merge("state" => "lost", "outcome" => nil)
+          end
+          return nil unless current
           return nil unless same_attempt_identity?(binding, current)
 
           current
@@ -1037,6 +1071,11 @@ module Hive
         else
           @attempt_store.fetch(attempt_id)
         end
+      end
+
+      def pre_activation_projection?(observed_at)
+        @attempt_store.respond_to?(:pre_activation_projection?) &&
+          @attempt_store.pre_activation_projection?(observed_at)
       end
 
       def durable_handoff_snapshot?(snapshot)

@@ -379,7 +379,7 @@ module Hive
 
       Hive::TaskProjection::Store.new(
         task_folder: task_folder, attempt_store: @writer.attempt_store
-      ).rebuild!
+      ).refresh_after_append!
     rescue StandardError => e
       warn "[hive] task workspace checkpoint refresh failed: #{e.class}"
       nil

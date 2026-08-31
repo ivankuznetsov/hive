@@ -11,6 +11,7 @@ module Hive
   module Gh
     NETWORK_TIMEOUT_SEC = 60
     POLL_INTERVAL_SEC = 0.05
+    CHECK_ANNOTATIONS_MAX_BYTES = 64 * 1024
 
     # Leading YAML frontmatter block of a hive-authored pr.md. Capture group
     # 1 is the YAML body (used by #pr_frontmatter); #pr_body strips the whole
@@ -638,8 +639,48 @@ module Hive
       fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
       return utf8_text(fetch_result[:log]) if fetch_result[:success]
 
+      annotations = fetch_check_annotations(worktree_path, job_id, cfg: cfg)
+      return annotations unless annotations.empty?
+
       error = utf8_text(fetch_result[:error])
       "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{error}]"
+    end
+
+    # GitHub creates a failed check with no job log when Actions cannot start
+    # the runner (for example an account billing or spending-limit hold). The
+    # check-run annotation is then the only useful diagnostic. Keep this a
+    # best-effort fallback so an annotation transport failure never masks the
+    # original log-fetch error.
+    def fetch_check_annotations(worktree_path, check_run_id, cfg: nil)
+      id = Integer(check_run_id, exception: false)
+      return "" unless id&.positive?
+
+      identity = repository_identity(worktree_path, cfg: cfg)
+      endpoint = "repos/#{identity.fetch('repository')}/check-runs/#{id}/annotations?per_page=100"
+      out, _err, status = capture3(
+        "gh", "api", "--hostname", identity.fetch("host"), endpoint,
+        chdir: worktree_path, cfg: cfg,
+        max_stdout_bytes: CHECK_ANNOTATIONS_MAX_BYTES
+      )
+      return "" unless status.success?
+
+      document = JSON.parse(out)
+      return "" unless document.is_a?(Array)
+
+      lines = document.filter_map do |annotation|
+        next unless annotation.is_a?(Hash)
+
+        parts = %w[title message raw_details]
+                .map { |key| utf8_text(annotation[key]).strip }
+                .reject(&:empty?)
+                .uniq
+        parts.join(" — ") unless parts.empty?
+      end
+      return "" if lines.empty?
+
+      "[hive-babysitter: GitHub check annotations]\n#{lines.join("\n")}"
+    rescue Hive::GhError, JSON::ParserError, KeyError, ArgumentError, TypeError
+      ""
     end
 
     # Max-min fair allocation: repeatedly hand out an even share of the

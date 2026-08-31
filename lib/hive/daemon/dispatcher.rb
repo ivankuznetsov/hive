@@ -1586,11 +1586,7 @@ module Hive
           # ready_to_run indefinitely. Convert it to the ordinary recoverable
           # ERROR lifecycle under the task lock; the next tick submits it to the
           # sole RecoveryCoordinator. Keep the explicit event for observability.
-          healed = @stale_agent_healer.heal_markerless_stall(row)
-          @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
-                                              stage: row.stage, action: row.action,
-                                              reason: "agent_exited_without_marker",
-                                              healed: healed)
+          record_markerless_stall(row)
           observe_policy_disposition(row, decision)
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
@@ -1767,10 +1763,15 @@ module Hive
           state_file_mtime: row.state_file_mtime,
           state_file_path: row.state_file,
           now: now,
-          trigger: trigger
+          trigger: trigger,
+          replay_semantic_terminal: trigger == "advance" &&
+            row.marker.to_s == "none" && Policy.advance?(row.action)
         )
         remember_routing_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
+        if failed_automatic_advance_replay?(row, trigger, dispatch_result)
+          return record_markerless_stall(row, attempt: dispatch_result.attempt)
+        end
         if dispatch_result.is_a?(Hive::Attempts::DispatchResult) &&
            (dispatch_result.accepted? || dispatch_result.status == :terminal_replay)
           # Durable attempts never enter ChildSupervisor, so consume their
@@ -1784,6 +1785,28 @@ module Hive
           )
         end
         outcome
+      end
+
+      def failed_automatic_advance_replay?(row, trigger, result)
+        trigger == "advance" && row.marker.to_s == "none" &&
+          Policy.advance?(row.action) &&
+          result.is_a?(Hive::Attempts::DispatchResult) &&
+          result.status == :terminal_replay &&
+          %w[failed cancelled].include?(result.attempt&.outcome)
+      end
+
+      def record_markerless_stall(row, attempt: nil)
+        attributes = {
+          project: row.project, slug: row.slug, stage: row.stage,
+          action: row.action, reason: "agent_exited_without_marker",
+          healed: @stale_agent_healer.heal_markerless_stall(row)
+        }
+        if attempt
+          attributes[:attempt_id] = attempt.attempt_id
+          attributes[:attempt_outcome] = attempt.outcome
+        end
+        @logger.event(:markerless_stalled, **attributes)
+        :markerless_stalled
       end
 
       def dispatch_outcome(result)
@@ -1822,6 +1845,8 @@ module Hive
           [ "agent", "this task already has an in-flight child" ]
         when :attempt_terminal_replay
           [ "hive", "the matching durable attempt already reached a terminal receipt" ]
+        when :markerless_stalled
+          [ "hive", "the automatic advance failed without producing task progress" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
         when :attempt_failure_cohort
@@ -3582,13 +3607,15 @@ module Hive
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, now:, trigger: "advance",
-                           request_id: nil, kind: :task, dispatch_token: nil)
+                           request_id: nil, kind: :task, dispatch_token: nil,
+                           replay_semantic_terminal: false)
         return :shutdown unless admission_open?
 
         if kind == :task && @attempt_dispatcher && !@dry_run
           return dispatch_durable_command(
             command, project: project, slug: slug, stage: stage,
-            now: now, trigger: trigger, request_id: request_id
+            now: now, trigger: trigger, request_id: request_id,
+            replay_semantic_terminal: replay_semantic_terminal
           )
         end
 
@@ -3620,7 +3647,8 @@ module Hive
         pid
       end
 
-      def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:)
+      def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:,
+                                   replay_semantic_terminal: false)
         return :shutdown unless admission_open?
 
         # A full daemon tick can take longer than the attempt launch window
@@ -3651,7 +3679,8 @@ module Hive
 
         result = @attempt_dispatcher.dispatch_request(
           request, interactive: false, now: now,
-          admission_view: @attempt_snapshot&.admission_view
+          admission_view: @attempt_snapshot&.admission_view,
+          replay_semantic_terminal: replay_semantic_terminal
         )
         log_attempt_admission(result)
         if result.status == :accepted

@@ -28,10 +28,11 @@ module Hive
       end
 
       def dispatch_request(request, interactive: false, now: Time.now.utc,
-                           admission_view: nil)
+                           admission_view: nil, replay_semantic_terminal: false)
         daemon.dispatch_request(
           request, interactive: interactive, now: now,
-          admission_view: admission_view
+          admission_view: admission_view,
+          replay_semantic_terminal: replay_semantic_terminal
         )
       end
 

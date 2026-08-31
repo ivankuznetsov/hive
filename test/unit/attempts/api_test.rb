@@ -58,7 +58,8 @@ class AttemptsAPITest < Minitest::Test
     api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
 
     result = api.dispatch_request(
-      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick
+      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick,
+      replay_semantic_terminal: true
     )
 
     assert_equal :accepted, result
@@ -66,6 +67,7 @@ class AttemptsAPITest < Minitest::Test
     assert_equal false, call.last.fetch(:interactive)
     assert_equal Time.at(1).utc, call.last.fetch(:now)
     assert_equal :tick, call.last.fetch(:admission_view)
+    assert_equal true, call.last.fetch(:replay_semantic_terminal)
   end
 
   def test_dispatch_successor_delegates_recovery_admission

@@ -323,6 +323,42 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_automatic_advance_replays_failed_generation_but_recovery_retries
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
+      request = lambda do |request_id, requestor:, trigger:|
+        FakeRequest.new(
+          slug: task.slug, project: "demo",
+          argv: [ "hive", "run", task.slug ], request_id: request_id,
+          inherited_outputs: [], requestor: requestor, trigger: trigger
+        )
+      end
+
+      first = dispatcher.dispatch_request(
+        request.call("advance-one", requestor: "daemon", trigger: "advance"),
+        now: NOW
+      )
+      failed = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1, now: NOW + 3
+      )
+      replay = dispatcher.dispatch_request(
+        request.call("advance-two", requestor: "daemon", trigger: "advance"),
+        now: NOW + 4, replay_semantic_terminal: true
+      )
+      recovery = dispatcher.dispatch_request(
+        request.call("recovery-one", requestor: "healer", trigger: "recovery"),
+        now: NOW + 5
+      )
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal failed.attempt_id, replay.attempt.attempt_id
+      assert_equal :accepted, recovery.status
+      refute_equal failed.attempt_id, recovery.attempt.attempt_id
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
   def test_successful_retry_replays_for_new_requests_without_changing_old_request_result
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")

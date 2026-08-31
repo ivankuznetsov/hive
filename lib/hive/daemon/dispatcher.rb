@@ -59,6 +59,9 @@ module Hive
       DISPATCH_AGING_STEP_SEC = 30 * 60
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
       STATE_FILE_PROBE_BATCH_SIZE = 64
+      STALE_RECOVERY_BLOCK_REASONS = %w[
+        generation_conflict task_identity_conflict
+      ].freeze
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answer_state`).
@@ -392,7 +395,9 @@ module Hive
         # consume every newly opened slot before an old direct row is ever
         # considered. Single-writer invariant: only the daemon spawns
         # `hive run`-class verbs.
-        queue_dispatch = process_dispatch_requests(now: now, rows: result.rows)
+        queue_dispatch = process_dispatch_requests(
+          now: now, rows: result.rows, projects: result.projects
+        )
         @priority_capacity_fences = queue_dispatch.fetch(:capacity_fences)
 
         # Accepted-source admission is an independent control lane. It is
@@ -2469,7 +2474,7 @@ module Hive
       #   8. Spawn via `dispatch_command`, threading `request_id`
       #      through the supervisor so `reap_completed` can complete the
       #      row and log `:dispatch_request_completed`.
-      def process_dispatch_requests(now:, rows:)
+      def process_dispatch_requests(now:, rows:, projects: nil)
         pending = dispatch_repository.pending(state_home: dispatch_request_state_home)
         pending = prepare_dispatch_requests(pending, now: now)
         current_request_ids = pending.to_h { |request| [ request.request_id.to_s, true ] }
@@ -2500,6 +2505,9 @@ module Hive
         rows.each do |row|
           key = [ row.project.to_s, row.slug.to_s ]
           rows_by_task[key] ||= row
+        end
+        observed_projects = if projects
+          Array(projects).to_h { |project| [ project.name.to_s, project ] }
         end
         pending_task_keys = pending.to_h do |request|
           [ [ request.project.to_s, request.slug.to_s ], true ]
@@ -2599,7 +2607,8 @@ module Hive
             result = process_dispatch_request_iteration(
               req, now: now, rows: rows,
               row_index: rows_by_task, project_lookup: project_lookup,
-              admission_context_loader: admission_context_loader
+              admission_context_loader: admission_context_loader,
+              project_observation: observed_projects&.[](req.project.to_s)
             )
             outcome = if result.is_a?(Hive::Attempts::DispatchResult)
               dispatch_outcome(result)
@@ -2702,7 +2711,8 @@ module Hive
       # @controller, @logger, and the queue's remove() call.
       def process_dispatch_request_iteration(req, now:, rows:, row_index: nil,
                                              project_lookup: nil,
-                                             admission_context_loader: nil)
+                                             admission_context_loader: nil,
+                                             project_observation: nil)
         return unless admission_open?
 
         unless dispatch_repository.valid_argv?(req.argv)
@@ -2769,14 +2779,10 @@ module Hive
               candidate.slug.to_s == req.slug.to_s
           end
         end
-        if row && projection_repair_row?(row)
-          log_dispatch_request_once(
-            :dispatch_request_blocked,
-            request_id: req.request_id, project: req.project,
-            slug: req.slug, reason: "projection_repair_required",
-            remediation: row.suggested_command ||
-              "repair the exact task projection before admission"
-          )
+        if req.recovery.is_a?(Hash) && stale_recovery_request?(
+          req, row, project_observation: project_observation
+        )
+          reject_request(req, reason: "stale_task_identity")
           return
         end
         if req.recovery.nil? && durable_task_request?(req) && bound_task_request?(req)
@@ -2797,6 +2803,16 @@ module Hive
             reject_request(req, reason: "stale_task_identity")
             return
           end
+        end
+        if row && projection_repair_row?(row)
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "projection_repair_required",
+            remediation: row.suggested_command ||
+              "repair the exact task projection before admission"
+          )
+          return
         end
         if req.recovery.is_a?(Hash)
           unless row
@@ -3090,6 +3106,41 @@ module Hive
       def bound_task_request?(request)
         !request.task_generation.to_s.empty? || !request.task_id.to_s.empty? ||
           !request.expected_stage.to_s.empty?
+      end
+
+      def stale_recovery_request?(request, row, project_observation:)
+        return true if STALE_RECOVERY_BLOCK_REASONS.include?(
+          request.recovery["blocked_reason"].to_s
+        )
+
+        if row
+          identity_changed =
+            (!request.task_id.to_s.empty? && !row.id.to_s.empty? &&
+             request.task_id.to_s != row.id.to_s) ||
+            (!request.expected_stage.to_s.empty? &&
+             request.expected_stage.to_s != row.stage.to_s)
+          return false unless identity_changed
+        else
+          return false unless project_observation
+        end
+        return false if project_observation&.legacy?
+
+        exact_recovery_task_stale?(request)
+      end
+
+      def exact_recovery_task_stale?(request)
+        task = Hive::TaskResolver.new(
+          request.slug, project_filter: request.project
+        ).resolve
+        current_stage = "#{task.stage_index}-#{task.stage_name}"
+        (!request.task_id.to_s.empty? && !task.id.to_s.empty? &&
+         request.task_id.to_s != task.id.to_s) ||
+          (!request.expected_stage.to_s.empty? &&
+           request.expected_stage.to_s != current_stage)
+      rescue Hive::InvalidTaskPath
+        bound_task_request?(request)
+      rescue Hive::Error, SystemCallError, IOError
+        false
       end
 
       def bound_task_request_current?(request, row: nil, admission_context: nil)

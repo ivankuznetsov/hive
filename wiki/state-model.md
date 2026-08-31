@@ -474,7 +474,18 @@ checkpoints while resetting legacy attempt rows. A checkpoint prefix whose
 attempt was accepted before the durable installation activation boundary may
 classify that missing legacy attempt as lost; the prefix must still pass its
 cursor, inode, and anchor checks. The appended suffix is validated against
-SQLite, and strict full replay still rejects every unknown attempt.
+SQLite. Ordinary lifecycle reads prefer this validated checkpoint and bounded
+suffix so retained tasks can resume after cutover. Strict full replay remains
+the fallback when no trusted checkpoint exists and remains mandatory for an
+explicit rebuild. Exact-task repair has one cutover-only compatibility route:
+it may use a retained snapshot binding for an unknown pre-activation attempt,
+but only when the journal itself also contains a pre-activation observation for
+that attempt. Hive then replays the complete journal under the task lock and
+publishes only when the ledger and complete projection match. The comparison ignores only recomputed
+marker overlays, an omitted optional null exit status, and the historical
+per-stage implementation-identity summary; its underlying identity events and
+history must still match. Post-activation unknown attempts, changed journals,
+and every other projection mismatch remain strict failures.
 
 The package manager publishes the candidate normally; Hive never renames
 package-owned launcher entries or retains the previous executable tree.

@@ -8010,9 +8010,6 @@ end
         expected_stage: "4-execute", task_generation: "old-generation",
         state_home: state_home, now: T0
       )
-      dispatcher.define_singleton_method(:bound_task_request_current?) do |_request, row: nil, **|
-        false
-      end
       stub_find_project!(dispatcher, "p1")
       begin
         dispatcher.tick(now: T0)
@@ -8027,6 +8024,293 @@ end
       assert_equal "stale_task_identity", rejected.last.fetch(:reason)
       assert_empty sup.spawned
       assert_nil Q.fetch("STALE", state_home: state_home)
+    end
+  end
+
+  def test_dispatcher_removes_a_recovery_request_after_the_task_advances
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [ row(id: 42, slug: "s1", stage: "6-done", action: "archived") ],
+        dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "STALE-RECOVERY", task_id: 42,
+        expected_stage: "4-review", task_generation: "old-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      rejected = logger.events.find do |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "STALE-RECOVERY"
+      end
+      refute_nil rejected
+      assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+      assert_empty coordinator.resumes
+      assert_empty sup.spawned
+      assert_nil Q.fetch("STALE-RECOVERY", state_home: state_home)
+    end
+  end
+
+  def test_dispatcher_removes_a_recovery_request_after_the_task_identity_changes
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [ row(id: 43, slug: "s1", stage: "4-review", action: "blocked") ],
+        dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "REPLACED-RECOVERY", task_id: 42,
+        expected_stage: "4-review", task_generation: "old-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      rejected = logger.events.find do |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "REPLACED-RECOVERY"
+      end
+      refute_nil rejected
+      assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+      assert_empty coordinator.resumes
+      assert_empty sup.spawned
+      assert_nil Q.fetch("REPLACED-RECOVERY", state_home: state_home)
+    end
+  end
+
+  def test_dispatcher_removes_inert_stale_recovery_conflicts
+    Hive::Daemon::Dispatcher::STALE_RECOVERY_BLOCK_REASONS.each do |reason|
+      Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+        coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+        request_id = "STALE-#{reason.upcase}"
+        dispatcher, sup, _ctrl, logger, = make_dispatcher(
+          rows: [ row(id: 42, slug: "s1", stage: "4-review", action: "blocked") ],
+          dispatch_request_state_home: state_home,
+          recovery_coordinator: coordinator
+        )
+        recovery = dispatcher_recovery(phase: "cleared").merge(
+          "owner" => "operator", "blocked_reason" => reason
+        )
+        Q.write_request!(
+          project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+          requestor: "healer", request_id: request_id, task_id: 42,
+          expected_stage: "4-review", task_generation: "old-generation",
+          recovery: recovery, state_home: state_home, now: T0
+        )
+        stub_find_project!(dispatcher, "p1")
+        begin
+          dispatcher.tick(now: T0)
+        ensure
+          restore_find_project!
+        end
+
+        rejected = logger.events.find do |name, attrs|
+          name == :dispatch_request_rejected && attrs[:request_id] == request_id
+        end
+        refute_nil rejected
+        assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+        assert_empty coordinator.resumes
+        assert_empty sup.spawned
+        assert_nil Q.fetch(request_id, state_home: state_home)
+      end
+    end
+  end
+
+  def test_dispatcher_removes_a_recovery_request_after_the_task_is_archived
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      observed_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
+        name: "p1", legacy_stage_dirs: []
+      )
+      status_result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [], projects: [ observed_project ], error: nil
+      )
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [], status_result: status_result,
+        dispatch_request_state_home: state_home, recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "ARCHIVED-RECOVERY", task_id: 42,
+        expected_stage: "4-review", task_generation: "old-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      rejected = logger.events.find do |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "ARCHIVED-RECOVERY"
+      end
+      refute_nil rejected
+      assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+      assert_empty coordinator.resumes
+      assert_empty sup.spawned
+      assert_nil Q.fetch("ARCHIVED-RECOVERY", state_home: state_home)
+    end
+  end
+
+  def test_dispatcher_preserves_a_recovery_request_when_the_project_observation_degrades
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "DEGRADED-RECOVERY", task_id: 42,
+        expected_stage: "4-review", task_generation: "old-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      blocked = logger.events.find do |name, attrs|
+        name == :dispatch_request_blocked && attrs[:request_id] == "DEGRADED-RECOVERY"
+      end
+      refute_nil blocked
+      assert_equal "recovery_observation_unavailable", blocked.last.fetch(:reason)
+      assert_empty coordinator.resumes
+      assert_empty sup.spawned
+      refute_nil Q.fetch("DEGRADED-RECOVERY", state_home: state_home)
+    end
+  end
+
+  def test_dispatcher_preserves_a_recovery_request_for_a_legacy_project_observation
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      legacy_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
+        name: "p1", legacy_stage_dirs: [ "/tmp/p1/legacy" ]
+      )
+      status_result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [], projects: [ legacy_project ], error: nil
+      )
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [], status_result: status_result,
+        dispatch_request_state_home: state_home, recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "LEGACY-RECOVERY", task_id: 42,
+        expected_stage: "4-review", task_generation: "old-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      blocked = logger.events.find do |name, attrs|
+        name == :dispatch_request_blocked && attrs[:request_id] == "LEGACY-RECOVERY"
+      end
+      refute_nil blocked
+      assert_equal "recovery_observation_unavailable", blocked.last.fetch(:reason)
+      assert_empty coordinator.resumes
+      assert_empty sup.spawned
+      refute_nil Q.fetch("LEGACY-RECOVERY", state_home: state_home)
+    end
+  end
+
+  def test_dispatcher_preserves_a_recovery_request_when_the_status_row_is_stale
+    Dir.mktmpdir("hive-dispatch-project") do |project_root|
+      state_home = Dir.mktmpdir("hive-dispatch-queue")
+      state_path = File.join(project_root, ".hive-state")
+      folder = File.join(state_path, "stages", "4-execute", "s1")
+      Hive::TaskMeta.write(
+        folder, id: 42, slug: "s1", display_name: nil, workflow: "coding"
+      )
+      project = {
+        "name" => "p1", "path" => project_root, "hive_state_path" => state_path
+      }
+      old_row = row(id: 42, slug: "s1", stage: "3-plan", action: "blocked")
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [ old_row ], dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "RACING-RECOVERY", task_id: 42,
+        expected_stage: "4-execute", task_generation: "current-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+        with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { project }) do
+          dispatcher.tick(now: T0)
+        end
+      end
+
+      refute logger.events.any? { |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "RACING-RECOVERY"
+      }
+      assert_equal 1, coordinator.resumes.size
+      assert_empty sup.spawned
+      refute_nil Q.fetch("RACING-RECOVERY", state_home: state_home)
+    ensure
+      FileUtils.remove_entry(state_home) if state_home && File.exist?(state_home)
+    end
+  end
+
+  def test_dispatcher_preserves_a_stale_candidate_when_exact_resolution_fails
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      old_row = row(id: 42, slug: "s1", stage: "3-plan", action: "blocked")
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      dispatcher, sup, _ctrl, logger, = make_dispatcher(
+        rows: [ old_row ], dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1", argv: %w[hive run s1 --json],
+        requestor: "healer", request_id: "UNAVAILABLE-RECOVERY", task_id: 42,
+        expected_stage: "4-execute", task_generation: "current-generation",
+        recovery: dispatcher_recovery(phase: "dispatched"),
+        state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        with_replaced_singleton_method(
+          Hive::TaskResolver, :new, ->(*, **) { raise IOError, "transient task read" }
+        ) { dispatcher.tick(now: T0) }
+      ensure
+        restore_find_project!
+      end
+
+      refute logger.events.any? { |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "UNAVAILABLE-RECOVERY"
+      }
+      assert_equal 1, coordinator.resumes.size
+      assert_empty sup.spawned
+      refute_nil Q.fetch("UNAVAILABLE-RECOVERY", state_home: state_home)
     end
   end
 

@@ -145,6 +145,46 @@ module Hive
       end
       private_constant :BoundedAttemptStore
 
+      class SnapshotAttemptStore
+        def initialize(store:, bindings:, records:)
+          @store = store
+          @bindings = bindings.to_h { |binding| [ binding["attempt_id"].to_s, binding ] }
+          @pre_activation_attempt_ids = records.each_with_object({}) do |record, index|
+            observed_at = record["observed_at"] || record["occurred_at"]
+            if observed_at && @store.respond_to?(:pre_activation_projection?) &&
+               @store.pre_activation_projection?(observed_at)
+              index[record["attempt_id"].to_s] = true
+            end
+          end
+        end
+
+        def fetch_projection_binding(attempt_id)
+          current = @store.fetch_projection_binding(attempt_id)
+          return current if current
+
+          binding = @bindings[attempt_id.to_s]
+          return unless binding && @pre_activation_attempt_ids[attempt_id.to_s] &&
+                        @store.respond_to?(:pre_activation_projection?) &&
+                        @store.pre_activation_projection?(binding["accepted_at"])
+
+          task = binding["task"]
+          return unless task.is_a?(Hash)
+
+          {
+            "attempt_id" => binding["attempt_id"], "task_id" => task["id"],
+            "task_slug" => task["slug"], "intended_stage" => binding["stage"],
+            "task_input_epoch" => binding["task_generation"],
+            "ownership_generation" => binding["ownership_generation"],
+            "accepted_at" => binding["accepted_at"],
+            "predecessor_attempt_id" => binding["predecessor_attempt_id"],
+            "state" => binding["state"], "outcome" => binding["outcome"],
+            "lease_version" => binding["lease_version"],
+            "receipt" => { "exit_status" => binding["exit_status"] }
+          }
+        end
+      end
+      private_constant :SnapshotAttemptStore
+
       attr_reader :task_folder, :journal_path, :snapshot_path, :checkpoint_path, :attempt_store
 
       def initialize(task_folder:, projector: Hive::TaskProjection, attempt_store: default_attempt_store)
@@ -157,19 +197,12 @@ module Hive
       end
 
       def read(marker: nil)
+        checkpoint = read_bounded(marker: marker, require_checkpoint: true)
+        return checkpoint.projection if checkpoint.current?
+
         snapshot = read_snapshot
         bytes = journal_bytes
         ensure_journal_after_handoff!(snapshot: snapshot, marker: marker, bytes: bytes)
-        quick_binding = {
-          "cursor" => bytes.bytesize,
-          "hash" => ::Digest::SHA256.hexdigest(bytes),
-          "event_id" => snapshot&.dig("journal", "event_id")
-        }
-        if valid?(snapshot, quick_binding) && attempt_bindings_valid?(snapshot)
-          projection = Hive::TaskProjection.from_data(snapshot)
-          return marker ? projection.with_marker(marker) : projection
-        end
-
         replay(journal_binding(bytes), marker: marker)
       end
 
@@ -249,6 +282,9 @@ module Hive
       end
 
       # Explicit exact-task repair owns the only routine-external full replay.
+      # A retained pre-activation snapshot may supply attempt bindings that the
+      # all-in cutover intentionally discarded, but only when its complete
+      # projection still matches the exact journal under the current projector.
       # The exclusive journal lock prevents a concurrent append from binding
       # the new derived files to two different authoritative cursors.
       def repair!(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
@@ -270,6 +306,11 @@ module Hive
             raise Hive::TaskProjection::InvalidJournal,
                   "authoritative task journal is missing, empty, or not a regular file"
           end
+          cutover_repair = repair_from_pre_activation_snapshot(
+            marker: marker, limits: limits, bytes: journal_bytes
+          )
+          return cutover_repair if cutover_repair
+
           projection = rebuild!(marker: marker)
           bounded = read_bounded_unlocked(
             marker: marker, limits: limits, require_checkpoint: true, pristine: false
@@ -278,9 +319,11 @@ module Hive
         end
       end
 
-      # Workspace reads use a separately bounded checkpoint and only replay
-      # the append-only suffix. The lifecycle-facing #read and #rebuild!
-      # methods intentionally retain their historical behavior.
+      # Bounded reads use a separately validated checkpoint and only replay
+      # the append-only suffix. Lifecycle reads prefer that path but retain
+      # strict full replay as their fallback. Explicit rebuild stays strict;
+      # repair has the narrow pre-activation compatibility path documented
+      # above before it falls back to that same strict replay.
       def read_bounded(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
                        snapshot_max_bytes: nil, journal_suffix_max_bytes: nil,
                        journal_event_limit: nil, require_checkpoint: false,
@@ -306,6 +349,7 @@ module Hive
           snapshot_limit: snapshot_limit
         )
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
+             Hive::Conditions::InvalidCondition,
              JSON::ParserError, KeyError, TypeError, ArgumentError,
              SystemCallError, IOError => e
         degraded_bounded_read(
@@ -382,7 +426,8 @@ module Hive
         end
 
         read_from_checkpoint(
-          checkpoint.fetch("document"), marker: marker,
+          checkpoint.fetch("document"), base_projection: checkpoint.fetch("projection"),
+          marker: marker,
           suffix_limit: suffix_limit, event_limit: event_limit,
           attempt_limit: attempt_limit, predecessor_limit: predecessor_limit
         )
@@ -443,8 +488,8 @@ module Hive
           return { "valid" => false, "reason" => "checkpoint_invalid" }
         end
 
-        Hive::TaskProjection.from_data(document.fetch("snapshot"))
-        { "valid" => true, "document" => document }
+        projection = Hive::TaskProjection.from_data(document.fetch("snapshot"))
+        { "valid" => true, "document" => document, "projection" => projection }
       rescue Errno::ENOENT
         { "valid" => false, "reason" => "checkpoint_missing" }
       rescue JSON::ParserError, KeyError, TypeError, ArgumentError,
@@ -452,12 +497,11 @@ module Hive
         { "valid" => false, "reason" => "checkpoint_invalid" }
       end
 
-      def read_from_checkpoint(checkpoint, marker:, suffix_limit:, event_limit:,
-                               attempt_limit:, predecessor_limit:)
+      def read_from_checkpoint(checkpoint, base_projection:, marker:, suffix_limit:,
+                               event_limit:, attempt_limit:, predecessor_limit:)
         journal = checkpoint.fetch("journal")
         cursor = Integer(journal.fetch("cursor"))
         snapshot = checkpoint.fetch("snapshot")
-        base_projection = Hive::TaskProjection.from_data(snapshot)
         return degraded_from_projection(
           base_projection, reason: "checkpoint_prefix_changed", state: "stale", cursor: cursor
         ) unless checkpoint_prefix_valid?(journal, cursor)
@@ -985,7 +1029,54 @@ module Hive
         )
       end
 
-      def journal_binding(bytes = journal_bytes)
+      def repair_from_pre_activation_snapshot(marker:, limits:, bytes:)
+        snapshot = read_snapshot
+        bindings = snapshot&.dig("journal", "attempts")
+        return unless bindings.is_a?(Array) &&
+                      @attempt_store.respond_to?(:fetch_projection_binding)
+
+        records = Hive::TaskProjection.replay_journal(bytes).records
+        binding = journal_binding(
+          bytes,
+          attempt_store: SnapshotAttemptStore.new(
+            store: @attempt_store, bindings: bindings, records: records
+          )
+        )
+        derived = replay(binding, marker: nil).to_h
+        expected = Hive::TaskProjection.from_data(snapshot).to_h
+        [ derived, expected ].each do |value|
+          value.delete("marker")
+          value.delete("closure")
+          if (compatibility = value["compatibility"])
+            compatibility["marker"] = nil
+            compatibility["marker_fallback"] = nil
+          end
+          value.dig("implementation_identity")&.delete("stages")
+          Array(value.dig("journal", "attempts")).each do |attempt|
+            attempt["exit_status"] = nil unless attempt.key?("exit_status")
+          end
+        end
+        return unless Hive::TaskProjection.canonical_json(derived) ==
+                      Hive::TaskProjection.canonical_json(expected)
+
+        projection = replay(binding, marker: marker)
+        publish_checkpoint(binding: binding, bytes: bytes, projection: projection)
+        bounded = read_bounded_unlocked(
+          marker: marker, limits: limits, require_checkpoint: true, pristine: false
+        )
+        unless bounded.current?
+          raise Hive::TaskProjection::InvalidJournal,
+                "pre-activation snapshot did not produce a current checkpoint"
+        end
+        publish(bounded.projection)
+        publish_checkpoint(binding: binding, bytes: bytes, projection: bounded.projection)
+        RepairResult.new(projection: bounded.projection, bounded: bounded)
+      rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
+             JSON::ParserError, KeyError, TypeError, ArgumentError
+        nil
+      end
+
+      def journal_binding(bytes = journal_bytes, attempt_store: @attempt_store)
         if bytes.empty? && !File.exist?(journal_path)
           return {
             "cursor" => 0, "hash" => ::Digest::SHA256.hexdigest(""),
@@ -993,7 +1084,7 @@ module Hive
           }
         end
 
-        replay = Hive::TaskProjection.replay_journal(bytes, attempt_store: @attempt_store)
+        replay = Hive::TaskProjection.replay_journal(bytes, attempt_store: attempt_store)
         {
           "cursor" => replay.cursor,
           "hash" => replay.ledger_hash,
@@ -1012,17 +1103,6 @@ module Hive
         File.binread(journal_path)
       rescue Errno::ENOENT
         ""
-      end
-
-      def attempt_bindings_valid?(snapshot)
-        bindings = snapshot.dig("journal", "attempts")
-        return false unless bindings.is_a?(Array)
-
-        refreshed = refreshed_attempt_bindings(snapshot)
-        refreshed && bindings.zip(refreshed).all? do |expected, current|
-          expected.values_at("state", "outcome", "lease_version") ==
-            current.values_at("state", "outcome", "lease_version")
-        end
       end
 
       def refreshed_attempt_bindings(snapshot)

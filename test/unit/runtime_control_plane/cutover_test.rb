@@ -644,6 +644,11 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     with_home do |_state, _data, projects|
       root = projects.first.fetch("hive_state_path")
       task = task_path(projects, "idea.md")
+      babysitter = File.join(root, "babysitter", "worktrees", "58", "node_modules", ".bin")
+      FileUtils.mkdir_p(babysitter)
+      File.symlink("../package/bin.js", File.join(babysitter, "package"))
+      Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+
       hardlink = File.join(File.dirname(task), "hardlink.md")
       File.link(task, hardlink)
       error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
@@ -651,6 +656,14 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       end
       assert_equal :task_authority_unsafe, error.code
       File.unlink(hardlink)
+
+      symlink = File.join(File.dirname(task), "linked.md")
+      File.symlink(task, symlink)
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+      end
+      assert_equal :task_authority_unsafe, error.code
+      File.unlink(symlink)
 
       original = File.method(:lstat)
       failing = lambda do |path|

@@ -456,7 +456,8 @@ retention does not delete the terminal attempt row or still-referenced payloads.
 
 The one-way installation cutover is offline and fleet-atomic. A durable
 `ready → intended → active` manifest binds the registered projects,
-task-authority fingerprints, a validated immutable token-usage snapshot, and
+canonical `stages/` task-authority fingerprints, a validated immutable
+token-usage snapshot, and
 every path-shape fence. Before candidate startup mutation an early read-only
 gate refuses ordinary commands. Services stop and live owners are rejected
 before task identity is rebuilt from file authority. All other machine-local

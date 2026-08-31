@@ -70,6 +70,17 @@ class HiveDaemonDispatcherReexecTest < Minitest::Test
            "stale baseline vs fresh on-disk digest must register as drift"
   end
 
+  def test_fingerprint_includes_the_in_process_status_producer
+    dispatcher = build_dispatcher
+    paths = dispatcher.send(:code_fingerprint_paths)
+    status_path = Hive::Commands::Status
+                  .instance_method(:internal_task_graph_payload)
+                  .source_location
+                  .first
+
+    assert_includes paths, status_path
+  end
+
   def test_version_drift_suppressed_by_env_kill_switch
     dispatcher = build_dispatcher
     dispatcher.instance_variable_set(:@code_fingerprint, "0" * 64)

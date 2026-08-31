@@ -71,6 +71,40 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert dispatcher_options.fetch(:routing_policy_resolver).call(nil, "4-execute").legacy?
   end
 
+  def test_evidence_rework_bypasses_provider_routing
+    task = FakeTask.new(slug: "task", project_root: "/projects/demo")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    dispatcher_options = nil
+    downstream = Object.new
+    downstream.define_singleton_method(:dispatch_request) { |*_args, **_options| :accepted }
+    dispatcher_class = Class.new
+    dispatcher_class.define_singleton_method(:new) do |**options|
+      dispatcher_options = options
+      downstream
+    end
+    launcher_class = Class.new
+    launcher_class.define_singleton_method(:new) { |**_options| :launcher }
+    adapter = Hive::Attempts::ConfiguredDispatcher.new(
+      store: :store,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) },
+      daemon_config_loader: -> { Hive::Config::DEFAULTS.fetch("daemon") },
+      launcher_class: launcher_class,
+      dispatcher_class: dispatcher_class
+    )
+    argv = [
+      "hive", "evidence", "rework", "task", "--stage", "7-artifacts",
+      "--generation", "a" * 64, "--recovery-digest", "b" * 64
+    ]
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
+      adapter.dispatch_request(FakeRequest.new(slug: "task", project: "demo", argv: argv))
+    end
+
+    policy = dispatcher_options.fetch(:routing_policy_resolver).call(nil, "7-artifacts")
+    assert policy.legacy?
+    assert_equal "artifacts", policy.stage
+  end
+
   def test_successor_uses_the_same_per_project_configuration
     task = FakeTask.new(slug: "task", project_root: "/projects/demo")
     downstream = Object.new

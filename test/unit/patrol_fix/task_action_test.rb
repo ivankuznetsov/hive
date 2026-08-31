@@ -13,6 +13,8 @@ require "hive/task"
 require "hive/task_action"
 
 class PatrolFixTaskActionTest < Minitest::Test
+  include HiveTestHelper
+
   SLUG = "repair-login-260820-abcd"
   Marker = Hive::Markers::State
 
@@ -129,7 +131,9 @@ class PatrolFixTaskActionTest < Minitest::Test
         } ],
         "aliases" => [], "relations" => { "successor" => successor, "issues" => [] }
       )
-      yield Hive::Task.new(folder), Hive::PatrolFix::ReceiptStore.new(task_folder: folder), root
+      task = Hive::Task.new(folder)
+      seed_task_projection(folder, state_file: task.state_file)
+      yield task, Hive::PatrolFix::ReceiptStore.new(task_folder: folder), root
     end
   end
 

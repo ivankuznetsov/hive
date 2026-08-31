@@ -110,6 +110,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  notification.keyboard.first.first[:callback_data])
   end
 
+  def test_outcome_evidence_rework_builds_its_guarded_controller_action
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(
+        action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+        marker: "error", stage: "7-artifacts"
+      )
+    )
+
+    assert_includes notification.text, "Reviewed implementation gaps"
+    assert_equal "Approve", notification.keyboard.first.first[:text]
+    assert_equal "rework:hive:slug-260514-abcd:7-artifacts",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
   def test_generic_ready_to_advance_builds_approve_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "ready_to_advance", marker: "complete", stage: "2-gather", workflow: "research")

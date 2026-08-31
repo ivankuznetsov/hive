@@ -156,6 +156,7 @@ module AgentCliRuntime
       effort_argument_builder: ->(effort) { [ "--effort", effort ] },
       launcher_identity: "claude-code/v1",
       usage_extractor: UsageExtractors::CLAUDE,
+      error_extractor: ErrorExtractors::CLAUDE,
       credential_environment_keys: %w[
         ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY
       ],

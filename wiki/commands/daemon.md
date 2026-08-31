@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-25
+updated: 2026-08-30
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -89,6 +89,7 @@ they never claim a later daemon tick will allocate the id.
 | `ready_to_brainstorm` | Dispatch `hive brainstorm <slug>` (1→2)      |
 | `ready_to_plan`       | Dispatch `hive plan <slug> --from 2-brainstorm` (2→3) |
 | `ready_to_develop`    | Dispatch `hive develop <slug> --from 3-plan` (3→4) |
+| `outcome_evidence_rework` | Validate and dispatch the row's exact digest-bound `hive evidence rework ... --stage 7-artifacts` command (7→4); never synthesize `develop` or `artifacts`. |
 | `ready_to_open_pr`    | Dispatch `hive open-pr <slug> --from 4-execute` (4→5) |
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
@@ -124,6 +125,19 @@ and reconsiders the whole queue. Project and daily caps fence only later rows
 from that project, so unrelated projects can still use available global
 capacity. Non-dispatch policy rows are still classified and published in the
 operational snapshot.
+
+Durable dispatch requests and unrelated status rows use that same
+stage-plus-age ordering. Requests age from queue creation and retain FIFO plus
+same-task precedence; direct rows age from their state-file mtime. A later
+request lends its priority backward through the FIFO prefix when Hive compares
+the request lane with direct rows. Older requests still run first, but a
+blocked low-priority head cannot make the higher-priority suffix invisible.
+This lets an old runnable plan or retry claim a newly opened slot ahead of a
+younger request backlog without allowing the request and automatic row for one
+task to launch twice. Global and project capacity fences propagate in both
+directions across the two sources for the rest of the scan.
+Invalid and expired request files are rejected or pruned before that admission
+arbitration, so a persistent capacity fence cannot retain stale queue work.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.

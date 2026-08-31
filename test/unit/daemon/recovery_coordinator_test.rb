@@ -24,9 +24,49 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   FakeRow = Data.define(
     :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
     :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
-    :task_generation, :suggested_command
-  )
+    :task_generation, :suggested_command, :projection_repair
+  ) do
+    def initialize(projection_repair: false, **attributes)
+      super(projection_repair: projection_repair, **attributes)
+    end
+  end
   FakeGeneration = Data.define(:progress_token, :task_generation)
+
+  def test_projection_repair_row_is_ineligible_for_request_and_resume
+    with_tmp_dir do |state_home|
+      command = "hive repair-projection task --project demo --stage 4-execute"
+      row = FakeRow.new(
+        project: "demo", slug: "task", folder: "/missing/task",
+        state_file: "/missing/task/task.md", stage: "4-execute",
+        workflow: "coding", marker: "error",
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+          "repair_command" => command
+        },
+        state_file_mtime: NOW, live_task_lock: false, attempt_id: nil,
+        task_generation: nil, suggested_command: command, projection_repair: true
+      )
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
+
+      requested = coordinator.request(row: row, requestor: "healer", now: NOW)
+      resumed = coordinator.resume(
+        request: request_for_helpers(
+          recovery: {
+            "phase" => "admitted", "failure_origin" => "implementer_failed",
+            "retry_count" => 1
+          }
+        ),
+        row: row, now: NOW
+      )
+
+      assert_equal "blocked", requested.status
+      assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON, requested.reason
+      assert_equal command, requested.remediation
+      assert_equal "blocked", resumed.status
+      assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON, resumed.reason
+      assert_empty Q.pending(state_home: state_home)
+    end
+  end
 
   def test_default_resolver_reuses_canonical_folder_for_historical_workflow_stage
     with_tmp_global_config do |home|
@@ -70,6 +110,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         id: 42, slug: "durable-task", folder: root, state_file: state_file,
         stage_index: 1, stage_name: "inbox",
         workflow: Hive::Workflows::PatrolFix::DESCRIPTOR
+      )
+      Hive::TaskProjection::Store.new(task_folder: root).initialize_pristine!(
+        marker: Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
       )
       Hive::PatrolFix::ReceiptStore.new(task_folder: root).append!(
         patrol_fix_decision_receipt(task.slug)

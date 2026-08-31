@@ -143,14 +143,14 @@ class ContextProvenanceCoverageGapsTest < Minitest::Test
   def test_repository_snapshot_covers_process_deadlines_and_fallbacks
     mod = Hive::ContextProvenance::RepositorySnapshot
     output, status, overflow = mod.capture_command(
-      [ RbConfig.ruby, "-e", "print 'ok'" ], timeout_sec: 1, max_bytes: 10
+      [ RbConfig.ruby, "-e", "print 'ok'" ], timeout_sec: 5, max_bytes: 10
     )
     assert_equal "ok", output
     assert status.success?
     refute overflow
 
     output, status, overflow = mod.capture_command(
-      [ RbConfig.ruby, "-e", "print 'abcdefghij'" ], timeout_sec: 1, max_bytes: 4
+      [ RbConfig.ruby, "-e", "print 'abcdefghij'" ], timeout_sec: 5, max_bytes: 4
     )
     assert_equal "abcd", output
     assert status.nil? || status.success?

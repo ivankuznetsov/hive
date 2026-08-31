@@ -35,6 +35,7 @@ require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 require "hive/events"
+require "hive/warnings"
 
 module Hive
   module Commands
@@ -43,7 +44,6 @@ module Hive
       attr_reader :next_retention_boundary
 
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
-
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
@@ -104,7 +104,7 @@ module Hive
       ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false, daemon_tasks: nil)
+                     operational: false, full: false, daemon_tasks: nil, warning_sink: nil)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -115,8 +115,14 @@ module Hive
         @operational = operational
         @full = full
         @daemon_tasks = Array(daemon_tasks).compact
+        @warning_sink = warning_sink
         @next_retention_boundary = nil
       end
+
+      def warn(message)
+        Hive::Warnings.emit(message, sink: @warning_sink)
+      end
+      private :warn
 
       def call
         call_with_envelope do
@@ -189,6 +195,20 @@ module Hive
           @stdout_written = true
         else
           render_running(payload)
+        end
+      end
+
+      # Internal object boundary used by the long-lived daemon. It returns the
+      # exact task-graph document without spawning another Ruby process or
+      # serializing the graph through JSON only to parse it again.
+      def internal_task_graph_payload(now: Time.now.utc)
+        Hive::Warnings.with_sink(@warning_sink) do
+          projects = Hive::Config.registered_projects
+          if daemon_task_mode?
+            daemon_task_payload(projects, now: now)
+          else
+            json_payload(projects, now: now)
+          end
         end
       end
 
@@ -828,6 +848,7 @@ module Hive
           "pr_url" => row[:pr_url],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
+          "projection_repair" => row[:projection_repair] == true,
           "mtime" => row[:mtime].utc.iso8601(6),
           "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
@@ -1447,7 +1468,7 @@ module Hive
               else
                 Hive::Markers.current(task.state_file)
               end
-              marker, projection = status_projection(
+              marker, projection, projection_repair = status_projection(
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
@@ -1497,6 +1518,7 @@ module Hive
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
+                projection_repair: projection_repair == true,
                 projection: projection,
                 projection_data: projection.to_h,
                 icon: icon,
@@ -1569,28 +1591,53 @@ module Hive
         end
 
         attempt_store = status_attempt_store
-        projection = Hive::TaskProjection::Store.new(
+        bounded = Hive::TaskProjection::Store.new(
           task_folder: task.folder, attempt_store: attempt_store
-        ).read_cached(marker: marker)
+        ).read_routine(marker: marker, pristine: pristine_projection_task?(task, marker))
         project ||= project_name_for(task)
+        unless bounded.current?
+          return projection_repair_status(task, bounded, project: project)
+        end
+
+        projection = bounded.projection
         closure = Hive::TaskClosure.projection(
-          task, project: project, attempt_store: attempt_store
+          task, project: project, attempt_store: attempt_store,
+          task_projection: projection
         )
         projection = projection.with_closure(closure) if closure
-        [ marker, projection ]
+        [ marker, projection, false ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e
-        warn "hive: status: #{task.folder} condition projection failed " \
-             "(#{e.class}: #{e.message}); surfaced as an Error row"
-        error_marker = Hive::Markers::State.new(
-          name: :error,
-          attrs: {
-            "reason" => "condition_projection_invalid",
-            "message" => e.message.to_s[0, 500]
-          },
-          raw: nil
+        project ||= project_name_for(task)
+        bounded = Hive::TaskProjection::Store::BoundedRead.new(
+          projection: nil, state: "repair_required", truncated: false,
+          journal_cursor: 0, journal_records: [],
+          diagnostics: [ {
+            "source" => "task_projection", "reason" => "bounded_projection_failed",
+            "message" => "bounded task projection failed",
+            "details" => { "error_class" => e.class.name }
+          } ]
         )
-        [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
+        projection_repair_status(task, bounded, project: project)
+      end
+
+      def pristine_projection_task?(task, marker)
+        Hive::TaskProjection::Store.pristine_task?(task, marker)
+      end
+
+      def projection_repair_status(task, bounded, project:)
+        attrs = Hive::TaskProjection.repair_marker_attrs(
+          bounded: bounded, project: project, slug: task.slug,
+          stage: "#{task.stage_index}-#{task.stage_name}"
+        )
+        error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+        warn "hive: status: #{task.folder} condition projection requires repair " \
+             "(#{attrs.fetch('projection_reason')}); surfaced as a task-local Error row"
+        [
+          error_marker,
+          Hive::TaskProjection.project(records: [], marker: error_marker),
+          true
+        ]
       end
 
       def status_attempt_store
@@ -1918,6 +1965,7 @@ module Hive
           task: nil,
           marker_name: marker.name,
           marker_attrs: marker.attrs,
+          projection_repair: false,
           icon: icon,
           state_label: state_label,
           mtime: folder_mtime,
@@ -1970,7 +2018,7 @@ module Hive
             agent_marker_grace_sec: grace_sec,
             live_task_lock: row[:live_task_lock]
           )
-          row.merge(
+          annotation = row.merge(
             action_key: action.key,
             action_label: action.label,
             suggested_command: action.command,
@@ -1984,7 +2032,41 @@ module Hive
             patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
+          projection_repair_annotation(annotation, project: project["name"]) || annotation
         end
+      end
+
+      def projection_repair_annotation(row, project:)
+        return nil unless Hive::TaskProjection.repair_required_row?(row)
+
+        command = unless Hive::TaskProjection.terminal_repair_reason?(
+          row.dig(:marker_attrs, "projection_reason")
+        ) || row.dig(:marker_attrs, "projection_reason") == "journal_lock_busy"
+          Hive::TaskProjection.repair_command(
+            project: project, slug: row[:slug], stage: row[:stage]
+          )
+        end
+        marker = marker_from_row(row)
+        row.merge(
+          action_key: Hive::Schemas::TaskActionKind::ERROR,
+          action_label: "Projection repair required",
+          suggested_command: command,
+          outcomes: [],
+          next_action: nil,
+          diagnostic: {
+            "summary" => "Task projection needs exact-task repair",
+            "detail" => row.dig(:marker_attrs, "message").to_s[0, 4_000],
+            "source" => "marker",
+            "source_path" => nil,
+            "artifact_paths" => [],
+            "generated_by" => "local",
+            "marker_signature" => Hive::TaskClosure.marker_generation(marker),
+            "suggested_next_action" => command ? {
+              "kind" => "manual_fix", "command" => command
+            } : nil,
+            "updated_at" => Time.now.utc.iso8601
+          }
+        )
       end
 
       def attempt_diagnostic_for(row)

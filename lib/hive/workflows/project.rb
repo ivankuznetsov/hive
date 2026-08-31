@@ -4,6 +4,7 @@ require "shellwords"
 require "hive/workflows/descriptor_parser"
 require "hive/workflows/loader"
 require "hive/workflows/registry"
+require "hive/warnings"
 
 module Hive
   module Workflows
@@ -156,16 +157,20 @@ module Hive
 
       def warn_config_fallback(project_root, error)
         fallback = fallback_workflow_dir(project_root)
-        warn "hive: workflow loader: could not read hive_state_path for #{project_root} " \
-             "(#{error.class}: #{error.message}); falling back to #{fallback}"
+        Hive::Warnings.emit(
+          "hive: workflow loader: could not read hive_state_path for #{project_root} " \
+          "(#{error.class}: #{error.message}); falling back to #{fallback}"
+        )
       end
 
       def register_descriptor(workflow, workflow_dir, project_root)
         source_path = File.join(workflow_dir, "#{workflow.id}.yml")
         if Hive::Workflows::Bench.legacy_project_descriptor?(workflow, source_path: source_path) &&
            warned_skips.add?(source_path)
-          warn "hive: legacy bench workflow at #{source_path} remains active; " \
-               "run `hive init #{Shellwords.escape(project_root)} --workflow bench` to migrate to the built-in"
+          Hive::Warnings.emit(
+            "hive: legacy bench workflow at #{source_path} remains active; " \
+            "run `hive init #{Shellwords.escape(project_root)} --workflow bench` to migrate to the built-in"
+          )
         end
         Hive::Workflows::Registry.register!(workflow, project: true, source_path: source_path)
       rescue Hive::ConfigError => e
@@ -181,7 +186,9 @@ module Hive
         # collision still surfaces loudly at the resolution boundary
         # (assert_descriptor_loadable!), so suppressing the repeat here loses no
         # signal.
-        warn "hive: skipping #{e.message}" if warned_skips.add?(source_path)
+        if warned_skips.add?(source_path)
+          Hive::Warnings.emit("hive: skipping #{e.message}")
+        end
       end
 
       # When a workflow id is named explicitly (`hive new --workflow <id>` /

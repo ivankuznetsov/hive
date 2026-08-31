@@ -1,14 +1,18 @@
 require "digest"
 require "fileutils"
+require "json"
 require "hive/agent_limit"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
 require "hive/artifact_firewall"
+require "hive/artifacts/outcome_evidence/rework"
+require "hive/artifacts/outcome_evidence/store"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/implementation_identity/store"
 require "hive/git_ops"
+require "hive/agent_git_gate"
 require "hive/markers"
 require "hive/plan_frontmatter"
 require "hive/conditions/execute_boundary"
@@ -47,7 +51,17 @@ module Hive
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
-        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+        rework_context = nil
+        begin
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+        rescue Hive::PlanReview::TransitionBlocked
+          rework_context = outcome_evidence_rework_context(task, require_receipt: true)
+          raise unless rework_context&.fetch("feedback")
+
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+            task:, config: cfg, reviewed_rework: true
+          )
+        end
         plan_path = File.join(task.folder, "plan.md")
         unless File.exist?(plan_path)
           warn "hive: plan.md missing; this task did not pass through 3-plan"
@@ -64,12 +78,13 @@ module Hive
         end
 
         identity = capture_implementation_identity(task, cfg)
+        rework_context ||= outcome_evidence_rework_context(task)
         FileUtils.mkdir_p(task.reviews_dir)
 
         if File.exist?(task.worktree_yml_path)
-          run_continuation_pass(task, cfg, identity)
+          run_continuation_pass(task, cfg, identity, rework_context: rework_context)
         else
-          run_init_pass(task, cfg, identity)
+          run_init_pass(task, cfg, identity, rework_context: rework_context)
         end
       end
 
@@ -95,7 +110,7 @@ module Hive
 
       # First entry into 4-execute: create the feature worktree, run
       # implementation, finalize.
-      def run_init_pass(task, cfg, identity = UNRESOLVED_IDENTITY)
+      def run_init_pass(task, cfg, identity = UNRESOLVED_IDENTITY, rework_context: nil)
         identity = capture_implementation_identity(task, cfg) if identity.equal?(UNRESOLVED_IDENTITY)
         ops = Hive::GitOps.new(task.project_root)
         worktree_root = canonical_worktree_root(task, cfg)
@@ -123,7 +138,7 @@ module Hive
         )
 
         write_initial_task_md(task)
-        run_pass(task, cfg, wt.path, identity)
+        run_pass(task, cfg, wt.path, identity, rework_context: rework_context)
       end
 
       # User re-ran `hive run` on a 4-execute task whose worktree
@@ -131,7 +146,8 @@ module Hive
       # spawn. Idempotent at the agent level (the agent re-reads
       # plan.md and continues / refines whatever was committed last
       # time).
-      def run_continuation_pass(task, cfg, identity = UNRESOLVED_IDENTITY)
+      def run_continuation_pass(task, cfg, identity = UNRESOLVED_IDENTITY,
+                                rework_context: nil)
         identity = capture_implementation_identity(task, cfg) if identity.equal?(UNRESOLVED_IDENTITY)
         worktree_root = canonical_worktree_root(task, cfg)
         pointer = Hive::Worktree.read_owned_pointer(
@@ -142,25 +158,31 @@ module Hive
         )
         worktree_path = pointer.fetch("path")
 
-        run_pass(task, cfg, worktree_path, identity)
+        run_pass(task, cfg, worktree_path, identity, rework_context: rework_context)
       end
 
       # Spawn the implementation agent, SHA-protect plan.md /
       # worktree.yml around it, finalize EXECUTE_COMPLETE on clean
       # spawn or :error on tamper / agent failure.
-      def run_pass(task, cfg, worktree_path, identity = UNRESOLVED_IDENTITY)
+      def run_pass(task, cfg, worktree_path, identity = UNRESOLVED_IDENTITY,
+                   rework_context: nil)
         identity = capture_implementation_identity(task, cfg) if identity.equal?(UNRESOLVED_IDENTITY)
+        rework_context ||= outcome_evidence_rework_context(task)
         worktree_git = Hive::GitOps.new(worktree_path)
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
-          execute_custody_manifest(task, worktree_path)
+          execute_custody_manifest(
+            task, worktree_path,
+            extra_protected: rework_context.fetch("protected_paths")
+          )
         )
         begin
           impl_result = spawn_implementation(
             task, cfg, worktree_path, identity: identity,
-            agent_custody: agent_custody
+            agent_custody: agent_custody,
+            rework_feedback: rework_context.fetch("feedback")
           )
         rescue Hive::ProviderRouteFailed
           record_implementation_exception(task, agent_custody) do
@@ -173,8 +195,6 @@ module Hive
           end
           raise
         end
-        append_implementation_output(task, impl_result)
-
         custody_report = agent_custody.report
         if custody_report&.tampered?
           return record_tamper(
@@ -183,6 +203,12 @@ module Hive
             restore_error: custody_report.restore_diagnostic
           )
         end
+
+        # task.md is protected from the implementation agent. Persist the
+        # controller-owned final-message transcript only after that custody
+        # window has closed, otherwise our own write is indistinguishable
+        # from agent tampering and a successful run is rejected.
+        append_implementation_output(task, impl_result)
 
         Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "execute", impl_result
@@ -248,6 +274,23 @@ module Hive
             task, cfg, worktree_path, baseline_head,
             marker_name: :error, attrs: { reason: "dirty_worktree" },
             commit: "execute_dirty_worktree", status: :error
+          )
+        end
+
+        reviewed_head = rework_context.dig("feedback", "implementation_head")
+        rework_changed = begin
+          !reviewed_head || rework_implementation_changed?(
+            worktree_path, reviewed_head, head_after
+          )
+        rescue Hive::AgentGitGate::Error
+          return worktree_git_failed(task, cfg, worktree_path, baseline_head)
+        end
+        unless rework_changed
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :error,
+            attrs: { reason: "outcome_evidence_rework_unchanged" },
+            commit: "outcome_evidence_rework_unchanged", status: :error
           )
         end
 
@@ -351,8 +394,8 @@ module Hive
       # Durable context and activity receipts grow with every retry. Admit the
       # exact inventory through one manifest so one validation/restore pass
       # owns every anchor; the hard limit remains a fail-closed retention cap.
-      def execute_custody_manifest(task, worktree_path)
-        paths = execute_protected_files(task)
+      def execute_custody_manifest(task, worktree_path, extra_protected: [])
+        paths = (execute_protected_files(task) + Array(extra_protected)).uniq
         writable_roots = [ task.folder, worktree_path ].uniq
         manifest_entries = paths.length + writable_roots.length
         Hive::ArtifactFirewall::Manifest.new(
@@ -513,7 +556,7 @@ module Hive
       end
 
       def spawn_implementation(task, cfg, worktree_path, identity: nil,
-                               agent_custody: nil)
+                               agent_custody: nil, rework_feedback: nil)
         plan_path = File.join(task.folder, "plan.md")
         plan_text = File.read(plan_path)
         prompt = Hive::Stages::Base.render(
@@ -523,6 +566,7 @@ module Hive
             worktree_path: worktree_path,
             task_folder: task.folder,
             plan_text: plan_text,
+            rework_feedback_json: rework_feedback && JSON.pretty_generate(rework_feedback),
             completion_trailer: completion_trailer(File.binread(plan_path)),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
@@ -598,6 +642,43 @@ module Hive
         merged = result&.merge(implementation_provider: profile.name.to_s)
         merged
       end
+
+      def outcome_evidence_rework_context(task, require_receipt: false)
+        project = File.basename(task.project_root)
+        tracker = Hive::Artifacts::OutcomeEvidence::Rework.new(
+          task: task, project: project
+        )
+        records = tracker.records
+        return nil if require_receipt && records.empty?
+
+        package = unless records.empty?
+          Hive::Artifacts::OutcomeEvidence::Store.new(
+            task: task, project: project
+          ).package_metadata
+        end
+        tracker.execution_context(package: package, records: records)
+      rescue Hive::Artifacts::OutcomeEvidence::StoreError => e
+        raise Hive::StageError,
+              "outcome-evidence implementation rework context is invalid: #{e.message}"
+      end
+
+      def rework_implementation_changed?(worktree_path, reviewed_head, head_after)
+        return false if reviewed_head == head_after
+
+        result = Hive::AgentGitGate.read(
+          worktree_path, :diff,
+          base_oid: reviewed_head, head_oid: head_after,
+          max_stdout_bytes: 1
+        )
+        return true if result.overflow
+        unless result.success?
+          raise Hive::AgentGitGate::CommandFailed,
+                "could not compare reviewed implementation with rework head"
+        end
+
+        !result.stdout.empty?
+      end
+      private_class_method :rework_implementation_changed?
 
       def restrict_task_state_access(scope, task, profile)
         support = Hive::AgentSupport.for(profile)

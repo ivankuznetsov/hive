@@ -118,6 +118,12 @@ OpenCode's profile-specific provider-error extractor reads only dedicated
 upstream rate-limit refusal therefore reaches Hive as a typed `rate_limited`
 signal and writes the normal cooldown-retry marker, while identical prose in
 ordinary model output cannot forge a retryable provider wall.
+Claude's extractor also recognizes its exact message-free rejected
+`rate_limit_event` for the known `five_hour` and `seven_day` account windows.
+It synthesizes bounded quota text and a typed `provider_limit`, so review,
+triage, and other output-file spawns retain normal `limits_reached` recovery
+instead of degrading to an exit-code error. Non-rejected and unknown window
+types remain unclassified.
 When OpenCode exits zero with an empty terminal assistant message after writing
 a current terminal stage artifact, Hive trusts that controller-scoped artifact;
 the strict malformed transcript remains a failure whenever the artifact itself

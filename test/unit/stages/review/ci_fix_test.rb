@@ -140,6 +140,39 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_command_runner_provider_limit_stops_before_spawning_a_fix_agent
+    with_ci_dir do |dir, task_folder|
+      limit = "The job was not started because recent account payments have failed " \
+              "or your spending limit needs to be increased."
+      calls = 0
+      runner = lambda do |**|
+        calls += 1
+        Hive::Stages::Review::CiFix::Run.new(limit, 1)
+      end
+      fix_spawned = false
+      unexpected_fix = lambda do |**|
+        fix_spawned = true
+        { status: :error, error_message: "unexpected fix spawn" }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Review::CiFix, :spawn_fix_agent, unexpected_fix
+      ) do
+        Hive::Stages::Review::CiFix.run!(
+          cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+          command: "hosted checks", command_runner: runner
+        )
+      end
+
+      assert_equal :error, result.status
+      assert_equal 1, result.attempts
+      assert_equal 1, calls
+      refute fix_spawned, "a hosted provider limit must not spawn a code-fix agent"
+      assert_equal limit, result.limit_text
+      assert_match(/limits reached/, result.error_message)
+    end
+  end
+
   # --- green after fix --------------------------------------------------
 
   def test_returns_green_after_fix_agent_recovers_failing_ci

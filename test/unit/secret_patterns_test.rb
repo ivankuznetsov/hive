@@ -158,6 +158,13 @@ class SecretPatternsTest < Minitest::Test
     assert_match_name("password: s3cretpassphrase42", :password_assignment)
   end
 
+  def test_password_assignment_shell_variable_indirection_is_not_a_secret
+    refute_match_any("MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}")
+    refute_match_any('DATABASE_PASSWORD="$DATABASE_PASSWORD"')
+    assert_match_name("DATABASE_PASSWORD=${DATABASE_PASSWORD}-literal", :password_assignment)
+    assert_match_name('DATABASE_PASSWORD="$DATABASE_PASSWORD-suffix"', :password_assignment)
+  end
+
   def test_password_before_json_delimiter_is_detected
     assert_match_name(
       '{"password":"s3cretpassphrase42"}',
@@ -181,6 +188,99 @@ class SecretPatternsTest < Minitest::Test
     [ "correct", "system-password" ].each do |value|
       assert_match_name(%(password: "#{value}"), :password_assignment)
     end
+  end
+
+  def test_diff_scan_allows_runtime_password_references_but_not_literals
+    runtime_diff = <<~DIFF
+      diff --git a/app/services/setup.rb b/app/services/setup.rb
+      --- a/app/services/setup.rb
+      +++ b/app/services/setup.rb
+      @@ -1 +1,4 @@
+      -operator.update!(name: name)
+      +operator.password = password
+      +def password=(raw_password)
+      +task reset_password: :environment do
+      +operator.update!(password: params[:password])
+    DIFF
+    literal_diff = runtime_diff.sub(
+      "+operator.password = password",
+      '+operator.password = "project-secret-42"'
+    )
+
+    refute Hive::SecretPatterns.match_diff?(runtime_diff)
+    assert Hive::SecretPatterns.match_diff?(literal_diff)
+  end
+
+  def test_diff_scan_does_not_exempt_shell_command_substitutions
+    command = <<~DIFF
+      diff --git a/.kamal/secrets b/.kamal/secrets
+      --- /dev/null
+      +++ b/.kamal/secrets
+      @@ -0,0 +1 @@
+      +# ROOT_PASSWORD=$(credential-tool read root_password ${PROJECT})
+    DIFF
+    literal_in_command = command.sub(
+      "root_password ${PROJECT}", "root_password s3cretpassphrase42"
+    )
+
+    assert Hive::SecretPatterns.match_diff?(command)
+    assert Hive::SecretPatterns.match_diff?(literal_in_command)
+  end
+
+  def test_diff_scan_ignores_removed_secrets_and_scans_added_paths
+    removed = <<~DIFF
+      diff --git a/config/old.env b/config/old.env
+      --- a/config/old.env
+      +++ /dev/null
+      @@ -1 +0,0 @@
+      -PASSWORD=s3cretpassphrase42
+    DIFF
+    secret_path = <<~DIFF
+      diff --git a/config/old.env b/config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
+      --- a/config/old.env
+      +++ b/config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
+      @@ -1 +1 @@
+      -old
+      +new
+    DIFF
+
+    refute Hive::SecretPatterns.match_diff?(removed)
+    assert Hive::SecretPatterns.match_diff?(secret_path)
+  end
+
+  def test_diff_scan_checks_target_paths_without_hunks
+    renamed = <<~DIFF
+      diff --git a/config/old b/config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
+      similarity index 100%
+      rename from config/old
+      rename to config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
+    DIFF
+
+    assert Hive::SecretPatterns.match_diff?(renamed)
+  end
+
+  def test_diff_scan_fails_closed_for_malformed_patch_lines
+    malformed_plain_path = <<~DIFF
+      diff --git a/config/old b/config/new
+      --- a/config/old
+      +++ config/new
+    DIFF
+    malformed_path = <<~DIFF
+      diff --git a/config/old b/config/new
+      --- a/config/old
+      +++ ghp_abcdefghijklmnopqrstuvwxyz0123456789
+    DIFF
+    malformed_hunk = <<~DIFF
+      diff --git a/config/old b/config/new
+      --- a/config/old
+      +++ b/config/new
+      @@ -1 +1 @@
+      PASSWORD=s3cretpassphrase42
+    DIFF
+
+    refute Hive::SecretPatterns.match_diff?(malformed_plain_path)
+    assert Hive::SecretPatterns.match_diff?(malformed_path)
+    assert Hive::SecretPatterns.match_diff?(malformed_hunk)
   end
 
   def test_high_signal_password_forms_remain_protected

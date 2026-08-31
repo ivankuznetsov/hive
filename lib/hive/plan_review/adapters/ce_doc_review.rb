@@ -11,6 +11,7 @@ require "hive/agent_skills"
 require "hive/artifact_firewall"
 require "hive/config"
 require "hive/plan_review/adapters/base"
+require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
@@ -136,14 +137,17 @@ module Hive
           # Those writes land in the task's own bookkeeping files, so holding
           # them under the firewall made every review fail with "reviewer
           # modified protected artifacts: task-journal.jsonl,
-          # task-projection.json" for edits the reviewer never made.
+          # task-projection.json, task-projection.checkpoint.json" for edits
+          # the reviewer never made.
           #
           # They stay protected everywhere else (the execute-stage firewall is
           # untouched); here they are excluded because hive is the one writing
           # them during this exact window. What the reviewer must not touch —
           # plan.md, meta.yml, and every existing plan-review record — is still
           # anchored below.
-          ORCHESTRATOR_JOURNALS = %w[task-journal.jsonl task-projection.json].freeze
+          ORCHESTRATOR_JOURNALS = %w[
+            task-journal.jsonl task-projection.json
+          ].push(CheckpointCustody::BASENAME).freeze
 
           # Review history is append-only. Keep every record in one custody
           # transaction so validation failure cannot skip restoration of a

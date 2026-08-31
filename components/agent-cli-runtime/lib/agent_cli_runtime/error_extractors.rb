@@ -23,6 +23,30 @@ module AgentCliRuntime
       end
     end
 
+    # Claude's subscription wall is a dedicated structured event with no
+    # human-readable message. The generic extractor therefore returned nil,
+    # leaving callers to flatten a rejected five-hour/seven-day window into a
+    # generic exit-code failure. Accept only the exact rejected account-window
+    # shapes observed from Claude Code and synthesize bounded provider text for
+    # the normal typed limit path. Other Claude errors retain DEFAULT behavior.
+    CLAUDE_ACCOUNT_LIMIT_TYPES = %w[five_hour seven_day].freeze
+    CLAUDE = lambda do |event|
+      if event.is_a?(Hash) && event["type"] == "rate_limit_event"
+        info = event["rate_limit_info"]
+        if info.is_a?(Hash) && info["status"] == "rejected"
+          limit_type = info["rateLimitType"].to_s
+          if CLAUDE_ACCOUNT_LIMIT_TYPES.include?(limit_type)
+            next ExtractedFailure.new(
+              kind: :provider_limit,
+              message: "Claude account quota reached (#{limit_type})"
+            )
+          end
+        end
+      end
+
+      DEFAULT.call(event)
+    end
+
     # pi keeps the envelope type ("message_start"/"message_end") and moves the
     # terminal state into stopReason. Provider refusals use
     # stopReason=error/errorMessage. A model that consumes its entire output

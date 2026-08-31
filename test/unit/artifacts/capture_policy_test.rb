@@ -340,6 +340,36 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     end
   end
 
+  def test_for_task_rescue_does_not_repeat_a_failed_projection_read
+    with_task do |task|
+      calls = []
+      generation = Data.define(:task_generation).new(task_generation: "generation-fallback")
+      resolve = lambda do |**kwargs|
+        calls << kwargs
+        raise Hive::TaskProjection::InvalidJournal, "checkpoint unavailable" unless
+          kwargs[:task_input_epoch] == 0
+
+        generation
+      end
+
+      policy = with_replaced_singleton_method(
+        Hive::Artifacts::CapturePolicy, :owned_pointer,
+        ->(_task) { nil }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Attempts::Generation, :resolve, resolve
+        ) do
+          Hive::Artifacts::CapturePolicy.for_task(task, project: "demo")
+        end
+      end
+
+      assert_equal 2, calls.length
+      assert_nil calls.first[:task_input_epoch]
+      assert_equal 0, calls.last.fetch(:task_input_epoch)
+      assert_equal "required", policy.build.fetch("result")
+    end
+  end
+
   def test_for_task_without_a_pointer_records_complete_nonvisual_evidence
     with_task do |task|
       generation = Data.define(:task_generation).new(task_generation: "generation-3")

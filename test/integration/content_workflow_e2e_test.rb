@@ -40,7 +40,7 @@ class ContentWorkflowE2ETest < Minitest::Test
                 max_runs_per_day_per_project: 100
               ),
               supervisor: supervisor,
-              status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
+              status_consumer: Hive::Daemon::StatusConsumer.new,
               logger: logger
             )
             30.times do

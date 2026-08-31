@@ -544,6 +544,60 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
+  def test_rework_callback_dispatches_the_exact_live_digest_bound_command
+    generation = "a" * 64
+    recovery_digest = "b" * 64
+    row = status_row(
+      project: "hive", slug: "rework-260830-abcd", stage: "7-artifacts",
+      marker: "error",
+      attrs: {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => generation, "recovery_digest" => recovery_digest
+      },
+      action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      action_label: "Implementation rework required"
+    )
+
+    result = handlers_with_rows([ row ]).handle(
+      :callback_rework,
+      update("rework:hive:rework-260830-abcd:7-artifacts")
+    )
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal(
+      [
+        "hive", "evidence", "rework", "rework-260830-abcd",
+        "--project", "hive", "--stage", "7-artifacts",
+        "--generation", generation, "--recovery-digest", recovery_digest, "--json"
+      ],
+      result.command_argv
+    )
+  end
+
+  def test_rework_callback_rejects_rotated_or_malformed_status
+    malformed = status_row(
+      project: "hive", slug: "rework-260830-abcd", stage: "7-artifacts",
+      marker: "error",
+      attrs: {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "short", "recovery_digest" => "b" * 64
+      },
+      action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
+    )
+    rotated = malformed.with(
+      attrs: malformed.attrs.merge("generation" => "a" * 64), action: "ready_to_artifacts"
+    )
+
+    [ malformed, rotated ].each do |row|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_rework,
+        update("rework:hive:rework-260830-abcd:7-artifacts")
+      )
+      assert_equal :reply, result.action
+      assert_match(/status changed/, result.text)
+    end
+  end
+
   def test_rerun_callback_dispatches_develop_against_current_execute_stage
     result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:develop"))
 

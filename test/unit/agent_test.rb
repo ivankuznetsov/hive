@@ -2418,6 +2418,58 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_captures_claude_rejected_subscription_window_without_message_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "rate_limit_event",
+        "rate_limit_info" => {
+          "status" => "rejected",
+          "rateLimitType" => "seven_day",
+          "resetsAt" => 1_788_400_800,
+          "overageDisabledReason" => "out_of_credits"
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      ).run!
+
+      assert_equal "Claude account quota reached (seven_day)", result[:limit_text]
+      assert_equal :error, result[:status]
+      assert_equal "limits_reached", result[:error_reason]
+      assert_match(/\Alimits reached for claude:/, result[:error_message])
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
+  def test_unknown_claude_rate_window_retains_raw_limit_fallback
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "rate_limit_event",
+        "rate_limit_info" => {
+          "status" => "rejected",
+          "rateLimitType" => "future_window"
+        },
+        "detail" => "account quota reached"
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      ).run!
+
+      assert_match(/account quota reached/i, result[:limit_text])
+      assert_equal :error, result[:status]
+      assert_equal "limits_reached", result[:error_reason]
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
   # The profile extractor only speaks JSON events. A CLI that prints its quota
   # wall as a bare line leaves `extract_provider_error` with nothing to read, so
   # the raw-line fallback is what has to catch it — otherwise a plain-text limit

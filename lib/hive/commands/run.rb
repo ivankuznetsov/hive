@@ -41,21 +41,16 @@ module Hive
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions allowed_outcomes].freeze
 
-      # Exact pre-run task-folder snapshot used only for terminal runners. Lock
-      # artifacts are process-owned and intentionally remain live across a
-      # restore; every other entry is restored byte-for-byte on a failed
-      # completion commit or interrupt.
+      # Exact pre-run task-folder snapshot used only for terminal runners.
+      # Task coordination lives outside the folder in SQLite, so every entry
+      # can be restored byte-for-byte after a failed completion commit.
       class TerminalStateSnapshot
-        LOCK_ARTIFACT = /\A\.lock(?:\z|\.tmp\.)/.freeze
-
         def self.capture(folder)
           root = Dir.mktmpdir("hive-terminal-state-")
           backup = File.join(root, "task")
           begin
             FileUtils.mkdir_p(backup)
             Dir.children(folder).each do |name|
-              next if name.match?(LOCK_ARTIFACT)
-
               FileUtils.copy_entry(
                 File.join(folder, name), File.join(backup, name), true, false, true
               )
@@ -75,8 +70,6 @@ module Hive
 
         def restore
           Dir.children(@folder).each do |name|
-            next if name.match?(LOCK_ARTIFACT)
-
             FileUtils.rm_rf(File.join(@folder, name))
           end
           Dir.children(@backup).each do |name|

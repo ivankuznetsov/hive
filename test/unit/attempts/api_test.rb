@@ -179,4 +179,16 @@ class AttemptsAPITest < Minitest::Test
     assert_same store, foreground_store
     assert_same store, daemon_store
   end
+
+  def test_correlated_log_reader_resolves_sealed_references_through_the_store
+    with_tmp_dir do |root|
+      store = Struct.new(:root) do
+        def sealed_payload_reference(reference) = reference.merge("sealed" => true)
+      end.new(root)
+      reader = Hive::Attempts::API.new(store: store).correlated_log_reader
+      resolver = reader.instance_variable_get(:@reference_resolver)
+
+      assert_equal({ "path" => "log", "sealed" => true }, resolver.call("path" => "log"))
+    end
+  end
 end

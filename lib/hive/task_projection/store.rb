@@ -1,7 +1,7 @@
 require "digest"
 require "json"
 require "hive/atomic_file"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/paths"
 require "hive/task_projection"
 require "hive/task_journal"
@@ -1071,7 +1071,7 @@ module Hive
       end
 
       def default_attempt_store
-        Hive::Attempts::Store.runtime(create_directories: false)
+        Hive::Attempts::Repository.runtime(create_directories: false)
       end
     end
   end

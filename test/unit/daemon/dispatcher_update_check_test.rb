@@ -8,6 +8,8 @@ require "hive/update_check/state"
 # Pins the update-flow integration in Dispatcher#tick (plan 2026-05-27-002,
 # U3): throttled release check, channel branch, nudge state, resilience.
 class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
+  include HiveTestHelper
+
   T0 = Time.utc(2026, 5, 27, 12, 0, 0)
 
   class FakeStatusConsumer
@@ -39,10 +41,18 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
 
   def setup
     @dir = Dir.mktmpdir
+    activate_test_control_plane(@dir)
+    @dispatch_database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(@dir)
+    ).open!
+    @dispatch_repository = Hive::RuntimeControlPlane::DispatchRepository.new(
+      database: @dispatch_database
+    )
     @state = Hive::UpdateCheck::State.new(path: File.join(@dir, "update_check.json"))
   end
 
   def teardown
+    @dispatch_database.disconnect
     FileUtils.remove_entry(@dir)
   end
 
@@ -58,7 +68,8 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
       logger: logger,
       update_state: @state,
       update_checker: -> { checker.call },
-      channel_detector: -> { channel }
+      channel_detector: -> { channel },
+      dispatch_repository: @dispatch_repository
     )
     [ dispatcher, logger ]
   end
@@ -86,7 +97,7 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
       ),
       supervisor: FakeSupervisor.new, status_consumer: FakeStatusConsumer.new, logger: logger,
       update_state: @state, update_checker: -> { result(latest: "9.9.9", behind: true) },
-      channel_detector: -> { "brew" }
+      channel_detector: -> { "brew" }, dispatch_repository: @dispatch_repository
     )
     dispatcher.tick(now: T0) # must NOT raise
     logger.close
@@ -173,7 +184,8 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
         max_concurrent_runs: 5, max_concurrent_per_project: 5, max_runs_per_day_per_project: 100
       ),
       supervisor: FakeSupervisor.new, status_consumer: FakeStatusConsumer.new, logger: logger,
-      update_state: @state, update_checker: -> { boom.call }, channel_detector: -> { "brew" }
+      update_state: @state, update_checker: -> { boom.call }, channel_detector: -> { "brew" },
+      dispatch_repository: @dispatch_repository
     )
     dispatcher.tick(now: T0) # must not raise
     assert_equal 1, events(logger, :update_check_error).size

@@ -1,5 +1,5 @@
 require "hive/bot/dispatch_request_writer"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/status_report"
 
 class Daemon
@@ -13,7 +13,7 @@ class Daemon
   def repair!
     request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
     Hive::Bot::DispatchRequestWriter.write!(
-      project: Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT,
+      project: Hive::RuntimeControlPlane::DispatchRepository::GLOBAL_MAINTENANCE_PROJECT,
       slug: "daemon-repair",
       argv: %w[hive daemon install --force],
       trigger: "web_daemon_repair",

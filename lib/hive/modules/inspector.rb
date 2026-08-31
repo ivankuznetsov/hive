@@ -1,7 +1,7 @@
 require "digest"
 require "json"
 require "time"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/normalizer"
 require "hive/modules/decision_journal"
@@ -25,7 +25,7 @@ module Hive
         )
         @project_config = project_config
         @project_id = project_id.to_s.freeze
-        @attempt_store = attempt_store || Hive::Attempts::Store.new(create_directories: false)
+        @attempt_store = attempt_store || Hive::Attempts::Repository.open_default(create_directories: false)
         @decision_journal = decision_journal || DecisionJournal.new(
           root: File.join(store.hive_state_path, "module-runtime"), create_directories: false
         )

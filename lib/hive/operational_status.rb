@@ -1,5 +1,5 @@
 require "time"
-require "hive/attempts/storage_health"
+require "hive/attempts/storage_status"
 require "hive/operational_action"
 require "hive/recovery"
 require "hive/workflows"
@@ -349,7 +349,7 @@ module Hive
       value = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["attempt_storage"] : nil
       return value if value.is_a?(Hash)
 
-      Hive::Attempts::StorageHealth.unknown_snapshot
+      Hive::Attempts::StorageStatus.unknown
     end
 
     def attempt_storage_issues(status)

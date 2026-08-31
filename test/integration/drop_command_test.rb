@@ -41,6 +41,10 @@ class DropCommandIntegrationTest < Minitest::Test
   def create_task(dir, stage, slug)
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(
+      folder, id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
+      slug: slug, display_name: nil
+    )
     state_name = Hive::Task::STATE_FILES.fetch(stage.split("-", 2).last)
     File.write(File.join(folder, state_name), "# #{slug}\n<!-- WAITING -->\n")
     folder

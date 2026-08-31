@@ -54,6 +54,7 @@ class RunOpenPrTest < Minitest::Test
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(project_root, ".hive-state", "stages", "5-open-pr", slug)
     FileUtils.mkdir_p(task_dir)
+    ensure_test_task_identity(task_dir)
     File.write(File.join(task_dir, "plan.md"), "## Plan\nImplement the fix.\n")
     File.write(File.join(task_dir, "task.md"), "## Execute Output\nImplemented and tested.\n")
 

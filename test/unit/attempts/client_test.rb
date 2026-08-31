@@ -48,7 +48,7 @@ class AttemptsClientTest < Minitest::Test
     missing_store = Struct.new(:logs_root) do
       define_method(:fetch) { |_id| nil }
     end.new(Dir.tmpdir)
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Client.new(store: missing_store).attach("missing")
     end
 
@@ -161,7 +161,7 @@ class AttemptsClientTest < Minitest::Test
 
   def with_terminal_attempt
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",

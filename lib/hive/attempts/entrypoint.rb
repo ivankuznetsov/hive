@@ -4,7 +4,7 @@ require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
 require "hive/attempts/finalization_maintenance"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/recovery_coordinator"
 require "hive/provider_routing"
 
@@ -31,7 +31,7 @@ module Hive
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc)
         cfg = @config_loader.call(task.project_root)
-        store = @store || Store.new
+        store = @store || Repository.new
         maintenance = @maintenance
         maintenance ||= foreground_maintenance(store) unless @store
         run_opportunistic_maintenance(maintenance, now: now)
@@ -78,16 +78,23 @@ module Hive
 
       def request_admission_recovery(result:, task:, argv:, request_id:, store:, now:)
         coordinator = @recovery_coordinator || Hive::Daemon::RecoveryCoordinator.new(
-          state_home: @state_home || state_home_for(store)
+          state_home: @state_home || state_home_for(store),
+          dispatch_repository: Hive::RuntimeControlPlane::DispatchRepository.new(
+            database: store.database
+          )
         )
-        request = Hive::Daemon::DispatchRequestQueue::Request.new(
+        request = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
           request_id: request_id.to_s,
           project: project_name_for(task),
           slug: task.slug,
           argv: argv,
           requestor: "cli",
           predecessor_attempt_id: nil,
-          inherited_outputs: []
+          inherited_outputs: [], chat_id: nil, update_id: nil, trigger: "recovery",
+          task_generation: nil, task_id: task.id, expected_stage: task.stage_name,
+          expected_marker_name: nil, expected_marker_id: nil, recovery: nil,
+          schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION,
+          state: "queued", revision: 0, created_at: now
         )
         coordinator.request_admission_failure(
           request: request,

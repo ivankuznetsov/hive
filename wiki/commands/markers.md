@@ -7,7 +7,11 @@ updated: 2026-07-12
 tags: [command, markers, recovery, json]
 ---
 
-**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` is a low-level maintenance command that validates the current recovery marker, removes marker history from the task's state file (atomic write), and records a `hive_commit` so the audit trail stays accurate. Normal agent recovery must use the fresh `workflow.retry` action from operational status so mutation and rerun remain one durable lifecycle.
+**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME]
+[--json]` is a low-level maintenance command that validates and removes marker
+history while holding the project commit lock, typed task lease, and narrower
+marker writer mutex in that order, then records a `hive_commit`. Normal agent
+recovery uses the fresh `workflow.retry` action from operational status.
 
 ## Usage
 
@@ -39,11 +43,17 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 1. Parse the subcommand (`clear` is the only verb in v1).
 2. Resolve `FOLDER` via the shared `Hive::TaskResolver`: path-shaped (contains `/` or starts with `~`/`.`) → expanded + realpath'd; bare slug or numeric task id → searched across registered projects (filtered by `--project` if given) over each project's registered workflow stage union, so tasks in runtime-registered workflow stages resolve too. Multi-stage hits inside one project are flagged as ambiguous — identical rules to [[commands/approve]] and the other resolver consumers.
 3. Validate the requested `--name` against `Hive::Commands::Markers::ALLOWED_NAMES`. Anything else raises `Hive::WrongStage` (exit 4).
-4. Read the current marker via `Hive::Markers.current(state_file)`. If the marker name does NOT match `--name`, raise `Hive::WrongStage` — refusing to silently clear a different state.
-5. If `--match-attr` is present, require every supplied `KEY=VALUE` pair to match the current marker. Comma-separated pairs such as `reason=exit_code,exit_code=143` are all checked; any mismatch raises `Hive::WrongStage`. TUI ERROR recovery prefers generated `marker_id` attrs when available and uses observed reason/exit_code attrs for legacy rows.
-6. Remove every recognized marker comment with `Hive::Markers.remove_all_markers`, preserving surrounding prose and headings. Runs append terminal markers after transient markers, so removing only the current recovery marker could expose a completed run's shadowed `AGENT_WORKING`, `REVIEW_WORKING`, or older error marker and strand the retry.
-7. Record a `hive_commit` on the `hive/state` branch (`hive: <stage>/<slug> markers clear <NAME>`).
-8. Emit a stdout summary (or one-line `hive-markers-clear` JSON document with `--json`); print a `next: hive run <folder>` hint to stderr.
+4. Acquire the project commit lock, then the stable task lease. A live runner
+   refuses the clear before any file or index mutation.
+5. Under the marker writer mutex, re-resolve the task and read the current
+   marker. Require the requested name and every `--match-attr` pair to match
+   this locked observation; otherwise raise `Hive::WrongStage`.
+6. Remove every recognized marker comment with
+   `Hive::Markers.remove_all_markers`, preserving prose and headings. Removing
+   only the latest marker could expose a shadowed transient/error marker.
+7. Record `hive: <stage>/<slug> markers clear <NAME>` while all three scopes
+   remain held, then release in reverse order.
+8. Emit the human or one-line JSON summary and next-run hint.
 
 ## JSON contract (`schema = "hive-markers-clear"`, version 1)
 

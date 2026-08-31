@@ -3,9 +3,10 @@ require "json"
 require "hive/commands/init"
 require "hive/commands/run"
 require "hive/attempts/capability"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/stages/plan"
 require "hive/task"
+require "hive/task_meta"
 
 class OpenCodeExecutionIntegrationTest < Minitest::Test
   include HiveTestHelper
@@ -53,7 +54,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
   end
 
   def test_fake_cli_completes_execute_with_native_state_policy_and_identity
-    with_tmp_global_config do
+    with_tmp_global_config do |home|
       with_tmp_git_repo do |project|
         capture_io { Hive::Commands::Init.new(project).call }
         config_path = File.join(project, ".hive-state", "config.yml")
@@ -69,6 +70,9 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
           project, ".hive-state", "stages", "4-execute", slug
         )
         FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(
+          folder, id: 42, slug: slug, display_name: nil, workflow: "coding"
+        )
         File.write(File.join(folder, "plan.md"), <<~PLAN)
           # Atomic OpenCode integration
 
@@ -78,18 +82,20 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         PLAN
 
         task = Hive::Task.new(folder)
-        attempts = Hive::Attempts::Store.new(
-          root: File.join(project, ".hive-state", "attempts")
+        attempts = Hive::Attempts::Repository.new(
+          root: Hive::Paths.runtime_payload_root(home),
+          database: Hive::RuntimeControlPlane::Database.new(
+            path: Hive::Paths.runtime_control_plane_path(home)
+          ).open!
         )
+        register_task_subject(attempts, task)
         attempt = create_attempt(task, attempts)
-        with_env("HIVE_ATTEMPT_STORE_ROOT" => attempts.root) do
-          with_attempt_context(
-            attempt_id: attempt.attempt_id,
-            task_generation: 1,
-            ownership_generation: attempt.ownership_generation
-          ) do
-            capture_io { Hive::Commands::Run.new(folder).call }
-          end
+        with_attempt_context(
+          attempt_id: attempt.attempt_id,
+          task_generation: 1,
+          ownership_generation: attempt.ownership_generation
+        ) do
+          capture_io { Hive::Commands::Run.new(folder).call }
         end
 
         pointer = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))
@@ -143,6 +149,11 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         "opencode-plan-260812-abcd"
       )
       FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: 43, slug: File.basename(folder),
+        display_name: nil, workflow: "coding"
+      )
+      prepare_test_task_run(folder)
       File.write(File.join(folder, "brainstorm.md"), "# Brainstorm\n")
       plugin_root = File.join(project, "vendor", "compound-engineering")
       plugin_entry = File.join(
@@ -224,6 +235,21 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
       claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       now: Time.now.utc
     )
+  end
+
+  def register_task_subject(attempts, task)
+    now = Time.now.utc.iso8601(6)
+    attempts.database.transaction do |database|
+      project_id = database[:projects].where(
+        state_root_path: File.join(task.project_root, ".hive-state")
+      ).get(:project_id)
+      database[:task_subjects].insert(
+        task_id: task.id.to_s, project_id: project_id, workflow_id: "coding",
+        task_slug: task.slug, observed_path: task.folder,
+        source_fingerprint: "opencode-execute-progress", generation: 1,
+        created_at: now, last_observed_at: now
+      )
+    end
   end
 
   def calls

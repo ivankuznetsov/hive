@@ -26,6 +26,8 @@ class HiveCommandsWorktreeTest < Minitest::Test
 
     folder = File.join(@root, ".hive-state", "stages", "6-review", "demo-260813-abcd")
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: 42, slug: "demo-260813-abcd", display_name: nil)
+    prepare_test_task_lease_repository(folder)
     @task = FakeTask.new(
       slug: "demo-260813-abcd", stage_index: 6, stage_name: "review",
       folder: folder, state_file: File.join(folder, "task.md"),

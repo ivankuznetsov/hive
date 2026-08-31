@@ -84,6 +84,31 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_runtime_usage_and_early_activation_failures_use_the_runtime_contract
+    with_tmp_global_config(runtime: false) do |home|
+      File.binwrite(File.join(home, "task-counter.yml"), "---\ngeneration: 1\n")
+      schemer = JSONSchemer.schema(JSON.parse(File.read(
+        Hive::Schemas.schema_path("hive-runtime-maintenance")
+      )))
+
+      out, _err, status = run_hive(home, "run", "demo:task", "--json")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-runtime-maintenance", payload.fetch("schema")
+      assert_equal "fleet_cutover_required", payload.fetch("runtime_code")
+      assert_equal "run", payload.fetch("action")
+      assert_empty schemer.validate(payload).to_a
+
+      File.unlink(File.join(home, "task-counter.yml"))
+      out, _err, status = run_hive(home, "runtime", "unknown", "extra", "--json")
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "unknown", payload.fetch("action")
+      assert_equal "usage", payload.fetch("runtime_code")
+      assert_empty schemer.validate(payload).to_a
+    end
+  end
+
   def test_repair_projection_missing_target_uses_its_versioned_error_contract
     with_tmp_global_config do |home|
       assert_pre_dispatch_error(
@@ -351,8 +376,16 @@ class CliUsageErrorJsonTest < Minitest::Test
         patch = File.join(dir, "break-json-generate.rb")
         File.write(patch, <<~RUBY)
           require "json"
-          def JSON.generate(*)
-            raise JSON::GeneratorError, "forced generator failure"
+          class << JSON
+            alias __hive_original_generate generate
+
+            def generate(*args)
+              if caller_locations.any? { |location| location.base_label == "emit_json_usage_error" }
+                raise JSON::GeneratorError, "forced generator failure"
+              end
+
+              __hive_original_generate(*args)
+            end
           end
         RUBY
 

@@ -27,6 +27,10 @@ steps:
           depends_on: synthetic-plan-prerequisite
           ---
           # Plan-only dependency declaration
+      - path: meta.yml
+        content: |
+          id: 42
+          slug: synthetic-dependent-task
 
   - kind: json_assert
     description: A plan-only declaration cannot silently become admitted metadata.

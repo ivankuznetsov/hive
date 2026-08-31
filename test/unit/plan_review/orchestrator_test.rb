@@ -5,6 +5,8 @@ require "hive/plan_review/orchestrator"
 require "tmpdir"
 
 class PlanReviewOrchestratorTest < Minitest::Test
+  include HiveTestHelper
+
   # A plan containing any non-ASCII character (em dash, arrow, curly quote)
   # used to crash the whole plan-review stage with
   # `Encoding::CompatibilityError: incompatible character encodings: UTF-8 and
@@ -1768,6 +1770,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       meta = File.join(folder, "meta.yml")
       File.write(meta, "id: task-1\nslug: demo-task\nworkflow: coding\n")
+      prepare_test_task_lease_repository(folder)
       File.write(File.join(folder, "plan.md"), plan)
       task = Task.new(
         folder:, project_root: project, slug: "demo-task", id: "task-1",

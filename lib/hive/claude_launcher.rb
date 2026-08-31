@@ -871,7 +871,7 @@ module Hive
 
     # `pane_idle`, `process_exited` and `pid` may be passed in when the
     # caller already computed them for its cheap per-poll candidate check,
-    # so we don't re-read `.lock` / re-probe the process here. They default
+    # so we don't re-read the lease / re-probe the process here. They default
     # to `:unset`, in which case we compute them (the deadline path does).
     def completion_evidence(task, runner, pane_tail:, reason:,
                             pane_idle: :unset, process_exited: :unset, pid: :unset)
@@ -926,7 +926,7 @@ module Hive
 
     # ADVISORY-ONLY: the recorded pid is trusted as written without
     # confirming it belongs to this run's process (a stale/reused pid in
-    # `.lock["claude_pid"]` is taken at face value). This is safe because the
+    # the lease's `claude_pid` is taken at face value). This is safe because the
     # pid only ever feeds `process_exited`, which after the cold-start-latch
     # fix no longer gates work_started — a wrongly-"alive" pid makes the
     # turn-end predicate strictly MORE conservative (it never reports
@@ -934,13 +934,10 @@ module Hive
     # seal). A session-ownership check would make the safety explicit but is
     # not required for correctness today.
     def recorded_claude_pid(task)
-      path = File.join(task.folder, ".lock")
-      return nil unless File.exist?(path)
-
-      data = YAML.safe_load(File.read(path)) || {}
+      data = Hive::Lock.read_task_lock(task.folder) || {}
       pid = data["claude_pid"]
       pid.is_a?(Integer) && pid.positive? ? pid : nil
-    rescue Psych::Exception, SystemCallError, IOError
+    rescue Hive::Error, SystemCallError, IOError
       nil
     end
 

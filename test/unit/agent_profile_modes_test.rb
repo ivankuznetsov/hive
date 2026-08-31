@@ -35,6 +35,7 @@ class AgentProfileModesTest < Minitest::Test
   def make_task(dir, stage = "2-brainstorm", slug = "agent-modes-260425-aaaa")
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     Hive::Task.new(folder)
   end
 

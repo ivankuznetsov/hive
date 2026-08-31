@@ -1,6 +1,7 @@
 require "time"
+require "securerandom"
 require "hive/paths"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/attempts/api"
 require "hive/attempts/generation"
 require "hive/recovery/api"
@@ -10,23 +11,27 @@ require "hive/workflows"
 
 module Hive
   module Bot
-    # Writes dispatch request files into the daemon's queue directory.
-    # The bot is a producer only; the daemon is the single dispatcher.
+    # Writes dispatch request rows into the runtime control plane. The bot is
+    # a producer only; the daemon is the single dispatcher.
     module DispatchRequestWriter
       module_function
 
       DispatchReference = Data.define(:request_id, :attempt_id, :state, :status, :argv)
 
-      def generate_request_id
-        Hive::Daemon::DispatchRequestQueue.generate_request_id
+      def generate_request_id(state_home: Hive::Paths.state_home, repository: nil)
+        return repository.generate_request_id if repository
+
+        SecureRandom.hex(8)
       end
 
       def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
-                 trigger: nil, request_id: generate_request_id,
+                 trigger: nil, request_id: nil,
                  task_generation: nil, predecessor_attempt_id: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
-                 state_home: Hive::Paths.state_home, now: Time.now)
-        Hive::Daemon::DispatchRequestQueue.write_request!(
+                 state_home: Hive::Paths.state_home, now: Time.now, repository: nil)
+        repository ||= repository_for(state_home)
+        request_id ||= repository.generate_request_id
+        repository.write_request!(
           project: project,
           slug: slug,
           argv: argv,
@@ -56,20 +61,22 @@ module Hive
         )
       end
 
-      # Durable foreground delivery. The queue file is written first and
+      # Durable foreground delivery. The request row is written first and
       # remains the delivery record even when this process admits the attempt
       # immediately; a daemon can later correlate its receipt after restart.
       # Capacity/unavailable-local cases simply leave the request pending.
       def dispatch!(project:, slug:, argv:, chat_id: nil, update_id: nil,
-                    trigger: nil, request_id: generate_request_id,
+                    trigger: nil, request_id: nil,
                     state_home: Hive::Paths.state_home, now: Time.now,
-                    entrypoint: nil)
+                    entrypoint: nil, repository: nil)
+        repository ||= repository_for(state_home)
+        request_id ||= repository.generate_request_id
         task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
           request_id: request_id, state_home: state_home, now: now,
-          **identity
+          **identity, repository: repository
         )
         unless task
           return DispatchReference.new(
@@ -96,15 +103,6 @@ module Hive
             argv: argv
           )
         end
-        Hive::Daemon::DispatchRequestQueue.claim(
-          request_id,
-          pid: nil,
-          process_start_time: nil,
-          attempt_id: result.attempt.attempt_id,
-          task_generation: result.attempt.task_generation,
-          now: now,
-          state_home: state_home
-        )
         DispatchReference.new(
           request_id: request_id.to_s,
           attempt_id: result.attempt.attempt_id,
@@ -118,7 +116,7 @@ module Hive
           status: :queued, argv: argv
         )
       rescue StandardError
-        Hive::Daemon::DispatchRequestQueue.remove_if_unclaimed(
+        repository&.remove_if_unclaimed(
           request_id, state_home: state_home
         )
         raise
@@ -139,16 +137,20 @@ module Hive
         )
       end
 
-      def write_sequence!(request_id:, remaining_argvs:, state_home: Hive::Paths.state_home)
-        Hive::Daemon::DispatchRequestQueue.write_sequence!(
+      def write_sequence!(request_id:, remaining_argvs:, state_home: Hive::Paths.state_home,
+                          repository: nil)
+        repository ||= repository_for(state_home)
+        repository.write_sequence!(
           request_id,
           remaining_argvs: remaining_argvs,
           state_home: state_home
         )
       end
 
-      def discard_sequence!(request_id:, state_home: Hive::Paths.state_home)
-        Hive::Daemon::DispatchRequestQueue.discard_sequence(
+      def discard_sequence!(request_id:, state_home: Hive::Paths.state_home,
+                            repository: nil)
+        repository ||= repository_for(state_home)
+        repository.discard_sequence(
           request_id,
           state_home: state_home
         )
@@ -160,6 +162,10 @@ module Hive
           project_filter: project,
           stage_filter: stage_filter_for(argv)
         ).resolve
+      end
+
+      def repository_for(state_home)
+        Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: state_home)
       end
 
       # A task can be momentarily unresolvable while migration owns and moves

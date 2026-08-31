@@ -5,7 +5,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/agent_git_gate"
 require "hive/attempts/context"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
@@ -884,7 +884,7 @@ module Hive
             raise StoreError,
                   "outcome evidence requires a controller-owned durable attempt context"
           end
-          store = @attempt_store || Hive::Attempts::Store.new(create_directories: false)
+          store = @attempt_store || Hive::Attempts::Repository.open_default(create_directories: false)
           record = store.fetch(context.attempt_id)
           unless record && record["project"] == @project &&
                  record["task_slug"] == @task.slug.to_s &&

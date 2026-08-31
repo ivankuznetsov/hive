@@ -496,14 +496,12 @@ class NewTest < Minitest::Test
     end
   end
 
-  def test_counter_failure_writes_null_id_and_still_captures
+  def test_unavailable_counter_writes_null_id_and_still_captures
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
-        error = Hive::ConcurrentRunError.new("busy", lock_path: "/tmp/counter")
-
-        with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise error }) do
+        with_replaced_singleton_method(Hive::TaskCounter, :next_or_nil, -> { nil }) do
           capture_io { Hive::Commands::New.new(project, "counter busy").call }
         end
 

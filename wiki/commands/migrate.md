@@ -1,48 +1,48 @@
 ---
 title: hive migrate
 type: command
-source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/patrol_fix/admission_store.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
+source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/runtime_control_plane/cutover.rb, lib/hive/patrol_fix/admission_store.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-27
+updated: 2026-08-30
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage, patrol]
 ---
 
-**TLDR**: `hive migrate [PROJECT_PATH]` is the sole explicit, idempotent upgrade
-path for one project. `hive migrate --all` checks global state and every
-registered project; `hive update` runs that fleet form automatically after a
-successful package update.
+**TLDR**: `hive migrate [PROJECT_PATH]` upgrades one project's Markdown task
+authority. `hive migrate --all --yes` is a different, installation-wide
+offline operation: it creates one verified SQLite candidate for the complete
+included fleet and publishes activation only after every included project validates.
 
 ## Usage
 
 ```bash
 hive migrate [PROJECT_PATH]
-hive migrate --all
+hive migrate --all [--yes] [--exclude-project NAME]
 ```
 
 `PROJECT_PATH` defaults to the current directory. The command requires `<project>/.hive-state/stages/` to exist.
 
-`--all` and `PROJECT_PATH` are mutually exclusive. Fleet mode prints a global
-state check, one progress row and result per registered project, and a final
-success/failure count. It continues after a project failure so one broken
-registration does not hide the rest of the migration inventory, then exits
-non-zero with a human-readable summary. Every failed project includes a
-shell-escaped single-project recovery command using the active `hive` or `hv`
-wrapper. If a registered path is missing or no longer contains a Hive project,
-the command instead names the restore path plus exact `forget` and `prune`
-cleanup commands while keeping the fleet result visibly incomplete.
+`--all` and `PROJECT_PATH` are mutually exclusive. Fleet mode is irreversible
+and requires explicit confirmation. On a TTY it prompts for `yes`; non-TTY use
+without the flag fails with the exact `hive migrate --all --yes` action. Missing registered projects must be repaired or named with
+`--exclude-project`; exclusions and their reason are durable manifest evidence.
+Corrupt reachable projects, live owners, changing task authority, or missing
+task ids stop activation. Project task files remain byte-identical before the
+activation-intent manifest.
 
-Before project-local changes, the command runs the owner-private recovery-state
-cutover for the current Hive state home. Stop the daemon and bot, run
-`hive migrate` or `hive migrate --all`, then restart them. Runtime commands do
-not discover or perform this cutover. A foreground default attempt store opens
-only the physical v4 layout that the explicit command prepared. Obsolete v1
-roots or competing material v2/v3/v4 roots fail closed inside the migration
-command, so the cutover never silently chooses a second authority.
-
-The v4 cutover verifies daily admission accounting against both bounded hot
-records and immutable permanent proofs. Terminal attempts may already have
-moved out of the hot window before a migration resumes; their same-day counts
-remain authoritative and must not be discarded as stale index entries.
+The package manager publishes the candidate normally; Hive never renames a
+package-owned launcher or preserves the previous executable tree. Before any
+candidate startup mutation, an early read-only gate refuses ordinary commands.
+Cutover journals the exact service state before stopping daemon, bot, and Web,
+rejects live owners, snapshots and validates token usage while holding the
+legacy database against late writers through fencing, and installs permanent
+path-shape tombstones over retired writer paths. It rebuilds project and task
+identity from file authority, validates the complete SQLite candidate before
+any tombstone, resets the remaining machine-local runtime domains, records
+irreversible intent, activates the database authority, and then restarts only
+services that were running. Task journals, projections, artifacts, and referenced
+payload files remain untouched. An interruption after fencing leaves evidence
+and tombstones in place; `hive runtime resume` only converges forward. Normal
+runtime never creates or migrates the database and has no legacy fallback.
 
 ## Task-folder renames
 
@@ -78,19 +78,14 @@ loading; a single-project migration requests its best-effort daemon restart at
 that point, so a later project-specific migration failure cannot leave a live
 daemon on the removed policy.
 
-After replacing the installed CLI through its package channel, `hive update`
-runs the new binary's `hive migrate --all`. That can mutate and commit each
-registered project's tracked `.hive-state` exactly as an explicit
-single-project migration would. A failed project is named with its error and
-`hive migrate PROJECT_PATH` recovery command; successful projects are not
-rolled back.
-
-Each single-project migration still requests a daemon restart when it changes
-stage layout or managed workflow tasks. Fleet mode restarts once after every
-successful all-project pass, including an otherwise no-op retry after a partial
-failure. That makes the successful pass the update cutover without maintaining
-another durable restart marker. A partial fleet failure defers the restart
-until the operator repairs the failed project and reruns `hive migrate --all`.
+`hive update --yes` lets the configured package manager publish the candidate
+normally, then runs that candidate's confirmed fleet cutover. The previous
+release's existing update route invokes candidate `migrate --all` without the
+flag; the candidate obtains confirmation interactively or refuses non-TTY use
+with the exact explicit rerun instruction.
+The single-project command remains the explicit preparation path for missing
+task identities; the fleet command never invents DB-only ids or commits task
+files before activation intent.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to
@@ -140,11 +135,12 @@ remain authoritative. A successful rebuild reports the indexed and total
 record counts and is byte-idempotent on a rerun. If an old daemon is running,
 the command synchronously restarts it and performs one final index pass. That
 second pass closes the finite window in which the old process could have
-written without maintaining the new index. Fleet migration performs this
-cutover at most once and otherwise retains its single final restart. If Hive
-cannot replace a running daemon automatically, migration fails with exact
-stop, rerun, and start commands. Projects without an admission inventory are
-not materialized.
+written without maintaining the new index. If Hive cannot replace a running
+daemon automatically, migration fails with exact stop, rerun, and start
+commands. Projects without an admission inventory are not materialized. This
+index rewrite belongs only to the explicit single-project command; fleet
+cutover observes project authority and never runs project-local mutators before
+activation intent.
 
 Runtime `AdmissionStore#pending` reads the index once and opens at most twice
 its requested record limit when repairing crash residue; a clean tick opens
@@ -174,38 +170,17 @@ has run. A task whose workflow descriptor is missing or invalid is left
 unchanged because Hive cannot identify its authoritative state file safely;
 restore the workflow, then rerun migrate.
 
-## Durable recovery schema cutover
+## Runtime activation surface
 
-Runtime recovery supports only the current shapes: attempt v4, dispatch request
-v5, and dispatch result v2. `Hive::Recovery::Migration` performs a forward-only
-physical cutover from `$HIVE_HOME/attempts/v3` to `attempts/v4` (and accepts a
-remaining supported v2 source). It takes the shared recovery lock and every
-source writer lock, rejects attempts whose owners may still be active, and
-converts definitively crashed attempts to ordinary lost records. Only expired
-pre-heartbeat launches and running records with missing/mismatched process
-identity qualify for that automatic reconciliation. It validates the complete
-source tree, atomically renames it, converts valid schema-v3 hot/proof records to explicit
-legacy routing mode, and replaces prior paths with owner-private old-binary
-fences. Malformed hot bytes remain exact reservations; a malformed permanent
-proof fails the migration.
-
-The durable `.v4-cutover.json` checkpoint advances through `fenced`, `verified`,
-and `complete`. Before completion Hive compares the exact source corpus and
-scan counts, proves decision-index and capacity parity, and promotes historical
-final records into permanent proof. Only then does it write
-`recovery-migration-v6.json`, migrate pending request v1-v4 and result v1
-documents, and remove superseded recovery receipts.
-
-Runtime opens only v4: there is no dual reader, reverse migration, or hydration
-path. This command is the sole authority that invokes the global recovery
-migration. `hive status`, daemon startup, bot startup, and ordinary attempt
-store construction neither perform nor monitor it. The operator must complete
-the one-off command before starting current runtime processes.
-back into v2/v3. An obsolete v1 tree, material competing-root collision, live
-writer or possibly active attempt, unsupported attempt schema, unsafe tree entry, changed corpus, or
-invalid checkpoint/fence fails closed with the evidence preserved. Re-running
-after a completed receipt validates the fences, v4 directory, and complete
-checkpoint, then returns the same receipt rather than repeating the cutover.
+The attempts-v4 recovery state machine and `Hive::Recovery::Migration` facade
+are deleted. `Hive::RuntimeControlPlane::Cutover` is the explicit fleet
+cutover/bootstrap/resume composition boundary. It has no general legacy decoder:
+the only retained-history adapter validates and imports the legacy token-usage
+SQLite database. `hive runtime status|resume` is the entire maintenance surface.
+Status validates the immutable manifest and exact database identity; resume
+revalidates task authority and the token-usage snapshot before moving forward.
+Hive deliberately provides no runtime backup, restore, rollback, or downgrade
+branch for this one-way transition.
 
 ## Registered repository identity backfill
 
@@ -274,9 +249,8 @@ A rerun after successful migration prints that there is nothing to move and keep
 ## Tests
 
 - `test/unit/commands/migrate_renames_consistency_test.rb` pins the stage rename map against `Hive::Stages::DIRS`.
-- `test/unit/commands/migrate_all_test.rb` covers global and per-project fleet
-  progress, continue-after-failure behavior, human-readable errors, and exact
-  recovery commands.
+- `test/unit/commands/migrate_all_test.rb` covers the thin fleet-cutover
+  delegation, TTY and non-TTY confirmation, and exclusions.
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
   backfill order, plan-review requirement/adoption boundary, display-name
@@ -291,10 +265,12 @@ A rerun after successful migration prints that there is nothing to move and keep
 - `test/unit/workflow_package/task_migrator_test.rb` covers semantic stage
   moves, same-position repins, removed-stage refusal, lock contention, cleanup,
   and idempotency.
-- `test/unit/recovery/migration_test.rb` covers the physical v2-to-v3 cutover,
-  exact parity and crash resume, real finalization obligations, v1 empty-skeleton
-  pruning, strict schema rejection, queue upgrades, and live/ambiguous-state
-  refusal.
+- `test/unit/runtime_control_plane/cutover_test.rb` covers fleet atomicity,
+  live-owner refusal, disposable runtime reset, exact-once token-usage import,
+  permanent path-shape fences, and crash-forward resume.
+- `test/unit/runtime_control_plane/activation_gate_test.rb` proves inactive
+  ordinary commands fail before wiki reconciliation while maintenance routes
+  remain available.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

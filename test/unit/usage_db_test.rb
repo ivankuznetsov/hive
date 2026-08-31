@@ -1,4 +1,5 @@
 require "test_helper"
+require "digest"
 require "sqlite3"
 require "hive/usage_db"
 
@@ -6,19 +7,57 @@ class UsageDbTest < Minitest::Test
   include HiveTestHelper
 
   def setup
-    @old_path = Hive::UsageDb.path
+    @old_database = Hive::UsageDb.instance_variable_get(:@database)
     @old_env = ENV["HIVE_USAGE_DB_PATH"]
   end
 
   def teardown
-    Hive::UsageDb.path = @old_path
+    Hive::UsageDb.database = @old_database
     @old_env.nil? ? ENV.delete("HIVE_USAGE_DB_PATH") : ENV["HIVE_USAGE_DB_PATH"] = @old_env
   end
 
   def with_usage_db
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
+      path = File.join(dir, "runtime-control-plane.sqlite3")
+      @usage_database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      Hive::UsageDb.database = @usage_database
+      seed_usage_attempts
       yield
+    ensure
+      @usage_database&.disconnect
+      @usage_database = nil
+    end
+  end
+
+  def seed_usage_attempts
+    now = Time.utc(2026, 5, 24, 10).iso8601(6)
+    @usage_database.transaction do |db|
+      installation_id = db[:installations].get(:installation_id)
+      db[:projects].insert(
+        project_id: "usage-project", installation_id: installation_id,
+        registration_id: "alpha", name: "alpha", observed_path: "/tmp/alpha",
+        state_root_path: "/tmp/alpha/.hive-state", active: 1,
+        registered_at: now, last_observed_at: now
+      )
+      db[:task_subjects].insert(
+        task_id: "usage-task", project_id: "usage-project", workflow_id: "coding",
+        task_slug: "task-a", observed_path: "/tmp/alpha/.hive-state/stages/4-execute/task-a",
+        source_fingerprint: "f" * 64, generation: 4,
+        created_at: now, last_observed_at: now
+      )
+      { "attempt-1" => 3, "attempt-2" => 3, "attempt-direct" => 4, "attempt" => 1 }.each do |id, generation|
+        document = Hive::RuntimeControlPlane::Codec.dump_json("attempt_id" => id)
+        db[:attempts].insert(
+          attempt_id: id, project_id: "usage-project", task_id: "usage-task",
+          subject_kind: "task_stage",
+          subject_key: "4-execute", task_generation: generation.to_s,
+          ownership_generation: "owner-#{id}", state: "terminal", outcome: "succeeded",
+          lease_version: 1, routing_json: "{}", source_fingerprint: "f" * 64,
+          record_json: document, record_digest: Digest::SHA256.hexdigest(document),
+          subject_json: "{}", project_name: "alpha", task_slug: "task-a",
+          accepted_date: "2026-05-24", created_at: now, accepted_at: now, ended_at: now
+        )
+      end
     end
   end
 
@@ -110,7 +149,7 @@ class UsageDbTest < Minitest::Test
         cost: 0.0
       )
 
-      db = SQLite3::Database.new(Hive::UsageDb.path)
+      db = SQLite3::Database.new(@usage_database.path)
       db.results_as_hash = true
       row = db.get_first_row("SELECT * FROM token_usage WHERE agent = 'opencode'")
 
@@ -164,6 +203,7 @@ class UsageDbTest < Minitest::Test
       assert_equal 0.0, session.fetch(:provider_reported_cost)
       assert_equal 0, session.fetch(:cache_write)
       assert_equal false, session.fetch(:cache_read_available)
+      refute session.key?(:cache_write_available)
     end
   end
 
@@ -243,7 +283,7 @@ class UsageDbTest < Minitest::Test
   def test_missing_db_returns_zero_tree_without_creating_file
     with_tmp_dir do |dir|
       path = File.join(dir, "usage.db")
-      Hive::UsageDb.path = path
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: path)
 
       aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
 
@@ -252,25 +292,23 @@ class UsageDbTest < Minitest::Test
     end
   end
 
-  def test_env_path_overrides_default_path
+  def test_legacy_usage_path_environment_no_longer_overrides_the_control_plane
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = nil
+      Hive::UsageDb.database = nil
       ENV["HIVE_USAGE_DB_PATH"] = File.join(dir, "custom.db")
 
-      assert_equal File.join(dir, "custom.db"), Hive::UsageDb.path
+      assert_equal Hive::Paths.runtime_control_plane_path, Hive::UsageDb.database.path
     end
   end
 
-  def test_record_with_broken_path_warns_and_does_not_raise
+  def test_record_with_broken_path_raises_typed_authoritative_failure
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = dir
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: dir)
 
-      _out, err = capture_io do
-        result = record
-        refute result
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        record
       end
-
-      assert_match(/usage record failed/, err)
+      assert_equal :database_custody_invalid, error.code
     end
   end
 
@@ -285,9 +323,11 @@ class UsageDbTest < Minitest::Test
     end
   end
 
-  def test_existing_usage_schema_is_migrated_without_losing_legacy_rows
-    with_usage_db do
-      db = SQLite3::Database.new(Hive::UsageDb.path)
+  def test_existing_legacy_usage_database_is_not_migrated_at_runtime
+    with_tmp_dir do |dir|
+      path = File.join(dir, "legacy-usage.db")
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: path)
+      db = SQLite3::Database.new(path)
       db.execute_batch(<<~SQL)
         CREATE TABLE token_usage (
           id TEXT PRIMARY KEY, agent TEXT NOT NULL, model TEXT,
@@ -303,55 +343,12 @@ class UsageDbTest < Minitest::Test
       SQL
       db.close
       db = nil
+      File.chmod(0o600, path)
 
-      record(agent: "opencode", input: 4, output: 5, cached: 6)
-
-      db = SQLite3::Database.new(Hive::UsageDb.path)
-      db.results_as_hash = true
-      legacy = db.get_first_row("SELECT * FROM token_usage WHERE id = 'legacy'")
-      current = db.get_first_row("SELECT * FROM token_usage WHERE agent = 'opencode'")
-      assert_equal 1, legacy.fetch("input_available")
-      assert_equal 0, legacy.fetch("cache_read_available")
-      assert_equal 4, current.fetch("input")
-      assert current.key?("requested_backend")
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { record }
+      assert_equal :application_id_mismatch, error.code
     ensure
       db&.close
-    end
-  end
-
-  def test_legacy_schema_migrates_transactionally_and_rows_remain_unattributed
-    with_usage_db do
-      require "sqlite3"
-      db = SQLite3::Database.new(Hive::UsageDb.path)
-      db.execute_batch(Hive::UsageDb::LEGACY_SCHEMA_SQL)
-      db.execute(
-        "INSERT INTO token_usage (id, agent, model, project_slug, task_slug, stage, " \
-        "started_at, ended_at, input, output, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [ "legacy-1", "claude", "legacy-model", "alpha", "task-a", "4-execute",
-          "2026-05-24T10:00:00Z", "2026-05-24T10:01:00Z", 10, 5, 1 ]
-      )
-      db.close
-
-      record(
-        agent: "codex", input: 20, output: 7, cached: 2,
-        attempt_id: "attempt-1", session_id: "session-1", task_generation: 3
-      )
-
-      db = SQLite3::Database.new(Hive::UsageDb.path)
-      columns = db.table_info("token_usage").map { |row| row["name"] || row[1] }
-      assert_includes columns, "attempt_id"
-      assert_includes columns, "session_id"
-      assert_includes columns, "task_generation"
-      assert_includes columns, "source"
-      assert_equal Hive::UsageDb::SCHEMA_VERSION, db.get_first_value("PRAGMA user_version")
-      db.close
-
-      exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1", task_generation: 3)
-      assert exact.fetch(:available)
-      assert_equal 1, exact.fetch(:sessions).length
-      assert_equal({ input: 20, output: 7, cached: 2 }, exact.fetch(:totals))
-      assert_equal 1, exact.fetch(:unattributed_count)
-      assert_equal "legacy-model", exact.fetch(:unattributed).first.fetch(:model)
     end
   end
 
@@ -374,7 +371,34 @@ class UsageDbTest < Minitest::Test
     end
   end
 
-  def test_concurrent_schema_migrators_and_session_writers_converge
+  def test_session_merge_preserves_the_first_authoritative_billing_evidence
+    with_usage_db do
+      common = {
+        agent: "codex", model: "gpt-test", project_slug: "alpha",
+        task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 5, 24, 10), ended_at: Time.utc(2026, 5, 24, 10, 1),
+        attempt_id: "attempt-1", session_id: "billing-session", task_generation: 3,
+        source: "runtime_receipt"
+      }
+      Hive::UsageDb.record!(
+        **common, input: 10, output: 2, cached: 1,
+        billing_route: "api", billing_evidence_source: "provider_account_config"
+      )
+      Hive::UsageDb.record!(
+        **common, input: 12, output: 3, cached: 1,
+        billing_route: "unknown", billing_evidence_source: "unavailable"
+      )
+
+      sessions = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", task_generation: 3
+      ).fetch(:sessions)
+      assert_equal 1, sessions.length
+      assert_equal "api", sessions.first.fetch(:billing_route)
+      assert_equal "provider_account_config", sessions.first.fetch(:billing_evidence_source)
+    end
+  end
+
+  def test_concurrent_session_writers_converge
     with_usage_db do
       ready = Queue.new
       release = Queue.new
@@ -412,9 +436,10 @@ class UsageDbTest < Minitest::Test
         task_generation: 3, source: "runtime_receipt"
       }
       assert Hive::UsageDb.record!(**common, attempt_id: "attempt-1")
-      _out, _err = capture_io do
-        refute Hive::UsageDb.record!(**common, attempt_id: "attempt-2")
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::UsageDb.record!(**common, attempt_id: "attempt-2")
       end
+      assert_equal :usage_session_conflict, error.code
 
       assert_equal 1,
                    Hive::UsageDb.exact_attempt(
@@ -428,12 +453,12 @@ class UsageDbTest < Minitest::Test
 
   def test_exact_attempt_marks_missing_or_failed_storage_unavailable_not_zero
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "missing.db")
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: File.join(dir, "missing.db"))
       missing = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
       refute missing.fetch(:available)
       assert_nil missing.fetch(:totals)
 
-      Hive::UsageDb.path = dir
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: dir)
       _out, _err = capture_io do
         broken = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
         refute broken.fetch(:available)
@@ -460,8 +485,9 @@ class UsageDbTest < Minitest::Test
 
   def test_exact_attempt_corrupt_store_is_reported_as_unavailable
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
-      File.write(Hive::UsageDb.path, "not a sqlite database")
+      path = File.join(dir, "usage.db")
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: path)
+      File.write(path, "not a sqlite database")
 
       _out, err = capture_io do
         exact = Hive::UsageDb.exact_attempt(attempt_id: "attempt-1")
@@ -547,7 +573,7 @@ class UsageDbTest < Minitest::Test
 
   def test_patrol_activity_marks_an_unavailable_store_instead_of_claiming_zero_usage
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = dir
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: dir)
 
       _out, err = capture_io do
         activity = Hive::UsageDb.patrol_activity(scope: {}, now: Time.utc(2026, 5, 24, 12))
@@ -560,66 +586,26 @@ class UsageDbTest < Minitest::Test
     end
   end
 
-  def test_patrol_discovery_seed_attributes_reviews_and_excludes_non_discovery_rows
-    with_usage_db do
-      now = Time.utc(2026, 8, 20, 12)
-      rows = [
-        [ "patrol-review", nil ],
-        [ "refactor-patrol-review-unmetered", "patrol_discovery_launch" ],
-        [ "patrol-fix", nil ],
-        [ "refactor-patrol-review", "patrol_non_discovery_launch" ],
-        [ "refactor-patrol-unclassified", nil ],
-        [ "patrol-unclassified", nil ]
-      ]
-      rows.each_with_index do |(stage, source), index|
-        Hive::UsageDb.record!(
-          agent: "codex", model: nil, project_slug: "alpha", task_slug: stage,
-          stage: stage, started_at: now + index, ended_at: now + index,
-          input: 0, output: 0, cached: 0, source: source
-        )
-      end
+  def test_aggregate_with_missing_control_plane_returns_zero_tree
+    with_tmp_dir do |dir|
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: dir)
 
-      seed = Hive::UsageDb.patrol_discovery_seed(
-        scope: { project_slug: "alpha" }, date: "2026-08-20"
-      )
-      assert seed.fetch(:available)
-      assert_equal({ count: 1, ambiguous: 1 }, seed.fetch(:ordinary))
-      assert_equal({ count: 1, ambiguous: 1 }, seed.fetch(:architecture))
-      other = Hive::UsageDb.patrol_discovery_seed(
-        scope: { project_slug: "beta" }, date: "2026-08-20"
-      )
-      assert_equal 0, other.dig(:ordinary, :count)
+      aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
+      assert_equal({ input: 0, output: 0, cached: 0 }, usage_at(aggregate, :claude, :all))
     end
   end
 
-  def test_patrol_discovery_seed_fails_closed_when_the_store_is_unavailable
-    with_tmp_dir do |dir|
-      Hive::UsageDb.path = dir
+  def test_aggregate_fails_closed_when_the_database_read_fails
+    broken = Struct.new(:path) do
+      def read = raise(IOError, "unreadable")
+    end.new(__FILE__)
+    Hive::UsageDb.database = broken
 
-      _out, err = capture_io do
-        seed = Hive::UsageDb.patrol_discovery_seed(
-          scope: {}, date: "2026-08-20"
-        )
-        refute seed.fetch(:available)
-        assert_equal({ count: 0, ambiguous: 0 }, seed.fetch(:ordinary))
-        assert_equal({ count: 0, ambiguous: 0 }, seed.fetch(:architecture))
-      end
-
-      assert_match(/patrol discovery seed failed/, err)
+    _out, err = capture_io do
+      aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
+      assert_equal({ input: 0, output: 0, cached: 0 }, usage_at(aggregate, :claude, :all))
     end
-  end
-
-  def test_aggregate_with_broken_path_warns_and_returns_zero_tree
-    with_tmp_dir do |dir|
-      Hive::UsageDb.path = dir
-
-      _out, err = capture_io do
-        aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
-        assert_equal({ input: 0, output: 0, cached: 0 }, usage_at(aggregate, :claude, :all))
-      end
-
-      assert_match(/usage aggregate failed/, err)
-    end
+    assert_match(/usage aggregate failed: IOError: unreadable/, err)
   end
 
   def test_iso8601_returns_original_text_when_parse_fails
@@ -628,16 +614,14 @@ class UsageDbTest < Minitest::Test
 
   def test_usage_identity_deadlines_and_boolean_evidence_fail_closed
     with_usage_db do
-      _out, err = capture_io do
-        refute Hive::UsageDb.record!(
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.record!(
           agent: "codex", harness: "opencode", model: "gpt",
           project_slug: "project", task_slug: "task", stage: "4-execute",
           started_at: Time.utc(2026, 8, 17), ended_at: Time.utc(2026, 8, 17),
           input: 1, output: 1, cached: 0
         )
       end
-      assert_match(/harness must match/, err)
-
       invalid_deadline = Hive::UsageDb.exact_attempt(
         attempt_id: "attempt", deadline: "bad", monotonic_clock: -> { 1.0 }
       )
@@ -652,10 +636,6 @@ class UsageDbTest < Minitest::Test
       )
       assert default_clock.fetch(:available)
 
-      assert_equal 2_000,
-                   Hive::UsageDb.send(:deadline_busy_timeout, 3.0, -> { 1.0 })
-      assert_equal 1,
-                   Hive::UsageDb.send(:deadline_busy_timeout, "bad", -> { 1.0 })
       assert_raises(ArgumentError) do
         Hive::UsageDb.send(:nullable_boolean, "yes")
       end

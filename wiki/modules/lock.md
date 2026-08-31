@@ -1,43 +1,59 @@
 ---
 title: Hive::Lock
 type: module
-source: lib/hive/lock.rb
+source: lib/hive/lock.rb, lib/hive/runtime_control_plane/task_lease_repository.rb, lib/hive/runtime_control_plane/process_guard.rb
 created: 2026-04-25
-updated: 2026-08-29
-tags: [lock, concurrency, flock, commit-lock]
+updated: 2026-08-30
+tags: [lock, concurrency, sqlite, sequel, lease, fencing, flock, commit-lock, fork]
 ---
 
-**TLDR**: Two locking primitives — per-task `.lock` (long-lived, atomically published with process and lock-generation identity) and per-project `.commit-lock` (short-lived, bounded flock for the brief hive-state git-commit window).
+**TLDR**: Ordinary task coordination is a typed SQLite lease keyed by stable
+task id. The only repository-level task workflow mutex that remains a file is
+the short-lived per-project `.commit-lock` around hive-state Git mutations.
 
-## Per-task lock
+## Task leases
 
-`with_task_lock(task_folder, payload = {}, create: true)` wraps a block:
+`Hive::Lock.with_task_lock(task_folder, payload = {}, create: true)` resolves
+`meta.yml#id` through `task_subjects`, claims `task_leases` in an immediate
+Sequel transaction, runs the block, then clears only the row whose random
+`holder_id` still matches. There is no task-folder `.lock`, tempfile guard,
+filesystem compatibility reader, or runtime backfill.
 
-1. `acquire_task_lock` writes and fsyncs a complete YAML payload to a sibling tempfile, then hard-links it to `<task_folder>/.lock` with no-replace semantics. Readers therefore see either no lock or a complete payload, never an empty/partial newly created lock.
-2. Publication, stale replacement, updates, and release are serialized on the stable `<task_folder>/.lock.tmp.guard` flock. That name is covered by the existing hive-state ignore rule. On `Errno::EEXIST`, acquisition calls `stale_lock?`; if stale, it deletes and retries up to 3 times, otherwise it raises `Hive::ConcurrentRunError`.
-3. The block runs with the lock held.
-4. `release_task_lock` deletes the lock file in `ensure` only when its generated `lock_id` still matches. An old owner cannot delete a replacement generation. If a stage transition moved the task folder while locked, release does not recreate the vanished source; the transition removes the moved lock before commit.
+The row contains typed holder identity, generation, monotonic `lease_version`,
+source fingerprint, acquire/expiry/release timestamps, and a bounded JSON
+payload. The payload projects operation detail plus runner and optional agent
+PID/start-time identities. JSON is canonicalized and bounded to 16 KiB before
+both claim and update; an oversized write cannot make its own row unreadable.
 
-Callers that only operate on an already observed task may pass `create: false`.
-Acquisition then rechecks the task directory and raises `ENOENT` rather than
-recreating a task that moved or was deleted while the caller waited.
+Acquisition uses compare-and-swap against the observed lease version and
+holder. A live exact PID/start-time holder raises `Hive::ConcurrentRunError`.
+A dead holder or reused PID can be replaced only by a higher lease version.
+Release and update require the current fenced holder nonce, so an old or
+unrelated caller cannot mutate a replacement generation. `Lock.update_task_lock`
+also requires same-thread ownership.
 
-`base_payload`:
-```ruby
-{
-  "pid" => Process.pid,
-  "started_at" => Time.now.utc.iso8601,
-  "process_start_time" => process_start_time(Process.pid),
-  "lock_id" => SecureRandom.hex(16)
-}
-```
+Reentrancy is process- and thread-local, keyed by stable task id. A nested call
+for the same task reuses the outer lease; forked children reject inherited
+ownership. Folder moves remain safe because metadata id is authoritative and
+the subject's observed path is updated under that id. A missing moved source
+can still release by its unguessable holder nonce without recreating a folder.
+A recreated path with a different id never binds to the historical subject,
+and an id cannot move across registered projects. Custom state roots resolve
+against `projects.state_root_path`, not a hard-coded `.hive-state` basename.
+
+Supported task mutators take this shared lease. Multi-task destructive work
+uses deterministic path order. When both project and task coordination are
+needed, lock order is commit lock, task lease(s), then narrower marker/file
+mutexes. `hive new` and other true identity creators use the commit lock
+because no task subject exists yet. Explicit fleet cutover/bootstrap is the
+other identity-creation exception.
 
 The runner adds `slug:` and `stage:` to the payload. After launch, both the
 headless `Hive::Agent` writer and the tmux-backed `Hive::ClaudeLauncher` writer
 inject `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.
 Those fields describe only the currently owned child: after a confirmed child
 exit or shared-session teardown, `clear_task_lock_child` removes both fields
-under the lock guard only when PID and start time still match. That
+in a fenced SQL update only when PID and start time still match. That
 compare-and-clear prevents an older completion from erasing a replacement
 child's liveness evidence. `hive status` uses the child PID for liveness, while
 cleanup commands compare the recorded start time with the live process before
@@ -45,84 +61,75 @@ signalling it so a reused PID cannot target an unrelated process. If the
 platform cannot read a start time, the field is nil and that child-specific
 PID-reuse guard degrades to its existing PID-only behavior.
 
-The internal scheduler graph exposes the verified live holder's `task_lock_pid`,
-`task_lock_process_start_time`, and `task_lock_id`. Recovery consumers bind
-destructive actions to that exact observed generation. The TUI snapshot keeps
-all three values losslessly even though its renderer currently uses only the
-derived `live_task_lock` flag, so the status/TUI schema boundary remains
-additive and future recovery actions can use the same generation identity.
+## Liveness
 
-`hive status --json` is the compact polling boundary. It validates
-the runner and child process identities directly from bounded `.lock` reads
-and returns only rows where at least one is alive. A live child remains visible
-when the runner lock is stale; a stale lock with no live child is omitted. The
-contract exposes a closed `liveness.source` plus `liveness.running: true`, so
-clients do not infer activity from full-status attempt or marker internals.
-Unlike legacy full-status observation, the compact contract fails closed when
-the recorded process start identity is absent; this prevents a reused PID from
-becoming a false running row.
+The runner identity is `holder_pid + holder_process_identity`; agent launchers
+add `claude_pid + claude_pid_start_time`. Linux reads `/proc/<pid>/stat` field
+22 and other systems fall back to bounded `ps -o lstart=`. Status and cleanup
+compare both PID and start identity so PID reuse does not target or report an
+unrelated process. An unavailable identity probe fails conservatively.
 
-## Stale-lock detection (`stale_lock?`)
+`hive status --json` does one bounded join from active `task_leases` through
+`task_subjects` and `projects`, then validates only those observed folders and
+process identities. It does not scan every task directory or issue one SQL
+query per task. Stale rows ahead of a live row do not consume the 32-row output
+budget; the source scan is independently capped at 10,000 rows.
 
-1. Read `.lock`; YAML-parse safely. Unparseable → treat as stale.
-2. Validate `pid` is an integer.
-3. `Process.kill(0, pid)`:
-   - `ESRCH` → process is gone → stale.
-   - `EPERM` → process exists but we can't signal → not stale (live).
-4. Read `process_start_time` from the lock and the live `/proc/<pid>/stat` field 22. If recorded ≠ live → PID was reused after we locked → stale.
+## Process guard
 
-This is the runner PID-reuse defence: a fresh process with the same PID would
-have a different start time. The optional `claude_pid_start_time` applies the
-same identity principle to the recorded agent child during cleanup.
+`Hive::RuntimeControlPlane::ProcessGuard` is the single process-wide barrier
+between Sequel checkouts and process creation. Every registered Database
+wrapper enters it for reads, transactions, open/migration, and temporary
+diagnostics connections. Before fork/daemon/self-exec it:
 
-PID-only observations elsewhere (`status`, daemon child/healer checks,
-Claude-session completion, and migration guards) delegate their common
-`kill(0)` / `ESRCH` / `EPERM` interpretation to
-`Hive::ProcessKill.pid_alive?`. Callers that need identity-safe termination
-still pair that probe with the recorded process start time.
+1. rejects a request from a thread that owns any checkout;
+2. rejects while another thread owns a write transaction;
+3. blocks new checkouts and waits only for other-thread reads;
+4. disconnects every registered Database wrapper; and
+5. resets synchronization state in the child, while the owning parent/daemon
+   reconnects lazily.
 
-## `process_start_time(pid)`
+Sequel pool disconnect alone drains idle connections but does not coordinate
+an application-wide fork request with active checkouts. The barrier supplies
+that missing ordering. Spawned agent processes rely on close-on-exec/
+`close_others` and inherit no SQLite descriptor; they do not receive a writable
+Database wrapper. The guarded boundaries include durable double-fork launch,
+daemonization, bot/web/babysitter self-exec, project-capture forks, and every
+Puma worker fork (`before_worker_fork`, parent release, child reset).
 
-Reads `/proc/<pid>/stat` when procfs is available, splits on `") "` to handle `(comm)` containing arbitrary characters, and returns field 22 (overall) — index 19 of the tail because the tail starts after `(comm) `. On macOS, BSD, or containers without readable procfs, it falls back to `ps -o lstart= -p <pid>`. Returns `nil` only when both probes fail, in which case stale-lock detection gracefully degrades to the PID-only check.
+Filesystem, provider, network, subprocess, and Git work stays outside SQLite
+transactions. Long work may hold a logical task lease, but never a database
+transaction.
 
 ## Per-project commit lock
 
-`with_commit_lock(project_hive_state_path, timeout: 30)`:
+`with_commit_lock(project_hive_state_path, timeout: 30)` opens the persistent
+`<state>/.commit-lock`, polls `flock(LOCK_EX | LOCK_NB)` to a bounded deadline,
+and holds the descriptor while yielding. It is same-thread reentrant but
+process-scoped; forked children must contend normally. The kernel releases it
+on close or process death.
 
-1. Ensures the directory exists.
-2. Opens `<dir>/.commit-lock` with `RDWR | CREAT, 0o644`.
-3. Polls `flock(LOCK_EX | LOCK_NB)` until it acquires the lock or the caller's bounded deadline expires.
-4. On timeout, raises `Hive::ConcurrentRunError` with `lock_path: <dir>/.commit-lock`.
-5. Records same-thread ownership keyed by the canonical hive-state path and
-   current PID, then yields while the file descriptor is open; closing the
-   descriptor releases the flock.
-
-Nested acquisition for the same canonical path in the same thread and process
-reuses the outer lock. The PID check is required because Ruby thread-local
-state is copied across `fork`; a child never trusts the inherited ownership
-record and must contend for the process lock. Exceptions clear the local
-ownership record, and normal exit or `SIGKILL` closes the owning descriptor so
-the kernel releases the flock.
-
-The lock file is *not* deleted on release (it persists for cheap re-locking).
-`Hive::GitOps#hive_commit` is the central short critical section around scoped
-staging, the optional staged-index callback, diff inspection, and commit.
-Commands that need a larger filesystem-plus-index transaction still take an
-outer commit lock; reentrancy prevents their nested `hive_commit` from
-deadlocking. This serializes shared `.hive-state` index writes across commands,
-explicit migration, and Patrol Fix transitions.
-
-## Why two-level
-
-Per-task lock is held for the entire `hive run`, including long execute/review passes, and only applies once a task folder exists. If that same lock were used for hive-state git commits, two concurrent runs on different tasks of the same project would serialize for the full agent runtime, while non-run writers such as `hive new` would still need a project-wide gate. The commit lock lets long stages run in parallel and only blocks during the commit instant.
+The commit lock serializes the shared hive-state Git index and brief commit
+window. It does not serialize long agents on different tasks. `.markers-lock`
+and other domain-specific filesystem mutexes remain narrower machine-local
+coordination, not task ownership authority.
 
 ## Tests
 
-- `test/unit/lock_test.rb` — happy path, complete-before-visible publication, generation-scoped release, child-identity compare-and-clear, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, process contention, same-thread reentrancy, fork-inherited ownership refusal, and kernel release after `SIGKILL`.
+- `test/unit/lock_test.rb` — stable identity, contention, CAS fencing,
+  reentrancy, dead/PID-reuse reclaim, moved/recreated/custom-root behavior,
+  oversized payload refusal, child-identity compare-and-clear, and commit-lock
+  process contention.
+- `test/unit/runtime_control_plane/process_guard_test.rb` — own-checkout and
+  transaction rejection, blocked new checkouts, all-wrapper disconnect,
+  diagnostics/fork race, mixed-database real fork, spawn, self-exec, and
+  daemon/double-fork descriptor proofs.
+- `test/unit/task_counter_test.rb` and
+  `test/unit/patrol/launch_budget_test.rb` — real multiprocess atomic mutation.
 - `test/integration/new_test.rb` — `hive new` wraps the captured-task hive-state commit in the project commit lock.
 
 ## Backlinks
 
 - [[modules/task]] · [[modules/agent]] · [[modules/git_ops]]
-- [[commands/run]] · [[commands/new]] · [[commands/approve]] · [[commands/findings]]
-- [[state-model]]
+- [[commands/run]] · [[commands/new]] · [[commands/drop]] · [[commands/markers]]
+- [[commands/status]] · [[state-model]]

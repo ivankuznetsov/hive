@@ -158,11 +158,13 @@ class RepairProjectionCommandTest < Minitest::Test
       first, moved = tasks
       write_legacy_journal(first)
 
-      locked_payload = nil
-      Hive::Lock.with_task_lock(first.folder, "op" => "test", create: false) do
+      held = Hive::Lock.acquire_task_lock(first.folder, "op" => "test", create: false)
+      begin
         locked_payload = command_error_payload(
           first.slug, project: project, stage: "1-inbox"
         )
+      ensure
+        Hive::Lock.release_task_lock(first.folder, lock_id: held.fetch("lock_id"))
       end
       assert_schema_valid(locked_payload)
       assert_equal "task_locked", locked_payload.fetch("error_kind")
@@ -181,7 +183,8 @@ class RepairProjectionCommandTest < Minitest::Test
       assert_equal "invalid_task_path", moved_payload.fetch("error_kind")
       assert_includes moved_payload.fetch("message"), "identity changed"
       refute File.exist?(File.join(first.folder, "task-projection.json"))
-      refute File.exist?(first.lock_file), "identity-change failure must release the task lock"
+      assert_nil Hive::Lock.read_task_lock(first.folder),
+                 "identity-change failure must release the task lease"
     end
   end
 

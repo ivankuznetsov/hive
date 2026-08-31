@@ -17,7 +17,7 @@ module Hive
           io.close_on_exec = true
           new(io: io, route: route)
         rescue ArgumentError, TypeError, Errno::EBADF
-          raise StoreError, "attempt evidence descriptor is unavailable"
+          raise RepositoryError, "attempt evidence descriptor is unavailable"
         end
 
         def initialize(io:, route:)
@@ -31,7 +31,7 @@ module Hive
 
           normalized = EvidenceChannel.validate_signal(signal, route: @route)
           payload = JSON.generate(normalized)
-          raise StoreError, "attempt provider evidence is too large" if payload.bytesize > MAX_BYTES
+          raise RepositoryError, "attempt provider evidence is too large" if payload.bytesize > MAX_BYTES
 
           @io.write("#{payload}\n")
           @io.flush
@@ -58,7 +58,7 @@ module Hive
         return nil unless bytes.end_with?("\n") && bytes.count("\n") == 1
 
         validate_signal(JSON.parse(bytes), route: route)
-      rescue JSON::ParserError, StoreError, IOError, SystemCallError
+      rescue JSON::ParserError, RepositoryError, IOError, SystemCallError
         nil
       ensure
         io&.close unless io&.closed?
@@ -66,7 +66,7 @@ module Hive
 
       def validate_signal(signal, route:)
         unless signal.is_a?(Hash) && signal.keys.map(&:to_s).sort == SIGNAL_KEYS.sort
-          raise StoreError, "attempt provider evidence has unexpected fields"
+          raise RepositoryError, "attempt provider evidence has unexpected fields"
         end
         value = signal.to_h { |key, child| [ key.to_s, child ] }
         scope = Hive::ProviderHealth.scope_from_h(value.fetch("scope"))
@@ -74,18 +74,18 @@ module Hive
         allowed = scope.provider_account? ?
           Hive::ProviderHealth::PROVIDER_FAILURE_CLASSES : Hive::ProviderHealth::MODEL_FAILURE_CLASSES
         unless allowed.include?(value.fetch("failure_class").to_s)
-          raise StoreError, "attempt provider evidence class is invalid"
+          raise RepositoryError, "attempt provider evidence class is invalid"
         end
         unless Hive::ProviderHealth::TRUSTED_PROVENANCE.include?(value.fetch("provenance").to_s)
-          raise StoreError, "attempt provider evidence provenance is invalid"
+          raise RepositoryError, "attempt provider evidence provenance is invalid"
         end
         unless scope.account_id == route_identity.account_id &&
                (!scope.model? || scope.model_id == route_identity.model_id)
-          raise StoreError, "attempt provider evidence scope does not match its route"
+          raise RepositoryError, "attempt provider evidence scope does not match its route"
         end
         hint = value["reset_hint_seconds"]
         unless hint.nil? || (hint.is_a?(Integer) && hint.between?(0, Hive::ProviderHealth::MAX_RESET_HINT_SECONDS))
-          raise StoreError, "attempt provider evidence reset hint is invalid"
+          raise RepositoryError, "attempt provider evidence reset hint is invalid"
         end
 
         {
@@ -95,7 +95,7 @@ module Hive
           "reset_hint_seconds" => hint
         }.freeze
       rescue KeyError, Hive::ProviderHealth::Error => e
-        raise StoreError, "attempt provider evidence rejected: #{e.class.name.split('::').last}"
+        raise RepositoryError, "attempt provider evidence rejected: #{e.class.name.split('::').last}"
       end
 
       def materialize(signal, record:, source_reference:)
@@ -120,15 +120,9 @@ module Hive
       end
 
       def route_identity(route)
-        Hive::ProviderHealth::RouteIdentity.new(
-          route_id: route.fetch("route_id"),
-          account_id: route.fetch("provider_account_id"),
-          adapter: route.fetch("adapter"),
-          launch_binding_id: route.fetch("launch_binding_id"),
-          model_id: route.fetch("model")
-        )
+        Hive::ProviderHealth::RouteIdentity.from_h(route)
       rescue KeyError, Hive::ProviderHealth::Error => e
-        raise StoreError, "attempt provider route rejected: #{e.class.name.split('::').last}"
+        raise RepositoryError, "attempt provider route rejected: #{e.class.name.split('::').last}"
       end
       private_class_method :route_identity
     end

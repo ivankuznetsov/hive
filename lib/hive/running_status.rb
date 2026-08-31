@@ -19,14 +19,13 @@ module Hive
     MAX_TASKS = 32
     MAX_OUTPUT_BYTES = 64 * 1024
     MAX_STRING_BYTES = 256
-    MAX_LOCK_BYTES = 16 * 1024
+    MAX_LOCK_BYTES = Hive::RuntimeControlPlane::TaskLeaseRepository::MAX_PAYLOAD_BYTES
     MAX_METADATA_BYTES = 64 * 1024
     MAX_DAEMON_PID_BYTES = 4 * 1024
     MAX_PROJECTS_SCANNED = 256
-    MAX_FILESYSTEM_ENTRIES_SCANNED = 10_000
+    MAX_LEASES_SCANNED = 10_000
     class MalformedLock < StandardError; end
     class OversizedFile < MalformedLock; end
-    class ScanLimitReached < StandardError; end
 
     def initialize(daemon_state: nil, daemon_report: nil,
                    runtime_identity: Hive::RuntimeIdentity.new.to_h)
@@ -45,18 +44,12 @@ module Hive
       counters["projects_omitted"] = projects.length - selected_projects.length
       counters["scan_truncated"] = counters["projects_omitted"].positive?
 
-      begin
-        selected_projects.sort_by { |project| project["name"].to_s }.each do |project|
-          each_project_row(project, counters) do |row|
-            identity = [ project["name"].to_s, row.fetch("slug") ]
-            next unless seen.add?(identity)
+      each_active_lease_row(selected_projects, counters) do |project, row|
+        identity = [ project["name"].to_s, row.fetch("slug") ]
+        next unless seen.add?(identity)
 
-            observed_count += 1
-            retain_row(rows, row)
-          end
-        end
-      rescue ScanLimitReached
-        counters["scan_truncated"] = true
+        observed_count += 1
+        retain_row(rows, row)
       end
 
       rows.sort_by! { |row| row.values_at("project", "slug", "stage") }
@@ -67,58 +60,56 @@ module Hive
 
     private
 
-    def each_project_row(project, counters)
-      hive_state = project["hive_state_path"].to_s
-      if hive_state.empty?
-        counters["projects_unavailable"] += 1
-        return
-      end
-      stages_root = File.join(hive_state, "stages")
-      unless real_directory?(stages_root)
-        counters["projects_unavailable"] += 1
-        return
-      end
+    def each_active_lease_row(projects, counters)
+      by_state_root = {}
+      projects.each do |project|
+        begin
+          root = project["hive_state_path"].to_s
+          raise Errno::ENOENT if root.empty? || !real_directory?(File.join(root, "stages"))
 
-      counters["projects_scanned"] += 1
-      Dir.each_child(stages_root) do |stage|
-        consume_filesystem_entry!(counters)
-        next unless Hive::Workflows.stage_dir?(stage)
-
-        stage_folder = File.join(stages_root, stage)
-        next unless real_directory?(stage_folder)
-
-        Dir.each_child(stage_folder) do |slug|
-          consume_filesystem_entry!(counters)
-          next unless Hive::Stages.task_slug?(slug)
-
-          task_folder = File.join(stage_folder, slug)
-          next unless real_directory?(task_folder)
-
-          counters["tasks_scanned"] += 1
-          lock_path = File.join(task_folder, ".lock")
-
-          begin
-            lock = read_lock_payload(lock_path)
-            row = live_row(project, stage, slug, task_folder, lock)
-            if row
-              yield row
-            else
-              counters["stale_locks"] += 1
-            end
-          rescue MalformedLock
-            counters["malformed_locks"] += 1
-          rescue Errno::ENOENT
-            # A task can move stages atomically between directory enumeration
-            # and its bounded lock/metadata reads. It will appear at the new
-            # location on this or the next invocation.
-            counters["transition_skips"] += 1 unless real_directory?(task_folder)
-          rescue SystemCallError, IOError
-            counters["malformed_locks"] += 1
-          end
+          expanded = File.expand_path(root)
+          by_state_root[expanded] = project
+          counters["projects_scanned"] += 1
+        rescue SystemCallError, IOError, ArgumentError
+          counters["projects_unavailable"] += 1
         end
       end
-    rescue SystemCallError, IOError, ArgumentError
-      counters["projects_unavailable"] += 1
+
+      leases = Hive::Lock.task_lease_repository.active_leases(
+        state_roots: by_state_root.keys, limit: max_leases_scanned + 1
+      )
+      if leases.size > max_leases_scanned
+        counters["scan_truncated"] = true
+        leases = leases.first(max_leases_scanned)
+      end
+      leases.each do |lease|
+        counters["lease_rows_scanned"] += 1
+        counters["tasks_scanned"] += 1
+        if lease.fetch(:malformed)
+          counters["malformed_locks"] += 1
+          next
+        end
+        project = by_state_root[File.expand_path(lease.fetch(:state_root_path))]
+        next unless project
+
+        folder = File.expand_path(lease.fetch(:observed_path))
+        stage = File.basename(File.dirname(folder))
+        slug = lease.fetch(:task_slug)
+        unless folder.start_with?("#{File.expand_path(project.fetch('hive_state_path'))}/stages/") &&
+               File.basename(folder) == slug && Hive::Workflows.stage_dir?(stage) &&
+               real_directory?(folder)
+          counters["transition_skips"] += 1
+          next
+        end
+        begin
+          row = live_row(project, stage, slug, folder, lease.fetch(:payload))
+          row ? yield(project, row) : counters["stale_locks"] += 1
+        rescue MalformedLock
+          counters["malformed_locks"] += 1
+        end
+      end
+    rescue Hive::RuntimeControlPlane::Error, SystemCallError, IOError, ArgumentError
+      counters["projects_unavailable"] += by_state_root&.size.to_i
     end
 
     def live_row(project, stage, folder_slug, task_folder, lock)
@@ -170,16 +161,6 @@ module Hive
           "agent_pid" => agent_pid_alive ? raw_agent_pid : nil
         }
       }
-    end
-
-    def read_lock_payload(lock_path)
-      raw = bounded_file_read(lock_path, MAX_LOCK_BYTES)
-      lock = YAML.safe_load(raw, permitted_classes: [ Time ]) || {}
-      raise MalformedLock unless lock.is_a?(Hash)
-
-      lock
-    rescue Psych::Exception, SystemStackError, NoMemoryError
-      raise MalformedLock
     end
 
     def read_metadata(task_folder)
@@ -261,7 +242,7 @@ module Hive
           "max_metadata_bytes" => MAX_METADATA_BYTES,
           "max_daemon_pid_bytes" => MAX_DAEMON_PID_BYTES,
           "max_projects_scanned" => max_projects_scanned,
-          "max_filesystem_entries_scanned" => max_filesystem_entries_scanned
+          "max_lease_rows_scanned" => max_leases_scanned
         },
         "source" => counters,
         "tasks" => rows
@@ -311,7 +292,7 @@ module Hive
         "projects_scanned" => 0,
         "projects_omitted" => 0,
         "projects_unavailable" => 0,
-        "filesystem_entries_scanned" => 0,
+        "lease_rows_scanned" => 0,
         "tasks_scanned" => 0,
         "malformed_locks" => 0,
         "stale_locks" => 0,
@@ -326,20 +307,13 @@ module Hive
       rows.pop if rows.length > MAX_TASKS
     end
 
-    def consume_filesystem_entry!(counters)
-      raise ScanLimitReached if
-        counters.fetch("filesystem_entries_scanned") >= max_filesystem_entries_scanned
-
-      counters["filesystem_entries_scanned"] += 1
-    end
-
     def daemon_report
       @daemon_report ||= Hive::Daemon::StatusReport.new
     end
 
     def max_projects_scanned = MAX_PROJECTS_SCANNED
 
-    def max_filesystem_entries_scanned = MAX_FILESYSTEM_ENTRIES_SCANNED
+    def max_leases_scanned = MAX_LEASES_SCANNED
 
     def real_directory?(path)
       stat = File.lstat(path)

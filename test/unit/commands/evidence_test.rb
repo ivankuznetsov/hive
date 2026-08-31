@@ -450,6 +450,8 @@ class CommandsEvidenceTest < Minitest::Test
   def fake_task(dir)
     folder = File.join(dir, ".hive-state", "stages", "7-artifacts", "demo-task")
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: 42, slug: "demo-task", display_name: nil)
+    prepare_test_task_lease_repository(folder)
     state_file = File.join(folder, "artifact.md")
     File.write(state_file, "")
     FakeTask.new(

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "hive/runtime_control_plane/process_guard"
+
 module Hive
   module Babysitter
     # Shared process boundary for babysitter dry-run passthroughs. Policies
@@ -64,7 +66,7 @@ module Hive
       end
 
       def exec_process(real, argv, _environment)
-        Kernel.exec(real, *argv)
+        Hive::RuntimeControlPlane::ProcessGuard.exec(real, *argv)
       end
     end
   end

@@ -4,7 +4,7 @@ require "fileutils"
 require "tmpdir"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/bot/dispatch_request_writer"
 
 # Plan 2026-05-28-002 §"Tests":
@@ -13,7 +13,7 @@ require "hive/bot/dispatch_request_writer"
 #
 # Drives the real `Hive::Daemon::Dispatcher#tick` with a real
 # `Hive::Daemon::ConcurrencyController` and a real
-# `Hive::Daemon::DispatchRequestQueue`. The only fakes are
+# `Hive::RuntimeControlPlane::DispatchRepository`. The only fakes are
 # StatusConsumer (so we don't shell out to `hive status`) and
 # ChildSupervisor (so we control the spawn/reap timing
 # deterministically). The bot side is the production
@@ -95,6 +95,10 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
     FileUtils.mkdir_p(@stage_dir)
     @brainstorm_path = File.join(@stage_dir, "brainstorm.md")
     File.write(@brainstorm_path, "## Round 1\n\n<!-- WAITING -->\n")
+    prepare_runtime_project(
+      state_home: @state_home, name: @project, path: @state_home,
+      state_root_path: @hive_state_path
+    )
 
     @supervisor = FakeSupervisor.new
     @status_consumer = FakeStatusConsumer.new
@@ -165,7 +169,7 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
   # ── ROUNDTRIP: bot writes → daemon picks up → child runs → no
   # redundant redispatch on the next tick ────────────────────────────
   def test_bot_request_picked_up_and_no_redundant_redispatch
-    # 1. Bot writes the request file.
+    # 1. Bot writes the request row.
     request_id = Hive::Bot::DispatchRequestWriter.write!(
       project: @project, slug: @slug,
       argv: [ "hive", "run", @slug, "--json" ],
@@ -178,21 +182,21 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
 
     assert_equal 1, @supervisor.spawned.size, "daemon must pick up the request and spawn exactly once"
     assert_equal request_id, @supervisor.spawned.first[:request_id],
-                 "the spawn must carry the request_id for reap-time unlink"
-    # C3: the file stays on disk until reap, but is CLAIMED (renamed to
-    # *.json.claimed) so a later tick never re-observes it.
-    assert_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*.json")),
-                 "the pending .json must be renamed away once dispatched (claimed)"
-    refute_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*.json.claimed")),
-                 "the claimed request file stays on disk until the child reaps"
+                 "the spawn must carry the request_id for reap-time completion"
+    # C3: the row becomes claimed before spawn, so a later tick never
+    # re-observes it as queued.
+    claimed = with_runtime_dispatch_repository(@state_home) do |repository|
+      repository.claimed.find { |delivery| delivery.request.request_id == request_id }
+    end
+    refute_nil claimed, "the request row stays claimed until the child reaps"
 
     # 3. The child writes a fresh marker; brainstorm.md mtime bumps.
     new_mtime = T0 + 30
     File.utime(new_mtime, new_mtime, @brainstorm_path)
 
     # 4. Child completes. Reap arrives. The daemon's reap path must
-    #    refresh the controller's baseline mtime AND unlink the
-    #    request file.
+    #    refresh the controller's baseline mtime AND complete the
+    #    request row.
     pid = @supervisor.spawned.first[:pid]
     @supervisor.reap_queue = [
       ChildExit.new(
@@ -212,11 +216,14 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
     @dispatcher.tick(now: T0 + 90)
 
     # The reap must have:
-    #   - unlinked the request file
+    #   - completed the request row
     #   - logged :dispatch_request_completed
     #   - refreshed the controller's baseline to the new mtime
-    assert_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*")),
-                 "the claimed request file must be unlinked on reap (no pending or claimed left)"
+    completed_request = with_runtime_dispatch_repository(@state_home) do |repository|
+      repository.fetch(request_id)
+    end
+    assert_equal "completed", completed_request.state,
+                 "the claimed request row must become terminal on reap"
     completed = @logger.events.find { |(n, _)| n == :dispatch_request_completed }
     refute_nil completed
     baseline = @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @slug)

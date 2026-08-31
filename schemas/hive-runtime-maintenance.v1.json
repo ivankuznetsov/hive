@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:runtime-maintenance:v1",
+  "title": "hive runtime maintenance output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "result"],
+      "properties": {
+        "schema": { "const": "hive-runtime-maintenance" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "type": "string", "enum": ["status", "resume"] },
+        "result": {
+          "oneOf": [
+            { "$ref": "#/$defs/StatusResult" },
+            { "$ref": "#/$defs/ResumeResult" }
+          ]
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message", "action", "runtime_code", "next_action", "details"
+      ],
+      "properties": {
+        "schema": { "const": "hive-runtime-maintenance" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string", "enum": ["runtime", "usage"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "action": { "type": "string" },
+        "runtime_code": { "type": "string" },
+        "next_action": { "type": ["string", "null"] },
+        "details": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "StatusResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "installation_id", "next_action", "database"],
+      "properties": {
+        "phase": { "type": "string", "enum": ["absent", "preparing", "ready", "intended", "active"] },
+        "installation_id": { "type": ["string", "null"] },
+        "next_action": { "type": ["string", "null"] },
+        "database": { "$ref": "#/$defs/DatabaseDiagnosis" }
+      }
+    },
+    "ResumeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "cutover_id", "database_path", "exclusions"],
+      "properties": {
+        "phase": { "const": "active" },
+        "cutover_id": { "type": "string" },
+        "database_path": { "type": "string" },
+        "exclusions": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+      }
+    },
+    "DatabaseDiagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "path", "application_id", "schema_version",
+        "sqlite_version", "integrity", "error"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok", "missing", "unrelated_database", "corrupt", "newer_schema",
+            "missing_schema", "older_schema", "partial_schema"
+          ]
+        },
+        "path": { "type": "string" },
+        "application_id": { "type": ["integer", "null"] },
+        "schema_version": { "type": ["integer", "null"] },
+        "sqlite_version": { "type": "string" },
+        "integrity": { "type": ["array", "null"], "items": { "type": "string" } },
+        "error": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "action"],
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string" },
+                "action": { "type": ["string", "null"] }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

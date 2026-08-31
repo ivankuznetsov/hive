@@ -14,6 +14,7 @@ if ENV["HIVE_COVERAGE"]
 end
 
 require "minitest/autorun"
+require "digest"
 require "tmpdir"
 require "fileutils"
 require "stringio"
@@ -121,6 +122,7 @@ module HiveTestStdinIsolation
   # production `hive init` prompts on TTY stdin, but tests that need the
   # interactive path inject their own tty-flagged StringIO explicitly.
   def before_setup
+    reset_test_runtime_owners!
     @hive_original_stdin = $stdin
     @hive_original_skip_llm_wiki_scheduler = ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"]
     @hive_original_skip_llm_wiki_systemctl = ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"]
@@ -140,11 +142,13 @@ module HiveTestStdinIsolation
       teardown_error = e
     ensure
       begin
+        cleanup_test_task_leases if respond_to?(:cleanup_test_task_leases, true)
         HiveTestTmpCleanup.remove_all!(@hive_tracked_tmp_dirs)
       rescue StandardError => e
         teardown_error ||= e
       ensure
         @hive_tracked_tmp_dirs = nil
+        reset_test_runtime_owners!
         if defined?(@hive_original_skip_llm_wiki_scheduler)
           if @hive_original_skip_llm_wiki_scheduler.nil?
             ENV.delete("HIVE_SKIP_LLM_WIKI_SCHEDULER")
@@ -171,6 +175,30 @@ module HiveTestStdinIsolation
     end
     raise teardown_error if teardown_error
   end
+
+  private
+
+  def reset_test_runtime_owners!
+    Hive::RuntimeControlPlane.disconnect if defined?(Hive::RuntimeControlPlane)
+    Hive::Lock.remove_instance_variable(:@task_lease_repository) if
+      defined?(Hive::Lock) && Hive::Lock.instance_variable_defined?(:@task_lease_repository)
+    Hive::TaskCounter.remove_instance_variable(:@database) if
+      defined?(Hive::TaskCounter) && Hive::TaskCounter.instance_variable_defined?(:@database)
+    Hive::UsageDb.remove_instance_variable(:@database) if
+      defined?(Hive::UsageDb) && Hive::UsageDb.instance_variable_defined?(:@database)
+    Thread.current[:hive_task_locks] = nil
+    reset_default_test_hive_homes!
+  end
+
+  def reset_default_test_hive_homes!
+    return unless defined?(HIVE_TEST_USER_ROOT)
+
+    home = File.join(HIVE_TEST_USER_ROOT, "home")
+    %w[.local/state/hive .local/share/hive .config/hive].each do |relative|
+      path = File.join(home, relative)
+      FileUtils.remove_entry(path) if File.exist?(path) || File.symlink?(path)
+    end
+  end
 end
 
 Minitest::Test.include(HiveTestStdinIsolation)
@@ -182,8 +210,260 @@ Minitest::Test.include(HiveWorkflowTestHelper)
 FAKE_GH_FIXTURE = File.expand_path("fixtures/fake-gh", __dir__).freeze
 FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
 
+# Legacy attempt tests use compact SQL fixtures while production requires an
+# injected, already migrated control plane and registered task subjects.
+require "hive/attempts/repository"
+module HiveTestAttemptRepository
+  def initialize(root: Hive::Paths.runtime_payload_root, database: nil,
+                 create_directories: true, migrate: false)
+    fixture_database = database.nil?
+    database ||= Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(File.expand_path(root))
+    )
+    database.migrate! if migrate
+    super(root: root, database: database, create_directories: create_directories)
+    @hive_test_register_subjects = fixture_database && migrate
+  end
+
+  def create_launching(source_fingerprint: nil, **attributes)
+    subject = attributes[:subject]
+    fixture_task = !subject.is_a?(Hash) || subject["kind"] != "module_hook"
+    register_test_subject(attributes, source_fingerprint) if
+      @hive_test_register_subjects && fixture_task
+    super(source_fingerprint: source_fingerprint, **attributes)
+  end
+
+  private
+
+  def register_test_subject(attributes, source_fingerprint)
+    now = Hive::Attempts::Record.iso8601(attributes.fetch(:now))
+    project_name = attributes.fetch(:project).to_s
+    task_id = attributes.fetch(:task_id).to_s
+    task_slug = attributes.fetch(:task_slug).to_s
+    project_id = "test-#{Digest::SHA256.hexdigest(project_name)[0, 32]}"
+    project_root = File.join(@root, "fixture-projects", project_id)
+    database.transaction do |db|
+      installation = db[:installations].get(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: project_id, installation_id: installation,
+        registration_id: project_id, name: project_name, observed_path: project_root,
+        state_root_path: File.join(project_root, ".hive-state"), active: 1,
+        registered_at: now, last_observed_at: now
+      )
+      subject = {
+        task_id: task_id, project_id: project_id, workflow_id: "coding",
+        task_slug: task_slug, observed_path: File.join(project_root, task_slug),
+        source_fingerprint: (source_fingerprint || attributes[:progress_token]).to_s,
+        generation: Integer(attributes.fetch(:task_input_epoch, 0)),
+        created_at: now, last_observed_at: now
+      }
+      updates = subject.slice(
+        :observed_path, :source_fingerprint, :generation, :last_observed_at
+      )
+      db[:task_subjects].insert_conflict(target: :task_id, update: updates).insert(subject)
+    end
+  end
+end
+Hive::Attempts::Repository.prepend(HiveTestAttemptRepository)
+
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze
+
+  def prepare_runtime_project(state_home:, name:, path: state_home,
+                              state_root_path: File.join(path, ".hive-state"),
+                              project_id: nil)
+    require "digest"
+    require "time"
+    require "hive/runtime_control_plane"
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).migrate!
+    register_runtime_project(
+      database: database, name: name, path: path,
+      state_root_path: state_root_path, project_id: project_id
+    )
+    database
+  end
+
+  def activate_test_control_plane(state_home)
+    require "hive/runtime_control_plane/cutover_manifest"
+    epoch = 20260829120000
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).migrate!
+    identity = database.read { |db| db[:installations].first }
+    database.transaction do |db|
+      db[:installations].update(
+        activation_epoch: epoch, activated_at: "2026-08-29T12:00:00.000000Z"
+      )
+    end
+    database.disconnect
+    root = File.join(state_home, ".runtime-cutover", "current")
+    FileUtils.mkdir_p(root)
+    document = Hive::RuntimeControlPlane::CutoverManifest.build(
+      phase: "active", installation_id: identity.fetch(:installation_id),
+      lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
+      target_release: Hive::VERSION, exclusions: [], task_authority: [],
+      evidence: { "activation_epoch" => epoch }
+    )
+    Hive::RuntimeControlPlane::CutoverManifest.new(
+      path: File.join(root, "active.json")
+    ).publish(document)
+  end
+
+  def register_runtime_project(database:, name:, path:,
+                               state_root_path: File.join(path, ".hive-state"),
+                               project_id: nil, registration_id: name)
+    timestamp = Time.now.utc.iso8601(6)
+    database.transaction do |db|
+      installation = db[:installations].first.fetch(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: project_id || "test-project-#{Digest::SHA256.hexdigest(name)[0, 16]}",
+        installation_id: installation, registration_id: registration_id, name: name,
+        observed_path: path, state_root_path: state_root_path, active: 1,
+        registered_at: timestamp, last_observed_at: timestamp
+      )
+    end
+    database
+  end
+
+  # Publish a typed task lease for tests that exercise task liveness. The
+  # production cutover deliberately has no filesystem-lock compatibility, so
+  # fixtures must use the same SQLite repository as runtime code.
+  def publish_test_task_lease(task_folder, payload = nil, state_home: nil, **payload_keywords)
+    payload = (payload || {}).merge(payload_keywords.transform_keys(&:to_s))
+    repository = prepare_test_task_lease_repository(task_folder, state_home: state_home)
+    held = repository.acquire(task_folder, { "op" => "test" }, create: false)
+    repository.update(task_folder, payload, lock_id: held.fetch("lock_id"))
+    held
+  end
+
+  def prepare_test_task_lease_repository(task_folder, state_home: nil)
+    require "digest"
+    require "hive/task_meta"
+    expanded = File.expand_path(task_folder)
+    project_root, separator, relative_task = expanded.partition("/.hive-state/stages/")
+    if separator.empty? || project_root.empty? || relative_task.empty?
+      raise ArgumentError, "task folder is outside .hive-state/stages"
+    end
+
+    repository = prepare_test_runtime_project(project_root, state_home: state_home)
+    Hive::Lock.task_lease_repository = repository
+    ensure_test_task_identity(task_folder)
+    repository
+  end
+
+  # Direct agent/stage unit tests bypass the command boundary that normally
+  # holds the task lease. Model that production precondition explicitly so
+  # Agent may update the lease without gaining a test-only acquisition path.
+  def prepare_test_task_run(task_folder, state_home: nil)
+    repository = prepare_test_task_lease_repository(task_folder, state_home: state_home)
+    key = repository.lease_key(task_folder)
+    held = (Thread.current[:hive_task_locks] ||= {})
+    return repository if held.dig(key, :pid) == Process.pid
+
+    lock = repository.acquire(task_folder, { "op" => "test_task_run" }, create: false)
+    held[key] = { depth: 1, lock_id: lock.fetch("lock_id"), pid: Process.pid }
+    repository
+  end
+
+  def release_test_task_run(task_folder)
+    repository = Hive::Lock.task_lease_repository
+    key = repository.lease_key(task_folder)
+    entry = Thread.current[:hive_task_locks].to_h.delete(key)
+    repository.release(task_folder, lock_id: entry.fetch(:lock_id)) if entry
+  end
+
+  def prepare_test_runtime_project(
+    project_root, state_home: nil, state_root_path: File.join(project_root, ".hive-state")
+  )
+    require "digest"
+    require "hive/task_counter"
+    state_home ||= (@hive_test_runtime_state_home ||= tracked_tmp_dir("hive-test-runtime"))
+    project_name = "test-#{Digest::SHA256.hexdigest(project_root)[0, 16]}"
+    database = prepare_runtime_project(
+      state_home: state_home, name: project_name, path: project_root,
+      state_root_path: state_root_path
+    )
+    (@hive_test_runtime_databases ||= []) << database
+    unless instance_variable_defined?(:@hive_test_runtime_prior_globals_captured)
+      @hive_test_prior_task_lease_repository_defined =
+        Hive::Lock.instance_variable_defined?(:@task_lease_repository)
+      @hive_test_prior_task_lease_repository =
+        Hive::Lock.instance_variable_get(:@task_lease_repository)
+      @hive_test_prior_task_counter_database_defined =
+        Hive::TaskCounter.instance_variable_defined?(:@database)
+      @hive_test_prior_task_counter_database =
+        Hive::TaskCounter.instance_variable_get(:@database)
+      @hive_test_runtime_prior_globals_captured = true
+    end
+    repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+      database: database,
+      process_start_time: Hive::Lock.method(:process_start_time),
+      process_alive: lambda { |pid, recorded_start_time:|
+        Hive::Lock.send(
+          :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+        )
+      }
+    )
+    Hive::Lock.task_lease_repository = repository
+    Hive::TaskCounter.database = database
+    repository
+  end
+
+  def cleanup_test_task_leases
+    if instance_variable_defined?(:@hive_test_runtime_prior_globals_captured)
+      if @hive_test_prior_task_lease_repository_defined
+        Hive::Lock.task_lease_repository = @hive_test_prior_task_lease_repository
+      elsif Hive::Lock.instance_variable_defined?(:@task_lease_repository)
+        Hive::Lock.remove_instance_variable(:@task_lease_repository)
+      end
+      if @hive_test_prior_task_counter_database_defined
+        Hive::TaskCounter.database = @hive_test_prior_task_counter_database
+      elsif Hive::TaskCounter.instance_variable_defined?(:@database)
+        Hive::TaskCounter.remove_instance_variable(:@database)
+      end
+    end
+    Array(@hive_test_runtime_databases).each(&:disconnect)
+    %i[
+      @hive_test_prior_task_lease_repository_defined
+      @hive_test_prior_task_lease_repository
+      @hive_test_prior_task_counter_database_defined
+      @hive_test_prior_task_counter_database
+      @hive_test_runtime_prior_globals_captured
+      @hive_test_runtime_databases
+      @hive_test_runtime_state_home
+    ].each do |name|
+      remove_instance_variable(name) if instance_variable_defined?(name)
+    end
+  end
+
+  def ensure_test_task_identity(task_folder)
+    path = Hive::TaskMeta.path(task_folder)
+    raw = YAML.safe_load(File.read(path)) || {}
+    raw = {} unless raw.is_a?(Hash)
+    unless Hive::TaskMeta.read(task_folder)[:id]
+      raw["id"] = Digest::SHA256.hexdigest(File.expand_path(task_folder))[0, 12].to_i(16)
+    end
+    raw["slug"] ||= File.basename(task_folder)
+    raw["display_name"] = nil unless raw.key?("display_name")
+    File.write(path, raw.to_yaml)
+  rescue Errno::ENOENT
+    File.write(path, {
+      "id" => Digest::SHA256.hexdigest(File.expand_path(task_folder))[0, 12].to_i(16),
+      "slug" => File.basename(task_folder), "display_name" => nil
+    }.to_yaml)
+  end
+
+  def with_runtime_dispatch_repository(state_home)
+    require "hive/runtime_control_plane/dispatch_repository"
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).open!
+    yield Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+  ensure
+    database&.disconnect
+  end
 
   # Register a tmpdir that must outlive its creating statement. The global
   # teardown hook removes it securely after the current test, including trees
@@ -339,7 +619,7 @@ module HiveTestHelper
     out
   end
 
-  def with_tmp_global_config(home: nil)
+  def with_tmp_global_config(home: nil, runtime: true)
     dir = Dir.mktmpdir("hive-global")
     begin
       fake_bin = File.join(dir, "fake-bin")
@@ -354,8 +634,11 @@ module HiveTestHelper
         "HOME" => home || dir,
         "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
       ) do
-        File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
-        yield(dir)
+        with_test_runtime_home do
+          File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+          activate_test_control_plane(dir) if runtime
+          yield(dir)
+        end
       end
     ensure
       # Same verified cleanup as `with_tmp_dir`.
@@ -375,20 +658,44 @@ module HiveTestHelper
   # daemon ServiceInstaller, which anchors on the real user home for
   # launchd/systemd paths and would otherwise write units to the
   # developer's actual $HOME.
-  def with_tmp_global_config_and_home
+  def with_tmp_global_config_and_home(runtime: true)
     dir = Dir.mktmpdir("hive-global")
     old_hive_home = ENV["HIVE_HOME"]
     old_home = ENV["HOME"]
     ENV["HIVE_HOME"] = dir
     ENV["HOME"] = dir
-    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
     begin
-      yield(dir)
+      with_test_runtime_home do
+        File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+        activate_test_control_plane(dir) if runtime
+        yield(dir)
+      end
     ensure
       old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
       old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
       # Same verified cleanup as `with_tmp_dir`.
       cleanup_tmp_dir!(dir) if dir
+    end
+  end
+
+  def with_test_runtime_home
+    owners = [ [ Hive::Lock, :@task_lease_repository ] ]
+    owners << [ Hive::TaskCounter, :@database ] if defined?(Hive::TaskCounter)
+    owners << [ Hive::UsageDb, :@database ] if defined?(Hive::UsageDb)
+    owners = owners.to_h do |owner, variable|
+      [ [ owner, variable ], owner.instance_variable_defined?(variable) ?
+        [ true, owner.instance_variable_get(variable) ] : [ false, nil ] ]
+    end
+    Hive::RuntimeControlPlane.disconnect
+    owners.each_key do |owner, variable|
+      owner.remove_instance_variable(variable) if owner.instance_variable_defined?(variable)
+    end
+    yield
+  ensure
+    Hive::RuntimeControlPlane.disconnect
+    owners&.each do |(owner, variable), (defined, value)|
+      owner.remove_instance_variable(variable) if owner.instance_variable_defined?(variable)
+      owner.instance_variable_set(variable, value) if defined
     end
   end
 

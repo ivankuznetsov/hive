@@ -1,7 +1,7 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/dispatcher"
@@ -491,7 +491,16 @@ class ModulesDispatcherTest < Minitest::Test
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      attempt_store.database.transaction do |db|
+        installation_id = db[:installations].get(:installation_id)
+        db[:projects].insert(
+          project_id: "project-1", installation_id: installation_id,
+          registration_id: "registration-1", name: "demo", observed_path: root,
+          state_root_path: File.join(root, ".hive-state"), active: 1,
+          registered_at: NOW.iso8601(6), last_observed_at: NOW.iso8601(6)
+        )
+      end
       launcher = Launcher.new
       attempt_dispatcher ||= Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: launcher,

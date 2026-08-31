@@ -273,6 +273,8 @@ class E2EReproScriptWriterTest < Minitest::Test
           assert_includes body, "seed_state: 2-brainstorm/auth-task",
                           "seed_state should emit a heredoc-write block"
           assert_includes body, "<!-- COMPLETE -->", "seed_state content must land in the heredoc body"
+          assert_includes body, "workflow: coding",
+                          "seed_state replay must preserve a stable task identity"
           assert_includes body, "CHECKPOINT_BASENAME",
                           "seed_state replay must publish the current zero-history projection checkpoint"
           assert_includes body, "write_file: notes/extra.md",

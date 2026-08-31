@@ -306,36 +306,43 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
   def test_record_claude_pid_updates_task_lock
     with_tmp_task_folder do |task|
-      lock_data = Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
+      prepare_test_task_lease_repository(task.folder)
 
-      identity = with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-time-#{pid}" }) do
-        Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
+      lock = nil
+      identity = nil
+      Hive::Lock.with_task_lock(task.folder, "stage" => "2-brainstorm") do
+        identity = with_replaced_singleton_method(
+          Hive::Lock, :process_start_time, ->(pid) { "start-time-#{pid}" }
+        ) do
+          Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
+        end
+        lock = Hive::Lock.read_task_lock(task.folder)
       end
 
-      lock = YAML.safe_load(File.read(File.join(task.folder, ".lock")))
       assert_equal 12_345, lock.fetch("claude_pid")
       assert_equal "start-time-12345", lock.fetch("claude_pid_start_time")
       assert_equal({ pid: 12_345, process_start_time: "start-time-12345" }, identity)
-    ensure
-      Hive::Lock.release_task_lock(task.folder, lock_id: lock_data && lock_data["lock_id"])
+      assert_nil Hive::Lock.read_task_lock(task.folder)
     end
   end
 
   def test_record_claude_pid_retries_until_pid_is_available
     with_tmp_task_folder do |task|
-      lock_data = Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
+      prepare_test_task_lease_repository(task.folder)
       sleeps = []
       runner = FakeSequencePidRunner.new([ nil, 12_346 ])
 
-      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(seconds) { sleeps << seconds }) do
-        Hive::ClaudeLauncher.record_claude_pid(task, runner)
+      lock = nil
+      Hive::Lock.with_task_lock(task.folder, "stage" => "2-brainstorm") do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(seconds) { sleeps << seconds }) do
+          Hive::ClaudeLauncher.record_claude_pid(task, runner)
+        end
+        lock = Hive::Lock.read_task_lock(task.folder)
       end
 
-      lock = YAML.safe_load(File.read(File.join(task.folder, ".lock")))
       assert_equal 12_346, lock.fetch("claude_pid")
       assert_equal [ 0.05 ], sleeps
-    ensure
-      Hive::Lock.release_task_lock(task.folder, lock_id: lock_data && lock_data["lock_id"])
+      assert_nil Hive::Lock.read_task_lock(task.folder)
     end
   end
 

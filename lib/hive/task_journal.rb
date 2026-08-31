@@ -1,5 +1,6 @@
 require "json"
 require "time"
+require "hive/canonical_json"
 require "hive/stringify_keys"
 require "hive/task_journal/envelope"
 require "hive/conditions/value"
@@ -336,7 +337,7 @@ module Hive
 
       def idempotency_signature(record)
         payload = record.fetch("payload", {}).reject { |key, _| key == "idempotency_key" }
-        canonical_json(
+        Hive::CanonicalJSON.generate(
           "event_type" => record["event_type"],
           "task" => record["task"],
           "workflow" => record["workflow"],
@@ -350,18 +351,6 @@ module Hive
           "provenance" => record["provenance"],
           "payload" => payload
         )
-      end
-
-      def canonical_json(value)
-        canonical = case value
-        when Hash
-          value.keys.sort.to_h { |key| [ key.to_s, JSON.parse(canonical_json(value[key])) ] }
-        when Array
-          value.map { |child| JSON.parse(canonical_json(child)) }
-        else
-          value
-        end
-        JSON.generate(canonical)
       end
 
       def validate!(record)

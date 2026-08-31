@@ -3,7 +3,7 @@
 ## Choose the status surface
 
 - Use `hive status` for bounded daemon health and currently live tasks.
-- Use `hive status --json` for the same bounded `hive-running-status.v1`
+- Use `hive status --json` for the same bounded `hive-running-status.v2`
   projection in machine-readable form.
 - Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v4`.
 - Use `hive task TARGET --project NAME --json` for one task's semantic result,

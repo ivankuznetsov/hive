@@ -60,9 +60,13 @@ class HiveCommandsDaemonTest < Minitest::Test
 
   def setup
     @home = Dir.mktmpdir("hive-daemon-command")
+    @runtime_database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(@home)
+    ).migrate!
   end
 
   def teardown
+    @runtime_database&.disconnect
     FileUtils.rm_rf(@home) if @home
   end
 
@@ -156,7 +160,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api
     assert_equal(
-      File.join(@home, "attempts", "v4"),
+      Hive::Paths.runtime_payload_root(@home),
       attempts_api.instance_variable_get(:@store).root
     )
     refute File.exist?(File.join(@home, "attempts", "v2")),

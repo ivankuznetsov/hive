@@ -51,6 +51,7 @@ class RunManualSteeringTest < Minitest::Test
     slug = "manual-steered-260520-aaaa"
     folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: 42, slug: slug, display_name: nil, workflow: "coding")
     File.write(File.join(folder, "plan.md"), "# Plan\n")
     File.write(File.join(folder, "task.md"), "# Task\n<!-- MANUAL_STEERING agent=codex -->\n")
     folder

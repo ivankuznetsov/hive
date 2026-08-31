@@ -350,7 +350,7 @@ module Hive
     end
 
     desc "setup", "Provision Hive web, daemon service, and project enrollment"
-    option :yes, type: :boolean, default: false, desc: "accept the aggregate agent-skill provisioning plan"
+    option :yes, type: :boolean, default: false, desc: "confirm the complete setup and fresh runtime bootstrap plan"
     option :service, type: :boolean, default: true,
                      desc: "install and start the managed Hive web service (use --no-service to opt out)"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
@@ -376,16 +376,17 @@ module Hive
         bash  → download the pinned install.sh to a tempfile, then run it
         dev   → prints git pull && bundle install && hive migrate --all guidance
 
-      Hive never swaps its own binary in place and never guesses across
-      channels. After the channel updater succeeds, the newly installed Hive
-      binary runs `hive migrate --all` and reports progress for every
-      registered project. A failed project is named with a human-readable
-      error and an exact recovery command.
+      Hive never guesses across channels. The package manager publishes the
+      candidate normally, then that installed binary runs the confirmed
+      `hive migrate --all --yes`. Once legacy authority is sealed the transition
+      is irreversible; an interrupted activation resumes forward with
+      `hive runtime resume`.
     DESC
     option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
+    option :yes, type: :boolean, default: false, desc: "confirm the one-way runtime cutover"
     def update
       require "hive/commands/update"
-      Hive::Commands::Update.new(dry_run: options[:dry_run]).call
+      Hive::Commands::Update.new(dry_run: options[:dry_run], confirm: options[:yes]).call
     end
 
     desc "connect SERVICE", "Connect an external service (screenote)"
@@ -458,6 +459,9 @@ module Hive
     desc "migrate [PROJECT_PATH]", "Migrate legacy project config, task folders, and metadata"
     option :all, type: :boolean, default: false,
                  desc: "migrate global state and every registered project"
+    option :yes, type: :boolean, default: false, desc: "confirm the one-way runtime cutover"
+    option :exclude_project, type: :array, default: [],
+                             desc: "explicitly exclude a missing or retired registered project"
     def migrate(project_path = nil)
       if options[:all]
         if project_path
@@ -465,11 +469,19 @@ module Hive
         end
 
         require "hive/commands/migrate_all"
-        Hive::Commands::MigrateAll.new.call
+        Hive::Commands::MigrateAll.new(
+          confirm: options[:yes], exclusions: options[:exclude_project]
+        ).call
       else
         require "hive/commands/migrate"
         Hive::Commands::Migrate.new(project_path || Dir.pwd).call
       end
+    end
+
+    desc "runtime ACTION", "Inspect or resume an irreversible runtime cutover"
+    def runtime(action = "status")
+      require "hive/commands/runtime"
+      Hive::Commands::Runtime.new(action, json: options[:json]).call
     end
 
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"
@@ -1257,7 +1269,7 @@ module Hive
     long_desc <<~DESC
       Default: prints a bounded daemon-health and currently-running-task
       snapshot without building the complete workflow graph. Combine with
-      --json to emit `hive-running-status` v1; the document is capped at 32
+      --json to emit `hive-running-status` v2; the document is capped at 32
       rows and 64 KiB and reports truncation explicitly.
 
       Use --operational for the broader active-work snapshot with blocker
@@ -1372,16 +1384,13 @@ module Hive
       exact-model circuit state/generation, probe ownership, protected evidence
       references, and recent deterministic route decisions.
 
-      Administrative actions are `block`, `unblock`, `reset`, and
-      `reset-intent`. Circuit actions require
+      Administrative actions are `block`, `unblock`, and `reset`. Circuit actions require
       an exact configured --provider, optional exact --model, a bounded
       single-line --reason, a fresh --expected-generation, and explicit --yes.
-      A reset of corrupt state instead takes the complete repair token emitted
-      by inspection: --journal-epoch, --corruption-fingerprint, and
-      --last-verified-generation. A corrupt global probe intent is listed with
-      an opaque file token and fingerprint; repair it with `reset-intent`,
-      --intent-file, --corruption-fingerprint, --reason, and --yes. Actor identity comes from the trusted local
-      execution context; it cannot be supplied on the command line.
+      SQLite integrity failures are repaired through the runtime-control-plane
+      recovery workflow, not a per-circuit file quarantine. Actor identity
+      comes from the trusted local execution context; it cannot be supplied on
+      the command line.
 
       These commands mutate provider health only. They never clear a task
       marker, schedule a retry, change a retry charge, create a successor, or
@@ -1393,14 +1402,6 @@ module Hive
     option :reason, type: :string, desc: "required bounded reason for a mutation"
     option :expected_generation, type: :numeric,
                                  desc: "fresh circuit generation from inspection"
-    option :journal_epoch, type: :numeric,
-                           desc: "corrupt-state repair token journal epoch"
-    option :corruption_fingerprint, type: :string,
-                                    desc: "corrupt-state repair token SHA-256"
-    option :last_verified_generation, type: :numeric,
-                                      desc: "corrupt-state repair token generation"
-    option :intent_file, type: :string,
-                         desc: "corrupt probe-intent file token from inspection"
     option :yes, type: :boolean, default: false,
                  desc: "approve one generation-fenced administrative mutation"
     def circuits(action = "list")
@@ -1411,10 +1412,6 @@ module Hive
         model: options[:model],
         reason: options[:reason],
         expected_generation: options[:expected_generation],
-        journal_epoch: options[:journal_epoch],
-        corruption_fingerprint: options[:corruption_fingerprint],
-        last_verified_generation: options[:last_verified_generation],
-        intent_file: options[:intent_file],
         yes: options[:yes],
         json: options[:json]
       ).call

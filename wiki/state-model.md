@@ -1,13 +1,19 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-08-30
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Evidence-bound delivered/superseded closure is a separate task-local authority retained with an archived task, never fabricated attempt success.
+**TLDR**: Authored task/project documents remain in `.hive-state` and feature
+worktrees. A Sequel/SQLite runtime control plane owns coordination state:
+attempt lifecycle, dispatch requests/outbox, capacity, provider circuits and
+audit, routing decisions, task leases and ids, Patrol discovery allowances,
+and PR merge reconciliation. Evidence-bound
+delivered/superseded closure remains a task-local authority retained with an
+archived task; it is never fabricated attempt success.
 
 ## Stage directory layout
 
@@ -235,13 +241,15 @@ integer values mean full 24-hour periods and hide only when
 visible. `never` always remains visible in ordinary views. The dedicated
 archive source bypasses this projection and retains every archived task.
 
-Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
-
-```yaml
-next_id: 2
-```
-
-`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for explicit migration. `hive migrate` uses strict `next!` allocation and seeds the counter above existing sidecar ids before assigning new ones.
+Task ids are allocated from the installation-scoped `task_counters` row
+`namespace=tasks` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
+The immediate SQLite transaction makes read-plus-increment atomic across
+processes; there is no counter YAML or counter lock file. `peek` returns the
+stored next value (or `1` before the first allocation), and `seed_at_least!`
+advances without moving backwards. Capture paths use `next_or_nil` so a typed
+runtime-control-plane outage can preserve an already-created task with a nil id
+for explicit migration. `hive migrate` strictly seeds above existing metadata
+ids before assigning missing ones.
 
 ## Slug grammar
 
@@ -305,19 +313,19 @@ surfaces still cannot bypass a newer operator edit.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
-## Concurrency files
+## Runtime coordination
 
-Durable leases under `$HIVE_HOME/attempts/v4/records/` are the authoritative
-execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
-wrapper/worker PID start fingerprints and session/group IDs make adoption and
-cleanup PID-reuse safe. Each record also immutably stores the
-exact admitted worker argv and only the digest of a random claim capability.
-The secret crosses exec through inherited descriptors, claims once, and gates
-worker context installation until the exact worker identity is durable.
-The worker cannot select an alternate record-store path, and no production
-thread-local/public constructor can synthesize the authenticated context.
-Per-generation flocks plus guarded lease version/deadline comparisons serialize
-claim, heartbeat, terminal, and loss transitions. See [[modules/attempts]].
+SQLite `attempts` rows are the authoritative execution owners. Records are
+`launching`, `running`, `terminal`, or `lost`; wrapper/worker PID start
+fingerprints and session/group IDs make adoption and cleanup PID-reuse safe.
+Each row also immutably stores the exact admitted worker argv and only the
+digest of a random claim capability. The secret crosses exec through inherited
+descriptors, claims once, and gates worker context installation until the exact
+worker identity is durable. The worker cannot select an alternate control
+plane, and no production thread-local/public constructor can synthesize the
+authenticated context. Immediate transactions plus guarded lease-version and
+deadline comparisons serialize claim, heartbeat, terminal, and loss
+transitions; no per-generation attempt flock remains. See [[modules/attempts]].
 The generation progress token includes the task's current dependency-admission
 verdict as well as its stage artifact, so terminal replay is stable while an
 admission wait is unchanged but cannot mask a later prerequisite advance.
@@ -328,7 +336,19 @@ repair attempt for that task generation across request IDs; after that repair
 terminalizes, its newest receipt replays so missing output can be repaired
 without creating an infinite loop.
 
-- **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, headless `Hive::Agent`, native OpenCode, and tmux-backed `Hive::ClaudeLauncher` write the active child `claude_pid` and its `claude_pid_start_time`. Confirmed completion or shared-session teardown compare-and-clears that exact pair while preserving the live parent lock; a replacement child with another identity cannot be erased. Cleanup compares identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
+- **Per-task lease**: installation SQLite `task_leases`, keyed through stable
+  `task_subjects.task_id`. Typed holder PID/start identity, holder nonce,
+  generation, lease version, and bounded JSON operation/agent detail provide
+  liveness plus compare-and-swap fencing. Dead or PID-reused holders are
+  reclaimable; an old nonce cannot release or update its replacement. Subject
+  lookup is metadata-id-first, validates the registered project/state root,
+  and updates the observed folder for legitimate stage moves. No ordinary task
+  `.lock` file or compatibility reader remains. See [[modules/lock]].
+- **Task-source admission fence**: dispatch computes the artifact/dependency
+  fingerprint and input epoch outside SQLite, observes that exact identity in
+  a short `task_subjects` transaction, then rechecks both fields inside final
+  admission. A concurrent newer observation makes the older admission fail
+  closed; a lease-created placeholder is never treated as an admitted source.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
 ## Task condition journal and projection
@@ -418,33 +438,41 @@ journal.
 
 ## Attempt storage lifecycle
 
-`$HIVE_HOME/attempts/v4/records/` is the bounded hot authority for live,
-lost-without-a-safe-successor, and finalization-pending attempts. Reconciliation
-and admission scan this directory once per cycle. A terminal or safely resolved
-lost attempt leaves it only after its immutable proof, decision-index entries,
-and the accounting, journal, request-delivery, and (for loss) loss-consumer
-acknowledgements are durable. `Store#fetch(attempt_id)` preserves point access
-to that permanent proof after promotion; historical identity reconstruction
-uses the successful semantic decision index and never enumerates proof.
+The runtime control plane's `attempts` rows are the bounded authority for live,
+lost-without-a-safe-successor, finalization-pending, and terminal attempts.
+Reconciliation and admission use indexed queries rather than scanning a record
+directory. Finalization first observes the terminal attempt into the
+task-authoritative journal and durably acknowledges that receipt. Only then may
+loss/accounting indexes, refunds, provider-health observation, or request
+delivery advance. Promotion removes the live reservation after every required
+consumer acknowledgement while `Repository#fetch(attempt_id)` preserves point
+access to the canonical terminal row.
 
-Raw frames move from `logs/` to digest-sharded `cold-logs/` during promotion.
-Maintenance advances a durable round-robin cursor through at most 512 entries
-per hourly pass and deletes them when the owning task is archived or three days
+Raw frames are sealed into the content-addressed runtime payload store during
+promotion. Maintenance advances a SQL keyset cursor through at most 512 entries
+per hourly pass and expires them when the owning task is archived or three days
 after `ended_at`, whichever is earlier, unless recovery remains pinned. This
-retention does not delete permanent proof or referenced output artifacts.
+retention does not delete the terminal attempt row or still-referenced payloads.
 
-The physical v3-to-v4 migration is forward-only and can consume a remaining
-supported v2 source. It quiesces the validated source tree, rejects live
-attempts, renames it to v4, converts valid schema-v3 records and proofs,
-publishes 0600 old-binary fences, verifies corpus and decision parity, promotes historical finals, and
-advances a `fenced → verified → complete` checkpoint before publishing
-`recovery-migration-v5.json`. Runtime has no v2/v3 reader or reverse hydration;
-any competing material root or changed corpus fails closed.
+The one-way installation cutover is offline and fleet-atomic. A durable
+`ready → intended → active` manifest binds the registered projects,
+task-authority fingerprints, a validated immutable token-usage snapshot, and
+every path-shape fence. Before candidate startup mutation an early read-only
+gate refuses ordinary commands. Services stop and live owners are rejected
+before task identity is rebuilt from file authority. All other machine-local
+runtime domains start empty. Every retry converges forward from the manifest;
+`active` is published only after the services recorded as running at cutover
+start again. There is no general legacy decoder, attempts-v4 migration state
+machine, dual reader/writer, reverse hydration, implicit database creation,
+rollback, or downgrade.
 
-One owner-private `maintenance/` status cell caches the latest migration and
-maintenance outcome. Operational status combines that cell with counts from
-the already-computed hot reconciliation snapshot. It does not traverse proof
-or cold logs and exposes last-run deltas rather than lifetime totals.
+The package manager publishes the candidate normally; Hive never renames
+package-owned launcher entries or retains the previous executable tree.
+`hive runtime` exposes only bounded status and forward resume. The external
+manifest is cutover evidence, not a user-selectable backup or restore source.
+Workflow files, task journals and projections, artifacts, and referenced
+payload files remain under their existing authorities after activation; only
+genuinely retired runtime writer paths receive tombstones.
 
 ## Runtime dispatch queue and web snapshots
 
@@ -496,7 +524,7 @@ remain delivery records: after admission the claim stores the attempt
 ID/generation, follows a loss successor, and completes from its terminal
 receipt.
 
-`Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
+`Hive::RuntimeControlPlane::DispatchRepository.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
 Ordinary pending requests expire after `EXPIRY_SEC = 600`. V5 recovery
@@ -676,7 +704,9 @@ operational snapshot. The TUI and bot consume those standard rows.
 The read-only web Patrol page uses bounded native `FindingQuery` and `JobQuery`
 reads so it remains available without a daemon. Those two sections fail
 independently and confer no mutation authority. Cohort, latency, token,
-publication-summary, and discovery-allowance projections are not persisted.
+and publication-summary projections are not persisted. Patrol discovery
+allowance and provider-lane holds are typed `patrol_allowances` rows; they are
+admission authority rather than a web projection.
 
 ## Patrol Fix finding import
 

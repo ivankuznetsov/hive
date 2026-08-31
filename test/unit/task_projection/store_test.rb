@@ -8,7 +8,7 @@ class TaskProjectionStoreTest < Minitest::Test
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::TaskProjection::Store.new(task_folder: root)
-        assert_equal File.join(root, "attempts", "v4"),
+        assert_equal File.join(root, "runtime-payloads"),
                      store.attempt_store.instance_variable_get(:@root)
       end
       refute File.exist?(File.join(root, "attempts", "v2"))
@@ -203,7 +203,7 @@ class TaskProjectionStoreTest < Minitest::Test
       projection_store(dir).rebuild!
       exploding_store = Object.new
       exploding_store.define_singleton_method(:fetch) do |_attempt_id|
-        raise Hive::Attempts::StoreError, "attempt store unavailable"
+        raise Hive::Attempts::RepositoryError, "attempt store unavailable"
       end
       store = Hive::TaskProjection::Store.new(
         task_folder: dir, attempt_store: exploding_store

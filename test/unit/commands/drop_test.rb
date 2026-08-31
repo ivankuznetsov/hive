@@ -14,6 +14,7 @@ class DropCommandTest < Minitest::Test
         ops = Hive::GitOps.new(dir)
         ops.hive_state_init
         Hive::Config.register_project(name: File.basename(dir), path: dir)
+        prepare_test_runtime_project(dir)
         # Drop validates pointer paths against the project's configured
         # worktree_root before removing a worktree. The fixture creates
         # worktrees under `<dirname>/<basename>.worktrees`, so config
@@ -42,6 +43,12 @@ class DropCommandTest < Minitest::Test
     FileUtils.mkdir_p(folder)
     state_name = Hive::Task::STATE_FILES.fetch(stage.split("-", 2).last)
     File.write(File.join(folder, state_name), body || "# #{slug}\n<!-- WAITING -->\n")
+    Hive::TaskMeta.write(
+      folder,
+      id: Digest::SHA256.hexdigest("#{File.expand_path(dir)}\0#{slug}")[0, 12].to_i(16),
+      slug: slug,
+      display_name: nil
+    )
     folder
   end
 
@@ -54,6 +61,12 @@ class DropCommandTest < Minitest::Test
     status.success?
   end
 
+  def with_task_lease_payload(payload, &block)
+    with_replaced_singleton_method(
+      Hive::Lock, :read_task_lock, ->(_folder) { payload }, &block
+    )
+  end
+
   def test_drop_without_a_pr_reports_pr_cleanup_as_clean
     with_drop_project do |dir, ops, project|
       slug = "no-pr-idea-260612-aaaa"
@@ -64,6 +77,31 @@ class DropCommandTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal true, payload["pr_closed"],
                    "no PR recorded means PR cleanup is CLEAN - false is reserved for "                    "'a PR existed and could not be closed' so web notices stay honest"
+    end
+  end
+
+  def test_replacement_runner_winning_after_kill_aborts_before_deletion
+    with_drop_project do |dir, ops, project|
+      slug = "replacement-race-260829-abcd"
+      folder = create_task(dir, "4-execute", slug)
+      commit_hive_state(ops, "4-execute", slug)
+      before_head = run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD")
+      repository = Hive::Lock.task_lease_repository
+      drop = Hive::Commands::Drop.new(slug, project: project, json: true)
+      drop.define_singleton_method(:kill_recorded_agents) do |folders|
+        repository.acquire(
+          folders.fetch(0).fetch(:folder), { "owner" => "replacement-runner" }, create: false
+        )
+        { killed: false, pid: nil, killed_pids: [], skipped_reason: "no_pid" }
+      end
+
+      out, _err, status = with_captured_exit { drop.call }
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, status
+      assert_equal false, JSON.parse(out).fetch("ok")
+      assert File.directory?(folder), "replacement contention must abort before task deletion"
+      assert_equal before_head.strip,
+                   run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD").strip
     end
   end
 
@@ -92,10 +130,10 @@ class DropCommandTest < Minitest::Test
       nested_pid = wait_for_pid_file(child_pid_path)
       nested_pgid = Process.getpgid(nested_pid)
       begin
-        File.write(File.join(folder, ".lock"), { "claude_pid" => pid }.to_yaml)
-
-        out, _err = capture_io do
-          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        out, _err = with_task_lease_payload("claude_pid" => pid) do
+          capture_io do
+            Hive::Commands::Drop.new(slug, project: project, json: true).call
+          end
         end
         payload = JSON.parse(out)
 
@@ -253,7 +291,13 @@ class DropCommandTest < Minitest::Test
   def seed_generic_task(dir, ops, stage_dir, slug)
     folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
     FileUtils.mkdir_p(folder)
-    File.write(File.join(folder, "meta.yml"), { "slug" => slug, "workflow" => "research" }.to_yaml)
+    Hive::TaskMeta.write(
+      folder,
+      id: Digest::SHA256.hexdigest("#{File.expand_path(dir)}\0#{slug}")[0, 12].to_i(16),
+      slug: slug,
+      display_name: nil,
+      workflow: "research"
+    )
     File.write(File.join(folder, "notes.md"), "# #{slug}\n<!-- WAITING -->\n")
     commit_hive_state(ops, stage_dir, slug)
     folder
@@ -307,14 +351,13 @@ class DropCommandTest < Minitest::Test
       # the guard would short-circuit to trust-the-pid, hiding a
       # regression in the start-time path.
       with_lock_start_time_stub("live-start-time-fixture") do
-        File.write(
-          File.join(folder, ".lock"),
+        out, _err = with_task_lease_payload(
           { "pid" => Process.pid,
-            "process_start_time" => "definitely-not-this-process" }.to_yaml
-        )
-
-        out, _err = capture_io do
-          Hive::Commands::Drop.new(slug, project: project, json: true).call
+            "process_start_time" => "definitely-not-this-process" }
+        ) do
+          capture_io do
+            Hive::Commands::Drop.new(slug, project: project, json: true).call
+          end
         end
         payload = JSON.parse(out)
         assert_equal false, payload["agent_killed"]
@@ -330,15 +373,12 @@ class DropCommandTest < Minitest::Test
       folder = create_task(dir, "4-execute", slug)
       group_pid = 81_001
       runner_pid = 81_002
-      File.write(
-        File.join(folder, ".lock"),
-        {
-          "claude_pid" => group_pid,
-          "claude_pid_start_time" => "recorded-group-start",
-          "pid" => runner_pid,
-          "process_start_time" => "recorded-runner-start"
-        }.to_yaml
-      )
+      lease = {
+        "claude_pid" => group_pid,
+        "claude_pid_start_time" => "recorded-group-start",
+        "pid" => runner_pid,
+        "process_start_time" => "recorded-runner-start"
+      }
 
       group_calls = []
       runner_calls = []
@@ -347,30 +387,32 @@ class DropCommandTest < Minitest::Test
         pid: runner_pid, killed: false, skipped_reason: "pid_reuse_guard"
       )
 
-      with_replaced_singleton_method(
+      with_task_lease_payload(lease) do
+        with_replaced_singleton_method(
         Hive::ProcessKill, :terminate_process_group,
         lambda do |pid, recorded_start_time: nil, **_kwargs|
           group_calls << [ pid, recorded_start_time ]
           group_result
         end
-      ) do
-        with_replaced_singleton_method(
+        ) do
+          with_replaced_singleton_method(
           Hive::ProcessKill, :terminate_process,
           lambda do |pid, recorded_start_time: nil, **_kwargs|
             runner_calls << [ pid, recorded_start_time ]
             runner_result
           end
-        ) do
-          out, _err = capture_io do
-            Hive::Commands::Drop.new(slug, project: project, json: true).call
-          end
-          payload = JSON.parse(out)
+          ) do
+            out, _err = capture_io do
+              Hive::Commands::Drop.new(slug, project: project, json: true).call
+            end
+            payload = JSON.parse(out)
 
-          assert_equal true, payload["agent_killed"],
-                       "one successful candidate must keep the aggregate cleanup successful"
-          assert_equal [ group_pid ], payload["agent_killed_pids"]
-          assert_equal "pid_reuse_guard", payload["agent_kill_skipped_reason"],
-                       "partial cleanup must retain the failed candidate's reason"
+            assert_equal true, payload["agent_killed"],
+                         "one successful candidate must keep the aggregate cleanup successful"
+            assert_equal [ group_pid ], payload["agent_killed_pids"]
+            assert_equal "pid_reuse_guard", payload["agent_kill_skipped_reason"],
+                         "partial cleanup must retain the failed candidate's reason"
+          end
         end
       end
 
@@ -380,19 +422,19 @@ class DropCommandTest < Minitest::Test
     end
   end
 
-  # `<!-- AGENT_WORKING pid=N -->` marker without a `.lock` file is a
-  # legitimate path (lock was removed by a crashed run, or the daemon
-  # stamped a marker but the agent hadn't taken the lock yet). Drop
+  # `<!-- AGENT_WORKING pid=N -->` without an active task lease is a
+  # legitimate path (the lease expired after a crash, or the daemon
+  # stamped a marker before the runner claimed the task). Drop
   # must still surface a kill candidate from the marker alone.
-  def test_drop_picks_up_pid_from_marker_without_lock_file
+  def test_drop_picks_up_pid_from_marker_without_task_lease
     with_drop_project do |dir, _ops, project|
       slug = "marker-only-260522-aaaa"
-      # Create an execute task with an AGENT_WORKING marker but NO .lock.
+      # Create an execute task with an AGENT_WORKING marker but no lease.
       folder = create_task(
         dir, "4-execute", slug,
         body: "# #{slug}\n<!-- AGENT_WORKING pid=999999 -->\n"
       )
-      refute File.exist?(File.join(folder, ".lock")), "fixture must omit .lock"
+      assert_nil Hive::Lock.read_task_lock(folder), "fixture must omit a task lease"
 
       out, _err = capture_io do
         Hive::Commands::Drop.new(slug, project: project, json: true).call
@@ -755,20 +797,27 @@ class DropCommandTest < Minitest::Test
     end
   end
 
-  def test_drop_ignores_corrupt_lock_payload_as_no_pid
+  def test_drop_rejects_a_corrupt_task_lease_without_deleting_the_task
     with_drop_project do |dir, ops, project|
       slug = "bad-lock-260525-aaaa"
       folder = create_task(dir, "4-execute", slug)
-      File.write(File.join(folder, ".lock"), "pid: [unterminated\n")
       commit_hive_state(ops, "4-execute", slug)
+      error = Hive::RuntimeControlPlane::CodecError.new(
+        "invalid task lease JSON", code: :json_invalid
+      )
 
-      out, _err = capture_io do
-        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      out, _err, status = with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { raise error }
+      ) do
+        with_captured_exit do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
       end
       payload = JSON.parse(out)
 
-      assert_equal true, payload["ok"]
-      assert_equal "no_pid", payload["agent_kill_skipped_reason"]
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_equal false, payload["ok"]
+      assert File.directory?(folder)
     end
   end
 
@@ -785,6 +834,31 @@ class DropCommandTest < Minitest::Test
       }) do
         drop = Hive::Commands::Drop.new(slug)
         assert_equal [], drop.send(:collect_stage_folders, File.join(dir, ".hive-state"), slug, [ "3-plan" ])
+      end
+    end
+  end
+
+  def test_revalidation_rejects_a_changed_or_disappearing_task_folder
+    with_tmp_dir do |root|
+      stage = File.join(root, "4-execute")
+      folder = File.join(stage, "different-slug")
+      FileUtils.mkdir_p(folder)
+      context = Hive::Commands::Drop::TaskContext.new(
+        slug: "expected-slug", folders: [ { folder: folder, stage: "4-execute" } ]
+      )
+      drop = Hive::Commands::Drop.new("expected-slug")
+
+      assert_raises(Hive::InvalidTaskPath) { drop.send(:revalidate_context!, context) }
+
+      context.slug = "different-slug"
+      original = File.method(:realpath)
+      replacement = lambda do |path|
+        raise Errno::ENOENT, path if path == folder
+
+        original.call(path)
+      end
+      with_replaced_singleton_method(File, :realpath, replacement) do
+        assert_raises(Hive::InvalidTaskPath) { drop.send(:revalidate_context!, context) }
       end
     end
   end

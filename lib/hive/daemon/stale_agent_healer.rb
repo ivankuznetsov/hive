@@ -18,20 +18,20 @@ module Hive
     # rewrite the marker to ERROR / REVIEW_ERROR with a `reason` attribute
     # so the existing red-status surface in Hive::TaskAction kicks in; the
     # REVIEW_WORKING paths rewrite the marker to REVIEW_ERROR (and drop the
-    # stale .lock). The next tick submits that durable failure to the same
+    # stale lease). The next tick submits that durable failure to the same
     # RecoveryCoordinator used by every other retry surface.
     #
     # Two failure modes are healed, distinguished by the row's
     # `claude_pid_alive` field (populated by Hive::Commands::Status from
-    # the per-task .lock file's `claude_pid` field — NOT from the
+    # the task lease's `claude_pid` field — NOT from the
     # marker's `pid` attribute, which records the hive runner PID
     # instead):
     #
-    #   - `agent_died`     — the .lock recorded a claude_pid that's
+    #   - `agent_died`     — the lease recorded a claude_pid that's
     #                        no longer alive (claude_pid_alive == false).
     #                        Covers SIGKILL, OOM, crash, hard reboot
     #                        of an attached agent.
-    #   - `agent_orphaned` — no .lock claude_pid (claude_pid_alive ==
+    #   - `agent_orphaned` — no lease claude_pid (claude_pid_alive ==
     #                        nil) and the marker's state-file mtime is
     #                        older than the grace window. Either the
     #                        daemon never dispatched the stage (the bug
@@ -41,7 +41,7 @@ module Hive
     #
     # REVIEW_WORKING markers are healed on two analogous paths:
     #   - `review_agent_died` — the review parent still holds a
-    #                        verified-live .lock but its Claude child died
+    #                        verified-live lease but its Claude child died
     #                        (live_task_lock == true, claude_pid_alive ==
     #                        false) AND the holder has no live child
     #                        processes (the actual "wedged" signal).
@@ -54,8 +54,8 @@ module Hive
     #                        reboot — tore down the whole review tree
     #                        before it could write a terminal marker;
     #                        Stages::Review's in-process rescue never runs
-    #                        on a kill. Record REVIEW_ERROR + drop any stale
-    #                        lock so the sole recovery coordinator can retry.
+    #                        on a kill. Record REVIEW_ERROR so the sole
+    #                        recovery coordinator can retry.
     #
     # ERROR and REVIEW_ERROR are durable observations, not permanent workflow
     # terminals. Every reason uses the same shared cooldown, then this scheduler
@@ -70,7 +70,7 @@ module Hive
     #   - controller.running_task? returns true (an in-process dispatch
     #     is live; do not race it)
     #   - row.live_task_lock is true (an externally-spawned `hive run` is
-    #     holding the per-task .lock with a verified PID + start-time
+    #     holding the task lease with a verified PID + start-time
     #     match; the runner is still inside the task even if its
     #     claude_pid is not yet recorded — do not race it). Issue #144.
     #   - project's legacy_stage_dirs is non-empty (we never touch markers
@@ -134,11 +134,11 @@ module Hive
           outcome = @lost_outcome_processor.process(attempt, now: now)
           next unless outcome["status"] == "ready"
 
-          successor_id = @attempt_store.decision_index.successor_attempt_id(
+          successor_id = @attempt_store.successor_attempt_id(
             predecessor_attempt_id: attempt.attempt_id
           )
           existing = if successor_id
-            admission_view.respond_to?(:find) ? admission_view.find(successor_id) : nil
+            admission_view.find(successor_id)
           else
             successors[attempt.attempt_id]
           end
@@ -263,7 +263,7 @@ module Hive
           end
 
           next unless row.marker.to_s == "agent_working"
-          # Externally-spawned `hive run` is holding the per-task .lock;
+          # Externally-spawned `hive run` is holding the task lease;
           # claude_pid_alive may still be nil because the runner has not
           # written its claude_pid yet (auto-rebase, etc.). Healing here
           # would race the live runner. Issue #144.
@@ -520,7 +520,7 @@ module Hive
       end
 
       # Case A (issue #320): the review parent still holds a verified-live
-      # .lock but its Claude child died — terminate the wedged holder,
+      # task lease but its Claude child died — terminate the wedged holder,
       # claim the lock, and record a terminal failure for the coordinator.
       def heal_wedged_review_row(row)
         return unless row.claude_pid_alive == false
@@ -576,7 +576,7 @@ module Hive
       # dispatches) — claim the task lock, transition the marker, and release our
       # claim so the coordinator can recover review under normal concurrency
       # control. Claiming closes the stale-status race where an external run
-      # acquires a fresh .lock between the status snapshot and this heal.
+      # acquires a fresh lease between the status snapshot and this heal.
       def heal_orphaned_review_row(row, now:)
         mtime = row.state_file_mtime
         return unless mtime && (now - mtime) > @grace_sec
@@ -608,9 +608,7 @@ module Hive
       end
 
       def task_lock_holder(row)
-        lock_path = File.join(row.folder.to_s, ".lock")
-        data = YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) || {}
-        data.is_a?(Hash) ? data : nil
+        Hive::Lock.read_task_lock(row.folder.to_s)
       rescue StandardError
         nil
       end

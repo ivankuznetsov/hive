@@ -1,6 +1,6 @@
 require "digest"
 require "hive/dependency_snapshot"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/conditions/generation_tracker"
 require "hive/markers"
 require "hive/paths"
@@ -115,7 +115,7 @@ module Hive
       end
 
       def self.default_attempt_store
-        Hive::Attempts::Store.runtime(create_directories: false)
+        Hive::Attempts::Repository.runtime(create_directories: false)
       end
     end
   end

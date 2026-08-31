@@ -3,8 +3,8 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-25
-tags: [architecture, components, boundaries, monorepo]
+updated: 2026-08-30
+tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 
 **TLDR**: The machine-readable component catalog defines supported entry
@@ -17,6 +17,7 @@ boundary.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
+| Runtime Control Plane | `boundary-ready` | `require "hive/runtime_control_plane"` → `Hive::RuntimeControlPlane` | [[component-boundaries]] |
 | Provider Health | `candidate` | `require "hive/provider_health"` → `Hive::ProviderHealth` | [[modules/provider_health]] |
 | Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
 | Provider Routing Operations | `candidate` | `require "hive/provider_routing/operational_projection"` → `Hive::ProviderRouting::OperationalProjection` | [[modules/provider_routing]] |
@@ -41,7 +42,7 @@ version, tag, or release.
 
 ## Graph audit
 
-The catalog retains sixteen components: twelve are `boundary-ready`; Provider
+The catalog retains seventeen components: thirteen are `boundary-ready`; Provider
 Health, Provider Routing Policy, Provider Routing Operations, and Attempts
 remain `candidate`. There are no migration exceptions.
 
@@ -55,8 +56,11 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core --> workflow_values[Workflow Creator Values]
   patrol_fix[Patrol Fix Workflow Core] --> git_gate[Safe Agent Git Gate]
+  provider_health[Provider Health] --> runtime[Runtime Control Plane]
+  provider_routing[Provider Routing Policy] --> runtime[Runtime Control Plane]
   attempts[Attempts] --> provider_health[Provider Health]
   attempts --> provider_routing[Provider Routing Policy]
+  attempts --> runtime
   routing_operations[Provider Routing Operations] --> attempts
   routing_operations --> provider_health
   routing_operations --> provider_routing
@@ -65,6 +69,24 @@ flowchart LR
 All other dependencies are explicit lower-level Hive primitives. Every retained
 entry point has focused clean-load proof, and the production construction scan
 enforces internal-owner boundaries.
+
+The Runtime Control Plane boundary owns the lazy process-local Sequel connection,
+exact integer migration gate, SQLite application identity, canonical codecs,
+and the complete target coordination schema. The
+boundary does not activate any legacy runtime consumer or move task/workflow
+authority out of project task folders.
+
+The clean cutover keeps two focused helpers outside the minimal entry point.
+`PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
+addresses only at terminal publication; and `CutoverManifest` publishes a
+digest-bound, owner-private phase record outside both the legacy roots and the
+candidate database. Attempts and routing-policy persistence now use the
+activated runtime control plane directly. Dispatch, provider health, and PR
+merge reconciliation now use the same database through their typed
+repositories. Cutover rejects live legacy owners, discards derived runtime
+rows, and directly imports only validated token-usage history. Fresh bootstrap
+loads no legacy decoder. Normal runtime never creates, imports, or repairs
+legacy state.
 
 ## Patrol Fix boundary
 

@@ -2,7 +2,7 @@ require "hive/attempts/capability"
 require "hive/attempts/command_progress"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/stringify_keys"
 
 module Hive
@@ -52,16 +52,16 @@ module Hive
           scrub_environment!
           claim_capability = read_inherited(values["HIVE_ATTEMPT_CONTEXT_FD"], limit: 65)
           gate = read_inherited(values["HIVE_ATTEMPT_GATE_FD"], limit: 1)
-          raise StoreError, "durable attempt worker gate was not released" unless gate == "1"
+          raise RepositoryError, "durable attempt worker gate was not released" unless gate == "1"
 
           attempt_id = values["HIVE_ATTEMPT_ID"].to_s
-          raise StoreError, "durable attempt context is incomplete" if attempt_id.empty?
+          raise RepositoryError, "durable attempt context is incomplete" if attempt_id.empty?
 
           # The record store is selected by trusted Hive process configuration,
           # not by a dedicated attempt-context override. This prevents supported
           # launch/inheritance paths from redirecting context installation; it
           # is not privilege separation from hostile same-UID process state.
-          record = Store.new.fetch(attempt_id)
+          record = Repository.open_default.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
           evidence_writer = if record["routing"]["mode"] == "explicit"
             EvidenceChannel::Writer.for_fd(
@@ -86,7 +86,7 @@ module Hive
             diagnostic_writer: diagnostic_writer
           )
         rescue Hive::Error, SystemCallError, IOError => e
-          raise StoreError, "durable attempt context rejected: #{e.message}"
+          raise RepositoryError, "durable attempt context rejected: #{e.message}"
         ensure
           scrub_environment!
         end
@@ -100,14 +100,14 @@ module Hive
         private
 
         def validate_record!(record, attempt_id:, argv:, claim_capability:)
-          raise StoreError, "attempt #{attempt_id} is unavailable" unless record
-          raise StoreError, "attempt identity mismatch" unless record.attempt_id == attempt_id
-          raise StoreError, "attempt is not running" unless record.state == "running"
+          raise RepositoryError, "attempt #{attempt_id} is unavailable" unless record
+          raise RepositoryError, "attempt identity mismatch" unless record.attempt_id == attempt_id
+          raise RepositoryError, "attempt is not running" unless record.state == "running"
           unless Capability.matches?(record["claim_capability_digest"], claim_capability)
-            raise StoreError, "attempt context capability is invalid"
+            raise RepositoryError, "attempt context capability is invalid"
           end
           unless record["worker_argv"] == argv
-            raise StoreError, "attempt worker argv does not match admission"
+            raise RepositoryError, "attempt worker argv does not match admission"
           end
           validate_process_identity!(record.worker)
           validate_task_binding!(record, argv)
@@ -121,7 +121,7 @@ module Hive
             "session_id" => Process.getsid(Process.pid),
             "process_group_id" => Process.getpgid(Process.pid)
           }
-          raise StoreError, "attempt worker process identity mismatch" unless expected == actual
+          raise RepositoryError, "attempt worker process identity mismatch" unless expected == actual
         end
 
         def validate_task_binding!(record, argv)
@@ -135,7 +135,7 @@ module Hive
           verb = argv[1].to_s
           evidence_rework = verb == "evidence" && argv[2].to_s == "rework"
           target = argv[evidence_rework ? 3 : 2].to_s
-          raise StoreError, "attempt worker command has no task target" if verb.empty? || target.empty?
+          raise RepositoryError, "attempt worker command has no task target" if verb.empty? || target.empty?
 
           task = Hive::TaskResolver.new(target, project_filter: record["project"]).resolve
           intended_stage = if evidence_rework || %w[run approve plan-review-run].include?(verb)
@@ -145,10 +145,10 @@ module Hive
           end
           same_task_id = record["task_id"].nil? || task.id.to_s == record["task_id"].to_s
           unless same_task_id && task.slug == record["task_slug"] && intended_stage == record["intended_stage"]
-            raise StoreError, "attempt task or intended stage does not match admission"
+            raise RepositoryError, "attempt task or intended stage does not match admission"
           end
         rescue KeyError, Hive::Error => e
-          raise StoreError, "attempt task binding could not be resolved: #{e.message}"
+          raise RepositoryError, "attempt task binding could not be resolved: #{e.message}"
         end
 
         def validate_module_hook_binding!(record, argv)
@@ -161,20 +161,20 @@ module Hive
                   options["--event-id"] == subject.fetch("event_id") &&
                   record["task_id"].nil? &&
                   record["intended_stage"] == "module-hook"
-          raise StoreError, "attempt module hook binding does not match admission" unless valid
+          raise RepositoryError, "attempt module hook binding does not match admission" unless valid
         rescue KeyError
-          raise StoreError, "attempt module hook binding is incomplete"
+          raise RepositoryError, "attempt module hook binding is incomplete"
         end
 
         def read_inherited(value, limit:)
           io = IO.for_fd(Integer(value), "r", autoclose: true)
           payload = io.read(limit)
           extra = io.read(1)
-          raise StoreError, "attempt context descriptor payload is invalid" unless extra.to_s.empty?
+          raise RepositoryError, "attempt context descriptor payload is invalid" unless extra.to_s.empty?
 
           payload
         rescue ArgumentError, TypeError, Errno::EBADF
-          raise StoreError, "attempt context descriptor is unavailable"
+          raise RepositoryError, "attempt context descriptor is unavailable"
         ensure
           io&.close unless io&.closed?
         end

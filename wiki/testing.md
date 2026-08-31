@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-08-31
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage]
 ---
 
@@ -133,6 +133,10 @@ bundle exec ruby -Itest test/unit/agent_skills/canonical_skill_test.rb
 From `web/`, run the Rails task integration/helper/model tests with
 `bundle exec ruby bin/rails test ...` and the focused Playwright file with
 `bundle exec ruby bin/rails test:system test/system/task_workspace_test.rb`.
+The shared Rails test home explicitly bootstraps a real migrated and activated
+SQLite runtime control plane before tests create projects. E2E sandboxes do the
+same before invoking `hive init`; tests do not rely on an implicit repository
+migration path that production forbids.
 
 Do not run the full suite after every commit. Use the default suite as a broad
 local checkpoint, normally once before handoff:
@@ -552,7 +556,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `attempts/*_test.rb`, `daemon/attempt_loss_healer_test.rb` | Durable task attempts — record/schema/CAS edges, competing claim/expiry, artifact-plus-dependency-verdict generation duplicates/successors, inherited-output fallback, authenticated launching handoff acceptance, capacity, detached session lifecycle, final terminal/lost frame drain, PID-reuse-safe adoption and orphan cleanup, marker/git evidence precedence, legacy backfill, mutation-free dirty capture, and restart-persistent unbounded loss healing paced by the shared cooldown. |
 | `attempts/context_test.rb`, `commands/{run,stage_action}_test.rb`, `integration/{run_error_envelope,run_stage_action}_test.rb` | Durable command-result interpretation — authenticated task/stage binding for generic `run`/`approve` and stage-specific admitted argv, plus the shared `CommandDispatch` policy for success receipts, lost attempts, non-zero receipts with or without worker JSON, exact exit propagation, and one command-shaped error document when a failed worker emitted none. |
 | `work_ledger_test.rb`, `task_journal_test.rb`, `conditions/*_test.rb`, `task_projection*_test.rb`, `task_action_conditions_test.rb` | Policy-light WorkLedger plus Hive-owned generation conditions — clean loading without workflow/condition/attempt policy; structural descriptor topology; exact cursor/hash receipts; locked, fsynced, idempotent complete JSONL append with short-write completion and partial-append rollback; generic replay duplicate/malformed refusal; strict Hive journal durability/attempt integrity; authenticated compatibility replay with future-schema/forged-attempt rejection; registry/evidence lifecycle; generation/HEAD reconciliation; deterministic supersession; telemetry-tail-stable snapshot validation/replay; terminal checkpoint history excluded from the mutable attempt-ID budget while over-budget mutable bindings still fail closed; gate/migration/shadow modes; execute boundary ordering; canonical TaskAction/status consumption; and sanitized task-1849 replay across missing/corrupt/stale snapshots with durable-attempt metadata and live-observation sentinels. |
-| `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, exact child-identity compare-and-clear, commit-lock process contention, same-thread reentrancy, fork-inherited ownership refusal, bounded timeout, exception cleanup, and kernel release after `SIGKILL`. |
+| `lock_test.rb`, `runtime_control_plane/process_guard_test.rb`, `task_counter_test.rb`, `patrol/launch_budget_test.rb` | SQLite coordination — stable task identity, CAS/fenced lease acquire/update/release, dead/PID-reuse reclaim, move/recreated/custom-root refusal, same-thread reentrancy, commit-lock process contention, atomic multiprocess task ids and Patrol allowance, bounded legacy seed/reservation state, process-wide checkout/fork barrier, all-wrapper disconnect, diagnostics race, and real fork/spawn/self-exec/daemon descriptor proof. |
 | `bot/{brainstorm_parser,brainstorm_answer_writer}_test.rb`, `commands/answer_test.rb` | Literal brainstorm answer boundary — physical slot order across rounds, marker-free question fingerprints, normalized fingerprints, missing-header repair, exact ordinal writes when source numbers repeat, unique-unanswered relocation despite answered duplicates, duplicate/missing match refusal, stable generation and corrupt-journal/input-epoch handling, moved-stage/folder refusal without source recreation, identical retry idempotency, different-answer conflict, creation-disabled task locking plus marker-sidecar serialization, invalid-UTF-8 and CRLF writes, reversible structural-line/marker neutralization, 64 KiB UTF-8 stdin and shell-metacharacter literalness, public binding validation, schema-valid closed outcomes/errors, and final-slot completion without direct dispatch. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head selection over a same-named tag, stalled-transport deadline/process-group cleanup, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, detached exact analysis materialization plus orphan-registration self-healing, quarantine-and-reattach recovery for a registered exact worktree whose `.git` pointer disappeared, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix validation. |
 | `dependencies_test.rb`, `task_meta_test.rb`, `plan_frontmatter_test.rb`, `repository_identity_test.rb`, `dependency_admission_test.rb`, `dependency_snapshot_test.rb` | Fail-closed dependency admission and preserving task metadata — exhaustive scalar grammar and duplicate-key rejection; tolerant-vs-strict metadata reads and corrupt-mutation refusal; immutable UTC `completed_at` first-write behavior and preservation across rewrites; bounded optional exact plan assertion; indexed same/cross-project and archived-fallback resolution; workflow/action-aware completed dependency snapshots; full cycle paths; and unexpected-error backstop. |
@@ -807,10 +811,10 @@ task creation. Generated task slugs use a 16-bit random suffix, so the helper
 retries rare `SlugCollisionError` cases and identifies the created folder by
 comparing inbox children before/after the command instead of relying on mtime
 ordering. Playwright examples share a process but not project state:
-`ApplicationSystemTestCase` stops the subscriber-owned feed, clears only the
-throwaway sandbox's canonical `repos/` tree, clears its registry through the
-locked atomic config updater, and resets workflow descriptor caches before each
-example. This keeps later refresh assertions
+`ApplicationSystemTestCase` stops the subscriber-owned feed, deregisters every
+throwaway project through the ordinary Hive registry API so its SQL identity is
+retired, clears only the sandbox's canonical `repos/` tree, and resets workflow
+descriptor caches before each example. This keeps later refresh assertions
 independent of test order and prevents a synthetic fleet accumulated by prior
 examples from dominating browser timing. Tests that mutate the filesystem and
 expect a Cable refresh first wait for the browser's confirmed subscription.
@@ -1142,6 +1146,10 @@ task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
 The final browser wait targets that durable PR-gate result rather than the
 transient `execute` badge: a fast daemon may complete execute between two
 Turbo renders, while the real worktree commit proves the stage ran.
+The fake plan declares its production/test files, a test scenario, and an
+explicit rollback, so the real plan-review classifier admits its local
+skip-review path. The provider-free golden test therefore cannot accidentally
+launch an installed Codex or Grok reviewer.
 The first task-page navigation deliberately re-resolves the grid link through
 brief row-lookup misses or Playwright "not attached to the DOM" click errors
 because Turbo can replace the row while the daemon advances the task from

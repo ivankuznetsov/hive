@@ -278,12 +278,7 @@ module Hive
         pid
       end
 
-      child_start_time = Hive::Lock.process_start_time(pid)
-      Hive::Lock.update_task_lock(
-        @task.folder,
-        "claude_pid" => pid,
-        "claude_pid_start_time" => child_start_time
-      )
+      child_start_time = record_spawned_agent(pid)
 
       old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
       old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
@@ -612,6 +607,18 @@ module Hive
       file.unlink
     end
 
+    def record_spawned_agent(pid)
+      return unless Hive::Lock.task_lock_held?(@task.folder)
+
+      child_start_time = Hive::Lock.process_start_time(pid)
+      Hive::Lock.update_task_lock(
+        @task.folder,
+        "claude_pid" => pid,
+        "claude_pid_start_time" => child_start_time
+      )
+      child_start_time
+    end
+
     # Provider transactions decide which commands to run; Hive retains child
     # process custody, bounded capture, cancellation, and timeout cleanup.
     def capture_process(argv:, environment:, stdout_limit:, stderr_limit:,
@@ -640,14 +647,7 @@ module Hive
       rescue Errno::ESRCH
         pid
       end
-      if record_spawn
-        child_start_time = Hive::Lock.process_start_time(pid)
-        Hive::Lock.update_task_lock(
-          @task.folder,
-          "claude_pid" => pid,
-          "claude_pid_start_time" => child_start_time
-        )
-      end
+      child_start_time = record_spawned_agent(pid) if record_spawn
       cancellation = { cancelled: false }
       signals_installed = false
       if forward_signals

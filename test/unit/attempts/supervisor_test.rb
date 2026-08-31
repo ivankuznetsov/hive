@@ -80,6 +80,11 @@ class AttemptsSupervisorTest < Minitest::Test
         claim_io: StringIO.new(CLAIM_CAPABILITY),
         heartbeat_sec: 5, stale_sec: 30, first_heartbeat_timeout_sec: 30
       )
+      sleep_calls = []
+      supervisor.define_singleton_method(:sleep) do |duration|
+        sleep_calls << duration
+        Kernel.sleep(duration)
+      end
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       cpu_started = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID)
@@ -88,6 +93,8 @@ class AttemptsSupervisorTest < Minitest::Test
       cpu_used = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID) - cpu_started
 
       assert_operator elapsed, :>=, 1.0, "supervisor must await worker exit"
+      assert(sleep_calls.any?(&:positive?),
+             "supervisor must sleep while all output pipes are at EOF")
       assert_operator cpu_used / elapsed, :<, 0.5,
                       "supervisor must not spin at full CPU while pipes are at EOF"
       assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome

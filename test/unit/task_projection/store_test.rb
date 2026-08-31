@@ -393,6 +393,24 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_append_refresh_refuses_a_journal_change_after_bounded_validation
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      store.define_singleton_method(:journal_bytes) do
+        "#{File.binread(journal_path)}changed"
+      end
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.refresh_after_append!
+      end
+
+      assert_includes error.message,
+                      "journal changed while advancing its projection checkpoint"
+    end
+  end
+
   def test_routine_read_does_not_charge_terminal_checkpoint_history_to_attempt_budget
     with_tmp_dir do |dir|
       attempts = 101.times.to_h do |index|

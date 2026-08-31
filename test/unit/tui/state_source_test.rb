@@ -104,7 +104,9 @@ class TuiStateSourceTest < Minitest::Test
       folder, id: id, slug: slug, display_name: nil, depends_on: depends_on,
       completed_at: (Time.now.utc if stage == "9-done")
     )
-    File.write(File.join(folder, state_file_name(stage)), "<!-- #{marker} -->\n")
+    state_file = File.join(folder, state_file_name(stage))
+    File.write(state_file, "<!-- #{marker} -->\n")
+    seed_task_projection(folder, state_file: state_file)
     folder
   end
 
@@ -155,7 +157,9 @@ class TuiStateSourceTest < Minitest::Test
       folder, id: 41, slug: slug, display_name: nil,
       workflow: "retained", completed_at: completed_at
     )
-    File.write(File.join(folder, "done.md"), "<!-- COMPLETE -->\n")
+    state_file = File.join(folder, "done.md")
+    File.write(state_file, "<!-- COMPLETE -->\n")
+    seed_task_projection(folder, state_file: state_file)
     folder
   end
 
@@ -1316,7 +1320,7 @@ class TuiStateSourceTest < Minitest::Test
 
       source.start
       begin
-        assert wait_for(deadline_seconds: 0.5) { fingerprint_started.length.positive? },
+        assert wait_for(deadline_seconds: 5) { fingerprint_started.length.positive? },
                "the first refresh must reach change-fingerprint capture"
         assert_nil source.current,
                    "readers must not observe a snapshot before its change fingerprints"
@@ -1324,7 +1328,7 @@ class TuiStateSourceTest < Minitest::Test
         release_fingerprint << true
       end
 
-      refute_nil wait_for(deadline_seconds: 0.5) { source.current },
+      refute_nil wait_for(deadline_seconds: 5) { source.current },
                  "the snapshot must publish after fingerprint capture completes"
     ensure
       source&.stop

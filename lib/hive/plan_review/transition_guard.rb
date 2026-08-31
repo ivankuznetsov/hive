@@ -102,7 +102,8 @@ module Hive
       # task carrying review state must prove current clearance. A task with no
       # review root is treated as an explicitly receipted pre-feature task so
       # upgrades do not retroactively strand work already in execute.
-      def validate_execute_entry!(task:, config: nil, clock: -> { Time.now.utc })
+      def validate_execute_entry!(task:, config: nil, clock: -> { Time.now.utc },
+                                  reviewed_rework: false)
         return true unless execute_applicable?(task)
 
         cfg = config || Hive::Config.load(task.project_root)
@@ -121,7 +122,10 @@ module Hive
         end
         return true if legacy_adoption_valid?(task, root)
 
-        authorize!(task, Projection.load(task_folder: task.folder), cfg:)
+        authorize!(
+          task, Projection.load(task_folder: task.folder), cfg:,
+          allow_policy_drift: reviewed_rework
+        )
         true
       rescue InvalidRecord, StaleObservation, Hive::ConfigError,
              Hive::TaskMeta::InvalidMetadata => error
@@ -143,7 +147,7 @@ module Hive
         cfg.dig("plan_review", "enabled") != false
       end
 
-      def authorize!(task, projection, cfg:)
+      def authorize!(task, projection, cfg:, allow_policy_drift: false)
         unless projection.is_a?(Projection)
           raise blocked_error(
             task, nil, "plan review has not produced a current resolution",
@@ -152,7 +156,9 @@ module Hive
         end
 
         record = projection.record
-        current_freshness = freshness(task:, projection:, config: cfg)
+        current_freshness = freshness(
+          task:, projection:, config: cfg, allow_policy_drift:
+        )
         fresh = current_freshness.fetch("status") == "current"
         executable = record.execution_allowed? && record["blockers"].empty?
         return projection if fresh && executable
@@ -162,15 +168,16 @@ module Hive
         raise blocked_error(task, projection, reason)
       end
 
-      def freshness(task:, projection:, config:)
+      def freshness(task:, projection:, config:, allow_policy_drift: false)
         record = projection.record
         required_digest = record["candidate_plan_digest"] || record.plan_digest
         return stale("task generation changed after plan review") unless
           record.task_generation.to_s == Identity.task_generation(task).to_s
         return stale("canonical plan changed after plan review") unless
           required_digest == current_plan_digest(task)
-        return stale("plan review policy changed after resolution") unless
-          policy_configuration_matches?(record, task, config)
+        unless allow_policy_drift || policy_configuration_matches?(record, task, config)
+          return stale("plan review policy changed after resolution")
+        end
 
         { "status" => "current", "reason" => nil }.freeze
       rescue InvalidPlan, InvalidRecord, SystemCallError, IOError => error

@@ -54,19 +54,20 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
-  def test_cached_read_uses_the_bounded_checkpoint_without_reading_the_full_journal
+  def test_routine_read_uses_the_bounded_checkpoint_without_reading_the_full_journal
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])
       store = projection_store(dir)
       expected = store.rebuild!
 
-      projection = with_replaced_singleton_method(
+      result = with_replaced_singleton_method(
         store, :journal_bytes, -> { raise "full journal read must not run" }
       ) do
-        store.read_cached
+        store.read_routine
       end
 
-      assert_equal expected.to_h, projection.to_h
+      assert_equal "current", result.state
+      assert_equal expected.to_h, result.projection.to_h
     end
   end
 
@@ -208,12 +209,12 @@ class TaskProjectionStoreTest < Minitest::Test
         task_folder: dir, attempt_store: exploding_store
       )
 
-      %i[read read_cached].each do |method_name|
-        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
-          store.public_send(method_name)
-        end
-        assert_includes error.message, "attempt store unavailable"
-      end
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.read }
+      assert_includes error.message, "attempt store unavailable"
+
+      routine = store.read_routine
+      assert_equal "repair_required", routine.state
+      assert_equal "bounded_projection_failed", routine.diagnostics.first.fetch("reason")
     end
   end
 
@@ -242,7 +243,7 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
-  def test_cached_read_reconciles_terminal_attempt_without_reading_the_full_journal
+  def test_routine_read_reconciles_terminal_attempt_without_reading_the_full_journal
     with_tmp_dir do |dir|
       attempt = durable_attempt
       attempt_store = Object.new
@@ -273,16 +274,17 @@ class TaskProjectionStoreTest < Minitest::Test
       assert_equal "attempt_terminal_failed",
                    bounded.projection.current_condition("AgentHealthy").fetch("reason")
 
-      projection = with_replaced_singleton_method(
+      result = with_replaced_singleton_method(
         store, :journal_bytes, -> { raise "full journal read must not run" }
       ) do
-        store.read_cached
+        store.read_routine
       end
-      assert_equal expected, projection.to_h
+      assert_equal "current", result.state
+      assert_equal expected, result.projection.to_h
     end
   end
 
-  def test_cached_read_trusts_final_attempt_binding_without_an_attempt_store_read
+  def test_routine_read_trusts_final_attempt_binding_without_an_attempt_store_read
     with_tmp_dir do |dir|
       attempt = durable_attempt.merge(
         "state" => "terminal", "outcome" => "failed", "lease_version" => 2
@@ -303,15 +305,103 @@ class TaskProjectionStoreTest < Minitest::Test
       store.rebuild!
       reads = 0
 
-      projection = store.read_cached
+      result = store.read_routine
 
       assert_equal 0, reads
+      assert_equal "current", result.state
       assert_equal "attempt_terminal_failed",
-                   projection.current_condition("AgentHealthy").fetch("reason")
+                   result.projection.current_condition("AgentHealthy").fetch("reason")
     end
   end
 
-  def test_cached_read_falls_back_to_the_full_journal_after_an_append
+  def test_routine_read_does_not_charge_terminal_checkpoint_history_to_attempt_budget
+    with_tmp_dir do |dir|
+      attempts = 101.times.to_h do |index|
+        attempt_id = "attempt-#{index}"
+        [ attempt_id, durable_attempt.merge(
+          "attempt_id" => attempt_id,
+          "ownership_generation" => "owner-#{index}",
+          "state" => "terminal", "outcome" => "failed", "lease_version" => 2
+        ) ]
+      end
+      reads = 0
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      events = attempts.keys.each_with_index.map do |attempt_id, index|
+        condition_event("event-#{index}", state: "unsatisfied").tap do |event|
+          event["attempt_id"] = attempt_id
+          event["ownership_generation"] = "owner-#{index}"
+          event.dig("evidence", 0)["attempt_id"] = attempt_id
+        end
+      end
+      write_journal(dir, events)
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      store.rebuild!
+      reads = 0
+
+      result = store.read_routine
+
+      assert_equal 101,
+                   result.projection.to_h.dig("journal", "attempts").length
+      assert_equal 0, reads
+      assert_equal "current", result.state
+      assert_empty result.diagnostics
+    end
+  end
+
+  def test_routine_read_still_bounds_mutable_checkpoint_attempts
+    with_tmp_dir do |dir|
+      attempts = 101.times.to_h do |index|
+        attempt_id = "attempt-#{index}"
+        [ attempt_id, durable_attempt.merge(
+          "attempt_id" => attempt_id,
+          "ownership_generation" => "owner-#{index}"
+        ) ]
+      end
+      reads = 0
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        reads += 1
+        attempts[attempt_id]
+      end
+      events = attempts.keys.each_with_index.map do |attempt_id, index|
+        condition_event("event-#{index}").tap do |event|
+          event["attempt_id"] = attempt_id
+          event["ownership_generation"] = "owner-#{index}"
+          event.dig("evidence", 0)["attempt_id"] = attempt_id
+        end
+      end
+      write_journal(dir, events)
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      store.rebuild!
+      reads = 0
+
+      result = store.read_routine
+
+      assert_equal 0, reads
+      assert_equal "repair_required", result.state
+      assert result.truncated
+      assert_equal "attempt_ids_exhausted",
+                   result.diagnostics.first.fetch("reason")
+    end
+  end
+
+  def test_routine_read_replays_only_the_bounded_suffix_after_an_append
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])
       store = projection_store(dir)
@@ -325,14 +415,16 @@ class TaskProjectionStoreTest < Minitest::Test
         File.binread(journal_path)
       end
 
-      projection = store.read_cached
+      result = store.read_routine
 
-      assert_equal 1, full_reads
-      assert_equal "unsatisfied", projection.current_condition("AgentHealthy").fetch("state")
+      assert_equal 0, full_reads
+      assert_equal "current", result.state
+      assert_equal "unsatisfied",
+                   result.projection.current_condition("AgentHealthy").fetch("state")
     end
   end
 
-  def test_cached_read_falls_back_after_same_size_journal_mutation
+  def test_routine_read_requires_repair_after_same_size_journal_mutation
     with_tmp_dir do |dir|
       records = 100.times.map { |index| condition_event("event-#{index}") }
       write_journal(dir, records)
@@ -351,14 +443,15 @@ class TaskProjectionStoreTest < Minitest::Test
         File.binread(journal_path)
       end
 
-      projection = store.read_cached
+      result = store.read_routine
 
-      assert_equal 1, full_reads
-      assert_equal Digest::SHA256.hexdigest(replacement), projection["journal"].fetch("hash")
+      assert_equal 0, full_reads
+      assert_equal "repair_required", result.state
+      assert_equal "checkpoint_prefix_changed", result.diagnostics.first.fetch("reason")
     end
   end
 
-  def test_cached_read_fails_closed_after_attempt_identity_changes
+  def test_routine_read_requires_repair_after_attempt_identity_changes
     with_tmp_dir do |dir|
       attempt = durable_attempt
       attempt_store = Object.new
@@ -377,10 +470,11 @@ class TaskProjectionStoreTest < Minitest::Test
         File.binread(journal_path)
       end
 
-      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.read_cached }
+      result = store.read_routine
 
-      assert_equal 1, full_reads
-      assert_includes error.message, "durable attempt mismatch: task"
+      assert_equal 0, full_reads
+      assert_equal "repair_required", result.state
+      assert_equal "bounded_projection_failed", result.diagnostics.first.fetch("reason")
     end
   end
 
@@ -581,6 +675,272 @@ class TaskProjectionStoreTest < Minitest::Test
       assert_equal "checkpoint_missing", result.diagnostics.first.fetch("reason")
       assert_equal "satisfied",
                    result.projection.current_condition("AgentHealthy").fetch("state")
+    end
+  end
+
+  def test_explicit_repair_requires_authority_and_is_idempotent
+    with_tmp_dir do |dir|
+      store = projection_store(dir)
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+
+      File.write(store.journal_path, "")
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+
+      write_journal(dir, [ condition_event("event-1") ])
+      first = store.repair!
+      first_snapshot = File.binread(store.snapshot_path)
+      first_checkpoint = File.binread(store.checkpoint_path)
+      second = store.repair!
+
+      assert first.bounded.current?
+      assert second.bounded.current?
+      assert_equal first.projection.to_h, second.projection.to_h
+      assert_equal first_snapshot, File.binread(store.snapshot_path)
+      assert_equal first_checkpoint, File.binread(store.checkpoint_path)
+    end
+  end
+
+  def test_pristine_initialization_refuses_preexisting_projection_authority
+    with_tmp_dir do |root|
+      marker = Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
+      authority_paths = [
+        Hive::TaskJournal::JOURNAL_BASENAME,
+        Hive::TaskProjection::Store::SNAPSHOT_BASENAME,
+        Hive::TaskProjection::Store::CHECKPOINT_BASENAME
+      ]
+
+      authority_paths.each_with_index do |basename, index|
+        folder = File.join(root, index.to_s)
+        FileUtils.mkdir_p(folder)
+        path = File.join(folder, basename)
+        original = "existing-#{basename}\n"
+        File.binwrite(path, original)
+
+        assert_raises(Hive::TaskProjection::InvalidJournal) do
+          projection_store(folder).initialize_pristine!(marker: marker)
+        end
+        assert_equal original, File.binread(path)
+      end
+    end
+  end
+
+  def test_explicit_repair_can_restore_a_legitimate_zero_history_checkpoint
+    with_tmp_dir do |dir|
+      marker = Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
+      store = projection_store(dir)
+      store.initialize_pristine!(marker: marker)
+      File.delete(store.checkpoint_path)
+
+      before = store.read_routine(marker: marker)
+      assert_equal "repair_required", before.state
+      assert_equal "checkpoint_missing", before.diagnostics.first.fetch("reason")
+
+      repaired = store.repair!(marker: marker, pristine: true)
+
+      assert repaired.bounded.current?
+      assert_equal "current", store.read_routine(marker: marker).state
+      refute File.exist?(store.journal_path),
+             "zero-history repair must not invent authoritative journal history"
+    end
+  end
+
+  def test_historical_zero_history_repair_rejects_a_missing_durable_handoff_journal
+    with_tmp_dir do |dir|
+      marker = Hive::Markers::State.new(
+        name: :execute_complete,
+        attrs: { "attempt_id" => "attempt-1" },
+        raw: nil
+      )
+      store = projection_store(dir)
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.repair!(marker: marker, historical_zero_history: true)
+      end
+
+      assert_match(/missing or empty after durable handoff/, error.message)
+      refute File.exist?(store.snapshot_path)
+      refute File.exist?(store.checkpoint_path)
+    end
+  end
+
+  def test_historical_zero_history_repair_refuses_partial_projection_authority
+    with_tmp_dir do |dir|
+      marker = Hive::Markers::State.new(name: :complete, attrs: {}, raw: nil)
+      store = projection_store(dir)
+      original = "existing projection authority\n"
+      File.binwrite(store.snapshot_path, original)
+
+      assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.repair!(marker: marker, historical_zero_history: true)
+      end
+
+      assert_equal original, File.binread(store.snapshot_path)
+      refute File.exist?(store.checkpoint_path)
+    end
+  end
+
+  def test_routine_read_degrades_immediately_while_exact_repair_holds_the_lock
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        assert lock.flock(File::LOCK_EX)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = store.read_routine
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        assert_operator elapsed, :<, 0.5
+        assert_equal "repair_required", result.state
+        assert_equal "journal_lock_busy", result.diagnostics.first.fetch("reason")
+      end
+    end
+  end
+
+  def test_routine_read_rejects_a_fifo_journal_lock_without_blocking
+    skip "File.mkfifo is unavailable" unless File.respond_to?(:mkfifo)
+
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+      FileUtils.rm_f(lock_path)
+      File.mkfifo(lock_path, 0o644)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = store.read_routine
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 0.5
+      assert_equal "repair_required", result.state
+      assert_equal "journal_lock_invalid", result.diagnostics.first.fetch("reason")
+    end
+  end
+
+  def test_explicit_repair_fails_immediately_when_the_journal_lock_is_busy
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        assert lock.flock(File::LOCK_EX)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+          store.repair!
+        end
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        assert_operator elapsed, :<, 0.5
+        assert_match(/journal lock is busy/, error.message)
+      end
+    end
+  end
+
+  def test_predecessor_fetch_exhaustion_remains_exact_task_repairable
+    bounded = Hive::TaskProjection::Store::BoundedRead.new(
+      projection: nil, state: "repair_required", truncated: true,
+      journal_cursor: 0, journal_records: [],
+      diagnostics: [ {
+        "reason" => "predecessor_fetches_exhausted",
+        "message" => "predecessor fetch budget exhausted",
+        "details" => { "cap" => "predecessor_fetches" }
+      } ]
+    )
+
+    attrs = Hive::TaskProjection.repair_marker_attrs(
+      bounded: bounded, project: "demo", slug: "repair-me", stage: "4-execute"
+    )
+
+    refute Hive::TaskProjection.terminal_repair_reason?(
+      "predecessor_fetches_exhausted"
+    )
+    assert_equal "hive repair-projection repair-me --project demo --stage 4-execute",
+                 attrs.fetch("repair_command")
+  end
+
+  def test_explicit_repair_serializes_a_concurrent_journal_append
+    release_projection = repair = append = nil
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      entered_projection = Queue.new
+      release_projection = Queue.new
+      projector = Object.new
+      projection_calls = 0
+      projector.define_singleton_method(:project) do |**attributes|
+        projection_calls += 1
+        if projection_calls == 1
+          entered_projection << true
+          release_projection.pop
+        end
+        Hive::TaskProjection.project(**attributes)
+      end
+      store = projection_store(dir, projector: projector)
+      repair_result = nil
+      repair = Thread.new { repair_result = store.repair! }
+      entered_projection.pop
+
+      append_waiting = Queue.new
+      append_done = Queue.new
+      append = Thread.new do
+        lock_path = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+        File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+          append_waiting << true
+          lock.flock(File::LOCK_EX)
+          File.open(store.journal_path, "a") do |journal|
+            journal.write("#{JSON.generate(condition_event('event-2', state: 'unsatisfied'))}\n")
+          end
+          append_done << true
+        end
+      end
+      append_waiting.pop
+      Thread.pass until append.status == "sleep"
+      assert append_done.empty?, "append must wait for the repair journal lock"
+
+      release_projection << true
+      repair.join
+      append.join
+
+      assert repair_result.bounded.current?
+      assert_equal "current", store.read_routine.state
+      assert_equal "unsatisfied",
+                   store.read_routine.projection.current_condition("AgentHealthy").fetch("state")
+    end
+  ensure
+    release_projection << true if defined?(release_projection) && release_projection&.empty?
+    repair&.join(1)
+    append&.join(1)
+  end
+
+  def test_interrupted_checkpoint_publication_releases_lock_and_stays_repair_required
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      journal_before = File.binread(store.journal_path)
+      original_write = Hive::AtomicFile.method(:write)
+      replacement = lambda do |path, *args, **kwargs|
+        raise Interrupt, "simulated interruption" if path == store.checkpoint_path
+
+        original_write.call(path, *args, **kwargs)
+      end
+
+      with_replaced_singleton_method(Hive::AtomicFile, :write, replacement) do
+        assert_raises(Interrupt) { store.repair! }
+      end
+
+      assert_equal journal_before, File.binread(store.journal_path)
+      assert File.exist?(store.snapshot_path), "the complete atomic snapshot may publish first"
+      refute File.exist?(store.checkpoint_path)
+      assert_equal "repair_required", store.read_routine.state
+      File.open(
+        File.join(dir, Hive::TaskJournal::LOCK_BASENAME), File::RDWR | File::CREAT, 0o644
+      ) do |lock|
+        assert lock.flock(File::LOCK_EX | File::LOCK_NB),
+               "repair interruption must release the journal lock"
+      end
     end
   end
 

@@ -1583,6 +1583,42 @@ def test_failing_job_log_fetch_errors_are_normalized_to_utf8
   end
 end
 
+def test_failing_job_log_fetch_falls_back_to_check_annotations
+  success = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  failure = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  rollup = {
+    "statusCheckRollup" => [
+      { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" }
+    ]
+  }
+  annotation = "The job was not started because recent account payments have failed " \
+               "or your spending limit needs to be increased."
+  calls = []
+  capture = lambda do |*cmd, **_kwargs|
+    calls << cmd
+    if cmd[1] == "run"
+      [ "", "log not found", failure ]
+    else
+      [ JSON.generate([ { "message" => annotation } ]), "", success ]
+    end
+  end
+
+  with_replaced_singleton_method(
+    Hive::Gh, :repository_identity,
+    ->(*, **) { { "host" => "github.com", "repository" => "acme/demo" } }
+  ) do
+    with_replaced_singleton_method(Hive::Gh, :capture3, capture) do
+      log = Hive::Gh.failing_jobs_with_logs(
+        "/tmp/repo", rollup, byte_cap: 2_048
+      ).first.fetch("log")
+
+      assert_includes log, annotation
+    end
+  end
+
+  assert calls.any? { |cmd| cmd[1] == "api" && cmd.join(" ").include?("check-runs/11/annotations") }
+end
+
 def test_failing_job_logs_support_check_urls_and_legacy_status_contexts
   calls = []
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)

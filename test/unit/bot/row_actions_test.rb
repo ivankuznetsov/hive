@@ -137,6 +137,17 @@ class HiveBotRowActionsTest < Minitest::Test
     assert_equal [ "approve:finalize:hive:slug-260624-abcd:7-artifacts" ], callbacks(r)
   end
 
+  def test_outcome_evidence_rework_uses_its_controller_callback
+    r = row(
+      action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      marker: "error", stage: "7-artifacts"
+    )
+
+    assert_equal [ :approve ], roles(r)
+    assert_equal :approve, primary_role(r)
+    assert_equal [ "rework:hive:slug-260624-abcd:7-artifacts" ], callbacks(r)
+  end
+
   def test_action_rejects_unknown_role_at_construction
     error = assert_raises(ArgumentError) do
       Hive::Bot::RowActions::Action.new(role: :bogus, callback: "x:y")

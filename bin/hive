@@ -53,12 +53,6 @@ if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
   end
 end
 
-require "hive/cli"
-require "hive/cli_argv_policy"
-require "hive/cli_json_options"
-require "hive/refactor_patrol/reporter"
-require "json"
-
 # Private detached-wrapper route. It is deliberately handled before Thor so
 # it never appears as a public workflow verb and cannot recurse through normal
 # admission. DetachedLauncher is the only producer.
@@ -87,6 +81,12 @@ if ARGV.first == "__module-hook"
     exit e.exit_code
   end
 end
+
+require "hive/cli"
+require "hive/cli_argv_policy"
+require "hive/cli_json_options"
+require "hive/refactor_patrol/reporter"
+require "json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
@@ -119,6 +119,10 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "status" => { schema: "hive-running-status", error_kind: "error" },
+  "repair-projection" => {
+    schema: "hive-repair-projection", error_kind: "invalid_arguments",
+    extras: { "outcome" => "failed" }
+  },
   "circuits" => { schema: "hive-circuits", error_kind: "usage" },
   "act" => { schema: "hive-act", error_kind: "usage" },
   "prune" => { schema: "hive-prune", error_kind: "usage" },

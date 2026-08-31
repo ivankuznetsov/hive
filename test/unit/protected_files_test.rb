@@ -10,7 +10,7 @@ class ProtectedFilesTest < Minitest::Test
   include HiveTestHelper
 
   def test_orchestrator_owned_lists_canonical_state_and_identity_files
-    assert_equal %w[plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json],
+    assert_equal %w[plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json task-projection.checkpoint.json],
                  Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
                  "ORCHESTRATOR_OWNED is the single source of truth for the protected set"
   end
@@ -23,6 +23,7 @@ class ProtectedFilesTest < Minitest::Test
       File.write(File.join(dir, "task.md"), "## task\n")
       File.write(File.join(dir, "task-journal.jsonl"), "{}\n")
       File.write(File.join(dir, "task-projection.json"), "{}\n")
+      File.write(File.join(dir, "task-projection.checkpoint.json"), "{}\n")
 
       snap = Hive::ProtectedFiles.snapshot(dir)
       assert_kind_of Hash, snap

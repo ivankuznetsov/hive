@@ -3,12 +3,14 @@ title: hive evidence
 type: command
 source: lib/hive/commands/evidence.rb, lib/hive/artifacts/browser_gateway.rb, lib/hive/artifacts/terminal_recorder.rb
 created: 2026-08-14
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [command, artifacts, evidence, recovery]
 ---
 
 **TLDR**: `hive evidence recover` is the stale-safe operator acknowledgement
-for a semantically blocked package. `hive evidence terminal` and
+for a semantically blocked package. `hive evidence rework` is Hive's guarded
+controller transition from a reviewed implementation defect back to execute.
+`hive evidence terminal` and
 `hive evidence browser` are the internal, controller-scoped capture boundaries
 given to an outcome-evidence producer.
 
@@ -21,6 +23,11 @@ reinterpret automatically.
 
 ```sh
 hive evidence recover TARGET \
+  --generation <sha256> \
+  --recovery-digest <sha256>
+
+hive evidence rework TARGET \
+  --stage 7-artifacts \
   --generation <sha256> \
   --recovery-digest <sha256>
 ```
@@ -69,6 +76,15 @@ Do not invent either digest. Copy the complete command from the task's current
 status diagnostic, Hivebox blocker panel, or `hive run` recovery output after
 reviewing the independent reviewer reasons.
 
+Operators normally do not invoke `rework`: `TaskAction` emits the exact command
+and the daemon dispatches it as the next ready action. Its queue grammar accepts
+only the explicit target, `7-artifacts`, both 64-hex bindings, an optional safe
+project, and optional `--json`. Because the command launches no model, durable
+attempt admission uses the controller-only route and does not wait for provider
+health or capacity. The durable worker authenticates the task from the fourth
+argument in this nested command shape (`hive evidence rework TARGET`), while
+binding the attempt to the task's current `7-artifacts` stage.
+
 ## Guards and effects
 
 The command acquires the task lock and requires all of these observations to
@@ -103,6 +119,27 @@ Recovery deliberately stops before dispatch. Refresh
 `workflow.retry` action/token, and invoke that normal action boundary. The new
 artifacts run opens a distinct outcome-evidence generation because the recovery
 epoch is part of generation identity.
+
+## Implementation rework guards and effects
+
+`rework` requires the current marker and strict package pointer to agree on
+`status=rework`, `reason=implementation_rework`, generation, and recovery
+digest under the task and stage-transition locks. It uses the ordinary guarded
+Approve transition to rearm `7-artifacts` back to `4-execute`, then appends a
+mode-0600 authorization receipt containing the reviewed base/head, failed
+targets, and reviewer reasons. The rejected package remains immutable.
+
+There are at most two receipts per task. Exact replay of one observation is
+idempotent; a different third observation fails closed and artifacts publishes
+the operator-owned `reworks_exhausted` blocker. Execute protects every receipt
+slot from the first execute pass onward and every referenced evidence document,
+representation, and project-provider manifest, ignores non-receipt siblings
+when enumerating its two fixed slots, and injects the latest feedback into the
+implementation prompt. Receipt bytes use the same 256 KiB document ceiling as
+the source outcome-evidence pointer, so every contract-valid maximal reviewer
+payload remains recordable. Execute refuses to complete when the
+reviewed-to-final repository diff is empty; a distinct empty commit is not
+progress.
 
 ## Backlinks
 

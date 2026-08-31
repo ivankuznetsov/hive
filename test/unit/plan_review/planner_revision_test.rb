@@ -355,6 +355,8 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     service = Hive::PlanReview::PlannerRevision.new(
       task:, cfg: {}, runner: lambda do |prompt:, output_path:, **|
         assert_includes prompt, "Review me"
+        assert_includes prompt, "Captured planner authority:"
+        assert_includes prompt, "Effective revision route:"
         File.write(output_path, "# Revised\n<!-- COMPLETE -->\n")
         { "status" => "success" }
       end

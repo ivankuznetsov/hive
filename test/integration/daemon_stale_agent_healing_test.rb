@@ -61,6 +61,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(folder)
         state_file = File.join(folder, "task.md")
+        seed_task_projection(folder)
         yield dir, folder, state_file, slug
       end
     end
@@ -184,6 +185,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         # Markers.set auto-stamps a random marker_id on ERROR markers —
         # the same path finalize uses when it writes reason=unpushed_commits.
         Hive::Markers.set(state_file, :error, reason: "unpushed_commits")
+        seed_task_projection(folder, state_file: state_file)
         stamped_id = Hive::Markers.current(state_file).attrs["marker_id"].to_s
         refute stamped_id.empty?, "precondition: Markers.set must stamp a marker_id"
 

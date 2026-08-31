@@ -355,7 +355,20 @@ class InvocationProcessCustodyTest < Minitest::Test
     reader, writer = IO.pipe
     writer.close_on_exec = false
     wrapper = Process.spawn(
-      environment.merge("RUBYOPT" => nil),
+      # test_helper changes HOME to a disposable directory while Bundler's
+      # loader variables still point at the parent bundle. The detached helper
+      # needs a plain Ruby process, otherwise it can exit before publishing its
+      # PID while Bundler tries to resolve gems under that temporary HOME.
+      environment.merge(
+        "BUNDLE_BIN_PATH" => nil,
+        "BUNDLE_GEMFILE" => nil,
+        "BUNDLER_SETUP" => nil,
+        "BUNDLER_VERSION" => nil,
+        "GEM_HOME" => nil,
+        "GEM_PATH" => nil,
+        "RUBYLIB" => nil,
+        "RUBYOPT" => nil
+      ),
       RbConfig.ruby, "-e", <<~'RUBY', writer.fileno.to_s,
         writer = IO.for_fd(Integer(ARGV.fetch(0)))
         child = fork do

@@ -153,6 +153,31 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert events.all? { |_name, attributes| attributes[:request_id] == "coordinated-1" }
   end
 
+  def test_outcome_evidence_implementation_rework_is_not_replayed_as_the_same_artifacts_run
+    with_marker_file do |state_file|
+      attrs = {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64,
+        "recovery_digest" => "b" * 64
+      }
+      Hive::Markers.set(state_file, :error, attrs)
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "error",
+        marker_attrs: Hive::Markers.current(state_file).attrs,
+        stage: "7-artifacts",
+        action: "outcome_evidence_rework",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_empty @coordinator.requests
+      assert_equal :error, Hive::Markers.current(state_file).name
+    end
+  end
+
   def test_resolved_review_stale_delegates_but_unresolved_review_stale_waits
     with_marker_file do |state_file|
       reviews = File.join(File.dirname(state_file), "reviews")
@@ -180,6 +205,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       File.utime(NOW, NOW, escalations)
       heal([ row ])
       assert_equal 1, @coordinator.requests.size
+    end
+  end
+
+  def test_projection_repair_row_never_enters_error_recovery
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        marker: "error",
+        marker_attrs: {
+          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+          "repair_command" => "hive repair-projection s --project p --stage 4-execute"
+        },
+        live_task_lock: false,
+        projection_repair: true
+      )
+
+      heal([ row ])
+
+      assert_empty @coordinator.requests
+      assert_empty @logger.events
+      assert_equal :agent_working, Hive::Markers.current(state_file).name
     end
   end
 
@@ -1135,7 +1182,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                project: "p", slug: "s", stage: "4-execute",
                marker: "agent_working", marker_attrs: {}, action: "error",
                live_task_lock: nil, workflow: nil, task_lock_pid: nil,
-               task_lock_process_start_time: nil, task_lock_id: nil)
+               task_lock_process_start_time: nil, task_lock_id: nil,
+               projection_repair: false)
     Row.new(
       project: project,
       slug: slug,
@@ -1144,6 +1192,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       workflow: workflow,
       marker: marker,
       marker_attrs: marker_attrs,
+      projection_repair: projection_repair,
       folder: File.dirname(state_file),
       state_file: state_file,
       state_file_mtime: mtime,

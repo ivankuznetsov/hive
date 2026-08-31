@@ -510,15 +510,24 @@ class TaskClosureTest < Minitest::Test
         :build_receipt, preview, operator: "tester", channel: "cli"
       )
       File.binwrite(File.join(task.folder, "closure.json"), JSON.generate(receipt))
+      task_projection = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: attempt_store
+      ).read(marker: Hive::Markers.current(task.state_file))
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :new,
-        ->(**) { flunk "active closure projection rebuilt the attempt store" }
+        Hive::TaskProjection::Store, :new,
+        ->(**) { flunk "active closure projection rebuilt the task projection" }
       ) do
-        projection = Hive::TaskClosure.projection(
-          task, project: project, attempt_store: attempt_store
-        )
-        assert_equal receipt.fetch("receipt_digest"), projection.fetch("receipt_digest")
+        with_replaced_singleton_method(
+          Hive::Attempts::Store, :new,
+          ->(**) { flunk "active closure projection rebuilt the attempt store" }
+        ) do
+          projection = Hive::TaskClosure.projection(
+            task, project: project, attempt_store: attempt_store,
+            task_projection: task_projection
+          )
+          assert_equal receipt.fetch("receipt_digest"), projection.fetch("receipt_digest")
+        end
       end
     end
   end
@@ -810,6 +819,24 @@ class TaskClosureTest < Minitest::Test
         assert_nil Hive::TaskClosure.transition_evidence(
           task, receipt_digest: "a" * 64, project: project
         )
+      end
+    end
+  end
+
+  def test_task_generation_accepts_an_already_projected_condition_generation
+    with_closure_project do |task, _project|
+      marker = Hive::Markers.current(task.state_file)
+      projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+      expected = Hive::TaskClosure.task_generation(task, marker: marker)
+
+      with_replaced_singleton_method(
+        Hive::TaskProjection::Store, :new,
+        ->(**) { flunk "task generation rebuilt an accepted projection" }
+      ) do
+        assert_equal expected,
+                     Hive::TaskClosure.task_generation(
+                       task, marker: marker, projection: projection
+                     )
       end
     end
   end

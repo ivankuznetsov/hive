@@ -216,6 +216,9 @@ plan_review:
     adversarial: {agent: grok, model: grok-4.6, family: grok, effort: high, route: native_grok_build}
     verification: {agent: codex, model: gpt-5.6-sol, family: openai, effort: high, route: native_codex}
     fallbacks: []
+    # Optional operational recovery route, used only after the captured
+    # planner produces a transient revision failure:
+    # planner_revision_fallback: {agent: codex, model: gpt-5.6-sol, family: openai, effort: high, route: native_codex}
   approval_policies: []
 ```
 
@@ -225,6 +228,16 @@ protected globs must be safe relative patterns, coverage names are unique
 lowercase identifiers, and required/optional coverage cannot overlap. Every
 route is a closed provider/model/family/effort/route receipt and every reviewer
 name must exist in the model-routing registry.
+
+`routes.planner_revision_fallback` is optional. It is an operational liveness
+control rather than a reviewer-policy input, so adding or changing it does not
+rekey the current logical review or discard accepted findings and decisions.
+The captured planner always receives the first revision attempt. After a
+transient failure, later attempts use the configured fallback and retain it for
+the rest of that review. Immutable attempt receipts record the captured
+planner authority, effective fallback, failure, and selection reason. Reviewer
+and verification route changes remain policy changes and still create a linked
+review.
 
 Ordinary project loads still reject `enabled: false`. A benchmark runtime that
 must reproduce pre-plan-review generation may set the process-local

@@ -186,6 +186,26 @@ class OperationalActionTest < Minitest::Test
     refute action.fetch("confirmation_required")
   end
 
+  def test_outcome_evidence_rework_is_a_distinct_guarded_operational_action
+    observed = {
+      "project" => "demo", "slug" => "rework-task", "folder" => "/tmp/rework-task",
+      "workflow" => "coding", "stage" => "7-artifacts", "marker" => "error",
+      "attrs" => {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64, "recovery_digest" => "b" * 64
+      },
+      "mtime" => "2026-08-30T12:00:00.000000Z",
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "blocked" => false, "held" => nil
+    }
+
+    action = Hive::OperationalAction.descriptor(project: "demo", row: observed)
+
+    assert_equal Hive::OperationalAction::ACTION_ID, action.fetch("action_id")
+    assert_equal "demo:rework-task", action.fetch("target")
+    assert_match(/\A[0-9a-f]{64}\z/, action.fetch("observation_token"))
+  end
+
   def test_max_pass_review_escalation_is_not_a_confirmation_free_retry
     with_tmp_dir do |folder|
       reviews = File.join(folder, "reviews")
@@ -264,6 +284,9 @@ class OperationalActionTest < Minitest::Test
         File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.to_yaml)
         state_file = File.join(folder, "brainstorm.md")
         File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
+        Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+          marker: Hive::Markers.current(state_file)
+        )
         Hive::Config.register_project(name: "demo", path: project_root, repository_identity: nil)
         project = Hive::Config.registered_projects.fetch(0)
         status_action = Hive::Commands::Status.new(
@@ -311,7 +334,13 @@ class OperationalActionTest < Minitest::Test
         def to_h = { "identity" => {} }
       end.new
       store = Object.new
-      store.define_singleton_method(:read) { |marker:| projection.marker = marker; projection }
+      store.define_singleton_method(:read_routine) do |marker:, **|
+        projection.marker = marker
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: projection, state: "current", diagnostics: [],
+          truncated: false, journal_cursor: 0
+        )
+      end
       action = Struct.new(:key).new("run")
 
       with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
@@ -320,6 +349,60 @@ class OperationalActionTest < Minitest::Test
             row = Hive::OperationalAction.observed_row(task, project: "demo")
             assert_equal "none", row.fetch("marker")
             assert_equal root, Hive::OperationalAction.observation_mtime_source(task)
+          end
+        end
+      end
+    end
+  end
+
+  def test_action_recheck_surfaces_projection_repair_without_full_replay
+    with_tmp_dir do |root|
+      workflow = Struct.new(:id) { def controller? = true }.new(:"patrol-fix")
+      task = Struct.new(
+        :workflow, :folder, :project_root, :state_file, :meta_yml_path,
+        :slug, :stage_index, :stage_name, keyword_init: true
+      ).new(
+        workflow: workflow, folder: root, project_root: root,
+        state_file: File.join(root, "patrol-fix-manifest.json"),
+        meta_yml_path: File.join(root, "meta.yml"), slug: "repair",
+        stage_index: 1, stage_name: "inbox"
+      )
+      bounded = Hive::TaskProjection::Store::BoundedRead.new(
+        projection: nil, state: "repair_required",
+        diagnostics: [ {
+          "reason" => "checkpoint_missing",
+          "message" => "bounded task projection is checkpoint missing",
+          "details" => {}
+        } ],
+        truncated: false, journal_cursor: 0
+      )
+      store = Object.new
+      store.define_singleton_method(:read) { |**| raise "action recheck used full replay" }
+      store.define_singleton_method(:read_routine) { |**| bounded }
+      observed_marker = nil
+
+      with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
+        with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+          action = Struct.new(:key).new("error")
+          replacement = lambda do |_task, marker, **|
+            observed_marker = marker
+            action
+          end
+          with_replaced_singleton_method(Hive::TaskAction, :for, replacement) do
+            row = Hive::OperationalAction.observed_row(task, project: "demo")
+
+            assert_equal "error", row.fetch("marker")
+            assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+                         row.dig("attrs", "reason")
+            assert_equal "operator", row.dig("attrs", "owner")
+            assert_equal :error, observed_marker.name
+            assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+            assert_raises(Hive::StaleOperationalObservation) do
+              Hive::OperationalAction.assert_current!(
+                task, project: "demo", action_id: Hive::OperationalAction::ACTION_ID,
+                target: "demo:repair", observation_token: "a" * 64
+              )
+            end
           end
         end
       end
@@ -384,6 +467,41 @@ class OperationalActionTest < Minitest::Test
     assert_match(/no confirmation-free operational action/, error.message)
   end
 
+  def test_dispatch_routes_outcome_evidence_rework_through_the_exact_controller_command
+    require "hive/commands/evidence"
+    task = Struct.new(:folder).new("/tmp/rework-task")
+    observed = {
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "stage" => "7-artifacts",
+      "attrs" => { "generation" => "a" * 64, "recovery_digest" => "b" * 64 }
+    }
+    calls = []
+    command = Object.new
+    command.define_singleton_method(:call) { { "status" => "rework_started" } }
+
+    result = with_replaced_singleton_method(
+      Hive::Commands::Evidence, :new,
+      lambda { |*args, **kwargs|
+        calls << [ args, kwargs ]
+        command
+      }
+    ) do
+      Hive::OperationalAction::Executor.new.send(
+        :dispatch, task, observed, "demo", ->(_locked_task) { }
+      )
+    end
+
+    assert_equal({ "status" => "rework_started" }, result)
+    args, options = calls.fetch(0)
+    assert_equal [ "rework", task.folder ], args
+    assert_equal "demo", options.fetch(:project)
+    assert_equal "7-artifacts", options.fetch(:stage)
+    assert_equal "a" * 64, options.fetch(:generation)
+    assert_equal "b" * 64, options.fetch(:recovery_digest)
+    assert options.fetch(:quiet)
+    assert_same task, options.fetch(:task_resolver).call
+  end
+
   def test_result_reports_archived_when_the_task_disappears_after_action
     executor = Hive::OperationalAction::Executor.new
     executor.define_singleton_method(:resolve_task) do |*|
@@ -407,7 +525,9 @@ class OperationalActionTest < Minitest::Test
         slug = "advance-260720-real"
         brainstorm = File.join(project_root, ".hive-state", "stages", "2-brainstorm", slug)
         FileUtils.mkdir_p(brainstorm)
-        File.write(File.join(brainstorm, "brainstorm.md"), "# Brainstorm\n<!-- COMPLETE -->\n")
+        state_file = File.join(brainstorm, "brainstorm.md")
+        File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
+        seed_task_projection(brainstorm, state_file: state_file)
         action = Hive::OperationalAction.descriptor_for_task(
           Hive::Task.new(brainstorm), project: project.fetch("name")
         )
@@ -462,6 +582,7 @@ class OperationalActionTest < Minitest::Test
             intake, id: 101, slug: slug,
             display_name: "Generic operational action", workflow: descriptor.id.to_s
           )
+          seed_task_projection(intake)
           executor = Hive::OperationalAction::Executor.new
           ran = []
           original = Hive::Stages::Base.method(:spawn_agent)
@@ -489,6 +610,9 @@ class OperationalActionTest < Minitest::Test
             assert_equal [ "intake" ], ran
             assert_equal "ready_to_advance", run_result.fetch("task_state")
 
+            Hive::TaskProjection::Store.new(task_folder: intake).rebuild!(
+              marker: Hive::Markers.current(Hive::Task.new(intake).state_file)
+            )
             second = operational_action_for(project, slug)
             approve_result = nil
             capture_io do
@@ -528,6 +652,7 @@ class OperationalActionTest < Minitest::Test
             folder, id: 202, slug: slug,
             display_name: "Generic mtime split", workflow: descriptor.id.to_s
           )
+          seed_task_projection(folder)
           meta_path = File.join(folder, "meta.yml")
           File.utime(Time.now - 10, Time.now - 10, meta_path)
           File.utime(Time.now + 10, Time.now + 10, folder)

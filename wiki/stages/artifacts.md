@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [stage, artifacts, evidence, review]
 ---
 
@@ -11,7 +11,8 @@ tags: [stage, artifacts, evidence, review]
 identity-bound outcome-evidence package. A fresh read-only inference agent maps
 the task, plan, and exact committed diff into user-meaningful claims; a separate
 producer makes the required proof; and a third fresh read-only reviewer accepts,
-targets for recapture, or blocks every claim and supported exclusion. Legacy
+targets evidence for recapture, returns repository defects for implementation
+rework, or blocks every claim and supported exclusion. Legacy
 Hivebox screenshots and recordings remain visible diagnostics but never establish
 completion authority.
 
@@ -102,16 +103,30 @@ completion authority.
    Hive records the exact immutable review scope instead of pretending a copied
    hash list is a per-tool access log.
 9. `accepted` publishes the append-only attempt and atomic `current.json`, then
-   writes `COMPLETE`. `revise` requests only the failed claim proofs, preserves
-   already accepted evidence, and permits a bounded attempt to improve any
-   nonempty subset of requested claims. Unaddressed claim evidence is retained;
-   Hive reassembles the full package and sends it through a fresh review.
-   `blocked`, an invalid exclusion, missing
-   capability, or exhausted recaptures publishes an operator-visible blocked
-   pointer and semantic `ERROR`.
+   writes `COMPLETE`. `revise` requests only replacement proof for failed
+   claims, preserves already accepted evidence, and permits a bounded attempt
+   to improve any nonempty subset of requested claims. Unaddressed claim
+   evidence is retained; Hive reassembles the full package and sends it through
+   a fresh review. `rework` means the reviewed source, configuration, tests, or
+   repository documentation must change. Hive publishes a digest-bound rework
+   pointer and semantic `ERROR`; the daemon then dispatches the exact
+   controller-owned `hive evidence rework` transition back to `4-execute`.
+   Reviewer targets and reasons enter the implementation prompt as untrusted
+   repair context, while the reviewed package and append-only authorization
+   receipts stay protected. The distinct `outcome_evidence_rework` action is
+   routed through its exact digest-bound command by daemon, Web, Telegram, and
+   operational adapters. An unchanged implementation tree cannot return to
+   artifacts, even when the implementer creates an empty commit. `blocked` is
+   reserved for an operator-owned credential,
+   environment, or decision that repository work cannot solve. Invalid
+   exclusions, missing capability, exhausted recaptures, or exhausted
+   implementation reworks publish an operator-visible blocked pointer and
+   semantic `ERROR`.
 
 The default is one initial attempt plus at most two targeted recaptures. Project
 configuration may reduce recaptures to zero or one, but cannot exceed two.
+Implementation rework has a separate fixed bound of two reviewed returns to
+`4-execute`; the third request becomes `reworks_exhausted` rather than looping.
 
 ## Proof selection
 
@@ -211,6 +226,14 @@ generation intact for audit. Refresh operational status and invoke its guarded
 `workflow.retry` action to start a new evidence generation. See
 [[commands/evidence]].
 
+Implementation rework is not an operator acknowledgement and does not use the
+recovery epoch. The current pointer binds the exact reviewed generation and
+recovery digest; `TaskAction` projects those values into `hive evidence rework`,
+and the daemon's ordinary ready-action path runs that controller-only command.
+The transition appends one of two task-level authorization receipts, rearms the
+coding workflow from `7-artifacts` to `4-execute`, and leaves the rejected
+evidence generation immutable for audit.
+
 ## Legacy capture diagnostics
 
 `capture-requirement.json`, `media/capture-manifest.json`, and the older
@@ -229,6 +252,10 @@ and reviewer capability. Legacy media follows in a visibly labelled
 
 - A valid accepted pointer is projected as `COMPLETE` and surfaces
   `ready_to_finalize`.
+- An implementation-rework pointer is a semantic `ERROR` that surfaces the
+  exact digest-bound `hive evidence rework` command. The daemon dispatches it
+  automatically without provider-route admission, returning the task to
+  `4-execute`; it is not handled by the same-stage stale-error healer.
 - Capability, review, and recapture-exhaustion blockers are durable `ERROR`
   rows with the exact `hive evidence recover` command. Paced automated recovery
   re-probes capability blockers in the same generation. It does not clear an

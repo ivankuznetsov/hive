@@ -94,6 +94,7 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    primary: nope\n" => /routes\.primary.*must be a Hash/i,
         "plan_review:\n  routes:\n    fallbacks: nope\n" => /fallbacks.*must be an Array/i,
         "plan_review:\n  routes:\n    fallbacks: [nope]\n" => /fallbacks\[0\].*must be a Hash/i,
+        "plan_review:\n  routes:\n    planner_revision_fallback: nope\n" => /planner_revision_fallback.*must be a Hash/i,
         "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
@@ -116,6 +117,21 @@ class ConfigTest < Minitest::Test
       YAML
       assert_equal "fallback-codex",
                    Hive::Config.load(dir).dig("plan_review", "routes", "fallbacks", 0, "route")
+
+      File.write(config_path, <<~YAML)
+        plan_review:
+          routes:
+            planner_revision_fallback:
+              agent: codex
+              model: gpt-5.6-sol
+              family: openai
+              effort: high
+              route: native_codex
+      YAML
+      assert_equal "gpt-5.6-sol",
+                   Hive::Config.load(dir).dig(
+                     "plan_review", "routes", "planner_revision_fallback", "model"
+                   )
 
       policy = {
         "id" => "bounded_policy", "version" => 1, "action" => "approve_finding",

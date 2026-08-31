@@ -3,7 +3,7 @@ title: Hive::SecretPatterns
 type: module
 source: lib/hive/secret_patterns.rb
 created: 2026-04-26
-updated: 2026-08-21
+updated: 2026-08-31
 tags: [security, secrets, regex, secret-scan, redact]
 ---
 
@@ -19,12 +19,21 @@ not state owned by either component. New patterns require focused tests.
 Hive::SecretPatterns::PATTERNS    # → frozen Hash<Symbol, Regexp>
 Hive::SecretPatterns.scan(text)   # → [{name: :aws_access_key, snippet: "AKIA..."}, …]
 Hive::SecretPatterns.match?(text) # → boolean, short-circuiting on the first match
+Hive::SecretPatterns.match_diff?(diff) # → boolean for paths and added lines
 Hive::SecretPatterns.redact(text) # → String with each match replaced by "[REDACTED:<name>]"
 ```
 
 `scan` snippets are truncated to 80 characters. Callers that only need a
 publication gate use `match?` so credential-dense input cannot allocate a match
 record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes replaced (so a binary log tail with `\xff` bytes never raises `Encoding::CompatibilityError` when gsubbed against the UTF-8 PATTERNS regexes — the failure path that previously aborted the old full status snapshot, PR #84 review finding #4).
+
+`match_diff?` is the source-aware publication gate. It scans changed paths and
+added hunk lines, not removed or unchanged base bytes. Password-shaped matches
+whose complete right-hand side is provably a Ruby runtime reference are not
+credential material. Quoted literals, shell substitutions, mixed
+reference-plus-literal expressions, unparsed source forms, and every other
+secret pattern still fail closed. Synthetic non-patch input retains the raw
+`match?` behavior.
 
 ## Pattern catalogue
 
@@ -36,7 +45,7 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 | `github_fine_grained_pat` | `github_pat_[A-Za-z0-9_]{20,}` | Current fine-grained GitHub personal access tokens. |
 | `generic_api_key` | `\bapi[_-]?key\b[\s:=]{0,3}['"]?…20+ chars` | Quoted or unquoted assignments. |
 | `pem_private_key` | `-----BEGIN … PRIVATE KEY-----…-----END … PRIVATE KEY-----` (`/m`) | Block form — redacts the base64 body, not just the BEGIN header. PR #84 #3. |
-| `password_assignment` | conventional names ending in `password`, `passwd`, or `pwd`, followed by `:` or `=` and 6+ chars | Catches shell / env / YAML assignment shapes such as `DB_PASSWORD=...` as well as bare `password: ...`. |
+| `password_assignment` | conventional names ending in `password`, `passwd`, or `pwd`, followed by `:` or `=` and 6+ chars | Catches shell / env / YAML assignment shapes such as `DB_PASSWORD=...` as well as bare `password: ...`. A whole `$NAME` or `${NAME}` reference, optionally quoted, is indirection rather than secret material; mixed reference-plus-literal values remain findings. |
 | `bearer_token` | `\bauthorization\s*[:=]\s*['"]?(Bearer|Basic|Token)\s+…8+ chars` | HTTP `Authorization:` headers across curl / log / framework formats. |
 | `session_cookie` | `(Set-)?Cookie:\s*…(session(id)?|sid|auth)…=…8+` | Cookie / Set-Cookie values containing a session-like key. |
 | `openai_api_key` | `\bsk-[A-Za-z0-9]{20,}` | OpenAI API key prefix. |
@@ -48,12 +57,14 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 ## Used by
 
 - `Hive::Stages::OpenPr` / `Hive::Stages::Finalize` — refuse PR body/state content containing any match (ADR-008).
+- `Hive::GithubPublication` — scans titles and bodies conservatively, and uses
+  `match_diff?` for exact Git patches so ordinary runtime password plumbing is
+  not mistaken for a committed credential.
 - `Hive::Stages::Review::GithubPublisher` — skips PR comment mirroring when a reviewer file contains a secret pattern.
 - `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default
-  scans every added line. A password assignment is skipped only when its whole
-  right-hand side is unquoted and contains syntactic lookup structure
-  (`[...]` or a call); a dot inside a literal value is not a lookup. Mixed
-  lookup-plus-literal lines remain findings. Exact findings may be waived by
+  scans every added line and shares the same runtime-reference classifier as
+  publication. A dot inside an unquoted non-code literal is not a lookup, and
+  shell substitutions or mixed lookup-plus-literal lines remain findings. Exact findings may be waived by
   `[pattern_name, SHA256(full match)]`, so no path/value allowlist grows inside
   the scanner.
 - `Hive::Stages::AutoCommit` — scans exact staged blobs before an autonomous

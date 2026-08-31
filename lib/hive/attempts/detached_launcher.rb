@@ -115,7 +115,14 @@ module Hive
           command = systemd_scope_command(record, command) if use_systemd_scope
           env = ENV.keys.grep(/\AHIVE_ATTEMPT_/).to_h { |key| [ key, nil ] }.merge(
             "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,
-            "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s
+            "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s,
+            # The wrapper re-enters Hive itself. It must not inherit the
+            # caller's Bundler loader, which can point at a different checkout
+            # or an ephemeral test HOME before the supervisor reports ready.
+            "RUBYOPT" => nil, "RUBYLIB" => nil,
+            "BUNDLE_GEMFILE" => nil, "BUNDLE_BIN_PATH" => nil,
+            "BUNDLER_SETUP" => nil, "BUNDLER_VERSION" => nil,
+            "RUBYGEMS_GEMDEPS" => nil, "GEM_HOME" => nil, "GEM_PATH" => nil
           )
           exec(
             env, *command,

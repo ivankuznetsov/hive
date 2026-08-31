@@ -108,7 +108,9 @@ module Hive
                   "#{accepted_without_proof.join(', ')}"
           end
 
-          status = if verdicts.any? { |item| item.fetch("verdict") == "blocked" }
+          status = if verdicts.any? { |item| item.fetch("verdict") == "rework" }
+            "rework"
+          elsif verdicts.any? { |item| item.fetch("verdict") == "blocked" }
             "blocked"
           elsif verdicts.any? { |item| item.fetch("verdict") == "revise" }
             "revise"
@@ -219,8 +221,8 @@ module Hive
           verdict = object!(value, "review verdict")
           reject_unknown!(verdict, %w[target_id verdict reason], "review verdict")
           result = verdict.fetch("verdict").to_s
-          unless %w[accepted revise blocked].include?(result)
-            raise StoreError, "review verdict must be accepted, revise, or blocked"
+          unless %w[accepted revise rework blocked].include?(result)
+            raise StoreError, "review verdict must be accepted, revise, rework, or blocked"
           end
 
           {

@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "shellwords"
 require "digest"
+require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/output_pulse"
 require "hive/agent_profiles"
@@ -117,6 +118,21 @@ module Hive
               error_message: nil,
               limit_text: nil
             ) if run_result.exit_code && run_result.exit_code.zero?
+
+            # Hosted check runners can report account, billing, or quota
+            # walls in their diagnostics. Those cannot be repaired by code,
+            # so return the existing typed limit result before spending an
+            # agent attempt. Local CI output is deliberately excluded: test
+            # suites can legitimately exercise and print limit-like strings.
+            if command_runner && Hive::AgentLimit.limit_reached?(output)
+              return Result.new(
+                status: :error,
+                attempts: attempts,
+                last_output: output,
+                error_message: Hive::AgentLimit.error_message(output, agent: "hosted-ci"),
+                limit_text: output
+              )
+            end
 
             if attempts >= max_attempts
               return Result.new(

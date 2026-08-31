@@ -764,8 +764,9 @@ module Hive
       end
 
       def ensure_secret_free!(request)
-        fields = { "title" => request.title, "body" => request.published_body, "diff" => request.diff }
+        fields = { "title" => request.title, "body" => request.published_body }
         detected = fields.keys.select { |key| Hive::SecretPatterns.match?(fields.fetch(key)) }
+        detected << "diff" if Hive::SecretPatterns.match_diff?(request.diff)
         return if detected.empty?
 
         blocked!("secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes")

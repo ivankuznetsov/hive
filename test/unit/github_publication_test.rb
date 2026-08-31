@@ -624,6 +624,53 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_secret_scan_classifies_runtime_password_references_in_a_native_diff
+    with_local_remote do |repo, remote, head|
+      clean = request_for(repo, head)
+      diff = <<~DIFF
+        diff --git a/app/services/setup.rb b/app/services/setup.rb
+        --- a/app/services/setup.rb
+        +++ b/app/services/setup.rb
+        @@ -1 +1 @@
+        -operator.name = name
+        +operator.password = password
+      DIFF
+      request = Hive::GithubPublication::Request.new(
+        **clean.to_h.merge(diff: diff, diff_digest: Digest::SHA256.hexdigest(diff))
+      )
+
+      result = controller_for(repo, remote, FakeGithub.new).publish!(
+        request, revalidate: ->(_phase) { true }
+      )
+
+      assert_equal request.head_oid, result.fetch("head_oid")
+    end
+  end
+
+  def test_secret_scan_blocks_literals_inside_shell_command_substitutions
+    with_local_remote do |repo, remote, head|
+      clean = request_for(repo, head)
+      diff = <<~DIFF
+        diff --git a/.kamal/secrets b/.kamal/secrets
+        --- /dev/null
+        +++ b/.kamal/secrets
+        @@ -0,0 +1 @@
+        +ROOT_PASSWORD=$(printf %s s3cretpassphrase42)
+      DIFF
+      request = Hive::GithubPublication::Request.new(
+        **clean.to_h.merge(diff: diff, diff_digest: Digest::SHA256.hexdigest(diff))
+      )
+
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller_for(repo, remote, FakeGithub.new).publish!(
+          request, revalidate: ->(_phase) { true }
+        )
+      end
+
+      assert_equal "secret_detected", error.code
+    end
+  end
+
   def test_creation_base_is_immutable_even_when_the_base_branch_later_advances
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)

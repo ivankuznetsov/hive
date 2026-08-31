@@ -469,6 +469,13 @@ start again. There is no general legacy decoder, attempts-v4 migration state
 machine, dual reader/writer, reverse hydration, implicit database creation,
 rollback, or downgrade.
 
+The cutover deliberately retains task journals and their validated projection
+checkpoints while resetting legacy attempt rows. A checkpoint prefix whose
+attempt was accepted before the durable installation activation boundary may
+classify that missing legacy attempt as lost; the prefix must still pass its
+cursor, inode, and anchor checks. The appended suffix is validated against
+SQLite, and strict full replay still rejects every unknown attempt.
+
 The package manager publishes the candidate normally; Hive never renames
 package-owned launcher entries or retains the previous executable tree.
 `hive runtime` exposes only bounded status and forward resume. The external

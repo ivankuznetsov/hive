@@ -48,6 +48,14 @@ payload files remain untouched. An interruption after fencing leaves evidence
 and tombstones in place; `hive runtime resume` only converges forward. Normal
 runtime never creates or migrates the database and has no legacy fallback.
 
+The installation's durable activation timestamp is also the boundary between
+discarded legacy attempts and new SQLite attempts. A valid projection
+checkpoint can retain its authenticated pre-activation prefix as lost legacy
+execution while validating every appended record against SQLite. Missing
+post-activation attempts and unknown attempts during strict full replay remain
+integrity failures; Hive inserts no fabricated legacy row and does not rewrite
+the journal.
+
 ## Task-folder renames
 
 `Hive::Commands::Migrate::STAGE_RENAMES` maps the pre-open-pr stage layout onto the current `Hive::Stages::DIRS` list:

@@ -290,6 +290,14 @@ module Hive
         }
       end
 
+      def pre_activation_projection?(observed_at)
+        activated_at = database.installation_identity&.fetch(:activated_at)
+        activated_at && RuntimeControlPlane::Codec.load_time(observed_at) <
+          RuntimeControlPlane::Codec.load_time(activated_at)
+      rescue RuntimeControlPlane::Error, KeyError, TypeError
+        false
+      end
+
       def projection_reader = ProjectionReader.new(self)
 
       # Internal seams used only by AdmissionTransition's one SQL transaction.

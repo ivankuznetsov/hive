@@ -36,7 +36,9 @@ class TaskActivityTest < Minitest::Test
   def test_checkpoint_refresh_failure_does_not_reject_a_durable_activity
     with_activity do |activity, dir|
       broken_store = Object.new
-      broken_store.define_singleton_method(:rebuild!) { raise "checkpoint unavailable" }
+      broken_store.define_singleton_method(:refresh_after_append!) do
+        raise "checkpoint unavailable"
+      end
       original_new = Hive::TaskProjection::Store.method(:new)
       Hive::TaskProjection::Store.define_singleton_method(:new) { |**| broken_store }
       begin

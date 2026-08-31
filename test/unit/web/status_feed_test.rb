@@ -188,6 +188,14 @@ class StatusFeedTest < Minitest::Test
     feed&.stop
   end
 
+  def test_status_command_requires_a_payload_implementation
+    command = Object.new.extend(Hive::Web::StatusCommand)
+
+    error = assert_raises(NotImplementedError) { command.json_payload([]) }
+
+    assert_equal "status commands must implement json_payload", error.message
+  end
+
   def test_contract_defaults_keep_minimal_producers_authoritative
     with_tmp_global_config do
       feed = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([

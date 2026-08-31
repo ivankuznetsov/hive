@@ -5,6 +5,29 @@ require "hive/attempts/repository"
 class AttemptsRepositoryTest < Minitest::Test
   include HiveTestHelper
 
+  class GuardedDataset
+    TERMINALS = %i[all any? count delete each first get insert select_map update].freeze
+
+    def initialize(dataset, active)
+      @dataset = dataset
+      @active = active
+    end
+
+    def method_missing(name, *arguments, **keywords, &block)
+      raise "dataset executed outside Database#read" if TERMINALS.include?(name) && !@active.call
+
+      result = @dataset.public_send(name, *arguments, **keywords, &block)
+      result.is_a?(Sequel::Dataset) ? self.class.new(result, @active) : result
+    end
+
+    def respond_to_missing?(name, include_private = false) =
+      @dataset.respond_to?(name, include_private) || super
+  end
+
+  GuardedDatabase = Data.define(:connection, :active) do
+    def [](table) = GuardedDataset.new(connection[table], active)
+  end
+
   NOW = Time.utc(2026, 7, 16, 12)
   CLAIM_CAPABILITY = "c" * 64
 
@@ -41,6 +64,40 @@ class AttemptsRepositoryTest < Minitest::Test
       assert restarted.finish_publication(terminal.attempt_id)
       assert_nil restarted.fetch_hot(terminal.attempt_id)
       assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
+    end
+  end
+
+  def test_coordination_queries_execute_before_the_process_guard_checkout_ends
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      terminal = repository.terminalize(
+        running,
+        outcome: "succeeded", exit_status: 0, final_checkpoint: checkpoint,
+        output_references: [ output_reference ], log_reference: log_reference, now: NOW + 3
+      )
+      database = repository.database
+      original_read = database.method(:read)
+      active = false
+      database.define_singleton_method(:read) do |&block|
+        original_read.call do |connection|
+          active = true
+          block.call(GuardedDatabase.new(connection, -> { active }))
+        ensure
+          active = false
+        end
+      end
+
+      assert_equal terminal.attempt_id,
+                   repository.terminal_attempt_id(request_id: terminal["request_id"])
+      assert_equal terminal.attempt_id,
+                   repository.successful_attempt_id(
+                     task_generation: terminal.task_generation, subject: terminal.subject
+                   )
     end
   end
 
@@ -166,11 +223,16 @@ class AttemptsRepositoryTest < Minitest::Test
       launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
       lost = repository.mark_lost(launching, reason: "stale_generation", now: NOW + 1)
 
-      reservation = repository.database.read do |db|
-        db[:capacity_reservations].where(attempt_id: lost.attempt_id).first
+      reservation, request = repository.database.read do |db|
+        [
+          db[:capacity_reservations].where(attempt_id: lost.attempt_id).first,
+          db[:dispatch_requests].where(request_id: lost["request_id"]).first
+        ]
       end
       assert_equal "released", reservation.fetch(:state)
       assert_equal Hive::Attempts::Record.iso8601(NOW + 1), reservation.fetch(:released_at)
+      assert_equal "awaiting_delivery", request.fetch(:state)
+      assert_equal lost.attempt_id, request.fetch(:claim_attempt_id)
       assert_raises(Hive::Attempts::CompareAndSwapFailed) do
         repository.mark_lost(launching, reason: "stale_generation", now: NOW + 2)
       end

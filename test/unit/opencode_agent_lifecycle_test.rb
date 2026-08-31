@@ -703,6 +703,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   def make_task(dir, slug: "opencode-agent-260812-aaaa")
     folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     Hive::Task.new(folder)
   end
 

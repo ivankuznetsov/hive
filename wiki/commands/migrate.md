@@ -9,8 +9,8 @@ tags: [command, migration, config, reviewers, stages, task-id, display-name, rec
 
 **TLDR**: `hive migrate [PROJECT_PATH]` upgrades one project's Markdown task
 authority. `hive migrate --all --yes` is a different, installation-wide
-offline operation: it creates one verified SQLite candidate and activates the
-whole registered fleet or none of it.
+offline operation: it creates one verified SQLite candidate for the complete
+included fleet and publishes activation only after every included project validates.
 
 ## Usage
 
@@ -32,12 +32,14 @@ activation-intent manifest.
 The package manager publishes the candidate normally; Hive never renames a
 package-owned launcher or preserves the previous executable tree. Before any
 candidate startup mutation, an early read-only gate refuses ordinary commands.
-Cutover stops daemon, bot, and Web, rejects live owners, snapshots and validates
-token usage including consistent SQLite WAL/SHM state, and installs permanent
+Cutover journals the exact service state before stopping daemon, bot, and Web,
+rejects live owners, snapshots and validates token usage while holding the
+legacy database against late writers through fencing, and installs permanent
 path-shape tombstones over retired writer paths. It rebuilds project and task
-identity from file authority, resets the remaining machine-local runtime
-domains, records irreversible intent, activates, and restarts only services
-that were running. Task journals, projections, artifacts, and referenced
+identity from file authority, validates the complete SQLite candidate before
+any tombstone, resets the remaining machine-local runtime domains, records
+irreversible intent, activates the database authority, and then restarts only
+services that were running. Task journals, projections, artifacts, and referenced
 payload files remain untouched. An interruption after fencing leaves evidence
 and tombstones in place; `hive runtime resume` only converges forward. Normal
 runtime never creates or migrates the database and has no legacy fallback.

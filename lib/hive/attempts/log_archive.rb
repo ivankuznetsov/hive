@@ -62,21 +62,27 @@ module Hive
       def expire(attempt_id, now: Time.now.utc)
         id = safe_id(attempt_id)
         with_custody(id, File::LOCK_EX, nonblock: true) do
-          paths = @store.database.transaction do |db|
+          references = @store.database.transaction do |db|
             rows = db[:payload_references].where(attempt_id: id)
-              .where(state: %w[sealed pinned]).all
+              .where(state: %w[sealed pinned releasable]).all
             next [] if rows.empty?
 
-            rows.each do |row|
+            rows.reject { |row| row.fetch(:state) == "releasable" }.each do |row|
               db[:payload_references].where(payload_id: row.fetch(:payload_id)).update(
                 state: "releasable", retain_until: now.utc.iso8601(6)
               )
             end
-            rows.map { |row| row.fetch(:relative_path) }.uniq
+            rows.map { |row| payload_reference(row) }.uniq
           end
-          return :missing if paths.empty?
+          return :missing if references.empty?
 
-          paths.each { |relative| remove_unreferenced(relative) }
+          @store.payload_store.with_reference_custody(references) do
+            references.each { |reference| remove_unreferenced(reference) }
+          end
+          @store.database.transaction do |db|
+            db[:payload_references].where(attempt_id: id, state: "releasable")
+              .update(retain_until: nil)
+          end
           :expired
         end
       rescue Sequel::Error, RuntimeControlPlane::Error,
@@ -92,7 +98,7 @@ module Hive
 
         after = normalize_cursor(cursor)
         ids = @store.database.read do |db|
-          rows = sealed_logs(db)
+          rows = expirable_logs(db)
           page = after ? rows.where { attempt_id > after } : rows
           values = page.order(:attempt_id).limit(limit).select_map(:attempt_id)
           if after && values.length < limit
@@ -144,18 +150,13 @@ module Hive
         nil
       end
 
-      def remove_unreferenced(relative)
+      def remove_unreferenced(reference)
+        relative = reference.fetch("path")
         retained = @store.database.read do |db|
           db[:payload_references].where(relative_path: relative)
             .where(state: %w[sealed pinned]).any?
         end
         return if retained
-
-        reference = @store.database.read do |db|
-          row = db[:payload_references].where(relative_path: relative).first
-          row && payload_reference(row)
-        end
-        return unless reference
 
         path = @store.payload_store.path_for(reference)
         status = File.lstat(path)
@@ -177,8 +178,10 @@ module Hive
         raise RepositoryError, "attempt cold log cursor is invalid"
       end
 
-      def sealed_logs(db)
-        db[:payload_references].where(kind: "attempt_log", state: %w[sealed pinned])
+      def expirable_logs(db)
+        db[:payload_references].where(kind: "attempt_log").where(
+          Sequel.lit("state IN ('sealed', 'pinned') OR (state = 'releasable' AND retain_until IS NOT NULL)")
+        )
       end
 
       def payload_reference(row)

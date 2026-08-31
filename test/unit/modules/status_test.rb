@@ -317,12 +317,13 @@ class ModulesStatusTest < Minitest::Test
       end
       projected = Hive::Modules::Inspector.new(
         store: store, project_id: "project-1", decision_journal: journal,
-        clock: -> { NOW }
+        attempt_store: empty_attempt_store, clock: -> { NOW }
       ).inspect("demo")
       assert_equal "local", projected.dig("latest_decision", "decision_id")
 
       inspector = Hive::Modules::Inspector.new(
-        store: store, project_id: "project-1", clock: -> { NOW }
+        store: store, project_id: "project-1",
+        attempt_store: empty_attempt_store, clock: -> { NOW }
       )
       tombstone = {
         "name" => "demo", "installed" => false, "enabled" => false,
@@ -399,7 +400,7 @@ class ModulesStatusTest < Minitest::Test
   def inspector(store, root, available: {})
     Hive::Modules::Inspector.new(
       store: store, project_id: "project-1",
-      attempt_store: Hive::Attempts::Repository.new(root: File.join(root, "attempts"), create_directories: false),
+      attempt_store: empty_attempt_store,
       secret_availability: ->(name) { available.fetch(name, false) }, clock: -> { NOW }
     )
   end

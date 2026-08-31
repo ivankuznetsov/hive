@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:running-status:v1",
-  "title": "Bounded Hive running-task status (v1)",
+  "$id": "urn:hive:schema:running-status:v2",
+  "title": "Bounded Hive running-task status (v2)",
   "description": "Stable compact contract emitted by `hive status --json`. Only tasks with a verified live runner lock or live recorded agent process are returned.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
@@ -19,7 +19,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-running-status" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": true },
         "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
         "generated_at": { "type": "string", "format": "date-time" },
@@ -99,7 +99,7 @@
       "required": [
         "max_tasks", "max_output_bytes", "max_string_bytes",
         "max_lock_bytes", "max_metadata_bytes", "max_daemon_pid_bytes",
-        "max_projects_scanned", "max_filesystem_entries_scanned"
+        "max_projects_scanned", "max_lease_rows_scanned"
       ],
       "properties": {
         "max_tasks": { "const": 32 },
@@ -109,7 +109,7 @@
         "max_metadata_bytes": { "const": 65536 },
         "max_daemon_pid_bytes": { "const": 4096 },
         "max_projects_scanned": { "const": 256 },
-        "max_filesystem_entries_scanned": {
+        "max_lease_rows_scanned": {
           "const": 10000,
           "description": "Maximum runtime-control-plane lease rows inspected as source entries."
         }
@@ -120,7 +120,7 @@
       "additionalProperties": false,
       "required": [
         "projects_total", "projects_scanned", "projects_omitted",
-        "projects_unavailable", "filesystem_entries_scanned", "tasks_scanned",
+        "projects_unavailable", "lease_rows_scanned", "tasks_scanned",
         "malformed_locks", "stale_locks", "transition_skips", "scan_truncated"
       ],
       "properties": {
@@ -128,7 +128,7 @@
         "projects_scanned": { "type": "integer", "minimum": 0 },
         "projects_omitted": { "type": "integer", "minimum": 0 },
         "projects_unavailable": { "type": "integer", "minimum": 0 },
-        "filesystem_entries_scanned": {
+        "lease_rows_scanned": {
           "type": "integer",
           "minimum": 0,
           "description": "Runtime-control-plane lease rows inspected as source entries."
@@ -159,7 +159,7 @@
         "status": { "const": "running" },
         "marker": {
           "type": "null",
-          "description": "Reserved for a future bounded marker projection; v1 does not read task state files."
+          "description": "Reserved for a future bounded marker projection; v2 does not read task state files."
         },
         "action": { "const": "agent_running" },
         "metadata_status": {
@@ -202,7 +202,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-running-status" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },

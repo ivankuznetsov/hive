@@ -22,9 +22,12 @@ class ReviewersAgentTest < Minitest::Test
   end
 
   def make_ctx(dir)
+    task_folder = File.join(dir, ".hive-state", "stages", "6-review", "test")
+    FileUtils.mkdir_p(task_folder)
+    prepare_test_task_run(task_folder)
     Hive::Reviewers::Context.new(
       worktree_path: dir,
-      task_folder: File.join(dir, ".hive-state", "stages", "6-review", "test"),
+      task_folder: task_folder,
       default_branch: "main",
       pass: 1
     )

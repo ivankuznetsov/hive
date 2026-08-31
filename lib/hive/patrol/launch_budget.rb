@@ -36,6 +36,7 @@ module Hive
                      clock: -> { Time.now.utc }, id_generator: -> { SecureRandom.uuid },
                      charge_discovery: true)
         @project_root = File.expand_path(project_root)
+        @cfg = cfg
         @usage_db = usage_db
         @database = database
         @clock = clock
@@ -77,8 +78,11 @@ module Hive
 
       def allowance_snapshot(engine: @engine || :ordinary)
         engine = normalize_engine(engine)
-        lane = ensure_lane(engine, date_for(now))
-        hold = read_hold(engine)
+        project_id!
+        date = date_for(now)
+        lane, hold = @database.read do |db|
+          [ allowance_dataset(db, engine, date).first || { used: 0 }, hold_dataset(db, engine).first ]
+        end
         used = lane.fetch(:used)
         status = "available"
         remaining = [ @limit - used, 0 ].max
@@ -97,7 +101,7 @@ module Hive
           @last_exhaustion = nil
         end
         {
-          engine: engine.to_s, utc_date: date_for(now), limit: @limit,
+          engine: engine.to_s, utc_date: date, limit: @limit,
           used: used, remaining: remaining, status: status, retry_at: retry_at
         }
       rescue StandardError => error
@@ -199,13 +203,22 @@ module Hive
 
       def reserve_discovery!(engine:, started_at:, reservation_id:)
         date = date_for(started_at)
-        ensure_lane(engine, date)
         id = reservation_id.to_s
         raise ArgumentError, "discovery reservation id is invalid" if
           id.empty? || id.bytesize > MAX_RESERVATION_ID_BYTES
+        project_id!
 
         @database.transaction do |db|
-          row = lane_dataset(db, engine, date).first
+          dataset = allowance_dataset(db, engine, date)
+          row = dataset.first
+          unless row
+            dataset.insert(
+              project_id: @project_id, kind: engine.to_s, window_key: date,
+              used: 0, limit_value: @limit, revision: 0,
+              reservation_ids_json: "[]", updated_at: timestamp_for(normalize_time(started_at))
+            )
+            row = dataset.first
+          end
           hold = hold_dataset(db, engine).first
           if retry_active?(hold, at: started_at)
             @last_exhaustion = exhaustion(
@@ -224,7 +237,7 @@ module Hive
             ids.length >= MAX_RESERVATIONS_PER_LANE
 
           ids << id
-          lane_dataset(db, engine, date).update(
+          dataset.update(
             used: row.fetch(:used) + 1,
             limit_value: [ @limit, row.fetch(:used) + 1 ].max,
             reservation_ids_json: Hive::RuntimeControlPlane::Codec.dump_json(ids),
@@ -238,20 +251,6 @@ module Hive
         @ledger_error = error
         @last_exhaustion = exhaustion("allowance_store_unavailable", 1, engine: engine)
         false
-      end
-
-      def ensure_lane(engine, date)
-        project_id!
-        timestamp = timestamp_for(now)
-        @database.transaction do |db|
-          dataset = lane_dataset(db, engine, date)
-          dataset.insert_conflict.insert(
-            project_id: @project_id, kind: engine.to_s, window_key: date,
-            used: 0, limit_value: @limit, revision: 0,
-            reservation_ids_json: "[]", updated_at: timestamp
-          )
-          dataset.first.slice(:used)
-        end
       end
 
       def reserve_telemetry!(profile:, stage:, started_at:)
@@ -273,16 +272,8 @@ module Hive
         false
       end
 
-      def lane_dataset(db, engine, date)
-        allowance_dataset(db, engine, date)
-      end
-
       def hold_dataset(db, engine)
         allowance_dataset(db, "#{engine}:hold", "provider")
-      end
-
-      def read_hold(engine)
-        @database.read { |db| hold_dataset(db, engine).first }
       end
 
       def allowance_dataset(db, kind, window)
@@ -336,7 +327,13 @@ module Hive
       end
 
       def profile_name(profile, stage)
-        profile.respond_to?(:name) ? profile.name.to_s : stage.to_s
+        return profile.name.to_s if profile.respond_to?(:name)
+        return (@cfg.dig("refactor_patrol", "auto_fix", "agent") || "codex").to_s if
+          stage.start_with?("refactor-patrol-fix")
+        return (@cfg.dig("refactor_patrol", "agent") || "claude").to_s if
+          stage.start_with?("refactor-patrol")
+
+        (@cfg.dig("patrol", "agent") || "claude").to_s
       end
 
       def stage_engine(stage)

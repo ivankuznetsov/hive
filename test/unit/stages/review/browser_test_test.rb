@@ -31,6 +31,7 @@ class BrowserTestTest < Minitest::Test
       task_folder = File.join(dir, ".hive-state", "stages", "6-review", "browser-test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
       FileUtils.mkdir_p(File.join(task_folder, "logs"))
+      prepare_test_task_run(task_folder)
       ctx = Hive::Reviewers::Context.new(
         worktree_path: dir,
         task_folder: task_folder,

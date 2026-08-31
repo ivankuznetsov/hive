@@ -52,6 +52,20 @@ class PrMergeRepositoryTest < Minitest::Test
     end
   end
 
+  def test_default_repository_reuses_the_process_control_plane
+    with_tmp_dir do |root|
+      with_env("HIVE_HOME" => root) do
+        Hive::RuntimeControlPlane.disconnect
+        database = Hive::RuntimeControlPlane.database.migrate!
+        repository = Hive::Daemon::PrMergeRepository.new
+
+        assert_same database, repository.send(:database)
+      ensure
+        Hive::RuntimeControlPlane.disconnect
+      end
+    end
+  end
+
   private
 
   def with_repository

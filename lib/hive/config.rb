@@ -1687,16 +1687,19 @@ module Hive
         abs_path = File.expand_path(path)
         hive_state_path = File.join(abs_path, ".hive-state")
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
+        retired = inactive_runtime_project_identity(name: name, state_root_path: hive_state_path) unless existing
         project_id = if existing
           registry_project_id(existing)
         else
-          SecureRandom.uuid
+          retired&.fetch(:project_id) || SecureRandom.uuid
         end
         entry = {
           "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path,
           "project_id" => project_id,
-          "registration_id" => existing&.fetch("registration_id", nil) || SecureRandom.uuid,
-          "registered_at" => existing&.fetch("registered_at", nil) || Time.now.utc.iso8601(6)
+          "registration_id" => existing&.fetch("registration_id", nil) ||
+            retired&.fetch(:registration_id) || SecureRandom.uuid,
+          "registered_at" => existing&.fetch("registered_at", nil) ||
+            retired&.fetch(:registered_at) || Time.now.utc.iso8601(6)
         }
         identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
         entry["repository_identity"] = identity if identity
@@ -1720,8 +1723,71 @@ module Hive
           data["registered_projects"] << entry
         end
       end
+      sync_runtime_projects!
       entry
     end
+
+    def sync_runtime_projects!
+      path = Hive::Paths.runtime_control_plane_path
+      return unless File.file?(path)
+
+      require "hive/runtime_control_plane"
+      with_global_config_lock do
+        entries = if File.exist?(global_config_path)
+          data = load_global_config(global_config_path)
+          raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
+          Array(data["registered_projects"]).select { |entry| valid_registry_entry?(entry) }
+        else
+          []
+        end
+        timestamp = Time.now.utc.iso8601(6)
+        Hive::RuntimeControlPlane.database.transaction do |db|
+          installation_id = db[:installations].get(:installation_id)
+          active_ids = entries.map do |entry|
+            project_id = registry_project_id(entry)
+            values = {
+              project_id: project_id, installation_id: installation_id,
+              registration_id: entry["registration_id"] || "legacy:#{project_id}",
+              name: entry.fetch("name"), observed_path: File.expand_path(entry.fetch("path")),
+              state_root_path: project_hive_state_path(entry),
+              repository_identity_json: entry["repository_identity"] &&
+                Hive::RuntimeControlPlane::Codec.dump_json(entry.fetch("repository_identity")),
+              active: 1, registered_at: entry.fetch("registered_at", timestamp),
+              last_observed_at: timestamp
+            }
+            updates = values.reject { |key, _value| %i[project_id installation_id registered_at].include?(key) }
+            db[:projects].insert_conflict(target: :project_id, update: updates).insert(values)
+            project_id
+          end
+          inactive = db[:projects].where(installation_id: installation_id)
+            .exclude(project_id: "global-maintenance")
+          inactive = inactive.exclude(project_id: active_ids) unless active_ids.empty?
+          inactive.update(active: 0, last_observed_at: timestamp)
+        end
+      end
+    rescue Hive::RuntimeControlPlane::Error, Sequel::Error => error
+      raise ConfigError, "runtime project registry synchronization failed: #{error.message}"
+    end
+    private_class_method :sync_runtime_projects!
+
+    def inactive_runtime_project_identity(name:, state_root_path:)
+      return unless File.file?(Hive::Paths.runtime_control_plane_path)
+
+      require "hive/runtime_control_plane"
+      canonical = canonical_registration_state_path(state_root_path)
+      rows = Hive::RuntimeControlPlane.database.read do |db|
+        db[:projects].where(active: 0).where(
+          Sequel.|({ name: name.to_s }, { state_root_path: canonical })
+        ).exclude(project_id: "global-maintenance").all
+      end
+      if rows.length > 1
+        raise ConfigError, "retired runtime project identity is ambiguous for #{name.inspect}"
+      end
+      rows.first
+    rescue Hive::RuntimeControlPlane::Error, Sequel::Error => error
+      raise ConfigError, "retired runtime project identity is unavailable: #{error.message}"
+    end
+    private_class_method :inactive_runtime_project_identity
 
     def assert_registration_state_root_available!(
       candidate, registrations, replacing:
@@ -1841,6 +1907,7 @@ module Hive
           end
         end
       end
+      sync_runtime_projects!
       removed
     end
 
@@ -1883,6 +1950,7 @@ module Hive
           end
         end
       end
+      sync_runtime_projects! unless dry_run
       result
     end
 

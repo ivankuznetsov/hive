@@ -209,10 +209,20 @@ module Hive
                    row.fetch(:task_slug) == generation.task_slug.to_s
               raise StaleTaskSource, "attempt task identity disagrees with its registered subject"
             end
-            db[:task_subjects].where(task_id: task_id).update(
+            observed = Time.iso8601(row.fetch(:last_observed_at).to_s)
+            placeholder = row[:source_fingerprint].to_s.empty? && row.fetch(:generation).zero?
+            if observed > observed_at || (observed == observed_at &&
+               !placeholder &&
+               (row[:source_fingerprint].to_s != fingerprint || row.fetch(:generation) != input_epoch))
+              raise StaleTaskSource, "attempt task source observation was superseded"
+            end
+            changed = db[:task_subjects].where(
+              task_id: task_id, last_observed_at: row.fetch(:last_observed_at)
+            ).update(
               observed_path: folder, source_fingerprint: fingerprint,
               generation: input_epoch, last_observed_at: timestamp
             )
+            raise StaleTaskSource, "attempt task source observation was superseded" unless changed == 1
           else
             db[:task_subjects].insert(
               task_id: task_id, project_id: project.fetch(:project_id),
@@ -504,6 +514,14 @@ module Hive
             db[:capacity_reservations].where(
               attempt_id: replacement.attempt_id, state: "reserved"
             ).update(state: "released", released_at: replacement["ended_at"])
+            db[:dispatch_requests].where(
+              request_id: replacement["request_id"],
+              claim_attempt_id: replacement.attempt_id,
+              state: "admitted"
+            ).update(
+              state: "awaiting_delivery", updated_at: replacement["ended_at"],
+              revision: Sequel[:revision] + 1
+            ) if replacement["request_id"]
           end
         end
         replacement

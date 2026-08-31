@@ -143,6 +143,91 @@ class AttemptsLogArchiveTest < Minitest::Test
     end
   end
 
+  def test_expiry_resumes_after_interruption_between_sql_and_unlink
+    with_repository do |store|
+      running = running_attempt(store)
+      terminal = terminalize(
+        store, running, log_reference: write_log(store, running.attempt_id, "expire\n")
+      )
+      assert_equal :archived, store.log_archive.archive(terminal.attempt_id)
+      path = store.log_archive.resolve(terminal.attempt_id).path
+      payloads = store.payload_store
+      original = payloads.method(:with_reference_custody)
+      payloads.define_singleton_method(:with_reference_custody) do |*_args|
+        raise IOError, "interrupted"
+      end
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        store.log_archive.expire(terminal.attempt_id, now: NOW + 60)
+      end
+      assert File.file?(path)
+      assert_includes store.log_archive.cold_attempt_ids_page(
+        cursor: { "after" => nil }, limit: 10
+      ).attempt_ids, terminal.attempt_id
+
+      payloads.define_singleton_method(:with_reference_custody, original)
+      assert_equal :expired, store.log_archive.expire(terminal.attempt_id, now: NOW + 61)
+      refute File.exist?(path)
+      retain_until = store.database.read do |db|
+        db[:payload_references].where(attempt_id: terminal.attempt_id).get(:retain_until)
+      end
+      assert_nil retain_until
+    end
+  end
+
+  def test_shared_digest_expiry_cannot_unlink_between_publication_and_sql_reference
+    with_repository do |store|
+      first = running_attempt(store, attempt_id: "first", request_id: "first-request")
+      first = terminalize(store, first, log_reference: write_log(store, "first", "same\n"))
+      assert_equal :archived, store.log_archive.archive(first.attempt_id)
+
+      second = running_attempt(store, attempt_id: "second", request_id: "second-request")
+      second = terminalize(store, second, log_reference: write_log(store, "second", "same\n"))
+      payloads = store.payload_store
+      expiry_checked = Queue.new
+      release_expiry = Queue.new
+      publisher_waiting = Queue.new
+      original_path_for = payloads.method(:path_for)
+      original_custody = payloads.method(:with_reference_custody)
+      payloads.define_singleton_method(:path_for) do |reference|
+        if Thread.current.thread_variable_get(:expiry_race)
+          expiry_checked << true
+          release_expiry.pop
+        end
+        original_path_for.call(reference)
+      end
+      payloads.define_singleton_method(:with_reference_custody) do |references, &block|
+        publisher_waiting << true if Thread.current.thread_variable_get(:publisher_race)
+        original_custody.call(references, &block)
+      end
+
+      expiry = Thread.new do
+        Thread.current.thread_variable_set(:expiry_race, true)
+        store.log_archive.expire(first.attempt_id, now: NOW + 60)
+      end
+      expiry_checked.pop
+      publisher = Thread.new do
+        Thread.current.thread_variable_set(:publisher_race, true)
+        store.log_archive.archive(second.attempt_id)
+      end
+      publisher_waiting.pop
+      assert_nil(store.database.read do |db|
+        db[:payload_references].where(attempt_id: second.attempt_id).first
+      end)
+
+      release_expiry << true
+      assert_equal :expired, expiry.value
+      assert_equal :archived, publisher.value
+      assert_equal :expired, store.log_archive.resolve(first.attempt_id).availability
+      assert_equal :available, store.log_archive.resolve(second.attempt_id).availability
+      assert_equal [ "same\n" ], store.log_archive.read(second.attempt_id).frames.map(&:bytes)
+    ensure
+      release_expiry << true if expiry&.alive?
+      expiry&.join
+      publisher&.join
+    end
+  end
+
   def test_unsafe_ids_and_custody_lock_symlinks_fail_closed
     with_repository do |store|
       archive = store.log_archive

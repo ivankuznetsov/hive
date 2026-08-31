@@ -4,6 +4,12 @@ require "hive/module_package/validator"
 require "hive/workflow_package/canonical_yaml"
 
 module HiveModuleTestHelper
+  EMPTY_ATTEMPT_STORE = Data.define(:scan).new(
+    scan: Data.define(:records).new(records: [].freeze)
+  ).freeze
+
+  def empty_attempt_store = EMPTY_ATTEMPT_STORE
+
   def write_module_package(root, name: "demo", version: "1.0.0", commit: "a" * 40,
                            hooks: nil, settings: nil, permissions: nil)
     FileUtils.mkdir_p(root)

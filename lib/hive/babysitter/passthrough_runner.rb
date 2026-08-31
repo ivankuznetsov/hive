@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "hive/runtime_control_plane"
+require "hive/runtime_control_plane/process_guard"
 
 module Hive
   module Babysitter

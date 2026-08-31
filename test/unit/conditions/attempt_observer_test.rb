@@ -136,18 +136,30 @@ class ConditionsAttemptObserverTest < Minitest::Test
         store: store, task_locator: ->(_attempt) { task }
       )
       journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      ready = Queue.new
+      release = Queue.new
+      holder = Thread.new do
+        Hive::Lock.with_task_lock(task.folder, op: "open_pr") do
+          ready << true
+          release.pop
+        end
+      end
+      ready.pop
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      Hive::Lock.with_task_lock(task.folder, op: "open_pr") do
-        assert_equal :pending, observer.observe(status, now: NOW + 3)
-      end
+      assert_equal :pending, observer.observe(status, now: NOW + 3)
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
       assert_operator elapsed, :<, 0.5
       refute File.exist?(journal_path), "contended delivery must not touch task state"
+      release << true
+      holder.join
       assert_equal :delivered, observer.observe(status, now: NOW + 4)
       assert File.exist?(journal_path)
       assert_equal :acknowledged, observer.observe(status, now: NOW + 5)
+    ensure
+      release << true if release && holder&.alive?
+      holder&.join
     end
   end
 
@@ -304,8 +316,10 @@ class ConditionsAttemptObserverTest < Minitest::Test
   private
 
   def build_task(dir)
-    folder = File.join(dir, "task")
+    folder = File.join(dir, ".hive-state", "stages", "4-execute", "task")
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: 42, slug: "task", display_name: nil, workflow: "coding")
+    prepare_test_task_lease_repository(folder)
     state_file = File.join(folder, "task.md")
     File.write(state_file, "<!-- ERROR reason=implementer_failed -->\n")
     TaskStub.new(

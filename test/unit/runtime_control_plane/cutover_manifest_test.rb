@@ -55,6 +55,27 @@ class RuntimeControlPlaneCutoverManifestTest < Minitest::Test
     end
   end
 
+  def test_crash_after_manifest_publication_leaves_one_loadable_link
+    with_tmp_dir do |root|
+      path = File.join(root, "cutover.json")
+      pid = fork do
+        Hive::AtomicFile.singleton_class.prepend(Module.new do
+          define_method(:fsync_directory) do |directory|
+            exit! 91 if directory == root && File.exist?(path)
+            super(directory)
+          end
+        end)
+        Hive::RuntimeControlPlane::CutoverManifest.new(path: path).publish(minimal_document)
+        exit! 0
+      end
+      Process.wait(pid)
+
+      assert_equal 91, $CHILD_STATUS.exitstatus
+      assert_equal 1, File.lstat(path).nlink
+      assert Hive::RuntimeControlPlane::CutoverManifest.new(path: path).load
+    end
+  end
+
   private
 
   def minimal_document

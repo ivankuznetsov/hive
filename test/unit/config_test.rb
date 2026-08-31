@@ -176,6 +176,72 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_projects_are_synchronized_into_the_active_control_plane
+    with_tmp_global_config do
+      with_tmp_dir do |project|
+        entry = Hive::Config.register_project(name: "sample", path: project)
+        row = Hive::RuntimeControlPlane.database.read do |db|
+          db[:projects].where(project_id: entry.fetch("project_id")).first
+        end
+
+        assert_equal entry.fetch("registration_id"), row.fetch(:registration_id)
+        assert_equal "sample", row.fetch(:name)
+        assert_equal project, row.fetch(:observed_path)
+        assert_equal File.join(project, ".hive-state"), row.fetch(:state_root_path)
+        assert_equal 1, row.fetch(:active)
+
+        Hive::Config.unregister_project(name: "sample")
+        active = Hive::RuntimeControlPlane.database.read do |db|
+          db[:projects].where(project_id: entry.fetch("project_id")).get(:active)
+        end
+        assert_equal 0, active
+      end
+    end
+  end
+
+  def test_deregistered_project_reuses_its_sql_identity_when_registered_again
+    with_tmp_global_config do
+      with_tmp_dir do |project|
+        original = Hive::Config.register_project(name: "sample", path: project)
+        Hive::Config.unregister_project(name: "sample")
+
+        restored = Hive::Config.register_project(name: "sample", path: project)
+
+        assert_equal original.fetch("project_id"), restored.fetch("project_id")
+        assert_equal original.fetch("registration_id"), restored.fetch("registration_id")
+        assert_equal original.fetch("registered_at"), restored.fetch("registered_at")
+        rows = Hive::RuntimeControlPlane.database.read do |db|
+          db[:projects].where(name: "sample").all
+        end
+        assert_equal 1, rows.length
+        assert_equal 1, rows.first.fetch(:active)
+      end
+    end
+  end
+
+  def test_registry_retry_reconciles_a_stale_runtime_projection
+    with_tmp_global_config do |home|
+      with_tmp_dir do |project|
+        entry = Hive::Config.register_project(name: "sample", path: project)
+        File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+
+        assert_nil Hive::Config.unregister_project(name: "sample")
+        active = Hive::RuntimeControlPlane.database.read do |db|
+          db[:projects].where(project_id: entry.fetch("project_id")).get(:active)
+        end
+        assert_equal 0, active
+      end
+    end
+  end
+
+  def test_registry_does_not_create_a_runtime_database_before_activation
+    with_tmp_global_config(runtime: false) do
+      Hive::Config.register_project(name: "sample", path: "/tmp/sample")
+
+      refute File.exist?(Hive::Paths.runtime_control_plane_path)
+    end
+  end
+
   def test_legacy_registry_identity_backfill_is_explicit_and_emits_no_event
     with_tmp_global_config do |home|
       path = File.join(home, "config.yml")
@@ -5526,7 +5592,7 @@ class ConfigTest < Minitest::Test
 
     reader, writer = IO.pipe
     pids = count.times.map do |i|
-      Process.fork do
+      Hive::RuntimeControlPlane::ProcessGuard.fork do
         writer.close
         reader.read(1)
         yield i

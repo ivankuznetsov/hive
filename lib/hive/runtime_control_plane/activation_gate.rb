@@ -13,16 +13,23 @@ module Hive
         dispatch_requests dispatch_results attempts provider-health operational .task-counter.lock task-counter.yml
       ].freeze
       DATA_LEGACY_PATHS = %w[usage.db usage.db-wal usage.db-shm usage.db.patrol-discovery-allowances].freeze
+      SERVICE_ACTIVATION_WAIT_SEC = 30
 
       module_function
 
       def check!(argv: ARGV, state_home: Hive::Paths.state_home,
                  data_home: Hive::Paths.data_home, config_home: Hive::Paths.config_home,
-                 before_allow: nil)
+                 before_allow: nil, sleeper: ->(seconds) { sleep(seconds) },
+                 monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         argv = Array(argv).map(&:to_s)
         route = command(argv)
         return allow(before_allow) if version_route?(argv) || route == "version"
-        return allow(before_allow) if active?(state_home)
+        status = runtime_status(state_home)
+        return allow(before_allow) if active_status?(status)
+        if managed_service_route?(argv) && status["phase"] == "intended"
+          wait_for_active!(state_home, sleeper: sleeper, monotonic_clock: monotonic_clock)
+          return allow(before_allow)
+        end
         incomplete = database_present?(state_home) || cutover_present?(state_home)
         legacy = legacy_present?(state_home, data_home, config_home)
         return allow(before_allow) unless incomplete || legacy
@@ -37,10 +44,35 @@ module Hive
       end
 
       def active?(state_home)
-        database = RuntimeControlPlane.database(path: Hive::Paths.runtime_control_plane_path(state_home))
-        Cutover.inspect_status(state_home: state_home, database: database).fetch("phase") == "active"
+        active_status?(runtime_status(state_home))
       rescue RuntimeControlPlane::Error, KeyError
         false
+      end
+
+      def runtime_status(state_home)
+        database = Database.new(path: Hive::Paths.runtime_control_plane_path(state_home))
+        Cutover.inspect_status(state_home: state_home, database: database)
+      ensure
+        database&.disconnect
+      end
+
+      def wait_for_active!(state_home, sleeper:, monotonic_clock:)
+        deadline = monotonic_clock.call + SERVICE_ACTIVATION_WAIT_SEC
+        until active?(state_home)
+          if monotonic_clock.call >= deadline
+            raise MigrationRequired.new(
+              "Hive service activation is waiting for cutover completion",
+              code: :fleet_cutover_required, action: "hive runtime status"
+            )
+          end
+          sleeper.call(0.05)
+        end
+      end
+
+      def active_status?(status) = status.fetch("phase") == "active" && status.dig("database", "status") == "ok"
+
+      def managed_service_route?(argv)
+        argv == %w[daemon start] || argv == %w[bot start --foreground] || argv == [ "web" ]
       end
 
       def maintenance_route?(argv, route = command(argv))

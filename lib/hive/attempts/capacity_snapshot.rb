@@ -51,16 +51,17 @@ module Hive
 
       def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:, max_daily:)
         global_count >= max_global || project_count(project) >= max_per_project ||
-          task_count(project: project, task_slug: task_slug).positive? ||
+          task_reserved?(project: project, task_slug: task_slug) ||
           daily_count(project, date) >= max_daily
       end
 
       def self.provider_account_capacity(accounts:, records:, reserved_attempt_ids:)
+        read = ->(account, key) { account.respond_to?(key) ? account.public_send(key) : account.fetch(key.to_s) }
         counts = accounts.to_h do |id, account|
-          [ id, { "observed" => 0, "max" => Integer(account.fetch("max_concurrent")) } ]
+          [ id, { "observed" => 0, "max" => Integer(read.call(account, :max_concurrent)) } ]
         end
-        defaults = accounts.select { |_id, account| account.fetch("launch_binding") == "default" }
-          .group_by { |_id, account| account.fetch("adapter") }.transform_values { |values| values.map(&:first) }
+        defaults = accounts.select { |_id, account| read.call(account, :launch_binding) == "default" }
+          .group_by { |_id, account| read.call(account, :adapter) }.transform_values { |values| values.map(&:first) }
         defaults.default = []
         reserved = reserved_attempt_ids.to_h { |id| [ id, true ] }
         Array(records).each do |record|

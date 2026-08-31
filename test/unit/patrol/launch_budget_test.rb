@@ -75,6 +75,16 @@ class PatrolLaunchBudgetTest < Minitest::Test
     assert_equal 4, subject.remaining_launches
   end
 
+  def test_capacity_reads_do_not_create_an_empty_lane
+    subject = budget(engine: :ordinary)
+    @database.define_singleton_method(:transaction) do |*|
+      raise "capacity read attempted a write transaction"
+    end
+
+    assert_equal 4, subject.remaining_launches
+    assert_equal "available", subject.allowance_snapshot.fetch(:status)
+  end
+
   def test_project_identity_is_resolved_from_the_registered_observed_path
     ensure_project("stable-project")
     @database.transaction do |db|

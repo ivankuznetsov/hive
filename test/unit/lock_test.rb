@@ -148,6 +148,25 @@ class LockTest < Minitest::Test
     assert_equal folder, observed_path
   end
 
+  def test_task_id_cannot_move_to_another_slug_in_the_same_project
+    original = task_folder(15)
+    conflicting = File.join(File.dirname(original), "different-task")
+    FileUtils.mkdir_p(conflicting)
+    File.write(
+      File.join(conflicting, "meta.yml"),
+      { "id" => 15, "slug" => "different-task" }.to_yaml
+    )
+
+    error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
+      repository.acquire(conflicting, {}, create: false)
+    end
+    assert_equal :task_identity_conflict, error.code
+    observed = @database.read do |db|
+      db[:task_subjects].where(task_id: "15").get(:observed_path)
+    end
+    assert_equal original, observed
+  end
+
   def test_task_identity_resolves_under_a_registered_custom_state_root
     custom_state = File.join(@root, ".custom-state")
     @database.transaction do |db|

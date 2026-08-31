@@ -8,6 +8,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
 
   ROOT = File.expand_path("../../..", __dir__)
   INVENTORY = File.join(ROOT, "test/fixtures/runtime_control_plane/affected_production.yml")
+  PRODUCTION_PATHS = %w[bin lib schemas install.sh packaging web/config].freeze
   RETIRED_SOURCE_FILES = %w[
     lib/hive/attempts/decision_index.rb
     lib/hive/attempts/pending_finalization_store.rb
@@ -70,9 +71,13 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     end
 
     assert_equal entries.map { |entry| entry.fetch("path") }.uniq.length, entries.length
-    assert_equal inventory.fetch("final_lines"), observed
-    assert_operator observed, :<=, inventory.fetch("maximum_final_lines")
-    assert_operator observed, :<=, (inventory.fetch("baseline_lines") * 0.8).floor
+    outside_net = outside_inventory_net_lines(inventory, entries)
+    final_lines = observed + outside_net
+    assert_equal inventory.fetch("final_inventory_lines"), observed
+    assert_equal inventory.fetch("outside_inventory_net_lines"), outside_net
+    assert_equal inventory.fetch("final_lines"), final_lines
+    assert_operator final_lines, :<=, inventory.fetch("maximum_final_lines")
+    assert_operator final_lines, :<=, (inventory.fetch("baseline_lines") * 0.8).floor
     assert_equal affected_production_files(inventory),
                  entries.map { |entry| entry.fetch("path") }.sort
   end
@@ -134,28 +139,50 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     retained = inventory.fetch("paths").filter_map do |entry|
       entry.fetch("path") if File.file?(File.join(ROOT, entry.fetch("path")))
     end
+    added = changed_production_files(inventory).filter_map do |status_code, path|
+      path if status_code == "A" && File.file?(File.join(ROOT, path))
+    end
+    (retained + added).uniq.sort
+  end
+
+  def outside_inventory_net_lines(inventory, entries)
+    classified = inventory.fetch("paths").map { |entry| entry.fetch("path") } +
+      entries.map { |entry| entry.fetch("path") }
+    changed_production_files(inventory).sum do |_status_code, path|
+      next 0 if classified.include?(path)
+
+      current = File.file?(File.join(ROOT, path)) ? File.foreach(File.join(ROOT, path)).count : 0
+      current - base_line_count(inventory.fetch("base_commit"), path)
+    end
+  end
+
+  def changed_production_files(inventory)
     output, error, status = Open3.capture3(
-      "git", "diff", "--name-status", "#{inventory.fetch('base_commit')}..HEAD",
-      "--", "lib", "bin", "schemas",
-      chdir: ROOT
+      "git", "diff", "--name-status", "--no-renames", inventory.fetch("base_commit"),
+      "--", *PRODUCTION_PATHS, chdir: ROOT
     )
     assert status.success?, error
-    added = output.lines.filter_map do |line|
-      status_code, path = line.split
-      path if status_code == "A" && File.file?(File.join(ROOT, path))
+    changed = output.lines.map do |line|
+      status_code, path = line.chomp.split("\t", 2)
+      [ status_code, path ]
     end
     status_output, status_error, status = Open3.capture3(
       "git", "status", "--porcelain", "--untracked-files=all", chdir: ROOT
     )
     assert status.success?, status_error
-    worktree_added = status_output.lines.filter_map do |line|
-      status_code = line[0, 2]
+    untracked = status_output.lines.filter_map do |line|
       path = line[3..].to_s.strip
-      if (status_code == "??" || status_code.include?("A")) &&
-         path.match?(%r{\A(?:lib|bin|schemas)/}) && File.file?(File.join(ROOT, path))
-        path
-      end
+      [ "A", path ] if line[0, 2] == "??" && production_path?(path)
     end
-    (retained + added + worktree_added).uniq.sort
+    (changed + untracked).uniq
+  end
+
+  def production_path?(path)
+    path == "install.sh" || path.match?(%r{\A(?:bin|lib|schemas|packaging|web/config)/})
+  end
+
+  def base_line_count(commit, path)
+    output, _error, status = Open3.capture3("git", "show", "#{commit}:#{path}", chdir: ROOT)
+    status.success? ? output.lines.count : 0
   end
 end

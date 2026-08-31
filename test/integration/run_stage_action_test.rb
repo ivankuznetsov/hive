@@ -134,11 +134,14 @@ class RunStageActionTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
+        metadata = File.binread(File.join(inbox, Hive::TaskMeta::FILENAME))
         brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
         plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
         FileUtils.mkdir_p(brainstorm)
         FileUtils.mkdir_p(plan)
         FileUtils.rm_rf(inbox)
+        File.binwrite(File.join(brainstorm, Hive::TaskMeta::FILENAME), metadata)
+        File.binwrite(File.join(plan, Hive::TaskMeta::FILENAME), metadata)
         File.write(File.join(brainstorm, "brainstorm.md"), "## Requirements\n<!-- COMPLETE -->\n")
         File.write(File.join(plan, "plan.md"), "## Existing\n<!-- WAITING -->\n")
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(plan, "plan.md")

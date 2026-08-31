@@ -1,26 +1,15 @@
 require "fileutils"
+require "digest"
 require "rubygems"
 require "securerandom"
 require "sequel"
 require "sequel/extensions/migration"
 require "sqlite3"
+require "hive/atomic_file"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_TABLES = %i[
-      attempt_accounting attempt_failure_cohorts attempt_failure_events attempt_lost_outcomes
-      attempt_relationships attempts capacity_reservations daemon_runtime dispatch_outbox
-      dispatch_requests installations patrol_allowances payload_references pr_merge_project_state
-      pr_merge_reconciliations projects provider_audit provider_circuits routing_policies
-      task_counters task_leases task_subjects terminal_pending_publications
-      terminal_publication_obligations token_usage
-      attempt_routing_decisions
-    ].freeze
-    EXPECTED_INDEXES = %i[
-      attempts_active_subject_generation_uidx attempts_request_uidx
-      capacity_reservations_active_uidx dispatch_requests_active_subject_uidx
-      dispatch_requests_idempotency_uidx provider_circuits_probe_idx token_usage_session_uidx
-    ].freeze
+    EXPECTED_SCHEMA_SHA256 = "670fd5ca1a3916115a210e2db2e5cdcc067b66aafcf486ee079b3bd21c21adb7".freeze
 
     class Database
       MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze
@@ -42,7 +31,6 @@ module Hive
         @owner_pid = Process.pid
         @connection = nil
         @validated = false
-        ProcessGuard.register(self)
       end
 
       def open!
@@ -59,6 +47,7 @@ module Hive
           raise_for_diagnosis!(diagnosis) if diagnosis &&
             %i[unrelated_database corrupt newer_schema].include?(diagnosis.status)
           FileUtils.mkdir_p(File.dirname(path))
+          prepare_storage!
           connect!
           Sequel::IntegerMigrator.new(@connection, @migrations_dir, table: :schema_info,
                                       column: :version, use_transactions: true).run
@@ -99,10 +88,13 @@ module Hive
 
       def diagnostics = ProcessGuard.checkout { diagnostics_uncoordinated }
       def disconnect
-        @connection&.disconnect
+        connection = @connection
         @connection = nil
         @validated = false
+        connection&.disconnect
         true
+      ensure
+        ProcessGuard.unregister(self)
       end
       def disconnected? = @connection.nil?
 
@@ -110,7 +102,12 @@ module Hive
 
       def diagnostics_uncoordinated
         ensure_process_owner!
-        return diagnosis(:missing) unless File.file?(path)
+        return diagnosis(:missing) unless File.exist?(path) || File.symlink?(path)
+        begin
+          validate_database_custody!
+        rescue IntegrityError => error
+          return diagnosis(:corrupt, error: error)
+        end
         inspect_database do |database|
           application_id = integer_pragma(database, "application_id")
           version = schema_version_for(database)
@@ -177,10 +174,20 @@ module Hive
 
       def connect!
         return @connection if @connection
+        validate_database_custody!
         @connection = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1,
                                      timeout: @busy_timeout_ms, disable_dqs: true)
-        %w[journal_mode\ =\ WAL foreign_keys\ =\ ON synchronous\ =\ FULL trusted_schema\ =\ OFF]
+        ProcessGuard.register(self)
+        journal_mode = pragma_rows(@connection, "journal_mode = WAL").first.to_s.downcase
+        unless journal_mode == "wal"
+          raise IntegrityError.new(
+            "runtime control-plane storage does not support SQLite WAL mode",
+            code: :wal_mode_unavailable, action: "move Hive state to a local WAL-capable filesystem"
+          )
+        end
+        %w[foreign_keys\ =\ ON synchronous\ =\ FULL trusted_schema\ =\ OFF]
           .each { |setting| @connection.run("PRAGMA #{setting}") }
+        validate_database_custody!
         @connection
       end
 
@@ -256,12 +263,60 @@ module Hive
       end
 
       def exact_schema?(database)
-        return false unless (database.tables.map(&:to_sym) - [ :schema_info ]).sort == EXPECTED_TABLES.sort
-        indexes = database[:sqlite_master].where(type: "index").exclude(name: nil)
-                    .select_map(:name).map(&:to_sym)
-        EXPECTED_INDEXES.all? { |index| indexes.include?(index) }
+        rows = database[:sqlite_master].where(type: %w[table index])
+          .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
+          .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
+        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == EXPECTED_SCHEMA_SHA256
       rescue Sequel::Error
         false
+      end
+
+      def prepare_storage!
+        parent = File.dirname(path)
+        FileUtils.mkdir_p(parent, mode: 0o700)
+        parent_status = File.lstat(parent)
+        unless parent_status.directory? && !parent_status.symlink? && parent_status.uid == Process.euid
+          custody_error!(parent)
+        end
+        File.chmod(0o700, parent)
+        return validate_database_custody! if File.exist?(path) || File.symlink?(path)
+
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(path, flags, 0o600) { |file| file.fsync }
+        Hive::AtomicFile.fsync_directory(parent)
+        validate_database_custody!
+      rescue Errno::ELOOP, Errno::EEXIST, SystemCallError, IOError => error
+        raise IntegrityError.new(
+          "runtime control-plane storage is unsafe: #{error.message}",
+          code: :database_custody_invalid, action: BACKUP_ACTION
+        )
+      end
+
+      def validate_database_custody!
+        parent = File.lstat(File.dirname(path))
+        custody_error!(File.dirname(path)) unless
+          parent.directory? && !parent.symlink? && parent.uid == Process.euid && (parent.mode & 0o077).zero?
+        [ path, "#{path}-wal", "#{path}-shm" ].each do |candidate|
+          next unless File.exist?(candidate) || File.symlink?(candidate)
+          status = File.lstat(candidate)
+          custody_error!(candidate) unless status.file? && !status.symlink? && status.nlink == 1 &&
+            status.uid == Process.euid && (status.mode & 0o077).zero?
+        end
+        true
+      rescue SystemCallError => error
+        raise IntegrityError.new(
+          "runtime control-plane storage is unsafe: #{error.message}",
+          code: :database_custody_invalid, action: BACKUP_ACTION
+        )
+      end
+
+      def custody_error!(candidate)
+        raise IntegrityError.new(
+          "runtime control-plane storage has unsafe custody: #{candidate}",
+          code: :database_custody_invalid, action: BACKUP_ACTION,
+          details: { path: candidate }
+        )
       end
 
       def schema_version_for(database)

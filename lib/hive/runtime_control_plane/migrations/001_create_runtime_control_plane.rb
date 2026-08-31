@@ -11,6 +11,27 @@ Sequel.migration do
       check Sequel.lit("activation_epoch >= 0")
     end
 
+    create_table(:attempt_maintenance) do
+      foreign_key :installation_id, :installations, type: String, key: :installation_id,
+                  primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
+      %i[last_started_at last_completed_at cursor_after error_class error_observed_at].each do |column|
+        String column
+      end
+      %i[promoted deleted cold_examined].each { |column| Integer column }
+      check Sequel.lit("cursor_after IS NULL OR length(cursor_after) BETWEEN 1 AND 128")
+      check Sequel.lit("promoted IS NULL OR promoted >= 0")
+      check Sequel.lit("deleted IS NULL OR deleted >= 0")
+      check Sequel.lit("cold_examined IS NULL OR cold_examined >= 0")
+      check Sequel.lit(
+        "last_completed_at IS NULL OR " \
+        "(promoted IS NOT NULL AND deleted IS NOT NULL AND cold_examined IS NOT NULL)"
+      )
+      check Sequel.lit(
+        "(error_class IS NULL AND error_observed_at IS NULL) OR " \
+        "(length(error_class) BETWEEN 1 AND 120 AND error_observed_at IS NOT NULL)"
+      )
+    end
+
     create_table(:projects) do
       String :project_id, primary_key: true, null: false
       foreign_key :installation_id, :installations, type: String, key: :installation_id,
@@ -54,30 +75,38 @@ Sequel.migration do
                   null: false, on_delete: :cascade, on_update: :cascade
       foreign_key :task_id, :task_subjects, type: String, key: :task_id,
                   on_delete: :cascade, on_update: :cascade
-      %i[subject_kind subject_key task_generation intended_stage state source_fingerprint].each do |column|
+      %i[subject_kind subject_key task_slug task_generation intended_stage state source_fingerprint].each do |column|
         String column, null: false
       end
       Integer :priority, null: false, default: 0
       %i[
-        idempotency_key claim_owner claim_process_identity claimed_at due_at
+        idempotency_key claim_owner claim_process_identity claim_attempt_id claimed_at due_at
         routing_policy_digest retain_until
       ].each { |column| String column }
       Integer :claim_pid
+      Integer :recovery_request, null: false, default: 0
       Integer :revision, null: false, default: 0
       String :payload_json, text: true, null: false
       %i[created_at updated_at].each { |column| String column, null: false }
       check Sequel.lit("priority >= 0")
       check Sequel.lit("revision >= 0")
       check Sequel.lit("claim_pid IS NULL OR claim_pid > 0")
+      check Sequel.lit("recovery_request IN (0, 1)")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
-      check Sequel.lit("state IN ('queued', 'claimed', 'admitted', 'completed', 'cancelled')")
+      check Sequel.lit(
+        "state IN ('queued', 'claimed', 'admitted', 'awaiting_delivery', 'completed', 'cancelled')"
+      )
       index [ :state, :priority, :created_at ], name: :dispatch_requests_ready_idx
       index [ :idempotency_key ], unique: true,
             where: Sequel.lit("idempotency_key IS NOT NULL"),
             name: :dispatch_requests_idempotency_uidx
       index [ :task_id, :subject_key, :task_generation ], unique: true,
-            where: Sequel.lit("task_id IS NOT NULL AND state IN ('queued', 'claimed')"),
+            where: Sequel.lit("task_id IS NOT NULL AND state IN ('queued', 'claimed', 'admitted')"),
             name: :dispatch_requests_active_subject_uidx
+      index [ :project_id, :task_slug, :recovery_request, :created_at ],
+            name: :dispatch_requests_recovery_idx
+      index [ :recovery_request, :updated_at, :request_id ],
+            name: :dispatch_requests_recovery_projection_idx
     end
 
     create_table(:dispatch_outbox) do

@@ -60,6 +60,7 @@ class RunFinalizeTest < Minitest::Test
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
     FileUtils.mkdir_p(task_dir)
+    ensure_test_task_identity(task_dir)
     File.write(File.join(task_dir, "plan.md"), "plan content")
     FileUtils.mkdir_p(File.join(task_dir, "reviews"))
     File.write(File.join(task_dir, "reviews", "codex-01.md"), "- [x] fixed\n")

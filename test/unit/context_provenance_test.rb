@@ -256,7 +256,8 @@ class ContextProvenanceTest < Minitest::Test
       write_candidate(task, context, candidate)
 
       result = Hive::ContextProvenance.promote_agent_receipt(
-        task: task, context: context, clock: -> { NOW }
+        task: task, context: context, activity: ActivityRecorder.new,
+        clock: -> { NOW }
       )
       assert_equal :promoted, result.status
       assert_includes result.receipt.dig("selection", "rationale"), "[REDACTED:openai_api_key]"
@@ -285,7 +286,8 @@ class ContextProvenanceTest < Minitest::Test
       write_candidate(task, context, candidate)
 
       result = Hive::ContextProvenance.promote_agent_receipt(
-        task: task, context: context, clock: -> { NOW }
+        task: task, context: context, activity: ActivityRecorder.new,
+        clock: -> { NOW }
       )
 
       assert_equal :promoted, result.status

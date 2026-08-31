@@ -70,6 +70,7 @@ module Hive
           persist_decision(db, record, decision) if decision
           db[:dispatch_requests].where(request_id: record["request_id"]).update(
             state: "admitted", routing_policy_digest: decision&.policy_digest,
+            claim_attempt_id: record.attempt_id,
             updated_at: record["accepted_at"], revision: Sequel[:revision] + 1
           ) if record["request_id"]
         end
@@ -131,9 +132,11 @@ module Hive
             request_id: request_id, project_id: project_id, task_id: task_id,
             subject_kind: record.subject_kind,
             subject_key: Digest::SHA256.hexdigest(Codec.dump_json(record.subject)),
+            task_slug: record["task_slug"],
             task_generation: record.task_generation,
             intended_stage: record["intended_stage"], state: "claimed", priority: 0,
             idempotency_key: request_id, claim_owner: "admission",
+            claim_attempt_id: record.attempt_id,
             claimed_at: record["accepted_at"], source_fingerprint: source_fingerprint.to_s,
             payload_json: Codec.dump_json(admission_request_payload(record)),
             created_at: record["accepted_at"], updated_at: record["accepted_at"],
@@ -162,7 +165,8 @@ module Hive
         ).update(
           task_id: task_id, subject_kind: record.subject_kind,
           subject_key: Digest::SHA256.hexdigest(Codec.dump_json(record.subject)),
-          task_generation: record.task_generation, intended_stage: record["intended_stage"],
+          task_slug: record["task_slug"], task_generation: record.task_generation,
+          intended_stage: record["intended_stage"], claim_attempt_id: record.attempt_id,
           state: "claimed", claim_owner: "admission", claimed_at: record["accepted_at"],
           source_fingerprint: source_fingerprint.to_s, updated_at: record["accepted_at"],
           revision: Sequel[:revision] + 1

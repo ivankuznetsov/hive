@@ -12,7 +12,7 @@ module Hive
       SCHEMA = "hive-runtime-cutover-manifest".freeze
       ENVELOPE_SCHEMA = "hive-runtime-cutover-envelope".freeze
       VERSION = 1
-      PHASES = %w[ready intended active].freeze
+      PHASES = %w[preparing ready intended active].freeze
       MAX_BYTES = 16 * 1024 * 1024
       class Error < RuntimeControlPlane::Error; end
       class PublicationError < Error; end
@@ -66,11 +66,11 @@ module Hive
         temporary = "#{path}.tmp-#{Process.pid}-#{SecureRandom.hex(6)}"
         Hive::AtomicFile.write(temporary, "#{Codec.dump_json(envelope)}\n", mode: 0o600)
         @before_publish&.call(temporary)
-        File.link(temporary, path)
+        fail!(:already_published, publication: true) if File.exist?(path) || File.symlink?(path)
+        File.rename(temporary, path)
+        temporary = nil
         Hive::AtomicFile.fsync_directory(parent)
         Codec.normalize(envelope).freeze
-      rescue Errno::EEXIST
-        fail!(:already_published, publication: true)
       rescue PublicationError
         raise
       rescue SystemCallError, IOError => error

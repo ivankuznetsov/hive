@@ -127,9 +127,11 @@ class HivePatrolValidatorTest < Minitest::Test
   def test_progressing_output_defers_the_idle_deadline
     with_tmp_dir do |dir|
       validator = Hive::Patrol::Validator.new(
-        { "test" => "ruby -e '8.times { puts :tick; $stdout.flush; sleep 0.1 }'" },
+        { "test" => "ruby -e '60.times { puts :tick; $stdout.flush; sleep 0.1 }'" },
         timeout_sec: 30,
-        idle_timeout_sec: 0.5
+        # Keep the command longer than the idle deadline while leaving enough
+        # startup headroom for a loaded CI host to schedule its first output.
+        idle_timeout_sec: 5
       )
 
       result = validator.validate(dir)
@@ -143,9 +145,9 @@ class HivePatrolValidatorTest < Minitest::Test
   def test_stderr_output_also_counts_as_activity
     with_tmp_dir do |dir|
       validator = Hive::Patrol::Validator.new(
-        { "test" => "ruby -e '8.times { $stderr.puts :tick; $stderr.flush; sleep 0.1 }'" },
+        { "test" => "ruby -e '60.times { $stderr.puts :tick; $stderr.flush; sleep 0.1 }'" },
         timeout_sec: 30,
-        idle_timeout_sec: 0.5
+        idle_timeout_sec: 5
       )
 
       result = validator.validate(dir)

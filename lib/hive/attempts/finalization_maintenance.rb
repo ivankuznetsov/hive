@@ -37,9 +37,7 @@ module Hive
           delivery_pending: lambda do |record|
             Hive::RuntimeControlPlane::DispatchRepository.new(
               database: store.database
-            ).claimed.any? do |delivery|
-              delivery.claim["attempt_id"].to_s == record.attempt_id
-            end
+            ).delivery_pending_for_attempt?(record.attempt_id)
           end,
           **options
         )
@@ -54,9 +52,6 @@ module Hive
         @task_archived = task_archived
         @logger = logger
         @provider_health_observer_factory = provider_health_observer_factory
-        @maintenance_at = nil
-        @maintenance_error = nil
-        @cold_sweep_cursor = { "after" => nil }
         @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
       end
 
@@ -157,8 +152,9 @@ module Hive
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
+        checkpoint = @store.maintenance_checkpoint
         page = @store.log_archive.cold_attempt_ids_page(
-          cursor: @cold_sweep_cursor,
+          cursor: { "after" => checkpoint && checkpoint.fetch(:cursor_after) },
           limit: COLD_SWEEP_LIMIT
         )
         page.attempt_ids.each do |attempt_id|
@@ -169,25 +165,32 @@ module Hive
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
-        @cold_sweep_cursor = page.cursor
+        @store.advance_maintenance_cursor(page.cursor)
         { deleted: deleted, cold_examined: page.attempt_ids.size }
       end
 
       def storage_snapshot(hot_count:, invalid_hot_count:)
         diagnosis = @store.database.diagnostics
+        checkpoint = @store.maintenance_checkpoint
         database_error = !diagnosis.ok? && {
           "operation" => "status", "class" => diagnosis.error&.class&.name || "IntegrityError"
         }
-        error = @maintenance_error || database_error
+        maintenance_error = checkpoint&.fetch(:error_class) && {
+          "operation" => "maintenance", "class" => checkpoint.fetch(:error_class),
+          "observed_at" => checkpoint.fetch(:error_observed_at)
+        }
+        error = maintenance_error || database_error
         status = StorageStatus.unknown
-        status["status"] = error ? "degraded" : (@maintenance_at ? "healthy" : "unknown")
+        status["status"] = error ? "degraded" : (checkpoint&.fetch(:last_started_at) ? "healthy" : "unknown")
+        status["layout"]["migration"] = diagnosis.ok? ? "complete" : "failed"
         status["hot"] = { "records" => hot_count, "invalid" => invalid_hot_count }
         status["maintenance"].merge!(
-          "last_started_at" => @maintenance_at,
-          "last_completed_at" => @maintenance_error ? nil : @maintenance_at
+          "last_started_at" => checkpoint&.fetch(:last_started_at),
+          "last_completed_at" => checkpoint&.fetch(:last_completed_at),
+          "last_result" => maintenance_result(checkpoint)
         )
         status["last_error"] = error
-        status["degraded_reason"] = @maintenance_error ? "maintenance_failed" :
+        status["degraded_reason"] = maintenance_error ? "maintenance_failed" :
           (database_error && "database_unhealthy")
         status
       rescue RuntimeControlPlane::Error
@@ -202,13 +205,10 @@ module Hive
       def maintain(now)
         return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
         result = sweep_logs(now: now).merge(ran: true, promoted: yield)
-        @maintenance_error = nil
+        @store.complete_maintenance(now: now, result: result)
         result
       rescue StandardError => error
-        @maintenance_error = {
-          "operation" => "maintenance", "class" => error.class.name.to_s.byteslice(0, 120),
-          "observed_at" => Record.iso8601(now)
-        }
+        @store.fail_maintenance(error: error, now: now)
         raise
       end
 
@@ -236,10 +236,15 @@ module Hive
       end
 
       def claim_due(now)
-        return false if @maintenance_at && now.utc < Time.iso8601(@maintenance_at) + MAINTENANCE_INTERVAL_SEC
+        @store.claim_maintenance(now: now, interval_sec: MAINTENANCE_INTERVAL_SEC)
+      end
 
-        @maintenance_at = Record.iso8601(now)
-        true
+      def maintenance_result(checkpoint)
+        return nil unless checkpoint&.fetch(:last_completed_at)
+
+        %i[promoted deleted cold_examined].to_h do |key|
+          [ key.to_s, checkpoint.fetch(key) ]
+        end
       end
 
       def recovery_pinned?(record)

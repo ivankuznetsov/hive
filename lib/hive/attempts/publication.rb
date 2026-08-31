@@ -1,5 +1,6 @@
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/payload_store"
+require "time"
 
 module Hive
   module Attempts
@@ -11,16 +12,19 @@ module Hive
           raise RepositoryError, "only final attempt payloads can be sealed"
         end
 
-        prepared = terminal_payload_specs(record).map do |spec|
-          spec.merge(reference: prepare_sealed_reference(spec.fetch(:source)))
+        specs = terminal_payload_specs(record)
+        payload_store.with_reference_custody(specs.map { |spec| spec.fetch(:source) }) do
+          prepared = specs.map do |spec|
+            spec.merge(reference: prepare_sealed_reference(spec.fetch(:source)))
+          end
+          database.transaction do |db|
+            prepared.each { |spec| persist_sealed_reference(db, record, spec) }
+          end
+          remove_open_sources(prepared)
+          prepared.to_h do |spec|
+            [ spec.fetch(:payload_id), output_reference(spec.fetch(:reference)) ]
+          end.freeze
         end
-        database.transaction do |db|
-          prepared.each { |spec| persist_sealed_reference(db, record, spec) }
-        end
-        remove_open_sources(prepared)
-        prepared.to_h do |spec|
-          [ spec.fetch(:payload_id), output_reference(spec.fetch(:reference)) ]
-        end.freeze
       rescue InvalidOutputReference, RuntimeControlPlane::Error,
              Sequel::Error, SystemCallError, IOError => error
         raise RepositoryError, "attempt payload sealing failed: #{error.message}"
@@ -101,7 +105,83 @@ module Hive
         end
       end
 
+      def claim_maintenance(now:, interval_sec:)
+        timestamp = Record.iso8601(now)
+        interval = Integer(interval_sec)
+        raise RepositoryError, "attempt maintenance interval is invalid" unless interval.positive?
+
+        database.transaction do |db|
+          row = maintenance_dataset(db).first
+          started_at = row && row.fetch(:last_started_at)
+          next false if started_at && now.utc < Time.iso8601(started_at) + interval
+
+          upsert_maintenance(db, last_started_at: timestamp)
+          true
+        end
+      rescue ArgumentError, TypeError, Sequel::Error => error
+        raise RepositoryError, "attempt maintenance claim failed: #{error.message}"
+      end
+
+      def maintenance_checkpoint
+        database.read { |db| maintenance_dataset(db).first }
+      rescue Sequel::Error => error
+        raise RepositoryError, "attempt maintenance checkpoint is unavailable: #{error.message}"
+      end
+
+      def advance_maintenance_cursor(cursor)
+        after = cursor.to_h.fetch("after")
+        unless after.nil? || (after.is_a?(String) && after.bytesize.between?(1, 128))
+          raise RepositoryError, "attempt maintenance cursor is invalid"
+        end
+        database.transaction { |db| upsert_maintenance(db, cursor_after: after) }
+        { "after" => after }.freeze
+      rescue KeyError, NoMethodError, Sequel::Error => error
+        raise RepositoryError, "attempt maintenance cursor is invalid: #{error.message}"
+      end
+
+      def complete_maintenance(now:, result:)
+        values = result.to_h.slice(:promoted, :deleted, :cold_examined)
+        unless values.keys.sort == %i[cold_examined deleted promoted] &&
+               values.values.all? { |value| value.is_a?(Integer) && value >= 0 }
+          raise RepositoryError, "attempt maintenance result is invalid"
+        end
+        database.transaction do |db|
+          upsert_maintenance(
+            db, **values, last_completed_at: Record.iso8601(now),
+            error_class: nil, error_observed_at: nil
+          )
+        end
+        true
+      rescue Sequel::Error => error
+        raise RepositoryError, "attempt maintenance completion failed: #{error.message}"
+      end
+
+      def fail_maintenance(error:, now:)
+        database.transaction do |db|
+          upsert_maintenance(
+            db, error_class: error.class.name.to_s.byteslice(0, 120),
+            error_observed_at: Record.iso8601(now)
+          )
+        end
+        true
+      rescue Sequel::Error => persistence_error
+        raise RepositoryError, "attempt maintenance failure could not be recorded: #{persistence_error.message}"
+      end
+
       private
+
+      def maintenance_dataset(db)
+        db[:attempt_maintenance].where(
+          installation_id: db[:installations].get(:installation_id)
+        )
+      end
+
+      def upsert_maintenance(db, **values)
+        installation_id = db[:installations].get(:installation_id)
+        db[:attempt_maintenance].insert_conflict(
+          target: :installation_id, update: values
+        ).insert({ installation_id: installation_id }.merge(values))
+      end
 
       def terminal_payload_specs(record)
         receipt = record.receipt

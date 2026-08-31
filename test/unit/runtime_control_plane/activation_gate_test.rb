@@ -60,6 +60,25 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     end
   end
 
+  def test_managed_service_waits_at_intended_until_active_is_published
+    status = { "phase" => "intended", "database" => { "status" => "ok" } }
+    probes = 0
+    sleeps = []
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::ActivationGate, :runtime_status, ->(*) { status }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::ActivationGate, :active?, ->(*) { (probes += 1) > 1 }
+      ) do
+        assert Hive::RuntimeControlPlane::ActivationGate.check!(
+          argv: %w[daemon start], state_home: "/tmp/state",
+          config_home: "/tmp/config", sleeper: ->(seconds) { sleeps << seconds }
+        )
+      end
+    end
+    assert_equal [ 0.05 ], sleeps
+  end
+
   def test_executable_checks_activation_before_loading_or_reconciling_the_wiki
     source = File.binread(File.expand_path("../../../bin/hive", __dir__))
 
@@ -68,5 +87,34 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     reconcile = source.index("Scheduler.reconcile_existing!")
     assert gate < wiki_require
     assert gate < reconcile
+  end
+
+  def test_active_manifest_does_not_admit_commands_when_database_is_unhealthy
+    with_tmp_dir do |root|
+      state = File.join(root, "state")
+      path = Hive::Paths.runtime_control_plane_path(state)
+      database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      identity = database.installation_identity
+      database.disconnect
+      manifest_path = File.join(state, ".runtime-cutover", "current", "active.json")
+      Hive::RuntimeControlPlane::CutoverManifest.new(path: manifest_path).publish(
+        Hive::RuntimeControlPlane::CutoverManifest.build(
+          phase: "active", installation_id: identity.fetch(:installation_id),
+          lineage_id: identity.fetch(:lineage_id), source_release: "old", target_release: "new",
+          exclusions: [], task_authority: [], evidence: { "activation_epoch" => 0 }
+        )
+      )
+      File.binwrite(path, "corrupt")
+
+      refute Hive::RuntimeControlPlane::ActivationGate.active?(state)
+      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+        Hive::RuntimeControlPlane::ActivationGate.check!(
+          argv: [ "status" ], state_home: state, data_home: File.join(root, "data"),
+          config_home: File.join(root, "config")
+        )
+      end
+    ensure
+      database&.disconnect
+    end
   end
 end

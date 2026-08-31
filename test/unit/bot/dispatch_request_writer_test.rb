@@ -13,21 +13,21 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
     end
   end
 
-  def test_write_disconnects_only_a_repository_it_opens
-    owned, owned_database = fake_repository
-    with_replaced_singleton_method(W, :repository_for, ->(*) { owned }) do
+  def test_write_never_disconnects_the_process_shared_repository
+    shared, database = fake_repository
+    with_replaced_singleton_method(W, :repository_for, ->(*) { shared }) do
       assert_equal "request-1", W.write!(
         project: "hive", slug: "task-1", argv: %w[hive run task-1]
       )
     end
-    assert_equal 1, owned_database.disconnects
+    assert_equal 0, database.disconnects
 
-    injected, injected_database = fake_repository
+    injected, database = fake_repository
     assert_equal "request-1", W.write!(
       project: "hive", slug: "task-1", argv: %w[hive run task-1],
       repository: injected
     )
-    assert_equal 0, injected_database.disconnects
+    assert_equal 0, database.disconnects
   end
 
   def test_write_emits_schema_versioned_json_with_required_fields

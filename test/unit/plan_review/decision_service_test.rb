@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/plan_review/decision_service"
 
 class PlanReviewDecisionServiceTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(
     :folder, :project_root, :hive_state_path, :slug, :id, :stage_index, :stage_name,
     keyword_init: true
@@ -354,8 +356,10 @@ class PlanReviewDecisionServiceTest < Minitest::Test
 
   def with_task
     Dir.mktmpdir("hive-plan-review-decision") do |root|
-      folder = File.join(root, "task")
+      folder = File.join(root, ".hive-state", "stages", "3-plan", "demo-task")
       FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(folder, id: "task-1", slug: "demo-task", display_name: nil)
+      prepare_test_task_lease_repository(folder)
       yield FakeTask.new(
         folder:, project_root: root, hive_state_path: File.join(root, ".hive-state"),
         slug: "demo-task", id: "task-1", stage_index: 3, stage_name: "plan"

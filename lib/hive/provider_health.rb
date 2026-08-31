@@ -420,9 +420,7 @@ module Hive
       require "hive/runtime_control_plane"
       require "hive/provider_health/repository"
 
-      database ||= RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path
-      ).open!
+      database ||= RuntimeControlPlane.database.open!
       Repository.new(database: database, **options)
     end
   end

@@ -85,6 +85,49 @@ class RuntimeControlPlaneMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_macos_transitions_are_idempotent_across_partial_activation
+    with_tmp_dir do |root|
+      loaded = { "hive-daemon" => true, "hive-bot" => true, "hive-web" => false }
+      fail_bot_once = true
+      runner = lambda do |argv|
+        name = argv.last.to_s.delete_prefix("gui/#{Process.uid}/local.")
+        ok = case argv.first(2)
+        when [ "launchctl", "print" ]
+          argv.last == "gui/#{Process.uid}" ? true : loaded.fetch(name, false)
+        when [ "launchctl", "bootout" ]
+          loaded[name] = false
+          true
+        when [ "launchctl", "bootstrap" ]
+          service = File.basename(argv.last, ".plist").delete_prefix("local.")
+          if service == "hive-bot" && fail_bot_once
+            fail_bot_once = false
+            false
+          else
+            loaded[service] = true
+            true
+          end
+        else
+          false
+        end
+        [ "", ok ? "" : "failed", Status.new(ok) ]
+      end
+      services = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: root, host_os: "darwin", runner: runner
+      )
+
+      services.stop!(cutover_id: "cutover-1")
+      services.stop!(cutover_id: "cutover-1")
+      assert_raises(Hive::RuntimeControlPlane::Error) { services.activate! }
+      services.activate!
+      services.activate!
+
+      assert services.activated?
+      assert loaded.fetch("hive-daemon")
+      assert loaded.fetch("hive-bot")
+      refute loaded.fetch("hive-web"), "only services running before cutover are restarted"
+    end
+  end
+
   def test_package_owned_launcher_has_no_runtime_mutation_abstraction
     refute Hive::RuntimeControlPlane.const_defined?(:MaintenanceLauncher, false)
   end

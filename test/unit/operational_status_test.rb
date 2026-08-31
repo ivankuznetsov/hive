@@ -480,7 +480,10 @@ class OperationalStatusTest < Minitest::Test
     )
     snapshot["attempt_storage"] = {
       "status" => "degraded",
-      "layout" => { "generation" => 4 },
+      "layout" => {
+        "generation" => 4, "migration" => "failed",
+        "last_migrated_at" => nil, "last_result" => nil
+      },
       "hot" => { "records" => 1, "invalid" => 0 },
       "maintenance" => {
         "last_started_at" => "2026-07-20T09:00:00.000000Z",

@@ -29,6 +29,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
         end
       end
 
+      def reset!
+        @repositories&.each_value { |repository| repository.database.disconnect }
+        @repositories = {}
+      end
+
       def write_request!(project:, task_id: nil, state_home:, **attributes)
         ensure_project(repository(state_home).database, project, task_id, attributes[:slug])
         repository(state_home).write_request!(
@@ -88,11 +93,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
   ChildExit = Hive::Daemon::ChildSupervisor::ChildExit
 
   def setup
+    Q.reset!
+    Q.repository(Hive::Paths.state_home)
     @row_dirs = []
   end
 
   def teardown
     Array(@row_dirs).each { |dir| FileUtils.rm_rf(dir) }
+    Q.reset!
   end
 
   # ── fakes ─────────────────────────────────────────────────────────────

@@ -336,8 +336,12 @@ class ImplementationIdentityStoreTest < Minitest::Test
           task: task, cfg: first_cfg, attempt_store: attempt_store
         ).resolve_stage!("open_pr")
       end
+      attempt_store.mark_lost(
+        first_attempt, reason: "retry_superseded", now: Time.now.utc
+      )
       retry_attempt = create_attempt(
-        attempt_store, task, attempt_id: "open-pr-retry", intended_stage: "5-open-pr"
+        attempt_store, task, attempt_id: "open-pr-retry", intended_stage: "5-open-pr",
+        predecessor_attempt_id: first_attempt.attempt_id
       )
       drifted_cfg = execute_config(
         "claude", "claude-fable-5",
@@ -503,7 +507,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
   def test_store_rejects_unknown_downstream_stage_before_context_or_projection
     task = TaskStub.new(folder: "/tmp/task", slug: "task", id: 42)
     store = Hive::ImplementationIdentity::Store.new(
-      task: task, cfg: execute_config("codex", "gpt-5.6-sol")
+      task: task, cfg: execute_config("codex", "gpt-5.6-sol"), attempt_store: Object.new
     )
 
     assert_raises(Hive::ImplementationIdentity::ResolutionError) do
@@ -552,33 +556,42 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
-  def test_default_attempt_store_honors_explicit_root
+  def test_default_attempt_store_ignores_retired_root_override
     with_tmp_dir do |root|
+      state_home = File.join(root, "state")
+      legacy_root = File.join(root, "attempts")
+      Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(state_home)
+      ).migrate!.disconnect
       task = TaskStub.new(
         folder: root, state_file: File.join(root, "task.md"), slug: "task",
         id: 1, project_root: root
       )
 
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(root, "attempts")) do
+      with_env("HIVE_HOME" => state_home, "HIVE_ATTEMPT_STORE_ROOT" => legacy_root) do
         store = Hive::ImplementationIdentity::Store.new(
           task: task, cfg: execute_config("codex", "gpt-5.6-sol")
         )
 
-        assert_equal File.join(root, "attempts"),
+        assert_equal File.join(state_home, "runtime-payloads"),
                      store.instance_variable_get(:@attempt_store).root
       end
+      refute File.exist?(legacy_root)
     end
   end
 
   def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |root|
+      Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ).migrate!.disconnect
       task = TaskStub.new(folder: root, state_file: File.join(root, "task.md"), slug: "task",
                           id: 1, project_root: root)
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::ImplementationIdentity::Store.new(
           task: task, cfg: execute_config("codex", "gpt-5.6-sol")
         )
-        assert_equal File.join(root, "attempts", "v4"),
+        assert_equal File.join(root, "runtime-payloads"),
                      store.instance_variable_get(:@attempt_store).root
       end
       refute File.exist?(File.join(root, "attempts", "v2"))
@@ -632,10 +645,11 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
-  def create_attempt(attempt_store, task, attempt_id:, intended_stage:, generation: 1)
+  def create_attempt(attempt_store, task, attempt_id:, intended_stage:, generation: 1,
+                     predecessor_attempt_id: nil)
     attempt_store.create_launching(
       attempt_id: attempt_id, request_id: "request-#{attempt_id}",
-      predecessor_attempt_id: nil, task_id: task.id.to_s, project: "demo",
+      predecessor_attempt_id: predecessor_attempt_id, task_id: task.id.to_s, project: "demo",
       task_slug: task.slug, intended_stage: intended_stage,
       task_generation: "owner-#{generation}", ownership_generation: "owner-#{generation}",
       task_input_epoch: generation, progress_token: "progress-#{attempt_id}",

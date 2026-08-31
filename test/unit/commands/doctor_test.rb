@@ -132,6 +132,33 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  def test_runtime_probe_recommends_only_forward_recovery_actions
+    with_tmp_dir do |root|
+      File.binwrite(Hive::Paths.runtime_control_plane_path(root), "placeholder")
+      previous = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = root
+      doctor = Hive::Commands::Doctor.new(
+        config: base_config, project_root: root, inspector: ResolutionOnlyInspector.new(
+          config: base_config, project_root: root
+        )
+      )
+      status = { "phase" => "ready", "database" => { "status" => "missing" } }
+
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::Cutover, :inspect_status, ->(**) { status }
+      ) do
+        row = doctor.send(:check_runtime_control_plane).fetch(0)
+        assert_equal(
+          "run hive runtime status, then hive runtime resume when its forward action is approved",
+          row.fetch(:remediation)
+        )
+        refute_match(/restore|rollback|downgrade/, row.values.compact.join(" "))
+      end
+    ensure
+      previous.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = previous
+    end
+  end
+
   def test_exit_missing_skill_when_one_missing
     with_fake_home do |home|
       write_file("#{home}/.claude/commands/plan.md")

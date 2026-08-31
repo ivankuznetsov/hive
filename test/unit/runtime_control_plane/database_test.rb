@@ -54,6 +54,73 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_migration_creates_owner_private_database_and_sidecars_under_permissive_umask
+    with_tmp_dir do |root|
+      path = File.join(root, "state", "runtime.sqlite3")
+      previous = File.umask(0o022)
+      database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      database.transaction do |connection|
+        connection[:task_counters].insert(
+          installation_id: installation_id(database), namespace: "mode-proof", value: 1,
+          updated_at: Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+        )
+      end
+
+      assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
+      [ path, "#{path}-wal", "#{path}-shm" ].each do |candidate|
+        next unless File.exist?(candidate)
+        assert_equal 0o600, File.lstat(candidate).mode & 0o777, candidate
+      end
+    ensure
+      File.umask(previous) if previous
+      database&.disconnect
+    end
+  end
+
+  def test_unsafe_database_custody_fails_closed_before_sqlite_open
+    with_database do |database, path|
+      database.disconnect
+      File.chmod(0o644, path)
+
+      diagnosis = database.diagnostics
+
+      assert_equal :corrupt, diagnosis.status
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.open! }
+      assert_equal :database_custody_invalid, error.code
+    end
+
+    with_database do |database, path|
+      database.disconnect
+      linked = "#{path}.linked"
+      File.link(path, linked)
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.open! }
+      assert_equal :database_custody_invalid, error.code
+    ensure
+      FileUtils.rm_f(linked) if linked
+    end
+  end
+
+  def test_exact_schema_rejects_column_constraint_and_unexpected_index_drift
+    with_database do |database, path|
+      database.disconnect
+      raw_sqlite(path) do |raw|
+        raw.execute("ALTER TABLE daemon_runtime RENAME COLUMN observation_json TO broken_json")
+      end
+
+      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }
+      assert_equal :partial_schema, error.code
+    end
+
+    with_database do |database, path|
+      database.disconnect
+      raw_sqlite(path) { |raw| raw.execute("CREATE INDEX unexpected_runtime_idx ON daemon_runtime(daemon_kind)") }
+
+      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }
+      assert_equal :partial_schema, error.code
+    end
+  end
+
   def test_database_owner_is_reused_only_inside_the_current_process
     with_tmp_dir do |root|
       path = File.join(root, "runtime.sqlite3")
@@ -199,6 +266,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     yield database
   ensure
     database&.close
+    File.chmod(0o600, path) if File.file?(path)
   end
 
   def set_schema_version(path, version)

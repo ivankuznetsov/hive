@@ -55,6 +55,9 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         },
         now: Time.now.utc
       )
+      log_path = File.join(store.root, "logs", "historical-execute.frames")
+      FileUtils.mkdir_p(File.dirname(log_path))
+      File.binwrite(log_path, "")
       terminal = store.terminalize(
         historical,
         outcome: "succeeded", exit_status: 0,
@@ -69,6 +72,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
       maintenance.prepare(terminal)
       maintenance.acknowledge(terminal, :journal)
+      assert maintenance.publish_after_journal(terminal)
       maintenance.acknowledge(terminal, :request_delivery)
       assert maintenance.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
@@ -107,7 +111,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         now: Time.now.utc
       )
       foreign = running_attempt(
-        store, "foreign-execute", "4-execute", "claude", project: "other"
+        store, "foreign-execute", "4-execute", "claude", project: "other", task_id: "43"
       )
       store.checkpoint(
         foreign,
@@ -375,11 +379,11 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
-  def running_attempt(store, id, stage, provider, project: "demo", input_epoch: 0)
+  def running_attempt(store, id, stage, provider, project: "demo", task_id: "42", input_epoch: 0)
     now = Time.now.utc
     claim_capability = "c" * 64
     launching = store.create_launching(
-      attempt_id: id, task_id: "42", project: project, task_slug: "legacy-task",
+      attempt_id: id, task_id: task_id, project: project, task_slug: "legacy-task",
       intended_stage: stage, task_generation: "owner-0", ownership_generation: "owner-0",
       task_input_epoch: input_epoch, progress_token: "progress-#{id}",
       provider: provider, starting_revision: nil,

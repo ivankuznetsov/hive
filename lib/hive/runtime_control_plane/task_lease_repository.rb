@@ -10,6 +10,8 @@ module Hive
       MAX_RETRIES = 8
       MAX_PAYLOAD_BYTES = 16 * 1024
 
+      attr_reader :database
+
       def initialize(database: RuntimeControlPlane.database,
                      clock: -> { Time.now.utc }, nonce: -> { SecureRandom.hex(16) },
                      process_start_time:, process_alive:)
@@ -138,9 +140,12 @@ module Hive
           "task #{task_id} is not registered in the runtime control plane",
           code: :missing_task_identity
         ) unless row
-        if project && row.fetch(:project_id) != project.fetch(:project_id)
+        workflow_id = (metadata[:workflow] || "coding").to_s
+        task_slug = (metadata[:slug] || File.basename(folder)).to_s
+        if project && (row.fetch(:project_id) != project.fetch(:project_id) ||
+                       row.fetch(:workflow_id) != workflow_id || row.fetch(:task_slug) != task_slug)
           raise IdentityError.new(
-            "task #{task_id} belongs to a different registered project",
+            "task #{task_id} belongs to a different registered subject",
             code: :task_identity_conflict
           )
         end
@@ -158,8 +163,8 @@ module Hive
       end
 
       def register_subject(folder, task_id, metadata, project)
-        workflow_id = metadata[:workflow] || "coding"
-        task_slug = metadata[:slug] || File.basename(folder)
+        workflow_id = (metadata[:workflow] || "coding").to_s
+        task_slug = (metadata[:slug] || File.basename(folder)).to_s
         timestamp = Codec.dump_time(@clock.call)
         @database.transaction do |db|
           historical = db[:task_subjects].where(

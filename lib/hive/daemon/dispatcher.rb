@@ -3018,6 +3018,7 @@ module Hive
                 request_id: request.request_id
               )
             end
+            dispatch_repository.complete_delivery(request.request_id, now: now)
             acknowledge_attempt_finalization(attempt_id, :request_delivery)
             next
           end
@@ -3070,6 +3071,8 @@ module Hive
             dispatch_repository.remove(
               request.request_id, state_home: dispatch_request_state_home
             )
+          else
+            dispatch_repository.complete_delivery(request.request_id, now: now)
           end
           @logger.event(
             :dispatch_request_completed,

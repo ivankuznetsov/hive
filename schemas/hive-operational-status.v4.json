@@ -214,9 +214,12 @@
         "layout": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["generation"],
+          "required": ["generation", "migration"],
           "properties": {
-            "generation": { "const": 4 }
+            "generation": { "const": 4 },
+            "migration": { "type": "string", "enum": ["complete", "failed", "unknown"] },
+            "last_migrated_at": { "type": ["string", "null"], "format": "date-time" },
+            "last_result": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } }
           }
         },
         "hot": {
@@ -255,7 +258,7 @@
               "additionalProperties": false,
               "required": ["operation", "class"],
               "properties": {
-                "operation": { "type": "string", "enum": ["maintenance", "status"] },
+                "operation": { "type": "string", "enum": ["maintenance", "migration", "status"] },
                 "class": { "type": "string", "maxLength": 120 },
                 "observed_at": { "type": "string", "format": "date-time" }
               }

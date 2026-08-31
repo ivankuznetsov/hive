@@ -17,6 +17,7 @@ class HiveDaemonCommandTest < Minitest::Test
   def with_isolated_hive_home(&block)
     Dir.mktmpdir("hive-daemon-test") do |home|
       env = ENV.to_h.merge("HIVE_HOME" => home, "HOME" => home)
+      activate_test_control_plane(home)
       prepare_runtime_project(state_home: home, name: "hive", path: home).disconnect
       block.call(home, env)
     end
@@ -1622,20 +1623,20 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
-  def test_queue_internal_error_json_emits_envelope
+  def test_queue_corrupt_runtime_is_fenced_by_the_boot_contract
     with_isolated_hive_home do |home, env|
-      # A corrupt runtime database must still emit the command's structured
-      # internal-error envelope instead of a bare stack trace.
+      # The activation gate runs before command dispatch, so a corrupt active
+      # database uses the runtime-maintenance contract rather than pretending
+      # the queue command reached its own repository.
       File.write(Hive::Paths.runtime_control_plane_path(home), "not a sqlite database")
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
                                          "daemon", "queue", "list", "--json")
-      # #262: an internal queue failure exits 70 (SOFTWARE), matching the
-      # envelope's error_kind:"internal" — not a bare uncaught StandardError
-      # (exit 1 + stack trace).
-      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
       doc = JSON.parse(out)
       assert_equal false, doc["ok"]
-      assert_equal "internal", doc["error_kind"]
+      assert_equal "hive-runtime-maintenance", doc["schema"]
+      assert_equal "runtime", doc["error_kind"]
+      assert_equal "fleet_cutover_required", doc["runtime_code"]
     end
   end
 end

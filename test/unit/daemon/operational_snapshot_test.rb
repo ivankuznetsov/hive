@@ -92,7 +92,10 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.begin_tick(now: T0)
       assembler.update_attempt_storage(
         "status" => "healthy",
-        "layout" => { "generation" => 4 },
+        "layout" => {
+          "generation" => 4, "migration" => "complete",
+          "last_migrated_at" => nil, "last_result" => nil
+        },
         "hot" => { "records" => 2, "invalid" => 0 },
         "maintenance" => {
           "last_started_at" => T0.iso8601(6),

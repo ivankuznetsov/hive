@@ -82,7 +82,8 @@ module Hive
           skill: "sqlite", status: healthy ? "ok" : "missing",
           message: healthy ? "runtime control plane is healthy" :
             "runtime control plane is #{status.fetch('phase')} (#{diagnosis.fetch('status')})",
-          remediation: healthy ? nil : "run hive runtime status before resuming or restoring"
+          remediation: healthy ? nil :
+            "run hive runtime status, then hive runtime resume when its forward action is approved"
         } ]
       rescue Hive::RuntimeControlPlane::Error => error
         [ {

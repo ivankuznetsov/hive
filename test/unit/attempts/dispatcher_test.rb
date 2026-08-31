@@ -88,7 +88,7 @@ class AttemptsDispatcherTest < Minitest::Test
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "request-one")
       File.write(task.state_file, "changed\n<!-- WAITING -->\n")
-      changed = dispatch(dispatcher, task, request_id: "request-two")
+      changed = dispatch(dispatcher, task, request_id: "request-two", now: NOW + 1)
 
       assert_equal :deferred, changed.status
       assert_equal "in_flight", changed.reason
@@ -361,11 +361,11 @@ class AttemptsDispatcherTest < Minitest::Test
 
       repair = dispatch(
         dispatcher, task, request_id: "request-two",
-        intended_stage: "2-brainstorm"
+        intended_stage: "2-brainstorm", now: NOW + 4
       )
       duplicate = dispatch(
         dispatcher, task, request_id: "request-three",
-        intended_stage: "2-brainstorm"
+        intended_stage: "2-brainstorm", now: NOW + 4
       )
 
       assert_equal :accepted, repair.status
@@ -384,7 +384,7 @@ class AttemptsDispatcherTest < Minitest::Test
       later = dispatch(
         dispatcher, task, request_id: "request-two",
         intended_stage: "2-brainstorm",
-        generation: repair.attempt.task_generation
+        generation: repair.attempt.task_generation, now: NOW + 7
       )
 
       assert_equal :terminal_replay, later.status
@@ -465,7 +465,7 @@ class AttemptsDispatcherTest < Minitest::Test
         store, launcher, successor, outcome: "failed", exit_status: 1, now: NOW + 5
       )
 
-      retry_result = dispatch(dispatcher, task, request_id: "request-three")
+      retry_result = dispatch(dispatcher, task, request_id: "request-three", now: NOW + 6)
 
       assert_equal :accepted, retry_result.status
       assert_equal "attempt-three", retry_result.attempt.attempt_id

@@ -75,7 +75,7 @@ module Hive
 
     def rates(groups)
       groups.transform_values do |counts|
-        counts.merge("rate" => rate(counts["reverted"], counts["total"]))
+        counts.merge("rate" => rate_of(counts))
       end
     end
 

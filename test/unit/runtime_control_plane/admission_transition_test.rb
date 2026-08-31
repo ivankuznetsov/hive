@@ -103,6 +103,28 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_older_task_source_observation_cannot_replace_a_newer_one
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }
+      folder = File.join(state_root, "stages", "4-execute", "task-1")
+      FileUtils.mkdir_p(folder)
+      task = Struct.new(:folder, :workflow).new(folder, nil)
+      generation = Struct.new(
+        :task_id, :project, :task_slug, :progress_token, :task_input_epoch
+      )
+      newer = generation.new("task-1", "demo", "task-1", "source-new", 2)
+      older = generation.new("task-1", "demo", "task-1", "source-old", 1)
+
+      assert attempts.observe_task_source(task: task, generation: newer, observed_at: NOW + 2)
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        attempts.observe_task_source(task: task, generation: older, observed_at: NOW + 1)
+      end
+      row = attempts.database.read { |db| db[:task_subjects].where(task_id: "task-1").first }
+      assert_equal "source-new", row.fetch(:source_fingerprint)
+      assert_equal 2, row.fetch(:generation)
+    end
+  end
+
   def test_provider_capacity_is_revalidated_inside_the_admission_transaction
     with_control_plane(task_ids: %w[task-1 task-2]) do |attempts, dispatch, health|
       policy = explicit_policy(max_concurrent: 1)

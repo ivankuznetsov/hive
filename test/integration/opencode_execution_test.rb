@@ -6,6 +6,7 @@ require "hive/attempts/capability"
 require "hive/attempts/repository"
 require "hive/stages/plan"
 require "hive/task"
+require "hive/task_meta"
 
 class OpenCodeExecutionIntegrationTest < Minitest::Test
   include HiveTestHelper
@@ -69,6 +70,9 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
           project, ".hive-state", "stages", "4-execute", slug
         )
         FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(
+          folder, id: 42, slug: slug, display_name: nil, workflow: "coding"
+        )
         File.write(File.join(folder, "plan.md"), <<~PLAN)
           # Atomic OpenCode integration
 
@@ -82,8 +86,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
           root: Hive::Paths.runtime_payload_root(home),
           database: Hive::RuntimeControlPlane::Database.new(
             path: Hive::Paths.runtime_control_plane_path(home)
-          ),
-          migrate: true
+          ).open!
         )
         register_task_subject(attempts, task)
         attempt = create_attempt(task, attempts)
@@ -146,6 +149,11 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         "opencode-plan-260812-abcd"
       )
       FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: 43, slug: File.basename(folder),
+        display_name: nil, workflow: "coding"
+      )
+      prepare_test_task_run(folder)
       File.write(File.join(folder, "brainstorm.md"), "# Brainstorm\n")
       plugin_root = File.join(project, "vendor", "compound-engineering")
       plugin_entry = File.join(
@@ -232,17 +240,13 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
   def register_task_subject(attempts, task)
     now = Time.now.utc.iso8601(6)
     attempts.database.transaction do |database|
-      installation_id = database[:installations].get(:installation_id)
-      database[:projects].insert(
-        project_id: "test-project", installation_id: installation_id,
-        registration_id: "test-registration", name: File.basename(task.project_root),
-        observed_path: task.project_root, state_root_path: File.join(task.project_root, ".hive-state"),
-        active: 1, registered_at: now, last_observed_at: now
-      )
+      project_id = database[:projects].where(
+        state_root_path: File.join(task.project_root, ".hive-state")
+      ).get(:project_id)
       database[:task_subjects].insert(
-        task_id: "test-task", project_id: "test-project", workflow_id: "coding",
-        task_slug: task.slug, observed_path: task.id.to_s,
-        source_fingerprint: "test-source", generation: 0,
+        task_id: task.id.to_s, project_id: project_id, workflow_id: "coding",
+        task_slug: task.slug, observed_path: task.folder,
+        source_fingerprint: "opencode-execute-progress", generation: 1,
         created_at: now, last_observed_at: now
       )
     end

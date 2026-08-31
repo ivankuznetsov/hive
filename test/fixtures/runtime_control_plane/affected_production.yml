@@ -5,70 +5,78 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_lines: 7954
+final_inventory_lines: 9119
+outside_inventory_net_lines: -3016
+final_lines: 6103
 final_paths:
 - path: lib/hive/attempts/capacity_snapshot.rb
-  lines: 103
+  lines: 104
 - path: lib/hive/attempts/coordination.rb
-  lines: 441
+  lines: 451
 - path: lib/hive/attempts/finalization_maintenance.rb
-  lines: 332
+  lines: 337
 - path: lib/hive/attempts/publication.rb
-  lines: 219
+  lines: 299
 - path: lib/hive/attempts/repository.rb
-  lines: 647
+  lines: 665
 - path: lib/hive/attempts/storage_status.rb
-  lines: 16
+  lines: 20
 - path: lib/hive/commands/runtime.rb
-  lines: 58
+  lines: 87
 - path: lib/hive/daemon/pr_merge_repository.rb
-  lines: 344
+  lines: 342
 - path: lib/hive/lock.rb
   lines: 225
 - path: lib/hive/metrics.rb
   lines: 85
 - path: lib/hive/patrol/launch_budget.rb
-  lines: 364
+  lines: 361
 - path: lib/hive/provider_health/attempt_observer.rb
   lines: 88
 - path: lib/hive/provider_health/repository.rb
   lines: 441
 - path: lib/hive/provider_routing/operational_projection.rb
   lines: 145
+- path: lib/hive/provider_routing/policy_repository.rb
+  lines: 227
 - path: lib/hive/runtime_control_plane.rb
   lines: 96
 - path: lib/hive/runtime_control_plane/activation_gate.rb
-  lines: 81
+  lines: 113
 - path: lib/hive/runtime_control_plane/admission_transition.rb
-  lines: 258
+  lines: 262
 - path: lib/hive/runtime_control_plane/codec.rb
   lines: 92
 - path: lib/hive/runtime_control_plane/cutover.rb
-  lines: 637
+  lines: 840
 - path: lib/hive/runtime_control_plane/cutover_manifest.rb
   lines: 114
 - path: lib/hive/runtime_control_plane/database.rb
-  lines: 311
+  lines: 366
 - path: lib/hive/runtime_control_plane/dispatch_repository.rb
-  lines: 636
+  lines: 691
 - path: lib/hive/runtime_control_plane/maintenance.rb
-  lines: 101
+  lines: 113
 - path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
-  lines: 457
+  lines: 486
 - path: lib/hive/runtime_control_plane/operational_repository.rb
   lines: 77
 - path: lib/hive/runtime_control_plane/payload_store.rb
-  lines: 279
+  lines: 342
 - path: lib/hive/runtime_control_plane/process_guard.rb
-  lines: 158
+  lines: 171
 - path: lib/hive/runtime_control_plane/task_lease_repository.rb
-  lines: 291
+  lines: 296
 - path: lib/hive/task_counter.rb
   lines: 62
 - path: lib/hive/task_journal.rb
   lines: 368
 - path: lib/hive/usage_db.rb
   lines: 428
+- path: schemas/hive-running-status.v2.json
+  lines: 217
+- path: schemas/hive-runtime-maintenance.v1.json
+  lines: 108
 paths:
 - path: lib/hive/attempts/store.rb
   lines: 686

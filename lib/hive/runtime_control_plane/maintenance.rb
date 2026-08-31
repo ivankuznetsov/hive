@@ -22,7 +22,8 @@ module Hive
       end
 
       def stop!(cutover_id:)
-        document = journal || { "cutover_id" => cutover_id, "running" => running_services }.tap do |value|
+        document = journal || { "cutover_id" => cutover_id, "running" => running_services,
+                                "activated" => false }.tap do |value|
           Hive::AtomicFile.write(journal_path, "#{JSON.generate(value)}\n", mode: 0o600)
         end
         raise Error.new("service journal belongs to another cutover", code: :service_lifecycle_failed) unless
@@ -34,10 +35,16 @@ module Hive
       def activate!
         document = journal
         raise Error.new("service journal is missing", code: :service_lifecycle_failed) unless document
+        return true if document.fetch("activated")
 
         document.fetch("running").each { |name| transition!(:start, name) }
+        Hive::AtomicFile.write(
+          journal_path, "#{JSON.generate(document.merge("activated" => true))}\n", mode: 0o600
+        )
         true
       end
+
+      def activated? = journal&.fetch("activated") == true
 
       private
 
@@ -59,6 +66,10 @@ module Hive
       end
 
       def transition!(action, name)
+        if @platform == :macos
+          present = success?([ "launchctl", "print", "gui/#{Process.uid}/local.#{name}" ])
+          return true if (action == :stop && !present) || (action == :start && present)
+        end
         command = if @platform == :linux
           [ "systemctl", "--user", action.to_s, name ]
         elsif action == :stop
@@ -88,8 +99,9 @@ module Hive
         end
         document = JSON.parse(File.binread(journal_path))
         running = document["running"]
-        valid = document.is_a?(Hash) && document.keys.sort == %w[cutover_id running] &&
+        valid = document.is_a?(Hash) && document.keys.sort == %w[activated cutover_id running] &&
           document["cutover_id"].is_a?(String) && running.is_a?(Array) &&
+          [ true, false ].include?(document["activated"]) &&
           running.uniq == running && (running - SERVICES).empty?
         raise Error.new("service journal is invalid", code: :service_lifecycle_failed) unless valid
         document

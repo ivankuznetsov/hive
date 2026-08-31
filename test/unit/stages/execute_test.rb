@@ -122,7 +122,7 @@ class HiveStagesExecuteTest < Minitest::Test
           original.call(path, name, attrs)
         end
 
-        with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "attempts")) do
+        with_env("HIVE_HOME" => store.root) do
           with_attempt_context(
             attempt_id: attempt.attempt_id, task_generation: 1,
             ownership_generation: attempt.ownership_generation

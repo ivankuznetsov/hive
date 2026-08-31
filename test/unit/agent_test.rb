@@ -33,6 +33,7 @@ class AgentTest < Minitest::Test
   def make_task(dir, stage = "2-brainstorm", slug = "agent-test-260424-aaaa")
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     Hive::Task.new(folder)
   end
 
@@ -696,9 +697,12 @@ class AgentTest < Minitest::Test
       ENV["HIVE_FAKE_CLAUDE_RELEASE_FILE"] = release
       ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      release_test_task_run(task.folder)
 
       worker = Thread.new do
-        Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+        Hive::Lock.with_task_lock(task.folder) do
+          Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+        end
       end
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
       sleep 0.01 until File.exist?(ready) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline

@@ -4,7 +4,7 @@ require "hive/attempts/entrypoint"
 class AttemptsEntrypointTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:slug, :project_root, :project_name, keyword_init: true)
+  FakeTask = Struct.new(:id, :slug, :stage_name, :project_root, :project_name, keyword_init: true)
 
   def test_operator_dispatch_still_defers_on_non_loss_reasons
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
@@ -211,7 +211,10 @@ class AttemptsEntrypointTest < Minitest::Test
   end
 
   def test_initial_no_route_is_admitted_to_markerless_recovery_before_returning
-    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    task = FakeTask.new(
+      id: 1, slug: "task", stage_name: "4-execute",
+      project_root: "/tmp/project", project_name: "demo"
+    )
     decision = Object.new
     result = Hive::Attempts::DispatchResult.new(
       status: :no_route, attempt: nil, receipt: nil,

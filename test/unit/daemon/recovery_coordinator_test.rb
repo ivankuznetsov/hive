@@ -614,10 +614,15 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       task_id: ->(task, _dir) { task.with(id: 818) },
       stage: ->(task, _dir) { task.with(stage_index: 5, stage_name: "open-pr") },
       folder: lambda do |task, dir|
-        folder = File.join(dir, "moved-task")
+        folder = File.join(
+          dir, "project", ".hive-state", "stages", "4-execute", "moved-task"
+        )
         FileUtils.mkdir_p(folder)
         state_file = File.join(folder, "task.md")
         FileUtils.cp(task.state_file, state_file)
+        Hive::TaskMeta.write(
+          folder, id: task.id, slug: task.slug, display_name: nil, workflow: "coding"
+        )
         task.with(folder: folder, state_file: state_file)
       end
     }
@@ -1709,8 +1714,14 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def test_provider_failure_waits_for_exact_health_consumer_acknowledgement
     Dir.mktmpdir("hive-provider-recovery") do |dir|
-      folder = File.join(dir, "task")
+      folder = File.join(dir, ".hive-state", "stages", "4-execute", "demo-task")
       FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: 817, slug: "demo-task", display_name: nil, workflow: "coding"
+      )
+      prepare_test_task_lease_repository(
+        folder, state_home: File.join(dir, "lease-runtime")
+      )
       state_file = File.join(folder, "task.md")
       task = FakeTask.new(
         id: 817, slug: "demo-task", folder: folder, state_file: state_file,
@@ -2215,8 +2226,15 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
                               suggested_command: "hive run demo-task --project hive --stage 2-fix --json",
                               task_resolver_builder: nil)
     Dir.mktmpdir("hive-markerless-recovery") do |dir|
-      folder = File.join(dir, "task")
+      folder = File.join(dir, ".hive-state", "stages", "2-fix", "demo-task")
       FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: task_id || 817, slug: "demo-task", display_name: nil,
+        workflow: "patrol-fix"
+      )
+      prepare_test_task_lease_repository(
+        folder, state_home: File.join(dir, "lease-runtime")
+      )
       state_file = File.join(folder, "patrol-fix-manifest.json")
       File.write(state_file, "{\"schema\":\"controller-state\"}\n")
       original = File.binread(state_file)
@@ -2288,8 +2306,17 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
                    safety: nil, task_resolver_builder: nil, task_id: 817,
                    generation_resolver: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
-      folder = File.join(dir, "task")
+      project_root = File.join(dir, "project")
+      folder = File.join(
+        project_root, ".hive-state", "stages", "4-execute", "demo-task"
+      )
       FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: task_id || 817, slug: "demo-task", display_name: nil, workflow: "coding"
+      )
+      prepare_test_task_lease_repository(
+        folder, state_home: File.join(dir, "lease-runtime")
+      )
       state_file = File.join(folder, "task.md")
       attrs = marker_attrs || { "reason" => "timeout", "marker_id" => "marker-1" }
       File.write(state_file, "# Task\n\n#{Hive::Markers.build_marker(marker_name, attrs)}\n")

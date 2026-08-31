@@ -1,8 +1,26 @@
 require "test_helper"
+require "weakref"
 require "hive/runtime_control_plane"
 
 class RuntimeControlPlaneProcessGuardTest < Minitest::Test
   include HiveTestHelper
+
+  def test_connected_database_stays_registered_without_an_external_owner
+    with_tmp_dir do |root|
+      database = database_at(File.join(root, "unowned.sqlite3"))
+      reference = WeakRef.new(database)
+      database = nil
+      GC.start
+
+      assert reference.weakref_alive?
+      registered = reference.__getobj__
+      Hive::RuntimeControlPlane::ProcessGuard.disconnect_all!
+      assert registered.disconnected?
+    ensure
+      Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
+      registered&.disconnect
+    end
+  end
 
   def test_fork_request_from_owning_checkout_fails_without_deadlock
     with_database do |database|
@@ -58,7 +76,7 @@ class RuntimeControlPlaneProcessGuardTest < Minitest::Test
         barrier_release.pop
         Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
       end
-      sleep 0.02
+      wait_for_fork_barrier
       blocked_checkout_entered = Queue.new
       blocked = Thread.new do
         second.read { blocked_checkout_entered << true }
@@ -174,7 +192,7 @@ class RuntimeControlPlaneProcessGuardTest < Minitest::Test
         end
         fork_complete << child
       end
-      sleep 0.02
+      wait_for_fork_barrier
       assert fork_complete.empty?
 
       release << true
@@ -328,6 +346,17 @@ class RuntimeControlPlaneProcessGuardTest < Minitest::Test
   end
 
   private
+
+  def wait_for_fork_barrier
+    guard_state = Hive::RuntimeControlPlane::ProcessGuard.send(:state)
+    Timeout.timeout(1) do
+      loop do
+        break if guard_state[:mutex].synchronize { guard_state[:forking] }
+
+        Thread.pass
+      end
+    end
+  end
 
   def with_database
     with_tmp_dir do |root|

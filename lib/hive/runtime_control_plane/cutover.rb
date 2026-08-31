@@ -4,12 +4,14 @@ require "json"
 require "securerandom"
 require "sequel"
 require "time"
+require "yaml"
 require "hive/atomic_file"
 require "hive/config"
 require "hive/daemon/activation_lock"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/cutover_manifest"
 require "hive/runtime_control_plane/maintenance"
+require "hive/pid_file"
 require "hive/task_meta"
 
 module Hive
@@ -20,7 +22,6 @@ module Hive
       Result = Data.define(:phase, :cutover_id, :database_path, :exclusions)
       Target = Data.define(:home, :relative_path, :expected_type)
       TaskIdentity = Data.define(:folder, :id, :workflow)
-      PHASES = %w[ready intended active].freeze
       FENCE_BYTES = "HIVE_RUNTIME_RETIRED\nUse the active Hive launcher and run hive runtime status.\n".freeze
       ATTEMPT_RUNTIME_PATHS = %w[
         decision-indexes generation-locks log-state maintenance pending-finalization
@@ -102,19 +103,24 @@ module Hive
       end
 
       def self.retired_task_path?(relative)
-        %w[daemon/pr-merge-reconciliation.json daemon/pr-merge-reconciliation.json.lock].include?(relative) ||
-          %w[.lock .lock.tmp.guard].include?(relative) ||
+        PROJECT_RUNTIME_FILES.include?(relative) || TASK_RUNTIME_FILES.include?(relative) ||
           relative.match?(%r{\Astages/[^/]+/[^/]+/\.lock(?:\.tmp\.guard)?\z})
       end
 
       def self.inspect_status(state_home:, database:)
         root = File.join(File.expand_path(state_home), ".runtime-cutover", "current")
-        phase = PHASES.reverse.find { |name| File.exist?(File.join(root, "#{name}.json")) }
+        phase = CutoverManifest::PHASES.reverse.find do |name|
+          File.exist?(File.join(root, "#{name}.json"))
+        end
         document = CutoverManifest.new(path: File.join(root, "#{phase}.json")).load.fetch("document") if phase
         diagnosis = database.diagnostics
         if diagnosis.ok?
-          raise Error.new("runtime database has no active cutover manifest", code: :activation_manifest_missing) unless
-            phase == "active"
+          unless %w[ready intended active].include?(phase)
+            raise Error.new(
+              "runtime database has no active cutover manifest and no resumable cutover manifest",
+              code: :activation_manifest_missing
+            )
+          end
           identity = database.installation_identity
           unless identity && identity.fetch(:installation_id) == document.fetch("installation_id") &&
                  identity.fetch(:lineage_id) == document.fetch("lineage_id") &&
@@ -122,10 +128,10 @@ module Hive
             raise Error.new("runtime database identity differs from active manifest", code: :activation_identity_mismatch)
           end
         end
-        { "schema" => "hive-runtime-cutover-status", "phase" => phase || "absent",
-          "installation_id" => document && document.fetch("installation_id"), "database" => diagnosis.to_h }
-      ensure
-        database.disconnect if diagnosis&.ok?
+        { "phase" => phase || "absent",
+          "installation_id" => document && document.fetch("installation_id"),
+          "next_action" => %w[ready intended].include?(phase) ? "hive runtime resume" : nil,
+          "database" => Codec.normalize(diagnosis.to_h) }
       end
 
       attr_reader :services
@@ -147,14 +153,14 @@ module Hive
       end
 
       def run(confirm:, exclusions: [])
-        return result_for("active") if current_phase == "active"
+        return finish_active_activation if current_phase == "active"
         return resume if current_phase
         confirmation! unless confirm
         perform(exclusions: exclusions, fresh: false)
       end
 
       def bootstrap(confirm:)
-        return result_for("active") if current_phase == "active"
+        return finish_active_activation if current_phase == "active"
         return resume if current_phase
         confirmation! unless confirm
         material = target_paths.select { |target| path_exists?(target.fetch(:live)) }
@@ -167,7 +173,7 @@ module Hive
 
       def resume
         phase = current_phase
-        return result_for("active") if phase == "active"
+        return finish_active_activation if phase == "active"
         raise Error.new("no cutover is ready to resume", code: :resume_unavailable) unless phase
 
         document = load_phase(phase).fetch("document")
@@ -178,7 +184,17 @@ module Hive
           document.fetch("task_authority") == self.class.task_authority(@active_projects)
         @services.stop!(cutover_id: cutover_id)
         @gate.synchronize do
-          publish_intent_from_ready if current_phase == "ready"
+          if %w[preparing ready].include?(current_phase)
+            with_legacy_writer_guards(enabled: !document.dig("evidence", "fresh")) do
+              if current_phase == "preparing"
+                prepare_ready(
+                  @active_projects, document.fetch("exclusions"), document.fetch("task_authority"),
+                  document.dig("evidence", "fresh")
+                )
+              end
+              publish_intent_from_ready if current_phase == "ready"
+            end
+          end
           activate_from_intent
         end
       end
@@ -191,11 +207,15 @@ module Hive
         @active_projects = active
         task_authority = self.class.task_authority(active)
         prepare_run!
+        publish_phase("preparing", active, excluded, task_authority, "fresh" => fresh)
         fault!(:run_prepared)
         @services.stop!(cutover_id: cutover_id)
+        fault!(:services_stopped)
         @gate.synchronize do
-          prepare_ready(active, excluded, task_authority, fresh)
-          publish_intent_from_ready
+          with_legacy_writer_guards(enabled: !fresh) do
+            prepare_ready(active, excluded, task_authority, fresh)
+            publish_intent_from_ready
+          end
           activate_from_intent
         end
       end
@@ -204,17 +224,14 @@ module Hive
         ensure_no_live_database!
         unless fresh
           assert_attempts_quiescent!
-          assert_locks_quiescent!
         end
-        FileUtils.rm_f(usage_snapshot_path)
-        usage = create_usage_snapshot! if File.file?(File.join(@data_home, "usage.db"))
         unless task_authority == self.class.task_authority(active)
           raise Error.new("registry or task authority changed during cutover", code: :source_changed)
         end
         epoch = activation_epoch
         activated_at = Codec.dump_time(@clock.call)
         evidence = {
-          "usage_snapshot" => usage, "fresh" => fresh,
+          "usage_expected" => File.file?(legacy_usage_path), "fresh" => fresh,
           "activation_epoch" => epoch, "activated_at" => activated_at
         }
         publish_phase("ready", active, excluded, task_authority, evidence)
@@ -224,13 +241,21 @@ module Hive
       def publish_intent_from_ready
         return if manifest_present?("intended")
         ready = load_phase("ready").fetch("document")
-        validate_usage_snapshot!(ready.dig("evidence", "usage_snapshot"))
-        seal_and_fence! unless ready.dig("evidence", "fresh")
-        fault!(:sources_sealed)
-        install_database!(active_projects_from(ready), ready.fetch("evidence"))
-        fault!(:database_built)
+        projects = active_projects_from(ready)
+        unless ready.fetch("task_authority") == self.class.task_authority(projects)
+          raise Error.new("registry or task authority changed during cutover", code: :source_changed)
+        end
+        evidence = ready.fetch("evidence").dup
+        with_usage_snapshot(expected: evidence.delete("usage_expected")) do |usage|
+          evidence["usage_snapshot"] = usage if usage
+          build_database!(projects, evidence)
+          fault!(:database_built)
+          seal_and_fence! unless evidence.fetch("fresh")
+          fault!(:sources_sealed)
+        end
+        install_database!(evidence)
         publish_phase("intended", active_projects_from(ready), ready.fetch("exclusions"),
-                      ready.fetch("task_authority"), ready.fetch("evidence"))
+                      ready.fetch("task_authority"), evidence)
         fault!(:activation_intent)
       end
 
@@ -240,10 +265,20 @@ module Hive
         validate_live_database!(document)
         FileUtils.mkdir_p(Hive::Paths.runtime_payload_root(@state_home), mode: 0o700)
         fault!(:candidate_identity_published)
-        @services.activate! if @services.respond_to?(:activate!)
+        @services.activate!
+        fault!(:services_activated)
         publish_phase("active", active_projects_from(document), document.fetch("exclusions"),
                       document.fetch("task_authority"), document.fetch("evidence")) unless
           manifest_present?("active")
+        fault!(:activation_published)
+        result_for("active")
+      end
+
+      def finish_active_activation
+        document = load_phase("active").fetch("document")
+        @cutover_id = document.fetch("installation_id")
+        validate_live_database!(document)
+        @services.activate! unless @services.activated?
         result_for("active")
       end
 
@@ -253,14 +288,24 @@ module Hive
         raise ProjectError.new("unknown exclusions: #{unknown.join(', ')}", code: :unknown_exclusion) unless unknown.empty?
 
         validate_project_identities!
-        load_task_identities!(@projects.reject { |project| names.include?(project.fetch("name")) })
+        missing_projects = @projects.select do |project|
+          !File.directory?(project.fetch("path")) || !File.directory?(project.fetch("hive_state_path"))
+        end
+        reachable_exclusions = names - missing_projects.map { |project| project.fetch("name") }
+        unless reachable_exclusions.empty?
+          raise ProjectError.new(
+            "reachable projects must be deregistered, not excluded: #{reachable_exclusions.join(', ')}",
+            code: :reachable_project_exclusion
+          )
+        end
+        load_task_identities!(@projects - missing_projects)
         active = []
         excluded = []
         @projects.each do |project|
           missing = !File.directory?(project.fetch("path")) || !File.directory?(project.fetch("hive_state_path"))
           if names.include?(project.fetch("name"))
             excluded << { "name" => project.fetch("name"), "project_id" => project.fetch("project_id"),
-                          "reason" => missing ? "missing" : "operator_excluded" }
+                          "reason" => "missing" }
           elsif missing
             raise ProjectError.new("registered project #{project.fetch('name')} is missing", code: :project_missing)
           else
@@ -271,12 +316,12 @@ module Hive
       end
 
       def validate_project_identities!
-        uuid = /\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i
         @projects.each do |project|
           registration = project.fetch("registration_id").to_s
-          valid_registration = uuid.match?(registration) ||
-            (registration.start_with?("legacy:") && uuid.match?(registration.delete_prefix("legacy:")))
-          unless uuid.match?(project.fetch("project_id").to_s) && valid_registration
+          valid_registration = Hive::Config::PROJECT_UUID.match?(registration) ||
+            (registration.start_with?("legacy:") &&
+             Hive::Config::PROJECT_UUID.match?(registration.delete_prefix("legacy:")))
+          unless Hive::Config::PROJECT_UUID.match?(project.fetch("project_id").to_s) && valid_registration
             raise ProjectError.new("registered project identity is invalid", code: :invalid_project_identity)
           end
         end
@@ -313,7 +358,7 @@ module Hive
         raise ProjectError.new("duplicate task id", code: :task_identity_collision) unless ids.uniq == ids
       end
 
-      def install_database!(projects, evidence)
+      def build_database!(projects, evidence)
         return validate_live_database!(evidence) if File.file?(database_path)
         FileUtils.rm_f([ build_path, "#{build_path}-wal", "#{build_path}-shm" ])
         database = Database.new(path: build_path).migrate!
@@ -342,14 +387,25 @@ module Hive
         database.disconnect
         diagnosis = Database.new(path: build_path).diagnostics
         raise diagnosis.error unless diagnosis.ok?
-        FileUtils.mkdir_p(File.dirname(database_path), mode: 0o700)
-        File.rename(build_path, database_path)
-        Hive::AtomicFile.fsync_directory(File.dirname(database_path))
-        validate_live_database!(evidence)
+        true
       rescue Sequel::Error => error
         raise Error.new("candidate import failed: #{error.message}", code: :candidate_import_failed)
       ensure
         database&.disconnect
+      end
+
+      def install_database!(evidence)
+        return validate_live_database!(evidence) if File.file?(database_path)
+        parent = File.dirname(database_path)
+        FileUtils.mkdir_p(parent, mode: 0o700)
+        status = File.lstat(parent)
+        unless status.directory? && !status.symlink? && status.uid == Process.euid
+          raise Error.new("runtime database parent is unsafe", code: :database_custody_invalid)
+        end
+        File.chmod(0o700, parent)
+        File.rename(build_path, database_path)
+        Hive::AtomicFile.fsync_directory(parent)
+        validate_live_database!(evidence)
       end
 
       def insert_tasks(db, project, timestamp)
@@ -400,17 +456,74 @@ module Hive
         invalid_legacy!("legacy runtime JSON is malformed")
       end
 
-      def assert_locks_quiescent!
-        target_paths.select { |target| target.fetch(:relative_path).end_with?(".lock") }.each do |target|
-          path = target.fetch(:live)
-          next unless File.file?(path)
-          File.open(path, File::RDONLY | (File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : 0)) do |lock|
-            live!("legacy writer lock is held", path: path) unless lock.flock(File::LOCK_EX | File::LOCK_NB)
-            lock.flock(File::LOCK_UN)
-          end
+      def with_legacy_writer_guards(enabled:)
+        handles = []
+        return yield unless enabled
+
+        legacy_flock_paths.each { |path| handles << acquire_legacy_guard(path) }
+        @task_metadata.values.flatten.each do |task|
+          guard = target_paths.find { |target| target.fetch(:live) == File.join(task.folder, ".lock.tmp.guard") }
+          next if guard && fence_installed?(guard)
+          handles << acquire_legacy_guard(guard.fetch(:live))
+          live!("legacy task owner is active", path: task.folder) if legacy_task_lock_live?(task.folder)
         end
+        yield
+      ensure
+        handles.reverse_each do |handle|
+          handle.flock(File::LOCK_UN)
+          handle.close
+        end
+      end
+
+      def legacy_flock_paths
+        target_paths.filter_map do |target|
+          path = target.fetch(:live)
+          path if path.end_with?(".lock") && File.basename(path) != ".lock" && !fence_installed?(target)
+        end
+      end
+
+      def acquire_legacy_guard(path)
+        FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+        flags = File::RDWR | File::CREAT
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        handle = File.open(path, flags, 0o600)
+        entry = File.lstat(path)
+        opened = handle.stat
+        valid = entry.file? && !entry.symlink? && entry.nlink == 1 &&
+          entry.uid == Process.euid && entry.dev == opened.dev && entry.ino == opened.ino
+        invalid_legacy!("legacy writer lock is unsafe", path: path) unless valid
+        live!("legacy writer lock is held", path: path) unless
+          handle.flock(File::LOCK_EX | File::LOCK_NB)
+        handle
+      rescue Error
+        handle&.close
+        raise
       rescue Errno::EWOULDBLOCK, Errno::EAGAIN
-        live!("legacy writer lock is held")
+        handle&.close
+        live!("legacy writer lock is held", path: path)
+      rescue SystemCallError, IOError => error
+        handle&.close
+        invalid_legacy!("legacy writer lock is unsafe", path: path, error: error.message)
+      end
+
+      def legacy_task_lock_live?(folder)
+        path = File.join(folder, ".lock")
+        return false unless File.file?(path)
+        raw = File.open(path, File::RDONLY | (File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : 0)) do |file|
+          file.read(64 * 1024 + 1)
+        end
+        invalid_legacy!("legacy task lock is oversized", path: path) if raw.bytesize > 64 * 1024
+        payload = YAML.safe_load(raw, permitted_classes: [ Time ])
+        pid = payload.is_a?(Hash) && payload["pid"]
+        return false unless pid.is_a?(Integer) && pid.positive? && Hive::PidFile.alive?(pid)
+
+        recorded = payload["process_start_time"]
+        current = Hive::Lock.process_start_time(pid)
+        recorded.nil? || current.nil? || recorded == current
+      rescue Errno::ENOENT, Psych::Exception
+        false
+      rescue SystemCallError, IOError => error
+        invalid_legacy!("legacy task lock is unsafe", path: path, error: error.message)
       end
 
       def live!(message, details = {})
@@ -422,21 +535,71 @@ module Hive
         raise Error.new(message, code: :legacy_runtime_invalid, details: details)
       end
 
-      def create_usage_snapshot!
-        destination = usage_snapshot_path
-        source = Sequel.connect(adapter: "sqlite", database: File.join(@data_home, "usage.db"),
-                                readonly: true, max_connections: 1)
+      def with_usage_snapshot(expected:)
+        unless expected
+          raise Error.new("legacy usage source appeared during cutover", code: :source_changed) if
+            File.file?(legacy_usage_path)
+          return yield(nil)
+        end
+        if fence_installed?(usage_target)
+          begin
+            return yield(usage_snapshot_evidence)
+          rescue Sequel::Error, SystemCallError, IOError
+            raise Error.new("sealed usage snapshot is corrupt", code: :sealed_source_corrupt)
+          end
+        end
+        unless File.file?(legacy_usage_path)
+          raise Error.new("legacy usage source is missing", code: :sealed_source_corrupt)
+        end
+
+        FileUtils.rm_f(usage_snapshot_path)
+        source = Sequel.connect(adapter: "sqlite", database: legacy_usage_path,
+                                max_connections: 1, timeout: BUSY_TIMEOUT_MS)
         validate_usage_database!(source)
-        source.run("VACUUM INTO #{source.literal(destination)}")
-        snapshot = Sequel.connect(adapter: "sqlite", database: destination, readonly: true, max_connections: 1)
-        validate_usage_database!(snapshot)
-        { "sha256" => Digest::SHA256.file(destination).hexdigest, "bytes" => File.size(destination),
-          "rows" => snapshot[:token_usage].count }
-      rescue Sequel::Error, SystemCallError => error
+        3.times do
+          FileUtils.rm_f(usage_snapshot_path)
+          source.run("VACUUM INTO #{source.literal(usage_snapshot_path)}")
+          evidence = usage_snapshot_evidence
+          snapshot = Sequel.connect(adapter: "sqlite", database: usage_snapshot_path,
+                                    readonly: true, max_connections: 1)
+          snapshot_digest = usage_content_digest(snapshot)
+          snapshot.disconnect
+          matched = false
+          result = source.transaction(mode: :exclusive, rollback: :always) do
+            next unless usage_content_digest(source) == snapshot_digest
+
+            matched = true
+            fault!(:usage_snapshotted)
+            yield evidence
+          end
+          return result if matched
+        end
+        raise Error.new("legacy usage changed during snapshot", code: :source_changed)
+      rescue Error
+        raise
+      rescue Sequel::Error, SystemCallError, IOError => error
         raise Error.new("legacy usage snapshot is invalid: #{error.message}", code: :usage_snapshot_invalid)
       ensure
-        snapshot&.disconnect
         source&.disconnect
+      end
+
+      def usage_content_digest(database)
+        columns = database[:token_usage].columns.sort
+        digest = Digest::SHA256.new << Codec.dump_json(columns.map(&:to_s))
+        database[:token_usage].select(*columns).order(:id).each do |row|
+          digest << Codec.dump_json(row.transform_keys(&:to_s))
+        end
+        digest.hexdigest
+      end
+
+      def usage_snapshot_evidence
+        snapshot = Sequel.connect(adapter: "sqlite", database: usage_snapshot_path,
+                                  readonly: true, max_connections: 1)
+        validate_usage_database!(snapshot)
+        { "sha256" => Digest::SHA256.file(usage_snapshot_path).hexdigest,
+          "bytes" => File.size(usage_snapshot_path), "rows" => snapshot[:token_usage].count }
+      ensure
+        snapshot&.disconnect
       end
 
       def validate_usage_database!(database)
@@ -466,27 +629,65 @@ module Hive
         raise Error.new("sealed usage row count changed", code: :sealed_source_corrupt) unless
           database[:token_usage].count == evidence.fetch("rows")
         true
-      rescue Sequel::Error
+      rescue Sequel::Error, SystemCallError, IOError
         raise Error.new("sealed usage snapshot is corrupt", code: :sealed_source_corrupt)
       ensure
         database&.disconnect
       end
 
       def seal_and_fence!
+        validate_target_shapes!
         target_paths.each do |target|
           next if fence_installed?(target)
-          FileUtils.rm_rf(target.fetch(:live))
+          path = target.fetch(:live)
+          if path_exists?(path)
+            target.fetch(:expected_type) == :file ? File.unlink(path) : FileUtils.rm_r(path)
+          end
           install_fence(target.fetch(:live), target.fetch(:expected_type))
           fault!(:fence_installed)
         end
       end
 
+      def validate_target_shapes!
+        target_paths.each do |target|
+          next if fence_installed?(target)
+          path = target.fetch(:live)
+          next unless path_exists?(path)
+
+          status = File.lstat(path)
+          valid = !status.symlink? && status.uid == Process.euid &&
+            if target.fetch(:expected_type) == :file
+              status.file? && status.nlink == 1
+            else
+              status.directory?
+            end
+          invalid_legacy!("legacy runtime target has an unexpected shape", path: path) unless valid
+        end
+      rescue SystemCallError => error
+        invalid_legacy!("legacy runtime target is unavailable", error: error.message)
+      end
+
       def fence_installed?(target)
         path = target.fetch(:live)
         if target.fetch(:expected_type) == :file
-          File.directory?(path) && File.binread(File.join(path, "RETIRED")) == FENCE_BYTES
+          status = File.lstat(path)
+          status.directory? && !status.symlink? && status.uid == Process.euid &&
+            safe_fence_file?(File.join(path, "RETIRED"))
         else
-          File.file?(path) && File.binread(path) == FENCE_BYTES
+          safe_fence_file?(path)
+        end
+      rescue SystemCallError
+        false
+      end
+
+      def safe_fence_file?(path)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(path, flags) do |file|
+          entry = File.lstat(path)
+          opened = file.stat
+          entry.file? && !entry.symlink? && entry.nlink == 1 && entry.uid == Process.euid &&
+            entry.dev == opened.dev && entry.ino == opened.ino && file.read == FENCE_BYTES
         end
       rescue SystemCallError
         false
@@ -583,6 +784,7 @@ module Hive
       end
 
       def target_paths = global_target_paths + project_target_paths
+      def usage_target = global_target_paths.find { |target| target.fetch(:live) == legacy_usage_path }
       def global_target_paths
         @global_target_paths ||= TARGETS.map do |target|
           home = target.home == :state ? @state_home : @data_home
@@ -606,7 +808,7 @@ module Hive
         end
       end
 
-      def current_phase = PHASES.reverse.find { |phase| manifest_present?(phase) }
+      def current_phase = CutoverManifest::PHASES.reverse.find { |phase| manifest_present?(phase) }
       def manifest(phase) = CutoverManifest.new(path: manifest_path(phase))
       def manifest_present?(phase) = path_exists?(manifest_path(phase))
       def load_phase(phase)
@@ -622,6 +824,7 @@ module Hive
       def manifest_path(phase) = File.join(current_root, "#{phase}.json")
       def current_root = File.join(@state_home, ".runtime-cutover", "current")
       def usage_snapshot_path = File.join(current_root, "usage.snapshot.sqlite3")
+      def legacy_usage_path = File.join(@data_home, "usage.db")
       def build_path = File.join(current_root, "build.sqlite3")
       def database_path = Hive::Paths.runtime_control_plane_path(@state_home)
       def cutover_id = @cutover_id ||= @uuid_generator.call

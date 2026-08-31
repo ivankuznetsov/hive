@@ -155,9 +155,7 @@ module Hive
       private
 
       def database
-        @database ||= RuntimeControlPlane::Database.new(
-          path: Hive::Paths.runtime_control_plane_path
-        ).open!
+        @database ||= RuntimeControlPlane.database.open!
       end
 
       def project_state(identity)

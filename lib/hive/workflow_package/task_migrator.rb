@@ -69,7 +69,7 @@ module Hive
         @project_name = cfg.fetch("project_name", File.basename(File.dirname(@hive_state_path)))
         @recovery_pruner = recovery_pruner || lambda do |project, slug|
           Hive::RuntimeControlPlane::DispatchRepository.new(
-            database: @store.database
+            database: Hive::Lock.task_lease_repository.database
           ).remove_nonterminal_for_task(
             project: project, slug: slug
           )

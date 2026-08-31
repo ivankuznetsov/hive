@@ -828,9 +828,9 @@ compatibility boundary before JSON persistence. Live binary marker scans and
 JSON-restored UTF-8 attrs therefore compare by the same valid UTF-8 bytes, so
 non-ASCII provider diagnostics cannot create a false `generation_conflict` or
 make the operational scheduler snapshot appear stale.
-The one-off recovery migration upgrades pending v1-v4 deliveries before the runtime queue
-opens; queue readers accept v5 only and contain no inferred-generation
-compatibility path. Identity-bound recovery requests do not expire; the
+The irreversible fleet cutover discards pending v1-v4 file deliveries rather
+than importing them; runtime readers accept v5 SQL rows only and contain no
+inferred-generation compatibility path. Identity-bound recovery requests do not expire; the
 consumer rejects them if the task, stage, post-clear generation, or marker
 history no longer matches.
 

@@ -36,9 +36,14 @@ class ModulesDryRunTest < Minitest::Test
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
       before = tree_digest(root)
+      runtime = prepare_test_runtime_project(root)
+      attempts = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: runtime.database,
+        create_directories: false
+      )
       dry_run = Hive::Modules::DryRun.new(
         store: store, project_id: "project-1", project: "demo",
-        attempt_store: Hive::Attempts::Repository.new(root: File.join(root, "attempts"), create_directories: false),
+        attempt_store: attempts,
         clock: -> { NOW }
       )
 
@@ -55,9 +60,7 @@ class ModulesDryRunTest < Minitest::Test
 
       capacity = Hive::Modules::DryRun.new(
         store: store, project_id: "project-1", project: "demo",
-        attempt_store: Hive::Attempts::Repository.new(
-          root: File.join(root, "attempts"), create_directories: false
-        ),
+        attempt_store: attempts,
         capacity_probe: ->(**) { true }, clock: -> { NOW }
       )
       blocked = with_env("MODULE_DRY_TOKEN" => "present") do

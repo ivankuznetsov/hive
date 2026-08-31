@@ -18,8 +18,10 @@ module Hive
       FAILURE_COHORT_PROBE_TTL_SEC = 24 * 60 * 60
 
       def terminal_attempt_id(request_id:)
-        row = attempts.where(request_id: identifier(request_id), state: "terminal")
-                      .reverse_order(:ended_at, :lease_version, :attempt_id).first
+        row = database.read do |db|
+          db[:attempts].where(request_id: identifier(request_id), state: "terminal")
+                       .reverse_order(:ended_at, :lease_version, :attempt_id).first
+        end
         row && row.fetch(:attempt_id)
       end
 
@@ -32,8 +34,10 @@ module Hive
       end
 
       def unresolved_loss_attempt_id(task_generation:, subject:)
-        row = semantic_attempts(task_generation, subject).where(state: "lost")
-              .reverse_order(:ended_at, :lease_version, :attempt_id).first
+        row = database.read do |db|
+          semantic_attempts(db, task_generation, subject).where(state: "lost")
+            .reverse_order(:ended_at, :lease_version, :attempt_id).first
+        end
         return nil unless row
         return nil if successor_attempt_id(predecessor_attempt_id: row.fetch(:attempt_id))
 
@@ -75,7 +79,9 @@ module Hive
       end
 
       def reservation_metadata(attempt_id)
-        row = accounting.where(attempt_id: identifier(attempt_id)).first
+        row = database.read do |db|
+          db[:attempt_accounting].where(attempt_id: identifier(attempt_id)).first
+        end
         row && RuntimeControlPlane::Codec.load_json(row.fetch(:reservation_json))
       end
 
@@ -260,28 +266,32 @@ module Hive
         ) == 1
       end
 
-      def attempts = database.read { |db| db[:attempts] }
-      def accounting = database.read { |db| db[:attempt_accounting] }
-
       def terminal_for(task_generation, subject, outcome: nil)
-        dataset = semantic_attempts(task_generation, subject).where(state: "terminal")
-        dataset = dataset.where(outcome: outcome) if outcome
-        dataset.reverse_order(:ended_at, :lease_version, :attempt_id).first
+        database.read do |db|
+          dataset = semantic_attempts(db, task_generation, subject).where(state: "terminal")
+          dataset = dataset.where(outcome: outcome) if outcome
+          dataset.reverse_order(:ended_at, :lease_version, :attempt_id).first
+        end
       end
 
-      def semantic_attempts(task_generation, subject)
-        attempts.where(
+      def semantic_attempts(db, task_generation, subject)
+        db[:attempts].where(
           task_generation: identifier(task_generation),
           subject_json: RuntimeControlPlane::Codec.dump_json(subject)
         )
       end
 
       def acceptance_for!(record)
-        row = accounting.where(attempt_id: record.attempt_id).first
-        unless row && attempts.where(
-          attempt_id: record.attempt_id, accepted_at: record["accepted_at"],
-          project_name: record["project"]
-        ).any?
+        row, accepted = database.read do |db|
+          [
+            db[:attempt_accounting].where(attempt_id: record.attempt_id).first,
+            db[:attempts].where(
+              attempt_id: record.attempt_id, accepted_at: record["accepted_at"],
+              project_name: record["project"]
+            ).any?
+          ]
+        end
+        unless row && accepted
           raise RepositoryError, "daily accounting acceptance is missing"
         end
         row

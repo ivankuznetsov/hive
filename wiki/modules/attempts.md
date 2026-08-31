@@ -29,9 +29,9 @@ and become immutable SHA-256 addresses only at terminal publication.
 | `FailureCohortReconciler` | Consume a terminal Patrol diagnostic idempotently while its receipt and live admission metadata are still bound, including immediately before finalization removes hot evidence. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, validate one child diagnostic frame, bind its exact private log reference, and terminalize only after appending the diagnostic output reference. |
-| `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
+| `Client` | Tail frames read-only and replay a terminal result. It does not own or reap the supervisor or worker. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
-| `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, normalize loss, and publish current hot counts beside process-local maintenance status without scanning historical proof or cold logs. |
+| `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, normalize loss, and publish current hot counts beside durable maintenance status without scanning historical proof or cold logs. |
 | `DirtyStateCapture`, `LostOutcomeTransition` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent through typed SQL rows. |
 
 ## Admission API boundary
@@ -95,7 +95,7 @@ composition root.
 
 ## Storage and identity
 
-Attempt schema v4 retains the generalized execution subject and adds a required
+The attempt value contract retains the generalized execution subject and a required
 immutable routing union. Task attempts use an
 explicit `task_stage` subject, while module hook attempts use a first-class
 `module_hook` subject containing the project, module, hook, event/decision
@@ -104,12 +104,9 @@ fabricate task folders merely to reuse the supervisor. A legacy attempt stores
 exactly `{mode: legacy}`. An explicitly routed attempt stores its frozen policy
 digest, decision, provider account, adapter/profile, launch-binding identity,
 model/effort, enclosing circuit generation vector, and probe bindings. Runtime
-readers accept v4 only. The migration-only legacy importer validates real
-`Record` documents, preserves malformed sources as blocking import
-dispositions, and fills the runtime-control-plane tables before activation.
-Only explicit migration may create or migrate the database. Repository, API,
-status, daemon, bot, CLI-log, and Web-log paths open the activated state-home
-database and never reinterpret `HIVE_ATTEMPT_STORE_ROOT` as a runtime home.
+readers accept v4 only. Repository, API, status, daemon, bot, CLI-log, and
+Web-log paths open the activated state-home database and never reinterpret a
+retired attempt-store path as a runtime home.
 
 Both subjects share the same SQL-backed CAS repository, leases, capabilities,
 heartbeats, detached ownership, bounded retry accounting, receipts, output
@@ -143,9 +140,12 @@ $HIVE_HOME/runtime-payloads/
 move into a second proof store. One immediate transaction creates an attempt,
 validates its request/source/generation binding, reserves host/project/task
 capacity, records accounting and lineage, and optionally claims a failure
-probe. Terminal and lost transitions release the reservation and complete the
-dispatch request exactly once in the same transaction. Typed SQL predicates,
-not decoded billing JSON or repaired indexes, answer admission queries.
+probe. Terminal and lost transitions release the reservation and move the
+bound dispatch request to `awaiting_delivery` in the same transaction. That
+state is no longer an active admission owner, so retries and loss successors
+can proceed, but delivery reconciliation can still replay and complete the
+request exactly once. Typed SQL predicates, not decoded billing JSON or
+repaired indexes, answer admission queries.
 
 Finalization seals every receipt log and output through `PayloadStore#seal`
 with the receipt's expected size and SHA-256. `payload_references` stores the
@@ -160,9 +160,10 @@ Operational status derives database health directly from control-plane
 diagnostics plus the current immutable hot reconciliation snapshot. The fixed
 layout generation is informational; there is no projection table, runtime
 layout-migration state, repair method, or invalid-record compatibility path.
-Maintenance timing and its last process-local error are advisory only, and a
-database failure becomes one concise degraded warning. Status never scans
-filesystem attempt history.
+Maintenance uses one typed installation row to claim each hourly pass, persist
+the cold-sweep keyset cursor, and publish its last result or error across every
+Hive process. A database failure becomes one concise degraded warning. Status
+never scans filesystem attempt history.
 
 Capacity uses one grouped SQL read for live reservations and daily accounting.
 The reconciler hands admission an immutable typed attempt snapshot; point
@@ -388,7 +389,12 @@ launching|running --expiry/reconciliation CAS--> lost
 
 `terminal` and `lost` cannot become live again. Each mutation compares attempt
 ID, generation, observed state, lease version, active deadline, and stored
-record digest in a conditional SQL update. Configurable defaults are heartbeat 5s, stale
+record digest in a conditional SQL update. The irreversible fleet cutover does
+not decode or preserve legacy attempt documents: attempt, dispatch, provider,
+routing, reconciliation, and derived operational state are disposable runtime
+domains. It rebuilds project/task identity from file authority and imports only
+validated token-usage history. Normal construction never creates or migrates
+the database or reads a retired runtime-path override. Configurable defaults are heartbeat 5s, stale
 30s, launch timeout 30s, and first-heartbeat timeout 30s. The daemon resolves
 those timers from the admitted task's project on every initial or successor
 dispatch. The wrapper must win first heartbeat before it may spawn the stage
@@ -398,8 +404,9 @@ worker.
 
 Public `hive run` and workflow verbs enter `Attempts::API`, which delegates to
 its foreground adapter. Bot/web v5 requests, daemon queue/auto-advance, and
-recovery use the same API boundary. Runtime queue readers accept v5 only; the
-same one-off migration upgrades pending v1-v4 files before they are opened. The
+recovery use the same API boundary. Runtime queue readers accept v5 SQL rows
+only; fleet cutover discards pending legacy file queues instead of upgrading
+or replaying them. The
 launcher double-forks into a distinct session. The dispatcher gives the wrapper
 a one-time random capability through an inherited pipe; the private
 `__attempt-supervise` route accepts no worker command argv and can claim only

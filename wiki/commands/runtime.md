@@ -18,9 +18,11 @@ hive runtime status [--json]
 hive runtime resume [--json]
 ```
 
-Every successful JSON call emits a `hive-runtime-maintenance` envelope with the
-action and typed result. Errors retain their runtime-control-plane code, action,
-and details through the normal CLI error renderer.
+Every JSON call emits the strict `hive-runtime-maintenance.v1` envelope with
+`schema_version`, action, and a typed result or error. Errors retain the runtime
+code, next action, and structured details. The early activation gate emits this
+same contract before the normal CLI loads, so `--json` callers never receive a
+prose-only maintenance refusal.
 
 ## Status
 
@@ -32,11 +34,16 @@ installation.
 
 The durable phases are:
 
-- `ready`: services are quiesced, task authority is fingerprinted, and any
-  legacy token-usage database has a validated immutable snapshot.
+- `preparing`: the exact prior service state is journaled and services are
+  being stopped. A retry reuses that journal rather than observing a new state.
+- `ready`: services and live owners are quiesced and task authority is
+  fingerprinted; no legacy writer has been fenced yet.
 - `intended`: retired writers are fenced and the rebuilt SQLite database is
   installed; activation must converge forward.
-- `active`: database identity and current services are active.
+- `active`: the database identity is authoritative and the ordinary-command
+  gate is open. Service replay then converges idempotently from the private
+  service journal, whose `activated` checkpoint prevents duplicate launchctl
+  starts after a crash.
 
 An incomplete result reports `hive runtime resume` as the action. Hive offers
 no rollback, restore, or downgrade command for this irreversible transition.
@@ -44,10 +51,16 @@ no rollback, restore, or downgrade command for this irreversible transition.
 ## Resume
 
 `resume` reopens the recorded manifest and continues from its durable phase. It
-revalidates task fingerprints and the token-usage snapshot, installs the rebuilt
-database idempotently, and publishes `active` only after the services recorded
-as running at cutover start again. Once fencing begins, evidence and tombstones
+revalidates task fingerprints, holds an exclusive legacy-usage transaction from
+snapshot comparison through fencing, installs the fully validated candidate
+database idempotently, publishes `active`, and then replays only services that
+were running at cutover start. Once fencing begins, evidence and tombstones
 remain in place so another process cannot silently revive a legacy writer.
+
+The live database directory is private (`0700`), and the main database, WAL,
+and SHM files must be owned single-link regular files with no group/world mode
+bits. Exact schema validation hashes the normalized SQLite table/index DDL,
+rather than accepting a database merely because expected names exist.
 
 ## Early activation gate
 

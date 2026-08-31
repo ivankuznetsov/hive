@@ -56,7 +56,10 @@ class RunApproveTest < Minitest::Test
     File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: #{descriptor.id}\n")
     folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
     FileUtils.mkdir_p(folder)
-    File.write(File.join(folder, "meta.yml"), "workflow: #{descriptor.id}\n")
+    Hive::TaskMeta.write(
+      folder, id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
+      slug: slug, display_name: nil, workflow: descriptor.id.to_s
+    )
     File.write(File.join(folder, state_file), "# #{slug}\n")
     write_marker(folder, marker)
     [ folder, slug ]
@@ -79,7 +82,10 @@ class RunApproveTest < Minitest::Test
           File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: agent_entry\n")
           hold = File.join(dir, ".hive-state", "stages", "2-hold", slug)
           FileUtils.mkdir_p(hold)
-          File.write(File.join(hold, "meta.yml"), "slug: #{slug}\nworkflow: agent_entry\n")
+          Hive::TaskMeta.write(
+            hold, id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
+            slug: slug, display_name: nil, workflow: "agent_entry"
+          )
           File.write(File.join(hold, "hold.md"), "# #{slug}\n")
 
           task = Hive::Task.new(hold)
@@ -391,8 +397,10 @@ class RunApproveTest < Minitest::Test
           capture_io { Hive::Commands::Init.new(dir2).call }
           slug = "shared-slug-260424-aaaa"
           [ dir1, dir2 ].each do |d|
-            FileUtils.mkdir_p(File.join(d, ".hive-state", "stages", "1-inbox", slug))
-            File.write(File.join(d, ".hive-state", "stages", "1-inbox", slug, "idea.md"),
+            folder = File.join(d, ".hive-state", "stages", "1-inbox", slug)
+            FileUtils.mkdir_p(folder)
+            ensure_test_task_identity(folder)
+            File.write(File.join(folder, "idea.md"),
                        "# x\n<!-- WAITING -->\n")
           end
 

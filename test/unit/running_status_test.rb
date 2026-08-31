@@ -13,6 +13,9 @@ class RunningStatusTest < Minitest::Test
       payload = status.payload([ project ], now: NOW)
 
       assert_equal "hive-running-status", payload.fetch("schema")
+      assert_equal 2, payload.fetch("schema_version")
+      assert_equal 0, payload.dig("source", "lease_rows_scanned")
+      assert_equal 10_000, payload.dig("limits", "max_lease_rows_scanned")
       assert_equal [], payload.fetch("tasks")
       assert_equal 0, payload.fetch("count")
       assert_equal 0, payload.fetch("observed_count")
@@ -533,7 +536,7 @@ class RunningStatusTest < Minitest::Test
       payload = capped_status.payload([ project ], now: NOW)
 
       assert_equal [], payload.fetch("tasks")
-      assert_equal 0, payload.dig("source", "filesystem_entries_scanned")
+      assert_equal 0, payload.dig("source", "lease_rows_scanned")
       assert_equal 0, payload.dig("source", "tasks_scanned")
       assert_equal true, payload.dig("source", "scan_truncated")
       assert_equal false, payload.fetch("observed_count_exact")

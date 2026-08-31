@@ -1108,7 +1108,7 @@ release was authorized.
 ## Confirmed fleet cutover needs installed-channel smoke (updated 2026-08-30)
 
 Focused source tests prove that brew, AUR, and bash update commands finish
-before the newly resolved Hive binary runs the confirmed, fleet-atomic
+before the newly resolved Hive binary runs the confirmed, fleet-wide
 `hive migrate --all --yes` cutover. The immediately previous packaged release
 and each enumerated retired writer have a release-candidate test that requires
 real extracted target roots; it remains an honest CI-only skip when those roots
@@ -1283,7 +1283,7 @@ the source checkout against the live Hivebox registry. That proves the compact
 producer over current task data, but not the final installed dogfood binary plus
 authenticated Omarchy plugin invocation. Keep this gap open until the feature
 PR is deployed and the plugin's unchanged bare status command consumes
-`hive-running-status.v1` below its 1 MiB capture limit.
+`hive-running-status.v2` below its 1 MiB capture limit.
 
 The public fleet-wide v7 status mode is removed, but daemon, bot, TUI, and web
 still share parts of its in-process producer. Daemon and bot temporarily reach

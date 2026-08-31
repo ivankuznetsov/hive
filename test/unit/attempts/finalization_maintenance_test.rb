@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "hive/attempts/finalization_maintenance"
 require "hive/attempts/reconciler"
 
@@ -163,10 +165,78 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
 
       first = subject.run_if_due(now: NOW + 60)
       assert first.fetch(:ran)
-      refute subject.run_if_due(now: NOW + 61).fetch(:ran)
+      refute maintenance(store).run_if_due(now: NOW + 61).fetch(:ran)
       snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
       assert_equal "healthy", snapshot.fetch("status")
-      assert_nil snapshot.dig("maintenance", "last_result")
+      assert_equal({
+        "promoted" => 1, "deleted" => 0, "cold_examined" => 0
+      }, snapshot.dig("maintenance", "last_result"))
+    end
+  end
+
+  def test_cold_sweep_cursor_resumes_in_a_new_maintenance_instance
+    with_repository do |store|
+      seen = []
+      page = Data.define(:attempt_ids, :cursor)
+      archive = Object.new
+      archive.define_singleton_method(:cold_attempt_ids_page) do |cursor:, limit:|
+        seen << [ cursor, limit ]
+        after = seen.one? ? "attempt-1" : "attempt-2"
+        page.new(
+          attempt_ids: [].freeze, cursor: { "after" => after }.freeze
+        )
+      end
+      store.define_singleton_method(:log_archive) { archive }
+
+      assert maintenance(store).sweep_if_due(now: NOW).fetch(:ran)
+      assert maintenance(store).sweep_if_due(
+        now: NOW + Hive::Attempts::FinalizationMaintenance::MAINTENANCE_INTERVAL_SEC
+      ).fetch(:ran)
+      assert_equal [ nil, "attempt-1" ], seen.map { |cursor, _limit| cursor.fetch("after") }
+    end
+  end
+
+  def test_maintenance_error_is_visible_to_a_new_instance
+    with_repository do |store|
+      archive = Object.new
+      archive.define_singleton_method(:cold_attempt_ids_page) { |**| raise ArgumentError, "bad page" }
+      store.define_singleton_method(:log_archive) { archive }
+
+      assert_raises(ArgumentError) { maintenance(store).sweep_if_due(now: NOW) }
+      snapshot = maintenance(store).storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "degraded", snapshot.fetch("status")
+      assert_equal "maintenance_failed", snapshot.fetch("degraded_reason")
+      assert_equal "ArgumentError", snapshot.dig("last_error", "class")
+      assert_equal NOW.iso8601(6), snapshot.dig("last_error", "observed_at")
+    end
+  end
+
+  def test_due_claim_serializes_across_processes
+    with_repository do |store|
+      store.database.disconnect
+      script = <<~'RUBY'
+        require "time"
+        require "hive/attempts/finalization_maintenance"
+        database = Hive::RuntimeControlPlane::Database.new(path: ARGV.fetch(0)).open!
+        store = Hive::Attempts::Repository.new(database: database, root: ARGV.fetch(1))
+        STDIN.read(1)
+        result = Hive::Attempts::FinalizationMaintenance.new(store: store)
+          .sweep_if_due(now: Time.iso8601(ARGV.fetch(2)))
+        puts(result.fetch(:ran) ? "1" : "0")
+      RUBY
+      processes = 2.times.map do
+        Open3.popen3(
+          RbConfig.ruby, "-Ilib", "-rbundler/setup", "-e", script,
+          store.database.path, store.root, NOW.iso8601(6)
+        )
+      end
+      processes.each { |stdin, *_rest| stdin.write("x"); stdin.close }
+      outcomes = processes.map { |_stdin, stdout, _stderr, _wait| stdout.read.strip }.sort
+      errors = processes.map { |_stdin, _stdout, stderr, _wait| stderr.read }
+      statuses = processes.map { |_stdin, _stdout, _stderr, wait| wait.value }
+
+      assert_equal %w[0 1], outcomes
+      assert statuses.all?(&:success?), errors.join
     end
   end
 

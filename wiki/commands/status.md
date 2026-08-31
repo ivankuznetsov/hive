@@ -3,14 +3,14 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-08-30
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler]
 ---
 
 **TLDR**: `hive status` answers the ordinary operational question—whether the
 daemon is alive and what is running now—without constructing every task's
 workflow history. `hive status --json` emits the bounded
-`hive-running-status.v1` contract. Use `hive status --operational` for the
+`hive-running-status.v2` contract. Use `hive status --operational` for the
 broader active queue and blocker ownership, `hive task TARGET --json` for one
 task's detail, `hive tui` for the fleet browser, and `hive archive` for
 terminal history. The former public full-fleet status surface is removed.
@@ -20,7 +20,7 @@ terminal history. The former public full-fleet status surface is removed.
 | Invocation | Contract |
 |---|---|
 | `hive status` | Bounded human daemon/liveness snapshot. |
-| `hive status --json` | `hive-running-status.v1`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. |
+| `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
 | `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |

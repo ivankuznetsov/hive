@@ -24,5 +24,6 @@ authorities.
 The corrected KTD12 union counts every surviving U2 baseline path plus every
 new production file. After the simplification pass it measures 7,954 physical
 lines across 31 files against the 7,960-line cap. The executable deletion
-contract also discovers added worktree production files, so an uncommitted or
+contract also discovers added worktree production files. The final integration
+pass measures 7,956 physical lines across the same 31 files, so an uncommitted or
 future file cannot escape the inventory.

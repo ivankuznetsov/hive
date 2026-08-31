@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/activation_gate"
 
 class RuntimeControlPlaneCutoverTest < Minitest::Test
   include HiveTestHelper
@@ -7,17 +8,39 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
   PROJECT_ID = "11111111-1111-4111-a111-111111111111"
   REGISTRATION_ID = "22222222-2222-4222-a222-222222222222"
   SimulatedCrash = Class.new(Exception)
+  CommandStatus = Struct.new(:ok) { def success? = ok }
 
   FakeServices = Struct.new(:events) do
+    attr_accessor :activated
+
     def stop!(**) = events << :stopped
-    def activate! = events << :active
+    def activate!
+      events << :active
+      self.activated = true
+    end
+    def activated? = !!activated
   end
 
   class FlakyServices < FakeServices
     def activate!
       events << :active
       raise "activation failed" if events.count(:active) == 1
+      self.activated = true
       true
+    end
+  end
+
+  class GateCheckingServices < FakeServices
+    def initialize(events, state_home)
+      super(events)
+      @state_home = state_home
+    end
+
+    def activate!
+      raise "active published before services" if File.exist?(
+        File.join(@state_home, ".runtime-cutover", "current", "active.json")
+      )
+      super
     end
   end
 
@@ -132,6 +155,62 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
 
       assert_equal "active", cutover.resume.phase
       assert_equal 2, services.events.count(:active)
+
+      cutover.run(confirm: true)
+      assert_equal 2, services.events.count(:active)
+    end
+  end
+
+  def test_active_manifest_is_published_after_managed_services_restart
+    with_home do |state, data, projects|
+      services = GateCheckingServices.new([], state)
+
+      result = build_cutover(state, data, projects, services: services).bootstrap(confirm: true)
+
+      assert_equal "active", result.phase
+      assert services.activated?
+    end
+  end
+
+  def test_failure_after_service_stop_resumes_from_preparing_with_original_journal
+    with_home do |state, data, projects|
+      running = true
+      calls = []
+      runner = lambda do |argv|
+        calls << argv
+        ok = if argv.include?("show-environment")
+          true
+        elsif argv.include?("is-active")
+          argv.last == "hive-daemon" && running
+        elsif argv.include?("stop")
+          running = false
+          true
+        elsif argv.include?("start")
+          running = true
+          true
+        else
+          false
+        end
+        [ "", "", CommandStatus.new(ok) ]
+      end
+      services = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: state, host_os: "linux", runner: runner
+      )
+      crashing = build_cutover(state, data, projects, services: services, fault: lambda { |point|
+        raise "refused after stop" if point == :services_stopped
+      })
+
+      assert_raises(RuntimeError) { crashing.run(confirm: true) }
+
+      current = File.join(state, ".runtime-cutover", "current")
+      assert_path_exists File.join(current, "preparing.json")
+      assert_path_exists File.join(current, "services.json")
+      resumed_services = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: state, host_os: "linux", runner: runner
+      )
+      assert_equal "active", build_cutover(state, data, projects, services: resumed_services).resume.phase
+      assert running
+      assert_equal 1, calls.count { |argv| argv == %w[systemctl --user start hive-daemon] }
     end
   end
 
@@ -157,6 +236,20 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
 
       result = build_cutover(state, data, projects).run(confirm: true, exclusions: [ "alpha" ])
       assert_equal [ "alpha" ], result.exclusions.map { |entry| entry.fetch("name") }
+    end
+  end
+
+  def test_reachable_project_cannot_be_hidden_by_cutover_exclusion
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
+        cutover.run(confirm: true, exclusions: [ "alpha" ])
+      end
+
+      assert_equal :reachable_project_exclusion, error.code
+      assert_empty cutover.services.events
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
     end
   end
 
@@ -195,6 +288,69 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     end
   end
 
+  def test_live_legacy_task_lock_refuses_cutover_without_flocking_the_lock_inode
+    with_home do |state, data, projects|
+      folder = File.dirname(task_path(projects, "idea.md"))
+      File.binwrite(File.join(folder, ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "lock_id" => "legacy-owner"
+      }.to_yaml)
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :live_runtime_owner, error.code
+      assert File.file?(File.join(folder, ".lock"))
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_legacy_task_guard_remains_held_until_fences_are_installed
+    with_home do |state, data, projects|
+      folder = File.dirname(task_path(projects, "idea.md"))
+      observed = nil
+      cutover = build_cutover(state, data, projects, fault: lambda { |point|
+        next unless point == :fleet_ready
+        File.open(File.join(folder, ".lock.tmp.guard"), File::RDWR | File::CREAT, 0o600) do |guard|
+          observed = guard.flock(File::LOCK_EX | File::LOCK_NB)
+        end
+      })
+
+      assert_equal "active", cutover.run(confirm: true).phase
+      refute observed
+      assert File.directory?(File.join(folder, ".lock.tmp.guard"))
+    end
+  end
+
+  def test_symlink_and_hardlink_fence_shapes_are_rejected
+    with_home do |state, data, projects|
+      target = File.join(state, "task-counter.yml")
+      outside = File.join(File.dirname(state), "outside")
+      FileUtils.mkdir_p(outside)
+      File.binwrite(File.join(outside, "RETIRED"), Hive::RuntimeControlPlane::Cutover::FENCE_BYTES)
+      File.symlink(outside, target)
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      target = File.join(state, "task-counter.yml")
+      marker = File.join(File.dirname(state), "outside-marker")
+      File.binwrite(marker, Hive::RuntimeControlPlane::Cutover::FENCE_BYTES)
+      FileUtils.mkdir_p(target)
+      File.link(marker, File.join(target, "RETIRED"))
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+  end
+
   def test_disposable_pending_dispatch_request_is_reset_after_services_stop
     with_home do |state, data, projects|
       requests = File.join(state, "dispatch_requests")
@@ -226,6 +382,43 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
         assert_equal :live_runtime_owner, error.code
       end
       refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_unexpected_legacy_target_shape_refuses_before_any_target_is_changed
+    with_home do |state, data, projects|
+      earlier = File.join(state, "dispatch_requests")
+      FileUtils.mkdir_p(earlier)
+      File.binwrite(File.join(earlier, "request.json"), "{}\n")
+      unexpected = File.join(state, "task-counter.yml")
+      FileUtils.mkdir_p(unexpected)
+      sentinel = File.join(unexpected, "do-not-delete")
+      File.binwrite(sentinel, "operator data\n")
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+
+      assert_equal :legacy_runtime_invalid, error.code
+      assert_equal "{}\n", File.binread(File.join(earlier, "request.json"))
+      assert_equal "operator data\n", File.binread(sentinel)
+    end
+  end
+
+  def test_task_authority_change_after_ready_refuses_before_fencing
+    with_home do |state, data, projects|
+      task = task_path(projects, "idea.md")
+      cutover = build_cutover(state, data, projects, fault: lambda { |point|
+        File.binwrite(task, "changed after ready\n") if point == :fleet_ready
+      })
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.run(confirm: true)
+      end
+
+      assert_equal :source_changed, error.code
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+      refute File.file?(File.join(state, "dispatch_requests")), "no absent-source fence may be installed"
     end
   end
 
@@ -270,6 +463,65 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       assert_in_delta 0.25, row.fetch(:cost)
       assert_equal 1, row.fetch(:cost_available)
     ensure
+      database&.disconnect
+    end
+  end
+
+  def test_candidate_database_is_complete_before_any_legacy_target_is_fenced
+    with_home do |state, data, projects|
+      counter = File.join(state, "task-counter.yml")
+      File.binwrite(counter, "---\ngeneration: 99\n")
+      cutover = build_cutover(state, data, projects, fault: lambda { |point|
+        raise "candidate verified" if point == :database_built
+      })
+
+      error = assert_raises(RuntimeError) { cutover.run(confirm: true) }
+
+      assert_equal "candidate verified", error.message
+      assert File.file?(counter)
+      assert_equal "---\ngeneration: 99\n", File.binread(counter)
+      refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_usage_writer_cannot_commit_into_retained_history_after_snapshot
+    with_home do |state, data, projects|
+      source_path = File.join(data, "usage.db")
+      write_usage(source_path)
+      attempting = Queue.new
+      completed = Queue.new
+      writer = nil
+      cutover = build_cutover(state, data, projects, fault: lambda { |point|
+        next unless point == :usage_snapshotted
+
+        writer = Thread.new do
+          source = Sequel.sqlite(source_path, timeout: 2_000)
+          attempting << true
+          source[:token_usage].where(id: "usage-1").update(agent: "late-writer")
+          completed << :committed
+        rescue Sequel::Error, SystemCallError
+          completed << :retired
+        ensure
+          source&.disconnect
+        end
+        attempting.pop
+        sleep 0.02
+        unless completed.empty?
+          outcome = completed.pop
+          assert_equal :retired, outcome, "the legacy writer must not commit after the snapshot"
+          completed << outcome
+        end
+      })
+
+      result = cutover.run(confirm: true)
+      writer.join
+      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
+
+      assert_equal "codex", database.read { |db| db[:token_usage].get(:agent) }
+      assert_includes %i[committed retired], completed.pop
+      assert File.directory?(source_path), "the retired database path must be a directory fence"
+    ensure
+      writer&.join
       database&.disconnect
     end
   end
@@ -323,6 +575,23 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       assert_equal :usage_snapshot_invalid, error.code
       assert_equal "not sqlite", File.binread(File.join(data, "usage.db"))
       refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+    end
+  end
+
+  def test_missing_sealed_usage_snapshot_has_a_typed_cutover_error
+    with_home do |state, data, projects|
+      write_usage(File.join(data, "usage.db"))
+      crashing = build_cutover(state, data, projects, fault: lambda { |point|
+        raise SimulatedCrash if point == :sources_sealed
+      })
+      assert_raises(SimulatedCrash) { crashing.run(confirm: true) }
+      FileUtils.rm_f(File.join(state, ".runtime-cutover", "current", "usage.snapshot.sqlite3"))
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).resume
+      end
+
+      assert_equal :sealed_source_corrupt, error.code
     end
   end
 

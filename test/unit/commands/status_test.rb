@@ -1639,13 +1639,13 @@ class CommandsStatusTest < Minitest::Test
         Hive::Task.new(folder)
       end
       stores = []
-      original_new = Hive::Attempts::Repository.method(:new)
+      original_runtime = Hive::Attempts::Repository.method(:runtime)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Repository, :new,
+        Hive::Attempts::Repository, :runtime,
         lambda do |**kwargs|
-          stores << kwargs unless kwargs.key?(:root)
-          original_new.call(**kwargs)
+          stores << kwargs
+          original_runtime.call(**kwargs)
         end
       ) do
         command = Hive::Commands::Status.new

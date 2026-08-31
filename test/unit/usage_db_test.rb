@@ -304,10 +304,10 @@ class UsageDbTest < Minitest::Test
     with_tmp_dir do |dir|
       Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: dir)
 
-      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
         record
       end
-      assert_equal :usage_persistence_failed, error.code
+      assert_equal :database_custody_invalid, error.code
     end
   end
 
@@ -342,6 +342,7 @@ class UsageDbTest < Minitest::Test
       SQL
       db.close
       db = nil
+      File.chmod(0o600, path)
 
       error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { record }
       assert_equal :application_id_mismatch, error.code

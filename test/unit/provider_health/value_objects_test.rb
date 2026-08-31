@@ -3,6 +3,8 @@ require "hive/provider_health/repository"
 require "hive/provider_routing"
 
 class ProviderHealthValueObjectsTest < Minitest::Test
+  include HiveTestHelper
+
   def test_scope_and_route_identity_reject_invalid_composition
     assert_raises(Hive::ProviderHealth::InvalidScope) do
       Hive::ProviderHealth::Scope.new(kind: "account", account_id: "account-a")
@@ -99,6 +101,20 @@ class ProviderHealthValueObjectsTest < Minitest::Test
       assert_instance_of Hive::ProviderHealth::Repository, store
     ensure
       database&.disconnect
+    end
+  end
+
+  def test_default_factory_reuses_the_process_control_plane
+    Dir.mktmpdir("provider-health-owner") do |root|
+      with_env("HIVE_HOME" => root) do
+        Hive::RuntimeControlPlane.disconnect
+        database = Hive::RuntimeControlPlane.database.migrate!
+        store = Hive::ProviderHealth.open
+
+        assert_same database, store.database
+      ensure
+        Hive::RuntimeControlPlane.disconnect
+      end
     end
   end
 

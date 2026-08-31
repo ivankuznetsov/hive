@@ -29,7 +29,6 @@ module Hive
                  task_generation: nil, predecessor_attempt_id: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
                  state_home: Hive::Paths.state_home, now: Time.now, repository: nil)
-        owned_repository = repository.nil?
         repository ||= repository_for(state_home)
         request_id ||= repository.generate_request_id
         repository.write_request!(
@@ -49,8 +48,6 @@ module Hive
           state_home: state_home,
           now: now
         )
-      ensure
-        repository&.database&.disconnect if owned_repository
       end
 
       # Queue a task action bound to the task identity observed now. The daemon
@@ -72,7 +69,6 @@ module Hive
                     trigger: nil, request_id: nil,
                     state_home: Hive::Paths.state_home, now: Time.now,
                     entrypoint: nil, repository: nil)
-        owned_repository = repository.nil?
         repository ||= repository_for(state_home)
         request_id ||= repository.generate_request_id
         task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
@@ -124,8 +120,6 @@ module Hive
           request_id, state_home: state_home
         )
         raise
-      ensure
-        repository&.database&.disconnect if owned_repository
       end
 
       # All ERROR / REVIEW_ERROR callers cross this boundary. Surface-specific
@@ -145,27 +139,21 @@ module Hive
 
       def write_sequence!(request_id:, remaining_argvs:, state_home: Hive::Paths.state_home,
                           repository: nil)
-        owned_repository = repository.nil?
         repository ||= repository_for(state_home)
         repository.write_sequence!(
           request_id,
           remaining_argvs: remaining_argvs,
           state_home: state_home
         )
-      ensure
-        repository&.database&.disconnect if owned_repository
       end
 
       def discard_sequence!(request_id:, state_home: Hive::Paths.state_home,
                             repository: nil)
-        owned_repository = repository.nil?
         repository ||= repository_for(state_home)
         repository.discard_sequence(
           request_id,
           state_home: state_home
         )
-      ensure
-        repository&.database&.disconnect if owned_repository
       end
 
       def resolve_task(project:, slug:, argv:)

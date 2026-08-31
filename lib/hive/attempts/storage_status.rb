@@ -5,7 +5,11 @@ module Hive
 
       def unknown
         {
-          "status" => "unknown", "layout" => { "generation" => 4 },
+          "status" => "unknown",
+          "layout" => {
+            "generation" => 4, "migration" => "unknown",
+            "last_migrated_at" => nil, "last_result" => nil
+          },
           "hot" => { "records" => nil, "invalid" => nil },
           "maintenance" => { "last_started_at" => nil, "last_completed_at" => nil, "last_result" => nil },
           "last_error" => nil, "degraded_reason" => nil

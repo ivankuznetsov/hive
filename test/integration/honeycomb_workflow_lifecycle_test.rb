@@ -52,6 +52,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
 
         applied = update(project, client, yes: true)
         assert_equal "updated", applied.fetch("status")
+        refute applied.key?("warnings"), applied["warnings"]&.join("\n")
         assert_equal candidate.fetch(:source_commit), current.selected("demo").fetch("source_commit")
         assert_equal candidate.fetch(:source_commit), Hive::Task.new(task).workflow_commit
         assert_equal :demo, Hive::Task.new(task).workflow.id
@@ -440,6 +441,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
       FileUtils.mkdir_p(File.join(hive_state, "stages"))
       File.write(File.join(hive_state, "config.yml"),
                  Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml)
+      prepare_test_runtime_project(project)
       yield project
     ensure
       Hive::Workflows::Project.reset!

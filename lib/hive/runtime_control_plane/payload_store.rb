@@ -26,6 +26,15 @@ module Hive
         prepare_directory!(open_root)
         prepare_directory!(sealed_root)
         prepare_directory!(temporary_root)
+        prepare_directory!(custody_root)
+      end
+
+      # Reference publication and expiry share these digest-keyed locks. The
+      # SQL retained-reference check and the content-addressed unlink must be
+      # one custody interval or a concurrent publisher can lose shared bytes.
+      def with_reference_custody(references)
+        shards = Array(references).map { |reference| custody_shard(reference) }.uniq.sort
+        with_custody_shards(shards) { yield }
       end
 
       def write_open(attempt_id:, name:, bytes:)
@@ -78,20 +87,22 @@ module Hive
         integrity!("payload size differs from its expected size", :source_size_mismatch) if
           expected_size && Integer(expected_size) != size
 
-        destination = sealed_path(sha256)
-        prepare_directory!(File.dirname(destination))
-        if optional_lstat(destination)
-          verify_file!(destination, sha256: sha256, size: size)
-        else
-          begin
-            File.link(temporary, destination)
-            File.unlink(temporary)
-            temporary = nil
-          rescue Errno::EEXIST
+        with_reference_custody([ sha256 ]) do
+          destination = sealed_path(sha256)
+          prepare_directory!(File.dirname(destination))
+          if optional_lstat(destination)
             verify_file!(destination, sha256: sha256, size: size)
+          else
+            begin
+              File.link(temporary, destination)
+              File.unlink(temporary)
+              temporary = nil
+            rescue Errno::EEXIST
+              verify_file!(destination, sha256: sha256, size: size)
+            end
+            File.chmod(0o600, destination)
+            Hive::AtomicFile.fsync_directory(File.dirname(destination))
           end
-          File.chmod(0o600, destination)
-          Hive::AtomicFile.fsync_directory(File.dirname(destination))
         end
         reference(sha256, size)
       rescue Error
@@ -256,6 +267,58 @@ module Hive
       def open_root = File.join(root, "open")
       def sealed_root = File.join(root, "sealed")
       def temporary_root = File.join(root, ".tmp")
+      def custody_root = File.join(root, ".custody")
+
+      def custody_shard(reference)
+        digest = reference.is_a?(Hash) ? (reference["sha256"] || reference[:sha256]) : reference
+        unless digest.to_s.match?(/\A[0-9a-f]{64}\z/)
+          integrity!("payload custody reference is invalid", :payload_reference_invalid)
+        end
+        digest.to_s[0, 2]
+      end
+
+      def with_custody_shards(shards)
+        held = (Thread.current.thread_variable_get(:hive_payload_custody) || {})
+        Thread.current.thread_variable_set(:hive_payload_custody, held)
+        counts = (held[object_id] ||= Hash.new(0))
+        opened = []
+        entered = []
+        shards.each do |shard|
+          if counts[shard].zero?
+            lock = open_custody_lock(shard)
+            lock.flock(File::LOCK_EX)
+            opened << [ shard, lock ]
+          end
+          counts[shard] += 1
+          entered << shard
+        end
+        yield
+      ensure
+        entered&.reverse_each { |shard| counts[shard] -= 1 }
+        opened&.reverse_each do |_shard, lock|
+          lock.flock(File::LOCK_UN)
+          lock.close
+        end
+        held&.delete(object_id) if counts&.empty? || counts&.values&.all?(&:zero?)
+      end
+
+      def open_custody_lock(shard)
+        path = File.join(custody_root, "#{shard}.lock")
+        flags = File::RDWR | File::CREAT
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        lock = File.open(path, flags, 0o600)
+        entry = File.lstat(path)
+        opened = lock.stat
+        unless entry.file? && !entry.symlink? && entry.nlink == 1 && entry.uid == Process.euid &&
+               entry.dev == opened.dev && entry.ino == opened.ino
+          path_error!(path, :unsafe_payload_custody)
+        end
+        lock.chmod(0o600)
+        lock
+      rescue StandardError
+        lock&.close unless lock&.closed?
+        raise
+      end
 
       def optional_lstat(path)
         File.lstat(path)

@@ -20,6 +20,7 @@ module Hive
       GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
       GLOBAL_MAINTENANCE_ARGVS = [ %w[hive daemon install --force] ].freeze
       RECOVERY_PHASES = %w[admitted cleared dispatched terminal].freeze
+      DELIVERY_STATES = %w[claimed admitted awaiting_delivery].freeze
       EXPIRY_SEC = 600
       CLAIM_EXPIRY_SEC = 14_400
       TERMINAL_RECOVERY_RETENTION_SEC = 7 * 24 * 60 * 60
@@ -89,39 +90,16 @@ module Hive
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
                          expected_marker_id: nil, recovery: nil, now: @clock.call, **)
-        validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
-        timestamp = now.utc.iso8601(6)
-        payload = {
-          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
-          "request_id" => request_id.to_s, "created_at" => timestamp,
-          "project" => project.to_s, "slug" => slug.to_s, "argv" => Array(argv),
-          "requestor" => requestor.to_s, "chat_id" => chat_id, "update_id" => update_id,
-          "trigger" => trigger.to_s, "task_generation" => task_generation,
-          "predecessor_attempt_id" => predecessor_attempt_id,
-          "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
-          "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
-          "expected_marker_id" => expected_marker_id, "recovery" => recovery,
-          "remaining_argvs" => []
-        }
+        payload = request_payload(
+          project: project, slug: slug, argv: argv, requestor: requestor,
+          request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
+          task_generation: task_generation, predecessor_attempt_id: predecessor_attempt_id,
+          inherited_outputs: inherited_outputs, task_id: task_id, expected_stage: expected_stage,
+          expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
+          recovery: recovery, now: now
+        )
         database.transaction do |db|
-          existing = db[:dispatch_requests].where(request_id: request_id.to_s).first
-          next request_id.to_s if existing && same_request?(existing, payload)
-          raise IntegrityError.new(
-            "dispatch request id is already bound", code: :dispatch_request_conflict
-          ) if existing
-
-          project_id = project_id_for!(db, project.to_s, timestamp)
-          db[:dispatch_requests].insert(
-            request_id: request_id.to_s, project_id: project_id,
-            task_id: registered_task_id(db, task_id), subject_kind: "task_stage",
-            subject_key: subject_key(project, slug, expected_stage, argv),
-            task_generation: task_generation.to_s,
-            intended_stage: expected_stage.to_s.empty? ? intended_stage(argv) : expected_stage.to_s,
-            state: "queued", priority: 0,
-            idempotency_key: request_id.to_s, source_fingerprint: source_fingerprint(payload),
-            payload_json: Codec.dump_json(payload), created_at: timestamp,
-            updated_at: timestamp, due_at: timestamp, revision: 0
-          )
+          insert_request!(db, payload)
         end
         request_id.to_s
       rescue Sequel::UniqueConstraintViolation => error
@@ -161,7 +139,8 @@ module Hive
 
       def claimed(**)
         database.read do |db|
-          db[:dispatch_requests].where(state: %w[claimed admitted]).order(:created_at, :request_id).map do |row|
+          db[:dispatch_requests].where(state: DELIVERY_STATES)
+            .order(:created_at, :request_id).map do |row|
             request = request_from(row)
             ClaimedDelivery.new(
               request: request,
@@ -169,7 +148,7 @@ module Hive
                 "pid" => row[:claim_pid],
                 "process_start_time" => row[:claim_process_identity],
                 "claimed_at" => row[:claimed_at],
-                "attempt_id" => db[:attempts].where(request_id: row[:request_id]).get(:attempt_id),
+                "attempt_id" => row[:claim_attempt_id],
                 "task_generation" => row[:task_generation]
               }
             )
@@ -177,10 +156,18 @@ module Hive
         end
       end
 
+      def delivery_pending_for_attempt?(attempt_id)
+        database.read do |db|
+          db[:dispatch_requests].where(
+            claim_attempt_id: attempt_id.to_s, state: DELIVERY_STATES
+          ).any?
+        end
+      end
+
       def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, **)
         database.read do |db|
           db[:dispatch_requests]
-            .where(Sequel.lit("json_type(payload_json, '$.recovery') = 'object'"))
+            .where(recovery_request: 1)
             .reverse_order(:updated_at, :request_id).limit(Integer(limit))
             .all.reverse.map { |row| request_from(row) }
         end
@@ -199,6 +186,7 @@ module Hive
           dataset.update(
             state: "claimed", claim_owner: "process", claim_pid: positive_pid(pid),
             claim_process_identity: process_start_time&.to_s, claimed_at: timestamp,
+            claim_attempt_id: attempt_id&.to_s,
             task_generation: task_generation.to_s.empty? ? Sequel[:task_generation] : task_generation.to_s,
             updated_at: timestamp, revision: Sequel[:revision] + 1
           )
@@ -207,16 +195,17 @@ module Hive
       end
 
       def update_claim(request_id, pid:, process_start_time: nil, now: @clock.call,
-                       task_generation: nil, **)
+                       attempt_id: nil, task_generation: nil, **)
         changed = database.transaction do |db|
           values = {
             claim_pid: positive_pid(pid), claim_process_identity: process_start_time&.to_s,
             claimed_at: now.utc.iso8601(6), updated_at: now.utc.iso8601(6),
             revision: Sequel[:revision] + 1
           }
+          values[:claim_attempt_id] = attempt_id.to_s unless attempt_id.to_s.empty?
           values[:task_generation] = task_generation.to_s unless task_generation.to_s.empty?
           db[:dispatch_requests].where(
-            request_id: request_id.to_s, state: %w[claimed admitted]
+            request_id: request_id.to_s, state: DELIVERY_STATES
           ).update(values)
         end
         changed == 1 ? request_id.to_s : nil
@@ -226,7 +215,7 @@ module Hive
         database.transaction do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: "claimed").update(
             state: "queued", claim_owner: nil, claim_pid: nil,
-            claim_process_identity: nil, claimed_at: nil,
+            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
             updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
           ) == 1
         end
@@ -240,7 +229,7 @@ module Hive
           if db[:dispatch_outbox].where(request_id: request_id.to_s).any?
             dataset.update(
               state: "completed", claim_owner: nil, claim_pid: nil,
-              claim_process_identity: nil, claimed_at: nil,
+              claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
               updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
             ) == 1
           else
@@ -277,17 +266,28 @@ module Hive
 
       def promote_sequence(request_id, project:, slug:, requestor: "bot", chat_id: nil,
                            update_id: nil, trigger: "sequence_continuation", now: @clock.call, **)
-        current = fetch(request_id)
-        remaining = current && Array(payload_for(current.request_id)["remaining_argvs"])
-        return nil if remaining.nil? || remaining.empty?
-        argv = remaining.shift
-        next_id = write_request!(
-          project: project, slug: slug, argv: argv, requestor: requestor,
-          chat_id: chat_id, update_id: update_id, trigger: trigger, now: now
-        )
-        write_sequence!(next_id, remaining_argvs: remaining) unless remaining.empty?
-        discard_sequence(request_id)
-        fetch(next_id)
+        next_id = database.transaction do |db|
+          row = db[:dispatch_requests].where(request_id: request_id.to_s).first
+          next unless row
+          parent = Codec.load_json(row.fetch(:payload_json))
+          remaining = Array(parent["remaining_argvs"])
+          next if remaining.empty?
+          id = "seq-#{Digest::SHA256.hexdigest(request_id.to_s)[0, 32]}"
+          child = request_payload(
+            project: project, slug: slug, argv: remaining.shift, requestor: requestor,
+            request_id: id, chat_id: chat_id, update_id: update_id, trigger: trigger,
+            remaining_argvs: remaining, now: now
+          )
+          insert_request!(db, child)
+          parent["remaining_argvs"] = []
+          updated = db[:dispatch_requests].where(
+            request_id: request_id.to_s, revision: row.fetch(:revision)
+          ).update(payload_json: Codec.dump_json(parent), updated_at: now.utc.iso8601(6),
+                   revision: Sequel[:revision] + 1)
+          raise IntegrityError.new("dispatch sequence raced", code: :dispatch_update_conflict) unless updated == 1
+          id
+        end
+        next_id && fetch(next_id)
       end
 
       def find_recovery(project:, slug:, observed_marker_generation:, **)
@@ -328,6 +328,16 @@ module Hive
 
       def update_recovery!(request_id, expected_phase:, changes:, **)
         update_recovery(request_id, expected_phase, changes, state: nil)
+      end
+
+      def complete_delivery(request_id, now: @clock.call, **)
+        database.transaction do |db|
+          db[:dispatch_requests].where(request_id: request_id.to_s, state: DELIVERY_STATES).update(
+            state: "completed", claim_owner: nil, claim_pid: nil,
+            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
+            updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+          ) == 1
+        end
       end
 
       def requeue_recovery!(request_id, expected_phase:, changes:, **)
@@ -451,12 +461,56 @@ module Hive
 
       private
 
+      def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,
+                          update_id: nil, trigger: nil, task_generation: nil,
+                          predecessor_attempt_id: nil, inherited_outputs: [], task_id: nil,
+                          expected_stage: nil, expected_marker_name: nil,
+                          expected_marker_id: nil, recovery: nil, remaining_argvs: [])
+        validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
+        {
+          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
+          "request_id" => request_id.to_s, "created_at" => now.utc.iso8601(6),
+          "project" => project.to_s, "slug" => slug.to_s, "argv" => Array(argv),
+          "requestor" => requestor.to_s, "chat_id" => chat_id, "update_id" => update_id,
+          "trigger" => trigger.to_s, "task_generation" => task_generation,
+          "predecessor_attempt_id" => predecessor_attempt_id,
+          "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
+          "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
+          "expected_marker_id" => expected_marker_id, "recovery" => recovery,
+          "remaining_argvs" => Array(remaining_argvs)
+        }
+      end
+
+      def insert_request!(db, payload)
+        request_id = payload.fetch("request_id")
+        existing = db[:dispatch_requests].where(request_id: request_id).first
+        return request_id if existing && same_request?(existing, payload)
+        raise IntegrityError.new("dispatch request id is already bound", code: :dispatch_request_conflict) if existing
+
+        timestamp = payload.fetch("created_at")
+        stage = payload["expected_stage"]
+        argv = payload.fetch("argv")
+        db[:dispatch_requests].insert(
+          request_id: request_id, project_id: project_id_for!(db, payload.fetch("project"), timestamp),
+          task_id: registered_task_id(db, payload["task_id"]), subject_kind: "task_stage",
+          subject_key: subject_key(payload.fetch("project"), payload.fetch("slug"), stage, argv),
+          task_slug: payload.fetch("slug"), task_generation: payload["task_generation"].to_s,
+          intended_stage: stage.to_s.empty? ? intended_stage(argv) : stage.to_s,
+          state: "queued", priority: 0, idempotency_key: request_id,
+          source_fingerprint: source_fingerprint(payload), payload_json: Codec.dump_json(payload),
+          created_at: timestamp, updated_at: timestamp, due_at: timestamp, revision: 0,
+          recovery_request: payload["recovery"] ? 1 : 0
+        )
+        request_id
+      end
+
       def same_request?(row, payload)
         existing = Codec.load_json(row.fetch(:payload_json))
         %w[
           request_id project slug argv requestor chat_id update_id trigger task_generation
           predecessor_attempt_id inherited_outputs task_id expected_stage
           expected_marker_name expected_marker_id recovery
+          remaining_argvs
         ].all? { |key| existing[key] == payload[key] }
       end
 
@@ -559,10 +613,8 @@ module Hive
           if state
             row_changes.merge!(
               state: state, claim_owner: nil, claim_pid: nil,
-              claim_process_identity: nil, claimed_at: nil
+              claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil
             )
-          elsif recovery["phase"] == "terminal"
-            row_changes[:state] = "completed"
           end
           true
         end
@@ -570,10 +622,13 @@ module Hive
 
       def matching_recoveries(project, slug)
         database.read do |db|
-          db[:dispatch_requests].order(:created_at, :request_id).filter_map do |row|
-            request = request_from(row)
-            request if request.project == project.to_s && request.slug == slug.to_s && request.recovery
-          end
+          db[:dispatch_requests].join(:projects, project_id: :project_id).where(
+            Sequel[:projects][:name] => project.to_s,
+            Sequel[:dispatch_requests][:task_slug] => slug.to_s,
+            Sequel[:dispatch_requests][:recovery_request] => 1
+          ).select_all(:dispatch_requests).order(
+            Sequel[:dispatch_requests][:created_at], Sequel[:dispatch_requests][:request_id]
+          ).map { |row| request_from(row) }
         end
       end
 

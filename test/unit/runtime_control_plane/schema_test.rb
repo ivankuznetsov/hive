@@ -9,6 +9,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     attempt_failure_cohorts
     attempt_failure_events
     attempt_lost_outcomes
+    attempt_maintenance
     attempt_relationships
     attempt_routing_decisions
     attempts
@@ -38,8 +39,6 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
       tables = database.read { |connection| connection.tables.sort }
 
       assert_equal EXPECTED_TABLES, tables
-      assert_equal Hive::RuntimeControlPlane::EXPECTED_TABLES.sort,
-                   (tables - [ :schema_info ]).sort
     end
   end
 
@@ -62,6 +61,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
           connection[:dispatch_requests].insert(
             request_id: uuid("3"), project_id: project_id(database),
             task_id: nil, subject_kind: "task_stage", subject_key: "build",
+            task_slug: "build",
             task_generation: "opaque", intended_stage: "4-execute", state: "queued",
             priority: -1, source_fingerprint: "sha256:source", payload_json: "{}",
             created_at: timestamp, updated_at: timestamp
@@ -121,7 +121,8 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
       database.transaction do |connection|
         request = {
           project_id: ids.fetch(:project_id), task_id: ids.fetch(:task_id),
-          subject_kind: "task_stage", subject_key: "4-execute", task_generation: 2,
+          subject_kind: "task_stage", subject_key: "4-execute", task_slug: "sqlite",
+          task_generation: 2,
           intended_stage: "4-execute", state: "queued", priority: 0,
           idempotency_key: "same", source_fingerprint: "sha256:request-source",
           payload_json: "{}", created_at: timestamp, updated_at: timestamp

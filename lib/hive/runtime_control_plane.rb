@@ -64,8 +64,8 @@ module Hive
 
       def disconnect
         reset_after_fork!
+        ProcessGuard.disconnect_all!
         owner_mutex.synchronize do
-          @database&.disconnect
           @database = nil
         end
         true

@@ -1264,7 +1264,7 @@ module Hive
     long_desc <<~DESC
       Default: prints a bounded daemon-health and currently-running-task
       snapshot without building the complete workflow graph. Combine with
-      --json to emit `hive-running-status` v1; the document is capped at 32
+      --json to emit `hive-running-status` v2; the document is capped at 32
       rows and 64 KiB and reports truncation explicitly.
 
       Use --operational for the broader active-work snapshot with blocker

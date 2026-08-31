@@ -45,8 +45,8 @@ Supported task mutators take this shared lease. Multi-task destructive work
 uses deterministic path order. When both project and task coordination are
 needed, lock order is commit lock, task lease(s), then narrower marker/file
 mutexes. `hive new` and other true identity creators use the commit lock
-because no task subject exists yet. Explicit legacy migration is the other
-bootstrap exception.
+because no task subject exists yet. Explicit fleet cutover/bootstrap is the
+other identity-creation exception.
 
 ## Liveness
 

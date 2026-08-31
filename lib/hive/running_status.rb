@@ -83,8 +83,7 @@ module Hive
         leases = leases.first(max_leases_scanned)
       end
       leases.each do |lease|
-        # Keep the v1 field name: each SQL lease row is now the source entry.
-        counters["filesystem_entries_scanned"] += 1
+        counters["lease_rows_scanned"] += 1
         counters["tasks_scanned"] += 1
         if lease.fetch(:malformed)
           counters["malformed_locks"] += 1
@@ -243,7 +242,7 @@ module Hive
           "max_metadata_bytes" => MAX_METADATA_BYTES,
           "max_daemon_pid_bytes" => MAX_DAEMON_PID_BYTES,
           "max_projects_scanned" => max_projects_scanned,
-          "max_filesystem_entries_scanned" => max_leases_scanned
+          "max_lease_rows_scanned" => max_leases_scanned
         },
         "source" => counters,
         "tasks" => rows
@@ -293,7 +292,7 @@ module Hive
         "projects_scanned" => 0,
         "projects_omitted" => 0,
         "projects_unavailable" => 0,
-        "filesystem_entries_scanned" => 0,
+        "lease_rows_scanned" => 0,
         "tasks_scanned" => 0,
         "malformed_locks" => 0,
         "stale_locks" => 0,

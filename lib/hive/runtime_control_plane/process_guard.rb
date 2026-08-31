@@ -1,5 +1,3 @@
-require "objspace"
-
 module Hive
   module RuntimeControlPlane
     # Coordinates every Sequel checkout with Ruby process creation. Sequel's
@@ -11,6 +9,11 @@ module Hive
       def register(database)
         state[:mutex].synchronize { state[:databases][database] = true }
         database
+      end
+
+      def unregister(database)
+        state[:mutex].synchronize { state[:databases].delete(database) }
+        true
       end
 
       def checkout(transaction: false)
@@ -84,6 +87,16 @@ module Hive
         true
       end
 
+      # Close every registered wrapper behind the same checkout barrier used
+      # for process creation. This is the process-wide shutdown/test-isolation
+      # boundary; individual repositories must not disconnect shared pools.
+      def disconnect_all!
+        before_fork!
+        true
+      ensure
+        after_fork_parent!
+      end
+
       # The parent disconnects every handle before the fork. Replace all
       # synchronization objects in the child because mutex state copied from a
       # multi-threaded parent is not safe to reuse.
@@ -137,7 +150,7 @@ module Hive
           pid: Process.pid,
           mutex: mutex,
           condition: ConditionVariable.new,
-          databases: ObjectSpace::WeakMap.new,
+          databases: {}.compare_by_identity,
           checkouts: 0,
           transactions: 0,
           owners: {}.compare_by_identity,

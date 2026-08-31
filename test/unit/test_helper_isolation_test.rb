@@ -48,4 +48,21 @@ class TestHelperIsolationTest < Minitest::Test
     Hive::Lock.task_lease_repository = prior[:lock] if prior&.fetch(:lock_defined)
     Hive::TaskCounter.database = prior[:counter] if prior&.fetch(:counter_defined)
   end
+
+  def test_test_boundary_disconnects_explicit_databases_and_clears_default_hive_homes
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(tracked_tmp_dir("hive-test-runtime-boundary"), "runtime.sqlite3")
+    ).migrate!
+    home = File.join(HIVE_TEST_USER_ROOT, "home")
+    hive_homes = %w[.local/state/hive .local/share/hive .config/hive].map do |relative|
+      File.join(home, relative).tap { |path| FileUtils.mkdir_p(path) }
+    end
+
+    send(:reset_test_runtime_owners!)
+
+    assert database.disconnected?
+    hive_homes.each { |path| refute_path_exists path }
+  ensure
+    database&.disconnect
+  end
 end

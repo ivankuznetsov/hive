@@ -24,17 +24,6 @@ module Hive
           :pattern_name, :file, :line, :snippet, :severity, :match_sha256
         )
         WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
-        PASSWORD_ASSIGNMENT_PREFIX = /\A.*?\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i
-        DYNAMIC_PASSWORD_LOOKUP = /\A
-          (?=[^\r\n]*(?:\[|\())
-          [A-Za-z_$][A-Za-z0-9_$]*
-          (?:
-            \.[A-Za-z_$][A-Za-z0-9_$]*
-            | \[[^\]\r\n]+\]
-            | \([^\)\r\n]*\)
-          )+
-        \z/x
-
         module_function
 
         def run!(cfg:, ctx:, base_sha:, head_sha:)
@@ -250,7 +239,9 @@ module Hive
               case spec[:detector]
               when :secret_patterns
                 Hive::SecretPatterns.scan(added).each do |hit|
-                  next if runtime_password_lookup?(added, hit)
+                  next if Hive::SecretPatterns.runtime_password_reference?(
+                    path: current_file, line: added, hit: hit
+                  )
 
                   matches << build_match(
                     pattern_name: "secrets_pattern_match.#{hit[:name]}",
@@ -285,29 +276,11 @@ module Hive
           matches
         end
 
-        def runtime_password_lookup?(added_line, hit)
-          return false unless hit[:name] == :password_assignment
-
-          snippet = hit[:snippet].to_s
-          rhs = snippet.sub(PASSWORD_ASSIGNMENT_PREFIX, "")
-          terminated = rhs.end_with?(",", ";")
-          rhs = rhs[0...-1] if terminated
-          return false if rhs == snippet || !DYNAMIC_PASSWORD_LOOKUP.match?(rhs)
-
-          return true if terminated
-
-          offset = added_line.to_s.index(snippet)
-          return false unless offset
-
-          tail = added_line.to_s[(offset + snippet.length)..].to_s.lstrip
-          tail.empty? || tail.start_with?(",", ")", "}", ";", "#")
-        end
-
         def build_match(pattern_name:, file:, line:, snippet:, severity:,
                         match_sha256: Digest::SHA256.hexdigest(snippet.to_s))
           Match.new(pattern_name:, file:, line:, snippet:, severity:, match_sha256:)
         end
-        private_class_method :runtime_password_lookup?, :build_match
+        private_class_method :build_match
       end
     end
   end

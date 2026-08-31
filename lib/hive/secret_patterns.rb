@@ -9,6 +9,22 @@ module Hive
   # test/unit/secret_patterns_test.rb (or the consumer's tests).
   module SecretPatterns
     POLICY_VERSION = 1
+    PASSWORD_ASSIGNMENT_PREFIX = /\A.*?\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i
+    DYNAMIC_PASSWORD_LOOKUP = /\A
+      (?=[^\r\n]*(?:\[|\())
+      [A-Za-z_$][A-Za-z0-9_$]*
+      (?:
+        \.[A-Za-z_$][A-Za-z0-9_$]*
+        | \[[^\]\r\n]+\]
+        | \([^\)\r\n]*\)
+      )+
+    \z/x
+    RUBY_SOURCE_PATH = /(?:\A|\/)(?:[^\/]+\.(?:rb|rake)|Rakefile)\z/.freeze
+    RUBY_PASSWORD_REFERENCE = /\A(?:
+      [@$]{0,2}[A-Za-z_][A-Za-z0-9_]*
+      | :[A-Za-z_][A-Za-z0-9_]*[!?=]?
+      | \([@$]{0,2}[A-Za-z_][A-Za-z0-9_]*\)
+    )\z/x
 
     PATTERNS = {
       # AWS access key id (AKIA = long-term, ASIA = temporary session token)
@@ -99,6 +115,91 @@ module Hive
       PATTERNS.each_value.any? { |regex| regex.match?(text) }
     end
 
+    # Git diffs need source-aware classification that raw logs and prose do
+    # not. Scan only paths and added lines, then ignore password-shaped bytes
+    # when the right-hand side is provably a runtime reference. The ordinary
+    # scan/match?/redact API stays conservative.
+    def match_diff?(diff)
+      return false if diff.nil? || diff.empty?
+
+      current_path = nil
+      in_hunk = false
+      saw_file = false
+
+      normalized_utf8(diff).each_line do |raw_line|
+        line = raw_line.chomp! || raw_line
+        if line.start_with?("diff --git ")
+          saw_file = true
+          current_path = nil
+          in_hunk = false
+          return true if match?(line)
+          next
+        end
+
+        if (path_match = line.match(%r{\A\+\+\+ [bciow]/(.+)\z}))
+          current_path = path_match[1]
+          return true if match?(current_path)
+          next
+        end
+        if line == "+++ /dev/null"
+          current_path = nil
+          next
+        end
+        if line.start_with?("+++ ")
+          current_path = nil
+          return true if match?(line)
+          next
+        end
+        if line.start_with?("@@ ")
+          in_hunk = true
+          next
+        end
+        unless in_hunk
+          return true if match?(line)
+          next
+        end
+
+        if line.start_with?("+") && !line.start_with?("+++")
+          added = line[1..]
+          return true if source_line_match?(path: current_path, line: added)
+        elsif line.start_with?("-") || line.start_with?(" ") ||
+              line == "\\ No newline at end of file"
+          next
+        else
+          in_hunk = false
+          return true if match?(line)
+        end
+      end
+
+      # Controller requests normally carry a native Git patch. Preserve the
+      # old fail-closed behavior for synthetic or malformed diff bytes.
+      !saw_file && match?(diff)
+    end
+
+    def runtime_password_reference?(path:, line:, hit:)
+      return false unless hit[:name] == :password_assignment
+
+      snippet = hit[:snippet].to_s
+      rhs = snippet.sub(PASSWORD_ASSIGNMENT_PREFIX, "")
+      return false if rhs == snippet || rhs.start_with?("'", '"')
+      candidates = [ rhs ]
+      candidates << rhs[0...-1] if rhs.end_with?(",", ";", ")", "}")
+      reference = candidates.any? do |candidate|
+        DYNAMIC_PASSWORD_LOOKUP.match?(candidate) ||
+          (RUBY_SOURCE_PATH.match?(path.to_s) && RUBY_PASSWORD_REFERENCE.match?(candidate))
+      end
+      return false unless reference
+
+      return true if candidates.length > 1
+
+      offset = line.to_s.index(snippet)
+      return false unless offset
+
+      tail = line.to_s[(offset + snippet.length)..].to_s.lstrip
+      tail.empty? || tail.start_with?(",", ")", "}", ";", "#") ||
+        (RUBY_SOURCE_PATH.match?(path.to_s) && tail.match?(/\Ado(?:\s|\z)/))
+    end
+
     # Replace every PATTERNS match in `text` with a `[REDACTED:<name>]`
     # placeholder. Shared helper so consumers (TaskAction#diagnostic,
     # DiagnosisAgent#artifact_body, etc.) cannot diverge on which
@@ -118,6 +219,20 @@ module Hive
     def normalized_utf8(text)
       text.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
     end
-    private_class_method :normalized_utf8
+
+    def source_line_match?(path:, line:)
+      PATTERNS.each do |name, regex|
+        line.scan(regex) do
+          return true unless name == :password_assignment
+
+          full = Regexp.last_match[0]
+          snippet = full.length > 80 ? "#{full[0, 80]}…" : full
+          hit = { name: name, snippet: snippet }
+          return true unless runtime_password_reference?(path: path, line: line, hit: hit)
+        end
+      end
+      false
+    end
+    private_class_method :normalized_utf8, :source_line_match?
   end
 end

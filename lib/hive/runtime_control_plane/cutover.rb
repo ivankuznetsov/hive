@@ -70,16 +70,17 @@ module Hive
         Array(projects).sort_by { |project| project.fetch("project_id") }.map do |project|
           root = File.expand_path(project.fetch("hive_state_path", project.fetch("path")))
           { "project_id" => project.fetch("project_id"), "name" => project.fetch("name"),
-            "state_path" => root, "sha256" => tree_digest(root) }
+            "state_path" => root, "sha256" => tree_digest(root, scope: "stages") }
         end.freeze
       end
 
-      def self.tree_digest(root)
-        status = File.lstat(root)
-        raise Errno::ENOTDIR, root unless status.directory? && !status.symlink?
+      def self.tree_digest(root, scope: nil)
+        scan_root = scope ? File.join(root, scope) : root
+        status = File.lstat(scan_root)
+        raise Errno::ENOTDIR, scan_root unless status.directory? && !status.symlink?
 
         digest = Digest::SHA256.new
-        pending = Dir.children(root).sort.reverse.map { |name| File.join(root, name) }
+        pending = Dir.children(scan_root).sort.reverse.map { |name| File.join(scan_root, name) }
         until pending.empty?
           path = pending.pop
           relative = path.delete_prefix("#{root}#{File::SEPARATOR}")

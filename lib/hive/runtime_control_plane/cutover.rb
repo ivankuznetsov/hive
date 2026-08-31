@@ -91,11 +91,11 @@ module Hive
           raise Error.new("task authority contains a symlink", code: :task_authority_unsafe) if entry.symlink?
           if entry.directory?
             Dir.children(path).sort.reverse_each { |name| pending << File.join(path, name) }
-          elsif entry.file? && entry.nlink == 1 && entry.size <= MAX_FILE_BYTES
+          elsif entry.file? && entry.size <= MAX_FILE_BYTES
             digest << "f\0#{relative}\0#{entry.mode & 0o7777}\0#{entry.size}\0"
             File.open(path, "rb") { |file| digest << file.read(64 * 1024) until file.eof? }
           else
-            raise Error.new("task authority contains an unsafe entry", code: :task_authority_unsafe)
+            raise Error.new("task authority contains an unsafe entry: #{path}", code: :task_authority_unsafe)
           end
         end
         digest.hexdigest

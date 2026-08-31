@@ -126,6 +126,16 @@ from that project, so unrelated projects can still use available global
 capacity. Non-dispatch policy rows are still classified and published in the
 operational snapshot.
 
+Durable dispatch requests and unrelated status rows use that same
+stage-plus-age ordering. Requests age from queue creation and retain FIFO plus
+same-task precedence; direct rows age from their state-file mtime. This lets an
+old runnable plan or retry claim a newly opened slot ahead of a younger request
+backlog without allowing the request and automatic row for one task to launch
+twice. Global and project capacity fences propagate in both directions across
+the two sources for the rest of the scan.
+Invalid and expired request files are rejected or pruned before that admission
+arbitration, so a persistent capacity fence cannot retain stale queue work.
+
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.
 

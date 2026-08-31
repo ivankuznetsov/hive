@@ -7338,6 +7338,21 @@ end
     end
   end
 
+  def with_registered_projects(*names)
+    projects = names.map do |name|
+      {
+        "name" => name, "path" => "/tmp/#{name}",
+        "hive_state_path" => "/tmp/#{name}/.hive-state"
+      }
+    end
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        ->(name) { projects.find { |project| project.fetch("name") == name } }
+      ) { yield }
+    end
+  end
+
   def test_dispatch_request_observed_logged_and_dispatched
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
@@ -8426,7 +8441,8 @@ end
       # must consult the controller and refuse rather than spawn a
       # second child against the same task.
       row_for_same_slug = row(slug: "s1", action: "ready_to_plan",
-                              command: "hive plan s1 --from 2-brainstorm")
+                              command: "hive plan s1 --from 2-brainstorm",
+                              mtime: T0 - (6 * 60 * 60))
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
         rows: [ row_for_same_slug ], dispatch_request_state_home: state_home
       )
@@ -8443,6 +8459,320 @@ end
         refute_nil blocked, "row scan must log :blocked reason=in_flight when slug is already running"
       ensure
         restore_find_project!
+      end
+    end
+  end
+
+  def test_older_direct_row_out_ranks_newer_request_for_the_last_task_slot
+    Dir.mktmpdir("hive-cross-source-dispatch-priority") do |state_home|
+      older_row = row(
+        slug: "older-plan", stage: "3-plan", action: "ready_to_plan",
+        command: "hive plan older-plan --from 2-brainstorm",
+        mtime: T0 - (6 * 60 * 60)
+      )
+      request_row = row(
+        slug: "newer-request", stage: "4-execute", action: nil,
+        command: nil, mtime: T0 - 60
+      )
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: [ older_row, request_row ], dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(
+        state_home, slug: "newer-request", request_id: "NEWER",
+        created_at: T0 - 60
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_equal [ "older-plan" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "an active request backlog must not starve older direct task rows"
+    end
+  end
+
+  def test_older_direct_row_capacity_fence_applies_to_newer_request
+    Dir.mktmpdir("hive-cross-source-row-fence") do |state_home|
+      rows = [
+        row(
+          slug: "older-plan", stage: "3-plan", action: "ready_to_plan",
+          command: "hive plan older-plan --from 2-brainstorm",
+          mtime: T0 - (6 * 60 * 60)
+        ),
+        row(
+          slug: "newer-request", stage: "4-execute", action: nil,
+          command: nil, mtime: T0 - 60
+        )
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      gate_calls = []
+      gates = [ :global_cap, :ok ]
+      controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+        gate_calls << [ project, slug ]
+        gates.shift || :ok
+      end
+      write_request_file(
+        state_home, slug: "newer-request", request_id: "NEWER",
+        created_at: T0 - 60
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned
+      assert_equal [ [ "p1", "older-plan" ] ], gate_calls
+      assert_equal [ :ok ], gates,
+                   "the request must inherit the older row's global capacity fence"
+    end
+  end
+
+  def test_request_capacity_fence_applies_to_lower_priority_direct_row
+    Dir.mktmpdir("hive-cross-source-request-fence") do |state_home|
+      rows = [
+        row(
+          slug: "lower-plan", stage: "3-plan", action: "ready_to_plan",
+          command: "hive plan lower-plan --from 2-brainstorm",
+          mtime: T0 - 60
+        ),
+        row(
+          slug: "higher-request", stage: "8-finalize", action: nil,
+          command: nil, mtime: T0 - 60
+        )
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      gate_calls = []
+      gates = [ :global_cap, :ok ]
+      controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+        gate_calls << [ project, slug ]
+        gates.shift || :ok
+      end
+      write_request_file(
+        state_home, slug: "higher-request", request_id: "HIGHER",
+        created_at: T0 - 60
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty supervisor.spawned
+      assert_equal [ [ "p1", "higher-request" ] ], gate_calls
+      assert_equal [ :ok ], gates,
+                   "the direct row must inherit the request's global capacity fence"
+    end
+  end
+
+  def test_equal_priority_request_precedes_unrelated_direct_row
+    Dir.mktmpdir("hive-cross-source-equal-priority") do |state_home|
+      rows = [
+        row(project: "p1", slug: "request", stage: "3-plan",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p2", slug: "direct", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan direct",
+            mtime: T0, id: 2)
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "request",
+        request_id: "EQUAL", created_at: T0
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0) }
+
+      assert_equal [ "request" ], supervisor.spawned.map { |entry| entry.fetch(:slug) }
+    end
+  end
+
+  def test_fifo_request_head_precedes_later_higher_priority_request
+    Dir.mktmpdir("hive-cross-source-request-fifo") do |state_home|
+      rows = [
+        row(project: "p1", slug: "older-low", stage: "2-brainstorm",
+            action: nil, command: nil, mtime: T0, id: 1),
+        row(project: "p2", slug: "later-high", stage: "8-finalize",
+            action: nil, command: nil, mtime: T0, id: 2)
+      ]
+      dispatcher, supervisor, controller = make_dispatcher(
+        rows: rows, dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(
+        state_home, project: "p1", slug: "older-low",
+        request_id: "OLDER", created_at: T0
+      )
+      write_request_file(
+        state_home, project: "p2", slug: "later-high",
+        request_id: "LATER", created_at: T0 + 1
+      )
+
+      with_registered_projects("p1", "p2") { dispatcher.tick(now: T0 + 2) }
+
+      assert_equal [ "older-low" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                   "a later request must not leapfrog the durable FIFO head"
+    end
+  end
+
+  def test_non_admission_request_cleanup_precedes_interleaved_row_fence
+    Dir.mktmpdir("hive-cross-source-request-cleanup") do |state_home|
+      older_row = row(
+        slug: "older-plan", stage: "8-finalize", action: "ready_to_plan",
+        command: "hive finalize older-plan --from 8-finalize",
+        mtime: T0 - (6 * 60 * 60)
+      )
+      dispatcher, supervisor, controller, logger = make_dispatcher(
+        rows: [ older_row ], dispatch_request_state_home: state_home
+      )
+      gate_calls = []
+      controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+        gate_calls << [ project, slug ]
+        :global_cap
+      end
+      write_request_file(
+        state_home, slug: "expired", request_id: "EXPIRED",
+        created_at: T0 - (11 * 60)
+      )
+      write_request_file(
+        state_home, slug: "invalid", request_id: "INVALID",
+        argv: [ "hive", "doctor" ]
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_empty supervisor.spawned
+      assert_equal [ [ "p1", "older-plan" ] ], gate_calls
+      assert(logger.events.any? { |name, attrs|
+        name == :dispatch_request_expired && attrs[:request_id] == "EXPIRED"
+      })
+      assert(logger.events.any? { |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "INVALID" &&
+          attrs[:reason] == "invalid_argv"
+      })
+      assert_empty Q.pending(state_home: state_home),
+                   "capacity fences must not retain expired or invalid requests"
+    end
+  end
+
+  def test_non_admission_request_cleanup_failure_keeps_request_for_retry
+    Dir.mktmpdir("hive-cross-source-request-cleanup-failure") do |state_home|
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "retry", request_id: "RETRY")
+
+      with_replaced_singleton_method(
+        Q, :valid_argv?, ->(*) { raise Errno::EAGAIN, "validation unavailable" }
+      ) { dispatcher.tick(now: T0) }
+
+      assert_empty supervisor.spawned
+      failure = logger.events.find { |name, attrs|
+        name == :dispatch_request_rejected && attrs[:request_id] == "RETRY"
+      }
+      assert_match(/spawn_failure: Errno::EAGAIN/, failure.last.fetch(:reason))
+      assert_equal [ "RETRY" ], Q.pending(state_home: state_home).map(&:request_id),
+                   "cleanup failures must preserve the durable request for retry"
+    end
+  end
+
+  def test_row_project_fence_applies_to_requests_without_blocking_other_projects
+    %i[project_cap daily_cap].each do |capacity_outcome|
+      Dir.mktmpdir("hive-cross-source-row-project-fence") do |state_home|
+        rows = [
+          row(
+            project: "p1", slug: "older-row", stage: "8-finalize",
+            action: "ready_to_plan", command: "hive finalize older-row",
+            mtime: T0 - (6 * 60 * 60), id: 1
+          ),
+          row(project: "p1", slug: "p1-request", stage: "3-plan",
+              action: nil, command: nil, mtime: T0 - 60, id: 2),
+          row(project: "p2", slug: "p2-request", stage: "3-plan",
+              action: nil, command: nil, mtime: T0 - 60, id: 3)
+        ]
+        dispatcher, supervisor, controller = make_dispatcher(
+          rows: rows, dispatch_request_state_home: state_home
+        )
+        gate_calls = []
+        controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+          gate_calls << [ project, slug ]
+          slug == "older-row" ? capacity_outcome : :ok
+        end
+        write_request_file(
+          state_home, project: "p1", slug: "p1-request",
+          request_id: "P1-#{capacity_outcome}", created_at: T0 - 60
+        )
+        write_request_file(
+          state_home, project: "p2", slug: "p2-request",
+          request_id: "P2-#{capacity_outcome}", created_at: T0 - 59
+        )
+
+        with_registered_projects("p1", "p2") { dispatcher.tick(now: T0) }
+
+        assert_equal [ "p2-request" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                     capacity_outcome.to_s
+        assert_equal [ [ "p1", "older-row" ], [ "p2", "p2-request" ] ], gate_calls,
+                     capacity_outcome.to_s
+      end
+    end
+  end
+
+  def test_request_project_fence_applies_to_rows_without_blocking_other_projects
+    %i[project_cap daily_cap].each do |capacity_outcome|
+      Dir.mktmpdir("hive-cross-source-request-project-fence") do |state_home|
+        rows = [
+          row(project: "p1", slug: "higher-request", stage: "8-finalize",
+              action: nil, command: nil, mtime: T0 - 60, id: 1),
+          row(
+            project: "p1", slug: "p1-row", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan p1-row",
+            mtime: T0 - 60, id: 2
+          ),
+          row(
+            project: "p2", slug: "p2-row", stage: "3-plan",
+            action: "ready_to_plan", command: "hive plan p2-row",
+            mtime: T0 - 60, id: 3
+          )
+        ]
+        dispatcher, supervisor, controller = make_dispatcher(
+          rows: rows, dispatch_request_state_home: state_home
+        )
+        gate_calls = []
+        controller.define_singleton_method(:can_dispatch?) do |project:, slug:, **|
+          gate_calls << [ project, slug ]
+          slug == "higher-request" ? capacity_outcome : :ok
+        end
+        write_request_file(
+          state_home, project: "p1", slug: "higher-request",
+          request_id: "HIGHER-#{capacity_outcome}", created_at: T0 - 60
+        )
+
+        with_registered_projects("p1", "p2") { dispatcher.tick(now: T0) }
+
+        assert_equal [ "p2-row" ], supervisor.spawned.map { |entry| entry.fetch(:slug) },
+                     capacity_outcome.to_s
+        assert_equal [ [ "p1", "higher-request" ], [ "p2", "p2-row" ] ], gate_calls,
+                     capacity_outcome.to_s
       end
     end
   end

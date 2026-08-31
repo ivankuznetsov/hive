@@ -223,17 +223,22 @@ timeouts -> prune dispatch-result notices -> **tick the digest scheduler** ->
 fetch status -> observe every task-bound PR in
 stages 5–8 -> advance one persisted merge candidate per project -> run
 repository-wide architecture catch-up -> heal stale ownership and cooled
-durable errors -> **process dispatch
-requests** -> patrol dispatches -> per-row dispatch -> prune baselines ->
+durable errors -> **arbitrate dispatch requests with higher-priority unrelated
+task rows** -> patrol dispatches -> remaining per-row dispatch -> prune baselines ->
 refresh cheap-probe mtime fingerprints. Merge reconciliation runs before
 automatic recovery so a safely delivered task cannot launch another provider
 attempt. Dependency/admission-held candidates stay persisted but ineligible;
 they are never dropped and become eligible when a later observation clears
 the hold.
-Dispatch requests come BEFORE the row-scan so a slug whose request just
-dispatched this tick is already in-flight in the controller and the row
-scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
-tick from double-spawning.
+
+Dispatch requests and unrelated direct task rows share the same
+stage-plus-age priority. A request ages from its queue `created_at`; when its
+task is present in the status frame it also receives that row's workflow-stage
+rank. Request FIFO remains intact, but an older higher-priority direct row can
+run before the next request instead of losing every newly opened slot to a
+durable backlog. Equal scores favor the request. A request always precedes the
+direct row for the same project/slug, so the row's per-slug in-flight gate
+(`controller.running_task?`) still prevents a same-tick double spawn.
 
 The per-row scan also carries a full-scan capacity fence. Durable admission
 reads live attempt state, so a high-priority row can be deferred just before a
@@ -255,13 +260,15 @@ newer later-stage work instead of starving indefinitely. Rows with missing or
 future mtimes receive no aging boost, and equal scores retain source order.
 
 Chronological dispatch-request consumption applies the same rule within each
-queue scan. Once an older request observes the controller's global cap or a
-generic durable-attempt capacity deferral, the scan stops before a later
-request can claim a slot that reopens while the scan is still draining. Both
-requests remain pending and the next queue scan starts again from the oldest
-request. Project and daily caps fence only later requests from the same
-project; prior cooldowns, dependency holds, and malformed requests do not
+queue scan. Once an older request or a higher-priority interleaved row observes
+the controller's global cap or a generic durable-attempt capacity deferral,
+the shared scan stops admitting from either source before a later candidate
+can claim a slot that reopens while the scan is still draining. Project and
+daily caps fence only later candidates from the same project. Prior cooldowns,
+dependency holds, malformed requests, and non-dispatch row dispositions do not
 create a capacity fence.
+Invalid-argv and expired requests are removed before admission arbitration, so
+an interleaved row fence cannot prevent non-admission queue cleanup.
 
 The timestamp captured at tick start is an observation timestamp, not a
 durable-attempt launch timestamp. A full tick can exceed

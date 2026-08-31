@@ -1209,11 +1209,27 @@ module Hive
           "terminal_outcome" => nil,
           "terminal_at" => nil
         }
-        request_queue.requeue_recovery!(
-          request.request_id, expected_phase: "terminal", changes: changes,
-          state_home: @state_home
+        retry_request_id = deterministic_markerless_retry_request_id(
+          request, retry_count: changes.fetch("retry_count")
         )
-        request_queue.fetch(request.request_id, state_home: @state_home) || request
+        request_queue.write_request!(
+          project: request.project, slug: request.slug, argv: request.argv,
+          requestor: request.requestor, chat_id: request.chat_id,
+          update_id: request.update_id, trigger: request.trigger,
+          request_id: retry_request_id, task_generation: request.task_generation,
+          predecessor_attempt_id: request.predecessor_attempt_id,
+          inherited_outputs: request.inherited_outputs || [], task_id: request.task_id,
+          expected_stage: request.expected_stage,
+          expected_marker_name: request.expected_marker_name,
+          expected_marker_id: request.expected_marker_id,
+          recovery: recovery.merge(changes), state_home: @state_home, now: now
+        )
+        request_queue.remove_terminal_recoveries(
+          project: request.project, slug: request.slug,
+          expected_stage: request.expected_stage,
+          except_request_id: retry_request_id, state_home: @state_home
+        )
+        request_queue.fetch(retry_request_id, state_home: @state_home) || request
       end
 
       def source_receipt_for(marker:, task:, project:)
@@ -1623,6 +1639,15 @@ module Hive
           [
             "hive-markerless-recovery-v1", value(row, :project), task.id || task.slug,
             value(row, :stage), reason, dispatch_generation
+          ].join("\0")
+        )[0, 32]
+      end
+
+      def deterministic_markerless_retry_request_id(request, retry_count:)
+        ::Digest::SHA256.hexdigest(
+          [
+            "hive-markerless-recovery-retry-v1", request.request_id,
+            retry_count
           ].join("\0")
         )[0, 32]
       end

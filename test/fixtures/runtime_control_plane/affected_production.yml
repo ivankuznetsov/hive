@@ -1,7 +1,7 @@
 schema: hive-runtime-control-plane-affected-production
 schema_version: 1
 base_commit: 1eab41d6b4bdac6664dc1e94ad1ccfb6ef604dd1
-outside_inventory_reference_commit: 9bc035f8960aae6ba3feb44be607fa8493e49b81
+outside_inventory_reference_commit: 62ca15ddbce7ab8e53f836069a1c52978fbd66dc
 baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true

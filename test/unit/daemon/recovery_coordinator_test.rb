@@ -1531,7 +1531,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_terminal_markerless_controller_failure_rearms_same_request
+  def test_terminal_markerless_controller_failure_rearms_with_fresh_delivery
     with_markerless_fixture do |coordinator, row, dir, original|
       admitted = coordinator.request_markerless_failure(
         row: row, requestor: "healer",
@@ -1560,14 +1560,20 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         row: row.with(attempt_id: "attempt-2"), requestor: "healer",
         reason: "agent_exited_without_terminal_marker", now: NOW + 8
       )
+      replay = coordinator.request_markerless_failure(
+        row: row.with(attempt_id: "attempt-2"), requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW + 9
+      )
 
-      assert_equal admitted.request_id, rearmed.request_id
+      refute_equal admitted.request_id, rearmed.request_id
+      assert_equal rearmed.request_id, replay.request_id
       assert_equal "cooldown", rearmed.status
       assert_equal "admitted", rearmed.phase
       assert_equal 2, rearmed.retry_count
       assert_empty Q.claimed(state_home: dir)
-      assert_equal [ admitted.request_id ], Q.pending(state_home: dir).map(&:request_id)
-      persisted = Q.fetch(admitted.request_id, state_home: dir)
+      assert_equal [ rearmed.request_id ], Q.pending(state_home: dir).map(&:request_id)
+      assert_nil Q.fetch(admitted.request_id, state_home: dir)
+      persisted = Q.fetch(rearmed.request_id, state_home: dir)
       assert_nil persisted.recovery.fetch("attempt_id")
       assert_nil persisted.recovery.fetch("terminal_outcome")
       assert_equal original, File.binread(row.state_file)

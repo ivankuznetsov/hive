@@ -444,7 +444,10 @@ Because the row scan mints a new delivery request on every tick, the daemon asks
 admission to replay the latest failed terminal attempt for the unchanged
 generation. This prevents an invalid markerless workflow command from consuming
 a new slot forever. Marked advance rows and recovery requests retain ordinary
-fresh retry semantics.
+fresh retry semantics. A terminal controller-markerless recovery therefore
+rearms with a deterministic new delivery request id after its cooldown; it
+never asks admission to reinterpret the failed receipt owned by the previous
+request id as a fresh attempt.
 
 An explicit-policy initial admission that returns no route has no attempt to
 attach. The foreground adapter therefore hands that markerless result directly

@@ -822,14 +822,34 @@ current-DOM query and visits that stable route directly. The project-rail test
 uses the same discipline for the broadcaster-replaced rail and composer:
 button lookup/click and ordered-value reads each happen in one current-DOM
 JavaScript turn, so Turbo cannot detach a saved node between lookup and action.
-Status-stream browser coverage also pins cancelled-confirmation refresh
-admission, changing-token one-request reconciliation, and pre-confirmation DOM
-teardown through the real Action Cable connection command path. It additionally
-pins teardown during a current-transport reconnect, bounded cleanup when no
-confirmation callback ever arrives, retry after a real server-side startup
-rejection, and reconnect after deferred adapter registration fails. Unit barriers
-bound every wait and assert the exact shared scan count and first-poller lease
-rollback rather than relying on scheduler timing.
+`web/test/system/status_stream_source_test.rb` is the focused status-source
+lifecycle suite. It retains the real browser/server pre-confirmation cases:
+`DOM teardown waits for Cable confirmation before server unsubscribe` observes
+server registration before release and a final zero subscriber count, while
+`a detached source has bounded cleanup when confirmation never arrives` proves
+transport-before-unsubscribe timeout cleanup. The suite also covers teardown
+during current-transport reconnect, one dedicated consumer per application
+attempt without changing Turbo's shared consumer, direct first-error identity,
+failure-complete and idempotent cleanup, exact-once normal socket close, guarded
+`OPEN`/`CONNECTING` fallbacks, DOM warning/recovery, supersession error order,
+pending-release failures, failed setup and terminal-disconnect retry, stale
+consumer/callback/timer and queued `open`/`reopen` fencing, same-attempt
+transport reconnect, persistent synchronous retry failure, immediate
+detach/reattach during pending consumer setup, real client-side setup and
+partial-registration recovery through `StatusChannel#catch_up`, fresh-attempt
+`retry_wait`, and one/two/zero transport bounds across source connection,
+supersession, repeated unconfirmed detach/attach, multiple sources, and detach.
+It keeps server startup rejection, deferred adapter failure, and detach-before-
+retry coverage alongside those owner/attempt cases.
+
+`kanban_board_test.rb` retains version/catch-up and navigation integration:
+cancelled-confirmation refresh admission, changing-token one-request
+reconciliation, same-URL permanent handoff, cross-URL/history clearing, real
+disconnect recovery, and task-page catch-up. Channel and Rails integration
+suites continue to own subscriber lease pairing, deferred registration,
+rejection recovery, and rendered wiring. Explicit barriers bound waits and
+assert exact shared scan counts and first-poller lease rollback rather than
+relying on scheduler timing.
 Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so

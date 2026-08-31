@@ -113,7 +113,10 @@ per unchanged task generation. A later daemon tick replays that terminal
 receipt and enters the same `markerless_stalled` recovery path instead of
 launching the broken command again. The resulting error or controller recovery
 request observes the shared cooldown; an explicit recovery delivery remains
-authorized to create a fresh attempt after the cause is fixed. Advance rows
+authorized to create a fresh attempt after the cause is fixed. Each terminal
+controller-recovery retry receives a deterministic new delivery id, so the
+original request remains idempotent without trapping later retries behind its
+failed receipt. Advance rows
 that still carry a terminal marker retain their existing transition semantics.
 
 `agent_running` rows also feed daemon capacity accounting when status

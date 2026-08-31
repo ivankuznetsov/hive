@@ -129,6 +129,28 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_capture_diff_forces_prefixes_when_repo_disables_them
+    with_tmp_git_repo do |dir|
+      run!("git", "-C", dir, "config", "diff.noprefix", "true")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+      path = ".github/workflows/deploy.yml"
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      File.write(File.join(dir, path), "name: deploy\n")
+      run!("git", "-C", dir, "add", path)
+      run!("git", "-C", dir, "commit", "-m", "add workflow", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      diff = Hive::Stages::Review::FixGuardrail.capture_diff(dir, base, head)
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir), base_sha: base, head_sha: head
+      )
+
+      assert_includes diff, "+++ b/#{path}"
+      assert_equal :tripped, result.status
+      assert(result.matches.any? { |match| match.pattern_name == "ci_workflow_edit" })
+    end
+  end
+
   def test_trips_on_cached_diff_with_mnemonic_commit_and_index_prefixes
     diff = <<~DIFF
       diff --git c/.github/workflows/deploy.yml i/.github/workflows/deploy.yml

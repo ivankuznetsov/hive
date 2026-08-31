@@ -119,7 +119,9 @@ module Hive
             # The wrapper re-enters Hive itself. It must not inherit the
             # caller's Bundler loader, which can point at a different checkout
             # or an ephemeral test HOME before the supervisor reports ready.
-            "RUBYOPT" => nil, "RUBYLIB" => nil,
+            # RUBYLIB is retained: source-tree and harness launches use its
+            # resolved require paths to load Hive's declared dependencies.
+            "RUBYOPT" => nil,
             "BUNDLE_GEMFILE" => nil, "BUNDLE_BIN_PATH" => nil,
             "BUNDLER_SETUP" => nil, "BUNDLER_VERSION" => nil,
             "RUBYGEMS_GEMDEPS" => nil, "GEM_HOME" => nil, "GEM_PATH" => nil

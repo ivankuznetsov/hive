@@ -163,6 +163,30 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
+  def test_wrapper_exec_retains_rubylib_for_hive_self_reentry
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: Struct.new(:root).new("/attempts"), systemd_scope: -> { false }
+    )
+    record = Struct.new(:attempt_id).new("attempt-rubylib")
+    executed = nil
+    launcher.define_singleton_method(:fork) do |&block|
+      block.call
+      999
+    end
+    launcher.define_singleton_method(:exec) { |*args, **kwargs| executed = [ args, kwargs ] }
+    reader, writer = IO.pipe
+
+    with_env("RUBYLIB" => "/resolved/hive/dependencies") do
+      launcher.send(:fork_wrapper, record, CLAIM_CAPABILITY, writer)
+    end
+
+    refute executed.first.first.key?("RUBYLIB"),
+           "exec inherits RUBYLIB unless the overlay explicitly unsets it"
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+  end
+
   def test_wrapper_exec_uses_a_sibling_systemd_scope_without_losing_handshake_fds
     launcher = Hive::Attempts::DetachedLauncher.new(
       store: Struct.new(:root).new("/attempts"),

@@ -28,8 +28,10 @@ without the flag fails with the exact `hive migrate --all --yes` action. Missing
 Corrupt reachable projects, live owners, changing task authority, or missing
 task ids stop activation. The task-authority fingerprint covers each project's
 canonical `stages/` tree; project-local babysitter worktrees are disposable
-runtime and are not interpreted as task authority. Project task files remain
-byte-identical before the activation-intent manifest.
+runtime and are not interpreted as task authority. Regular task files remain
+part of the fingerprint when they are hardlinked (for example, tool outputs in
+an archived task); symlinks and non-regular entries still fail closed. Project
+task files remain byte-identical before the activation-intent manifest.
 
 The package manager publishes the candidate normally; Hive never renames a
 package-owned launcher or preserves the previous executable tree. Before any

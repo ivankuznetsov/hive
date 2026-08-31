@@ -460,8 +460,10 @@ canonical `stages/` task-authority fingerprints, a validated immutable
 token-usage snapshot, and
 every path-shape fence. Before candidate startup mutation an early read-only
 gate refuses ordinary commands. Services stop and live owners are rejected
-before task identity is rebuilt from file authority. All other machine-local
-runtime domains start empty. Every retry converges forward from the manifest;
+before task identity is rebuilt from file authority. Fingerprinting preserves
+regular hardlinked task artifacts while rejecting symlinks and non-regular
+entries. All other machine-local runtime domains start empty. Every retry
+converges forward from the manifest;
 `active` is published only after the services recorded as running at cutover
 start again. There is no general legacy decoder, attempts-v4 migration state
 machine, dual reader/writer, reverse hydration, implicit database creation,

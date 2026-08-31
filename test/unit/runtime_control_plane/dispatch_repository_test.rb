@@ -213,6 +213,118 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  def test_recovery_requeue_and_cleanup_use_the_same_sql_row
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "recovery-requeue", recovery: { "phase" => "admitted" }, now: NOW
+      )
+      repository.claim(id, pid: 123, now: NOW)
+
+      assert repository.requeue_recovery!(
+        id, expected_phase: "admitted", changes: { phase: "cleared" }
+      )
+      assert_equal "queued", repository.fetch(id).state
+      assert_equal "cleared", repository.fetch(id).recovery.fetch("phase")
+      assert_equal 0, repository.remove_terminal_recoveries(
+        project: "hive", slug: "sqlite-cutover", expected_stage: "4-execute"
+      )
+      assert_equal 1, repository.remove_nonterminal_for_task(project: "hive", slug: "sqlite-cutover")
+      assert_nil repository.fetch(id)
+    end
+  end
+
+  def test_claim_recovery_releases_dead_owners_but_preserves_live_attempts
+    with_repository do |repository|
+      requeued = repository.write_request!(
+        project: "hive", slug: "requeued-task", argv: %w[hive run requeued-task],
+        request_id: "recovery-dead", recovery: { "phase" => "admitted" }, now: NOW
+      )
+      repository.claim(requeued, pid: 123, now: NOW)
+      events = []
+      assert_equal 1, repository.recover_claims(
+        now: NOW + 20_000, alive: ->(*) { false },
+        handler: ->(**event) { events << event }
+      )
+      assert_equal "queued", repository.fetch(requeued).state
+      assert_equal "recovery_claim_requeued", events.first.fetch(:reason)
+
+      live = repository.write_request!(
+        project: "hive", slug: "live-task", argv: %w[hive run live-task],
+        request_id: "attempt-live", now: NOW
+      )
+      repository.claim(live, pid: 123, attempt_id: "attempt-1", now: NOW)
+      assert_equal 0, repository.recover_claims(
+        now: NOW + 20_000, alive: ->(*) { false }, attempt_alive: ->(*) { true }
+      )
+      assert_equal "claimed", repository.fetch(live).state
+    end
+  end
+
+  def test_payload_lookup_and_revision_race_fail_closed
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "payload-race", now: NOW
+      )
+      assert_equal id, repository.send(:payload_for, id).fetch("request_id")
+      assert_nil repository.send(:payload_for, "missing")
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.send(:mutate_payload, id) do
+          repository.database.transaction do |db|
+            db[:dispatch_requests].where(request_id: id)
+              .update(revision: Sequel[:revision] + 1)
+          end
+          true
+        end
+      end
+      assert_equal :dispatch_update_conflict, error.code
+    end
+  end
+
+  def test_invalid_recovery_and_unregistered_project_are_typed
+    with_repository do |repository|
+      assert_raises(ArgumentError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: "bad-recovery", recovery: { "phase" => "unknown" }, now: NOW
+        )
+      end
+      error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
+        repository.write_request!(
+          project: "missing", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: "missing-project", now: NOW
+        )
+      end
+      assert_equal :missing_project_identity, error.code
+    end
+  end
+
+  def test_disappearing_unique_conflict_is_still_typed
+    with_repository do |repository|
+      register_task(repository.database, task_id: "race-task")
+      attributes = {
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        task_id: "race-task", task_generation: "generation-1", now: NOW
+      }
+      repository.write_request!(**attributes, request_id: "race-winner")
+      database = repository.database
+      original_read = database.method(:read)
+      database.define_singleton_method(:read) do |&block|
+        transaction { |db| db[:dispatch_requests].where(request_id: "race-winner").delete }
+        original_read.call(&block)
+      end
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(**attributes, request_id: "race-loser")
+      end
+      assert_equal :dispatch_request_conflict, error.code
+    ensure
+      database&.define_singleton_method(:read, original_read) if original_read
+    end
+  end
+
   private
 
   def with_repository

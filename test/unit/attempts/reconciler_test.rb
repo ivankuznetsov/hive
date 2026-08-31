@@ -390,6 +390,19 @@ class AttemptsReconcilerTest < Minitest::Test
 
       unavailable = service.operational_storage_status(nil)
       assert_equal({ "records" => nil, "invalid" => nil }, unavailable.fetch("hot"))
+
+      maintenance = Object.new
+      call = nil
+      maintenance.define_singleton_method(:storage_snapshot) do |**values|
+        call = values
+        { "status" => "healthy" }
+      end
+      maintained = Hive::Attempts::Reconciler.new(
+        store: store, process_identity: FakeIdentity.new(:matching),
+        finalization_maintenance: maintenance
+      )
+      assert_equal "healthy", maintained.operational_storage_status(snapshot).fetch("status")
+      assert_equal({ hot_count: 1, invalid_hot_count: 0 }, call)
     end
   end
 

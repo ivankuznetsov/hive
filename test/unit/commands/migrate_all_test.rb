@@ -48,4 +48,18 @@ class MigrateAllCommandTest < Minitest::Test
     assert_equal "hive migrate --all --yes", error.action
     assert_includes error.message, "non-interactive"
   end
+
+  def test_interactive_cutover_requires_an_exact_yes
+    input = StringIO.new("no\n")
+    input.define_singleton_method(:tty?) { true }
+
+    error = assert_raises(Hive::RuntimeControlPlane::Cutover::ConfirmationRequired) do
+      Hive::Commands::MigrateAll.new(
+        projects: [], input: input, output: StringIO.new,
+        cutover: ->(**) { flunk "cutover must not start" }
+      ).call
+    end
+
+    assert_equal "hive migrate --all --yes", error.action
+  end
 end

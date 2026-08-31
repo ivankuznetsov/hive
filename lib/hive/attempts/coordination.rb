@@ -208,7 +208,7 @@ module Hive
           ).insert(row)
         end
         decision.to_h
-      rescue Sequel::Error, RuntimeControlPlane::Error => error
+      rescue ArgumentError, Sequel::Error, RuntimeControlPlane::Error => error
         raise RepositoryError, "routing decision is invalid: #{error.message}"
       end
 
@@ -323,7 +323,7 @@ module Hive
         identifier(value["stage"])
         date_value(value["utc_date"])
         value
-      rescue KeyError, TypeError, RuntimeControlPlane::Error
+      rescue ArgumentError, KeyError, TypeError, RuntimeControlPlane::Error
         raise RepositoryError, "live capacity admission metadata is invalid"
       end
 
@@ -337,7 +337,7 @@ module Hive
           raise RepositoryError, "failure cohort runtime digest is invalid"
         end
         value
-      rescue KeyError, TypeError, RuntimeControlPlane::Error
+      rescue ArgumentError, KeyError, TypeError, RuntimeControlPlane::Error
         raise RepositoryError, "failure cohort identity is invalid"
       end
 

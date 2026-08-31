@@ -80,6 +80,14 @@ class AttemptsOutputReferenceTest < Minitest::Test
       assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference, max_bytes: 64)
       end
+
+      File.binwrite(path, "typed diagnostix")
+      assert_raises(Hive::InvalidOutputReference) do
+        Hive::OutputReference.read(reference, root: root, max_bytes: 64)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        reader.read_output(reference, max_bytes: 64)
+      end
       assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference.merge("path" => "../private.log"), max_bytes: 64)
       end

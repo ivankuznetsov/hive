@@ -838,6 +838,31 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  def test_revalidation_rejects_a_changed_or_disappearing_task_folder
+    with_tmp_dir do |root|
+      stage = File.join(root, "4-execute")
+      folder = File.join(stage, "different-slug")
+      FileUtils.mkdir_p(folder)
+      context = Hive::Commands::Drop::TaskContext.new(
+        slug: "expected-slug", folders: [ { folder: folder, stage: "4-execute" } ]
+      )
+      drop = Hive::Commands::Drop.new("expected-slug")
+
+      assert_raises(Hive::InvalidTaskPath) { drop.send(:revalidate_context!, context) }
+
+      context.slug = "different-slug"
+      original = File.method(:realpath)
+      replacement = lambda do |path|
+        raise Errno::ENOENT, path if path == folder
+
+        original.call(path)
+      end
+      with_replaced_singleton_method(File, :realpath, replacement) do
+        assert_raises(Hive::InvalidTaskPath) { drop.send(:revalidate_context!, context) }
+      end
+    end
+  end
+
   def test_marker_for_returns_none_for_malformed_task_folder
     state = Hive::Commands::Drop.new("bad-folder-260525-aaaa").send(:marker_for, "/tmp/not-a-hive-task")
 

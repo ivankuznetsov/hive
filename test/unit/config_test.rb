@@ -259,6 +259,84 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_missing_registry_file_deactivates_runtime_projects
+    with_tmp_global_config do |home|
+      timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      Hive::RuntimeControlPlane.database.transaction do |db|
+        installation = db[:installations].get(:installation_id)
+        db[:projects].insert(
+          project_id: "orphan-project", installation_id: installation,
+          registration_id: "orphan-project", name: "orphan",
+          observed_path: "/tmp/orphan", state_root_path: "/tmp/orphan/.hive-state",
+          active: 1, registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+      File.delete(File.join(home, "config.yml"))
+
+      Hive::Config.send(:sync_runtime_projects!)
+
+      active = Hive::RuntimeControlPlane.database.read do |db|
+        db[:projects].where(project_id: "orphan-project").get(:active)
+      end
+      assert_equal 0, active
+    end
+  end
+
+  def test_runtime_registry_sync_wraps_database_errors
+    with_tmp_global_config do
+      database = Object.new
+      database.define_singleton_method(:transaction) { raise Sequel::DatabaseError, "offline" }
+
+      error = with_replaced_singleton_method(
+        Hive::RuntimeControlPlane, :database, -> { database }
+      ) do
+        assert_raises(Hive::ConfigError) { Hive::Config.send(:sync_runtime_projects!) }
+      end
+      assert_includes error.message, "registry synchronization failed"
+    end
+  end
+
+  def test_retired_runtime_identity_is_ambiguous_or_unavailable_fail_closed
+    with_tmp_global_config do
+      timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      Hive::RuntimeControlPlane.database.transaction do |db|
+        installation = db[:installations].get(:installation_id)
+        [ [ "retired", "/tmp/retired-0/.hive-state" ],
+          [ "other", "/tmp/retired/.hive-state" ] ].each_with_index do |(name, state_root), index|
+          db[:projects].insert(
+            project_id: "retired-#{index}", installation_id: installation,
+            registration_id: "retired-#{index}", name: name,
+            observed_path: "/tmp/retired-#{index}",
+            state_root_path: state_root,
+            active: 0, registered_at: timestamp, last_observed_at: timestamp
+          )
+        end
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :inactive_runtime_project_identity,
+          name: "retired", state_root_path: "/tmp/retired/.hive-state"
+        )
+      end
+      assert_includes error.message, "ambiguous"
+
+      database = Object.new
+      database.define_singleton_method(:read) { raise Sequel::DatabaseError, "offline" }
+      error = with_replaced_singleton_method(
+        Hive::RuntimeControlPlane, :database, -> { database }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          Hive::Config.send(
+            :inactive_runtime_project_identity,
+            name: "retired", state_root_path: "/tmp/retired/.hive-state"
+          )
+        end
+      end
+      assert_includes error.message, "identity is unavailable"
+    end
+  end
+
   def test_legacy_registry_identity_backfill_is_explicit_and_emits_no_event
     with_tmp_global_config do |home|
       path = File.join(home, "config.yml")

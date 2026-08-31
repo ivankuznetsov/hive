@@ -276,6 +276,13 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "migrate", "/tmp/project", "--all" ])
     end
     assert_match(/PROJECT_PATH and --all are mutually exclusive/, error.message)
+
+    require "hive/commands/runtime"
+    with_command_new_stub(Hive::Commands::Runtime) do |calls|
+      Hive::CLI.start([ "runtime", "resume", "--json" ])
+      assert_equal [ "resume" ], calls.first.fetch(:args)
+      assert_equal({ json: true }, calls.first.fetch(:kwargs))
+    end
   end
 
   def test_doctor_loads_project_config_and_exits_with_command_status

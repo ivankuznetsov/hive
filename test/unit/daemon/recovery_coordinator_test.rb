@@ -87,6 +87,29 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
   FakeGeneration = Data.define(:progress_token, :task_generation)
 
+  def test_request_reports_missing_observation_when_assessment_has_no_retry_time
+    with_tmp_dir do |state_home|
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
+      coordinator.define_singleton_method(:durable_retry_count) { |_row| 0 }
+      coordinator.define_singleton_method(:assessment) do |_row, **|
+        { due: false, retry_at: nil, safe: false, safety_reason: "missing observation" }
+      end
+      row = FakeRow.new(
+        project: "demo", slug: "task", folder: "/tmp/task",
+        state_file: "/tmp/task/task.md", stage: "4-execute", workflow: "coding",
+        marker: "error", marker_attrs: { "reason" => "implementer_failed" },
+        state_file_mtime: nil, live_task_lock: false, attempt_id: nil,
+        task_generation: nil, suggested_command: nil, projection_repair: false
+      )
+
+      receipt = coordinator.request(row: row, requestor: "scheduler", now: NOW)
+
+      assert_equal "unavailable", receipt.status
+      assert_equal "missing_observation_time", receipt.reason
+      assert_equal "hive", receipt.owner
+    end
+  end
+
   def test_projection_repair_row_is_ineligible_for_request_and_resume
     with_tmp_dir do |state_home|
       command = "hive repair-projection task --project demo --stage 4-execute"

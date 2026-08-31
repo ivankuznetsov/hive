@@ -109,7 +109,7 @@ module Hive
         raise
       rescue Errno::ELOOP, Errno::EMLINK => error
         raise_path_error!("unsafe payload source: #{error.message}", :unsafe_payload_path, source)
-      rescue SystemCallError, IOError, ArgumentError => error
+      rescue SystemCallError, IOError, ArgumentError, TypeError => error
         integrity!("payload sealing failed: #{error.message}", :payload_seal_failed)
       ensure
         FileUtils.rm_f(temporary) if temporary

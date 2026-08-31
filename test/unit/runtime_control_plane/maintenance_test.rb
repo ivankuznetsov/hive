@@ -131,4 +131,34 @@ class RuntimeControlPlaneMaintenanceTest < Minitest::Test
   def test_package_owned_launcher_has_no_runtime_mutation_abstraction
     refute Hive::RuntimeControlPlane.const_defined?(:MaintenanceLauncher, false)
   end
+
+  def test_unsupported_missing_and_unsafe_service_managers_fail_closed
+    with_tmp_dir do |root|
+      unsupported = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: root, host_os: "windows", runner: ->(*) { raise "unexpected" }
+      )
+      assert_equal :service_manager_unavailable,
+                   assert_raises(Hive::RuntimeControlPlane::Error) {
+                     unsupported.stop!(cutover_id: "cutover")
+                   }.code
+
+      missing = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: root, host_os: "linux",
+        runner: ->(*) { raise Errno::ENOENT, "systemctl" }
+      )
+      assert_equal :service_manager_unavailable,
+                   assert_raises(Hive::RuntimeControlPlane::Error) {
+                     missing.stop!(cutover_id: "cutover")
+                   }.code
+
+      current = File.join(root, ".runtime-cutover", "current")
+      FileUtils.mkdir_p(current)
+      FileUtils.mkdir_p(File.join(current, "services.json"))
+      unsafe = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: root, host_os: "linux", runner: ->(*) { raise "unexpected" }
+      )
+      assert_equal :service_lifecycle_failed,
+                   assert_raises(Hive::RuntimeControlPlane::Error) { unsafe.activate! }.code
+    end
+  end
 end

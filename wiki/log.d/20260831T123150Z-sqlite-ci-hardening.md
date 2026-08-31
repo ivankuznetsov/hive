@@ -24,3 +24,9 @@ date: 2026-08-31
 - Registered command and daemon module projects in the same isolated SQL
   repository used by their hook attempts, instead of relying on file-only
   project fixtures that the production admission contract correctly rejects.
+- Kept malformed routing, live-admission, and failure-cohort JSON behind the
+  Attempts repository's typed error boundary instead of leaking `ArgumentError`.
+- Normalized operator generation input before entering Sequel's transaction
+  boundary, preserving the provider-health stale-generation error contract.
+- Kept invalid sealed-payload size expectations behind the typed payload
+  integrity boundary instead of leaking `TypeError`.

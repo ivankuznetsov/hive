@@ -371,6 +371,33 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_session_merge_preserves_the_first_authoritative_billing_evidence
+    with_usage_db do
+      common = {
+        agent: "codex", model: "gpt-test", project_slug: "alpha",
+        task_slug: "task-a", stage: "4-execute",
+        started_at: Time.utc(2026, 5, 24, 10), ended_at: Time.utc(2026, 5, 24, 10, 1),
+        attempt_id: "attempt-1", session_id: "billing-session", task_generation: 3,
+        source: "runtime_receipt"
+      }
+      Hive::UsageDb.record!(
+        **common, input: 10, output: 2, cached: 1,
+        billing_route: "api", billing_evidence_source: "provider_account_config"
+      )
+      Hive::UsageDb.record!(
+        **common, input: 12, output: 3, cached: 1,
+        billing_route: "unknown", billing_evidence_source: "unavailable"
+      )
+
+      sessions = Hive::UsageDb.exact_attempt(
+        attempt_id: "attempt-1", task_generation: 3
+      ).fetch(:sessions)
+      assert_equal 1, sessions.length
+      assert_equal "api", sessions.first.fetch(:billing_route)
+      assert_equal "provider_account_config", sessions.first.fetch(:billing_evidence_source)
+    end
+  end
+
   def test_concurrent_session_writers_converge
     with_usage_db do
       ready = Queue.new
@@ -566,6 +593,19 @@ class UsageDbTest < Minitest::Test
       aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
       assert_equal({ input: 0, output: 0, cached: 0 }, usage_at(aggregate, :claude, :all))
     end
+  end
+
+  def test_aggregate_fails_closed_when_the_database_read_fails
+    broken = Struct.new(:path) do
+      def read = raise(IOError, "unreadable")
+    end.new(__FILE__)
+    Hive::UsageDb.database = broken
+
+    _out, err = capture_io do
+      aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
+      assert_equal({ input: 0, output: 0, cached: 0 }, usage_at(aggregate, :claude, :all))
+    end
+    assert_match(/usage aggregate failed: IOError: unreadable/, err)
   end
 
   def test_iso8601_returns_original_text_when_parse_fails

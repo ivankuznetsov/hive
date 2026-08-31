@@ -91,6 +91,33 @@ class ProviderRoutingPolicyRepositoryTest < Minitest::Test
           subject: subject.merge("unsupported" => Object.new), policy: candidate
         )
       end
+
+      policies.fetch_or_store(
+        ownership_generation: "owner-valid", subject: subject, policy: candidate
+      )
+      attempts.database.transaction do |db|
+        db[:routing_policies].where(policy_digest: candidate.digest)
+          .update(policy_digest: "0" * 64)
+      end
+      assert_raises(Hive::ProviderRouting::PolicyRepository::InvalidSnapshot) do
+        policies.fetch_snapshot(ownership_generation: "owner-valid", subject: subject)
+      end
+    end
+  end
+
+  def test_unique_insert_race_reads_the_committed_winner
+    with_policies do |policies, _attempts|
+      candidate = policy(model: "gpt-5.6-sol")
+      policies.define_singleton_method(:fetch_or_store_in) do |*, **|
+        raise Sequel::UniqueConstraintViolation, "lost race"
+      end
+      policies.define_singleton_method(:fetch_snapshot) do |**|
+        candidate
+      end
+
+      assert_same candidate, policies.fetch_or_store(
+        ownership_generation: ownership_generation, subject: subject, policy: candidate
+      )
     end
   end
 

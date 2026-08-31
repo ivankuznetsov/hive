@@ -247,6 +247,135 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_migration_and_feature_probe_failures_are_typed
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(path: File.join(root, "runtime.sqlite3"))
+      migrator = Object.new
+      migrator.define_singleton_method(:run) { raise Sequel::DatabaseError, "migration failed" }
+      replacement = ->(*) { migrator }
+      error = with_replaced_singleton_method(Sequel::IntegerMigrator, :new, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.migrate! }
+      end
+      assert_equal :migration_failed, error.code
+      assert database.disconnected?
+    end
+
+    with_tmp_dir do |root|
+      invalid = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "invalid.sqlite3"), sqlite_version: "not-a-version"
+      )
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) { invalid.migrate! }
+      assert_equal :sqlite_version_unsupported, error.code
+
+      broken = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "broken.sqlite3"),
+        feature_probe: ->(*) { raise Sequel::DatabaseError, "probe failed" }
+      )
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) { broken.migrate! }
+      assert_equal :sqlite_feature_missing, error.code
+    end
+  end
+
+  def test_diagnostics_classify_missing_schema_and_failed_integrity
+    with_tmp_dir do |root|
+      path = File.join(root, "missing-schema.sqlite3")
+      raw_sqlite(path) do |raw|
+        raw.execute("PRAGMA application_id = #{Hive::RuntimeControlPlane::APPLICATION_ID}")
+        raw.execute("CREATE TABLE placeholder (id INTEGER)")
+      end
+      assert_equal :missing_schema,
+                   Hive::RuntimeControlPlane::Database.new(path: path).diagnostics.status
+    end
+
+    with_database do |database|
+      original = database.method(:pragma_rows)
+      database.define_singleton_method(:pragma_rows) do |connection, name|
+        name == "quick_check" ? [ "bad" ] : original.call(connection, name)
+      end
+      diagnosis = database.diagnostics
+      assert_equal :corrupt, diagnosis.status
+      assert_equal :integrity_check_failed, diagnosis.error.code
+    end
+  end
+
+  def test_wal_migration_set_and_schema_helpers_fail_closed
+    with_database do |database|
+      database.disconnect
+      original = database.method(:pragma_rows)
+      database.define_singleton_method(:pragma_rows) do |connection, name|
+        name == "journal_mode = WAL" ? [ "delete" ] : original.call(connection, name)
+      end
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.open! }
+      assert_equal :wal_mode_unavailable, error.code
+    end
+
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3"), migrations_dir: File.join(root, "missing")
+      )
+      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.migrate! }
+      assert_equal :migration_set_invalid, error.code
+    end
+
+    with_database do |database|
+      fake = Object.new
+      fake.define_singleton_method(:[]) { |_| raise Sequel::DatabaseError, "schema unreadable" }
+      refute database.send(:exact_schema?, fake)
+
+      dataset = Struct.new(:value) { def get(*) = value }.new("bad")
+      schema = Object.new
+      schema.define_singleton_method(:table_exists?) { |_| true }
+      schema.define_singleton_method(:[]) { |_| dataset }
+      assert_nil database.send(:schema_version_for, schema)
+    end
+  end
+
+  def test_storage_parent_and_custody_io_fail_closed
+    with_tmp_dir do |root|
+      real = File.join(root, "real")
+      link = File.join(root, "linked")
+      FileUtils.mkdir_p(real)
+      File.symlink(real, link)
+      database = Hive::RuntimeControlPlane::Database.new(path: File.join(link, "runtime.sqlite3"))
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.migrate! }
+      assert_equal :database_custody_invalid, error.code
+    end
+
+    with_tmp_dir do |root|
+      parent = File.join(root, "not-directory")
+      File.binwrite(parent, "file")
+      database = Hive::RuntimeControlPlane::Database.new(path: File.join(parent, "runtime.sqlite3"))
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        database.send(:prepare_storage!)
+      end
+      assert_equal :database_custody_invalid, error.code
+    end
+
+    with_database do |database, path|
+      database.disconnect
+      FileUtils.remove_entry(File.dirname(path))
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        database.send(:validate_database_custody!)
+      end
+      assert_equal :database_custody_invalid, error.code
+    end
+  end
+
+  def test_diagnostics_reraises_typed_internal_errors
+    with_database do |database|
+      database.define_singleton_method(:inspect_database) do |&block|
+        fake = Object.new
+        block.call(fake)
+      end
+      database.define_singleton_method(:integer_pragma) do |*, **|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("typed", code: :database_corrupt)
+      end
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.diagnostics }
+      assert_equal :database_corrupt, error.code
+    end
+  end
+
   private
 
   def with_database

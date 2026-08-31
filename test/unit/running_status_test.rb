@@ -123,6 +123,35 @@ class RunningStatusTest < Minitest::Test
     assert_equal false, payload.fetch("complete")
   end
 
+  def test_lease_query_failure_marks_registered_projects_unavailable
+    with_project do |project, _hive_state|
+      unavailable = Object.new
+      unavailable.define_singleton_method(:active_leases) do |**|
+        raise Hive::RuntimeControlPlane::Unavailable.new(
+          "database unavailable", code: :unavailable
+        )
+      end
+      Hive::Lock.task_lease_repository = unavailable
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_empty payload.fetch("tasks")
+      assert_equal 1, payload.dig("source", "projects_unavailable")
+      assert_equal false, payload.fetch("complete")
+    end
+  end
+
+  def test_missing_metadata_is_absent_only_while_task_folder_exists
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      FileUtils.mkdir_p(task)
+
+      assert_equal [ "absent", {} ], status.send(:read_metadata, task)
+      FileUtils.rmdir(task)
+      assert_raises(Errno::ENOENT) { status.send(:read_metadata, task) }
+    end
+  end
+
   def test_live_task_lock_without_agent_pid_is_running
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "lock-only-task")

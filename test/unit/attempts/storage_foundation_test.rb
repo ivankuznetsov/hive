@@ -90,6 +90,85 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  def test_publication_and_maintenance_inputs_fail_closed
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.seal_terminal_payloads(Object.new)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [])
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [ "Bad Name" ])
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.claim_maintenance(now: NOW, interval_sec: "bad")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.advance_maintenance_cursor("after" => "")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.advance_maintenance_cursor(Object.new)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.complete_maintenance(now: NOW, result: { promoted: -1 })
+      end
+    end
+  end
+
+  def test_publication_persistence_errors_remain_typed
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Sequel::DatabaseError, "bad read"
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.maintenance_checkpoint }
+    end
+
+    %i[complete fail].each do |operation|
+      with_repository do |repository|
+        repository.database.define_singleton_method(:transaction) do |**|
+          raise Sequel::DatabaseError, "bad write"
+        end
+        if operation == :complete
+          assert_raises(Hive::Attempts::RepositoryError) do
+            repository.complete_maintenance(
+              now: NOW, result: { promoted: 0, deleted: 0, cold_examined: 0 }
+            )
+          end
+        else
+          assert_raises(Hive::Attempts::RepositoryError) do
+            repository.fail_maintenance(error: ArgumentError.new("bad"), now: NOW)
+          end
+        end
+      end
+    end
+  end
+
+  def test_sealed_payload_identity_conflict_is_rejected
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      reference = {
+        "path" => "sealed/sha256/aa/#{'a' * 64}",
+        "sha256" => "a" * 64, "size" => 1
+      }
+      repository.database.transaction do |db|
+        db[:payload_references].insert(
+          payload_id: "payload", attempt_id: terminal.attempt_id,
+          kind: "attempt_log", relative_path: reference.fetch("path"),
+          sha256: reference.fetch("sha256"), bytes: 1,
+          state: "releasable", created_at: NOW.iso8601(6)
+        )
+      end
+      spec = { payload_id: "payload", kind: "attempt_log", reference: reference }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.database.transaction do |db|
+          repository.send(:persist_sealed_reference, db, terminal, spec)
+        end
+      end
+    end
+  end
+
   private
 
   def with_repository

@@ -9155,6 +9155,134 @@ end
     assert_nil Hive::TaskMeta.read(folder)[:display_name]
   end
 
+  def test_dispatch_iteration_rejects_invalid_and_expired_requests_before_lookup
+    repository = Object.new
+    repository.define_singleton_method(:valid_argv?) do |argv|
+      argv == %w[hive run expired-task]
+    end
+    repository.define_singleton_method(:expired?) { |_request, now:| now == T0 }
+    dispatcher, = make_dispatcher(rows: [], dispatch_repository: repository)
+    rejected = []
+    expired = []
+    dispatcher.define_singleton_method(:reject_request) do |request, reason:|
+      rejected << [ request.request_id, reason ]
+    end
+    dispatcher.define_singleton_method(:expire_request) do |request|
+      expired << request.request_id
+    end
+    invalid = Q::Request.new(
+      request_id: "invalid", created_at: T0, project: "p1", slug: "invalid-task",
+      argv: %w[rm -rf], requestor: "daemon"
+    )
+    stale = Q::Request.new(
+      request_id: "expired", created_at: T0 - 1_000, project: "p1",
+      slug: "expired-task", argv: %w[hive run expired-task], requestor: "daemon"
+    )
+
+    dispatcher.send(:process_dispatch_request_iteration, invalid, now: T0, rows: [])
+    dispatcher.send(:process_dispatch_request_iteration, stale, now: T0, rows: [])
+
+    assert_equal [ [ "invalid", "invalid_argv" ] ], rejected
+    assert_equal [ "expired" ], expired
+  end
+
+  def test_nondurable_request_releases_preclaim_when_shutdown_starts_after_claim
+    Dir.mktmpdir("hive-dispatch-final-gate") do |state_home|
+      dispatcher, supervisor, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive markers demo-task],
+        request_id: "request-final-gate-race", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+      checks = 0
+      dispatcher.define_singleton_method(:admission_open?) do
+        checks += 1
+        checks == 1
+      end
+
+      assert_equal :shutdown, dispatcher.send(:dispatch_request!, request, now: T0)
+      assert_empty supervisor.spawned
+      assert_equal [ "request-final-gate-race" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_recover_dispatch_claims_checks_attempt_generation_and_missing_reconciler
+    observed = []
+    repository = Object.new
+    repository.define_singleton_method(:recover_claims) do |attempt_alive:, **|
+      observed << attempt_alive.call("attempt-1", "generation-1")
+    end
+    dispatcher, = make_dispatcher(rows: [], dispatch_repository: repository)
+    dispatcher.send(:recover_dispatch_claims, now: T0)
+
+    attempt = Struct.new(:task_generation).new("generation-1")
+    reconciler = Object.new
+    reconciler.define_singleton_method(:fetch) do |attempt_id|
+      attempt_id == "attempt-1" ? attempt : nil
+    end
+    repository.define_singleton_method(:recover_claims) do |attempt_alive:, **|
+      observed << attempt_alive.call("missing", "generation-1")
+      observed << attempt_alive.call("attempt-1", "other-generation")
+      observed << attempt_alive.call("attempt-1", "generation-1")
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], dispatch_repository: repository, attempt_reconciler: reconciler
+    )
+    dispatcher.send(:recover_dispatch_claims, now: T0)
+
+    assert_equal [ false, nil, false, true ], observed
+  end
+
+  def test_lost_successor_rebinds_claim_and_acknowledges_original_attempt
+    request = Q::Request.new(
+      request_id: "lost-delivery", created_at: T0, project: "p1", slug: "task",
+      argv: %w[hive run task], requestor: "daemon"
+    )
+    delivery = Q::ClaimedDelivery.new(
+      request: request,
+      claim: {
+        "attempt_id" => "lost-1", "pid" => 123,
+        "process_start_time" => "process-start-1"
+      }
+    )
+    updates = []
+    repository = Object.new
+    repository.define_singleton_method(:claimed) { |**| [ delivery ] }
+    repository.define_singleton_method(:update_claim) do |request_id, **attributes|
+      updates << [ request_id, attributes ]
+    end
+    attempt = Struct.new(:attempt_id).new("lost-1")
+    acknowledgements = []
+    reconciler = Object.new
+    reconciler.define_singleton_method(:fetch) { |_attempt_id| attempt }
+    reconciler.define_singleton_method(:acknowledge_finalization) do |seen, consumer|
+      acknowledgements << [ seen.attempt_id, consumer ]
+    end
+    outcomes = Object.new
+    outcomes.define_singleton_method(:fetch) do |_attempt_id|
+      {
+        "status" => "successor_dispatched",
+        "successor_attempt_id" => "successor-1",
+        "task_generation" => "generation-2"
+      }
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], dispatch_repository: repository, attempt_reconciler: reconciler
+    )
+    dispatcher.instance_variable_set(:@lost_outcome_store, outcomes)
+
+    dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
+
+    assert_equal "lost-delivery", updates.fetch(0).fetch(0)
+    assert_equal "successor-1", updates.fetch(0).fetch(1).fetch(:attempt_id)
+    assert_equal "generation-2", updates.fetch(0).fetch(1).fetch(:task_generation)
+    assert_equal [ [ "lost-1", :request_delivery ] ], acknowledgements
+  end
+
   def test_shutdown_snapshot_failure_is_advisory
     snapshot = FakeOperationalSnapshot.new(
       fail_on: :shutdown,

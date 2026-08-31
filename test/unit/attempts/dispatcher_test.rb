@@ -520,6 +520,19 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_capacity_race_inside_atomic_admission_returns_a_deferred_result
+    with_dispatcher do |dispatcher, launcher, task, store|
+      store.define_singleton_method(:create_launching) do |**|
+        raise Hive::Attempts::CapacityExceeded, "final slot was claimed"
+      end
+      result = dispatch(dispatcher, task, request_id: "request-race")
+
+      assert_equal :deferred, result.status
+      assert_equal "capacity", result.reason
+      assert_empty launcher.launched
+    end
+  end
+
   def test_patrol_failure_cohort_survives_restart_and_runtime_change_releases_it
     with_tmp_dir do |root|
       database = attempt_database(root, projects: [ "demo" ])

@@ -117,4 +117,52 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
       database&.disconnect
     end
   end
+
+  def test_active_probe_timeout_and_corrupt_registry_fail_closed
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::ActivationGate, :runtime_status, ->(*) { raise KeyError, "bad" }
+    ) do
+      refute Hive::RuntimeControlPlane::ActivationGate.active?("/state")
+    end
+
+    clocks = [ 0.0, Hive::RuntimeControlPlane::ActivationGate::SERVICE_ACTIVATION_WAIT_SEC ].each
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::ActivationGate, :active?, ->(*) { false }
+    ) do
+      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+        Hive::RuntimeControlPlane::ActivationGate.wait_for_active!(
+          "/state", sleeper: ->(_) { }, monotonic_clock: -> { clocks.next }
+        )
+      end
+      assert_equal :fleet_cutover_required, error.code
+    end
+
+    with_tmp_dir do |root|
+      config = File.join(root, "config")
+      FileUtils.mkdir_p(config)
+      File.binwrite(File.join(config, "config.yml"), "registered_projects: [\n")
+      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+        Hive::RuntimeControlPlane::ActivationGate.check!(
+          argv: [ "status" ], state_home: File.join(root, "state"),
+          data_home: File.join(root, "data"), config_home: config
+        )
+      end
+    end
+  end
+
+  def test_default_service_wait_sleeper_is_exercised
+    status = { "phase" => "intended", "database" => { "status" => "ok" } }
+    probes = 0
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::ActivationGate, :runtime_status, ->(*) { status }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::ActivationGate, :active?, ->(*) { (probes += 1) > 1 }
+      ) do
+        assert Hive::RuntimeControlPlane::ActivationGate.check!(
+          argv: %w[daemon start], state_home: "/tmp/state", config_home: "/tmp/config"
+        )
+      end
+    end
+  end
 end

@@ -66,6 +66,43 @@ class PrMergeRepositoryTest < Minitest::Test
     end
   end
 
+  def test_repository_errors_remain_typed_at_public_boundaries
+    with_repository do |repository, identity, _database|
+      key = repository.candidate_key(
+        project: "hive", slug: "sqlite-cutover", task_generation: TASK_GENERATION,
+        pull_request: pull_request
+      )
+      item = candidate(key)
+
+      assert_raises(Hive::Daemon::PrMergeRepository::Invalid) do
+        repository.candidates({})
+      end
+      assert_raises(Hive::Daemon::PrMergeRepository::Invalid) do
+        repository.upsert_candidate({}, item, now: NOW)
+      end
+      assert_raises(Hive::Daemon::PrMergeRepository::Invalid) do
+        repository.checkpoint(
+          identity, item, expected_task_generation: TASK_GENERATION, now: NOW
+        )
+      end
+
+      invalid = candidate(key)
+      invalid["observation"] = Object.new
+      error = assert_raises(Hive::Daemon::PrMergeRepository::Invalid) do
+        repository.upsert_candidate(identity, invalid, now: NOW)
+      end
+      assert_match(/candidate is invalid/, error.message)
+    end
+  end
+
+  def test_backoff_values_must_be_positive
+    error = assert_raises(ArgumentError) do
+      Hive::Daemon::PrMergeRepository.new(backoff_base_sec: 0)
+    end
+
+    assert_equal "PR merge backoff base must be positive", error.message
+  end
+
   private
 
   def with_repository

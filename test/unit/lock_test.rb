@@ -148,6 +148,40 @@ class LockTest < Minitest::Test
     assert_equal folder, observed_path
   end
 
+  def test_subject_registration_detects_a_concurrent_cross_project_insert
+    original = task_folder(102)
+    other_root = File.join(@root, "concurrent-project")
+    timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+    other_project = @database.transaction do |db|
+      installation = db[:installations].get(:installation_id)
+      db[:projects].insert(
+        project_id: "concurrent-project", installation_id: installation,
+        registration_id: "concurrent-project", name: "concurrent-project",
+        observed_path: other_root,
+        state_root_path: File.join(other_root, ".hive-state"), active: 1,
+        registered_at: timestamp, last_observed_at: timestamp
+      )
+      db[:projects].where(project_id: "concurrent-project").first
+    end
+    other_folder = File.join(
+      other_root, ".hive-state", "stages", "4-execute", "concurrent-task"
+    )
+    FileUtils.mkdir_p(other_folder)
+
+    error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
+      repository.send(
+        :register_subject, other_folder, "102",
+        { id: 102, slug: "concurrent-task", workflow: "coding" }, other_project
+      )
+    end
+
+    assert_equal :task_identity_conflict, error.code
+    observed_path = @database.read do |db|
+      db[:task_subjects].where(task_id: "102").get(:observed_path)
+    end
+    assert_equal original, observed_path
+  end
+
   def test_task_id_cannot_move_to_another_slug_in_the_same_project
     original = task_folder(15)
     conflicting = File.join(File.dirname(original), "different-task")
@@ -313,6 +347,147 @@ class LockTest < Minitest::Test
   def test_process_start_time_helpers_remain_bounded
     assert Hive::Lock.process_start_time(Process.pid)
     assert_kind_of Numeric, Hive::Lock.monotonic_now
+  end
+
+  def test_process_identity_helpers_fail_closed_for_platform_errors
+    original_exist = File.method(:exist?)
+    original_read = File.method(:read)
+    exist = ->(path) { path == "/proc/987654/stat" ? true : original_exist.call(path) }
+    read = lambda do |path, *arguments|
+      raise Errno::EACCES, path if path == "/proc/987654/stat"
+
+      original_read.call(path, *arguments)
+    end
+    result = with_replaced_singleton_method(File, :exist?, exist) do
+      with_replaced_singleton_method(File, :read, read) do
+        Hive::Lock.proc_stat_start_time(987654)
+      end
+    end
+    assert_nil result
+
+    missing = ->(*) { raise Errno::ESRCH }
+    denied = ->(*) { raise Errno::EPERM }
+    assert_equal false, with_replaced_singleton_method(Process, :kill, missing) {
+      Hive::Lock.send(:process_identity_alive?, 987654, recorded_start_time: nil)
+    }
+    assert_equal true, with_replaced_singleton_method(Process, :kill, denied) {
+      Hive::Lock.send(:process_identity_alive?, 987654, recorded_start_time: nil)
+    }
+  end
+
+  def test_ps_start_time_timeout_and_read_failures_are_bounded
+    fake_pid = 987654
+    spawn = ->(*, **) { fake_pid }
+    wait = ->(*) { nil }
+    terminated = []
+    terminate = ->(pid) { terminated << pid }
+    timed_out = with_replaced_singleton_method(Process, :spawn, spawn) do
+      with_replaced_singleton_method(Hive::Lock, :wait_for_process, wait) do
+        with_replaced_singleton_method(Hive::Lock, :terminate_and_detach, terminate) do
+          Hive::Lock.ps_lstart_start_time(fake_pid)
+        end
+      end
+    end
+    assert_nil timed_out
+    assert_equal [ fake_pid ], terminated
+
+    io_failure = -> { raise IOError, "pipe failed" }
+    assert_nil with_replaced_singleton_method(IO, :pipe, io_failure) {
+      Hive::Lock.ps_lstart_start_time(fake_pid)
+    }
+  end
+
+  def test_ps_start_time_reads_one_bounded_line
+    fake_pid = 987654
+    status = Struct.new(:success?).new(true)
+    spawn = lambda do |*, out:, **|
+      out.write("Mon Aug 31 12:00:00 2026\n")
+      out.close
+      fake_pid
+    end
+    wait = ->(*) { status }
+    value = with_replaced_singleton_method(Process, :spawn, spawn) do
+      with_replaced_singleton_method(Hive::Lock, :wait_for_process, wait) do
+        Hive::Lock.ps_lstart_start_time(fake_pid)
+      end
+    end
+
+    assert_equal "Mon Aug 31 12:00:00 2026", value
+  end
+
+  def test_process_cleanup_tolerates_disappearing_children
+    missing = ->(*) { raise Errno::ESRCH }
+    detached = []
+    detach = ->(pid) { detached << pid }
+    with_replaced_singleton_method(Process, :kill, missing) do
+      with_replaced_singleton_method(Process, :detach, detach) do
+        Hive::Lock.send(:terminate_and_detach, 987654)
+      end
+    end
+    assert_equal [ 987654 ], detached
+
+    detach_missing = ->(*) { raise Errno::ECHILD }
+    with_replaced_singleton_method(Process, :detach, detach_missing) do
+      assert_nil Hive::Lock.send(:terminate_and_detach, 987654)
+    end
+  end
+
+  def test_missing_noncreating_lease_and_liveness_probe_errors_fail_closed
+    missing = File.join(@root, ".hive-state", "stages", "4-execute", "missing")
+    assert_raises(Errno::ENOENT) do
+      repository.acquire(missing, {}, create: false)
+    end
+
+    folder = task_folder(99)
+    subject = repository(process_alive: ->(*) { raise IOError, "probe unavailable" })
+    first = subject.acquire(folder, {}, create: false)
+    error = assert_raises(Hive::ConcurrentRunError) do
+      subject.acquire(folder, {}, create: false)
+    end
+    assert_equal first.fetch("lock_id"), error.holder.fetch("lock_id")
+  ensure
+    subject&.release(folder, lock_id: first&.fetch("lock_id", nil))
+  end
+
+  def test_acquire_reports_contention_after_compare_and_swap_retries_are_exhausted
+    folder = task_folder(100)
+    subject = repository
+    subject.define_singleton_method(:read_row) { |_task_id| nil }
+    subject.define_singleton_method(:claim) { |_identity, _observed, _data, _payload| nil }
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      subject.acquire(folder, {}, create: false)
+    end
+
+    assert_nil error.holder
+  end
+
+  def test_unique_insert_race_retries_without_claiming_the_existing_row
+    folder = task_folder(101)
+    subject = repository
+    identity = subject.send(:subject_for, folder, observe: true)
+    timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+    @database.transaction do |db|
+      db[:task_leases].insert(
+        task_id: identity.fetch(:task_id), lease_version: 1,
+        holder_kind: nil, holder_id: nil, holder_pid: nil,
+        holder_process_identity: nil, payload_json: "{}",
+        generation: identity.fetch(:generation),
+        source_fingerprint: identity.fetch(:source_fingerprint),
+        acquired_at: nil, expires_at: nil, released_at: timestamp
+      )
+    end
+    data = {
+      "started_at" => timestamp, "pid" => Process.pid,
+      "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+      "lock_id" => "racing-owner", "task_id" => identity.fetch(:task_id)
+    }
+
+    assert_nil subject.send(:claim, identity, nil, data, subject.send(:dump_payload, data))
+    holder_id = @database.read do |db|
+      db[:task_leases].where(task_id: identity.fetch(:task_id)).get(:holder_id)
+    end
+    assert_nil holder_id
   end
 
   private

@@ -122,6 +122,18 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
+  def test_exec_delegates_to_the_process_guard
+    launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
+    call = nil
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::ProcessGuard, :exec,
+      ->(*arguments, **options) { call = [ arguments, options ]; :executed }
+    ) do
+      assert_equal :executed, launcher.send(:exec, "hive", "version", close_others: true)
+    end
+    assert_equal [ [ "hive", "version" ], { close_others: true } ], call
+  end
+
   private
 
   def launcher_store

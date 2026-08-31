@@ -123,6 +123,24 @@ class ProviderRoutingRouterTest < Minitest::Test
     assert_equal "health_state_unavailable", unavailable.reason
   end
 
+  def test_hard_pin_excludes_routes_outside_the_selected_account
+    pinned_policy = Hive::ProviderRouting::Policy.explicit(
+      stage: "execute", routes: policy.routes,
+      requirements: Hive::ProviderRouting::Requirements.empty,
+      pin: Hive::ProviderRouting::Pin.new(provider: "account-b"),
+      account_policy: policy.account_policy
+    )
+    request = Hive::ProviderRouting::Request.new(
+      policy: pinned_policy, task_generation: "generation-1",
+      health: health_evaluations,
+      capacity: capacity("account-a" => 0, "account-b" => 0)
+    )
+
+    decision = Hive::ProviderRouting::Router.new.call(request: request, decided_at: NOW)
+    assert_equal "account-b/model-b", decision.route.id
+    assert_equal [ "hard_pin_mismatch" ], decision.exclusions.map(&:reason)
+  end
+
   private
 
   def route(capacity:)

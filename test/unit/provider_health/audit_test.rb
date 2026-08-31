@@ -81,6 +81,13 @@ class ProviderHealthAuditTest < Minitest::Test
         "message" => "unsafe"
       )
     end
+
+    reference = {
+      "path" => "artifacts/provider.json", "size" => 1, "sha256" => "a" * 64
+    }
+    validated = Hive::ProviderHealth::Audit.validate_reference(reference)
+    assert_equal reference, validated
+    assert validated.frozen?
   end
 
   private

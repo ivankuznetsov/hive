@@ -169,6 +169,29 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
+  def test_transition_persistence_and_attempt_identity_errors_are_typed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+      changed = lost.with("loss" => lost["loss"].merge("at" => (NOW + 99).iso8601(6)))
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(changed, status: "ready")
+      end
+
+      store.database.define_singleton_method(:transaction) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.ensure_for(lost, now: NOW)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(lost, status: "ready")
+      end
+    end
+  end
+
   private
 
   def with_task

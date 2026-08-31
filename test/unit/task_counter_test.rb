@@ -49,4 +49,27 @@ class TaskCounterTest < Minitest::Test
     assert_equal 1, Hive::TaskCounter.next_or_nil
     refute File.exist?(File.join(Hive::Paths.state_home, "task-counter.yml"))
   end
+
+  def test_peek_infers_the_floor_from_numeric_task_subject_ids
+    now = Time.now.utc.iso8601(6)
+    @database.transaction do |db|
+      installation_id = db[:installations].get(:installation_id)
+      db[:projects].insert(
+        project_id: "counter-project", installation_id: installation_id,
+        registration_id: "counter", name: "counter", observed_path: "/tmp/counter",
+        state_root_path: "/tmp/counter/.hive-state", active: 1,
+        registered_at: now, last_observed_at: now
+      )
+      %w[41 not-numeric].each_with_index do |task_id, index|
+        db[:task_subjects].insert(
+          task_id: task_id, project_id: "counter-project", workflow_id: "coding",
+          task_slug: "task-#{index}", observed_path: "/tmp/counter/task-#{index}",
+          source_fingerprint: "f" * 64, generation: 1,
+          created_at: now, last_observed_at: now
+        )
+      end
+    end
+
+    assert_equal 42, Hive::TaskCounter.peek
+  end
 end

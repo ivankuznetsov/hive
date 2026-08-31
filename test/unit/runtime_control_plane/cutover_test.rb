@@ -640,6 +640,387 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     end
   end
 
+  def test_task_authority_rejects_unsafe_and_unavailable_entries
+    with_home do |_state, _data, projects|
+      root = projects.first.fetch("hive_state_path")
+      task = task_path(projects, "idea.md")
+      hardlink = File.join(File.dirname(task), "hardlink.md")
+      File.link(task, hardlink)
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+      end
+      assert_equal :task_authority_unsafe, error.code
+      File.unlink(hardlink)
+
+      original = File.method(:lstat)
+      failing = lambda do |path|
+        raise Errno::EIO, path if path == task
+
+        original.call(path)
+      end
+      error = with_replaced_singleton_method(File, :lstat, failing) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          Hive::RuntimeControlPlane::Cutover.task_authority(projects)
+        end
+      end
+      assert_equal :task_authority_unavailable, error.code
+    end
+  end
+
+  def test_bootstrap_rejects_legacy_material_and_invalid_project_identities
+    with_home do |state, data, projects|
+      File.binwrite(File.join(state, "task-counter.yml"), "legacy\n")
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).bootstrap(confirm: true)
+      end
+      assert_equal :legacy_state_present, error.code
+    end
+
+    with_home do |state, data, projects|
+      projects.first["registration_id"] = "legacy:#{REGISTRATION_ID}"
+      assert_equal "active", build_cutover(state, data, projects).run(confirm: true).phase
+    end
+
+    with_home do |state, data, projects|
+      projects.first["project_id"] = "invalid"
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :invalid_project_identity, error.code
+    end
+
+    with_home do |state, data, projects|
+      projects.first.delete("registration_id")
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :invalid_project_identity, error.code
+    end
+  end
+
+  def test_invalid_task_metadata_and_pre_ready_source_changes_fail_closed
+    with_home do |state, data, projects|
+      File.binwrite(task_path(projects, "meta.yml"), "---\n[unterminated\n")
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::ProjectError) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :project_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      task = task_path(projects, "idea.md")
+      cutover = build_cutover(state, data, projects, fault: lambda { |point|
+        File.binwrite(task, "changed before ready\n") if point == :services_stopped
+      })
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.run(confirm: true)
+      end
+      assert_equal :source_changed, error.code
+    end
+  end
+
+  def test_candidate_import_and_database_custody_errors_are_typed
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+      cutover.define_singleton_method(:insert_tasks) do |*|
+        raise Sequel::DatabaseError, "insert failed"
+      end
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.run(confirm: true)
+      end
+      assert_equal :candidate_import_failed, error.code
+    end
+
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+      cutover.instance_variable_set(:@cutover_id, "custody-test")
+      Hive::RuntimeControlPlane::Database.new(path: cutover.send(:build_path)).migrate!.disconnect
+      parent = File.dirname(Hive::Paths.runtime_control_plane_path(state))
+      original = File.method(:lstat)
+      unsafe = lambda do |path|
+        status = original.call(path)
+        path == parent ? Struct.new(:directory?, :symlink?, :uid).new(true, false, Process.euid + 1) : status
+      end
+      error = with_replaced_singleton_method(File, :lstat, unsafe) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          cutover.send(
+            :install_database!, "activation_epoch" => 1,
+            "activated_at" => Time.utc(2026, 8, 29, 12).iso8601(6)
+          )
+        end
+      end
+      assert_equal :database_custody_invalid, error.code
+    end
+  end
+
+  def test_legacy_attempt_and_lock_corruption_are_typed
+    with_home do |state, data, projects|
+      records = File.join(state, "attempts", "v4", "records")
+      FileUtils.mkdir_p(records)
+      File.binwrite(File.join(records, "broken.json"), "{")
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      lock_path = File.join(File.dirname(task_path(projects, "idea.md")), ".lock")
+      File.binwrite(lock_path, "---\n[broken\n")
+      assert_equal "active", build_cutover(state, data, projects).run(confirm: true).phase
+    end
+
+    with_home do |state, data, projects|
+      lock_path = File.join(File.dirname(task_path(projects, "idea.md")), ".lock")
+      File.binwrite(lock_path, "---\npid: 1\n")
+      original = File.method(:open)
+      failing = lambda do |path, *arguments, &block|
+        raise Errno::EACCES, path if path == lock_path
+
+        original.call(path, *arguments, &block)
+      end
+      error = with_replaced_singleton_method(File, :open, failing) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+  end
+
+  def test_legacy_guard_open_and_flock_errors_close_the_handle
+    with_home do |state, data, projects|
+      guard_path = File.join(state, ".task-counter.lock")
+      File.binwrite(guard_path, "")
+      original = File.method(:lstat)
+      invalid = lambda do |path|
+        status = original.call(path)
+        path == guard_path ? Struct.new(:file?, :directory?, :symlink?, :nlink, :uid, :dev, :ino)
+          .new(false, false, false, 1, Process.euid, status.dev, status.ino) : status
+      end
+      error = with_replaced_singleton_method(File, :lstat, invalid) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      guard_path = File.join(state, ".task-counter.lock")
+      File.binwrite(guard_path, "")
+      original = File.method(:open)
+      failing = lambda do |path, *arguments, &block|
+        raise Errno::EACCES, path if path == guard_path
+
+        original.call(path, *arguments, &block)
+      end
+      error = with_replaced_singleton_method(File, :open, failing) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+  end
+
+  def test_usage_snapshot_source_change_and_validation_fail_closed
+    with_home do |state, data, projects|
+      source = File.join(data, "usage.db")
+      write_usage(source)
+      cutover = build_cutover(state, data, projects, fault: lambda { |point|
+        FileUtils.rm_f(source) if point == :fleet_ready
+      })
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.run(confirm: true)
+      end
+      assert_equal :sealed_source_corrupt, error.code
+    end
+
+    with_home do |state, data, projects|
+      write_usage(File.join(data, "usage.db"))
+      cutover = build_cutover(state, data, projects)
+      counter = 0
+      cutover.define_singleton_method(:usage_content_digest) do |_database|
+        counter += 1
+        "digest-#{counter}"
+      end
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.run(confirm: true)
+      end
+      assert_equal :source_changed, error.code
+    end
+  end
+
+  def test_sealed_usage_evidence_checks_shape_digest_rows_and_open_errors
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+      path = cutover.send(:usage_snapshot_path)
+      FileUtils.mkdir_p(File.dirname(path))
+      assert cutover.send(:validate_usage_snapshot!, nil)
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.send(:validate_usage_snapshot!, {})
+      end
+      assert_equal :sealed_source_corrupt, error.code
+
+      write_usage(path)
+      evidence = {
+        "sha256" => Digest::SHA256.file(path).hexdigest,
+        "bytes" => File.size(path), "rows" => 1
+      }
+      assert cutover.send(:validate_usage_snapshot!, evidence)
+      wrong_rows = evidence.merge("rows" => 2)
+      assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.send(:validate_usage_snapshot!, wrong_rows)
+      end
+      wrong_digest = evidence.merge("sha256" => "0" * 64)
+      assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.send(:validate_usage_snapshot!, wrong_digest)
+      end
+
+      connect = ->(**) { raise Sequel::DatabaseError, "cannot open" }
+      error = with_replaced_singleton_method(Sequel, :connect, connect) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          cutover.send(:validate_usage_snapshot!, evidence)
+        end
+      end
+      assert_equal :sealed_source_corrupt, error.code
+    end
+  end
+
+  def test_existing_database_manifest_identity_and_stale_run_fail_closed
+    with_home do |state, data, projects|
+      path = Hive::Paths.runtime_control_plane_path(state)
+      Hive::RuntimeControlPlane::Database.new(path: path).migrate!.disconnect
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :database_already_present, error.code
+    end
+
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+      result = cutover.bootstrap(confirm: true)
+      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
+      database.transaction { |db| db[:installations].update(activation_epoch: 999) }
+      database.disconnect
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :candidate_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      current = File.join(state, ".runtime-cutover", "current")
+      FileUtils.mkdir_p(current)
+      File.binwrite(File.join(current, "stale"), "partial")
+      assert_equal "active", build_cutover(state, data, projects).run(confirm: true).phase
+    end
+  end
+
+  def test_incomplete_run_race_and_preflight_io_error_are_typed
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+      cutover.instance_variable_set(:@cutover_id, "race")
+      FileUtils.mkdir_p(cutover.send(:current_root))
+      cutover.define_singleton_method(:current_phase) { "ready" }
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        cutover.send(:reject_existing_run!)
+      end
+      assert_equal :cutover_incomplete, error.code
+    end
+
+    with_home do |state, data, projects|
+      failure = ->(*) { raise Errno::EIO, "probe failed" }
+      error = with_replaced_singleton_method(Hive::AtomicFile, :write, failure) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
+      end
+      assert_equal :storage_preflight_failed, error.code
+    end
+  end
+
+  def test_import_attempt_shape_and_target_io_errors_fail_closed
+    with_home do |state, data, projects|
+      cutover = build_cutover(state, data, projects)
+      failure = ->(**) { raise Sequel::DatabaseError, "usage unavailable" }
+      error = with_replaced_singleton_method(Sequel, :connect, failure) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          cutover.send(:import_usage, Object.new)
+        end
+      end
+      assert_equal :usage_snapshot_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      records = File.join(state, "attempts", "v4", "records")
+      FileUtils.mkdir_p(records)
+      record = File.join(records, "attempt.json")
+      File.binwrite(record, JSON.generate("attempt_id" => "attempt", "state" => "terminal"))
+      File.link(record, File.join(records, "attempt-copy.json"))
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        build_cutover(state, data, projects).run(confirm: true)
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+
+    with_home do |state, data, projects|
+      target = File.join(state, "task-counter.yml")
+      File.binwrite(target, "legacy")
+      original = File.method(:lstat)
+      failure = lambda do |path|
+        raise Errno::EIO, path if path == target
+
+        original.call(path)
+      end
+      error = with_replaced_singleton_method(File, :lstat, failure) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
+      end
+      assert_equal :legacy_runtime_invalid, error.code
+    end
+  end
+
+  def test_guard_flock_race_is_reported_as_a_live_writer
+    with_home do |state, data, projects|
+      guard_path = File.join(state, ".task-counter.lock")
+      File.binwrite(guard_path, "")
+      original = File.method(:open)
+      replacement = lambda do |path, *arguments, &block|
+        handle = original.call(path, *arguments)
+        handle.define_singleton_method(:flock) do |*|
+          raise Errno::EWOULDBLOCK, path
+        end if path == guard_path
+        block ? block.call(handle) : handle
+      ensure
+        handle&.close if block && !handle.closed?
+      end
+      error = with_replaced_singleton_method(File, :open, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+          build_cutover(state, data, projects).run(confirm: true)
+        end
+      end
+      assert_equal :live_runtime_owner, error.code
+    end
+  end
+
+  def test_status_rejects_database_identity_drift
+    with_home do |state, data, projects|
+      result = build_cutover(state, data, projects).bootstrap(confirm: true)
+      database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
+      database.transaction { |db| db[:installations].update(activation_epoch: 999) }
+
+      error = assert_raises(Hive::RuntimeControlPlane::Cutover::Error) do
+        Hive::RuntimeControlPlane::Cutover.inspect_status(state_home: state, database: database)
+      end
+      assert_equal :activation_identity_mismatch, error.code
+    ensure
+      database&.disconnect
+    end
+  end
+
   private
 
   def with_home(create_project: true)

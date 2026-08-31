@@ -244,6 +244,72 @@ class AttemptsLogArchiveTest < Minitest::Test
     end
   end
 
+  def test_writer_archive_page_and_cursor_failures_are_typed
+    with_repository do |store|
+      archive = store.log_archive
+      with_replaced_singleton_method(
+        Hive::Attempts::StreamLog, :new, ->(*) { raise IOError, "bad writer" }
+      ) do
+        assert_raises(IOError) { archive.open_writer("attempt") }
+      end
+
+      running = running_attempt(store)
+      assert_raises(Hive::Attempts::RepositoryError) { archive.archive(running.attempt_id) }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        archive.cold_attempt_ids_page(cursor: { "after" => nil }, limit: "bad")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        archive.cold_attempt_ids_page(cursor: { "after" => "", "extra" => true }, limit: 1)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        archive.cold_attempt_ids_page(cursor: Object.new, limit: 1)
+      end
+    end
+
+    with_repository do |store|
+      store.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        store.log_archive.cold_attempt_ids_page(cursor: { "after" => nil }, limit: 1)
+      end
+    end
+  end
+
+  def test_unknown_sealed_state_missing_byte_and_unsafe_lock_are_bounded
+    with_repository do |store|
+      running = running_attempt(store)
+      terminal = terminalize(
+        store, running, log_reference: write_log(store, running.attempt_id, "sealed\n")
+      )
+      assert_equal :archived, store.log_archive.archive(terminal.attempt_id)
+      store.database.transaction do |db|
+        db.run("PRAGMA ignore_check_constraints = ON")
+        db[:payload_references].where(attempt_id: terminal.attempt_id).update(state: "unknown")
+      end
+      assert_equal :unavailable, store.log_archive.resolve(terminal.attempt_id).availability
+
+      reference = {
+        "algorithm" => "sha256", "sha256" => "a" * 64, "size" => 1,
+        "path" => "sealed/sha256/aa/#{'a' * 64}"
+      }
+      assert_nil store.log_archive.send(:remove_unreferenced, reference)
+
+      fake_status = Struct.new(:dev, :ino) do
+        def file? = false
+        def symlink? = false
+      end.new(1, 1)
+      original_lstat = File.method(:lstat)
+      with_replaced_singleton_method(
+        File, :lstat, ->(path) { path.end_with?(".lock") ? fake_status : original_lstat.call(path) }
+      ) do
+        assert_raises(Hive::Attempts::RepositoryError) do
+          store.log_archive.resolve("unsafe-lock")
+        end
+      end
+    end
+  end
+
   private
 
   def with_repository

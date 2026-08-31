@@ -182,6 +182,177 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_task_source_observation_rejects_each_identity_and_generation_mismatch
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }
+      generation_class = Struct.new(
+        :task_id, :project, :task_slug, :progress_token, :task_input_epoch
+      )
+      task_class = Struct.new(:folder, :workflow)
+
+      invalid_path = task_class.new(File.join(state_root, "other", "task-1"), nil)
+      valid_generation = generation_class.new("task-1", "demo", "task-1", "source", 1)
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        attempts.observe_task_source(task: invalid_path, generation: valid_generation, observed_at: NOW)
+      end
+
+      unknown_root = File.join(File.dirname(state_root), "unknown", ".hive-state")
+      unregistered = task_class.new(File.join(unknown_root, "stages", "4-execute", "task-1"), nil)
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        attempts.observe_task_source(task: unregistered, generation: valid_generation, observed_at: NOW)
+      end
+
+      folder = File.join(state_root, "stages", "4-execute", "task-1")
+      task = task_class.new(folder, nil)
+      alias_generation = generation_class.new("other-id", "demo", "task-1", "source", 1)
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        attempts.observe_task_source(task: task, generation: alias_generation, observed_at: NOW)
+      end
+
+      wrong_workflow = task_class.new(folder, "review")
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        attempts.observe_task_source(task: wrong_workflow, generation: valid_generation, observed_at: NOW)
+      end
+
+      invalid_generation = generation_class.new("task-1", "demo", "task-1", "source", "bad")
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        attempts.observe_task_source(task: task, generation: invalid_generation, observed_at: NOW)
+      end
+      attempts.database.transaction do |db|
+        assert_raises(Hive::Attempts::StaleTaskSource) do
+          attempts.admission_validate_subject_in(
+            db, task_id: "task-1", source_fingerprint: "source-1", generation: "bad"
+          )
+        end
+      end
+    end
+
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }
+      folder = File.join(state_root, "stages", "4-execute", "task-1")
+      task = Struct.new(:folder, :workflow).new(folder, nil)
+      generation = Struct.new(
+        :task_id, :project, :task_slug, :progress_token, :task_input_epoch
+      ).new("task-1", "demo", "task-1", "source", 1)
+      attempts.database.define_singleton_method(:transaction) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        attempts.observe_task_source(task: task, generation: generation, observed_at: NOW)
+      end
+      assert_match(/could not be observed/, error.message)
+    end
+  end
+
+  def test_admission_rejects_unregistered_module_invalid_record_and_invalid_limits
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      base = {
+        attempt_id: "module-attempt", request_id: "module-request",
+        predecessor_attempt_id: nil, task_id: nil, project: "demo",
+        task_slug: "module-demo-task-event-1", intended_stage: "module-hook",
+        task_generation: "module-generation", ownership_generation: "module-owner",
+        task_input_epoch: 1, progress_token: "event-1", provider: "module",
+        worker_argv: %w[hive __module-hook demo task],
+        claim_capability_digest: CLAIM_DIGEST, starting_revision: nil,
+        retry_charge: 0, inherited_outputs: [],
+        subject: {
+          "kind" => "module_hook", "project_id" => "missing", "module" => "demo",
+          "hook" => "task", "event_id" => "event-1", "occurrence_id" => "event-1",
+          "event_name" => "task.completed", "module_generation" => "a" * 40,
+          "configuration_digest" => "b" * 64, "grant_digest" => "c" * 64
+        },
+        launch_timeout_sec: 30, now: NOW
+      }
+      assert_raises(Hive::Attempts::RepositoryError) { attempts.create_launching(**base) }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        attempts.create_launching(**base.merge(attempt_id: ""))
+      end
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        attempts.create_launching(
+          attempt_id: "attempt-1", request_id: "request-1",
+          predecessor_attempt_id: nil, task_id: "task-1", project: "demo",
+          task_slug: "task-1", intended_stage: "4-execute",
+          task_generation: "generation-1", ownership_generation: "owner-1",
+          task_input_epoch: 1, progress_token: "source-1", provider: "codex",
+          worker_argv: %w[hive run task-1], claim_capability_digest: CLAIM_DIGEST,
+          starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+          limits: { max_global: "bad" }, launch_timeout_sec: 30, now: NOW
+        )
+      end
+    end
+  end
+
+  def test_admission_rejects_a_stale_routing_decision_before_mutation
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, health|
+      policy = explicit_policy(max_concurrent: 1)
+      stale_policy = explicit_policy(max_concurrent: 2)
+      route_decision = decision(stale_policy, health, "generation-1")
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-1", expected_stage: "4-execute", now: NOW
+      )
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(attempts, health, policy, route_decision, suffix: 1)
+      end
+      assert_equal 0, attempts.database.read { |db| db[:attempts].count }
+    end
+  end
+
+  def test_admission_rejects_changed_dispatch_source_binding
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, health|
+      policy = explicit_policy(max_concurrent: 1)
+      route_decision = decision(policy, health, "generation-1")
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-1", expected_stage: "4-execute", now: NOW
+      )
+      attempts.database.transaction do |db|
+        row = db[:dispatch_requests].where(request_id: "request-1").first
+        payload = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:payload_json))
+        payload["task_id"] = "different-task"
+        db[:dispatch_requests].where(request_id: "request-1")
+          .update(payload_json: Hive::RuntimeControlPlane::Codec.dump_json(payload))
+      end
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(attempts, health, policy, route_decision, suffix: 1)
+      end
+      assert_equal "queued", dispatch.fetch("request-1").state
+    end
+  end
+
+  def test_admission_requires_a_provider_capacity_observation
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, health|
+      policy = explicit_policy(max_concurrent: 1)
+      ordinary = decision(policy, health, "generation-1")
+      candidate = Hive::ProviderRouting::Candidate.new(
+        route: ordinary.route, exclusions: [], max_concurrency: nil
+      )
+      incomplete = Hive::ProviderRouting::Decision.selected(
+        request: ordinary.request, route: ordinary.route, considered: ordinary.considered,
+        candidates: [ candidate ], decided_at: NOW,
+        probe_requirements: ordinary.probe_requirements,
+        circuit_generations: ordinary.circuit_generations
+      )
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-1", expected_stage: "4-execute", now: NOW
+      )
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(attempts, health, policy, incomplete, suffix: 1)
+      end
+      assert_match(/provider capacity observation is unavailable/, error.message)
+      assert_equal 0, attempts.database.read { |db| db[:attempts].count }
+    end
+  end
+
   private
 
   def with_control_plane(task_ids:)

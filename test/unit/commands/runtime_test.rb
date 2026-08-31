@@ -132,6 +132,39 @@ class RuntimeCommandTest < Minitest::Test
     end
   end
 
+  def test_human_status_renders_each_runtime_field
+    with_tmp_dir do |root|
+      output = StringIO.new
+
+      assert_equal 0, Hive::Commands::Runtime.new(
+        "status", output: output, state_home: root, projects: []
+      ).call
+
+      assert_includes output.string, "phase: absent"
+      assert_includes output.string, "database:"
+    end
+  end
+
+  def test_json_resume_failure_supplies_the_forward_recovery_action
+    output = StringIO.new
+    failure = Hive::RuntimeControlPlane::Unavailable.new(
+      "resume unavailable", code: :runtime_unavailable
+    )
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Cutover, :resume, ->(**) { raise failure }
+    ) do
+      assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        Hive::Commands::Runtime.new(
+          "resume", json: true, output: output, state_home: "/tmp/state", projects: []
+        ).call
+      end
+    end
+
+    payload = JSON.parse(output.string)
+    assert_equal "run hive runtime status and follow its forward-only recovery action",
+                 payload.fetch("next_action")
+  end
+
   private
 
   def runtime_schema

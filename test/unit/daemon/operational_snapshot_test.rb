@@ -368,6 +368,27 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_repository_rejects_invalid_projection_shape_and_corrupt_sql_payload
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = database_for(path)
+      repository = Hive::RuntimeControlPlane::OperationalRepository.new(database: database)
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.publish({ "phase" => "complete" }, status_projection: {})
+      end
+
+      database.transaction do |db|
+        installation_id = db[:installations].get(:installation_id)
+        db[:daemon_runtime].insert(
+          installation_id: installation_id, daemon_kind: "operational",
+          generation: 1, state: "running", observation_json: "{",
+          observed_at: T0.iso8601(6)
+        )
+      end
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) { repository.snapshot }
+    end
+  end
+
   def test_status_cache_reader_rejects_malformed_snapshot_deadline
     with_tmp_dir do |dir|
       cache_reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(
@@ -379,6 +400,20 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       }
 
       assert_nil cache_reader.read(snapshot: snapshot, now: T0)
+    end
+  end
+
+  def test_status_cache_projection_degrades_when_clock_normalization_fails
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "runtime.sqlite3"))
+      bad_clock = Object.new
+      bad_clock.define_singleton_method(:utc) { raise TypeError, "invalid clock" }
+      payload = {
+        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => []
+      }
+
+      assert_nil assembler.send(:status_cache_record, payload, now: bad_clock)
     end
   end
 
@@ -442,6 +477,23 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         now: T0
       )
     end
+  end
+
+  def test_reader_distinguishes_runtime_database_failures
+    repository = Object.new
+    repository.define_singleton_method(:snapshot) do
+      raise Hive::RuntimeControlPlane::Unavailable.new(
+        "database unavailable", code: :unavailable
+      )
+    end
+    reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+      repository: repository, expected_daemon: IDENTITY
+    )
+
+    snapshot = reader.read(now: T0)
+    assert_equal "invalid", snapshot.fetch("status")
+    assert_equal "snapshot_database_invalid", snapshot.fetch("reason")
+    assert_nil reader.shutdown_acknowledgement(expected_daemon: IDENTITY, now: T0)
   end
 
   def test_runtime_ready_is_published_and_retained_on_later_records

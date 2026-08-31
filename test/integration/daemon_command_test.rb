@@ -4,6 +4,8 @@ require "open3"
 require "tmpdir"
 require "rbconfig"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/commands/daemon"
+require "hive/commands/daemon/queue_command"
 
 # Integration test for `hive daemon` subcommands. Uses real bin/hive
 # subprocesses against a temporary HIVE_HOME so PID file / log file
@@ -1637,6 +1639,28 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_equal "hive-runtime-maintenance", doc["schema"]
       assert_equal "runtime", doc["error_kind"]
       assert_equal "fleet_cutover_required", doc["runtime_code"]
+    end
+  end
+
+  def test_queue_wraps_typed_and_unexpected_repository_failures
+    [
+      Hive::RuntimeControlPlane::Unavailable.new("database unavailable", code: :unavailable),
+      IOError.new("database unreadable")
+    ].each do |failure|
+      repository = Object.new
+      repository.define_singleton_method(:pending) { |**| raise failure }
+      output, = capture_io do
+        error = assert_raises(Hive::InternalError) do
+          Hive::Commands::Daemon::QueueCommand.new(
+            queue_args: [ "list" ], json: true, hive_home: "/tmp/hive",
+            dispatch_repository: repository
+          ).call
+        end
+        assert_includes error.message, failure.class.name
+      end
+      payload = JSON.parse(output)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "internal", payload.fetch("error_kind")
     end
   end
 end

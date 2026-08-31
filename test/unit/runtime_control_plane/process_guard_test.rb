@@ -345,6 +345,25 @@ class RuntimeControlPlaneProcessGuardTest < Minitest::Test
     end
   end
 
+  def test_failed_process_creation_releases_the_fork_barrier
+    original_fork = Process.method(:fork)
+    original_daemon = Process.method(:daemon)
+    Process.define_singleton_method(:fork) { raise Errno::EAGAIN, "fork unavailable" }
+    assert_raises(Errno::EAGAIN) do
+      Hive::RuntimeControlPlane::ProcessGuard.fork { flunk "child must not run" }
+    end
+    Process.define_singleton_method(:daemon) { |*| raise Errno::EPERM, "daemon unavailable" }
+    assert_raises(Errno::EPERM) do
+      Hive::RuntimeControlPlane::ProcessGuard.daemonize(true, true)
+    end
+
+    state = Hive::RuntimeControlPlane::ProcessGuard.send(:state)
+    refute state[:mutex].synchronize { state[:forking] }
+  ensure
+    Process.define_singleton_method(:fork, original_fork) if original_fork
+    Process.define_singleton_method(:daemon, original_daemon) if original_daemon
+  end
+
   private
 
   def wait_for_fork_barrier

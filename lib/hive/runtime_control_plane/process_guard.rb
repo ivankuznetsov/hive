@@ -53,9 +53,6 @@ module Hive
           current[:fork_waiters] += 1
           begin
             current[:condition].wait(current[:mutex]) while current[:forking]
-            if current[:owners].key?(Thread.current)
-              raise ForkUnsafe, "current thread owns a runtime control-plane checkout"
-            end
             raise ForkUnsafe, "runtime control-plane transaction is active" if
               current[:transactions].positive?
 

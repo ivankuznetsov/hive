@@ -1079,6 +1079,23 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_equal false, attempted
   end
 
+  def test_with_heal_lock_handles_a_task_removed_after_the_snapshot
+    row = make_row("/tmp/missing-task/task.md", pid_alive: nil)
+    implementation = Hive::Daemon::StaleAgentHealer.instance_method(:with_heal_lock)
+    missing = ->(*_args, **_kwargs) { raise Errno::ENOENT, row.folder.to_s }
+
+    result = with_replaced_singleton_method(Hive::Lock, :with_task_lock, missing) do
+      implementation.bind_call(@healer, row, reason: "test", create: false) { flunk }
+    end
+    assert_equal false, result
+
+    assert_raises(Errno::ENOENT) do
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, missing) do
+        implementation.bind_call(@healer, row, reason: "test", create: true) { flunk }
+      end
+    end
+  end
+
   def test_child_process_lookup_handles_each_pgrep_outcome
     status = Struct.new(:exitstatus, :successful) do
       def success?

@@ -76,6 +76,28 @@ class RuntimeControlPlaneCutoverManifestTest < Minitest::Test
     end
   end
 
+  def test_invalid_missing_and_symlinked_manifests_are_typed
+    assert_raises(Hive::RuntimeControlPlane::CutoverManifest::IntegrityError) do
+      Hive::RuntimeControlPlane::CutoverManifest.validate!({})
+    end
+    with_tmp_dir do |root|
+      path = File.join(root, "missing.json")
+      store = Hive::RuntimeControlPlane::CutoverManifest.new(path: path)
+      assert_equal :manifest_missing,
+                   assert_raises(Hive::RuntimeControlPlane::CutoverManifest::IntegrityError) {
+                     store.load
+                   }.code
+
+      outside = File.join(root, "outside.json")
+      File.binwrite(outside, "{}")
+      File.symlink(outside, path)
+      assert_equal :manifest_unsafe,
+                   assert_raises(Hive::RuntimeControlPlane::CutoverManifest::IntegrityError) {
+                     store.load
+                   }.code
+    end
+  end
+
   private
 
   def minimal_document

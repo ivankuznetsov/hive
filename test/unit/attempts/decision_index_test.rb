@@ -107,6 +107,140 @@ class AttemptsCoordinationTest < Minitest::Test
     end
   end
 
+  def test_failure_cohort_probe_failure_and_success_close_the_original_fence
+    with_repository do |repository|
+      3.times do |index|
+        attempt = create(repository, attempt_id: "failure-#{index}", task_slug: "task-#{index}")
+        lost = repository.mark_lost(attempt, reason: "agent_failed", now: NOW + index)
+        repository.record_failure_cohort(
+          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW + index
+        )
+      end
+      probe_time = NOW + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 5
+      probe = create(
+        repository, attempt_id: "probe", task_slug: "probe",
+        failure_cohort_probe: {
+          identity: failure_identity, date: NOW.to_date, now: probe_time,
+          explicit_release: false
+        }
+      )
+      lost_probe = repository.mark_lost(probe, reason: "agent_failed", now: probe_time + 1)
+      different = failure_identity.merge("code" => "different_failure")
+
+      assert repository.record_failure_cohort(
+        attempt_id: lost_probe.attempt_id, identity: different, occurred_at: probe_time + 1
+      )
+      assert_equal "probe", repository.failure_cohort_admission(
+        identity: failure_identity, date: NOW.to_date,
+        now: probe_time + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 2
+      ).fetch("status")
+
+      successor_probe = create(
+        repository, attempt_id: "success-probe", task_slug: "success-probe",
+        failure_cohort_probe: {
+          identity: failure_identity, date: NOW.to_date,
+          now: probe_time + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 2,
+          explicit_release: false
+        }
+      )
+      assert repository.record_failure_cohort_success(
+        attempt_id: successor_probe.attempt_id, date: NOW.to_date
+      )
+      refute repository.record_failure_cohort_success(
+        attempt_id: successor_probe.attempt_id, date: NOW.to_date
+      )
+    end
+  end
+
+  def test_expired_probe_is_cleared_by_read_and_claim_paths
+    with_repository do |repository|
+      old_probe = create(repository, attempt_id: "old-probe", task_slug: "old-probe")
+      digest = repository.send(:failure_cohort_digest, failure_identity)
+      expired = (NOW - 1).iso8601(6)
+      repository.database.transaction do |db|
+        db[:attempt_failure_cohorts].insert(
+          utc_date: NOW.to_date.iso8601, identity_digest: digest,
+          identity_json: Hive::RuntimeControlPlane::Codec.dump_json(failure_identity),
+          failure_count: 3, retry_at: (NOW - 2).iso8601(6),
+          probe_attempt_id: old_probe.attempt_id, probe_expires_at: expired,
+          updated_at: (NOW - 3).iso8601(6)
+        )
+      end
+
+      row = repository.database.read do |db|
+        db[:attempt_failure_cohorts].where(identity_digest: digest).first
+      end
+      assert_nil repository.send(:expire_probe, row, NOW).fetch(:probe_attempt_id)
+      repository.database.transaction do |db|
+        db[:attempt_failure_cohorts].where(identity_digest: digest).update(
+          probe_attempt_id: old_probe.attempt_id, probe_expires_at: expired
+        )
+        refreshed = db[:attempt_failure_cohorts].where(identity_digest: digest).first
+        assert_nil repository.send(:expire_probe, refreshed, NOW, db: db).fetch(:probe_attempt_id)
+      end
+    end
+  end
+
+  def test_coordination_rejects_invalid_accounting_routing_and_identity_inputs
+    with_repository do |repository|
+      launching = create(repository, attempt_id: "live", task_slug: "live")
+      assert_raises(Hive::Attempts::RepositoryError) { repository.refund_unstarted(launching) }
+      assert_raises(Hive::Attempts::RepositoryError) { repository.refund_tempfail(launching) }
+      assert_raises(Hive::Attempts::RepositoryError) { repository.refund_tempfail(Object.new) }
+
+      terminal = terminalize(repository, launching, exit_status: 0)
+      assert_raises(Hive::Attempts::RepositoryError) { repository.refund_tempfail(terminal) }
+      repository.database.transaction do |db|
+        db[:attempt_accounting].where(attempt_id: terminal.attempt_id).delete
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.send(:mark_refunded, terminal) }
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_routing_decision(
+          decision: Object.new, task_generation: "generation-1",
+          subject: subject, project: "demo"
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_routing_decision(
+          decision: selected_decision("wrong-generation"), task_generation: "other",
+          subject: subject, project: "demo"
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_routing_decision(
+          decision: selected_decision("bad-subject"), task_generation: "generation-1",
+          subject: Object.new, project: "demo"
+        )
+      end
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.send(:live_admission, { "workflow" => "other" })
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.send(:live_admission, Object.new) }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.send(:failure_cohort_identity, failure_identity.except("code"))
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.send(:failure_cohort_identity, failure_identity.merge("runtime_digest" => "bad"))
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.send(:failure_cohort_identity, Object.new)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_failure_cohort_success(attempt_id: "attempt", date: "not-a-date")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_failure_cohort(
+          attempt_id: "attempt", identity: failure_identity, occurred_at: "not-a-time"
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_failure_cohort_success(attempt_id: "\n", date: NOW.to_date)
+      end
+    end
+  end
+
   private
 
   def with_repository
@@ -183,5 +317,19 @@ class AttemptsCoordinationTest < Minitest::Test
       "workflow" => "patrol_fix", "stage" => "2-fix",
       "code" => "agent_exit_nonzero"
     }
+  end
+
+  def terminalize(repository, launching, exit_status:)
+    claimed = repository.claim(
+      launching, owner: { "pid" => Process.pid }, claim_capability: "c" * 64,
+      first_heartbeat_timeout_sec: 30, now: NOW + 1
+    )
+    running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+    repository.terminalize(
+      running, outcome: exit_status.zero? ? "succeeded" : "failed", exit_status: exit_status,
+      final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
+      log_reference: { "path" => "open/log", "size" => 0, "sha256" => "0" * 64 },
+      now: NOW + 3
+    )
   end
 end

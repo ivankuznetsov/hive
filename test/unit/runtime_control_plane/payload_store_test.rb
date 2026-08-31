@@ -85,6 +85,147 @@ class RuntimeControlPlanePayloadStoreTest < Minitest::Test
     end
   end
 
+  def test_open_write_and_seal_io_failures_are_typed
+    with_tmp_dir do |root|
+      subject = store(root)
+      failure = ->(*) { raise IOError, "write failed" }
+      error = with_replaced_singleton_method(Hive::AtomicFile, :write, failure) do
+        assert_raises(Hive::RuntimeControlPlane::PayloadStore::PathError) do
+          subject.write_open(attempt_id: "attempt", name: "out", bytes: "data")
+        end
+      end
+      assert_equal :payload_write_failed, error.code
+
+      source = File.join(root, "source")
+      File.binwrite(source, "data")
+      original = File.method(:open)
+      unsafe = lambda do |path, *arguments, &block|
+        raise Errno::ELOOP, path if path == source
+
+        original.call(path, *arguments, &block)
+      end
+      error = with_replaced_singleton_method(File, :open, unsafe) do
+        assert_raises(Hive::RuntimeControlPlane::PayloadStore::PathError) { subject.seal(source) }
+      end
+      assert_equal :unsafe_payload_path, error.code
+
+      error = assert_raises(Hive::RuntimeControlPlane::PayloadStore::IntegrityError) do
+        subject.seal(source, expected_size: Object.new)
+      end
+      assert_equal :payload_seal_failed, error.code
+    end
+  end
+
+  def test_link_race_verifies_the_existing_content_address
+    with_tmp_dir do |root|
+      subject = store(root)
+      source = subject.write_open(attempt_id: "attempt", name: "out", bytes: "data")
+      reference = subject.seal(source)
+      destination = subject.path_for(reference)
+      original = subject.method(:optional_lstat)
+      subject.define_singleton_method(:optional_lstat) do |path|
+        path == destination ? nil : original.call(path)
+      end
+
+      assert_equal reference, subject.seal(source)
+    end
+  end
+
+  def test_reference_shape_path_and_missing_resolution_fail_closed
+    with_tmp_dir do |root|
+      subject = store(root)
+      source = subject.write_open(attempt_id: "attempt", name: "out", bytes: "data")
+      reference = subject.seal(source)
+      invalid = [ Object.new, reference.merge("algorithm" => "md5"), reference.merge("size" => Object.new) ]
+      invalid.each do |value|
+        error = assert_raises(Hive::RuntimeControlPlane::PayloadStore::IntegrityError) do
+          subject.read_sealed(value)
+        end
+        assert_equal :payload_reference_invalid, error.code
+      end
+      error = assert_raises(Hive::RuntimeControlPlane::PayloadStore::PathError) do
+        subject.path_for(reference.merge("path" => "sealed/wrong"))
+      end
+      assert_equal :payload_path_mismatch, error.code
+
+      subject.define_singleton_method(:path_for) { |_| raise Errno::ENOENT }
+      error = assert_raises(Hive::RuntimeControlPlane::PayloadStore::IntegrityError) do
+        subject.read_sealed(reference)
+      end
+      assert_equal :payload_missing, error.code
+    end
+  end
+
+  def test_read_detects_inode_and_snapshot_changes
+    with_tmp_dir do |root|
+      subject = store(root)
+      source = subject.write_open(attempt_id: "attempt", name: "out", bytes: "data")
+      reference = subject.seal(source)
+      path = subject.path_for(reference)
+      original = File.method(:lstat)
+      calls = 0
+      changed = lambda do |candidate|
+        status = original.call(candidate)
+        if candidate == path
+          calls += 1
+          if calls == 2
+            return Struct.new(:file?, :symlink?, :nlink, :uid, :size, :dev, :ino, :mtime, :ctime)
+              .new(true, false, 1, status.uid, status.size, status.dev, status.ino,
+                   status.mtime, status.ctime + 1)
+          end
+        end
+        status
+      end
+      error = with_replaced_singleton_method(File, :lstat, changed) do
+        assert_raises(Hive::RuntimeControlPlane::PayloadStore::IntegrityError) do
+          subject.read_sealed(reference)
+        end
+      end
+      assert_equal :payload_changed, error.code
+
+      mismatch = lambda do |candidate|
+        status = original.call(candidate)
+        if candidate == path
+          Struct.new(:file?, :symlink?, :nlink, :uid, :size, :dev, :ino, :mtime, :ctime)
+            .new(true, false, 1, status.uid, status.size, status.dev, status.ino + 1,
+                 status.mtime, status.ctime)
+        else
+          status
+        end
+      end
+      error = with_replaced_singleton_method(File, :lstat, mismatch) do
+        assert_raises(Hive::RuntimeControlPlane::PayloadStore::PathError) do
+          subject.read_sealed(reference)
+        end
+      end
+      assert_equal :source_changed, error.code
+    end
+  end
+
+  def test_custody_reference_and_lock_shape_are_typed
+    with_tmp_dir do |root|
+      subject = store(root)
+      assert_raises(Hive::RuntimeControlPlane::PayloadStore::IntegrityError) do
+        subject.with_reference_custody([ "bad" ]) { flunk "must not enter custody" }
+      end
+
+      digest = "a" * 64
+      lock_path = File.join(root, "payloads", ".custody", "aa.lock")
+      original = File.method(:lstat)
+      unsafe = lambda do |path|
+        status = original.call(path)
+        path == lock_path ? Struct.new(:file?, :symlink?, :nlink, :uid, :dev, :ino)
+          .new(false, false, 1, Process.euid, status.dev, status.ino) : status
+      end
+      error = with_replaced_singleton_method(File, :lstat, unsafe) do
+        assert_raises(Hive::RuntimeControlPlane::PayloadStore::PathError) do
+          subject.with_reference_custody([ digest ]) { flunk "must not enter custody" }
+        end
+      end
+      assert_equal :unsafe_payload_custody, error.code
+    end
+  end
+
   private
 
   def store(root, **options)

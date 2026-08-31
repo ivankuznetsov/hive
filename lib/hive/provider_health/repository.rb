@@ -329,9 +329,10 @@ module Hive
         require_scope!(scope)
         actor = Audit.validate_actor(actor)
         reason = Audit.validate_reason(reason)
+        expected_generation = Integer(expected_generation)
         database.transaction do |db|
           circuit = circuit_for(db, scope)
-          unless circuit.generation == Integer(expected_generation)
+          unless circuit.generation == expected_generation
             raise StaleGeneration, "provider-health generation changed; inspect again"
           end
           now = current_time

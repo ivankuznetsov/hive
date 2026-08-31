@@ -258,6 +258,85 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_projection_reader_caches_live_and_terminal_bindings
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      reader = repository.projection_reader
+      first = reader.fetch_projection_binding(launching.attempt_id)
+      assert_same first, reader.fetch_projection_binding(launching.attempt_id)
+      assert_nil reader.fetch_terminal_diagnostic_binding(launching.attempt_id)
+
+      terminal = terminal_attempt(repository, launching)
+      terminal_reader = repository.projection_reader
+      diagnostic = terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
+      assert_equal terminal.receipt, diagnostic.fetch("receipt")
+      assert_same diagnostic, terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
+    end
+  end
+
+  def test_payload_paths_fail_closed_for_io_non_files_missing_paths_and_escapes
+    with_repository do |repository|
+      with_replaced_singleton_method(FileUtils, :mkdir_p, ->(*) { raise Errno::EACCES, "denied" }) do
+        assert_raises(Hive::Attempts::RepositoryError) do
+          repository.output_directory("attempt", "segment", create: true)
+        end
+      end
+
+      directory = repository.output_directory("attempt", create: true)
+      FileUtils.mkdir_p(File.join(directory, "not-a-file"))
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.output_path("attempt", "not-a-file")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.send(:validate_directory!, File.join(repository.root, "missing"), "missing")
+      end
+
+      with_tmp_dir do |outside|
+        assert_raises(Hive::Attempts::RepositoryError) do
+          repository.send(:ensure_contained!, outside, repository.root)
+        end
+      end
+    end
+  end
+
+  def test_transition_and_record_corruption_errors_remain_typed
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.checkpoint(
+          running, checkpoint: checkpoint, now: NOW + 3,
+          output_references: [ { "path" => "../escape" } ]
+        )
+      end
+
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: running.attempt_id).update(task_generation: "different")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(running.attempt_id) }
+
+      invalid = "{"
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: running.attempt_id).update(
+          record_json: invalid, record_digest: Digest::SHA256.hexdigest(invalid)
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(running.attempt_id) }
+    end
+
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
+      end
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.fetch("attempt") }
+      assert_match(/lookup failed/, error.message)
+    end
+  end
+
   private
 
   def with_repository
@@ -288,4 +367,17 @@ class AttemptsRepositoryTest < Minitest::Test
   def checkpoint = { "revision" => "b" * 40, "progress_token" => "progress-1" }
   def output_reference = { "path" => "open/attempt-1/result.json", "size" => 2, "sha256" => "0" * 64 }
   def log_reference = { "path" => "open/attempt-1.frames", "size" => 4, "sha256" => "1" * 64 }
+
+  def terminal_attempt(repository, launching)
+    claimed = repository.claim(
+      launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+      first_heartbeat_timeout_sec: 30, now: NOW + 1
+    )
+    running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+    repository.terminalize(
+      running, outcome: "succeeded", exit_status: 0,
+      final_checkpoint: checkpoint, output_references: [],
+      log_reference: log_reference, now: NOW + 3
+    )
+  end
 end

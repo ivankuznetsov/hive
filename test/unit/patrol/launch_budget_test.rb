@@ -25,6 +25,7 @@ class PatrolLaunchBudgetTest < Minitest::Test
     2.times { |index| assert acquire(ordinary, "patrol-review", id: "o-#{index}") }
 
     refute acquire(ordinary, "patrol-review", id: "o-3")
+    assert_match(/2\/2 launches today/, ordinary.exhaustion_message)
     assert_equal 2, architecture.remaining_launches
     assert_equal 0, budget(engine: :ordinary, limit: 2).remaining_launches
   end
@@ -168,6 +169,67 @@ class PatrolLaunchBudgetTest < Minitest::Test
     assert_equal 60, Hive::Patrol::LaunchBudget.resource_exhaustion_backoff_sec(
       [ "token_limit" ], now: now, fallback: 60
     )
+  end
+
+  def test_off_mode_has_no_discovery_headroom
+    subject = Hive::Patrol::LaunchBudget.new(
+      @root, cfg: { "patrol" => { "mode" => "off" } },
+      project_id: "project-1", project_name: "demo", engine: :ordinary,
+      usage_db: @usage, database: @database, clock: -> { NOW }
+    )
+    ensure_project("project-1")
+
+    assert_equal 0, subject.remaining_launches
+  end
+
+  def test_allowance_and_hold_fail_closed_when_sql_is_unavailable
+    broken = Object.new
+    broken.define_singleton_method(:read) { raise IOError, "read failed" }
+    broken.define_singleton_method(:transaction) { raise IOError, "write failed" }
+    subject = Hive::Patrol::LaunchBudget.new(
+      @root, cfg: { "patrol" => {} }, project_id: "project-1",
+      project_name: "demo", engine: :ordinary, usage_db: @usage,
+      database: broken, clock: -> { NOW }
+    )
+
+    assert_equal "unavailable", subject.allowance_snapshot.fetch(:status)
+    refute subject.park!(retry_at: NOW + 60, reason: "provider")
+    refute subject.clear_park!
+    assert_equal "allowance_store_unavailable", subject.resource_exhaustion.fetch(:reason)
+  end
+
+  def test_active_hold_blocks_reservation_and_reports_a_bounded_message
+    subject = budget(engine: :ordinary)
+    assert subject.park!(retry_at: NOW + 60, reason: "provider")
+
+    refute acquire(subject, "patrol-review", id: "held")
+    assert_match(/provider_lane_backoff/, subject.exhaustion_message)
+    assert_equal "provider_lane_backoff", subject.resource_exhaustion.fetch(:reason)
+  end
+
+  def test_unknown_exhaustion_message_and_failed_telemetry_are_nonfatal
+    subject = budget(engine: :ordinary)
+    assert_match(/blocked \(unknown\)/, subject.exhaustion_message)
+
+    usage = Object.new
+    usage.define_singleton_method(:record!) { |**| raise IOError, "telemetry down" }
+    unmetered = budget(engine: :ordinary, usage_db: usage)
+    _out, err = capture_io do
+      assert acquire(unmetered, "patrol-fix")
+    end
+    assert_match(/patrol usage reservation failed: telemetry down/, err)
+  end
+
+  def test_unregistered_project_identity_fails_closed
+    subject = Hive::Patrol::LaunchBudget.new(
+      File.join(@root, "missing"), cfg: { "patrol" => {} },
+      project_name: "missing", engine: :ordinary,
+      usage_db: @usage, database: @database, clock: -> { NOW }
+    )
+
+    snapshot = subject.allowance_snapshot
+    assert_equal "unavailable", snapshot.fetch(:status)
+    assert_equal "allowance_store_unavailable", subject.resource_exhaustion.fetch(:reason)
   end
 
   private

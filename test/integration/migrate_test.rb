@@ -113,6 +113,37 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_class_restart_entrypoint_delegates_to_the_instance_boundary
+    called = false
+    instance = Object.new
+    instance.define_singleton_method(:restart_daemon_if_running!) { called = true }
+
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, ->(*) { instance }) do
+      Hive::Commands::Migrate.restart_daemon_if_running!
+    end
+
+    assert called
+  end
+
+  def test_healthy_database_without_active_phase_requires_fleet_cutover
+    with_tmp_global_config(runtime: false) do |home|
+      Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(home)
+      ).migrate!.disconnect
+      command = Hive::Commands::Migrate.new(home)
+
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::Cutover, :inspect_status,
+        ->(**) { { "phase" => "ready" } }
+      ) do
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          command.send(:ensure_active_control_plane!)
+        end
+        assert_equal :control_plane_inactive, error.code
+      end
+    end
+  end
+
   def test_explicit_migrate_rebuilds_the_patrol_fix_pending_index_once
     with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|

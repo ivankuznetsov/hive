@@ -461,6 +461,24 @@ class SetupOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_setup_reuses_an_active_runtime_control_plane
+    with_tmp_dir do |root|
+      activate_test_control_plane(root)
+      path = Hive::Paths.runtime_control_plane_path(root)
+      setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+
+      with_replaced_singleton_method(Hive::Paths, :runtime_control_plane_path, ->(*) { path }) do
+        with_replaced_singleton_method(Hive::Paths, :state_home, -> { root }) do
+          setup.send(:bootstrap_runtime_control_plane)
+        end
+      end
+
+      phase = setup.instance_variable_get(:@phases).last
+      assert phase.fetch("ok")
+      assert_equal "active", phase.fetch("phase")
+    end
+  end
+
   # ── --service: web service installed ─────────────────────────────────
 
   def test_default_installs_web_service_phase

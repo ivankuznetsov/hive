@@ -297,6 +297,158 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_runtime_wires_provider_health_and_dispatch_delivery_to_the_shared_database
+    with_repository do |store|
+      subject = Hive::Attempts::FinalizationMaintenance.runtime(store: store)
+      observer = subject.instance_variable_get(:@provider_health_observer_factory).call
+      delivery = subject.instance_variable_get(:@delivery_pending)
+
+      assert_instance_of Hive::ProviderHealth::AttemptObserver, observer
+      refute delivery.call(Struct.new(:attempt_id).new("missing"))
+    end
+  end
+
+  def test_provider_health_and_delivery_fail_closed_on_collaborator_errors
+    record = Struct.new(:attempt_id) do
+      def explicit_routing? = true
+    end.new("attempt")
+    observer = Object.new
+    observer.define_singleton_method(:observe) { |_| raise Hive::ProviderHealth::Error, "bad" }
+    store = Object.new
+    subject = Hive::Attempts::FinalizationMaintenance.new(
+      store: store, provider_health_observer_factory: -> { observer },
+      delivery_pending: ->(_) { raise Hive::Error, "bad" }
+    )
+
+    refute subject.acknowledge_provider_health(record)
+    assert subject.send(:delivery_pending?, record)
+  end
+
+  def test_promote_rejects_mismatched_proof_and_post_archive_hot_mutation
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
+      forged = terminal.with("diagnostics" => terminal["diagnostics"].merge("forged" => true))
+      assert_raises(Hive::Attempts::RepositoryError) { subject.promote(forged) }
+
+      archive = Object.new
+      archive.define_singleton_method(:archive) do |_attempt_id|
+        changed = terminal.with("diagnostics" => terminal["diagnostics"].merge("changed" => true))
+        payload = Hive::RuntimeControlPlane::Codec.dump_json(changed.to_h)
+        store.database.transaction do |db|
+          db[:attempts].where(attempt_id: terminal.attempt_id).update(
+            record_json: payload, record_digest: Digest::SHA256.hexdigest(payload)
+          )
+        end
+        :archived
+      end
+      store.define_singleton_method(:log_archive) { archive }
+      assert_raises(Hive::Attempts::RepositoryError) { subject.promote(terminal) }
+    end
+  end
+
+  def test_storage_and_retention_helpers_fail_closed
+    with_repository do |store|
+      subject = maintenance(store)
+      store.database.define_singleton_method(:diagnostics) do
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "degraded", snapshot.fetch("status")
+      assert_equal "database_unhealthy", snapshot.fetch("degraded_reason")
+    end
+
+    broken_store = Object.new
+    broken_store.define_singleton_method(:fetch_hot) do |_|
+      raise Hive::Attempts::RepositoryError, "bad"
+    end
+    subject = Hive::Attempts::FinalizationMaintenance.new(store: broken_store)
+    record = Struct.new(:attempt_id) do
+      def [](key) = key == "ended_at" ? "not-a-time" : nil
+    end.new("attempt")
+    assert subject.send(:recovery_pinned?, record)
+    refute subject.send(:retention_expired?, record, now: NOW)
+
+    pending_store = Object.new
+    pending_store.define_singleton_method(:fetch_hot) { |_| Object.new }
+    pending_store.define_singleton_method(:publication_complete?) { |_| false }
+    pending = Hive::Attempts::FinalizationMaintenance.new(store: pending_store)
+    assert pending.send(:recovery_pinned?, record)
+  end
+
+  def test_successful_patrol_attempt_closes_its_failure_cohort
+    calls = []
+    store = Object.new
+    store.define_singleton_method(:record_failure_cohort_success) do |**attributes|
+      calls << attributes
+      true
+    end
+    reconciler = Hive::Attempts::FailureCohortReconciler.new(store: store)
+    record = Struct.new(:state, :outcome, :attempt_id) do
+      def [](key) = key == "intended_stage" ? "2-fix" : nil
+    end.new("terminal", "succeeded", "attempt-1")
+    admission = { "workflow" => "patrol_fix", "stage" => "2-fix", "utc_date" => "2026-08-10" }
+
+    assert reconciler.reconcile(record: record, admission: admission)
+    assert_equal [ { attempt_id: "attempt-1", date: "2026-08-10" } ], calls
+  end
+
+  def test_archived_task_lookup_and_loss_successor_checks_are_bounded
+    record = Struct.new(:attempt_id, :task_generation, :subject) do
+      def [](key)
+        { "project" => "demo", "task_slug" => "task", "task_id" => "42" }[key]
+      end
+    end.new("lost", "generation", { "kind" => "task_stage" })
+    successor = Struct.new(:attempt_id, :task_generation, :subject) do
+      def [](key) = key == "predecessor_attempt_id" ? "lost" : nil
+    end.new("successor", "generation", record.subject)
+    store = Object.new
+    store.define_singleton_method(:successor_attempt_id) { |**| "successor" }
+    store.define_singleton_method(:fetch) { |_| successor }
+    subject = Hive::Attempts::FinalizationMaintenance.new(store: store)
+    transition = Object.new
+    transition.define_singleton_method(:fetch) do |_|
+      { "status" => "successor_dispatched", "cleanup" => "absent",
+        "successor_attempt_id" => "successor" }
+    end
+
+    with_replaced_singleton_method(Hive::Attempts::LostOutcomeTransition, :new, ->(**) { transition }) do
+      assert_same successor, subject.send(:resolved_loss_successor, record)
+    end
+    with_replaced_singleton_method(
+      Hive::Attempts::LostOutcomeTransition, :new,
+      ->(**) { raise Hive::Attempts::RepositoryError, "bad" }
+    ) do
+      refute subject.send(:resolved_loss?, record)
+    end
+
+    with_replaced_singleton_method(Hive::Config, :find_project, lambda { |_|
+      raise Hive::Error, "bad"
+    }) do
+      refute subject.send(:task_archived?, record)
+    end
+
+    with_tmp_dir do |state_root|
+      FileUtils.mkdir_p(File.join(state_root, "stages", "4-execute", "task"))
+      with_replaced_singleton_method(
+        Hive::Config, :find_project, ->(_) { { "hive_state_path" => state_root } }
+      ) do
+        with_replaced_singleton_method(Hive::Task, :new, ->(_) { raise Hive::Error, "bad" }) do
+          refute subject.send(:task_archived?, record)
+        end
+      end
+    end
+
+    refunded = []
+    store.define_singleton_method(:refund_unstarted) { |value| refunded << value }
+    lost = Struct.new(:state) do
+      def [](key) = key == "started_at" ? nil : nil
+    end.new("lost")
+    subject.send(:publish_indexes, lost)
+    assert_equal [ lost ], refunded
+  end
+
   private
 
   def with_repository

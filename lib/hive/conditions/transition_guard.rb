@@ -58,7 +58,7 @@ module Hive
         if force
           audit_force!(
             task: task, projection: projection, history_reader: history_reader,
-            result: result, source: source
+            result: result, source: source, repository: repository
           ) unless result.eligible?
           return true
         end
@@ -95,7 +95,7 @@ module Hive
         true
       end
 
-      def audit_force!(task:, projection:, history_reader:, result:, source:)
+      def audit_force!(task:, projection:, history_reader:, result:, source:, repository:)
         data = projection.to_h
         attempt_id = data.dig("identity", "attempt_id")
         if attempt_id.to_s.empty?
@@ -120,7 +120,7 @@ module Hive
         return if duplicate
 
         Hive::TaskJournal::Writer.new(
-          task_folder: task.folder, attempt_store: Hive::Attempts::Repository.open_default
+          task_folder: task.folder, attempt_store: repository
         ).append(
           event_type: "operator_action",
           task: {
@@ -151,17 +151,10 @@ module Hive
       end
 
       def admitted_attempt?(task, repository:)
-        project = Hive::Config.registered_projects.find do |candidate|
-          File.expand_path(candidate["path"]) == File.expand_path(task.project_root)
-        end
-        return false unless project
-
         task_id = task.respond_to?(:id) ? task.id&.to_s : nil
-        repository.active_attempts.any? do |attempt|
-          attempt["project"].to_s == project.fetch("name").to_s &&
-            attempt["task_slug"].to_s == task.slug.to_s &&
-            (task_id.to_s.empty? || attempt["task_id"].to_s == task_id)
-        end
+        return false if task_id.to_s.empty?
+
+        !repository.live_attempt_for(task_id: task_id).nil?
       end
 
       def journal_publication_pending?(projection, repository:)

@@ -1594,20 +1594,22 @@ module Hive
           task_folder: task.folder, task: task
         ).read_routine(marker: marker)
         project ||= project_name_for(task)
-        if bounded.state == "invalid"
-          return task_history_invalid_status(task, bounded)
+        case bounded.state
+        when "invalid"
+          task_history_invalid_status(task, bounded)
+        when "busy"
+          task_history_unavailable_status(task, bounded)
+        when "current"
+          projection = bounded.projection
+          closure = Hive::TaskClosure.projection(
+            task, project: project, attempt_store: attempt_store,
+            task_projection: projection
+          )
+          projection = projection.with_closure(closure) if closure
+          [ marker, projection, false ]
+        else
+          task_history_unavailable_status(task, bounded)
         end
-        unless bounded.current?
-          return task_history_unavailable_status(task, bounded)
-        end
-
-        projection = bounded.projection
-        closure = Hive::TaskClosure.projection(
-          task, project: project, attempt_store: attempt_store,
-          task_projection: projection
-        )
-        projection = projection.with_closure(closure) if closure
-        [ marker, projection, false ]
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e
         project ||= project_name_for(task)

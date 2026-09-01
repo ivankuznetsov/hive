@@ -45,7 +45,7 @@ events validate their task, stage, numeric input epoch, opaque ownership
 generation, and durable attempt before append. Legacy `Hive::Events.emit`
 remains separate fail-soft telemetry in `<task>/events.jsonl`.
 
-`Hive::TaskProjection::Reader` is a direct bounded reader, not a store. It
+`Hive::TaskProjection::Reader` is a direct journal reader, not a store. It
 takes a shared lock, validates complete JSON lines, the hash chain, one task /
 workflow stream, and stable attempt bindings, then folds them in memory through
 `Hive::TaskProjection`. Routine scheduling reads cover the complete journal;
@@ -54,11 +54,21 @@ Historical replay is self-contained: it performs no SQLite, git, GitHub, or
 subprocess lookup. The fold derives retry lineage from journal provenance, so
 causal order wins over wall-clock regression.
 
-A missing journal is an empty history stream. Invalid, partial,
-over-limit workspace history or lock-unsafe history yields a synthetic
-`condition_task_history_invalid` row for that task; unrelated work continues.
-There is no snapshot, checkpoint, repair command, repair queue, or background
-projection watcher. Restore or correct the authoritative JSONL itself.
+Unchanged routine read results use a 512-entry process-local LRU keyed by canonical
+journal path, device/inode, size, nanosecond mtime/ctime, marker semantics, task
+identity, and projector identity. A cache lookup first acquires the same
+nonblocking shared journal lock as a miss, so writer contention returns `busy`
+instead of stale current state. Appended, replaced, or otherwise changed files
+miss. The cache is disposable memory only; it is neither a checkpoint nor a
+second history authority.
+
+A missing journal is an empty history stream. Invalid or over-limit workspace
+history yields a synthetic `condition_task_history_invalid` row for that task;
+unrelated work continues. Routine lock contention returns transient `busy`
+state and maps to scheduler-owned `condition_task_history_unavailable`. There
+is no persisted snapshot, checkpoint, repair command, repair queue, or
+background projection watcher. Restore or correct the authoritative JSONL
+itself.
 
 Execute-observation deduplication compares a fresh observation with the latest
 record in the same stream (`event_type` + attempt + condition). A state that

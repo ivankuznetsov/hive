@@ -49,12 +49,15 @@ module HiveStatusProjectionScaleFixture
 
     private
 
-    def journal_bytes(limit: nil)
-      bytes = super
-      @scale_counters[:journal_reads] += 1
-      @scale_counters[:journal_bytes] += bytes.bytesize
-      @scale_counters[:journal_bytes_by_task][File.basename(task_folder)] += bytes.bytesize
-      bytes
+    def routine_snapshot(marker)
+      snapshot = super
+      bytes = snapshot.last
+      if bytes
+        @scale_counters[:journal_reads] += 1
+        @scale_counters[:journal_bytes] += bytes.bytesize
+        @scale_counters[:journal_bytes_by_task][File.basename(task_folder)] += bytes.bytesize
+      end
+      snapshot
     end
   end
 

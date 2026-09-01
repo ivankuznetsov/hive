@@ -53,7 +53,6 @@ module Hive
           identity_event(context, selection, recovery),
           idempotency_key: "#{task_key}/#{context.task_generation}/execute-identity"
         )
-        @history_reader.read
         selection
       end
 

@@ -48,15 +48,16 @@ module Hive
         selection_from_projection(projected_execute(context.task_generation, projection: projection))
       end
 
-      def projected_execute(generation, projection: @history_reader.read)
+      def projected_execute(generation, projection:)
         identity = projection["implementation_identity"]
         execute = identity && identity["execute"]
         execute if execute && execute["generation"] == generation
       end
 
-      def ensure_execute!
+      def ensure_execute!(projection: nil)
         context = context!
-        existing = projected_execute(context.task_generation)
+        projection ||= @history_reader.read
+        existing = projected_execute(context.task_generation, projection: projection)
         return selection_from_projection(existing) if existing
 
         require "hive/implementation_identity/reconstructor"
@@ -73,11 +74,12 @@ module Hive
         end
 
         context = context!
-        if (existing = projected_stage(stage, context.task_generation))
+        projection = @history_reader.read
+        if (existing = projected_stage(stage, context.task_generation, projection: projection))
           return selection_from_projection(existing)
         end
 
-        execute = ensure_execute!
+        execute = ensure_execute!(projection: projection)
         selection = @resolver.resolve_stage(
           stage, execute_identity: execute, attempt_id: context.attempt_id
         )
@@ -94,7 +96,6 @@ module Hive
 
           return selection_from_projection(existing)
         end
-        @history_reader.read
         selection
       end
 
@@ -108,9 +109,10 @@ module Hive
         end
 
         context = context!
+        projection = @history_reader.read
         selected = stage == "execute" ?
-          projected_execute(context.task_generation) :
-          projected_stage(stage, context.task_generation)
+          projected_execute(context.task_generation, projection: projection) :
+          projected_stage(stage, context.task_generation, projection: projection)
         unless selected
           raise ResolutionError,
                 "#{stage} implementation identity must be persisted before observation"
@@ -145,7 +147,6 @@ module Hive
             provenance.fetch("namespace"), identity
           ].join("/")
         )
-        @history_reader.read
         observation
       end
 
@@ -155,7 +156,7 @@ module Hive
         @resolver.materialize_persisted(identity)
       end
 
-      def projected_stage(stage, generation, projection: @history_reader.read)
+      def projected_stage(stage, generation, projection:)
         identity = projection["implementation_identity"]
         selected = identity&.dig("stages", stage.to_s)
         selected if selected && selected["generation"] == generation

@@ -156,6 +156,8 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
       assert_equal "stale", subject.send(:status_payload, stale_read).fetch("state")
       partial_read = read.with(state: "partial")
       assert_equal "partial", subject.send(:status_payload, partial_read).fetch("state")
+      busy_read = read.with(state: "busy")
+      assert_equal "unavailable", subject.send(:status_payload, busy_read).fetch("state")
       assert_nil subject.send(:valid_time, "bad")
 
       task.values["action"] = "ready_execute"

@@ -111,6 +111,20 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
                     "predecessor_fetches_exhausted"
   end
 
+  def test_oversized_seed_attempt_exhausts_the_byte_budget_before_projection
+    store = ExactStore.new("attempt-a" => attempt("attempt-a").merge("padding" => "x" * 500))
+    panel = Hive::TaskWorkspace::Attempts.new(
+      projection: projection(current: "attempt-a"), attempt_store: store,
+      activities: [], limits: Hive::TaskWorkspace::Limits.new(attempt_bytes: 100)
+    ).call
+
+    assert_equal "unavailable", panel.fetch("state")
+    assert panel.fetch("truncated")
+    assert_empty panel.fetch("records")
+    assert_equal 0, panel.fetch("observed_bytes")
+    assert_equal "attempt_bytes_exhausted", panel.dig("diagnostics", 0, "reason")
+  end
+
   private
 
   def projection(current:)

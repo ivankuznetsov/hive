@@ -57,10 +57,12 @@ current attempt layout and contains no legacy migration preflight or watcher.
 
 ## Task-local history isolation
 
-The hidden task graph consumed by a tick reads each task's bounded
-`task-journal.jsonl` directly under a shared lock and folds it in memory. It
-does not read a snapshot/checkpoint or query SQLite to reinterpret historical
-events.
+The hidden task graph consumed by a tick reads each task's complete
+`task-journal.jsonl` directly under a shared lock and folds it in memory.
+Unchanged journals reuse the Reader's bounded process-local fold cache, but a
+hit still takes the nonblocking shared journal lock and a changed file misses.
+It does not read a persisted snapshot/checkpoint or query SQLite to reinterpret
+historical events.
 
 If one task's journal is invalid, status supplies a synthetic
 `condition_task_history_invalid` row. The dispatcher excludes that row from

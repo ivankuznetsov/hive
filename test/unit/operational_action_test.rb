@@ -408,6 +408,47 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_action_recheck_treats_a_busy_task_journal_as_scheduler_owned_unavailable
+    with_tmp_dir do |root|
+      workflow = Struct.new(:id) { def controller? = true }.new(:"patrol-fix")
+      task = Struct.new(
+        :workflow, :folder, :project_root, :state_file, :meta_yml_path,
+        :slug, :stage_index, :stage_name, keyword_init: true
+      ).new(
+        workflow: workflow, folder: root, project_root: root,
+        state_file: File.join(root, "patrol-fix-manifest.json"),
+        meta_yml_path: File.join(root, "meta.yml"), slug: "repair",
+        stage_index: 1, stage_name: "inbox"
+      )
+      bounded = Hive::TaskProjection::Reader::BoundedRead.new(
+        projection: nil, state: "busy",
+        diagnostics: [ {
+          "reason" => "journal_lock_busy",
+          "message" => "task journal writer holds the task lock",
+          "details" => {}
+        } ],
+        truncated: false, journal_cursor: 0
+      )
+      store = Object.new
+      store.define_singleton_method(:read_routine) { |**| bounded }
+
+      with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { store }) do
+        with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+          row = Hive::OperationalAction.observed_row(task, project: "demo")
+
+          assert_equal "error", row.fetch("marker")
+          assert_equal "condition_task_history_unavailable", row.dig("attrs", "reason")
+          assert_equal "scheduler", row.dig("attrs", "owner")
+          assert_equal "journal_lock_busy", row.dig("attrs", "journal_reason")
+          refute row.fetch("task_history_invalid")
+          descriptor = Hive::OperationalAction.descriptor(project: "demo", row: row)
+          assert_equal Hive::OperationalAction::RETRY_ACTION_ID, descriptor.fetch("action_id")
+          assert_equal "demo:repair", descriptor.fetch("target")
+        end
+      end
+    end
+  end
+
   def test_unknown_action_is_rejected_before_task_resolution
     executor = Hive::OperationalAction::Executor.new
 

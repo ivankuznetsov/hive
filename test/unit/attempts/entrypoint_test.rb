@@ -278,10 +278,14 @@ class AttemptsEntrypointTest < Minitest::Test
     entrypoint = Hive::Attempts::Entrypoint.new(
       store: Object.new, dispatcher: dispatcher
     )
+    resolved_paths = []
 
     with_replaced_singleton_method(
-      Hive::Config, :registered_projects,
-      -> { [ { "name" => "registered", "path" => "/tmp/registered" } ] }
+      Hive::Config, :project_for_path,
+      lambda { |path|
+        resolved_paths << path
+        { "name" => "registered", "path" => path }
+      }
     ) do
       entrypoint.dispatch(
         task: task, intended_stage: "4-execute", argv: [ "hive", "develop", "task" ],
@@ -290,5 +294,6 @@ class AttemptsEntrypointTest < Minitest::Test
     end
 
     assert_equal "registered", captured.fetch(:project)
+    assert_equal [ "/tmp/registered" ], resolved_paths
   end
 end

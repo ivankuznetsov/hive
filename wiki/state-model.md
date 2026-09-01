@@ -372,12 +372,17 @@ shared lock, validate every record and hash-chain link, bind the stream to one
 task/workflow and each attempt to one stage/generation identity, then fold it
 directly in memory through `Hive::TaskProjection`. Routine scheduling reads the
 complete stream; only bounded task-workspace presentation enforces byte and
-event limits. Replay is self-contained and never asks SQLite to reinterpret old
+event limits. Unchanged routine read results are memoized in a bounded, process-local
+LRU by the journal's path and file identity plus marker and task identity. Every
+lookup still takes the nonblocking shared journal lock before it can reuse a
+fold, and an append or replacement changes the file identity and misses the
+cache. Replay is self-contained and never asks SQLite to reinterpret old
 history. Attempt lineage used by the fold comes from journal provenance. A
 malformed or incomplete journal fails that task closed as
 `task_history_invalid`; Hive does not create a checkpoint, snapshot, or repair
-sidecar. If the lock sidecar appears during a first append, a reader retries
-through the shared lock instead of consuming an unlocked partial write.
+sidecar. A busy lock reports transient `busy` state without serving a cached
+fold. If the lock sidecar appears during a first append, a reader retries through
+the shared lock instead of consuming an unlocked partial write.
 
 The low-level append/replay mechanics enter through `require
 "hive/work_ledger"`. `Hive::WorkLedger` owns JSONL locking, complete-write

@@ -137,6 +137,17 @@ class TaskProjectionTest < Minitest::Test
     end
   end
 
+  def test_replay_rejects_a_wrong_top_level_record_schema
+    record = event(event_id: "wrong-schema")
+    record["schema"] = "not-a-task-journal"
+
+    error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+      Hive::TaskProjection.replay_journal("#{JSON.generate(record)}\n")
+    end
+
+    assert_includes error.message, "unexpected record schema"
+  end
+
   def test_parse_journal_normalizes_lines_without_trailing_newlines
     event = condition_event("AgentHealthy", event_id: "parsed")
 

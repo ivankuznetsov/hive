@@ -196,9 +196,11 @@ module Hive
         records = view.records
         semantic_owner = find_semantic_owner(records, generation)
         if semantic_owner&.live?
-          return semantic_owner.task_generation == generation.task_generation ?
-            live_result(semantic_owner, interactive: interactive)
-            : deferred_result("in_flight", attempt: semantic_owner)
+          if semantic_owner.task_generation == generation.task_generation
+            return live_result(semantic_owner, interactive: interactive)
+          end
+
+          return deferred_result("in_flight", attempt: semantic_owner)
         end
 
         exact = records.select { |record| record.task_generation == generation.task_generation }
@@ -275,6 +277,24 @@ module Hive
           subject: durable_subject,
           policy: routing_policy
         ) || routing_policy
+        launching_attributes = {
+          view: view,
+          request_id: request_id,
+          predecessor_attempt_id: predecessor_attempt_id,
+          task: task,
+          generation: generation,
+          argv: argv,
+          retry_charge: retry_charge,
+          inherited_outputs: inherited_outputs,
+          subject: subject,
+          now: now,
+          admission: patrol_admission_metadata(
+            task: task, generation: generation, now: now
+          ),
+          cohort_identity: cohort_identity,
+          cohort_admission: cohort_admission,
+          cohort_release: cohort_release
+        }
 
         if frozen_policy.explicit?
           health, health_available = resolve_provider_health
@@ -315,26 +335,11 @@ module Hive
             claim_capability = @capability_generator.call
             attempt_id = @id_generator.call
             created = persist_launching_attempt(
-              view: view,
+              **launching_attributes,
               attempt_id: attempt_id,
-              request_id: request_id,
-              predecessor_attempt_id: predecessor_attempt_id,
-              task: task,
-              generation: generation,
-              argv: argv,
               provider: route_decision.adapter,
               routing: nil,
               claim_capability: claim_capability,
-              retry_charge: retry_charge,
-              inherited_outputs: inherited_outputs,
-              subject: subject,
-              now: now,
-              admission: patrol_admission_metadata(
-                task: task, generation: generation, now: now
-              ),
-              cohort_identity: cohort_identity,
-              cohort_admission: cohort_admission,
-              cohort_release: cohort_release,
               routing_policy: frozen_policy,
               route_decision: route_decision,
               health_repository: health
@@ -351,26 +356,11 @@ module Hive
           claim_capability = @capability_generator.call
           attempt_id = @id_generator.call
           created = persist_launching_attempt(
-            view: view,
+            **launching_attributes,
             attempt_id: attempt_id,
-            request_id: request_id,
-            predecessor_attempt_id: predecessor_attempt_id,
-            task: task,
-            generation: generation,
-            argv: argv,
             provider: provider.to_s,
             routing: { "mode" => "legacy" },
             claim_capability: claim_capability,
-            retry_charge: retry_charge,
-            inherited_outputs: inherited_outputs,
-            subject: subject,
-            now: now,
-            admission: patrol_admission_metadata(
-              task: task, generation: generation, now: now
-            ),
-            cohort_identity: cohort_identity,
-            cohort_admission: cohort_admission,
-            cohort_release: cohort_release,
             routing_policy: frozen_policy
           )
         end

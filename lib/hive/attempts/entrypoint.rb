@@ -107,9 +107,7 @@ module Hive
       end
 
       def project_name_for(task)
-        project = Hive::Config.registered_projects.find do |candidate|
-          File.expand_path(candidate["path"]) == File.expand_path(task.project_root)
-        end
+        project = Hive::Config.project_for_path(task.project_root)
         project ? project.fetch("name") : task.project_name
       end
     end

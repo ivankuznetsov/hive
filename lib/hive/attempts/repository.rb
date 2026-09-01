@@ -35,8 +35,7 @@ module Hive
 
         def fetch(attempt_id)
           key = attempt_id.to_s
-          @records[key] = @repository.fetch(key) unless @records.key?(key)
-          @records[key]
+          @records.fetch(key) { @records[key] = @repository.fetch(key) }
         end
 
         def fetch_terminal_diagnostic_binding(attempt_id)
@@ -313,6 +312,21 @@ module Hive
         rows.map { |row| record_from(row) }.freeze
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "active attempt query failed")
+      end
+
+      def live_attempt_for(task_id:)
+        id = safe_id(task_id, error: "unsafe task id")
+        row = database.read do |db|
+          pending = db[:terminal_pending_publications].select(:attempt_id)
+          db[:attempts]
+            .where(task_id: id)
+            .where(Sequel.|({ state: %w[launching running] }, { attempt_id: pending }))
+            .order(:attempt_id)
+            .first
+        end
+        row && record_from(row)
+      rescue Sequel::Error, RuntimeControlPlane::Error => error
+        translate_store_error(error, "live attempt query failed")
       end
 
       def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)

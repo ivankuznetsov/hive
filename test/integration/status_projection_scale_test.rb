@@ -7,7 +7,7 @@ class StatusProjectionScaleTest < Minitest::Test
 
   Fixture = HiveStatusProjectionScaleFixture
 
-  def test_routine_status_work_is_independent_of_permanent_proof_cardinality
+  def test_routine_status_reuses_journal_folds_regardless_of_proof_cardinality
     with_tmp_global_config do |home|
       fixture = Fixture.build(root: File.join(home, "projects"))
 
@@ -21,14 +21,14 @@ class StatusProjectionScaleTest < Minitest::Test
       assert_equal 0, empty.fetch(:attempt_store).proof_directory_enumerations
       assert_equal 0, full.fetch(:attempt_store).proof_directory_enumerations
       assert_equal Fixture::TASK_COUNT, empty.dig(:counters, :journal_reads)
-      assert_equal Fixture::TASK_COUNT, full.dig(:counters, :journal_reads)
+      assert_equal 0, full.dig(:counters, :journal_reads)
       assert_operator empty.dig(:counters, :journal_bytes), :>, 0
-      assert_operator full.dig(:counters, :journal_bytes), :>, 0
-      journals = full.dig(:counters, :journal_bytes_by_task)
+      assert_equal 0, full.dig(:counters, :journal_bytes)
+      journals = empty.dig(:counters, :journal_bytes_by_task)
       assert_equal Fixture::TASK_COUNT, journals.length
       assert journals.values.all?(&:positive?),
              "every task must read its own bounded journal"
-      assert_equal empty.fetch(:counters), full.fetch(:counters)
+      assert_empty full.dig(:counters, :journal_bytes_by_task)
       assert_equal Fixture::TASK_COUNT, full.dig(:counters, :stores)
       assert_equal empty.fetch(:attempt_store).point_fetches,
                    full.fetch(:attempt_store).point_fetches

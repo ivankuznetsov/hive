@@ -68,6 +68,7 @@ module Hive
         @require_attempt_store = require_attempt_store
         @attempt_cache = {}
         @stream_task = nil
+        @stream_task_id = nil
         @stream_attempts = {}
       end
 

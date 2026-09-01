@@ -170,7 +170,7 @@ module Hive
             begin
               dispatch("strict-pin-#{reason}", policy: strict_policy)
             rescue Hive::ProviderRouting::PolicyRepository::InvalidSnapshot
-              assert!(@store.scan.records.empty?, "AE4 invalid requirements created an attempt")
+              assert!(@store.active_attempts.empty?, "AE4 invalid requirements created an attempt")
               next
             end
             raise "AE4 impossible pinned requirements crossed durable policy validation"
@@ -386,7 +386,7 @@ module Hive
         generation = Hive::Attempts::Generation.resolve(
           task: task, project: "demo", intended_stage: "4-execute",
           progress_token: Hive::Attempts::Generation.artifact_token(task),
-          task_generation: generation, task_input_epoch: 0, attempt_store: @store
+          task_generation: generation, task_input_epoch: 0
         )
         dispatcher.dispatch(
           task: task, project: "demo", intended_stage: "4-execute",

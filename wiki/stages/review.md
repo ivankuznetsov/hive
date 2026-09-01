@@ -15,11 +15,9 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 - **Worktree pointer**: `worktree.yml` carried from the owning workflow or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml".
 - **PR pointer**: `pr.md` carried from publication or written by ad-hoc review. Missing PR metadata disables hosted-check settlement and GitHub comment mirroring; local review still runs.
 - **Reviews directory**: `reviews/`, carried over or created by the workflow/ad-hoc handoff.
-- **Projection authority**: an ad-hoc task starts directly in `6-review`, so
-  its creator records a generation-0 baseline before deriving the bounded
-  projection. Losing the derived files can therefore be repaired with the
-  exact-task `hive repair-projection` command without treating the task as a
-  journal-less pristine intake task.
+- **Task history**: an ad-hoc task starts directly in `6-review`, so its creator
+  records a generation-0 baseline in `task-journal.jsonl`. Status folds that
+  journal directly; there are no derived projection files.
 
 ## Pre-flight (`Review.run!`)
 

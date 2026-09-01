@@ -284,7 +284,7 @@ class OperationalActionTest < Minitest::Test
         File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.to_yaml)
         state_file = File.join(folder, "brainstorm.md")
         File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
-        Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+        Hive::TaskProjection::Reader.new(task_folder: folder).read(
           marker: Hive::Markers.current(state_file)
         )
         Hive::Config.register_project(name: "demo", path: project_root, repository_identity: nil)
@@ -336,14 +336,14 @@ class OperationalActionTest < Minitest::Test
       store = Object.new
       store.define_singleton_method(:read_routine) do |marker:, **|
         projection.marker = marker
-        Hive::TaskProjection::Store::BoundedRead.new(
+        Hive::TaskProjection::Reader::BoundedRead.new(
           projection: projection, state: "current", diagnostics: [],
           truncated: false, journal_cursor: 0
         )
       end
       action = Struct.new(:key).new("run")
 
-      with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
+      with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { store }) do
         with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
           with_replaced_singleton_method(Hive::TaskAction, :for, ->(*, **) { action }) do
             row = Hive::OperationalAction.observed_row(task, project: "demo")
@@ -355,7 +355,7 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
-  def test_action_recheck_surfaces_projection_repair_without_full_replay
+  def test_action_recheck_surfaces_task_history_invalid_without_full_replay
     with_tmp_dir do |root|
       workflow = Struct.new(:id) { def controller? = true }.new(:"patrol-fix")
       task = Struct.new(
@@ -367,21 +367,20 @@ class OperationalActionTest < Minitest::Test
         meta_yml_path: File.join(root, "meta.yml"), slug: "repair",
         stage_index: 1, stage_name: "inbox"
       )
-      bounded = Hive::TaskProjection::Store::BoundedRead.new(
-        projection: nil, state: "repair_required",
+      bounded = Hive::TaskProjection::Reader::BoundedRead.new(
+        projection: nil, state: "invalid",
         diagnostics: [ {
-          "reason" => "checkpoint_missing",
-          "message" => "bounded task projection is checkpoint missing",
+          "reason" => "journal_invalid",
+          "message" => "task journal is invalid",
           "details" => {}
         } ],
         truncated: false, journal_cursor: 0
       )
       store = Object.new
-      store.define_singleton_method(:read) { |**| raise "action recheck used full replay" }
       store.define_singleton_method(:read_routine) { |**| bounded }
       observed_marker = nil
 
-      with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
+      with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { store }) do
         with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
           action = Struct.new(:key).new("error")
           replacement = lambda do |_task, marker, **|
@@ -392,7 +391,7 @@ class OperationalActionTest < Minitest::Test
             row = Hive::OperationalAction.observed_row(task, project: "demo")
 
             assert_equal "error", row.fetch("marker")
-            assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+            assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON,
                          row.dig("attrs", "reason")
             assert_equal "operator", row.dig("attrs", "owner")
             assert_equal :error, observed_marker.name
@@ -528,7 +527,6 @@ class OperationalActionTest < Minitest::Test
       Hive::TaskMeta.write(brainstorm, id: 42, slug: slug, display_name: nil, workflow: "coding")
       state_file = File.join(brainstorm, "brainstorm.md")
       File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
-      seed_task_projection(brainstorm, state_file: state_file)
         action = Hive::OperationalAction.descriptor_for_task(
           Hive::Task.new(brainstorm), project: project.fetch("name")
         )
@@ -583,7 +581,6 @@ class OperationalActionTest < Minitest::Test
             intake, id: 101, slug: slug,
             display_name: "Generic operational action", workflow: descriptor.id.to_s
           )
-          seed_task_projection(intake)
           executor = Hive::OperationalAction::Executor.new
           ran = []
           original = Hive::Stages::Base.method(:spawn_agent)
@@ -598,7 +595,8 @@ class OperationalActionTest < Minitest::Test
             run_result = nil
             with_attempt_context(
               attempt_id: "operational-run-attempt",
-              task_generation: "operational-run-generation"
+              task_generation: 0,
+              ownership_generation: "operational-run-generation"
             ) do
               capture_io do
                 run_result = executor.execute(
@@ -611,7 +609,7 @@ class OperationalActionTest < Minitest::Test
             assert_equal [ "intake" ], ran
             assert_equal "ready_to_advance", run_result.fetch("task_state")
 
-            Hive::TaskProjection::Store.new(task_folder: intake).rebuild!(
+            Hive::TaskProjection::Reader.new(task_folder: intake).read(
               marker: Hive::Markers.current(Hive::Task.new(intake).state_file)
             )
             second = operational_action_for(project, slug)
@@ -653,7 +651,6 @@ class OperationalActionTest < Minitest::Test
             folder, id: 202, slug: slug,
             display_name: "Generic mtime split", workflow: descriptor.id.to_s
           )
-          seed_task_projection(folder)
           meta_path = File.join(folder, "meta.yml")
           File.utime(Time.now - 10, Time.now - 10, meta_path)
           File.utime(Time.now + 10, Time.now + 10, folder)

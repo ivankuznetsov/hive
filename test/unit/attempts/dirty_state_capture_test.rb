@@ -33,7 +33,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
         assert_equal before_revision, run!("git", "-C", worktree, "rev-parse", "HEAD")
         assert_equal before_status,
                      run!("git", "-C", worktree, "status", "--porcelain=v2", "--untracked-files=all")
-        assert capture.references.all? { |reference| Hive::Attempts::OutputReference.verify(reference, root: root) }
+        assert capture.references.all? { |reference| Hive::OutputReference.verify(reference, root: root) }
         manifest = JSON.parse(File.binread(File.join(capture.directory, "manifest.json")))
         binary = manifest.fetch("untracked").find do |entry|
           Base64.strict_decode64(entry.fetch("path_base64")) == "binary.bin"

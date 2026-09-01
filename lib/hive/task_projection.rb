@@ -1,5 +1,4 @@
 require "json"
-require "shellwords"
 require "hive/conditions/registry"
 require "hive/conditions/value"
 require "hive/conditions/policy"
@@ -14,79 +13,53 @@ module Hive
     SCHEMA = "hive-task-projection".freeze
     SCHEMA_VERSION = 1
     OPERATOR_ACTIONS_MAX = 20
-    REPAIR_REQUIRED_REASON = "condition_projection_repair_required".freeze
-    TERMINAL_REPAIR_REASONS = %w[
-      checkpoint_oversized attempt_ids_exhausted
-    ].freeze
+    INVALID_HISTORY_REASON = "condition_task_history_invalid".freeze
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
-    class RoutineLockUnavailable < Error; end
-    class RoutineLockInvalid < RoutineLockUnavailable; end
+    class JournalLockBusy < Error; end
 
-    # Projection repair is a producer-owned row classification. Marker attrs
-    # are agent-authored evidence and must never grant this control state.
-    def self.repair_required_row?(row)
-      value = if row.respond_to?(:projection_repair)
-        row.projection_repair
+    # An unreadable journal is classified by the producer. Agent-authored
+    # marker attributes cannot forge this control state.
+    def self.history_invalid_row?(row)
+      value = if row.respond_to?(:task_history_invalid)
+        row.task_history_invalid
       elsif row.is_a?(Hash)
-        row.key?(:projection_repair) ? row[:projection_repair] : row["projection_repair"]
+        row.key?(:task_history_invalid) ? row[:task_history_invalid] : row["task_history_invalid"]
       end
       value == true
     end
 
-    def self.terminal_repair_reason?(reason)
-      TERMINAL_REPAIR_REASONS.include?(reason.to_s)
-    end
-
-    def self.repair_command(project:, slug:, stage:)
-      Shellwords.shelljoin([
-        "hive", "repair-projection", slug.to_s,
-        "--project", project.to_s, "--stage", stage.to_s
-      ])
-    end
-
-    def self.repair_marker_attrs(bounded:, project:, slug:, stage:)
+    def self.invalid_journal_marker_attrs(bounded:)
       diagnostic = bounded.diagnostics.first || {
-        "reason" => "bounded_projection_unavailable",
-        "message" => "bounded task projection is unavailable",
+        "reason" => "journal_unavailable",
+        "message" => "task journal is unavailable",
         "details" => {}
       }
-      reason = diagnostic.fetch("reason", "bounded_projection_unavailable").to_s
-      terminal = terminal_repair_reason?(reason)
-      transient = reason == "journal_lock_busy"
-      message = if transient
-        "task projection is locked by an exact-task repair; wait for it to finish"
-      elsif terminal
-        "#{diagnostic.fetch('message', 'bounded task projection exceeded its cap')}; " \
-          "compact this task's retained projection history before repair"
-      else
-        "#{diagnostic.fetch('message', 'bounded task projection is unavailable')}; " \
-          "run the exact-task projection repair"
-      end
+      reason = diagnostic.fetch("reason", "journal_unavailable").to_s
       attrs = {
-        "reason" => REPAIR_REQUIRED_REASON,
+        "reason" => INVALID_HISTORY_REASON,
         "owner" => "operator",
-        "projection_reason" => reason[0, 128],
-        "projection_state" => bounded.state.to_s[0, 64],
-        "message" => message.to_s[0, 500]
+        "journal_reason" => reason[0, 128],
+        "message" => diagnostic.fetch("message", "task journal is unavailable").to_s[0, 500]
       }
-      unless terminal || transient
-        attrs["repair_command"] = repair_command(
-          project: project, slug: slug, stage: stage
-        )
-      end
-      details = diagnostic["details"]
-      if details.is_a?(Hash) && details["cap"]
-        attrs["projection_cap"] = details["cap"].to_s[0, 128]
-      end
       attrs
     end
 
+    def self.unavailable_journal_marker_attrs(bounded:)
+      diagnostic = bounded.diagnostics.first || {}
+      {
+        "reason" => "condition_task_history_unavailable",
+        "owner" => "scheduler",
+        "journal_reason" => diagnostic.fetch("reason", "journal_unavailable").to_s[0, 128],
+        "message" => diagnostic.fetch(
+          "message", "task journal is temporarily unavailable"
+        ).to_s[0, 500]
+      }
+    end
+
     INTERNAL_FACT_KEYS = %w[
-      journal_index attempt_accepted_at durable_attempt_state
-      durable_attempt_outcome durable_attempt_exit_status durable_attempt_lease_version
-      predecessor_attempt_id
+      journal_index attempt_accepted_at predecessor_attempt_id
     ].freeze
 
     attr_reader :data
@@ -97,21 +70,19 @@ module Hive
           marker: marker, registry: registry).project
     end
 
-    def self.read_journal(path, attempt_store: nil)
+    def self.read_journal(path)
       return [] unless File.exist?(path)
 
-      replay_journal(File.binread(path), attempt_store: attempt_store).records
+      replay_journal(File.binread(path)).records
     end
 
-    def self.parse_journal(lines, attempt_store: nil)
+    def self.parse_journal(lines)
       bytes = lines.map { |line| line.end_with?("\n") ? line : "#{line}\n" }.join
-      replay_journal(bytes, attempt_store: attempt_store).records
+      replay_journal(bytes).records
     end
 
-    def self.replay_journal(bytes, attempt_store: nil)
-      validator = Hive::TaskJournal::Validator.new(
-        attempt_store: attempt_store, projection_bindings: true
-      )
+    def self.replay_journal(bytes)
+      validator = Hive::TaskJournal::Validator.new
       Hive::WorkLedger.replay(
         bytes: bytes,
         record_id: ->(record) { record["event_id"] },
@@ -123,12 +94,6 @@ module Hive
                 "unexpected record schema #{record['schema'].inspect} at journal line #{line_number}"
         end
         validator.validate!(record)
-        if (attempt = validator.attempt_for(record["attempt_id"]))
-          record["__attempt"] = durable_attempt_metadata(attempt)
-          record["__attempt_lineage"] = validator.lineage_for(record["attempt_id"]).map do |entry|
-            durable_attempt_metadata(entry)
-          end
-        end
         record
       rescue Hive::TaskJournal::Error => e
         raise Hive::WorkLedger::InvalidRecord,
@@ -151,34 +116,9 @@ module Hive
       JSON.generate(canonical(value))
     end
 
-    def self.durable_attempt_metadata(attempt)
-      task_generation = attempt.respond_to?(:task_input_epoch) ? attempt.task_input_epoch : attempt["task_input_epoch"]
-      ownership_generation = if attempt.respond_to?(:ownership_generation)
-        attempt.ownership_generation
-      else
-        attempt["ownership_generation"]
-      end
-      lease_version = attempt.respond_to?(:lease_version) ? attempt.lease_version : attempt["lease_version"]
-      receipt = attempt.respond_to?(:receipt) ? attempt.receipt : attempt["receipt"]
-
-      {
-        "attempt_id" => attempt["attempt_id"],
-        "task" => { "id" => attempt["task_id"]&.to_s, "slug" => attempt["task_slug"] },
-        "stage" => attempt["intended_stage"],
-        "task_generation" => task_generation,
-        "ownership_generation" => ownership_generation,
-        "accepted_at" => attempt["accepted_at"],
-        "predecessor_attempt_id" => attempt["predecessor_attempt_id"],
-        "state" => attempt.respond_to?(:state) ? attempt.state : attempt["state"],
-        "outcome" => attempt.respond_to?(:outcome) ? attempt.outcome : attempt["outcome"],
-        "exit_status" => receipt.is_a?(Hash) ? receipt["exit_status"] : nil,
-        "lease_version" => lease_version
-      }
-    end
-
     def self.from_data(data)
       unless data.is_a?(Hash) && data["schema"] == SCHEMA && data["schema_version"] == SCHEMA_VERSION
-        raise InvalidJournal, "invalid task projection snapshot envelope"
+        raise InvalidJournal, "invalid task projection envelope"
       end
 
       canonical_copy = JSON.parse(canonical_json(data))
@@ -219,21 +159,24 @@ module Hive
         current.reject { |fact| fact["state"] == "pending" }
                .max_by { |fact| fact.fetch("journal_index", -1) }
                &.fetch("attempt_id", nil)
+      current_ownership = authoritative.reverse.find do |record|
+        record["attempt_id"] == current_attempt && record["task_generation"] == generation
+      end&.fetch("ownership_generation", nil)
       @data = self.class.canonical(
         "schema" => SCHEMA,
         "schema_version" => SCHEMA_VERSION,
         "journal" => {
           "cursor" => @cursor,
           "event_id" => last&.fetch("event_id", nil),
-          "hash" => @journal_hash,
-          "attempts" => journal_attempt_bindings
+          "hash" => @journal_hash
         },
         "task" => task,
         "identity" => {
           "task_generation" => generation,
           "commit_generation" => commit_generation,
           "head_sha" => head_sha,
-          "attempt_id" => current_attempt
+          "attempt_id" => current_attempt,
+          "ownership_generation" => current_ownership
         },
         "conditions" => {
           "current" => current.map { |fact| public_fact(fact) },
@@ -266,10 +209,8 @@ module Hive
       self["conditions"].fetch("current").find { |fact| fact["condition"] == name.to_s }
     end
 
-    # Compatibility markers are written after snapshot publication. Overlay
-    # the currently observed marker in memory so status can consume a valid
-    # snapshot without republishing it or classifying markers outside this
-    # projection boundary.
+    # Compatibility markers remain a current-state input. Overlay their value
+    # after folding history so status does not need another persisted cache.
     def with_marker(marker)
       copy = Hive::StringifyKeys.call(to_h)
       copy["compatibility"] = compatibility_for(
@@ -294,14 +235,6 @@ module Hive
       @authoritative_records ||= @records.select do |record|
         record["schema"] == Hive::TaskJournal::Envelope::SCHEMA
       end
-    end
-
-    def journal_attempt_bindings
-      @journal_attempt_bindings ||= authoritative_records.flat_map do |record|
-        record.fetch("__attempt_lineage", [])
-      end.uniq { |binding| binding.fetch("attempt_id") }
-        .sort_by { |binding| binding.fetch("attempt_id") }
-        .map { |binding| Hive::StringifyKeys.call(binding) }
     end
 
     def admitted_attempt_for(generation)
@@ -336,16 +269,10 @@ module Hive
           "event_id" => record.fetch("event_id"),
           "task" => Hive::StringifyKeys.call(record["task"]),
           "journal_index" => index,
-          "attempt_accepted_at" => record.dig("__attempt", "accepted_at") ||
-            record.dig("provenance", "attempt_accepted_at"),
-          "predecessor_attempt_id" => record.dig("__attempt", "predecessor_attempt_id") ||
-            record.dig("provenance", "predecessor_attempt_id"),
-          "durable_attempt_state" => record.dig("__attempt", "state"),
-          "durable_attempt_outcome" => record.dig("__attempt", "outcome"),
-          "durable_attempt_exit_status" => record.dig("__attempt", "exit_status"),
-          "durable_attempt_lease_version" => record.dig("__attempt", "lease_version")
+          "attempt_accepted_at" => record.dig("provenance", "attempt_accepted_at"),
+          "predecessor_attempt_id" => record.dig("provenance", "predecessor_attempt_id")
         }
-        reconcile_durable_agent_health(fact)
+        fact
       end
     end
 
@@ -440,8 +367,9 @@ module Hive
     end
 
     def attempt_descends_from?(candidate_id, ancestor_id)
-      @attempt_predecessors ||= journal_attempt_bindings.to_h do |binding|
-        [ binding.fetch("attempt_id"), binding["predecessor_attempt_id"] ]
+      @attempt_predecessors ||= authoritative_records.each_with_object({}) do |record, predecessors|
+        predecessor = record.dig("provenance", "predecessor_attempt_id")
+        predecessors[record.fetch("attempt_id")] ||= predecessor unless predecessor.to_s.empty?
       end
       seen = {}
       current = candidate_id
@@ -453,42 +381,6 @@ module Hive
         seen[predecessor] = true
         current = predecessor
       end
-    end
-
-    def reconcile_durable_agent_health(fact)
-      return fact unless fact["condition"] == "AgentHealthy"
-
-      durable_state = fact["durable_attempt_state"]
-      return fact unless %w[terminal lost].include?(durable_state)
-
-      durable_outcome = fact["durable_attempt_outcome"]
-      state, reason = if durable_state == "lost"
-        [ "unsatisfied", "attempt_lost" ]
-      elsif durable_outcome == "succeeded"
-        [ "satisfied", "attempt_terminal_succeeded" ]
-      elsif fact["durable_attempt_exit_status"] == Hive::ExitCodes::TEMPFAIL
-        [ "pending", "attempt_terminal_retryable" ]
-      else
-        [ "unsatisfied", "attempt_terminal_#{durable_outcome || 'unknown'}" ]
-      end
-      durable_evidence = {
-        "type" => "attempt_lease",
-        "attempt_id" => fact["attempt_id"],
-        "lease_version" => fact["durable_attempt_lease_version"],
-        "state" => durable_state,
-        "outcome" => durable_outcome
-      }
-      fact.merge(
-        "state" => state,
-        "reason" => reason,
-        "evidence" => (fact.fetch("evidence") + [ durable_evidence ]).uniq,
-        "provenance" => fact.fetch("provenance").merge(
-          "projection_reconciled_attempt_state" => true
-        ),
-        "payload" => fact.fetch("payload").merge(
-          "informational_after_terminal" => durable_state == "terminal" && state == "satisfied"
-        )
-      )
     end
 
     def public_fact(fact)

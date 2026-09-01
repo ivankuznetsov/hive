@@ -164,7 +164,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader, cache_reader = build(path)
       payload = {
-        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "schema" => "hive-status", "schema_version" => 8, "ok" => true,
         "generated_at" => T0.iso8601(6), "projects" => []
       }
 
@@ -268,7 +268,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
           "published_at" => (T0 + 1).iso8601(6),
           "valid_until" => (T0 + 90).iso8601(6),
           "payload" => {
-            "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+            "schema" => "hive-status", "schema_version" => 8, "ok" => true,
             "generated_at" => T0.iso8601(6), "projects" => []
           }
         })
@@ -286,7 +286,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader, cache_reader = build(path)
       payload = {
-        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "schema" => "hive-status", "schema_version" => 8, "ok" => true,
         "generated_at" => T0.iso8601(6), "projects" => []
       }
       assembler.begin_tick(now: T0)
@@ -317,7 +317,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.complete(
         rows: [], controller: {}, queue: {}, recoveries: {},
         status_payload: {
-          "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+          "schema" => "hive-status", "schema_version" => 8, "ok" => true,
           "generated_at" => "not-a-time", "projects" => []
         },
         now: T0 + 1
@@ -342,7 +342,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         repository: repository, expected_daemon: IDENTITY
       )
       payload = {
-        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "schema" => "hive-status", "schema_version" => 8, "ok" => true,
         "generated_at" => T0.iso8601(6), "projects" => []
       }
 
@@ -409,7 +409,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       bad_clock = Object.new
       bad_clock.define_singleton_method(:utc) { raise TypeError, "invalid clock" }
       payload = {
-        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "schema" => "hive-status", "schema_version" => 8, "ok" => true,
         "generated_at" => T0.iso8601(6), "projects" => []
       }
 
@@ -422,7 +422,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader, cache_reader = build(path)
       payload = {
-        "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+        "schema" => "hive-status", "schema_version" => 8, "ok" => true,
         "generated_at" => T0.iso8601(6), "projects" => []
       }
       assembler.reconfigure(poll_interval_sec: 300)

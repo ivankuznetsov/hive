@@ -135,7 +135,7 @@ class AttemptsRepositoryTest < Minitest::Test
       values = results.map(&:value)
       assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::Record) }
       assert_equal 5, values.count { |value| value.is_a?(Hive::Attempts::RepositoryError) }
-      assert_equal 1, repository.scan.records.length
+      assert_equal 1, repository.active_attempts.length
     end
   end
 
@@ -174,7 +174,7 @@ class AttemptsRepositoryTest < Minitest::Test
         db[:attempts].where(attempt_id: record.attempt_id).update(record_json: "{")
       end
 
-      error = assert_raises(Hive::Attempts::RepositoryError) { repository.scan }
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.active_attempts }
       assert_match(/record digest is invalid/, error.message)
     end
   end
@@ -191,12 +191,6 @@ class AttemptsRepositoryTest < Minitest::Test
       assert_equal "source-v1", row.fetch(:source_fingerprint)
       assert_equal Digest::SHA256.hexdigest(row.fetch(:record_json)), row.fetch(:record_digest)
       assert_equal record.subject, Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json))
-      binding = repository.fetch_projection_binding(record.attempt_id)
-      assert_equal record["task_id"], binding.fetch("task_id")
-      assert_equal record["task_slug"], binding.fetch("task_slug")
-      assert_equal record["intended_stage"], binding.fetch("intended_stage")
-      assert_equal record.task_input_epoch, binding.fetch("task_input_epoch")
-      assert_equal record.ownership_generation, binding.fetch("ownership_generation")
     end
   end
 
@@ -209,7 +203,7 @@ class AttemptsRepositoryTest < Minitest::Test
 
       with_env("HIVE_ATTEMPT_STORE_ROOT" => legacy_root) do
         assert_raises(Hive::Attempts::RepositoryError) do
-          Hive::Attempts::Repository.runtime(state_home: state_home)
+          Hive::Attempts::Repository.open_default(state_home: state_home)
         end
       end
 
@@ -301,16 +295,15 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
-  def test_projection_reader_caches_live_and_terminal_bindings
+  def test_read_session_caches_records_and_terminal_diagnostics
     with_repository do |repository|
       launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      reader = repository.projection_reader
-      first = reader.fetch_projection_binding(launching.attempt_id)
-      assert_same first, reader.fetch_projection_binding(launching.attempt_id)
+      reader = repository.read_session
+      assert_same reader.fetch(launching.attempt_id), reader.fetch(launching.attempt_id)
       assert_nil reader.fetch_terminal_diagnostic_binding(launching.attempt_id)
 
       terminal = terminal_attempt(repository, launching)
-      terminal_reader = repository.projection_reader
+      terminal_reader = repository.read_session
       diagnostic = terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
       assert_equal terminal.receipt, diagnostic.fetch("receipt")
       assert_same diagnostic, terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
@@ -377,23 +370,6 @@ class AttemptsRepositoryTest < Minitest::Test
       end
       error = assert_raises(Hive::Attempts::RepositoryError) { repository.fetch("attempt") }
       assert_match(/lookup failed/, error.message)
-    end
-  end
-
-  def test_projection_cutover_boundary_accepts_only_pre_activation_history
-    with_repository do |repository|
-      activated_at = "2026-07-16T12:00:00.000000Z"
-      repository.database.transaction do |db|
-        db[:installations].update(activated_at: activated_at)
-      end
-
-      assert repository.pre_activation_projection?("2026-07-16T11:59:59.999999Z")
-      assert repository.projection_reader.pre_activation_projection?(
-        "2026-07-16T11:59:59.999999Z"
-      )
-      refute repository.pre_activation_projection?(activated_at)
-      refute repository.pre_activation_projection?("2026-07-16T12:00:00.000001Z")
-      refute repository.pre_activation_projection?("invalid")
     end
   end
 

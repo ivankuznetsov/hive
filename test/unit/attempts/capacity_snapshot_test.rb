@@ -25,7 +25,7 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
   def test_admission_view_keeps_one_immutable_scan_while_queries_remain_current
     with_tmp_dir do |root|
       first = Hive::Attempts::Repository.new(root: root, migrate: true)
-      view = Hive::Attempts::AdmissionView.new(store: first, records: first.scan.records)
+      view = Hive::Attempts::AdmissionView.new(store: first, records: first.active_attempts)
       second = Hive::Attempts::Repository.new(root: root, migrate: true)
       created = create(second, attempt_id: "external", task_slug: "external")
 

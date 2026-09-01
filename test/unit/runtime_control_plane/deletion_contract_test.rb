@@ -55,7 +55,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/atomic_file.rb
     lib/hive/managed_directory.rb
     lib/hive/task_journal.rb
-    lib/hive/task_projection/store.rb
+    lib/hive/task_projection/reader.rb
     lib/hive/workflow_package/publish_store.rb
   ].freeze
 

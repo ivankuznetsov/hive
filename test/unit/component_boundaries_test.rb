@@ -117,6 +117,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/commands/module/dry_run.rb",
           "lib/hive/commands/status.rb",
           "lib/hive/conditions/execute_boundary.rb",
+          "lib/hive/conditions/transition_guard.rb",
           "lib/hive/artifacts/outcome_evidence/store.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
@@ -124,7 +125,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",
-          "lib/hive/task_projection/store.rb"
+          "lib/hive/task_workspace/builder.rb"
         ],
         "Hive::Attempts::Supervisor" => [ "lib/hive/commands/attempt_supervise.rb" ]
       },

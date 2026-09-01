@@ -191,7 +191,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       attempt_store = Struct.new(:unused) { def fetch(*) = nil }.new
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: attempt_store,
-        projection_store: projection
+        history_reader: projection
       )
 
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
@@ -269,7 +269,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end.new({ "implementation_identity" => { "execute" => identity } })
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection
+        history_reader: projection
       )
 
       selection = with_attempt_context(
@@ -302,7 +302,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end.new({ "implementation_identity" => { "execute" => identity } })
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection
+        history_reader: projection
       )
 
       selection = with_attempt_context(
@@ -341,7 +341,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection, resolver: resolver
+        history_reader: projection, resolver: resolver
       )
 
       selection = with_attempt_context(

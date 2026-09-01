@@ -99,8 +99,8 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       action = Struct.new(:key).new(Hive::Schemas::TaskActionKind::READY_TO_ARCHIVE)
       projection = Object.new
       bounded = Struct.new(:projection) { def current? = true }.new(projection)
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read_routine) { |**| bounded }
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read_routine) { |**| bounded }
       observed_projections = []
       subject = Hive::Attempts::FinalizationMaintenance.new(store: store)
       assert_equal [ folder ], Dir.glob(
@@ -116,21 +116,17 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
           with_replaced_singleton_method(Hive::Markers, :current, ->(_path) { marker }) do
             with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
               with_replaced_singleton_method(
-                Hive::TaskProjection::Store, :pristine_task?, ->(*) { false }
+                Hive::TaskProjection::Reader, :new, ->(**) { history_reader }
               ) do
-                with_replaced_singleton_method(
-                  Hive::TaskProjection::Store, :new, ->(**) { projection_store }
-                ) do
-                  action_for = lambda do |*_args, **kwargs|
-                    observed_projections << kwargs.fetch(:projection)
-                    action
-                  end
-                  with_replaced_singleton_method(Hive::TaskAction, :for, action_for) do
-                    refute subject.send(:task_archived?, terminal, attempt_store: store)
-                    assert_equal [ projection ], observed_projections
-                    action.key = Hive::Schemas::TaskActionKind::ARCHIVED
-                    assert subject.send(:task_archived?, terminal, attempt_store: store)
-                  end
+                action_for = lambda do |*_args, **kwargs|
+                  observed_projections << kwargs.fetch(:projection)
+                  action
+                end
+                with_replaced_singleton_method(Hive::TaskAction, :for, action_for) do
+                  refute subject.send(:task_archived?, terminal)
+                  assert_equal [ projection ], observed_projections
+                  action.key = Hive::Schemas::TaskActionKind::ARCHIVED
+                  assert subject.send(:task_archived?, terminal)
                 end
               end
             end

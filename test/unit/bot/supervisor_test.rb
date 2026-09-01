@@ -331,7 +331,6 @@ class HiveBotSupervisorTest < Minitest::Test
         )
         path = File.join(folder, "brainstorm.md")
         File.write(path, content)
-        seed_task_projection(folder, state_file: path)
         Hive::Config.register_project(name: "hive", path: project)
         yield path, project
       end

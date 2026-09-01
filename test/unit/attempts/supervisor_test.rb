@@ -302,7 +302,7 @@ class AttemptsSupervisorTest < Minitest::Test
       references = terminal.receipt.fetch("output_references")
       assert_equal 1, references.length
       reference = references.fetch(0)
-      assert Hive::Attempts::OutputReference.verify(reference, root: store.root)
+      assert Hive::OutputReference.verify(reference, root: store.root)
       diagnostic = JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
       assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
       assert_equal attempt.attempt_id, diagnostic.fetch("correlation_id")

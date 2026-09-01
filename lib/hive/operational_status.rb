@@ -632,6 +632,9 @@ module Hive
         state = owner == "provider" ? "waiting_on_provider_or_scheduler" : "needs_repair"
         return [ state, owner ]
       end
+      if row.dig("attrs", "reason") == "condition_task_history_unavailable"
+        return [ "waiting_on_provider_or_scheduler", "scheduler" ]
+      end
       return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
       return [ "waiting_on_provider_or_scheduler", "provider" ] if row["held"]
@@ -911,12 +914,17 @@ module Hive
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
 
-    # Durable workflow errors remain retryable. A synthetic projection-repair
-    # row is operator-owned because another agent run cannot rebuild its proof.
+    # Durable workflow errors remain retryable. Invalid journal history is
+    # operator-owned; a busy writer is transient scheduler-owned state.
     def automatic_error_retry?(project, row)
       daemon_enabled?(project["name"]) &&
         %w[error review_error].include?(row["marker"].to_s) &&
-        !Hive::TaskProjection.repair_required_row?(row)
+        !Hive::TaskProjection.history_invalid_row?(row) &&
+        !task_history_unavailable?(row)
+    end
+
+    def task_history_unavailable?(row)
+      row.dig("attrs", "reason") == "condition_task_history_unavailable"
     end
 
     def reasons_for(project, row)
@@ -948,6 +956,12 @@ module Hive
           diagnostic.fetch("code"),
           diagnostic["detail"] || diagnostic.fetch("summary"),
           "attempt_diagnostic"
+        )
+      elsif task_history_unavailable?(row)
+        reasons << reason(
+          "task_history_unavailable",
+          row.dig("attrs", "message") || "task journal is temporarily locked by a writer",
+          "scheduler"
         )
       elsif automatic_error_retry?(project, row)
         marker = row["marker"].to_s.upcase

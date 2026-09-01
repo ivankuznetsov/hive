@@ -1539,7 +1539,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
           attempt_id: nil, task_generation: nil,
-          condition_task_generation: nil, projection_repair: false, id: 1)
+          condition_task_generation: nil, task_history_invalid: false, id: 1)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, id: id, stage: stage, workflow: workflow, marker: marker,
@@ -1553,7 +1553,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       admission_error: admission_error,
       attempt_id: attempt_id, task_generation: task_generation,
       condition_task_generation: condition_task_generation,
-      projection_repair: projection_repair
+      task_history_invalid: task_history_invalid
     )
   end
 
@@ -1569,7 +1569,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     observed = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
     snapshot = FakeOperationalSnapshot.new
     status_payload = {
-      "schema" => "hive-status", "schema_version" => 7, "ok" => true,
+      "schema" => "hive-status", "schema_version" => 8, "ok" => true,
       "generated_at" => T0.iso8601(6), "projects" => []
     }
     with_tmp_dir do |state_home|
@@ -1836,16 +1836,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, disposition.fetch(:retry_safe)
   end
 
-  def test_projection_repair_row_is_operator_owned_and_never_retried
+  def test_task_history_invalid_row_is_operator_owned_and_never_retried
     snapshot = FakeOperationalSnapshot.new
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
     observed = row(
       marker: "error", action: "error", command: nil,
-      projection_repair: true,
+      task_history_invalid: true,
       marker_attrs: {
-        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-        "message" => "checkpoint missing",
-        "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"
+        "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON,
+        "message" => "task journal is invalid"
       }
     )
 
@@ -1853,17 +1852,17 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_empty supervisor.spawned
     disposition = snapshot.calls.last.last
-    assert_equal :projection_repair_required, disposition.fetch(:decision)
+    assert_equal :task_history_invalid, disposition.fetch(:decision)
     assert_equal "operator", disposition.fetch(:owner)
-    assert_equal "checkpoint missing", disposition.fetch(:reason)
+    assert_equal "task journal is invalid", disposition.fetch(:reason)
   end
 
-  def test_idle_projection_repair_does_not_block_ready_patrol_fix_in_same_tick
+  def test_idle_task_history_invalid_does_not_block_ready_patrol_fix_in_same_tick
     repair = row(
       slug: "repair-me", marker: "error", action: "error", command: nil,
-      projection_repair: true,
+      task_history_invalid: true,
       marker_attrs: {
-        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
+        "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON
       }
     )
     fix = row(
@@ -1881,7 +1880,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # makes it stuck: the exempt reason still needs the same retry, performed by
   # hand at whatever delay a human happens to notice it. Every durable workflow
   # error is assessed now, and the assessment decides — not the reason string.
-  # Producer-owned synthetic projection-repair rows are handled separately.
+  # Producer-owned invalid task-history rows are handled separately.
   def test_terminal_outcome_errors_are_assessed_for_automatic_retry
     %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
       snapshot = FakeOperationalSnapshot.new
@@ -4155,14 +4154,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "global_cap", blocked[1][:reason]
   end
 
-  def test_live_projection_repair_row_still_reserves_real_capacity
+  def test_live_task_history_invalid_row_still_reserves_real_capacity
     rows = [
       row(
         slug: "repairing", marker: "error", action: "error", command: nil,
         live_task_lock: true,
-        projection_repair: true,
+        task_history_invalid: true,
         marker_attrs: {
-          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON
+          "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON
         }
       ),
       row(
@@ -5979,14 +5978,13 @@ end
 
   # ── dispatch-request queue integration ───────────────────────────────
 
-  def test_projection_repair_row_blocks_durable_request_admission
+  def test_task_history_invalid_row_blocks_durable_request_admission
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       repair = row(
         project: "p1", slug: "s1", marker: "error", action: "error", command: nil,
-        projection_repair: true,
+        task_history_invalid: true,
         marker_attrs: {
-          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-          "repair_command" => "hive repair-projection s1 --project p1 --stage 1-inbox"
+          "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON
         }
       )
       dispatcher, supervisor, _controller, logger = make_dispatcher(
@@ -6005,7 +6003,7 @@ end
         name == :dispatch_request_blocked && attrs[:request_id] == "REPAIR-BLOCKED"
       end
       refute_nil blocked
-      assert_equal "projection_repair_required", blocked.last.fetch(:reason)
+      assert_equal "task_history_invalid", blocked.last.fetch(:reason)
       assert_equal [ "REPAIR-BLOCKED" ], Q.pending(state_home: state_home).map(&:request_id)
     end
   end
@@ -6050,10 +6048,10 @@ end
     Dir.mktmpdir("hive-attempt-tick") do |root|
       store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       scans = 0
-      original_scan = store.method(:scan)
-      store.define_singleton_method(:scan) do
+      original_active_attempts = store.method(:active_attempts)
+      store.define_singleton_method(:active_attempts) do
         scans += 1
-        original_scan.call
+        original_active_attempts.call
       end
       reconciler = Hive::Attempts::Reconciler.new(store: store)
       dispatcher, = make_dispatcher(rows: [], attempt_reconciler: reconciler)

@@ -11,7 +11,7 @@ require "hive/task_counter"
 require "hive/task"
 require "hive/task_journal"
 require "hive/task_meta"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/workflows"
 require "hive/worktree"
 
@@ -290,7 +290,7 @@ module Hive
           provenance: { "source" => "ad_hoc_review" },
           payload: {}
         )
-        Hive::TaskProjection::Store.new(task_folder: task_folder).rebuild!(
+        Hive::TaskProjection::Reader.new(task_folder: task_folder, task: task).read(
           marker: marker
         )
       end

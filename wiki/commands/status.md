@@ -1,10 +1,10 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/store.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-30
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, projection-repair]
+updated: 2026-09-01
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
 ---
 
 **TLDR**: `hive status` answers the ordinary operational question—whether the
@@ -52,7 +52,7 @@ at most 64 KiB of `meta.yml` is read after a live process is established.
 Task and daemon PID files are opened nonblocking and no-follow; daemon health
 reads at most 4 KiB through `Hive::Daemon::StatusReport#running_state`. The
 producer does not instantiate `Task`, open the attempts store, read conditions
-or history, project actions, inspect git, build `hive-status.v7`, or run daemon
+or history, project actions, inspect git, build `hive-status.v8`, or run daemon
 service/binary-drift subprocess probes.
 Bounded JSON/YAML parsing treats parser recursion and allocation failures as
 malformed input, so corrupt leases, metadata, or daemon PID documents
@@ -145,61 +145,35 @@ decision when an explicit pool was evaluated. The human row adds either the
 selected route or the no-selection reason only when that routing data exists;
 legacy rows render unchanged.
 
-## Bounded task projections and repair rows
+## Bounded task history
 
 The internal task graph used by operational status and the daemon reads each
-task's derived condition projection through a strict bounded path. One
-scan-wide attempt projection reader is reused, while each task may read at
-most a 512 KiB checkpoint, a 1 MiB / 2,000-event journal suffix, 100 IDs across
-mutable checkpoint bindings plus that suffix, and 32 predecessor point fetches. Terminal
-bindings already sealed inside that byte-bounded checkpoint do not consume the
-mutable-ID budget. Routine status never falls back
-to the complete journal, rebuilds a projection, or enumerates permanent proof
-storage. Bytes before a valid checkpoint and unrelated proof count therefore
-do not increase routine work.
+task's `task-journal.jsonl` under a shared lock and folds it directly in memory.
+Routine scheduling reads validate the complete journal, its hash chain, stream
+identity, attempt bindings, and marker compatibility without opening SQLite to
+reinterpret historical facts. The 1 MiB / 2,000-event limits apply only to the
+task-workspace presentation: they may truncate detail, but cannot permanently
+disable a valid long-running task. New tasks begin with no journal; the first
+authoritative event creates it.
 
-New canonical tasks start with a zero-history derived checkpoint, published by
-task creation before the task becomes visible. No empty authoritative journal
-is created. Older tasks without a valid checkpoint still follow the explicit
-repair flow below; status never backfills them.
+If the routine read cannot prove one task's current state, status emits a
+synthetic `ERROR` row with reason `condition_task_history_invalid`, owner
+`operator`, and the journal diagnostic under
+`evidence.marker_attrs.journal_reason` in operational status
+(`attrs.journal_reason` in the base status payload).
+Operational status classifies only that row as `needs_repair`; healthy rows
+remain available and the daemon may continue unrelated work. The state is
+recomputed on every scan and is never written as a marker. There is no repair
+command or derived cache to rebuild: restore or correct the journal itself.
 
-Confirmation-free operational actions revalidate their observation tokens
-through this same bounded contract. If projection evidence degrades between
-status and `hive act`, the recheck becomes operator-owned projection repair and
-the stale action is rejected without complete-journal replay.
+If a writer currently owns the journal lock, the bounded scan returns
+immediately with `condition_task_history_unavailable` and
+`journal_reason: journal_lock_busy`. This is transient scheduler-owned state,
+not corruption; the next scan retries it while other tasks remain visible.
 
-If those bounded facts cannot prove one task's current state, status emits a
-synthetic `ERROR` row with reason
-`condition_projection_repair_required`, `owner: operator`, and the underlying
-`projection_reason`. The internal row's additive `projection_repair: true`
-field is producer-owned; daemon and action consumers never infer this control
-state from agent-writable marker attributes. Status also regenerates any
-suggested repair command from the trusted project, slug, and stage instead of
-executing a command carried in marker evidence. Operational status classifies only that row as
-`needs_repair`; healthy rows remain available and the daemon may continue
-dispatching unrelated workflow and Patrol Fix work. The synthetic state is
-recomputed on every scan and is not written as a marker. A verified live task
-lock still reports running and reserves its real capacity even when the
-projection is degraded.
-
-Repairable rows expose the fully scoped command in
-`evidence.marker_attrs.repair_command`, for example:
-
-```bash
-hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
-```
-
-This is different from `workflow.retry`: retry reruns a workflow failure, but
-cannot reconstruct derived projection state. The terminal reasons
-`checkpoint_oversized` and `attempt_ids_exhausted` omit a repair command because
-repeating it cannot fit the current fixed bounds; compact that task's retained
-projection history first. `attempt_ids_exhausted` counts only mutable
-checkpoint bindings and IDs introduced by the bounded suffix, not terminal
-checkpoint history. `predecessor_fetches_exhausted` remains exact-task
-repairable. A transient `journal_lock_busy` row also omits the command and
-clears on the next scan after the writer releases its lock. See
-[[commands/repair-projection]]. No migration, daemon
-watcher, restart, or fleet repair is part of this flow.
+Confirmation-free operational actions repeat this routine read under the task
+lock. If history changes or becomes invalid between status and `hive act`, the
+observation token is rejected without mutation.
 
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
@@ -570,23 +544,12 @@ scan owns it. This keeps bounded consumers such as `hive task` able to resolve
 receipt-bound Patrol diagnostics without reopening the store per task or
 raising outside a fleet scan.
 
-Each task row first reads its bounded projection checkpoint instead of hashing
-and replaying the task's complete journal. A checkpoint is usable for exact
-status only when it is current, its journal identity/size/metadata and bounded
-head/tail anchors still match, and every durable attempt identity still
-matches. Mutable attempt state is refreshed through the scan-scoped attempt
-reader and reprojected from checkpoint seed facts, so a terminal or lost
-attempt is visible without replaying old journal history. A journal append,
-missing/stale/partial checkpoint, invalid attempt identity, or any bounded-read
-failure falls back to the authoritative full-journal `read`; status never
-publishes the partial workspace projection as exact task state.
-
-Terminal and lost attempt bindings in a validated checkpoint are final,
-permanent-proof metadata and are therefore reused without another global
-attempt-store point read. Only non-final bindings are refreshed on each scan,
-which preserves live running-to-terminal reconciliation while keeping status
-cost proportional to active attempts instead of every historical attempt named
-by every task.
+Each task row folds its complete journal directly. SQLite is consulted only for
+current live-attempt and terminal-publication fences, never as a second history
+reader. A writer-held journal lock returns transient scheduler-owned
+unavailability immediately, so one append cannot stall the fleet. Malformed
+history fails only that task closed; there is no checkpoint fallback or repair
+path.
 
 Stage moves are treated as a normal filesystem race. If an entry disappears between the stage glob and any in-folder row read, `collect_rows` rescues `Errno::ENOENT`, re-checks the folder path, and skips it only when the folder is gone. The rescue is deliberately folder-level: an `ENOENT` while the task folder still exists is re-raised as a real status command failure, because in-place state-file writers may truncate content but should not make the state file transiently absent inside a surviving folder. A forward stage move can resurface under the later stage in the same scan; a backward move to an already-scanned stage can disappear for one poll and then reappear on the next refresh. After all stages are scanned, `drop_transient_stage_moves` looks only at duplicate-slug groups and removes every duplicate row whose folder no longer exists. If two live folders still share a slug, both rows remain and `annotate_actions` still passes `stage_collision: true` into `Hive::TaskAction`. This keeps the internal graph and TUI snapshots from briefly showing an old-stage and new-stage copy during a normal `mv`, without hiding persistent duplicate state.
 
@@ -687,5 +650,5 @@ task/commit locks and committed before the clock can hide a row.
 
 ## Backlinks
 
-- [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]] · [[commands/repair-projection]]
+- [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]]
 - [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]] · [[modules/plan_review]]

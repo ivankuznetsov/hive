@@ -253,7 +253,7 @@ module Hive
         active = context.dig(:selection, "active")
         return unless active && context[:configuration] && context[:hook]
 
-        @attempt_store.scan.records.find do |record|
+        @attempt_store.active_attempts.find do |record|
           subject = record.subject
           record.module_hook? && subject["project_id"] == @project_id &&
             subject["module"] == context.fetch(:module_name) &&
@@ -356,7 +356,7 @@ module Hive
       end
 
       def live_for_hook?(context)
-        @attempt_store.scan.records.any? do |record|
+        @attempt_store.active_attempts.any? do |record|
           subject = record.subject
           record.live? && record.module_hook? && subject["project_id"] == @project_id &&
             subject["module"] == context.fetch(:module_name) && subject["hook"] == context.fetch(:hook_id)

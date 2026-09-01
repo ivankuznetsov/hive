@@ -41,7 +41,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert_equal version, store.fetch(lost.attempt_id).lease_version
         assert_equal 1, identity.calls.size
         assert first.fetch("capture_references").all? do |reference|
-          Hive::Attempts::OutputReference.verify(reference, root: root)
+          Hive::OutputReference.verify(reference, root: root)
         end
         assert Hive::Markers.current(task.state_file).none?,
                "the attempt ledger owns loss recovery; it must not create a second marker lifecycle"

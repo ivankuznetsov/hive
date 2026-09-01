@@ -3,8 +3,8 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-30
-tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics, projection-repair]
+updated: 2026-09-01
+tags: [attempts, ownership, leases, daemon, recovery, bounded-storage, diagnostics]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and one
@@ -21,7 +21,7 @@ and become immutable SHA-256 addresses only at terminal publication.
 |--------|----------------|
 | `API` | Provide Hive commands, bot delivery, daemon recovery, and module-hook delivery with the stable admission operations `dispatch`, `dispatch_request`, `dispatch_successor`, and `dispatch_module_hook`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
-| `Record`, `Repository` | Preserve schema-v4 validation and the public attempt value behavior while storing queryable lifecycle rows in the runtime control plane. Conditional SQL updates enforce stale-revision CAS; `ProjectionReader` point-fetches validated bindings without a second projection sidecar. `Repository#read_log` is the single authoritative attempt-log read contract: readers consume frames and availability from the repository and never resolve hot or cold frame paths themselves. Normal construction never creates or migrates a database and reuses its process-owned validated connection instead of repeating startup validation. |
+| `Record`, `Repository` | Preserve schema-v4 validation and the public attempt value behavior while storing queryable lifecycle rows in the runtime control plane. Conditional SQL updates enforce stale-revision CAS. A short-lived `ReadSession` caches repeated point reads for one task workspace without a projection sidecar. `Repository#read_log` is the single authoritative attempt-log read contract: readers consume frames and availability from the repository and never resolve hot or cold frame paths themselves. Normal construction never creates or migrates a database and reuses its process-owned validated connection instead of repeating startup validation. |
 | `Coordination`, `Publication` | Own transactional request binding, capacity reservations, daily accounting/refunds, lineage, failure cohorts, routing decisions, pending terminal consumers, and content-addressed terminal payload publication. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, expose the immutable admitted route, and provide one inherited bounded diagnostic writer after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
@@ -58,25 +58,21 @@ It creates an in-monorepo seam that Hive can exercise first; a separately
 published package remains a later response to demonstrated non-Hive demand,
 not a requirement of the module design.
 
-Task-projection validation and journal replay use
-`Repository#fetch_projection_binding`. Every fetched row verifies its canonical
-JSON digest and reconstructs the real `Record`, so final history remains
-queryable from the same attempts table without a proof store or repairable
-sidecar. Bounded indexed columns answer hot, terminal, successor, request, and
-capacity queries; full `Repository#fetch` still validates receipts,
-diagnostics, and every output-reference shape.
-
-A routine task-graph scan shares that repository across task projections and
-active-closure checks. Each task may bind at most 100 attempt IDs and
-point-fetch at most 32 predecessors; reuse never expands those task-local
-budgets. A missing binding fails only that task into projection repair instead
-of opening an unbounded fallback.
+Historical task-journal replay is independent of Attempts. Current task detail
+uses a `Repository::ReadSession` only to point-read the current attempt and
+non-legacy attempt IDs explicitly named by the bounded journal, then follows at
+most 32 predecessors. This preserves independent manual retries and their token
+usage without a global attempt scan. Every fetched
+row verifies its canonical JSON digest and reconstructs the real `Record`.
+Bounded indexed columns answer live, terminal, successor, request, and capacity
+queries; full `Repository#fetch` validates receipts, diagnostics, and output
+references.
 
 The component catalog keeps this admission slice as a guarded reference
 `candidate`. Its facade, result contracts, focused clean-process load, and
 exact internal-construction sites are enforced now. U8 removed the former
 Attempts/WorkLedger catalog dependency and reciprocal-source exception:
-task-journal generation reads and `TaskProjection::Store` are Hive adapters,
+task-journal generation reads and `TaskProjection::Reader` are Hive adapters,
 not source owned by the policy-light WorkLedger component. Attempts remains a
 candidate because this guarded reference does not turn the full durable-attempt
 lifecycle into a supported component API:
@@ -91,7 +87,7 @@ Hive still has narrow, cataloged internal construction sites: the daemon
 composition root wires reconciliation and loss processing, the private
 supervisor argv adapter starts the owner wrapper, module inspection and
 dry-run preview open the canonical store read-only, and a `hive status` scan
-hoists one read-only projection reader for the whole graph and passes it to
+hoists one read-only attempt session for the whole graph and passes it to
 active closure validation. Compatibility adapters retain their cataloged
 construction sites. These sites are
 not alternate admission producers. The component-boundary test pins each
@@ -146,7 +142,8 @@ $HIVE_HOME/runtime-payloads/
 └── .locks/                                # live log reader/writer custody only
 ```
 
-`Repository#scan` is a bounded query over the attempts table; final rows never
+`Repository#active_attempts` is a bounded query over live and
+publication-pending attempts; final rows never
 move into a second proof store. One immediate transaction creates an attempt,
 validates its request/source/generation binding, reserves host/project/task
 capacity, records accounting and lineage, and optionally claims a failure
@@ -365,23 +362,17 @@ are unchanged.
 
 ## Task workspace attempt/session projection
 
-The task workspace never calls `Repository#scan`. Dispatcher admission writes an
-attempt-bound task-journal activity after the durable record exists and before
-worker handoff. Read-time discovery begins with that task-local binding (or the
-legacy `TaskProjection.identity.attempt_id`) and follows only exact predecessor
-IDs through `Repository#fetch`, bounded to 100 seed IDs, 32 predecessors, and 512
-KiB. Only the canonical projection binding can mark an attempt current;
-overlapping live but unbound records are conflicting evidence.
+Dispatcher admission writes an attempt-bound task-journal activity after the
+SQLite record exists and before worker handoff. Task workspace discovery begins
+with IDs named by the direct journal fold and follows exact predecessor IDs
+through one `Repository::ReadSession`, bounded to 100 seeds, 32 predecessors,
+and 512 KiB. Overlapping live records not named by task history remain
+conflicting evidence rather than silently becoming historical authority.
 
-Routine status and daemon generation checks use the same task-local checkpoint
-and bounded suffix rather than replaying the full journal. If the current
-attempt lineage cannot be verified inside those limits, that task becomes
-operator-owned `condition_projection_repair_required`; no healing or admission
-path scans attempt history as a substitute. `hive repair-projection` is the
-only direct command that may replay the selected task's full journal, and even
-it point-reads only attempt IDs named by that journal. Attempt records and
-proofs remain read-only authority, so projection repair requires no Attempts
-migration or periodic monitor.
+Routine status and daemon generation checks fold the bounded journal without
+opening Attempts. If history is invalid, that task becomes operator-owned
+`condition_task_history_invalid`; healing and admission do not scan the attempt
+table to invent replacement history.
 
 Every actual child spawn receives a separate session/correlation ID beneath
 the attempt. Durable start/finish observations preserve role, requested

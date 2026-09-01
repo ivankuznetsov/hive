@@ -1,7 +1,7 @@
 require "digest"
 require "securerandom"
 require "time"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 require "hive/paths"
 require "hive/runtime_control_plane"
 
@@ -649,7 +649,7 @@ module Hive
         raise ArgumentError, "slug is invalid" unless SLUG_RE.match?(slug.to_s)
         raise ArgumentError, "requestor is invalid" unless REQUESTORS.include?(requestor.to_s)
         raise ArgumentError, "request id is invalid" unless REQUEST_ID_RE.match?(request_id.to_s)
-        Array(outputs).each { |reference| Hive::Attempts::OutputReference.validate_shape!(reference) }
+        Array(outputs).each { |reference| Hive::OutputReference.validate_shape!(reference) }
         validate_recovery!(recovery) if recovery
       end
 

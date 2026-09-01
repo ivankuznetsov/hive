@@ -55,31 +55,23 @@ global and project cutover explicitly through `hive migrate` or
 `hive migrate --all` while those processes are stopped. Startup opens only the
 current attempt layout and contains no legacy migration preflight or watcher.
 
-## Task-local projection isolation
+## Task-local history isolation
 
-The hidden task graph consumed by a tick uses one scan-wide attempt projection
-reader and one strict bounded projection per task. A valid checkpoint may
-replay only its capped suffix and referenced attempt lineage; routine status,
-closure, merge reconciliation, healing, recovery, and admission never request
-a full-journal replay or projection rebuild. Permanent proof cardinality and
-bytes before a valid checkpoint therefore do not increase tick work.
+The hidden task graph consumed by a tick reads each task's bounded
+`task-journal.jsonl` directly under a shared lock and folds it in memory. It
+does not read a snapshot/checkpoint or query SQLite to reinterpret historical
+events.
 
-If one task cannot be verified within those bounds, status supplies a
-synthetic `condition_projection_repair_required` row. The dispatcher records
-operator ownership and excludes that row from automatic retry, stale-agent
-healing, merge closure, durable request admission, provider launch, and Patrol
-Fix admission. The row does not consume capacity unless it also has a verified
-live task lock; that real process remains visible and is never duplicated or
-killed merely because projection failed. Other rows continue through the same
-tick, so a ready Patrol Fix or ordinary workflow task may use available
-capacity.
+If one task's journal is invalid, status supplies a synthetic
+`condition_task_history_invalid` row. The dispatcher excludes that row from
+automatic retry, stale-agent healing, merge closure, durable request admission,
+provider launch, and Patrol Fix admission. A separately verified live task
+lease still consumes capacity and remains visible. Other rows continue through
+the same tick.
 
-The state is recomputed on every scan and is never a durable error marker.
-Repairable rows name [[commands/repair-projection]] for one exact task;
-checkpoint-size and attempt-ID cap exhaustion instead name task-local
-retained-history compaction. Predecessor-fetch exhaustion remains repairable;
-a busy exact-repair lock is transient and carries no command. There is no daemon migration,
-automatic backfill, repair queue, or periodic projection watcher.
+The invalid-history state is recomputed on every scan and is never a durable
+error marker. There is no daemon migration, automatic backfill, repair queue,
+or projection watcher.
 
 `StatusConsumer` passes through the additive condition projection fields and
 the project-level `hidden_archived_task_count` from the in-process internal
@@ -111,7 +103,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound, explicit-route admission, and controller-markerless recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy/failure-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. An id-less task remains blocked and its receipt names the explicit `hive migrate --all` repair; no runtime backfiller is implied. Controller failures bind to the unchanged task generation and never append compatibility markers to structured JSON state. Failure fingerprints and retry ladders are stage- and runtime-source-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. Same-runtime ticks keep a park inert; a different validated release/build digest automatically rearms one bounded fresh probe, while a freshness-bound operator `workflow.retry` remains the explicit same-runtime unpark. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
-| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled recoverable marker observations to `RecoveryCoordinator`, including `REVIEW_CI_STALE` and resolved `REVIEW_STALE`; a newer operator-edited escalation remains parked, and synthetic projection-repair rows are always skipped. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` using the reconciler's bounded `AdmissionView`; it never falls back to a global attempt scan or clears a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled recoverable marker observations to `RecoveryCoordinator`, including `REVIEW_CI_STALE` and resolved `REVIEW_STALE`; a newer operator-edited escalation remains parked, and invalid task-history rows are always skipped. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` using the reconciler's bounded `AdmissionView`; it never falls back to a global attempt scan or clears a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
 | `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Durable task-bound reconciler for every coding task with a PR in stages 5–8, including error rows. It verifies the registered repository, observed PR head, immutable reachable merge SHA, current task generation, ownership, and local worktree safety; checkpoints GitHub and architecture-intake receipts before the next side effect; then calls the same evidence-bound closure transition used by an operator. Registrations with a blank or `local:` repository identity are quietly skipped because merge reconciliation is not applicable; a real GitHub identity mismatch still fails closed. New `pr.md` metadata carries the controller-observed head; older tasks may recover it only from a strictly owned registered worktree. A merged PR without that binding stays `ambiguous` and active. `OPEN`, closed-unmerged, cross-repository, held, unsafe, and failing candidates remain in the ledger. Observed-head drift stays held against automatic archive but continues bounded, identity-matched remote polling only when no current dependency, admission, repository, or PR-identity hold outranks it. A temporary bounded-projection outage blocks and retries the same durable candidate; only a proven generation change supersedes it. `OPEN` or closed-unmerged facts release ordinary error recovery; merged, delivered-elsewhere, and ambiguous facts persist a terminal block before architecture intake or closure and stop polling. The daemon composition root supplies one attempt repository lazily per watcher tick, and every selected project reuses it. One candidate per project advances per tick, and retry counts never evict work. |
 | `Hive::Daemon::PrMergeRepository` | `lib/hive/daemon/pr_merge_repository.rb` | Row-oriented runtime-control-plane persistence for merge candidates. Typed project/task/generation/state/retry/hold columns fence revision-CAS checkpoints and bounded SQL candidate selection; bounded JSON stores evidence only. |
@@ -512,7 +504,7 @@ generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
 ## Plan-review automation boundary
 
 Coding `3-plan` rows carry the shared [[modules/plan_review]] projection from
-`hive-status.v7`. `plan_reviewing` and a due `plan_review_retry` dispatch the
+`hive-status.v8`. `plan_reviewing` and a due `plan_review_retry` dispatch the
 non-authority `hive plan-review-run` verb. It may initialize/retry review,
 perform a revision whose decisions already exist, and verify; it cannot approve
 a gated finding, answer a manual finding, waive coverage, or downgrade

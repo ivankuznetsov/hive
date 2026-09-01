@@ -73,7 +73,7 @@ class SchemaFilesTest < Minitest::Test
       "incomplete_attestation_retry" => true
     }
 
-    %w[hive-status.v7.json hive-operational-status.v4.json].each do |name|
+    %w[hive-status.v8.json hive-operational-status.v4.json].each do |name|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       %w[PlanReviewBlocker PlanReviewRoute].zip([ blocker, route ]).each do |definition, value|
         schemer = JSONSchemer.schema({
@@ -2967,7 +2967,7 @@ class SchemaFilesTest < Minitest::Test
 
   def test_recovery_status_contracts_keep_only_the_current_schema
     {
-      "hive-status" => 7,
+      "hive-status" => 8,
       "hive-operational-status" => 4,
       "hive-act" => 2
     }.each do |name, expected_version|

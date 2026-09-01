@@ -595,10 +595,10 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     end
   end
 
-  def test_task_projection_artifacts_and_referenced_payloads_remain_untouched
+  def test_task_history_artifacts_and_referenced_payloads_remain_untouched
     with_home do |state, data, projects|
       File.binwrite(task_path(projects, "task-journal.jsonl"), "{\"event\":\"existing\"}\n")
-      File.binwrite(task_path(projects, "task-projection.json"), "{\"state\":\"existing\"}\n")
+      File.binwrite(task_path(projects, "notes.md"), "operator notes\n")
       artifacts = task_path(projects, "artifacts")
       FileUtils.mkdir_p(artifacts)
       File.binwrite(File.join(artifacts, "review.md"), "evidence\n")
@@ -607,7 +607,7 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       File.binwrite(File.join(payloads, "attempt-1.frames"), "retained log\n")
       retained = [
         task_path(projects, "meta.yml"), task_path(projects, "idea.md"),
-        task_path(projects, "task-journal.jsonl"), task_path(projects, "task-projection.json"),
+        task_path(projects, "task-journal.jsonl"), task_path(projects, "notes.md"),
         File.join(artifacts, "review.md")
       ]
       task_before = retained.to_h { |path| [ path, File.binread(path) ] }

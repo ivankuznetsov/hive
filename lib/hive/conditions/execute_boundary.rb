@@ -17,7 +17,7 @@ module Hive
       EXECUTE_STAGE = "4-execute" # coding-scoped: condition rollout currently governs coding execute
 
       def initialize(task:, config:, worktree_path:, attempt_store: nil, context: nil,
-                     writer: nil, projection_store: nil, git_ops: nil)
+                     writer: nil, history_reader: nil, git_ops: nil)
         @task = task
         @config = config
         @worktree_path = worktree_path
@@ -27,8 +27,8 @@ module Hive
         @writer = writer || Hive::TaskJournal::Writer.new(
           task_folder: task.folder, attempt_store: @attempt_store
         )
-        @projection_store = projection_store || Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: @attempt_store
+        @history_reader = history_reader || Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
         )
         @git_ops = git_ops || Hive::GitOps.new(worktree_path)
       end
@@ -105,7 +105,7 @@ module Hive
       def default_attempt_store
         return nil unless @context
 
-        Hive::Attempts::Repository.runtime
+        Hive::Attempts::Repository.open_default
       end
 
       def verify_context!
@@ -121,7 +121,7 @@ module Hive
       def reconcile(baseline_head:, waiting_reason:, research:, research_evidence:)
         Hive::Conditions::Reconcilers::Execute.new(
           task: @task, attempt: @attempt, attempt_store: @attempt_store,
-          writer: @writer, projection_store: @projection_store, git_ops: @git_ops,
+          writer: @writer, history_reader: @history_reader, git_ops: @git_ops,
           workflow_policy: execute_rule.to_h
         ).reconcile(
           baseline_head: baseline_head, waiting_reason: waiting_reason, research: research,
@@ -163,7 +163,7 @@ module Hive
           task: @task, writer: @writer, marker: Hive::Markers.current(@task.state_file),
           head_sha: head_sha, branch: branch
         )
-        projection = @projection_store.rebuild!
+        projection = @history_reader.read
         selection = Hive::Conditions::Migration.selection(
           config: @config, stage: EXECUTE_STAGE, projection: projection,
           rule: execute_rule # coding-scoped: increment 1 gates coding execute only
@@ -176,9 +176,7 @@ module Hive
 
       def append_shadow_audit(projection:, category:, marker_action:, condition_action:)
         identity = projection["identity"]
-        records = Hive::TaskProjection.read_journal(
-          @writer.path, attempt_store: @writer.attempt_store
-        )
+        records = Hive::TaskProjection.read_journal(@writer.path)
         existing = records.any? do |record|
           record["event_type"] == "shadow_audit" &&
             record["attempt_id"] == @attempt.attempt_id &&
@@ -198,7 +196,7 @@ module Hive
           condition_action: condition_action
         )
         @writer.append(event)
-        @projection_store.rebuild!
+        @history_reader.read
       end
 
       def category_for(marker_name, attrs, projection:)

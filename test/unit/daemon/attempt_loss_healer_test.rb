@@ -188,7 +188,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_attempt(store, retry_charge: 0, task_folder: root)
-      store.define_singleton_method(:scan) { raise "global attempt scan must not run" }
+      store.define_singleton_method(:active_attempts) { raise "global attempt scan must not run" }
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       dispatcher = FakeDispatcher.new(store)
       logger = FakeLogger.new
@@ -481,7 +481,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
           starting_revision: lost["starting_revision"], retry_charge: 1,
           inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
         )
-        store.define_singleton_method(:scan) { raise "unexpected hot scan" }
+        store.define_singleton_method(:active_attempts) { raise "unexpected hot scan" }
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
         outcomes.ensure_for(lost, now: NOW + 1)
         outcomes.update(

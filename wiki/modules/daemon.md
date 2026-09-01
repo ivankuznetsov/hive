@@ -628,6 +628,23 @@ advances a workflow stage directly:
    This keeps a historical recovery queue from turning each daemon tick into
    one full task reconstruction per parked request.
 
+   Before resuming a recovery request, the dispatcher compares its bound task
+   ID and expected stage with the current authoritative status row. A task that
+   advanced, was archived, or was otherwise removed from a successfully
+   observed project graph makes the old request stale; Hive rejects and removes
+   that request instead of retaining it forever as
+   `recovery_observation_unavailable`. If the project-level status observation
+   failed or the project still has legacy stage directories, absence is not
+   authoritative and Hive preserves the request. For a healthy canonical
+   project, Hive resolves the exact task identity before treating the missing
+   row or an ID/stage-mismatched status row as stale. A current
+   deterministic-failure request remains durable because it is the operator's
+   recovery receipt, not runnable backlog. Already-classified
+   `generation_conflict` and `task_identity_conflict` requests are different:
+   those receipts prove that their bound recovery transition can never resume,
+   so the dispatcher retires them instead of leaving inert operator rows in
+   the queue forever.
+
    `StaleAgentHealer` is the automatic scheduler for those durable errors and
    for `REVIEW_STALE` whose pass-completion receipt is newer than its escalation
    input. A newer escalation is operator input and remains parked.

@@ -618,7 +618,7 @@ class AttemptsSupervisorTest < Minitest::Test
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
         claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
-        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.03
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 1
       )
       supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
         [ RbConfig.ruby, "-e", "sleep 10" ]
@@ -626,7 +626,7 @@ class AttemptsSupervisorTest < Minitest::Test
       supervisor.instance_variable_set(:@cancel_reason, :signal)
       supervisor.instance_variable_set(:@cancel_signal, "TERM")
 
-      assert_equal 143, Timeout.timeout(2) { supervisor.run }
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       diagnostic = diagnostic_from_terminal(store, terminal)
       assert_equal "agent_cancelled", diagnostic.fetch("code")

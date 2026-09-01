@@ -18,7 +18,11 @@ module Hive
     PERMISSION_CAPABILITIES = %w[network read write].freeze
     BILLING_ROUTES = Hive::BillingEvidence::ROUTES
     BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
-    DIRECT_SUBSCRIPTION_ADAPTERS = Hive::BillingEvidence::DIRECT_SUBSCRIPTION_ADAPTERS
+    EXCLUSION_REASONS = %w[
+      hard_pin_mismatch requirements_incompatible manual_block circuit_open
+      circuit_cooldown half_open_probe_owned provider_concurrency_saturated
+      health_state_unavailable
+    ].freeze
 
     ACCOUNT_HEALTH_CLASSES = %w[
       authentication
@@ -138,7 +142,7 @@ module Hive
     autoload :Configuration, File.expand_path("provider_routing/configuration.rb", __dir__)
     autoload :Candidate, File.expand_path("provider_routing/candidate.rb", __dir__)
     autoload :Policy, File.expand_path("provider_routing/policy.rb", __dir__)
-    autoload :PolicyStore, File.expand_path("provider_routing/policy_store.rb", __dir__)
+    autoload :PolicyRepository, File.expand_path("provider_routing/policy_repository.rb", __dir__)
     autoload :Request, File.expand_path("provider_routing/request.rb", __dir__)
     autoload :Decision, File.expand_path("provider_routing/decision.rb", __dir__)
     autoload :OperationalProjection,

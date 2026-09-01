@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-08-29
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Workflow and attempt state are filesystem records plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns attempt lifecycle, admission/accounting relationships, capacity, and routing-policy snapshots.
 
 ## Layer cake
 
@@ -26,7 +26,7 @@ Top-down, each layer only depends on the ones below it. There are no cycles. Sta
 
 ## Two filesystem trees per project
 
-1. **`<project>/.hive-state/`** — a worktree of the orphan branch `hive/state`. Holds task folders, configs, locks, logs. Never appears in master because master's `.gitignore` excludes it.
+1. **`<project>/.hive-state/`** — a worktree of the orphan branch `hive/state`. Holds task folders, configs, task evidence, and the short-lived Git commit lock. Never appears in master because master's `.gitignore` excludes it. Runtime leases and admission state live in the installation SQLite control plane.
 2. **`<worktree_root>/<slug>/`** (default `~/Dev/<project>.worktrees/<slug>/`) — the feature worktree. Contains actual code, branched off `<default_branch>`. Created by `4-execute/`.
 
 Master is never modified by Hive (apart from one initial `chore: ignore .hive-state worktree` commit). All hive metadata lives on `hive/state` so master `git log` stays code-only.
@@ -36,7 +36,7 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 Every accepted task-stage launch resolves through one durable admission
 protocol: a generation-scoped lease claimed by a detached supervisor wrapper
 that starts the ordinary Hive command as its worker. CLI calls admit locally
-and attach; bot/web requests remain file-backed deliveries consumed by the
+and attach; bot/web requests are durable SQL deliveries consumed by the
 daemon when present; daemon auto-advance and coordinator-owned recovery call
 the same dispatcher; attempt-loss healing is a separate ledger successor
 admission. A daemon is optional after acceptance. Every surface attaches to
@@ -44,7 +44,7 @@ or observes the durable attempt instead of owning agent lifetime.
 
 ```text
 CLI ───────────────────────────────┐
-bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
+bot/web → request rows → daemon ───┼→ Attempts::Dispatcher
 daemon auto-advance / recovery ────┘          │
                                       generation lock + lease
                                                │
@@ -58,6 +58,27 @@ daemon auto-advance / recovery ────┘          │
 Attempt custody, wrapper ownership, successor healing, and lease durability
 are owned by [[modules/attempts]]; delivery scheduling, reconciliation
 policy, and non-task ancillary children are owned by [[modules/daemon]].
+
+The installation runtime database is a private Sequel/SQLite authority. Every
+query is materialized inside `RuntimeControlPlane::Database#read` or a short
+transaction; no lazy dataset may outlive the process-wide fork barrier. Puma
+cluster hooks and Hive fork/daemonize seams disconnect all registered pools
+before process creation. Repository facades reuse an already validated
+process-owned connection; the first open and every reopen after disconnect or
+fork still perform the complete capability, custody, integrity, and schema
+checks. A missing database path also forces those checks so a live connection
+cannot hide a removed database. Explicit `Database#open!` remains the
+force-validation path.
+Content-addressed attempt payloads use digest-sharded
+custody locks across both SQL reference publication and expiry, so expiring one
+attempt cannot unlink bytes while another attempt publishes the same digest.
+
+Project and task source files remain authoritative. Registration YAML is
+project discovery authority and synchronizes stable project lineage into SQL;
+deregistering and re-registering the same project reuses that inactive lineage.
+The irreversible fleet cutover imports only validated token-usage history,
+rebuilds project/task identity from files, and discards other legacy runtime
+state after proving services, attempts, and leases are quiescent.
 
 ## Scheduled architecture-patrol boundary
 
@@ -334,7 +355,11 @@ solid_cable. `StatusFeed` serializes concurrent Puma callers through
 `CachedStatusCommand`, which reuses a visible-only `StateSource`: its
 five-second hot path is active-task proportional, its missed-signal backstop is
 five minutes, and the complete archive producer runs only for an explicit
-archive request. Each accepted channel acquires one poller lease and releases it
+archive request. The status producer fulfills the authoritative
+`Hive::Web::StatusCommand` contract (`json_payload`, plus optional
+dependency-context and recovery-overlay members with explicit nil defaults);
+`StatusFeed` invokes the contract directly instead of probing collaborator
+shape with `respond_to?`. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
 release without serializing unrelated browser connections. A failed first

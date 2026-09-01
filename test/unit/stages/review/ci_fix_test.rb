@@ -31,6 +31,7 @@ class CiFixTest < Minitest::Test
       task_folder = File.join(dir, ".hive-state", "stages", "6-review", "ci-test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
       FileUtils.mkdir_p(File.join(task_folder, "logs"))
+      prepare_test_task_run(task_folder)
       yield(dir, task_folder)
     end
   end
@@ -140,6 +141,39 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_command_runner_provider_limit_stops_before_spawning_a_fix_agent
+    with_ci_dir do |dir, task_folder|
+      limit = "The job was not started because recent account payments have failed " \
+              "or your spending limit needs to be increased."
+      calls = 0
+      runner = lambda do |**|
+        calls += 1
+        Hive::Stages::Review::CiFix::Run.new(limit, 1)
+      end
+      fix_spawned = false
+      unexpected_fix = lambda do |**|
+        fix_spawned = true
+        { status: :error, error_message: "unexpected fix spawn" }
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Review::CiFix, :spawn_fix_agent, unexpected_fix
+      ) do
+        Hive::Stages::Review::CiFix.run!(
+          cfg: cfg_with(nil), ctx: make_ctx(dir, task_folder),
+          command: "hosted checks", command_runner: runner
+        )
+      end
+
+      assert_equal :error, result.status
+      assert_equal 1, result.attempts
+      assert_equal 1, calls
+      refute fix_spawned, "a hosted provider limit must not spawn a code-fix agent"
+      assert_equal limit, result.limit_text
+      assert_match(/limits reached/, result.error_message)
+    end
+  end
+
   # --- green after fix --------------------------------------------------
 
   def test_returns_green_after_fix_agent_recovers_failing_ci
@@ -205,6 +239,7 @@ class CiFixTest < Minitest::Test
       with_tmp_git_repo do |worktree|
         task_folder = File.join(task_root, ".hive-state", "stages", "6-review", "ci-dirty")
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        prepare_test_task_run(task_folder)
         File.write(File.join(task_folder, "task.md"), "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")
         File.write(File.join(task_folder, "worktree.yml"), { "path" => worktree }.to_yaml)
@@ -230,6 +265,7 @@ class CiFixTest < Minitest::Test
       with_tmp_git_repo do |worktree|
         task_folder = File.join(task_root, ".hive-state", "stages", "6-review", "ci-tamper")
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        prepare_test_task_run(task_folder)
         task_md = File.join(task_folder, "task.md")
         File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")
@@ -261,6 +297,7 @@ class CiFixTest < Minitest::Test
           task_root, ".hive-state", "stages", "6-review", "ci-restore-failure"
         )
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        prepare_test_task_run(task_folder)
         task_md = File.join(task_folder, "task.md")
         File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")

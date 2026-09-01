@@ -241,10 +241,8 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     Dir.mktmpdir("hive-plan-revision-controller-bookkeeping") do |root|
       meta = File.join(root, "meta.yml")
       journal = File.join(root, "task-journal.jsonl")
-      projection = File.join(root, "task-projection.json")
       File.write(meta, "id: demo\n")
       File.write(journal, "before\n")
-      File.write(projection, "before\n")
       workspace = File.join(root, "workspace")
       FileUtils.mkdir_p(workspace)
       File.write(File.join(workspace, "input-plan.md"), "# Plan\n")
@@ -259,7 +257,6 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
           File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
           { status: :ok, usage: { model: "served-model" } }
         end
-        File.write(projection, "session-finish\n")
         result
       end
 
@@ -273,7 +270,6 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
 
       assert_equal "success", observed.fetch("status")
       assert_equal "session-start\n", File.read(journal)
-      assert_equal "session-finish\n", File.read(projection)
     end
   end
 
@@ -355,6 +351,8 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     service = Hive::PlanReview::PlannerRevision.new(
       task:, cfg: {}, runner: lambda do |prompt:, output_path:, **|
         assert_includes prompt, "Review me"
+        assert_includes prompt, "Captured planner authority:"
+        assert_includes prompt, "Effective revision route:"
         File.write(output_path, "# Revised\n<!-- COMPLETE -->\n")
         { "status" => "success" }
       end

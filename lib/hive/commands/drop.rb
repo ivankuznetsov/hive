@@ -57,8 +57,16 @@ module Hive
         context = resolve_context
         guard_archived!(context)
 
-        cleanup = cleanup_context(context)
-        commit_action = record_drop_commit!(context)
+        cleanup = nil
+        commit_action = nil
+        Hive::Lock.with_commit_lock(context.hive_state_path) do
+          killed = kill_recorded_agents(context.folders)
+          with_task_leases(context.folders) do
+            revalidate_context!(context)
+            cleanup = cleanup_context(context, killed: killed)
+            commit_action = record_drop_commit!(context)
+          end
+        end
 
         payload = success_payload(context, cleanup, commit_action)
         if @json
@@ -286,9 +294,8 @@ module Hive
         raise AlreadyArchived, "task #{context.slug} is at #{context.from_stages.uniq.join(', ')}; nothing to drop"
       end
 
-      def cleanup_context(context)
+      def cleanup_context(context, killed:)
         folders = context.folders
-        killed = kill_recorded_agents(folders)
         pr_closed = close_draft_prs(folders)
         worktree_removed = remove_worktrees(context, folders)
         branch_deleted = delete_branch(context)
@@ -301,6 +308,38 @@ module Hive
           worktree_removed: worktree_removed,
           branch_deleted: branch_deleted
         }
+      end
+
+      def with_task_leases(folders, &block)
+        ordered = folders.sort_by { |entry| entry.fetch(:folder) }
+        acquire_task_leases(ordered, 0, &block)
+      end
+
+      def acquire_task_leases(ordered, index, &block)
+        return block.call if index >= ordered.length
+
+        folder = ordered.fetch(index).fetch(:folder)
+        Hive::Lock.with_task_lock(
+          folder, "owner" => "drop", "operation" => "drop", create: false
+        ) do
+          acquire_task_leases(ordered, index + 1, &block)
+        end
+      end
+
+      def revalidate_context!(context)
+        context.folders.each do |entry|
+          folder = entry.fetch(:folder)
+          valid = File.directory?(folder) && File.realpath(folder) == folder &&
+                  File.basename(folder) == context.slug &&
+                  File.basename(File.dirname(folder)) == entry.fetch(:stage)
+          next if valid
+
+          raise Hive::InvalidTaskPath,
+                "task #{context.slug} changed while drop was acquiring its lease"
+        rescue Errno::ENOENT
+          raise Hive::InvalidTaskPath,
+                "task #{context.slug} changed while drop was acquiring its lease"
+        end
       end
 
       def kill_recorded_agents(folders)
@@ -337,7 +376,7 @@ module Hive
       def process_candidates(folders)
         by_pid = {}
         folders.each do |entry|
-          lock = lock_payload(File.join(entry[:folder], ".lock"))
+          lock = Hive::Lock.read_task_lock(entry[:folder]) || {}
           if integer_like?(lock["claude_pid"])
             register_candidate(by_pid, lock["claude_pid"].to_i,
                                process_start_time: lock["claude_pid_start_time"], group: true)
@@ -374,15 +413,6 @@ module Hive
         }
       end
 
-      def lock_payload(path)
-        return {} unless File.exist?(path)
-
-        data = YAML.safe_load(File.read(path), permitted_classes: [ Time ]) || {}
-        data.is_a?(Hash) ? data : {}
-      rescue Psych::Exception, SystemCallError, IOError
-        {}
-      end
-
       def marker_for(folder)
         state_file = state_file_for_folder(folder)
         Hive::Markers.current(state_file)
@@ -397,7 +427,7 @@ module Hive
       def integer_like?(value)
         return false unless value.is_a?(Integer) || value.to_s.match?(/\A\s*\d+\s*\z/)
 
-        # Reject pid <= 1 here so a corrupted `.lock` or marker cannot
+        # Reject pid <= 1 here so a corrupted task lease or marker cannot
         # leak PID 0 (current process group) or PID 1 (init) through
         # to ProcessKill. ProcessKill enforces the same rule again as
         # defense in depth.
@@ -531,16 +561,14 @@ module Hive
         # "committed" symbol — drop always writes a commit so the
         # audit trail is complete, even when the working tree was
         # already clean from a prior interrupted run.
-        result = Hive::Lock.with_commit_lock(context.hive_state_path) do
-          Hive::GitOps.new(context.project_root).hive_commit(
-            stage_name: "dropped",
-            slug: context.slug,
-            action: "dropped",
-            body: body,
-            pathspecs: rel_paths,
-            allow_empty: true
-          )
-        end
+        result = Hive::GitOps.new(context.project_root).hive_commit(
+          stage_name: "dropped",
+          slug: context.slug,
+          action: "dropped",
+          body: body,
+          pathspecs: rel_paths,
+          allow_empty: true
+        )
         result.to_s
       end
 

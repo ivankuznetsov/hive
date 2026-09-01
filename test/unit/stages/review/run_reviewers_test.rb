@@ -589,6 +589,18 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class StagedRaisingReviewer < Hive::Reviewers::Base
+    def failure_output_path
+      "#{output_path}.partial"
+    end
+
+    def run!(deadline: nil)
+      ensure_reviews_dir!
+      File.write(failure_output_path, "incomplete replacement\n")
+      raise RuntimeError, "staged boom"
+    end
+  end
+
   # A reviewer whose run! returns :ok. Produces a stub findings file so
   # the test can verify both reviewers actually ran.
   class OkReviewer < Hive::Reviewers::Base
@@ -1211,6 +1223,30 @@ class RunReviewersTest < Minitest::Test
       assert_includes contents, "[raises] reviewer \"raises\" failed"
       assert_includes contents, "RuntimeError"
       assert_includes contents, "boom"
+    end
+  end
+
+  def test_raising_staged_reviewer_preserves_prior_successful_output
+    with_tmp_dir do |dir|
+      spec = { "name" => "staged", "output_basename" => "staged" }
+      adapter = StagedRaisingReviewer.new(spec, make_ctx(dir))
+      FileUtils.mkdir_p(File.dirname(adapter.output_path))
+      prior = "## High\n- [ ] retained finding: prior successful review\n"
+      File.write(adapter.output_path, prior)
+
+      with_stubbed_dispatch([ adapter ]) do
+        result = Hive::Stages::Review.run_reviewers(
+          { "review" => { "reviewers" => [ spec ] } },
+          make_ctx(dir),
+          Task.new(dir, File.join(dir, "task.md"))
+        )
+        assert_equal :all_failed, result
+      end
+
+      assert_equal prior, File.read(adapter.output_path)
+      refute File.exist?(adapter.failure_output_path),
+             "orchestrator cleanup must remove only the staged failure output"
+      assert_includes File.read(File.join(dir, "reviews", "errors-01.md")), "staged boom"
     end
   end
 
@@ -2102,6 +2138,93 @@ class RunReviewersTest < Minitest::Test
       ctx = make_ctx(dir).with(pass: 4)
       assert Hive::Stages::Review.fix_guardrail_approved?(ctx)
     end
+  end
+
+  def test_fix_guardrail_report_escapes_control_bytes_in_decoded_paths
+    # Patrol rework follow-up to the C-quoted rename decode: decode_git_path
+    # hands write_fix_guardrail_findings paths with LITERAL control bytes,
+    # and the report interpolated them unescaped. A rename target like
+    # ".github/workflows/de\n- [x] ploy.yml" then split one checkbox line
+    # into three, two of them PRE-CHECKED — a forged approval fragment the
+    # user never ticked — while the marker recorded one match, so
+    # fix_guardrail_approved?(expected_matches: 1) stayed false and the
+    # task could never be approved. The report boundary must escape control
+    # bytes so one Match renders as exactly one unchecked checkbox line.
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, "docs"))
+      File.write(File.join(dir, "docs", "template.yml"), "name: template\n")
+      run!("git", "-C", dir, "add", "docs/template.yml")
+      run!("git", "-C", dir, "commit", "-m", "add template", "--quiet")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+
+      forged = ".github/workflows/de\n- [x] ploy.yml"
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      run!("git", "-C", dir, "mv", "docs/template.yml", forged)
+      run!("git", "-C", dir, "commit", "-m", "rename into workflows", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      ctx = make_ctx(dir).with(pass: 1)
+      guardrail = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: { "review" => { "fix" => { "guardrail" => { "enabled" => true } } } },
+        ctx: ctx, base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, guardrail.status
+      assert_equal 1, guardrail.matches.size
+
+      Hive::Stages::Review.send(:write_fix_guardrail_findings, ctx, guardrail.matches)
+      report = File.join(dir, "reviews", "fix-guardrail-01.md")
+      body = File.read(report)
+
+      checkbox_lines = body.each_line.count { |l| l.match?(/^\s*-\s+\[[ xX]\]\s+/) }
+      assert_equal 1, checkbox_lines,
+                   "one match must render as exactly one checkbox line (got #{checkbox_lines})"
+      assert_equal 0, body.each_line.count { |l| l.match?(/^\s*-\s+\[[xX]\]\s+/) },
+                    "no checkbox may render pre-checked: the forged fragment must be escaped"
+      assert_includes body, 'de\\n- [x] ploy.yml',
+                      "the control bytes must be escaped at the report boundary"
+
+      # Full approval round-trip: the user ticks the single intended row,
+      # and the count-vs-marker gate accepts it (pre-fix this deadlocked
+      # at false because the forged boxes inflated the count).
+      File.write(report, body.sub("- [ ] ci_workflow_edit", "- [x] ci_workflow_edit"))
+      assert Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 1),
+             "ticking the single escaped row must satisfy the approval round-trip"
+    end
+  end
+
+  def test_fix_guardrail_report_escapes_control_bytes_in_snippets
+    # Same boundary, code-target side: a matched snippet (e.g. a
+    # multi-line secret hit) carrying a newline must not split its
+    # checkbox line either, or the marker count and the checkbox count
+    # drift and approval deadlocks.
+    Dir.mktmpdir("hive-guardrail-escape") do |dir|
+      ctx = make_ctx(dir).with(pass: 2)
+      match = Hive::Stages::Review::FixGuardrail::Match.new(
+        pattern_name: "secrets_pattern_match.generic_key",
+        file: "config/settings.rb", line: 3,
+        snippet: "KEY = \"abc\n- [x] def\"",
+        severity: :high, match_sha256: "a" * 64
+      )
+
+      Hive::Stages::Review.send(:write_fix_guardrail_findings, ctx, [ match ])
+      body = File.read(File.join(dir, "reviews", "fix-guardrail-02.md"))
+
+      assert_equal 1, body.each_line.count { |l| l.match?(/^\s*-\s+\[[ xX]\]\s+/) },
+                   "a newline-bearing snippet must still render one checkbox line"
+      assert_includes body, 'abc\\n- [x] def',
+                      "the snippet's control bytes must be escaped"
+      assert_equal 0, body.each_line.count { |l| l.match?(/^\s*-\s+\[[xX]\]\s+/) },
+                   "no forged pre-checked box may appear"
+    end
+  end
+
+  def test_escape_control_bytes_renders_every_control_byte_visibly
+    escaped = Hive::Stages::Review.send(
+      :escape_control_bytes,
+      "\n\t\r\f\v\e\b\a\0\x01"
+    )
+
+    assert_equal "\\n\\t\\r\\f\\v\\e\\b\\a\\0\\x01", escaped
   end
 
   def test_fix_guardrail_approved_rejects_truncated_file_with_count_mismatch

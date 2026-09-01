@@ -37,7 +37,6 @@ module Hive
         configured = configured_mode(config, stage)
         data = projection.respond_to?(:to_h) ? projection.to_h : projection
         attempt_id = data.dig("identity", "attempt_id") ||
-                     data.dig("journal", "attempts")&.last&.fetch("attempt_id", nil) ||
                      data.dig("compatibility", "marker", "attrs", "attempt_id") ||
                      data.dig("compatibility", "marker_fallback", "attrs", "attempt_id")
         handoff = !attempt_id.to_s.empty? && attempt_id != Hive::TaskJournal::LEGACY_ATTEMPT_ID
@@ -68,7 +67,7 @@ module Hive
       end
 
       def ensure_legacy_baseline!(task:, writer:, marker:, head_sha:, branch:, workflow: "coding")
-        records = Hive::TaskProjection.read_journal(writer.path, attempt_store: writer.attempt_store)
+        records = Hive::TaskProjection.read_journal(writer.path)
         existing = records.find { |record| record["event_type"] == "legacy_baseline" }
         return existing if existing
 

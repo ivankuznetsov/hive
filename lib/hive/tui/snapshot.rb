@@ -75,7 +75,7 @@ module Hive
         :condition_warning,
         :marker,
         :attrs,
-        :projection_repair,
+        :task_history_invalid,
         # Carried verbatim from the JSON `held` object for payload↔Row
         # schema-correspondence only (schema_correspondence_test). The
         # renderer does NOT read this — it derives the hold label from
@@ -134,7 +134,7 @@ module Hive
                        action_receipt_id: nil,
                        unanswered_questions: 0, outcomes: [], depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
-                       blocked: false, admission_error: nil, projection_repair: false,
+                       blocked: false, admission_error: nil, task_history_invalid: false,
                        held: nil, **rest)
           super(id: id, display_name: display_name,
                 workflow: workflow,
@@ -160,7 +160,7 @@ module Hive
                 condition_provenance: condition_provenance,
                 shadow_audit: shadow_audit,
                 condition_warning: condition_warning,
-                projection_repair: projection_repair,
+                task_history_invalid: task_history_invalid,
                 held: held,
                 observation_mtime: observation_mtime,
                 folder_mtime: folder_mtime,
@@ -274,7 +274,7 @@ module Hive
           condition_warning: payload["condition_warning"],
           marker: payload["marker"],
           attrs: payload["attrs"],
-          projection_repair: payload["projection_repair"] == true,
+          task_history_invalid: payload["task_history_invalid"] == true,
           held: payload["held"],
           mtime: payload["mtime"],
           observation_mtime: payload["observation_mtime"],

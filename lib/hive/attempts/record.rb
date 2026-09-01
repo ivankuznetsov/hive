@@ -2,7 +2,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/attempts/capability"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 require "hive/billing_evidence"
 require "hive/stringify_keys"
 

@@ -5,6 +5,7 @@ require "yaml"
 require_relative "cli_driver"
 require_relative "path_safety"
 require_relative "paths"
+require_relative "../../support/runtime_control_plane_fixture"
 
 module Hive
   module E2E
@@ -32,6 +33,7 @@ module Hive
         initialise_git_repo(@sandbox_dir)
         FileUtils.mkdir_p(@run_home)
         File.write(File.join(@run_home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+        HiveRuntimeControlPlaneFixture.activate!(@run_home)
         CliDriver.new(@sandbox_dir, @run_home).call([ "init" ], cwd: @sandbox_dir)
         tune_project_config(@sandbox_dir)
         self

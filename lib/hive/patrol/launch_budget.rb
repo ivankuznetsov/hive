@@ -1,47 +1,29 @@
-require "digest"
-require "date"
-require "fileutils"
-require "json"
 require "securerandom"
 require "time"
-
-require "hive/atomic_file"
 require "hive/config"
-require "hive/managed_directory"
+require "hive/runtime_control_plane"
 require "hive/usage_db"
 
 module Hive
   module Patrol
-    # Durable admission for scheduled discovery provider launches. The ledger
-    # is intentionally separate from UsageDb: token rows are telemetry and a
-    # telemetry failure cannot create or remove discovery capacity.
     class LaunchBudget
-      class SeedUnavailable < Hive::Error; end
+      class AllowanceError < Hive::Error; end
 
-      SCHEMA = "hive-patrol-discovery-allowances".freeze
-      SCHEMA_VERSION = 1
       ENGINES = %i[ordinary architecture].freeze
       DISCOVERY_STAGES = {
         "patrol-review" => :ordinary,
         "refactor-patrol-review" => :architecture
       }.freeze
-      DAILY_EXHAUSTION_REASONS = %w[daily_agent_spawn_limit legacy_attribution_ambiguous].freeze
+      DAILY_EXHAUSTION_REASONS = %w[daily_agent_spawn_limit].freeze
       DEFAULT_MAX_AGENT_SPAWNS_PER_DAY = 4
-      MAX_DAY_BYTES = 2 * 1024 * 1024
-      MAX_HOLDS_BYTES = 2 * 1024 * 1024
-      MAX_PROJECTS_PER_DAY = 4_096
-      MAX_HELD_PROJECTS = 4_096
+      MAX_RESERVATION_ID_BYTES = 256
       MAX_RESERVATIONS_PER_LANE = 10_000
-      DAY_DIRECTORY = "dates".freeze
-      HOLDS_FILE = "provider-holds.json".freeze
-      LOCK_FILE = "ledger.lock".freeze
 
       attr_reader :last_exhaustion
 
       def self.resource_exhaustion_backoff_sec(reasons, now:, fallback:)
         reasons = Array(reasons).map(&:to_s)
-        return fallback unless reasons.any? &&
-                               (reasons - DAILY_EXHAUSTION_REASONS).empty?
+        return fallback unless reasons.any? && (reasons - DAILY_EXHAUSTION_REASONS).empty?
 
         current = now.utc
         next_day = Time.utc(current.year, current.month, current.day) + 86_400
@@ -50,51 +32,40 @@ module Hive
 
       def initialize(project_root, cfg:, project_id: nil, project_name: nil,
                      engine: nil, usage_db: Hive::UsageDb,
-                     ledger_path: nil, clock: -> { Time.now.utc },
-                     id_generator: -> { SecureRandom.uuid },
+                     database: Hive::RuntimeControlPlane.database,
+                     clock: -> { Time.now.utc }, id_generator: -> { SecureRandom.uuid },
                      charge_discovery: true)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @usage_db = usage_db
+        @database = database
         @clock = clock
         @id_generator = id_generator
-        @project_slug = project_name.to_s.strip
-        @project_slug = fallback_project_slug if @project_slug.empty?
+        @project_slug = present_or(project_name, File.basename(@project_root))
         @project_id = project_id.to_s.strip
-        @project_id = fallback_project_id if @project_id.empty?
+        @project_id = nil if @project_id.empty?
         @engine = normalize_engine(engine) unless engine.nil?
         @charge_discovery = charge_discovery == true
-        @ledger_root = File.expand_path(
-          ledger_path || "#{@usage_db.path}.patrol-discovery-allowances"
-        )
-        @directory = Hive::ManagedDirectory.new(
-          root: @ledger_root, label: "Patrol discovery allowance ledger"
-        )
-        patrol_cfg = cfg.is_a?(Hash) && cfg["patrol"].is_a?(Hash) ? cfg.fetch("patrol") : {}
-        mode = patrol_cfg["mode"].to_s
-        @max_agent_spawns_per_day = if mode == "off"
+        patrol = cfg.is_a?(Hash) && cfg["patrol"].is_a?(Hash) ? cfg.fetch("patrol") : {}
+        mode = patrol["mode"].to_s
+        @limit = if mode == "off"
           0
         else
-          patrol_cfg["scheduled_discovery_launches_per_engine_per_day"] ||
+          patrol["scheduled_discovery_launches_per_engine_per_day"] ||
             Hive::Config::PATROL_MODE_KNOBS.dig(
               mode, "scheduled_discovery_launches_per_engine_per_day"
-            ) ||
-            DEFAULT_MAX_AGENT_SPAWNS_PER_DAY
+            ) || DEFAULT_MAX_AGENT_SPAWNS_PER_DAY
         end
       end
 
-      # Reserve the discovery slot immediately before the provider child is
-      # started. Non-discovery Patrol stages only open a best-effort telemetry
-      # session and never consult or mutate this ledger.
       def acquire(profile:, stage:, started_at:, reservation_id: nil)
         engine = @charge_discovery ? stage_engine(stage) : nil
         @active_telemetry_source = engine ? "patrol_discovery_launch" : "patrol_non_discovery_launch"
-        if engine
-          reserved = reserve_discovery!(
-            engine: engine, started_at: started_at,
-            reservation_id: reservation_id || @id_generator.call
-          )
-          return false unless reserved
+        if engine && !reserve_discovery!(
+          engine: engine, started_at: started_at,
+          reservation_id: reservation_id || @id_generator.call
+        )
+          return false
         end
 
         reserve_telemetry!(profile: profile, stage: stage, started_at: started_at)
@@ -107,25 +78,21 @@ module Hive
 
       def allowance_snapshot(engine: @engine || :ordinary)
         engine = normalize_engine(engine)
-        lane, hold = capacity_snapshot(engine)
-        used = lane.fetch("reservations").size
+        project_id!
+        date = date_for(now)
+        lane, hold = @database.read do |db|
+          [ allowance_dataset(db, engine, date).first || { used: 0 }, hold_dataset(db, engine).first ]
+        end
+        used = lane.fetch(:used)
         status = "available"
-        remaining = [ @max_agent_spawns_per_day - used, 0 ].max
+        remaining = [ @limit - used, 0 ].max
         retry_at = nil
         if retry_active?(hold)
+          retry_at = hold.fetch(:retry_not_before)
           @last_exhaustion = exhaustion(
-            "provider_lane_backoff", used,
-            engine: engine, retry_at: hold.fetch("retry_not_before")
+            "provider_lane_backoff", used, engine: engine, retry_at: retry_at
           )
           status = "provider_backoff"
-          remaining = 0
-          retry_at = hold.fetch("retry_not_before")
-        elsif lane.fetch("seed_state") == "parked"
-          @last_exhaustion = exhaustion(
-            "legacy_attribution_ambiguous", used,
-            engine: engine
-          )
-          status = "legacy_attribution_ambiguous"
           remaining = 0
         elsif remaining.zero?
           @last_exhaustion = exhaustion("daily_agent_spawn_limit", used, engine: engine)
@@ -133,63 +100,59 @@ module Hive
         else
           @last_exhaustion = nil
         end
-
         {
-          engine: engine.to_s, utc_date: date_for(now),
-          limit: @max_agent_spawns_per_day, used: used, remaining: remaining,
-          status: status, retry_at: retry_at,
-          seeded_launches: lane.fetch("seeded_launches"),
-          ambiguous_legacy_rows: lane.fetch("ambiguous_rows")
+          engine: engine.to_s, utc_date: date, limit: @limit,
+          used: used, remaining: remaining, status: status, retry_at: retry_at
         }
-      rescue StandardError => e
-        @ledger_error = e
+      rescue StandardError => error
+        @ledger_error = error
         @last_exhaustion = exhaustion("allowance_store_unavailable", 1, engine: engine)
         {
-          engine: engine.to_s, utc_date: date_for(now),
-          limit: @max_agent_spawns_per_day, used: nil, remaining: 0,
-          status: "unavailable", retry_at: nil,
-          seeded_launches: nil, ambiguous_legacy_rows: nil
+          engine: engine.to_s, utc_date: date_for(now), limit: @limit,
+          used: nil, remaining: 0, status: "unavailable", retry_at: nil
         }
       end
 
       def park!(engine: @engine || :ordinary, retry_at:, reason:)
         engine = normalize_engine(engine)
+        project_id!
         instant = normalize_time(retry_at)
         normalized_reason = reason.to_s.strip
         raise ArgumentError, "provider retry reason is invalid" if
           normalized_reason.empty? || normalized_reason.bytesize > 128
 
-        with_ledger_lock do
-          state = load_holds
-          project = (state.fetch("projects")[@project_id] ||= {})
-          hold = project[engine.to_s]
-          current = hold && normalize_time(hold.fetch("retry_not_before"))
-          if !current || instant > current
-            project[engine.to_s] = {
-              "retry_not_before" => instant.iso8601(6),
-              "reason" => normalized_reason
+        timestamp = Hive::RuntimeControlPlane::Codec.dump_time(now)
+        @database.transaction do |db|
+          dataset = hold_dataset(db, engine)
+          current = dataset.first
+          current_retry = current && normalize_time(current.fetch(:retry_not_before))
+          next if current_retry && current_retry >= instant
+
+          dataset.insert_conflict(
+            target: %i[project_id kind window_key],
+            update: {
+              retry_not_before: timestamp_for(instant), hold_reason: normalized_reason,
+              revision: Sequel[:revision] + 1, updated_at: timestamp
             }
-          end
-          persist_holds(state)
+          ).insert(
+            project_id: @project_id, kind: "#{engine}:hold", window_key: "provider",
+            used: 0, limit_value: 0, revision: 0, retry_not_before: timestamp_for(instant),
+            hold_reason: normalized_reason, updated_at: timestamp
+          )
         end
         true
-      rescue StandardError => e
-        @ledger_error = e
+      rescue StandardError => error
+        @ledger_error = error
         false
       end
 
       def clear_park!(engine: @engine || :ordinary)
         engine = normalize_engine(engine)
-        with_ledger_lock do
-          state = load_holds
-          project = state.fetch("projects")[@project_id]
-          project&.delete(engine.to_s)
-          state.fetch("projects").delete(@project_id) if project&.empty?
-          persist_holds(state)
-        end
+        project_id!
+        @database.transaction { |db| hold_dataset(db, engine).delete }
         true
-      rescue StandardError => e
-        @ledger_error = e
+      rescue StandardError => error
+        @ledger_error = error
         false
       end
 
@@ -199,48 +162,37 @@ module Hive
         when "daily_agent_spawn_limit"
           "#{detail.fetch(:engine)} patrol daily discovery launch limit reached " \
             "(#{detail.fetch(:observed)}/#{detail.fetch(:limit)} launches today)"
-        when "legacy_attribution_ambiguous"
-          "#{detail.fetch(:engine)} patrol discovery is parked until the next UTC day " \
-            "because legacy launch attribution is ambiguous"
         else
           "#{detail.fetch(:engine)} patrol discovery launch blocked (#{detail.fetch(:reason)})"
         end
       end
 
       def resource_exhaustion
-        detail = @last_exhaustion
-        return nil unless detail
-
-        detail.slice(:reason, :limit, :observed, :engine, :retry_at).compact
+        @last_exhaustion&.slice(:reason, :limit, :observed, :engine, :retry_at)&.compact
       end
 
-      # Complete the independent telemetry session. Failure is observable but
-      # cannot retroactively change the already-consumed discovery reservation.
       def record!(result:, profile:, stage:, started_at:)
         reservation = @active_telemetry
         usage = result.is_a?(Hash) && result[:usage].is_a?(Hash) ? result[:usage] : {}
         input = integer(usage[:input])
         output = integer(usage[:output])
         cached = integer(usage[:cached])
-        metered = (input + output + cached).positive?
-        recorded_stage = metered ? stage : "#{stage}-unmetered"
+        recorded_stage = (input + output + cached).positive? ? stage : "#{stage}-unmetered"
         identity = reservation || telemetry_identity
-
-        model = usage[:model]
-        model ||= result[:model] if result.is_a?(Hash)
+        model = usage[:model] || (result[:model] if result.is_a?(Hash))
         recorded = @usage_db.record!(
           agent: profile_name(profile, stage), model: model,
           project_slug: @project_slug, task_slug: stage, stage: recorded_stage,
           started_at: started_at, ended_at: now.iso8601,
           input: input, output: output, cached: cached,
-          attempt_id: identity.fetch(:attempt_id),
-          session_id: identity.fetch(:session_id), task_generation: 0,
+          attempt_id: identity.fetch(:attempt_id), session_id: identity.fetch(:session_id),
+          task_generation: 0,
           source: @active_telemetry_source || "patrol_non_discovery_launch"
         )
         warn "[hive] patrol usage record failed; discovery allowance is unchanged" unless recorded
         recorded
-      rescue StandardError => e
-        warn "[hive] patrol usage record failed: #{e.message}"
+      rescue StandardError => error
+        warn "[hive] patrol usage record failed: #{error.message}"
         false
       ensure
         @active_telemetry = nil
@@ -250,110 +202,55 @@ module Hive
       private
 
       def reserve_discovery!(engine:, started_at:, reservation_id:)
-        with_ledger_lock do
-          date = date_for(started_at)
-          state = load_day(date)
-          lane = ensure_lane!(state, engine, date)
-          if @lane_created
-            persist_day(state)
-            @lane_created = false
+        date = date_for(started_at)
+        id = reservation_id.to_s
+        raise ArgumentError, "discovery reservation id is invalid" if
+          id.empty? || id.bytesize > MAX_RESERVATION_ID_BYTES
+        project_id!
+
+        @database.transaction do |db|
+          dataset = allowance_dataset(db, engine, date)
+          row = dataset.first
+          unless row
+            dataset.insert(
+              project_id: @project_id, kind: engine.to_s, window_key: date,
+              used: 0, limit_value: @limit, revision: 0,
+              reservation_ids_json: "[]", updated_at: timestamp_for(normalize_time(started_at))
+            )
+            row = dataset.first
           end
-          hold = held_lane(load_holds, engine)
+          hold = hold_dataset(db, engine).first
           if retry_active?(hold, at: started_at)
             @last_exhaustion = exhaustion(
-              "provider_lane_backoff", lane.fetch("reservations").size,
-              engine: engine, retry_at: hold.fetch("retry_not_before")
+              "provider_lane_backoff", row.fetch(:used), engine: engine,
+              retry_at: hold.fetch(:retry_not_before)
             )
             next false
           end
-          if lane.fetch("seed_state") == "parked"
-            @last_exhaustion = exhaustion(
-              "legacy_attribution_ambiguous", lane.fetch("reservations").size,
-              engine: engine
-            )
+          ids = decode_ids(row.fetch(:reservation_ids_json))
+          next true if ids.include?(id)
+          if row.fetch(:used) >= @limit
+            @last_exhaustion = exhaustion("daily_agent_spawn_limit", row.fetch(:used), engine: engine)
             next false
           end
-          id = reservation_id.to_s
-          raise ArgumentError, "discovery reservation id is invalid" if id.empty? || id.bytesize > 256
-          if lane.fetch("reservations").any? { |item| item.fetch("id") == id }
-            @last_exhaustion = nil
-            next true
-          end
-          if lane.fetch("reservations").size >= @max_agent_spawns_per_day
-            @last_exhaustion = exhaustion(
-              "daily_agent_spawn_limit", lane.fetch("reservations").size,
-              engine: engine
-            )
-            next false
-          end
-          lane.fetch("reservations") << {
-            "id" => id,
-            "reserved_at" => normalize_time(started_at).iso8601(6)
-          }
-          persist_day(state)
+          raise AllowanceError, "discovery reservations exceed the safety bound" if
+            ids.length >= MAX_RESERVATIONS_PER_LANE
+
+          ids << id
+          dataset.update(
+            used: row.fetch(:used) + 1,
+            limit_value: [ @limit, row.fetch(:used) + 1 ].max,
+            reservation_ids_json: Hive::RuntimeControlPlane::Codec.dump_json(ids),
+            revision: row.fetch(:revision) + 1,
+            updated_at: timestamp_for(normalize_time(started_at))
+          )
           @last_exhaustion = nil
           true
         end
-      rescue StandardError => e
-        @ledger_error = e
+      rescue StandardError => error
+        @ledger_error = error
         @last_exhaustion = exhaustion("allowance_store_unavailable", 1, engine: engine)
         false
-      end
-
-      def capacity_snapshot(engine)
-        with_ledger_lock do
-          date = date_for(now)
-          state = load_day(date)
-          lane = ensure_lane!(state, engine, date)
-          persist_day(state) if @lane_created
-          @lane_created = false
-          hold = held_lane(load_holds, engine)
-          [ lane, hold ]
-        end
-      end
-
-      def ensure_lane!(state, engine, date)
-        project = (state.fetch("projects")[@project_id] ||= {})
-        return project.fetch(engine.to_s) if project.key?(engine.to_s)
-
-        seed = legacy_seed(date)
-        raise SeedUnavailable, "legacy discovery seed is unavailable" unless seed
-
-        lane_seed = seed.fetch(engine)
-        lane = {
-          "seed_state" => lane_seed.fetch(:ambiguous).positive? ? "parked" : "complete",
-          "seeded_launches" => lane_seed.fetch(:count),
-          "ambiguous_rows" => lane_seed.fetch(:ambiguous),
-          "reservations" => Array.new(lane_seed.fetch(:count)) do |index|
-            {
-              "id" => "legacy:#{engine}:#{date}:#{index + 1}",
-              "reserved_at" => "#{date}T00:00:00Z"
-            }
-          end
-        }
-        project[engine.to_s] = lane
-        @lane_created = true
-        lane
-      end
-
-      def legacy_seed(date)
-        return empty_seed unless @usage_db.respond_to?(:patrol_discovery_seed)
-
-        result = @usage_db.patrol_discovery_seed(
-          scope: { project_slug: @project_slug }, date: date
-        )
-        return nil unless result.is_a?(Hash) && result[:available] != false
-
-        ENGINES.to_h do |engine|
-          value = result.fetch(engine, {})
-          [ engine, { count: integer(value[:count]), ambiguous: integer(value[:ambiguous]) } ]
-        end
-      rescue StandardError
-        nil
-      end
-
-      def empty_seed
-        ENGINES.to_h { |engine| [ engine, { count: 0, ambiguous: 0 } ] }
       end
 
       def reserve_telemetry!(profile:, stage:, started_at:)
@@ -363,21 +260,80 @@ module Hive
           project_slug: @project_slug, task_slug: stage,
           stage: "#{stage}-unmetered", started_at: started_at, ended_at: nil,
           input: 0, output: 0, cached: 0,
-          attempt_id: identity.fetch(:attempt_id),
-          session_id: identity.fetch(:session_id), task_generation: 0,
+          attempt_id: identity.fetch(:attempt_id), session_id: identity.fetch(:session_id),
+          task_generation: 0,
           source: @active_telemetry_source || "patrol_non_discovery_launch"
         )
         @active_telemetry = identity if recorded
         warn "[hive] patrol usage reservation failed; continuing without token telemetry" unless recorded
         recorded
-      rescue StandardError => e
-        warn "[hive] patrol usage reservation failed: #{e.message}; continuing without token telemetry"
+      rescue StandardError => error
+        warn "[hive] patrol usage reservation failed: #{error.message}; continuing without token telemetry"
         false
       end
 
+      def hold_dataset(db, engine)
+        allowance_dataset(db, "#{engine}:hold", "provider")
+      end
+
+      def allowance_dataset(db, kind, window)
+        db[:patrol_allowances].where(project_id: @project_id, kind: kind.to_s, window_key: window)
+      end
+
+      def decode_ids(value)
+        ids = Hive::RuntimeControlPlane::Codec.load_json(value)
+        valid = ids.is_a?(Array) && ids.size <= MAX_RESERVATIONS_PER_LANE &&
+          ids.all? { |id| id.is_a?(String) && !id.empty? && id.bytesize <= MAX_RESERVATION_ID_BYTES } &&
+          ids.uniq.size == ids.size
+        raise "discovery reservation ids are invalid" unless valid
+        ids
+      end
+
+      def project_id!
+        return @project_id if @project_id
+
+        state_root = File.join(@project_root, ".hive-state")
+        project = @database.read do |db|
+          db[:projects].where(observed_path: @project_root).first ||
+            db[:projects].where(state_root_path: state_root).first
+        end
+        @project_id = project&.fetch(:project_id, nil)
+        return @project_id if @project_id
+
+        raise Hive::RuntimeControlPlane::IdentityError.new(
+          "Patrol project is not registered in the runtime control plane",
+          code: :missing_project_identity,
+          action: "enroll the project and rerun Patrol"
+        )
+      end
+
+      def retry_active?(hold, at: now)
+        hold && normalize_time(hold.fetch(:retry_not_before)) > normalize_time(at)
+      end
+
+      def exhaustion(reason, observed, engine:, retry_at: nil)
+        {
+          reason: reason, limit: @limit, observed: observed,
+          engine: engine.to_s, retry_at: retry_at
+        }
+      end
+
       def telemetry_identity
-        session_id = "patrol-launch-#{SecureRandom.uuid}"
-        { attempt_id: session_id, session_id: session_id }
+        id = "patrol-launch-#{SecureRandom.uuid}"
+        # A standalone Patrol launch is a telemetry session, not an Attempts
+        # lifecycle row. Keep it unattributed so the control-plane foreign key
+        # cannot manufacture an attempt identity that does not exist.
+        { attempt_id: nil, session_id: id }
+      end
+
+      def profile_name(profile, stage)
+        return profile.name.to_s if profile.respond_to?(:name)
+        return (@cfg.dig("refactor_patrol", "auto_fix", "agent") || "codex").to_s if
+          stage.start_with?("refactor-patrol-fix")
+        return (@cfg.dig("refactor_patrol", "agent") || "claude").to_s if
+          stage.start_with?("refactor-patrol")
+
+        (@cfg.dig("patrol", "agent") || "claude").to_s
       end
 
       def stage_engine(stage)
@@ -385,230 +341,21 @@ module Hive
         return nil unless inferred
         return inferred unless @engine
         raise ArgumentError, "discovery stage does not match configured engine" unless inferred == @engine
-
         inferred
       end
 
       def normalize_engine(value)
         engine = value.to_sym
         raise ArgumentError, "unknown patrol discovery engine #{value.inspect}" unless ENGINES.include?(engine)
-
         engine
       end
 
-      def date_for(value)
-        normalize_time(value).strftime("%Y-%m-%d")
-      end
-
-      def normalize_time(value)
-        value.respond_to?(:utc) ? value.utc : Time.parse(value.to_s).utc
-      end
-
-      def with_ledger_lock
-        @directory.prepare!
-        @directory.with_lock(LOCK_FILE) do
-          yield
-        end
-      end
-
-      def load_day(date)
-        bytes = @directory.read(day_path(date), max_bytes: MAX_DAY_BYTES, missing: true)
-        return empty_day(date) unless bytes
-
-        state = JSON.parse(bytes)
-        validate_day!(state, date)
-        state
-      end
-
-      def empty_day(date)
-        {
-          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
-          "date" => date, "projects" => {}
-        }
-      end
-
-      def persist_day(state)
-        date = state.fetch("date")
-        validate_day!(state, date)
-        content = "#{JSON.pretty_generate(state)}\n"
-        raise "discovery allowance day exceeds its size bound" if content.bytesize > MAX_DAY_BYTES
-
-        @directory.ensure_directory(DAY_DIRECTORY)
-        @directory.atomic_write(
-          day_path(date), content, mode: 0o600,
-          max_existing_bytes: MAX_DAY_BYTES
-        )
-      end
-
-      def validate_day!(state, expected_date)
-        valid = state.is_a?(Hash) &&
-          state.keys.sort == %w[date projects schema schema_version] &&
-          state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
-          state["date"] == expected_date && state["projects"].is_a?(Hash) &&
-          state["projects"].size <= MAX_PROJECTS_PER_DAY
-        raise "discovery allowance day schema is invalid" unless valid
-
-        validate_date!(state.fetch("date"))
-        state.fetch("projects").each do |project_id, project|
-          validate_project_identity!(project_id)
-          unless project.is_a?(Hash) && !project.empty? &&
-                 (project.keys - ENGINES.map(&:to_s)).empty?
-            raise "discovery allowance project lanes are invalid"
-          end
-          project.each { |engine, lane| validate_lane!(engine, lane, expected_date) }
-        end
-        true
-      end
-
-      def load_holds
-        bytes = @directory.read(HOLDS_FILE, max_bytes: MAX_HOLDS_BYTES, missing: true)
-        return empty_holds unless bytes
-
-        state = JSON.parse(bytes)
-        validate_holds!(state)
-        state
-      end
-
-      def empty_holds
-        {
-          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
-          "kind" => "provider_holds", "projects" => {}
-        }
-      end
-
-      def persist_holds(state)
-        validate_holds!(state)
-        content = "#{JSON.pretty_generate(state)}\n"
-        raise "discovery allowance holds exceed their size bound" if content.bytesize > MAX_HOLDS_BYTES
-
-        @directory.atomic_write(
-          HOLDS_FILE, content, mode: 0o600,
-          max_existing_bytes: MAX_HOLDS_BYTES
-        )
-      end
-
-      def validate_holds!(state)
-        valid = state.is_a?(Hash) &&
-          state.keys.sort == %w[kind projects schema schema_version] &&
-          state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
-          state["kind"] == "provider_holds" && state["projects"].is_a?(Hash) &&
-          state["projects"].size <= MAX_HELD_PROJECTS
-        raise "discovery allowance provider holds schema is invalid" unless valid
-
-        state.fetch("projects").each do |project_id, project|
-          validate_project_identity!(project_id)
-          unless project.is_a?(Hash) && !project.empty? &&
-                 (project.keys - ENGINES.map(&:to_s)).empty?
-            raise "discovery allowance provider hold lanes are invalid"
-          end
-          project.each do |engine, hold|
-            unless ENGINES.map(&:to_s).include?(engine) && hold.is_a?(Hash) &&
-                   hold.keys.sort == %w[reason retry_not_before] &&
-                   hold["reason"].is_a?(String) && !hold["reason"].empty? &&
-                   hold["reason"].bytesize <= 128 && hold["retry_not_before"].is_a?(String)
-              raise "discovery allowance provider hold is invalid"
-            end
-            normalize_time(hold.fetch("retry_not_before"))
-          end
-        end
-        true
-      end
-
-      def held_lane(state, engine)
-        state.dig("projects", @project_id, engine.to_s)
-      end
-
-      def day_path(date)
-        validate_date!(date)
-        File.join(DAY_DIRECTORY, "#{date}.json")
-      end
-
-      def validate_date!(date)
-        parsed = Date.iso8601(date.to_s)
-        raise "discovery allowance date is invalid" unless parsed.iso8601 == date
-
-        true
-      rescue ArgumentError
-        raise "discovery allowance date is invalid"
-      end
-
-      def validate_project_identity!(project_id)
-        return true if project_id.is_a?(String) && !project_id.empty? && project_id.bytesize <= 256
-
-        raise "discovery allowance project identity is invalid"
-      end
-
-      def validate_lane!(engine, lane, date)
-        expected = %w[ambiguous_rows reservations seed_state seeded_launches]
-        valid = ENGINES.map(&:to_s).include?(engine) && lane.is_a?(Hash) &&
-          lane.keys.sort == expected && %w[complete parked].include?(lane["seed_state"]) &&
-          lane["seeded_launches"].is_a?(Integer) && lane["seeded_launches"] >= 0 &&
-          lane["ambiguous_rows"].is_a?(Integer) && lane["ambiguous_rows"] >= 0 &&
-          lane["reservations"].is_a?(Array) &&
-          lane["reservations"].size <= MAX_RESERVATIONS_PER_LANE &&
-          lane["reservations"].size >= lane["seeded_launches"]
-        raise "discovery allowance lane is invalid" unless valid
-        if lane["seed_state"] == "parked" && lane["ambiguous_rows"].zero?
-          raise "discovery allowance parked seed lacks ambiguity evidence"
-        end
-        ids = {}
-        lane.fetch("reservations").each do |reservation|
-          unless reservation.is_a?(Hash) && reservation.keys.sort == %w[id reserved_at] &&
-                 reservation["id"].is_a?(String) && !reservation["id"].empty? &&
-                 reservation["id"].bytesize <= 256 && reservation["reserved_at"].is_a?(String)
-            raise "discovery allowance reservation is invalid"
-          end
-          raise "discovery allowance reservation is duplicated" if ids[reservation.fetch("id")]
-          ids[reservation.fetch("id")] = true
-          reserved_at = normalize_time(reservation.fetch("reserved_at"))
-          raise "discovery allowance reservation date is invalid" unless reserved_at.strftime("%Y-%m-%d") == date
-        end
-      end
-
-      def retry_active?(hold, at: now)
-        return false unless hold
-
-        value = hold["retry_not_before"]
-        value && normalize_time(at) < normalize_time(value)
-      end
-
-      def fallback_project_slug
-        "#{File.basename(@project_root)}-#{Digest::SHA256.hexdigest(@project_root)[0, 12]}"
-      end
-
-      def fallback_project_id
-        "unregistered:#{Digest::SHA256.hexdigest(@project_root)}"
-      end
-
-      def exhaustion(reason, observed, engine:, retry_at: nil)
-        {
-          reason: reason,
-          limit: reason == "daily_agent_spawn_limit" ? @max_agent_spawns_per_day : 1,
-          observed: reason == "daily_agent_spawn_limit" ? observed : 1,
-          engine: normalize_engine(engine).to_s,
-          retry_at: retry_at
-        }
-      end
-
-      def now
-        normalize_time(@clock.call)
-      end
-
-      def profile_name(profile, stage)
-        return profile.name.to_s if profile.respond_to?(:name)
-
-        if stage.start_with?("refactor-patrol-fix")
-          (@cfg.dig("refactor_patrol", "auto_fix", "agent") || "codex").to_s
-        elsif stage.start_with?("refactor-patrol")
-          (@cfg.dig("refactor_patrol", "agent") || "claude").to_s
-        else
-          (@cfg.dig("patrol", "agent") || "claude").to_s
-        end
-      end
-
-      def integer(value)
-        [ value.to_i, 0 ].max
-      end
+      def now = normalize_time(@clock.call)
+      def date_for(value) = normalize_time(value).strftime("%Y-%m-%d")
+      def normalize_time(value) = value.respond_to?(:utc) ? value.utc : Time.parse(value.to_s).utc
+      def timestamp_for(value) = Hive::RuntimeControlPlane::Codec.dump_time(normalize_time(value))
+      def integer(value) = [ Integer(value || 0), 0 ].max
+      def present_or(value, fallback) = value.to_s.strip.empty? ? fallback.to_s : value.to_s.strip
     end
   end
 end

@@ -179,7 +179,6 @@ class PatrolFixTaskActionTest < Minitest::Test
         "aliases" => [], "relations" => { "successor" => successor, "issues" => [] }
       )
       task = Hive::Task.new(folder)
-      seed_task_projection(folder, state_file: task.state_file)
       yield task, Hive::PatrolFix::ReceiptStore.new(task_folder: folder), root
     end
   end

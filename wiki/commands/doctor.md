@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-07-30
+updated: 2026-08-30
 tags: [command, preflight, skills, hive, openclaw, tmux, provisioning]
 ---
 
@@ -15,7 +15,9 @@ filesystem evidence is joined with the real runtime resolver and exact
 projection digests; Doctor does not launch supported agent CLIs, because even
 nominally read-only upstream commands can initialize user state. `--json` is
 the versioned `hive-doctor.v2` contract.
-Legacy tmux, QMD, and deprecated-config checks remain separate rows.
+Legacy tmux, QMD, and deprecated-config checks remain separate rows. When a
+runtime database or cutover manifest exists, Doctor also reports exact SQLite
+application/schema/integrity health without creating or migrating anything.
 
 ## Usage
 
@@ -30,6 +32,15 @@ does not launch Claude, Codex, Pi, or OpenClaw; invoke install/update commands;
 write aliases or skills; or call a model. An absent agent binary is an
 `unavailable`, non-blocking row. Legacy dependency checks remain bounded and
 separate from managed-agent inventory.
+
+## Runtime control-plane diagnosis
+
+Doctor opens no missing database. When SQLite or cutover evidence exists, it
+validates the immutable manifest, exact application/schema identity, lineage,
+and integrity. A corrupt or identity-mismatched manifest stays a typed failure
+even if the database file itself is healthy. An incomplete irreversible
+cutover reports `hive runtime status` / `hive runtime resume`; Doctor never
+falls back to legacy authority and never offers rollback, restore, or downgrade.
 
 The CLI loads the project through the shared `Hive::Config.load` boundary
 before constructing the doctor inspector. Unsupported project root keys
@@ -168,8 +179,9 @@ project.
 - `test/unit/agent_skills/openclaw_test.rb` covers filesystem-only ClawHub
   provenance from workspace and managed roots, legacy projection evidence,
   drift, missing binaries/skills, and an always-empty command audit.
-- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering and legacy
-  dependency rows. `doctor_managed_skills_test.rb` covers managed remediation,
+- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering, legacy
+  dependency rows, control-plane integrity, and corrupt-manifest diagnosis.
+  `doctor_managed_skills_test.rb` covers managed remediation,
   non-blocking unavailable agents, OpenClaw ownership, and byte-identical homes
   even when every available agent runner would mutate if called.
   `doctor_web_alias_test.rb` also runs independently and covers injected

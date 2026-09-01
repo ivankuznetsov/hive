@@ -6,7 +6,7 @@ require "hive/patrol_fix/task_manifest"
 require "hive/task"
 require "hive/task_journal"
 require "hive/task_meta"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 
 module HiveStatusProjectionScaleFixture
   TASK_COUNT = 251
@@ -17,39 +17,30 @@ module HiveStatusProjectionScaleFixture
     :project, :attempts, :deep_slug, :invalid_slug, :patrol_slug
   )
 
-  class AttemptProjectionFacade
-    attr_reader :logical_proof_count, :point_fetches, :fetches_by_id,
-                :proof_directory_enumerations
+  class AttemptStoreFacade
+    attr_reader :logical_proof_count, :point_fetches, :proof_directory_enumerations
 
     def initialize(attempts:, logical_proof_count:)
       @attempts = attempts
       @logical_proof_count = Integer(logical_proof_count)
       @point_fetches = 0
-      @fetches_by_id = Hash.new(0)
       @proof_directory_enumerations = 0
-      @bindings = {}
     end
 
-    def fetch_projection_binding(attempt_id)
-      key = attempt_id.to_s
-      return @bindings[key] if @bindings.key?(key)
-
+    def fetch(attempt_id)
       @point_fetches += 1
-      @fetches_by_id[key] += 1
-      @bindings[key] = @attempts[key]
+      @attempts[attempt_id.to_s]
     end
 
-    alias fetch fetch_projection_binding
+    def fetch_terminal_diagnostic_binding(_attempt_id) = nil
 
     def scan
       @proof_directory_enumerations += 1
       raise "routine status must not enumerate proof storage"
     end
-
-    def projection_reader = self
   end
 
-  class InstrumentedStore < Hive::TaskProjection::Store
+  class InstrumentedJournalReader < Hive::TaskProjection::Reader
     def initialize(counters:, **options)
       @scale_counters = counters
       @scale_counters[:stores] += 1
@@ -58,17 +49,15 @@ module HiveStatusProjectionScaleFixture
 
     private
 
-    def journal_bytes
-      @scale_counters[:full_journal_reads] += 1
-      raise "routine status must not read a complete task journal"
-    end
-
-    def journal_suffix(cursor, limit)
-      suffix, size, over = super
-      @scale_counters[:journal_suffix_bytes] += suffix.bytesize
-      @scale_counters[:journal_suffix_bytes_by_task][File.basename(task_folder)] +=
-        suffix.bytesize
-      [ suffix, size, over ]
+    def routine_snapshot(marker)
+      snapshot = super
+      bytes = snapshot.last
+      if bytes
+        @scale_counters[:journal_reads] += 1
+        @scale_counters[:journal_bytes] += bytes.bytesize
+        @scale_counters[:journal_bytes_by_task][File.basename(task_folder)] += bytes.bytesize
+      end
+      snapshot
     end
   end
 
@@ -103,10 +92,7 @@ module HiveStatusProjectionScaleFixture
       attempts: attempts
     )
     invalid = coding_tasks.last
-    File.write(
-      File.join(invalid.folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME),
-      "{\n"
-    )
+    File.write(File.join(invalid.folder, Hive::TaskJournal::JOURNAL_BASENAME), "{\n")
 
     Result.new(
       project: {
@@ -123,8 +109,8 @@ module HiveStatusProjectionScaleFixture
 
   def counters
     Hash.new(0).merge(
-      stores: 0, full_journal_reads: 0, journal_suffix_bytes: 0,
-      journal_suffix_bytes_by_task: Hash.new(0)
+      stores: 0, journal_reads: 0, journal_bytes: 0,
+      journal_bytes_by_task: Hash.new(0)
     )
   end
 
@@ -158,24 +144,15 @@ module HiveStatusProjectionScaleFixture
         slug: slug, id: id, stage: stage, workflow: workflow, index: index
       )
     end
-    File.write(
-      File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME),
-      events.map { |event| JSON.generate(event) }.join("\n") + "\n"
-    )
-    Hive::TaskProjection::Store.new(
-      task_folder: folder,
-      attempt_store: AttemptProjectionFacade.new(
-        attempts: attempts, logical_proof_count: 0
-      )
-    ).rebuild!
-    suffix = activity_event(
+    events << activity_event(
       event_id: "scale-suffix-#{id}", attempt_id: attempt_id,
       slug: slug, id: id, stage: stage, workflow: workflow,
       index: history_events + 1
     )
-    File.open(File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME), "a") do |journal|
-      journal.write("#{JSON.generate(suffix)}\n")
-    end
+    File.write(
+      File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME),
+      events.map { |event| JSON.generate(event) }.join("\n") + "\n"
+    )
     Hive::Task.new(folder)
   end
   private_class_method :write_task

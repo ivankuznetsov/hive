@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/task_activity"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class TaskActivityTest < Minitest::Test
   include HiveTestHelper
@@ -23,33 +23,9 @@ class TaskActivityTest < Minitest::Test
       assert_equal "attempt_dispatcher", record.dig("provenance", "source")
       assert_equal "2026-08-12T12:00:00.000000Z", record.fetch("observed_at")
 
-      checkpoint = File.join(dir, Hive::TaskProjection::Store::CHECKPOINT_BASENAME)
-      assert File.file?(checkpoint), "a durable activity must publish the bounded-read checkpoint"
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: dir, attempt_store: writer.attempt_store
-      ).read_bounded
+      projection = Hive::TaskProjection::Reader.new(task_folder: dir).read_bounded
       assert_equal "current", projection.state
       assert_empty projection.diagnostics
-    end
-  end
-
-  def test_checkpoint_refresh_failure_does_not_reject_a_durable_activity
-    with_activity do |activity, dir|
-      broken_store = Object.new
-      broken_store.define_singleton_method(:rebuild!) { raise "checkpoint unavailable" }
-      original_new = Hive::TaskProjection::Store.method(:new)
-      Hive::TaskProjection::Store.define_singleton_method(:new) { |**| broken_store }
-      begin
-        result = activity.record(
-          kind: "attempt_admitted", operation_id: "attempt/attempt-1/admitted",
-          reason: "durable attempt admitted", source: "attempt_dispatcher"
-        )
-      ensure
-        Hive::TaskProjection::Store.singleton_class.define_method(:new, original_new)
-      end
-
-      assert_equal "event-1", result.event_id
-      assert_equal 1, File.readlines(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)).size
     end
   end
 
@@ -422,7 +398,7 @@ class TaskActivityTest < Minitest::Test
 
   def with_activity(task_generation: 3)
     with_tmp_dir do |dir|
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task",

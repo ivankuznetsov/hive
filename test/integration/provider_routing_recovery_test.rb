@@ -3,7 +3,7 @@ require "hive/attempts/dispatcher"
 require "hive/attempts/finalization_maintenance"
 require "hive/daemon/recovery_coordinator"
 require "hive/provider_health/attempt_observer"
-require "hive/provider_health/store"
+require "hive/provider_health/repository"
 require "hive/provider_routing"
 
 class ProviderRoutingRecoveryTest < Minitest::Test
@@ -11,7 +11,10 @@ class ProviderRoutingRecoveryTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
   CAPABILITY = "c" * 64
-  Task = Data.define(:id, :slug, :folder, :state_file, :stage_index, :stage_name)
+  Task = Data.define(
+    :id, :slug, :folder, :state_file, :stage_index, :stage_name,
+    :project_root, :workflow
+  )
   Row = Data.define(
     :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
     :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
@@ -36,8 +39,21 @@ class ProviderRoutingRecoveryTest < Minitest::Test
   def test_failed_a_health_acknowledges_before_one_recovery_successor_selects_b
     with_tmp_dir do |root|
       task = build_task(root)
-      attempts = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
-      health = health_store(root, attempts)
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ).migrate!
+      attempts = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: database
+      )
+      register_runtime_project(
+        database: attempts.database, name: "demo", path: task.project_root,
+        state_root_path: File.join(task.project_root, ".hive-state")
+      )
+      prepare_test_task_lease_repository(task.folder, state_home: root)
+      dispatch = Hive::RuntimeControlPlane::DispatchRepository.new(
+        database: attempts.database, clock: -> { NOW }
+      )
+      health = health_store(attempts)
       launcher = Launcher.new
       ids = %w[attempt-a attempt-b].each
       dispatcher = Hive::Attempts::Dispatcher.new(
@@ -69,17 +85,16 @@ class ProviderRoutingRecoveryTest < Minitest::Test
       marker = provider_failure_marker(task, terminal)
       row = recovery_row(task, marker)
       coordinator = Hive::Daemon::RecoveryCoordinator.new(
-        state_home: root, task_resolver: ->(**_attributes) { task },
+        state_home: root, dispatch_repository: dispatch,
+        task_resolver: ->(**_attributes) { task },
         safety: ->(_observation) { [ true, "safe" ] }, attempt_store: attempts
       )
       queued = coordinator.request(
         row: row, requestor: "healer", request_id: "caller-id", now: NOW
       )
-      recovery = Hive::Daemon::DispatchRequestQueue.fetch(
-        queued.request_id, state_home: root
-      )
+      recovery = dispatch.fetch(queued.request_id)
 
-      assert_equal "queued", queued.status
+      assert_equal "queued", queued.status, queued.to_h.inspect
       assert_equal 1, queued.retry_count
       assert_equal terminal.attempt_id, recovery.predecessor_attempt_id
       assert_equal terminal.attempt_id,
@@ -97,9 +112,9 @@ class ProviderRoutingRecoveryTest < Minitest::Test
       assert_equal terminal.task_input_epoch, successor.attempt.task_input_epoch
       assert_equal policy.digest, successor.attempt["routing"].fetch("policy_digest")
       assert_equal 1, successor.attempt["retry_charge"]
-      assert_equal 2, attempts.scan.records.size
-      assert_equal 1,
-                   Hive::Daemon::DispatchRequestQueue.pending(state_home: root).size
+      assert_equal 2, attempts.active_attempts.size
+      assert_empty dispatch.pending
+      assert_equal "admitted", dispatch.fetch(recovery.request_id).state
       assert_equal 1, recovery.recovery.fetch("retry_count")
     end
   end
@@ -107,29 +122,25 @@ class ProviderRoutingRecoveryTest < Minitest::Test
   private
 
   def build_task(root)
-    folder = File.join(root, "task")
+    project_root = File.join(root, "demo")
+    folder = File.join(project_root, ".hive-state", "stages", "4-execute", "routed-task")
     FileUtils.mkdir_p(folder)
     state_file = File.join(folder, "task.md")
     File.write(state_file, "# Routed task\n")
+    File.write(
+      File.join(folder, Hive::TaskMeta::FILENAME),
+      { "id" => 42, "slug" => "routed-task", "workflow" => "coding" }.to_yaml
+    )
     Task.new(
       id: 42, slug: "routed-task", folder: folder, state_file: state_file,
-      stage_index: 4, stage_name: "execute"
+      stage_index: 4, stage_name: "execute", project_root: project_root,
+      workflow: nil
     )
   end
 
-  def health_store(root, attempts)
-    Hive::ProviderHealth::Store.new(
-      root: File.join(root, "provider-health"), clock: -> { NOW },
-      attempt_reader: lambda do |attempt_id|
-        record = attempts.fetch(attempt_id)
-        record && {
-          "attempt_id" => record.attempt_id,
-          "task_generation" => record.task_generation,
-          "ownership_fence" => record.ownership_generation,
-          "state" => record.state,
-          "probe_bindings" => record["routing"].fetch("probe_bindings", [])
-        }
-      end
+  def health_store(attempts)
+    Hive::ProviderHealth::Repository.new(
+      database: attempts.database, clock: -> { NOW }
     )
   end
 

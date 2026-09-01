@@ -1,5 +1,19 @@
 # Recovery
 
+## Runtime cutover recovery
+
+A `fleet_cutover_required` error is a controller-wide maintenance fence, not a
+task retry. Run the read-only `hive runtime status --json` first and report its
+`phase`, database status, `runtime_code`, and `next_action`. Do not run ordinary
+workflow commands while the fence is active.
+
+The SQLite cutover is irreversible. `hive migrate --all --yes` starts it and
+`hive runtime resume` advances an interrupted cutover; both change controller
+state and require explicit operator approval. There is no rollback, restore, or
+downgrade path. Never invent one or remove cutover evidence. After an approved
+resume, re-run `hive runtime status --json` and require `phase: active` with an
+`ok` database before returning to task operations.
+
 ## Diagnose before changing state
 
 Start with native evidence:
@@ -14,24 +28,17 @@ Use the operational row’s liveness, reasons, scheduler freshness, provider hol
 
 Preserve the task folder, worktree, attempt records, queue entries, locks, markers, and daemon snapshots while investigating. A stale physical lock, a stale durable attempt, and a provider or global-cap wait are different conditions.
 
-## Keep projection repair separate from workflow retry
+## Keep task-history recovery separate from workflow retry
 
-An operational row whose `evidence.marker_attrs.reason` is
-`condition_projection_repair_required` is synthetic and operator-owned. It is
-not a persisted workflow failure, so `workflow.retry`, marker clearing, or
-rerunning the stage cannot repair it. For a repairable row, run only its exact
-`evidence.marker_attrs.repair_command`, for example:
-
-```bash
-hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
-```
-
-Then refresh `hive status --operational --json`; no daemon restart is needed.
-If `projection_reason` is `checkpoint_oversized`,
-`attempt_ids_exhausted`, or `predecessor_fetches_exhausted`, there is
-deliberately no repair command. Repeating repair cannot fit the fixed bound;
-compact that task's retained projection history first. Do not create a
-migration, backfill, polling script, or watcher. Hive isolates the row and
+An operational row with `task_history_invalid: true` and reason
+`condition_task_history_invalid` is synthetic and operator-owned. Hive could
+not fold that task's authoritative `task-journal.jsonl`. This is not a persisted
+workflow failure, so `workflow.retry`, marker clearing, rerunning the stage, or
+restarting the daemon cannot repair it. Preserve the task folder, inspect the
+task-local journal diagnostic, and recover the JSONL only from verified task
+evidence or a trusted backup with explicit operator approval. Hive does not
+synthesize missing history and has no projection repair command. Refresh
+`hive status --operational --json` afterward. Hive isolates the row and
 continues unrelated work automatically.
 
 ## Respect recovery ownership

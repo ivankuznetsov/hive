@@ -96,8 +96,9 @@ class MixedAgentModelRoutingTest < Minitest::Test
   private
 
   def spawn_fake(dir, stage, profile, resolution)
-    folder = File.join(dir, stage)
+    folder = File.join(dir, ".hive-state", "stages", "4-execute", stage)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     task = Task.new(
       folder: folder,
       state_file: File.join(folder, "state.md"),

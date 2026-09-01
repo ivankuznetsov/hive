@@ -18,13 +18,13 @@ require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/attempts/api"
 require "hive/attempts/process_identity"
 require "hive/attempts/reconciler"
@@ -145,14 +145,14 @@ module Hive
         # Stale PID file from a prior crash → safe to remove.
         File.delete(pid_file) if File.exist?(pid_file)
         if @detach
-          Process.daemon(true, true)
+          Hive::RuntimeControlPlane::ProcessGuard.daemonize(true, true)
         end
 
         # A manually-started daemon must keep using the exact Hive CLI that
-        # launched it. Without an explicit HIVE_BIN, ChildSupervisor,
-        # StatusConsumer, and the display-name backfiller fall back to the
-        # first `hive` on PATH. That can silently mix a checkout daemon with
-        # an older packaged gem for every dispatched child. Service units
+        # launched it. Without an explicit HIVE_BIN, ChildSupervisor and the
+        # display-name backfiller fall back to the first `hive` on PATH. That
+        # can silently mix a checkout daemon with an older packaged gem for
+        # every dispatched child. StatusConsumer is in-process. Service units
         # already export HIVE_BIN; pin the equivalent value for foreground
         # and --detach starts while preserving an operator override.
         runtime_hive_bin_was_set = ENV.key?("HIVE_BIN")
@@ -228,7 +228,7 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
-        attempt_store = Hive::Attempts::Store.open_default(state_home: @hive_home)
+        attempt_store = Hive::Attempts::Repository.open_default(state_home: @hive_home)
         Hive::Config.ensure_project_identities!
         module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
@@ -238,8 +238,7 @@ module Hive
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           merge_intake: refactor_patrol_merge_reconciler,
-          store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
-          attempt_store_factory: -> { attempt_store.projection_reader },
+          store: Hive::Daemon::PrMergeRepository.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
@@ -291,18 +290,15 @@ module Hive
           finalization_maintenance: finalization_maintenance,
           logger: logger
         )
-        lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)
+        lost_outcome_store = Hive::Attempts::LostOutcomeTransition.new(store: attempt_store)
         lost_outcome_processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: attempt_store,
           outcome_store: lost_outcome_store,
           process_identity: attempt_process_identity
         )
         operational_snapshot = Hive::Daemon::OperationalSnapshot::Assembler.new(
-          store: Hive::Daemon::OperationalSnapshot::Store.new(
-            path: Hive::Paths.operational_snapshot_path(@hive_home)
-          ),
-          status_cache_store: Hive::Daemon::OperationalSnapshot::StatusCache::Store.new(
-            path: Hive::Paths.operational_status_cache_path(@hive_home)
+          repository: Hive::RuntimeControlPlane::OperationalRepository.new(
+            database: attempt_store.database
           ),
           daemon_identity: Hive::Daemon::OperationalSnapshot.daemon_identity(
             pid: Process.pid, process_start_time: own_start_time
@@ -386,7 +382,7 @@ module Hive
       def reexec_with_fresh_code!
         reexec_argv = [ "daemon", "start" ]
         reexec_argv << "--dry-run" if @dry_run
-        Kernel.method(:exec).call(Process.argv0, *reexec_argv)
+        Hive::RuntimeControlPlane::ProcessGuard.exec(Process.argv0, *reexec_argv)
       end
 
       def stop_daemon
@@ -584,17 +580,13 @@ module Hive
       end
 
       # `hive daemon queue [list|show <id>|prune]` (AN-1/2/3) — read-only
-      # operator/agent inspection of the file-backed dispatch-request
-      # queue the bot writes and the daemon consumes. Runs in the CLI
-      # process (no daemon contact); reads the same `<state_home>/
-      # dispatch_requests/` directory the daemon scans each tick.
+      # operator/agent inspection of the SQLite dispatch rows the bot writes
+      # and the daemon consumes. Runs in the CLI process without daemon contact.
       #
       #   list   default — every pending request with age, verb, and
       #          whether it is expired / still allowlisted.
       #   show   <id> — full payload for one request_id.
-      #   prune  remove expired + malformed request files (the daemon
-      #          does this lazily on its own tick; this lets an operator
-      #          force it without waiting).
+      #   prune  remove expired requests (the daemon also does this lazily).
       # Read-only dispatch-request queue inspection. Delegates to the
       # extracted QueueCommand (#254) — the queue concern touches only
       # @queue_args / @json / @hive_home, orthogonal to the daemon

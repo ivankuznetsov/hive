@@ -1,8 +1,10 @@
 require_relative "../../test_helper"
-require "hive/provider_health/store"
+require "hive/provider_health/repository"
 require "hive/provider_routing"
 
 class ProviderHealthValueObjectsTest < Minitest::Test
+  include HiveTestHelper
+
   def test_scope_and_route_identity_reject_invalid_composition
     assert_raises(Hive::ProviderHealth::InvalidScope) do
       Hive::ProviderHealth::Scope.new(kind: "account", account_id: "account-a")
@@ -31,14 +33,7 @@ class ProviderHealthValueObjectsTest < Minitest::Test
         scope: Object.new, journal_epoch: 0, observed_generation: 0
       )
     end
-    assert_raises(Hive::ProviderHealth::InvalidMutation) do
-      probe_intent([])
-    end
-    assert_raises(Hive::ProviderHealth::InvalidMutation) do
-      probe_intent([ requirement, requirement ])
-    end
-
-    assert_equal [ requirement.to_h ], probe_intent([ requirement ]).to_h.fetch("requirements")
+    assert_equal provider_scope.to_h, requirement.to_h.fetch("scope")
   end
 
   def test_attempt_corruption_and_evaluation_values_validate_types
@@ -50,12 +45,6 @@ class ProviderHealthValueObjectsTest < Minitest::Test
     end
     assert_equal route.to_h, attempt_binding.to_h.fetch("route")
 
-    assert_raises(Hive::ProviderHealth::InvalidMutation) do
-      corruption_token(scope: Object.new)
-    end
-    assert_raises(Hive::ProviderHealth::InvalidMutation) do
-      corruption_token(corruption_fingerprint: "not-a-digest")
-    end
     assert_raises(Hive::ProviderHealth::InvalidMutation) do
       Hive::ProviderHealth::RouteEvaluation.new(
         status: "eligible", inspections: [], blockers: [],
@@ -102,12 +91,30 @@ class ProviderHealthValueObjectsTest < Minitest::Test
     end
   end
 
-  def test_default_factory_uses_the_typed_store
+  def test_default_factory_uses_the_sql_repository
     Dir.mktmpdir("provider-health-values") do |root|
-      store = Hive::ProviderHealth.open(root: File.join(root, "health"))
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      store = Hive::ProviderHealth.open(database: database)
 
-      assert_instance_of Hive::ProviderHealth::Store, store
-      assert_equal [], store.reconcile!
+      assert_instance_of Hive::ProviderHealth::Repository, store
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_default_factory_reuses_the_process_control_plane
+    Dir.mktmpdir("provider-health-owner") do |root|
+      with_env("HIVE_HOME" => root) do
+        Hive::RuntimeControlPlane.disconnect
+        database = Hive::RuntimeControlPlane.database.migrate!
+        store = Hive::ProviderHealth.open
+
+        assert_same database, store.database
+      ensure
+        Hive::RuntimeControlPlane.disconnect
+      end
     end
   end
 
@@ -138,26 +145,10 @@ class ProviderHealthValueObjectsTest < Minitest::Test
     )
   end
 
-  def probe_intent(requirements)
-    Hive::ProviderHealth::ProbeIntent.new(
-      intent_id: "intent-1", attempt_id: "attempt-1",
-      task_generation: "generation-1", ownership_fence: "fence-1",
-      requirements: requirements
-    )
-  end
-
   def attempt_binding(route: self.route, probe_bindings: [ probe_binding ])
     Hive::ProviderHealth::AttemptBinding.new(
       attempt_id: "attempt-1", task_generation: "generation-1",
       ownership_fence: "fence-1", route: route, probe_bindings: probe_bindings
-    )
-  end
-
-  def corruption_token(scope: provider_scope, corruption_fingerprint: "a" * 64)
-    Hive::ProviderHealth::CorruptionToken.new(
-      scope: scope, journal_epoch: 0,
-      corruption_fingerprint: corruption_fingerprint,
-      last_verified_generation: 0
     )
   end
 end

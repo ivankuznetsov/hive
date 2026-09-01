@@ -1,7 +1,7 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/daemon_runtime"
@@ -37,11 +37,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       runtime.fetch(:module_dispatcher).dispatch(
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
-      first = runtime.fetch(:attempt_store).scan.records.first
+      first = runtime.fetch(:attempt_store).active_attempts.first
       terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
 
       result = runtime.fetch(:daemon_runtime).tick(now: NOW + 3).first
-      attempts = runtime.fetch(:attempt_store).scan.records.sort_by { |record| record["retry_charge"] }
+      attempts = runtime.fetch(:attempt_store).active_attempts.sort_by { |record| record["retry_charge"] }
 
       assert_equal :ok, result.fetch(:status)
       assert_equal 2, attempts.size
@@ -56,13 +56,13 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       runtime.fetch(:module_dispatcher).dispatch(
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
-      first = runtime.fetch(:attempt_store).scan.records.first
+      first = runtime.fetch(:attempt_store).active_attempts.first
       terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
       runtime.fetch(:store).disable("demo", now: NOW + 2)
 
       runtime.fetch(:daemon_runtime).tick(now: NOW + 3)
 
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
       run = JSON.parse(Dir.glob(File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")).then { |paths| File.read(paths.first) })
       assert_equal "failed", run.fetch("status")
       assert_equal "retry_closed", run.dig("retry", "reason")
@@ -74,7 +74,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       runtime.fetch(:module_dispatcher).dispatch(
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
-      first = runtime.fetch(:attempt_store).scan.records.first
+      first = runtime.fetch(:attempt_store).active_attempts.first
       terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
       capacity = Hive::Attempts::DispatchResult.new(
         status: :deferred, attempt: nil, receipt: nil,
@@ -109,14 +109,14 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       runtime.fetch(:module_dispatcher).dispatch(
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
-      first = runtime.fetch(:attempt_store).scan.records.first
+      first = runtime.fetch(:attempt_store).active_attempts.first
       terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
       runtime.fetch(:store).uninstall("demo", now: NOW + 2)
 
       result = runtime.fetch(:daemon_runtime).tick(now: NOW + 3).first
 
       assert_equal :idle, result.fetch(:status)
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
       assert_equal "failed", current_run(runtime).fetch("status")
       assert_equal "retry_closed", current_run(runtime).dig("retry", "reason")
 
@@ -137,7 +137,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
 
       runtime.fetch(:daemon_runtime).tick(now: NOW + 6)
 
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
       assert_equal "retry_closed", current_run(runtime).dig("retry", "reason")
     end
   end
@@ -168,7 +168,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
 
       assert_equal 1, first.fetch(:decisions)
       assert_equal 0, second.fetch(:decisions)
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
     end
   end
 
@@ -183,14 +183,14 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
     with_runtime(hooks: hooks) do |runtime|
       attempt_store = runtime.fetch(:attempt_store)
-      admission_open = -> { attempt_store.scan.records.empty? }
+      admission_open = -> { attempt_store.active_attempts.empty? }
 
       interrupted = runtime.fetch(:daemon_runtime).tick(
         now: NOW + 1, admission_open: admission_open
       ).first
 
       assert_equal 1, interrupted.fetch(:decisions)
-      assert_equal 1, attempt_store.scan.records.size
+      assert_equal 1, attempt_store.active_attempts.size
       cursor = File.join(
         runtime.fetch(:store).hive_state_path,
         "module-runtime", "daemon-event-cursor.json"
@@ -204,7 +204,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
 
       assert_equal 2, replayed.fetch(:decisions),
                    "the first hook replays idempotently and the second remains eligible"
-      assert_equal 2, attempt_store.scan.records.size,
+      assert_equal 2, attempt_store.active_attempts.size,
                    "replay must not duplicate the already-admitted hook attempt"
       assert_equal 1, JSON.parse(File.binread(cursor)).fetch("cursor")
       assert_equal 0, runtime.fetch(:daemon_runtime).tick(
@@ -221,7 +221,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       )
 
       assert_empty results
-      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:attempt_store).active_attempts
     end
   end
 
@@ -246,7 +246,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       end
 
       assert_equal 0, result.fetch(:decisions)
-      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:attempt_store).active_attempts
       refute_path_exists File.join(
         store.hive_state_path, "module-runtime", "daemon-event-cursor.json"
       )
@@ -258,7 +258,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       runtime.fetch(:module_dispatcher).dispatch(
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
-      first = runtime.fetch(:attempt_store).scan.records.first
+      first = runtime.fetch(:attempt_store).active_attempts.first
       terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
       admission = true
       store = runtime.fetch(:store)
@@ -278,7 +278,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         )
       end
 
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
     end
   end
 
@@ -287,7 +287,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       runtime.fetch(:module_dispatcher).dispatch(
         module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
       )
-      attempt = runtime.fetch(:attempt_store).scan.records.first
+      attempt = runtime.fetch(:attempt_store).active_attempts.first
       terminalize(runtime.fetch(:attempt_store), attempt, outcome: "succeeded")
 
       runtime.fetch(:daemon_runtime).tick(now: NOW + 3)
@@ -315,7 +315,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
 
   def test_empty_and_corrupt_projects_return_idle_or_bounded_blocked_results
     with_tmp_dir do |root|
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,
         capability_generator: -> { CAPABILITY }
@@ -425,7 +425,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         setup_context: { project_id: "project-1", project: "demo" },
         now: NOW - 60
       )
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      register_runtime_project(
+        database: attempt_store.database, name: "demo", path: File.join(root, "project"),
+        state_root_path: state, project_id: "project-1"
+      )
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,
         capability_generator: -> { CAPABILITY }
@@ -445,7 +449,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       assert_equal 1, first.fetch(:decisions)
       assert_equal 0, second.fetch(:decisions)
       assert_nil store.inspect_setup_outbox("demo")
-      assert_equal 1, attempt_store.scan.records.size
+      assert_equal 1, attempt_store.active_attempts.size
       event = Hive::Modules::EventLedger.new(
         root: File.join(state, "module-runtime")
       ).all.fetch(0)
@@ -480,7 +484,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      register_runtime_project(
+        database: attempt_store.database, name: "demo", path: File.join(root, "project"),
+        state_root_path: state, project_id: "project-1"
+      )
       counter = 0
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,

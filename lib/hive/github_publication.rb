@@ -156,6 +156,18 @@ module Hive
         }.freeze
       end
 
+      def ancestor?(worktree_path:, ancestor_oid:, head_oid:)
+        result = Hive::AgentGitGate.read(
+          worktree_path, :ancestor,
+          base_oid: ancestor_oid, head_oid: head_oid
+        )
+        return true if result.success?
+        return false if result.exitstatus == 1 && !result.overflow
+
+        raise Hive::AgentGitGate::PublicationFailed,
+              "publication ancestry could not be verified"
+      end
+
       def push_exact(worktree_path:, branch:, head_oid:, expected_remote_oid:)
         receipt = Hive::AgentGitGate.publish(
           repository_path: worktree_path, oid: head_oid, branch: branch,
@@ -310,6 +322,9 @@ module Hive
           ensure_secret_free!(request)
           authenticate(request)
           state = read_state || initialize_state(request, revalidate)
+          return reconcile_revision(request, state, revalidate) if
+            observed_publication_revision?(state, request)
+
           validate_request!(state, request)
           reconcile(request, state, revalidate)
         end
@@ -365,6 +380,153 @@ module Hive
         end
       end
 
+      # A coding task can legitimately return from review/artifact rework with
+      # new commits while its controller-owned draft PR remains open. Keep the
+      # original state as the immutable ownership anchor, prove the hosted PR
+      # still carries that exact title/body marker, and permit only a local
+      # fast-forward of the same branch. The PR body is refreshed later by the
+      # existing finalize stage; this boundary owns only safe branch custody.
+      def reconcile_revision(request, state, revalidate)
+        record = revision_pull_request(request, state)
+        hosted_state = hosted_state(record)
+        if %w[closed merged].include?(hosted_state)
+          unless record.fetch("head_oid") == request.head_oid
+            blocked!(
+              "revision_hosted_terminal",
+              "pull request became terminal before the publication revision was hosted"
+            )
+          end
+          revalidate!(revalidate, :final)
+          return revision_observation(state, request, record, head_oid: request.head_oid)
+        end
+
+        remote = observe(request)
+        remote_oid = remote.fetch("oid")
+        unless remote_oid == record.fetch("head_oid")
+          blocked!(
+            "revision_remote_conflict",
+            "controller-owned pull-request head does not match the remote branch"
+          )
+        end
+        unless revision_ancestor?(request, state.fetch("head_oid"), remote_oid)
+          blocked!(
+            "revision_history_rewritten",
+            "hosted pull-request head no longer contains the owned publication"
+          )
+        end
+        unless revision_ancestor?(request, remote_oid, request.head_oid)
+          blocked!(
+            "revision_non_fast_forward",
+            "local publication revision does not contain the hosted pull-request head"
+          )
+        end
+
+        if remote_oid != request.head_oid
+          revalidate!(revalidate, :before_push)
+          begin
+            receipt = @git.push_exact(
+              worktree_path: request.worktree_path, branch: request.branch,
+              head_oid: request.head_oid, expected_remote_oid: remote_oid
+            )
+            validate_push_receipt!(
+              receipt, remote_oid, request, code: "revision_push_outcome_unknown"
+            )
+          rescue Blocked
+            raise
+          rescue StandardError
+            after_failure = observe(request)
+            unless after_failure.fetch("oid") == request.head_oid
+              blocked!(
+                "revision_push_outcome_unknown",
+                "publication revision push outcome requires reconciliation"
+              )
+            end
+          end
+          after = observe(request)
+          unless after.fetch("oid") == request.head_oid
+            blocked!(
+              "revision_push_not_observed",
+              "publication revision was not observed at the reviewed head"
+            )
+          end
+        end
+
+        revalidate!(revalidate, :final)
+        revision_observation(state, request, record, head_oid: request.head_oid)
+      end
+
+      def observed_publication_revision?(state, request)
+        return false unless state.fetch("phase") == "pr_observed" && state.fetch("pr")
+
+        expected = identity(request)
+        return false if expected.all? { |key, value| state[key] == value }
+
+        %w[host repository base_branch creation_base_oid branch draft].all? do |key|
+          state[key] == expected[key]
+        end && state.fetch("title_digest") == request.title_digest &&
+          state.fetch("head_oid") != request.head_oid
+      end
+
+      def revision_pull_request(request, state)
+        records = complete_inventory(request)
+        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
+        exact = candidates.select { |record| revision_owned?(record, state, request) }
+        return exact.first if candidates.one? && exact.one?
+
+        blocked!(
+          "revision_identity_conflict",
+          "controller-owned pull-request revision identity requires operator reconciliation"
+        )
+      end
+
+      def revision_owned?(record, state, request)
+        prior = state.fetch("pr")
+        marker = publication_marker(state)
+        prior_body = "#{request.body.rstrip}\n\n#{marker}\n"
+        record.fetch("number") == prior.fetch("number") &&
+          record.fetch("url") == prior.fetch("url") &&
+          record.fetch("head_repository")&.casecmp?(request.repository) &&
+          record.fetch("base_branch") == request.base_branch &&
+          record.fetch("base_repository").casecmp?(request.repository) &&
+          record.fetch("title") == request.title &&
+          record.fetch("body") == prior_body &&
+          Digest::SHA256.hexdigest(record.fetch("title")) == state.fetch("title_digest") &&
+          Digest::SHA256.hexdigest(record.fetch("body")) == state.fetch("body_digest") &&
+          Digest::SHA256.hexdigest(marker) == state.fetch("marker_digest")
+      end
+
+      def publication_marker(state)
+        "<!-- hive-publication:v1 id=#{state.fetch('publication_id')} " \
+          "base=#{state.fetch('creation_base_oid')} -->"
+      end
+
+      def revision_ancestor?(request, ancestor_oid, head_oid)
+        @git.ancestor?(
+          worktree_path: request.worktree_path,
+          ancestor_oid: ancestor_oid, head_oid: head_oid
+        ).equal?(true)
+      rescue StandardError
+        blocked!(
+          "revision_ancestry_unavailable",
+          "publication revision ancestry could not be verified"
+        )
+      end
+
+      def revision_observation(state, request, record, head_oid:)
+        state.fetch("pr").merge(
+          "head_oid" => head_oid,
+          "hosted_state" => hosted_state(record),
+          "observed_at" => timestamp,
+          "diff_digest" => request.diff_digest
+        )
+      end
+
+      def hosted_state(record)
+        return record.fetch("state").downcase unless record.fetch("state") == "OPEN"
+
+        record.fetch("draft") ? "draft" : "open"
+      end
+
       def reconcile_push(request, state, revalidate)
         current = observe(request)
         if current.fetch("oid") == request.head_oid
@@ -405,7 +567,7 @@ module Hive
             head_oid: request.head_oid,
             expected_remote_oid: state.fetch("expected_remote_oid")
           )
-          validate_push_receipt!(receipt, state, request)
+          validate_push_receipt!(receipt, state.fetch("expected_remote_oid"), request)
         rescue Blocked
           raise
         rescue StandardError
@@ -572,18 +734,13 @@ module Hive
       end
 
       def observe_pr(state, request, record)
-        hosted = if record.fetch("state") == "OPEN"
-          record.fetch("draft") ? "draft" : "open"
-        else
-          record.fetch("state").downcase
-        end
         pr = identity(request).slice(
           "publication_id", "host", "repository", "base_branch",
           "creation_base_oid", "branch", "head_oid", "diff_digest",
           "title_digest", "body_digest", "marker_digest"
         ).merge(
           "number" => record.fetch("number"), "url" => record.fetch("url"),
-          "hosted_state" => hosted, "observed_at" => timestamp
+          "hosted_state" => hosted_state(record), "observed_at" => timestamp
         )
         write_state(state.merge(
           "phase" => "pr_observed", "pr" => pr, "updated_at" => timestamp
@@ -607,8 +764,9 @@ module Hive
       end
 
       def ensure_secret_free!(request)
-        fields = { "title" => request.title, "body" => request.published_body, "diff" => request.diff }
+        fields = { "title" => request.title, "body" => request.published_body }
         detected = fields.keys.select { |key| Hive::SecretPatterns.match?(fields.fetch(key)) }
+        detected << "diff" if Hive::SecretPatterns.match_diff?(request.diff)
         return if detected.empty?
 
         blocked!("secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes")
@@ -738,14 +896,14 @@ module Hive
           value["remote_fingerprint"].to_s.match?(DIGEST)
       end
 
-      def validate_push_receipt!(value, state, request)
+      def validate_push_receipt!(value, expected_oid, request, code: "push_outcome_unknown")
         fields = %w[expected_oid before_oid after_oid remote_fingerprint]
         unless value.is_a?(Hash) && value.keys.sort == fields.sort &&
-               value["expected_oid"] == state.fetch("expected_remote_oid") &&
-               value["before_oid"] == state.fetch("expected_remote_oid") &&
+               value["expected_oid"] == expected_oid &&
+               value["before_oid"] == expected_oid &&
                value["after_oid"] == request.head_oid &&
                value["remote_fingerprint"].to_s.match?(DIGEST)
-          blocked!("push_outcome_unknown", "remote push outcome requires reconciliation")
+          blocked!(code, "remote push outcome requires reconciliation")
         end
       end
 

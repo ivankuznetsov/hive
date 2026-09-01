@@ -16,6 +16,13 @@ resolution can authorize `3-plan` to `4-execute`. Markers, generic approval,
 `--force`, daemon automation, Web forms, and direct execute entry cannot replace
 that authority.
 
+An implementation returned from `7-artifacts` by the native outcome-evidence
+rework command retains that already-used clearance when reviewer routing changes
+later. The exact rework receipt and current evidence package must validate first;
+the reviewed plan digest, task generation, executable resolution, and empty
+blocker set remain mandatory. Raw moves and first-time plan transitions still
+require the current review policy fingerprint.
+
 ## Applicability and boundary
 
 The first release applies only when all of these are true:
@@ -40,10 +47,12 @@ rollback/reversibility text, file count/locality, protected-path matches, and
 bounded risk text. It never executes project code and rejects symlinks,
 traversal, invalid UTF-8, oversized input, and malformed evidence.
 Declared-file and test evidence may use repeated Markdown headings or repeated
-bold labels such as `**Files:**` and `**Test scenarios:**`. Oversized YAML
-frontmatter remains explicit uncertainty rather than disappearing, and a
-recognized literal credential pattern always selects mandatory review even
-when nearby prose never says "secret" or "credential".
+bold labels such as `**Files:**` and `**Test scenarios:**`. Bold labels may be
+list-prefixed or carry their first value inline, and test scenarios may use
+ordered or unordered Markdown lists. An unquoted YAML date is valid
+frontmatter. Oversized YAML frontmatter remains explicit uncertainty rather
+than disappearing, and a recognized literal credential pattern always selects
+mandatory review even when nearby prose never says "secret" or "credential".
 
 | Level | Rule | Availability behavior |
 |---|---|---|
@@ -85,6 +94,14 @@ validated output path, and the live plan-review records remain under
 ArtifactFirewall detection and restore. One manifest captures the entire
 authority history; its default bound is 128 and this explicit consumer widens
 it only to the exact inventory, subject to the hard 4096-entry ceiling.
+Hive's review-session journal, derived projection, and bounded projection
+checkpoint are excluded only from this review-time manifest because the
+controller updates all three while the provider is running. Canonical
+`plan.md`, task metadata, and every existing plan-review record remain anchored.
+Reviews blocked by the former checkpoint false positive are re-entered once per
+affected initial-review role when their immutable route carries the exact
+runner diagnostic. A versioned recovery reset prevents repeated retries and
+reviewer-authored or unrelated custody failures remain operator-owned.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,
@@ -123,13 +140,14 @@ diagnostic receives the same bounded, versioned, daemon-runnable recovery.
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one
 attempt series for primary, adversarial, verification, and original-planner
-revision legs. Exhausting a mandatory primary or adversarial series persists a
-recovery reset instead of converting missing required coverage into an
-operator waiver prompt. The daemon opens the next series after a deterministic
-five-minute exponential cooldown capped at 24 hours; a legacy blocked record
-whose latest required initial leg is an attempted transient outcome enters the
-same recovery path. Standard review degradation and the separately bounded
-verification and planner-revision loops are unchanged. Provider-route
+revision legs. Exhausting a mandatory primary or adversarial series, or any
+transient planner-revision series, persists a recovery reset instead of
+terminalizing the provider outage. The daemon opens the next series after a
+deterministic five-minute exponential cooldown capped at 24 hours; exact legacy
+blocked records produced by the old exhaustion behavior enter the same recovery
+path. Standard review degradation and the verification transient bound are
+unchanged. The separate cap on successful planner-revision rounds still fences
+plans whose defects survive repeated revisions. Provider-route
 exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded
 exponential delay with deterministic jitter rather than a hot retry loop.
@@ -181,6 +199,18 @@ of four classes:
 - `manual`: requires an answer, then planner incorporation and verification;
 - `fyi`: retained as non-blocking evidence.
 
+The primary and adversarial prompts classify by decision authority rather than
+severity. That prompt-level taxonomy is authoritative for the final Hive JSON,
+even when primary review invokes a skill with a different internal routing
+rubric. A routine, repository-grounded technical correction is `safe_auto`;
+`gated_auto` is reserved for a clear correction that itself crosses a material
+approval boundary. `manual` is reserved for a choice the existing contract and
+repository patterns cannot safely determine when the alternatives materially
+change product scope, authority or trust, privacy or compliance, risk
+acceptance, irreversible external effects, or architectural direction. Merely
+needing to choose, decide, specify, or add detail does not make a finding
+manual.
+
 The fingerprint binds classification, risk, source, and exact plan evidence,
 but deliberately excludes model-authored title, description, and excerpt
 prose. The adapter verifies each `plan.md` line range and its normalized
@@ -194,7 +224,7 @@ refuse a non-Git temporary directory. Each call writes one immutable,
 digest-named `candidate-plan-<sha256>.md`. Its ArtifactFirewall custody is
 passed into the shared agent launcher, so the protected snapshot surrounds only the untrusted
 provider process. Hive's own durable session-start/session-finish writes to
-`task-journal.jsonl` and `task-projection.json` occur outside that interval;
+`task-journal.jsonl` occur outside that interval;
 they cannot be misclassified as planner tampering, while provider writes to
 the same anchors still fail closed and are restored. A launcher that returns
 success without invoking the supplied custody is rejected. Hive then runs a
@@ -203,12 +233,26 @@ ending in the exact `COMPLETE` marker remains authoritative completion evidence
 when a provider's terminal telemetry is malformed or truncated. Missing,
 non-terminal, oversized, invalid, or tampered candidates still fail closed.
 Planner-revision attempt receipts carry the result-adjudication contract
-version. When an exhausted transient series predates the running contract,
-Hive opens one new bounded attempt series automatically; a fixed harness can
-therefore recover without an operator manufacturing a linked plan generation.
-The task-action classifier exposes only this stale-contract blocked state as
-`plan_reviewing`, allowing the daemon to enter the recovery path while current
-blocked verdicts remain terminal and operator-owned.
+version. Every exhausted transient series opens another bounded series after
+the shared widening cooldown, so a recovered planner route resumes the same
+review lineage without an operator manufacturing a linked plan generation or
+raising global attempt capacity. The task-action classifier also exposes the
+exact planner-owned transient blocks written by older builds as
+`plan_reviewing`, allowing the daemon to migrate them into paced recovery.
+Stale-contract records retain their versioned adjudication reset. Invalid
+candidate results and other terminal planner outcomes remain blocked and
+operator-owned.
+
+Projects may configure the optional operational
+`plan_review.routes.planner_revision_fallback` route. Hive still tries the
+captured planner first; after a transient revision failure it uses the fallback
+for subsequent attempts in the same lineage, including later cooled series.
+The fallback is deliberately excluded from the reviewer-policy fingerprint so
+recovery preserves all finding decisions. It has no authority to change review
+routes or verdicts: each revision receipt names both the original planner
+authority and the effective fallback route, while reviewer-route changes still
+rekey the review.
+
 Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
 generic critique does not verify it. A
@@ -340,6 +384,13 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
+A retired projection-checkpoint rollout briefly included Hive's own
+`task-projection.checkpoint.json` write in reviewer custody. The current
+reviewer firewall excludes that orchestrator-owned file. Exact historical
+runner diagnostics for this false positive receive one versioned recovery
+reset for primary, adversarial, or verification; unrelated diagnostics and a
+second failure under the current contract remain terminal.
+
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An
 agent with unrestricted same-user shell access therefore has CLI authority.
@@ -355,7 +406,7 @@ manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 
-`hive-status.v7` and `hive-operational-status.v4` contain one required nullable
+`hive-status.v8` and `hive-operational-status.v4` contain one required nullable
 `plan_review` field. Applicable rows include review and observation identity,
 computed/effective level, state/outcome, degradation reason, attempt/current
 attempt, coverage and finding counts, blockers/owner/reason, retry time, one

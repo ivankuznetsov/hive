@@ -185,6 +185,42 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  def test_reviewed_implementation_rework_keeps_clearance_across_policy_drift
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      publish_projection(task, cfg, state: "cleared")
+      changed_cfg = Marshal.load(Marshal.dump(cfg))
+      changed_cfg["plan_review"]["adapter"] = "replacement-review-adapter"
+
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+          task:, config: changed_cfg
+        )
+      end
+      assert_includes error.message, "policy changed"
+
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+        task:, config: changed_cfg, reviewed_rework: true
+      )
+
+      task.id = 43
+      changed_generation = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+          task:, config: changed_cfg, reviewed_rework: true
+        )
+      end
+      assert_includes changed_generation.message, "task generation changed"
+      task.id = 42
+
+      File.write(File.join(task.folder, "plan.md"), "# changed after review\n")
+      changed_plan = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+          task:, config: changed_cfg, reviewed_rework: true
+        )
+      end
+      assert_includes changed_plan.message, "canonical plan changed"
+    end
+  end
+
   def test_invalid_review_inputs_are_normalized_to_blocked_or_invalid_results
     with_task do |task, cfg|
       error = assert_raises(Hive::PlanReview::TransitionBlocked) do

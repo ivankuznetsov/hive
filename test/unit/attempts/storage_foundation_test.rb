@@ -1,902 +1,211 @@
 require "test_helper"
-require "date"
-require "json"
-require "hive/attempts/store"
-require "hive/attempts/permanent_proof_store"
-require "hive/attempts/decision_index"
-require "hive/attempts/pending_finalization_store"
+require "hive/attempts/repository"
 
 class AttemptsStorageFoundationTest < Minitest::Test
   include HiveTestHelper
 
-  NOW = Time.utc(2026, 8, 9, 12, 0, 0)
+  NOW = Time.utc(2026, 8, 10, 12)
   CLAIM_CAPABILITY = "c" * 64
 
-  def test_point_storage_enumeration_is_bounded_and_rejects_non_directory_shards
-    with_tmp_dir do |root|
-      storage = Hive::Attempts::PointStorage.new(root: root, label: "test storage")
-      %w[first second].each do |key|
-        storage.write(
-          "projection", { "id" => key }, "#{key}\n",
-          expected_bytes: nil, max_existing_bytes: 1024
-        )
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        storage.each_entry("projection", max_entries: 1, max_bytes: 1024).to_a
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        storage.each_entry("projection", max_entries: "invalid", max_bytes: 1024).to_a
-      end
-
-      broken_root = File.join(root, "broken")
-      broken = Hive::Attempts::PointStorage.new(root: broken_root, label: "broken storage")
-      FileUtils.mkdir_p(File.join(broken_root, "projection"))
-      File.write(File.join(broken_root, "projection", "aa"), "not-a-directory")
-      assert_raises(Hive::Attempts::StoreError) do
-        broken.each_entry("projection", max_entries: 2, max_bytes: 1024).to_a
-      end
-    end
-  end
-
-  def test_store_fetches_permanent_proof_without_enumerating_it
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      proofs = 64.times.map do |index|
-        terminal = terminal_record(
-          store,
-          attempt_id: "cold-attempt-#{index}",
-          request_id: "cold-request-#{index}",
-          now: NOW + index
-        )
-        store.permanent_proofs.publish(terminal)
-        File.unlink(store.record_path(terminal.attempt_id))
-        terminal
-      end
-
-      scan = store.scan
-
-      assert_empty scan.records
-      assert_empty scan.invalid_records
-      assert_equal proofs.last.to_h, store.fetch(proofs.last.attempt_id).to_h
-      assert_equal Hive::Attempts::Record::SCHEMA_VERSION,
-                   store.fetch(proofs.last.attempt_id)["schema_version"]
-    end
-  end
-
-  def test_projection_binding_skips_unrelated_output_and_receipt_validation
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
-      terminal = terminal_record(
-        source, attempt_id: "projection-proof", request_id: "projection-request"
-      )
-      store.permanent_proofs.publish(terminal)
-      File.unlink(store.permanent_proofs.projection_binding_path_for(terminal.attempt_id))
-
-      replacement = ->(*) { raise "full record validation must not run" }
-      binding = with_replaced_singleton_method(
-        Hive::Attempts::Record, :new, replacement
-      ) do
-        store.fetch_projection_binding(terminal.attempt_id)
-      end
-
-      assert_equal terminal.attempt_id, binding.fetch("attempt_id")
-      assert_equal terminal.task_input_epoch, binding.fetch("task_input_epoch")
-      assert_equal terminal.state, binding.fetch("state")
-      assert_equal terminal.outcome, binding.fetch("outcome")
-      assert_equal Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS.sort,
-                   binding.keys.sort
-
-      backfilled = store.permanent_proofs.backfill_projection_binding(terminal.attempt_id)
-      assert_equal binding, backfilled
-      assert File.file?(store.permanent_proofs.projection_binding_path_for(terminal.attempt_id))
-
-      File.binwrite(store.permanent_proofs.path_for(terminal.attempt_id), "{")
-      assert_equal binding, store.fetch_projection_binding(terminal.attempt_id)
-    end
-  end
-
-  def test_projection_binding_rejects_malformed_oversized_and_conflicting_sidecars
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
-      terminal = terminal_record(
-        source, attempt_id: "binding-proof", request_id: "binding-request"
-      )
-      binding = terminal.to_h.slice(
-        *Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS
-      )
-
-      invalid_full_record = terminal.to_h.except("schema")
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.send(
-          :parse_projection_binding, JSON.generate(invalid_full_record),
-          expected_attempt_id: terminal.attempt_id
-        )
-      end
-
-      too_large = "{" + (" " * Hive::Attempts::PermanentProofStore::MAX_PROJECTION_BINDING_BYTES) + "}"
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.send(
-          :parse_projection_binding_document, too_large,
-          expected_attempt_id: terminal.attempt_id
-        )
-      end
-
-      invalid_documents = [
-        { "schema" => "wrong", "schema_version" => 1, "binding" => binding },
-        {
-          "schema" => Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_SCHEMA,
-          "schema_version" => 1,
-          "binding" => binding.except("task_slug")
-        }
-      ]
-      invalid_documents.each do |document|
-        assert_raises(Hive::Attempts::StoreError) do
-          proof.send(
-            :parse_projection_binding_document, JSON.generate(document),
-            expected_attempt_id: terminal.attempt_id
-          )
-        end
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.send(
-          :parse_projection_binding_document, "{",
-          expected_attempt_id: terminal.attempt_id
-        )
-      end
-
-      oversized_binding = binding.merge(
-        "task_slug" => "x" * Hive::Attempts::PermanentProofStore::MAX_PROJECTION_BINDING_BYTES
-      )
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.send(:publish_projection_binding, terminal.attempt_id, oversized_binding)
-      end
-
-      proof.publish(terminal)
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.send(
-          :publish_projection_binding, terminal.attempt_id,
-          binding.merge("task_slug" => "changed-task")
-        )
-      end
-    end
-  end
-
-  def test_projection_binding_validates_each_immutable_field_family
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
-      terminal = terminal_record(
-        source, attempt_id: "binding-validation", request_id: "binding-request"
-      )
-      binding = terminal.to_h.slice(
-        *Hive::Attempts::PermanentProofStore::PROJECTION_BINDING_KEYS
-      )
-
-      invalid_bindings = [
-        binding.merge("task_slug" => ""),
-        binding.merge("task_input_epoch" => -1),
-        binding.merge("predecessor_attempt_id" => 1),
-        binding.merge("task_id" => []),
-        binding.merge("outcome" => nil),
-        binding.merge("state" => "lost", "outcome" => "completed")
-      ]
-      invalid_bindings.each do |invalid|
-        assert_raises(Hive::Attempts::InvalidRecord) do
-          proof.send(
-            :validate_projection_binding!, invalid,
-            expected_attempt_id: terminal.attempt_id
-          )
-        end
-      end
-    end
-  end
-
-  def test_hot_record_wins_during_interrupted_proof_promotion
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      hot = terminal_record(store, attempt_id: "duplicate", request_id: "request")
-      proof = hot.with("diagnostics" => { "copy" => "proof" })
-      store.permanent_proofs.publish(proof)
-
-      fetched = store.fetch(hot.attempt_id)
-
-      assert_equal hot.to_h, fetched.to_h
-      refute_equal proof["diagnostics"], fetched["diagnostics"]
-    end
-  end
-
-  def test_proof_is_immutable_and_invalid_collision_or_symlink_fails_closed
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      proof = Hive::Attempts::PermanentProofStore.new(
-        root: File.join(root, "proof")
-      )
-      terminal = terminal_record(source, attempt_id: "proof-attempt", request_id: "request")
-
-      assert_equal terminal.to_h, proof.publish(terminal).to_h
-      assert_equal terminal.to_h, proof.publish(terminal).to_h
-      assert_equal 0o600, File.stat(proof.path_for(terminal.attempt_id)).mode & 0o777
-
-      conflicting = terminal.with("diagnostics" => { "changed" => true })
-      assert_raises(Hive::Attempts::StoreError) { proof.publish(conflicting) }
-
-      collision = terminal_record(
-        source,
-        attempt_id: "other-attempt",
-        request_id: "other-request",
-        now: NOW + 10
-      )
-      File.binwrite(proof.path_for(terminal.attempt_id), JSON.generate(collision.to_h) + "\n")
-      assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
-
-      outside = File.join(root, "outside-proof.json")
-      File.write(outside, "outside")
-      File.unlink(proof.path_for(terminal.attempt_id))
-      File.symlink(outside, proof.path_for(terminal.attempt_id))
-      assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
-      assert_equal "outside", File.binread(outside)
-    end
-  end
-
-  def test_decision_indexes_preserve_newest_order_and_successful_owner
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-      older = terminal_record(
-        source,
-        attempt_id: "attempt-a",
-        request_id: "same-request",
-        outcome: "failed",
-        exit_status: Hive::ExitCodes::TEMPFAIL,
-        now: NOW
-      )
-      successful = terminal_record(
-        source,
-        attempt_id: "attempt-b",
-        request_id: "same-request",
-        outcome: "succeeded",
-        exit_status: 0,
-        now: NOW + 10
-      )
-      newest_failure = terminal_record(
-        source,
-        attempt_id: "attempt-c",
-        request_id: "same-request",
-        outcome: "failed",
-        exit_status: 2,
-        now: NOW + 20
-      )
-
-      [ successful, older, newest_failure, successful ].each do |record|
-        index.record_terminal(record)
-      end
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-
-      assert_equal newest_failure.attempt_id,
-                   index.terminal_attempt_id(request_id: "same-request")
-      assert_equal newest_failure.attempt_id,
-                   index.latest_terminal_attempt_id(
-                     task_generation: newest_failure.task_generation,
-                     subject: newest_failure.subject
+  def test_final_attempt_remains_in_the_attempt_table_without_a_proof_store
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      assert_equal 1, repository.database.read { |db| db[:attempts].count }
+      assert_equal terminal.to_h, repository.fetch(terminal.attempt_id).to_h
+      assert_equal terminal.attempt_id,
+                   repository.successful_attempt_id(
+                     task_generation: terminal.task_generation, subject: terminal.subject
                    )
-      assert_equal successful.attempt_id, index.successful_attempt_id(
-        task_generation: successful.task_generation,
-        subject: successful.subject
-      )
+      refute_respond_to repository, :permanent_proofs
+      refute_respond_to repository, :decision_index
     end
   end
 
-  def test_loss_successor_and_daily_accounting_primitives_are_idempotent
+  def test_terminal_pending_receipt_digest_and_consumer_acknowledgements_survive_restart
     with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-      lost = lost_record(source, attempt_id: "lost-attempt", request_id: "lost-request")
-      successor = source.create_launching(
-        **identity(
-          attempt_id: "successor-attempt",
-          request_id: "successor-request",
-          predecessor_attempt_id: lost.attempt_id
-        ),
-        launch_timeout_sec: 30,
-        now: NOW + 2
-      )
+      repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+      terminal = terminal_attempt(repository)
+      receipt_json = Hive::RuntimeControlPlane::Codec.dump_json(terminal.receipt)
+      pending = repository.database.read do |db|
+        db[:terminal_pending_publications].where(attempt_id: terminal.attempt_id).first
+      end
+      assert_equal Digest::SHA256.hexdigest(receipt_json), pending.fetch(:expected_receipt_digest)
 
-      index.record_unresolved_loss(lost)
-      index.record_unresolved_loss(lost)
-      assert_equal lost.attempt_id, index.unresolved_loss_attempt_id(
-        task_generation: lost.task_generation,
-        subject: lost.subject
+      repository.prepare_publication(
+        attempt_id: terminal.attempt_id, consumers: %w[journal provider_health]
       )
-
-      index.record_successor(successor)
-      index.record_successor(successor)
-      advanced = source.claim(
-        successor, owner: owner, claim_capability: CLAIM_CAPABILITY,
-        first_heartbeat_timeout_sec: 30, now: NOW + 3
-      )
-      index.record_successor(advanced)
-      competing = source.create_launching(
-        **identity(
-          attempt_id: "newer-successor", request_id: "newer-request",
-          predecessor_attempt_id: lost.attempt_id
-        ),
-        launch_timeout_sec: 30, now: NOW + 4
-      )
-      index.record_successor(competing)
-      assert_equal competing.attempt_id,
-                   index.successor_attempt_id(predecessor_attempt_id: lost.attempt_id),
-                   "a legacy duplicate converges on the deterministic newest successor"
-      assert_nil index.unresolved_loss_attempt_id(
-        task_generation: lost.task_generation,
-        subject: lost.subject
-      )
-
-      tempfail = terminal_record(
-        source,
-        attempt_id: "tempfail-attempt",
-        request_id: "tempfail-request",
-        outcome: "failed",
-        exit_status: Hive::ExitCodes::TEMPFAIL,
-        now: NOW + 5
-      )
-      2.times { index.record_acceptance(tempfail) }
-      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
-
-      other_project = terminal_record(
-        source,
-        attempt_id: "other-project-attempt",
-        request_id: "other-project-request",
-        now: NOW + 10
-      ).with("project" => "other")
-      index.record_acceptance(other_project)
-      assert_equal(
-        {
-          [ "demo", NOW.to_date ] => 1,
-          [ "other", NOW.to_date ] => 1
-        },
-        index.daily_counts(date: NOW.to_date)
-      )
-
-      2.times { index.refund_tempfail(tempfail) }
-      assert_equal 0, index.daily_count(project: "demo", date: NOW.to_date)
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
+      restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
+      refute restarted.publication_complete?(terminal.attempt_id)
+      restarted.acknowledge_publication(terminal.attempt_id, consumer: "provider_health")
+      assert restarted.publication_complete?(terminal.attempt_id)
+      assert restarted.finish_publication(terminal.attempt_id)
+      assert_nil restarted.publication(terminal.attempt_id)
     end
   end
 
-  # A launch that never produced an agent spent nothing, so it must not spend
-  # a daily slot. Without this, a night of failed handoffs exhausts the day's
-  # budget and locks out the runs that would have succeeded.
-  def test_unstarted_loss_refunds_its_daily_slot
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
-      index = store.decision_index
-      lost = lost_record(store, attempt_id: "never-ran", request_id: "request-never-ran")
+  def test_publication_rejects_conflicting_or_unknown_consumers
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: %w[journal])
 
-      assert_nil lost["started_at"], "fixture must never have reached running"
-      index.record_acceptance(lost)
-      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
-
-      2.times { index.refund_unstarted(lost) }
-
-      assert_equal 0, index.daily_count(project: "demo", date: NOW.to_date)
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.prepare_publication(
+          attempt_id: terminal.attempt_id, consumers: %w[journal provider_health]
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.acknowledge_publication(terminal.attempt_id, consumer: "unknown")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.finish_publication(terminal.attempt_id)
+      end
     end
   end
 
-  # A loss after the agent started keeps its charge: the tokens are already
-  # spent, and the daily cap is a spend bound.
-  def test_loss_after_starting_is_not_refunded
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
-      index = store.decision_index
-      launching = store.create_launching(
-        **identity(attempt_id: "ran-then-lost", request_id: "request-ran-then-lost"),
-        launch_timeout_sec: 30, now: NOW
+  def test_open_payload_bytes_use_the_nonretired_root_and_seal_by_digest
+    with_repository do |repository|
+      path = repository.payload_store.write_open(
+        attempt_id: "attempt-1", name: "result.bin", bytes: "payload"
       )
-      claimed = store.claim(
-        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
-        first_heartbeat_timeout_sec: 30, now: NOW + 1
-      )
-      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
-      lost = store.mark_lost(running, reason: "owner_gone", now: NOW + 3)
+      assert path.start_with?(File.join(repository.root, "open"))
+      reference = repository.payload_store.seal(path)
 
-      refute_nil lost["started_at"], "fixture must have reached running"
-      index.record_acceptance(lost)
-
-      assert_raises(Hive::Attempts::StoreError) { index.refund_unstarted(lost) }
-      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
+      assert_equal "payload", repository.payload_store.read_sealed(reference)
+      assert_equal Digest::SHA256.hexdigest("payload"), reference.fetch("sha256")
+      assert reference.fetch("path").start_with?("sealed/")
     end
   end
 
-  def test_live_capacity_reservations_are_bounded_idempotent_and_identity_checked
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
-      index = store.decision_index
+  def test_output_paths_reject_traversal_and_symlink_escape
+    with_repository do |repository|
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.output_path("attempt-1", "../escape")
+      end
+      directory = repository.output_directory("attempt-1", create: true)
+      File.symlink("/tmp", File.join(directory, "result"))
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.output_path("attempt-1", "result")
+      end
+    end
+  end
 
-      store.with_admission_lock do
-        2.times do
-          index.reserve_live(
-            attempt_id: "attempt-1", project: "demo", task_slug: "durable-task"
-          )
+  def test_publication_and_maintenance_inputs_fail_closed
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.seal_terminal_payloads(Object.new)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [])
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [ "Bad Name" ])
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.claim_maintenance(now: NOW, interval_sec: "bad")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.advance_maintenance_cursor("after" => "")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.advance_maintenance_cursor(Object.new)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.complete_maintenance(now: NOW, result: { promoted: -1 })
+      end
+    end
+  end
+
+  def test_publication_persistence_errors_remain_typed
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Sequel::DatabaseError, "bad read"
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.maintenance_checkpoint }
+    end
+
+    %i[complete fail].each do |operation|
+      with_repository do |repository|
+        repository.database.define_singleton_method(:transaction) do |**|
+          raise Sequel::DatabaseError, "bad write"
         end
-        assert_equal "pending", index.live_reservations.dig("attempt-1", "phase")
-
-        2.times do
-          index.confirm_live(
-            attempt_id: "attempt-1", project: "demo", task_slug: "durable-task"
-          )
-        end
-        assert_equal "active", index.live_reservations.dig("attempt-1", "phase")
-        assert_raises(Hive::Attempts::StoreError) do
-          index.reserve_live(
-            attempt_id: "attempt-1", project: "other", task_slug: "durable-task"
-          )
-        end
-
-        2.times { index.release_live(attempt_id: "attempt-1") }
-        assert_empty index.live_reservations
-      end
-    end
-  end
-
-  def test_decision_index_verifies_embedded_compound_key_and_refuses_symlinks
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      index_root = File.join(root, "indexes")
-      index = Hive::Attempts::DecisionIndex.new(root: index_root)
-      terminal = terminal_record(source, attempt_id: "indexed", request_id: "request/key")
-      index.record_terminal(terminal)
-      path = index.path_for(
-        "terminal-request", { "request_id" => terminal["request_id"] }
-      )
-      payload = JSON.parse(File.binread(path))
-      payload["key"] = { "request_id" => "colliding-request" }
-      File.binwrite(path, JSON.generate(payload) + "\n")
-
-      assert_raises(Hive::Attempts::StoreError) do
-        index.terminal_attempt_id(request_id: terminal["request_id"])
-      end
-
-      File.unlink(path)
-      outside = File.join(root, "outside-index.json")
-      File.write(outside, "outside")
-      File.symlink(outside, path)
-      assert_raises(Hive::Attempts::StoreError) do
-        index.terminal_attempt_id(request_id: terminal["request_id"])
-      end
-      assert_equal "outside", File.binread(outside)
-    end
-  end
-
-  def test_pending_finalization_acknowledgements_are_durable_and_idempotent
-    with_tmp_dir do |root|
-      pending = Hive::Attempts::PendingFinalizationStore.new(
-        root: File.join(root, "pending")
-      )
-      consumers = %w[accounting journal request-delivery]
-
-      created = pending.create(attempt_id: "attempt-1", consumers: consumers)
-      assert_equal consumers.sort, created.fetch("consumers").keys.sort
-      refute pending.complete?("attempt-1")
-      acknowledged = pending.acknowledge("attempt-1", consumer: "journal")
-      assert acknowledged["consumers"]["journal"]
-      assert_equal acknowledged,
-                   pending.create(attempt_id: "attempt-1", consumers: consumers)
-      assert_equal acknowledged,
-                   pending.acknowledge("attempt-1", consumer: "journal")
-      assert_equal acknowledged, pending.fetch("attempt-1")
-
-      %w[accounting request-delivery].each do |consumer|
-        pending.acknowledge("attempt-1", consumer: consumer)
-      end
-      assert pending.complete?("attempt-1")
-      assert_raises(Hive::Attempts::StoreError) do
-        pending.create(attempt_id: "attempt-1", consumers: [ "different" ])
-      end
-    end
-  end
-
-  def test_pending_finalization_corruption_and_symlink_fail_closed
-    with_tmp_dir do |root|
-      pending = Hive::Attempts::PendingFinalizationStore.new(
-        root: File.join(root, "pending")
-      )
-      pending.create(attempt_id: "attempt-1", consumers: [ "journal" ])
-      path = pending.path_for("attempt-1")
-      File.binwrite(path, "{")
-      assert_raises(Hive::Attempts::StoreError) { pending.fetch("attempt-1") }
-
-      outside = File.join(root, "outside-pending.json")
-      File.write(outside, "outside")
-      File.unlink(path)
-      File.symlink(outside, path)
-      assert_raises(Hive::Attempts::StoreError) { pending.fetch("attempt-1") }
-      assert_equal "outside", File.binread(outside)
-    end
-  end
-
-  def test_storage_keys_reject_unsafe_values_and_point_storage_translates_failures
-    assert_raises(Hive::Attempts::StoreError) do
-      Hive::Attempts::StorageKey.normalize(Object.new)
-    end
-    assert_raises(Hive::Attempts::StoreError) do
-      Hive::Attempts::StorageKey.relative("Invalid", { "id" => "attempt-1" })
-    end
-    assert_raises(Hive::Attempts::StoreError) do
-      Hive::Attempts::StorageKey.string("\xFF".b)
-    end
-    assert_raises(ArgumentError) do
-      Hive::PointStorage.new(
-        root: "/unused", label: "test point", error_class: Object
-      )
-    end
-
-    replacement = ->(**) { raise ArgumentError, "bad root" }
-    with_replaced_singleton_method(Hive::ManagedDirectory, :new, replacement) do
-      error = assert_raises(Hive::Attempts::StoreError) do
-        Hive::Attempts::PointStorage.new(root: "/unused", label: "test point")
-      end
-      assert_match(/test point is unavailable: bad root/, error.message)
-    end
-
-    with_tmp_dir do |root|
-      storage = Hive::Attempts::PointStorage.new(root: root, label: "test point")
-      unavailable = Object.new
-      unavailable.define_singleton_method(:atomic_write) do |*, **|
-        raise IOError, "write failed"
-      end
-      unavailable.define_singleton_method(:with_lock) do |*, **|
-        raise ArgumentError, "lock failed"
-      end
-      unavailable.define_singleton_method(:unlink) do |*, **|
-        raise IOError, "delete failed"
-      end
-      storage.instance_variable_set(:@directory, unavailable)
-
-      write_error = assert_raises(Hive::Attempts::StoreError) do
-        storage.write(
-          "cell", { "id" => "attempt-1" }, "{}\n",
-          expected_bytes: nil, max_existing_bytes: 100
-        )
-      end
-      assert_match(/test point is unavailable: write failed/, write_error.message)
-
-      yielded = false
-      lock_error = assert_raises(Hive::Attempts::StoreError) do
-        storage.synchronize("cell", { "id" => "attempt-1" }) { yielded = true }
-      end
-      refute yielded
-      assert_match(/test point is unavailable: lock failed/, lock_error.message)
-
-      delete_error = assert_raises(Hive::Attempts::StoreError) do
-        storage.delete(
-          "cell", { "id" => "attempt-1" },
-          expected_bytes: nil, max_bytes: 100
-        )
-      end
-      assert_match(/test point is unavailable: delete failed/, delete_error.message)
-    end
-  end
-
-  def test_permanent_proofs_require_final_records_and_reject_unreadable_bytes
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      launching_source = Hive::Attempts::Store.new(root: File.join(root, "launching"))
-      proof = Hive::Attempts::PermanentProofStore.new(root: File.join(root, "proof"))
-      launching = launching_source.create_launching(
-        **identity(attempt_id: "proof-attempt", request_id: "proof-request"),
-        launch_timeout_sec: 30,
-        now: NOW
-      )
-
-      assert_raises(Hive::Attempts::StoreError) { proof.publish(launching) }
-
-      terminal = terminal_record(
-        source, attempt_id: launching.attempt_id, request_id: "proof-request"
-      )
-      proof.publish(terminal)
-      path = proof.path_for(terminal.attempt_id)
-      binding_path = proof.projection_binding_path_for(terminal.attempt_id)
-      File.unlink(binding_path)
-      File.binwrite(path, JSON.generate(launching.to_h) + "\n")
-      assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.fetch_projection_binding(terminal.attempt_id)
-      end
-
-      File.binwrite(path, "{")
-      assert_raises(Hive::Attempts::StoreError) { proof.fetch(terminal.attempt_id) }
-      assert_raises(Hive::Attempts::StoreError) do
-        proof.fetch_projection_binding(terminal.attempt_id)
-      end
-    end
-  end
-
-  def test_pending_finalization_validates_consumers_and_removal_lifecycle
-    with_tmp_dir do |root|
-      pending = Hive::Attempts::PendingFinalizationStore.new(
-        root: File.join(root, "pending")
-      )
-
-      assert_raises(Hive::Attempts::StoreError) do
-        pending.create(attempt_id: "empty", consumers: [])
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        pending.create(
-          attempt_id: "too-many",
-          consumers: 33.times.map { |index| "consumer_#{index}" }
-        )
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        pending.create(attempt_id: "invalid", consumers: [ "Bad Consumer" ])
-      end
-
-      pending.create(attempt_id: "attempt-1", consumers: [ "journal" ])
-      assert_raises(Hive::Attempts::StoreError) do
-        pending.acknowledge("attempt-1", consumer: "accounting")
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        pending.remove_complete("attempt-1")
-      end
-
-      pending.acknowledge("attempt-1", consumer: "journal")
-      assert pending.remove_complete("attempt-1")
-      assert_nil pending.fetch("attempt-1")
-      refute pending.remove_complete("attempt-1")
-    end
-  end
-
-  def test_decision_indexes_reject_incompatible_records_and_accounting_changes
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-      launching = source.create_launching(
-        **identity(attempt_id: "launching", request_id: "launching-request"),
-        launch_timeout_sec: 30,
-        now: NOW
-      )
-
-      assert_raises(Hive::Attempts::StoreError) do
-        index.record_unresolved_loss(launching)
-      end
-      assert_raises(Hive::Attempts::StoreError) { index.record_successor(launching) }
-      assert_raises(Hive::Attempts::StoreError) { index.record_acceptance(Object.new) }
-      assert_raises(Hive::Attempts::StoreError) { index.record_terminal(launching) }
-
-      succeeded = terminal_record(
-        source, attempt_id: "succeeded", request_id: "succeeded-request"
-      )
-      assert_raises(Hive::Attempts::StoreError) { index.refund_tempfail(succeeded) }
-      # A live attempt has not finished losing yet, so its charge is not free
-      # to give back even though it never reached running.
-      assert_raises(Hive::Attempts::StoreError) { index.refund_unstarted(launching) }
-
-      tempfail = terminal_record(
-        source,
-        attempt_id: "tempfail",
-        request_id: "tempfail-request",
-        outcome: "failed",
-        exit_status: Hive::ExitCodes::TEMPFAIL,
-        now: NOW + 10
-      )
-      index.record_acceptance(tempfail)
-      assert_raises(Hive::Attempts::StoreError) do
-        index.record_acceptance(tempfail.with("project" => "other"))
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        index.refund_tempfail(tempfail.with("project" => "other"))
-      end
-
-      unaccepted = terminal_record(
-        source,
-        attempt_id: "unaccepted",
-        request_id: "unaccepted-request",
-        outcome: "failed",
-        exit_status: Hive::ExitCodes::TEMPFAIL,
-        now: NOW + 86_400
-      )
-      assert_raises(Hive::Attempts::StoreError) { index.refund_tempfail(unaccepted) }
-    end
-  end
-
-  def test_decision_indexes_enforce_bounded_daily_accounting_and_dates
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-      first = terminal_record(
-        source, attempt_id: "first", request_id: "first-request", now: NOW
-      )
-      second = terminal_record(
-        source, attempt_id: "second", request_id: "second-request", now: NOW + 10
-      )
-
-      with_constant(Hive::Attempts::DecisionIndex, :MAX_DAILY_ATTEMPTS, 1) do
-        index.record_acceptance(first)
-        assert_raises(Hive::Attempts::StoreError) { index.record_acceptance(second) }
-      end
-
-      assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date.iso8601)
-      assert_raises(Hive::Attempts::StoreError) do
-        index.daily_count(project: "demo", date: "not-a-date")
-      end
-    end
-  end
-
-  def test_decision_indexes_validate_live_replacement_and_capacity
-    with_tmp_dir do |root|
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-      index.reserve_live(
-        attempt_id: "attempt-1", project: "demo", task_slug: "durable-task"
-      )
-
-      assert_raises(Hive::Attempts::StoreError) do
-        index.confirm_live(
-          attempt_id: "attempt-1", project: "other", task_slug: "durable-task"
-        )
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        index.replace_live_reservations("attempt-2" => {})
-      end
-      assert_raises(Hive::Attempts::StoreError) do
-        index.replace_live_reservations(
-          "attempt-2" => {
-            "project" => "demo", "task_slug" => "durable-task", "phase" => "stale"
-          }
-        )
-      end
-
-      with_constant(Hive::Attempts::DecisionIndex, :MAX_LIVE_RESERVATIONS, 1) do
-        assert_raises(Hive::Attempts::StoreError) do
-          index.reserve_live(
-            attempt_id: "attempt-2", project: "demo", task_slug: "durable-task"
-          )
+        if operation == :complete
+          assert_raises(Hive::Attempts::RepositoryError) do
+            repository.complete_maintenance(
+              now: NOW, result: { promoted: 0, deleted: 0, cold_examined: 0 }
+            )
+          end
+        else
+          assert_raises(Hive::Attempts::RepositoryError) do
+            repository.fail_maintenance(error: ArgumentError.new("bad"), now: NOW)
+          end
         end
       end
     end
   end
 
-  def test_decision_indexes_reject_malformed_and_invalid_cells
-    with_tmp_dir do |root|
-      source = Hive::Attempts::Store.new(root: File.join(root, "source"))
-      index = Hive::Attempts::DecisionIndex.new(root: File.join(root, "indexes"))
-      terminal = terminal_record(
-        source, attempt_id: "indexed", request_id: "indexed-request"
-      )
-      index.record_terminal(terminal)
-      path = index.path_for(
-        "terminal-request", { "request_id" => terminal["request_id"] }
-      )
-      original = JSON.parse(File.binread(path))
-
-      File.binwrite(path, "{")
-      assert_raises(Hive::Attempts::StoreError) do
-        index.terminal_attempt_id(request_id: terminal["request_id"])
+  def test_sealed_payload_identity_conflict_is_rejected
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      reference = {
+        "path" => "sealed/sha256/aa/#{'a' * 64}",
+        "sha256" => "a" * 64, "size" => 1
+      }
+      repository.database.transaction do |db|
+        db[:payload_references].insert(
+          payload_id: "payload", attempt_id: terminal.attempt_id,
+          kind: "attempt_log", relative_path: reference.fetch("path"),
+          sha256: reference.fetch("sha256"), bytes: 1,
+          state: "releasable", created_at: NOW.iso8601(6)
+        )
       end
-
-      invalid_outcome = Marshal.load(Marshal.dump(original))
-      invalid_outcome.fetch("value")["outcome"] = "unknown"
-      File.binwrite(path, Hive::Attempts::StorageKey.dump(invalid_outcome))
-      assert_raises(Hive::Attempts::StoreError) do
-        index.terminal_attempt_id(request_id: terminal["request_id"])
+      spec = { payload_id: "payload", kind: "attempt_log", reference: reference }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.database.transaction do |db|
+          repository.send(:persist_sealed_reference, db, terminal, spec)
+        end
       end
-
-      invalid_time = Marshal.load(Marshal.dump(original))
-      invalid_time.fetch("value")["accepted_at"] = "not-a-time"
-      File.binwrite(path, Hive::Attempts::StorageKey.dump(invalid_time))
-      assert_raises(Hive::Attempts::StoreError) do
-        index.terminal_attempt_id(request_id: terminal["request_id"])
-      end
-    end
-  end
-
-  def test_store_exposes_managed_roots_and_hot_removal_fails_closed
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      assert_equal File.join(root, "decision-indexes"), store.decision_indexes_root
-      assert_equal File.join(root, "pending-finalization"), store.pending_finalization_root
-      assert_equal File.join(root, "maintenance"), store.maintenance_root
-
-      terminal = terminal_record(
-        store, attempt_id: "hot-final", request_id: "hot-final-request"
-      )
-      changed = terminal.with("diagnostics" => { "changed" => true })
-      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.remove_hot_final(changed)
-      end
-
-      replacement = ->(*) { raise Errno::EACCES, "denied" }
-      with_replaced_singleton_method(File, :unlink, replacement) do
-        assert_raises(Hive::Attempts::StoreError) { store.remove_hot_final(terminal) }
-      end
-      assert_equal terminal.to_h, store.fetch_hot(terminal.attempt_id).to_h
     end
   end
 
   private
 
-  def with_constant(owner, name, replacement)
-    original = owner.const_get(name)
-    owner.send(:remove_const, name)
-    owner.const_set(name, replacement)
-    yield
-  ensure
-    owner.send(:remove_const, name) if owner.const_defined?(name, false)
-    owner.const_set(name, original)
+  def with_repository
+    with_tmp_dir do |root|
+      yield Hive::Attempts::Repository.new(root: root, migrate: true)
+    end
   end
 
-  def terminal_record(store, attempt_id:, request_id:, outcome: "succeeded", exit_status: 0,
-                      now: NOW)
-    launching = store.create_launching(
-      **identity(attempt_id: attempt_id, request_id: request_id),
-      launch_timeout_sec: 30,
-      now: now
-    )
-    claimed = store.claim(
-      launching,
-      owner: owner,
-      claim_capability: CLAIM_CAPABILITY,
-      first_heartbeat_timeout_sec: 30,
-      now: now + 1
-    )
-    running = store.first_heartbeat(claimed, stale_sec: 30, now: now + 2)
-    store.terminalize(
-      running,
-      outcome: outcome,
-      exit_status: exit_status,
-      final_checkpoint: checkpoint,
-      output_references: [],
-      log_reference: log_reference(attempt_id),
-      now: now + 3
-    )
-  end
-
-  def lost_record(store, attempt_id:, request_id:)
-    launching = store.create_launching(
-      **identity(attempt_id: attempt_id, request_id: request_id),
-      launch_timeout_sec: 30,
-      now: NOW
-    )
-    store.mark_lost(launching, reason: "owner_gone", now: NOW + 1)
-  end
-
-  def identity(attempt_id:, request_id:, predecessor_attempt_id: nil)
-    {
-      attempt_id: attempt_id,
-      request_id: request_id,
-      predecessor_attempt_id: predecessor_attempt_id,
-      task_id: "42",
-      project: "demo",
-      task_slug: "durable-task",
-      intended_stage: "4-execute",
-      task_generation: "generation-1",
-      progress_token: "progress-1",
-      provider: "codex",
-      worker_argv: [ "hive", "run", "durable-task" ],
+  def terminal_attempt(repository)
+    launching = repository.create_launching(
+      attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+      task_id: "42", project: "demo", task_slug: "task",
+      intended_stage: "4-execute", task_generation: "generation-1",
+      ownership_generation: "owner-1", task_input_epoch: 1,
+      progress_token: "progress-1", provider: "codex",
+      worker_argv: [ "hive", "run", "task" ],
       claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-      starting_revision: "a" * 40,
-      retry_charge: 0,
-      inherited_outputs: []
-    }
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: NOW
+    )
+    claimed = repository.claim(
+      launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+      first_heartbeat_timeout_sec: 30, now: NOW + 1
+    )
+    running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+    repository.terminalize(
+      running, outcome: "succeeded", exit_status: 0,
+      final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
+      log_reference: { "path" => "open/attempt-1.frames", "size" => 0, "sha256" => "0" * 64 },
+      now: NOW + 3
+    )
   end
 
   def owner
     {
-      "pid" => Process.pid,
-      "start_fingerprint" => "pid-start",
-      "session_id" => Process.getsid(0),
-      "process_group_id" => Process.getpgrp
-    }
-  end
-
-  def checkpoint
-    { "revision" => "b" * 40, "progress_token" => "progress-1" }
-  end
-
-  def log_reference(attempt_id)
-    {
-      "path" => "logs/#{attempt_id}.frames",
-      "size" => 0,
-      "sha256" => "0" * 64
+      "pid" => Process.pid, "start_fingerprint" => "pid-start",
+      "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp
     }
   end
 end

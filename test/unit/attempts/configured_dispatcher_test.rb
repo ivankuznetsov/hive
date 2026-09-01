@@ -7,14 +7,43 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
   FakeTask = Struct.new(:slug, :project_root, keyword_init: true)
   FakeRequest = Struct.new(:slug, :project, :argv, keyword_init: true)
 
+  def test_dispatch_applies_project_configuration_once
+    task = FakeTask.new(slug: "task", project_root: "/projects/demo")
+    calls = []
+    downstream = Object.new
+    downstream.define_singleton_method(:dispatch) { |**attributes| calls << attributes; :accepted }
+    dispatcher_class = Class.new
+    dispatcher_class.define_singleton_method(:new) { |**_options| downstream }
+    cfg = Hive::Config.merge_defaults("execute" => { "agent" => "claude" })
+    loads = 0
+    adapter = Hive::Attempts::ConfiguredDispatcher.new(
+      store: :store,
+      config_loader: ->(_root) { loads += 1; cfg },
+      daemon_config_loader: -> { Hive::Config::DEFAULTS.fetch("daemon") },
+      launcher_class: Class.new { def self.new(**) = :launcher },
+      dispatcher_class: dispatcher_class
+    )
+
+    assert_equal :accepted,
+                 adapter.dispatch(
+                   task: task, project: "demo", intended_stage: "4-execute",
+                   argv: %w[hive run task], request_id: "request-1"
+                 )
+    assert_equal 1, loads
+    assert_equal task, calls.fetch(0).fetch(:task)
+    assert_equal "claude", calls.fetch(0).fetch(:provider)
+    assert_equal "request-1", calls.fetch(0).fetch(:request_id)
+  end
+
   def test_dispatch_request_uses_the_resolved_projects_attempt_timers
     task = FakeTask.new(slug: "task", project_root: "/projects/demo")
     resolver = Struct.new(:task) { def resolve = task }.new(task)
     launcher_options = nil
     dispatcher_options = nil
     downstream = Object.new
-    downstream.define_singleton_method(:dispatch_request) do |_request, interactive:, now:, admission_view:|
-      [ interactive, now, admission_view ]
+    downstream.define_singleton_method(:dispatch_request) do |_request, interactive:, now:, admission_view:,
+                                                              replay_semantic_terminal:|
+      [ interactive, now, admission_view, replay_semantic_terminal ]
     end
     launcher_class = Class.new
     launcher_class.define_singleton_method(:new) do |**options|
@@ -49,10 +78,11 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     )
 
     with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
-      assert_equal [ false, Time.at(0), :tick ],
+      assert_equal [ false, Time.at(0), :tick, true ],
                    adapter.dispatch_request(
                      FakeRequest.new(slug: "task", project: "demo", argv: %w[hive review task]),
-                     now: Time.at(0), admission_view: :tick
+                     now: Time.at(0), admission_view: :tick,
+                     replay_semantic_terminal: true
                    )
     end
 

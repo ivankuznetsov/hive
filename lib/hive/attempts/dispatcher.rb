@@ -58,7 +58,8 @@ module Hive
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
                    interactive: false, generation: nil, predecessor_attempt_id: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
-                   admission_view: nil, routing_policy: nil, cohort_release: false)
+                   admission_view: nil, routing_policy: nil, cohort_release: false,
+                   replay_semantic_terminal: false)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage,
@@ -71,7 +72,8 @@ module Hive
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           successor_of: nil, now: now, admission_view: admission_view,
-          routing_policy: policy, cohort_release: cohort_release
+          routing_policy: policy, cohort_release: cohort_release,
+          replay_semantic_terminal: replay_semantic_terminal
         )
         return result unless superseding_loss?(result)
 
@@ -105,8 +107,7 @@ module Hive
           # worker to the exact post-recovery-clear task bytes admitted now.
           progress_token: Generation.artifact_token(task),
           task_generation: predecessor.task_generation,
-          task_input_epoch: predecessor.task_input_epoch,
-          attempt_store: @store
+          task_input_epoch: predecessor.task_input_epoch
         )
         inherited = if inherited_outputs.nil? || inherited_outputs.empty?
           (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
@@ -147,14 +148,13 @@ module Hive
       end
 
       def dispatch_request(request, interactive: false, now: @clock.call,
-                           admission_view: nil)
+                           admission_view: nil, replay_semantic_terminal: false)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
           progress_token: command_progress_token(request.argv, task),
-          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil,
-          attempt_store: @store
+          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
         )
         predecessor_id = request.respond_to?(:predecessor_attempt_id) ? request.predecessor_attempt_id : nil
         predecessor = predecessor_id && @store.fetch(predecessor_id)
@@ -173,7 +173,8 @@ module Hive
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
-          cohort_release: explicit_cohort_release?(request)
+          cohort_release: explicit_cohort_release?(request),
+          replay_semantic_terminal: replay_semantic_terminal
         )
       end
 
@@ -181,7 +182,8 @@ module Hive
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
-                subject: nil, admission_view: nil, routing_policy:, cohort_release: false)
+                subject: nil, admission_view: nil, routing_policy:, cohort_release: false,
+                replay_semantic_terminal: false)
         result = nil
         created = nil
         claim_capability = nil
@@ -189,238 +191,178 @@ module Hive
         cohort_identity = nil
         cohort_admission = nil
         view = admission_view
-        # Fixed lock order: global admission, then task generation. The outer
-        # lock makes the capacity snapshot and reservation one host-wide
-        # transaction even when concurrent requests have different generations.
-        @store.with_admission_lock do
-          @store.with_generation_lock(generation.task_generation) do
-            view ||= AdmissionView.new(store: @store, hot_scan: @store.scan)
-            records = view.refresh_for_admission
-            semantic_owner = find_semantic_owner(records, generation)
-            if semantic_owner&.live?
-              result = if semantic_owner.task_generation == generation.task_generation
-                live_result(semantic_owner, interactive: interactive)
-              else
-                DispatchResult.new(
-                  status: :deferred, attempt: semantic_owner, receipt: nil,
-                  attach_descriptor: nil, reason: "in_flight"
-                )
-              end
-              next
-            end
-
-            exact = records.select { |record| record.task_generation == generation.task_generation }
-            terminal = if successor_of.nil?
-              replayable_terminal(
-                exact, request_id, task: task, admission_view: view,
-                generation: generation, subject: subject
-              )
-            end
-            if terminal
-              result = DispatchResult.new(
-                status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
-                attach_descriptor: nil, reason: nil
-              )
-              next
-            end
-
-            transient = transient_retry_terminal(
-              admission_view: view, generation: generation,
-              subject: subject || task_subject(generation), now: now
-            )
-            if transient
-              result = DispatchResult.new(
-                status: :deferred, attempt: transient, receipt: transient.receipt,
-                attach_descriptor: nil, reason: "transient_retry"
-              )
-              next
-            end
-
-            lost = unresolved_lost_attempts(
-              admission_view: view, generation: generation, subject: subject
-            )
-            predecessor = successor_of &&
-                          view.find(successor_of)
-            if successor_of && !successor_predecessor?(predecessor)
-              result = DispatchResult.new(
-                status: :deferred, attempt: predecessor, receipt: nil,
-                attach_descriptor: nil, reason: "invalid_predecessor"
-              )
-              next
-            end
-            existing_successor = successor_of && view.successor(
-              predecessor_attempt_id: successor_of
-            )
-            if existing_successor
-              result = DispatchResult.new(
-                status: :deferred, attempt: existing_successor, receipt: nil,
-                attach_descriptor: nil, reason: "successor_exists"
-              )
-              next
-            end
-            if successor_of.nil? && lost.any?
-              result = DispatchResult.new(
-                status: :deferred, attempt: lost.last, receipt: nil,
-                attach_descriptor: nil, reason: "attempt_lost"
-              )
-              next
-            end
-
-            snapshot = view.capacity(now: now, records: records)
-            utc_date = now.utc.to_date
-            if snapshot.at_limit?(
-              project: generation.project, task_slug: generation.task_slug, date: utc_date,
-              max_global: @limits.fetch(:max_global),
-              max_per_project: @limits.fetch(:max_per_project),
-              max_daily: @limits.fetch(:max_daily)
-            )
-              result = DispatchResult.new(
-                status: :deferred, attempt: nil, receipt: nil,
-                attach_descriptor: nil, reason: "capacity"
-              )
-              next
-            end
-
-            cohort_identity = failure_cohort_identity(
-              view: view, task: task, generation: generation,
-              subject: subject || task_subject(generation)
-            )
-            cohort_admission = cohort_identity && view.failure_cohort_admission(
-              identity: cohort_identity, date: now.utc.to_date, now: now,
-              explicit_release: cohort_release
-            )
-            if cohort_admission&.fetch("status") == "blocked"
-              result = DispatchResult.new(
-                status: :deferred, attempt: nil, receipt: nil,
-                attach_descriptor: nil,
-                reason: cohort_admission.fetch("reason")
-              )
-              next
-            end
-
-            durable_subject = subject || task_subject(generation)
-            frozen_policy = @store.routing_policies.fetch_or_store(
-              ownership_generation: generation.ownership_generation,
-              subject: durable_subject,
-              policy: routing_policy
-            )
-
-            if frozen_policy.explicit?
-              health, health_available = resolve_provider_health
-              stale_retries = 0
-              loop do
-                route_decision = select_provider_route(
-                  policy: frozen_policy,
-                  health: health,
-                  snapshot: snapshot,
-                  records: records,
-                  generation: generation,
-                  now: now,
-                  health_available: health_available
-                )
-                unless route_decision.selected?
-                  view.record_routing_decision(
-                    decision: route_decision,
-                    task_generation: generation.task_generation,
-                    subject: durable_subject,
-                    project: generation.project
-                  )
-                  result = DispatchResult.new(
-                    status: route_decision.capacity_saturated? ? :deferred : :no_route,
-                    attempt: nil,
-                    receipt: nil,
-                    attach_descriptor: nil,
-                    reason: route_decision.reason,
-                    decision: route_decision
-                  )
-                  break
-                end
-
-                claim_capability = @capability_generator.call
-                attempt_id = @id_generator.call
-                selected = route_decision.candidates.find(&:eligible?)
-                intent = if route_decision.probe_requirements.empty?
-                  nil
-                else
-                  Hive::ProviderHealth::ProbeIntent.new(
-                    intent_id: route_decision.decision_id,
-                    attempt_id: attempt_id,
-                    task_generation: generation.task_generation,
-                    ownership_fence: generation.ownership_generation,
-                    requirements: route_decision.probe_requirements
-                  )
-                end
-                created = health.with_route_admission(
-                  evaluation: selected.health,
-                  intent: intent
-                ) do |probe_bindings|
-                  persist_launching_attempt(
-                    view: view,
-                    attempt_id: attempt_id,
-                    request_id: request_id,
-                    predecessor_attempt_id: predecessor_attempt_id,
-                    task: task,
-                    generation: generation,
-                    argv: argv,
-                    provider: route_decision.adapter,
-                    routing: explicit_routing(route_decision, probe_bindings),
-                    claim_capability: claim_capability,
-                    retry_charge: retry_charge,
-                    inherited_outputs: inherited_outputs,
-                    subject: subject,
-                    now: now,
-                    admission: patrol_admission_metadata(
-                      task: task, generation: generation, now: now
-                    ),
-                    cohort_identity: cohort_identity,
-                    cohort_admission: cohort_admission,
-                    cohort_release: cohort_release
-                  )
-                end
-                view.record_routing_decision(
-                  decision: route_decision,
-                  task_generation: generation.task_generation,
-                  subject: durable_subject,
-                  project: generation.project,
-                  attempt_id: created.attempt_id
-                )
-                break
-              rescue Hive::ProviderHealth::StaleGeneration
-                raise if created
-
-                stale_retries += 1
-                raise if stale_retries >= 3
-
-                health_available = reconcile_provider_health(health)
-              end
-              next if result
-            else
-              claim_capability = @capability_generator.call
-              attempt_id = @id_generator.call
-              created = persist_launching_attempt(
-                view: view,
-                attempt_id: attempt_id,
-                request_id: request_id,
-                predecessor_attempt_id: predecessor_attempt_id,
-                task: task,
-                generation: generation,
-                argv: argv,
-                provider: provider.to_s,
-                routing: { "mode" => "legacy" },
-                claim_capability: claim_capability,
-                retry_charge: retry_charge,
-                inherited_outputs: inherited_outputs,
-                subject: subject,
-                now: now,
-                admission: patrol_admission_metadata(
-                  task: task, generation: generation, now: now
-                ),
-                cohort_identity: cohort_identity,
-                cohort_admission: cohort_admission,
-                cohort_release: cohort_release
-              )
-            end
+        @store.observe_task_source(task: task, generation: generation, observed_at: now) if task
+        view ||= AdmissionView.new(store: @store, records: @store.active_attempts)
+        records = view.records
+        semantic_owner = find_semantic_owner(records, generation)
+        if semantic_owner&.live?
+          if semantic_owner.task_generation == generation.task_generation
+            return live_result(semantic_owner, interactive: interactive)
           end
+
+          return deferred_result("in_flight", attempt: semantic_owner)
+        end
+
+        exact = records.select { |record| record.task_generation == generation.task_generation }
+        terminal = if successor_of.nil?
+          replayable_terminal(
+            exact, request_id, task: task, admission_view: view,
+            generation: generation, subject: subject,
+            replay_semantic_terminal: replay_semantic_terminal
+          )
+        end
+        if terminal
+          return DispatchResult.new(
+            status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
+            attach_descriptor: nil, reason: nil
+          )
+        end
+
+        transient = transient_retry_terminal(
+          admission_view: view, generation: generation,
+          subject: subject || task_subject(generation), now: now
+        )
+        if transient
+          return deferred_result(
+            "transient_retry", attempt: transient, receipt: transient.receipt
+          )
+        end
+
+        lost = unresolved_lost_attempt(
+          admission_view: view, generation: generation, subject: subject
+        )
+        predecessor = successor_of &&
+                      view.find(successor_of)
+        if successor_of && !successor_predecessor?(predecessor)
+          return deferred_result("invalid_predecessor", attempt: predecessor)
+        end
+        existing_successor = successor_of && view.successor(
+          predecessor_attempt_id: successor_of
+        )
+        if existing_successor
+          return existing_successor.live? ?
+            live_result(existing_successor, interactive: interactive) :
+            deferred_result("successor_exists", attempt: existing_successor)
+        end
+        if successor_of.nil? && lost
+          return deferred_result("attempt_lost", attempt: lost)
+        end
+
+        snapshot = view.capacity(now: now)
+        utc_date = now.utc.to_date
+        if snapshot.at_limit?(
+          project: generation.project, task_slug: generation.task_slug, date: utc_date,
+          max_global: @limits.fetch(:max_global),
+          max_per_project: @limits.fetch(:max_per_project),
+          max_daily: @limits.fetch(:max_daily)
+        )
+          return deferred_result("capacity")
+        end
+
+        cohort_identity = failure_cohort_identity(
+          view: view, task: task, generation: generation,
+          subject: subject || task_subject(generation)
+        )
+        cohort_admission = cohort_identity && view.failure_cohort_admission(
+          identity: cohort_identity, date: now.utc.to_date, now: now,
+          explicit_release: cohort_release
+        )
+        if cohort_admission&.fetch("status") == "blocked"
+          return deferred_result(cohort_admission.fetch("reason"))
+        end
+
+        durable_subject = subject || task_subject(generation)
+        frozen_policy = @store.routing_policies.fetch(
+          ownership_generation: generation.ownership_generation,
+          subject: durable_subject,
+          policy: routing_policy
+        ) || routing_policy
+        launching_attributes = {
+          view: view,
+          request_id: request_id,
+          predecessor_attempt_id: predecessor_attempt_id,
+          task: task,
+          generation: generation,
+          argv: argv,
+          retry_charge: retry_charge,
+          inherited_outputs: inherited_outputs,
+          subject: subject,
+          now: now,
+          admission: patrol_admission_metadata(
+            task: task, generation: generation, now: now
+          ),
+          cohort_identity: cohort_identity,
+          cohort_admission: cohort_admission,
+          cohort_release: cohort_release
+        }
+
+        if frozen_policy.explicit?
+          health, health_available = resolve_provider_health
+          stale_retries = 0
+          loop do
+            route_decision = select_provider_route(
+              policy: frozen_policy,
+              health: health,
+              snapshot: snapshot,
+              records: records,
+              generation: generation,
+              now: now,
+              health_available: health_available
+            )
+            unless route_decision.selected?
+              frozen_policy = @store.routing_policies.fetch_or_store(
+                ownership_generation: generation.ownership_generation,
+                subject: durable_subject,
+                policy: frozen_policy
+              )
+              view.record_routing_decision(
+                decision: route_decision,
+                task_generation: generation.task_generation,
+                subject: durable_subject,
+                project: generation.project
+              )
+              result = DispatchResult.new(
+                status: route_decision.capacity_saturated? ? :deferred : :no_route,
+                attempt: nil,
+                receipt: nil,
+                attach_descriptor: nil,
+                reason: route_decision.reason,
+                decision: route_decision
+              )
+              break
+            end
+
+            claim_capability = @capability_generator.call
+            attempt_id = @id_generator.call
+            created = persist_launching_attempt(
+              **launching_attributes,
+              attempt_id: attempt_id,
+              provider: route_decision.adapter,
+              routing: nil,
+              claim_capability: claim_capability,
+              routing_policy: frozen_policy,
+              route_decision: route_decision,
+              health_repository: health
+            )
+            break
+          rescue Hive::ProviderHealth::StaleGeneration
+            raise if created
+
+            stale_retries += 1
+            raise if stale_retries >= 3
+          end
+          return result if result
+        else
+          claim_capability = @capability_generator.call
+          attempt_id = @id_generator.call
+          created = persist_launching_attempt(
+            **launching_attributes,
+            attempt_id: attempt_id,
+            provider: provider.to_s,
+            routing: { "mode" => "legacy" },
+            claim_capability: claim_capability,
+            routing_policy: frozen_policy
+          )
         end
 
         return result if result
@@ -439,15 +381,17 @@ module Hive
         resolve_failed_handoff(
           created, interactive: interactive,
           error: handoff.is_a?(Hash) ? handoff["error"] : nil,
-          admission_view: view, cohort_identity: cohort_identity,
+          cohort_identity: cohort_identity,
           cohort_date: now.utc.to_date
         )
+      rescue CapacityExceeded
+        deferred_result("capacity")
       rescue StandardError => e
         raise unless created
 
         resolve_failed_handoff(
           created, interactive: interactive, error: "#{e.class}: #{e.message}",
-          admission_view: view, cohort_identity: cohort_identity,
+          cohort_identity: cohort_identity,
           cohort_date: now.utc.to_date
         )
       end
@@ -498,15 +442,25 @@ module Hive
 
       # Request IDs own delivery idempotency: replaying the same request must
       # keep returning its original receipt, including a failure. A different
-      # request is a deliberate retry, so only a successful terminal receipt
-      # remains the semantic owner of the unchanged generation.
+      # request is normally a deliberate retry, so only a successful terminal
+      # receipt remains the semantic owner of the unchanged generation. The
+      # daemon's automatic advance scan is the exception: it creates a fresh
+      # delivery request on every tick, so an unchanged failed generation must
+      # replay instead of spending on the same broken command forever.
       def replayable_terminal(records, request_id, task:, admission_view: nil,
-                              generation: nil, subject: nil)
+                              generation: nil, subject: nil,
+                              replay_semantic_terminal: false)
         terminals = records.select { |record| record.state == "terminal" }
+        semantic_terminal = nil
         if admission_view
           point_subject = subject || task_subject(generation)
+          semantic_terminal = admission_view.latest_terminal_attempt(
+            task_generation: generation.task_generation,
+            subject: point_subject
+          )
           terminals |= [
             admission_view.terminal_attempt(request_id: request_id),
+            semantic_terminal,
             admission_view.successful_attempt(
               task_generation: generation.task_generation,
               subject: point_subject
@@ -526,6 +480,10 @@ module Hive
           newest = same_request.last
           return newest unless newest.outcome == "succeeded"
           return newest if required_artifact_valid?(task, newest)
+        end
+
+        if replay_semantic_terminal && semantic_terminal&.outcome != "succeeded"
+          return semantic_terminal
         end
 
         terminals.reverse.find do |record|
@@ -578,13 +536,11 @@ module Hive
       # successor exists. Once that descendant terminalizes unsuccessfully, a
       # new error-retry request must not be trapped behind the older resolved
       # loss forever.
-      def unresolved_lost_attempts(admission_view:, generation:,
-                                   subject: nil)
-        unresolved = admission_view.unresolved_loss(
+      def unresolved_lost_attempt(admission_view:, generation:, subject: nil)
+        admission_view.unresolved_loss(
           task_generation: generation.task_generation,
           subject: subject || task_subject(generation)
         )
-        unresolved ? [ unresolved ] : []
       end
 
       def successor_predecessor?(record)
@@ -648,17 +604,15 @@ module Hive
       end
 
       def resolve_failed_handoff(created, interactive:, error: nil,
-                                 admission_view: nil, cohort_identity: nil,
-                                 cohort_date: nil)
+                                 cohort_identity: nil, cohort_date: nil)
         current = @store.fetch_hot(created.attempt_id)
-        admission_view&.record(current) if current
         adopted = result_for_adopted_handoff(current, interactive: interactive)
         return adopted if adopted
         if current&.state == "lost"
           release_failed_handoff_probe(
             current, cohort_identity: cohort_identity, cohort_date: cohort_date
           )
-          return deferred_handoff_result(current)
+          return deferred_result("launch_handoff_failed", attempt: current)
         end
 
         diagnostics = {}
@@ -669,29 +623,26 @@ module Hive
           diagnostics: diagnostics,
           now: @clock.call
         )
-        admission_view&.record(lost)
         release_failed_handoff_probe(
           lost, cohort_identity: cohort_identity, cohort_date: cohort_date
         )
-        deferred_handoff_result(lost)
+        deferred_result("launch_handoff_failed", attempt: lost)
       rescue CompareAndSwapFailed
         current = @store.fetch_hot(created.attempt_id)
-        admission_view&.record(current) if current
         release_failed_handoff_probe(
           current, cohort_identity: cohort_identity, cohort_date: cohort_date
         ) if current&.state == "lost"
-        result_for_adopted_handoff(current, interactive: interactive) || deferred_handoff_result(current)
+        result_for_adopted_handoff(current, interactive: interactive) ||
+          deferred_result("launch_handoff_failed", attempt: current)
       end
 
       def release_failed_handoff_probe(record, cohort_identity:, cohort_date:)
         return false unless record&.state == "lost" && cohort_identity && cohort_date
 
-        @store.with_admission_lock do
-          @store.decision_index.release_failure_cohort_probe(
-            identity: cohort_identity, date: cohort_date,
-            attempt_id: record.attempt_id
-          )
-        end
+        @store.release_failure_cohort_probe(
+          identity: cohort_identity, date: cohort_date,
+          attempt_id: record.attempt_id
+        )
       end
 
       def result_for_adopted_handoff(record, interactive:)
@@ -708,10 +659,10 @@ module Hive
         nil
       end
 
-      def deferred_handoff_result(record)
+      def deferred_result(reason, attempt: nil, receipt: nil)
         DispatchResult.new(
-          status: :deferred, attempt: record, receipt: nil,
-          attach_descriptor: nil, reason: "launch_handoff_failed"
+          status: :deferred, attempt: attempt, receipt: receipt,
+          attach_descriptor: nil, reason: reason
         )
       end
 
@@ -725,7 +676,7 @@ module Hive
         Generation.resolve(
           task: task, project: project, intended_stage: intended_stage,
           progress_token: command_progress_token(argv, task),
-          task_generation: generation, attempt_store: @store
+          task_generation: generation
         )
       end
 
@@ -778,57 +729,38 @@ module Hive
       end
 
       def resolve_provider_health
-        health = provider_health_store
-        [ health, reconcile_provider_health(health) ]
+        [ provider_health_store, true ]
       rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
         [ nil, false ]
       end
 
-      def reconcile_provider_health(health)
-        health.reconcile!
-        true
-      rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
-        false
-      end
-
       def open_health_store
-        Hive::ProviderHealth.open(attempt_reader: method(:health_attempt_state))
-      end
-
-      def health_attempt_state(attempt_id)
-        record = @store.fetch_hot(attempt_id)
-        return nil unless record
-
-        {
-          "attempt_id" => record.attempt_id,
-          "task_generation" => record.task_generation,
-          "ownership_fence" => record["ownership_generation"],
-          "state" => record.state,
-          "probe_bindings" => record["routing"].fetch("probe_bindings", [])
-        }
-      rescue Hive::Attempts::StoreError
-        nil
+        Hive::ProviderHealth.open
       end
 
       def select_provider_route(policy:, health:, snapshot:, records:, generation:, now:,
                                 health_available: true)
         routes = policy.eligible_routes
-        route_evaluations = if health_available
-          health.evaluate_routes(
-            routes: routes.map do |route|
-              { account_id: route.account, model_id: route.model }
-            end,
-            now: now
-          )
-        else
+        route_evaluations = begin
+          if health_available
+            health.evaluate_routes(
+              routes: routes.map do |route|
+                { account_id: route.account, model_id: route.model }
+              end,
+              now: now
+            )
+          else
+            routes.map { |route| unavailable_route_evaluation(route) }
+          end
+        rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
           routes.map { |route| unavailable_route_evaluation(route) }
         end
         evaluations = routes.each_with_index.to_h do |route, index|
           [ route.id, route_evaluations.fetch(index) ]
         end
-        capacity = snapshot.provider_account_capacity(
-          policy: policy,
-          records: records
+        capacity = CapacitySnapshot.provider_account_capacity(
+          accounts: policy.account_policy, records: records,
+          reserved_attempt_ids: snapshot.reserved_attempt_ids
         )
         request = Hive::ProviderRouting::Request.new(
           policy: policy,
@@ -874,25 +806,16 @@ module Hive
                                     task:, generation:, argv:, provider:, routing:,
                                     claim_capability:, retry_charge:, inherited_outputs:,
                                     subject:, now:, admission:, cohort_identity:,
-                                    cohort_admission:, cohort_release:)
-        probe_claimed = false
-        if cohort_admission&.fetch("status") == "probe"
-          claimed = view.claim_failure_cohort_probe(
-            identity: cohort_identity, date: now.utc.to_date,
-            attempt_id: attempt_id, now: now,
+                                    cohort_admission:, cohort_release:,
+                                    routing_policy:, route_decision: nil,
+                                    health_repository: nil)
+        failure_cohort_probe = if cohort_admission&.fetch("status") == "probe"
+          {
+            identity: cohort_identity, date: now.utc.to_date, now: now,
             explicit_release: cohort_release
-          )
-          raise StoreError, "failure cohort probe claim became stale" unless claimed
-
-          probe_claimed = true
+          }
         end
-        view.reserve_live(
-          attempt_id: attempt_id,
-          project: generation.project,
-          task_slug: generation.task_slug,
-          admission: admission
-        )
-        record = @store.create_launching(
+        @store.create_launching(
           attempt_id: attempt_id,
           request_id: request_id,
           predecessor_attempt_id: predecessor_attempt_id,
@@ -906,33 +829,22 @@ module Hive
           progress_token: generation.progress_token,
           provider: provider,
           routing: routing,
+          routing_policy: routing_policy,
+          route_decision: route_decision,
+          health_repository: health_repository,
           worker_argv: argv,
           claim_capability_digest: Capability.digest(claim_capability),
           starting_revision: starting_revision(task),
           retry_charge: retry_charge,
           inherited_outputs: inherited_outputs || [],
           subject: subject,
+          source_fingerprint: generation.progress_token,
+          admission: admission,
+          limits: @limits,
+          failure_cohort_probe: failure_cohort_probe,
           launch_timeout_sec: @launch_timeout_sec,
           now: now
         )
-        view.confirm_live(record, admission: admission)
-        view.record(record)
-      rescue StandardError
-        release_unpersisted_failure_probe(
-          view: view, identity: cohort_identity, date: now.utc.to_date,
-          attempt_id: attempt_id
-        ) if probe_claimed
-        raise
-      end
-
-      def release_unpersisted_failure_probe(view:, identity:, date:, attempt_id:)
-        return false if @store.fetch_hot(attempt_id)
-
-        view.release_failure_cohort_probe(
-          identity: identity, date: date, attempt_id: attempt_id
-        )
-      rescue StoreError
-        false
       end
 
       def patrol_admission_metadata(task:, generation:, now:)
@@ -980,27 +892,6 @@ module Hive
           request.respond_to?(:requestor) &&
           OPERATOR_COHORT_RELEASE_REQUESTORS.include?(request.requestor.to_s) &&
           request.respond_to?(:trigger) && request.trigger.to_s == "recovery"
-      end
-
-      def explicit_routing(decision, probe_bindings)
-        route = decision.route
-        {
-          "mode" => "explicit",
-          "policy_digest" => decision.policy_digest,
-          "decision" => decision.to_record_h,
-          "route" => {
-            "route_id" => route.id,
-            "provider_account_id" => route.account,
-            "adapter" => route.adapter,
-            "launch_binding_id" => route.launch_binding,
-            "model" => route.model,
-            "effort" => route.effort,
-            "billing_route" => route.billing_route,
-            "billing_evidence_source" => route.billing_evidence_source
-          },
-          "circuit_generations" => decision.circuit_generations,
-          "probe_bindings" => Array(probe_bindings).map(&:to_h)
-        }
       end
 
       def intended_stage_for(argv, task)

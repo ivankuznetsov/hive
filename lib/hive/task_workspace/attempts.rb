@@ -1,4 +1,5 @@
 require "json"
+require "hive/task_journal"
 require "hive/task_workspace"
 
 module Hive
@@ -12,27 +13,28 @@ module Hive
       end
 
       def call
-        current_id = @projection.dig("identity", "attempt_id")
-        seed_ids = [ current_id ] + Array(@projection.dig("journal", "attempts")).map do |binding|
-          binding["attempt_id"]
-        end
-        seed_ids = seed_ids.compact.map(&:to_s).reject(&:empty?).uniq
+        current_id = @projection.dig("identity", "attempt_id").to_s
+        current_id = nil if current_id.empty?
         diagnostics = []
         truncated = false
-        if seed_ids.length > @limits.fetch(:attempt_ids)
-          seed_ids = seed_ids.first(@limits.fetch(:attempt_ids))
-          diagnostics << diagnostic("attempt_ids_exhausted", @limits.fetch(:attempt_ids), seed_ids.length)
-          truncated = true
-        end
 
         records = []
         fetched = {}
         bytes = 0
+        seed_ids = ([ current_id ] + @activities.filter_map do |activity|
+          attempt_id = activity["attempt_id"].to_s
+          attempt_id unless attempt_id.empty? || attempt_id == Hive::TaskJournal::LEGACY_ATTEMPT_ID
+        end).compact.uniq
         seed_ids.each do |attempt_id|
           record, consumed = fetch_attempt(attempt_id, diagnostics)
           next unless record
-          break truncated = true if bytes + consumed > @limits.fetch(:attempt_bytes)
-
+          if bytes + consumed > @limits.fetch(:attempt_bytes)
+            diagnostics << diagnostic(
+              "attempt_bytes_exhausted", @limits.fetch(:attempt_bytes), bytes + consumed
+            )
+            truncated = true
+            break
+          end
           fetched[attempt_id] = record
           records << record
           bytes += consumed
@@ -75,16 +77,11 @@ module Hive
           [ record.fetch("task_generation"), record.fetch("accepted_at").to_s,
             record.fetch("attempt_id") ]
         end
-        live = projected.select { |record| %w[launching running].include?(record["state"]) }
-        if current_id.to_s.empty? && live.length > 1
-          diagnostics << diagnostic("current_attempt_unbound", nil, live.length)
-        elsif !current_id.to_s.empty? && projected.none? { |record| record["attempt_id"] == current_id }
+        if current_id && projected.none? { |record| record["attempt_id"] == current_id }
           diagnostics << diagnostic("current_attempt_missing", current_id, nil)
         end
 
-        state = if current_id.to_s.empty? && live.length > 1
-          "conflicting"
-        elsif truncated || diagnostics.any?
+        state = if truncated || diagnostics.any?
           projected.empty? ? "unavailable" : "partial"
         elsif projected.empty?
           "missing"

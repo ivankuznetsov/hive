@@ -3,13 +3,13 @@ require "json"
 require "time"
 require "uri"
 require "hive/config"
-require "hive/daemon/pr_merge_reconciliation_store"
+require "hive/daemon/pr_merge_repository"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
 require "hive/task"
 require "hive/task_closure"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -19,7 +19,7 @@ module Hive
     #
     # Every PR-bearing coding stage is observed, not only a clean completed
     # finalize. Remote state, architecture intake, retry/backoff, and archive
-    # receipt live in PrMergeReconciliationStore, so daemon restart and a
+    # receipt live in PrMergeRepository, so daemon restart and a
     # transient GitHub or intake failure cannot silently forget a task.
     class PrMergeWatcher
       PROJECTION_OUTAGE_PREFIX = "projection_unavailable: ".freeze
@@ -30,12 +30,11 @@ module Hive
 
       def initialize(poll_interval_sec: 300, merge_intake: nil,
                      poll_timeout_sec: DEFAULT_POLL_TIMEOUT_SEC,
-                     store: PrMergeReconciliationStore.new,
+                     store: PrMergeRepository.new,
                      gh: Hive::Gh, config_lookup: Hive::Config.method(:find_project),
                      config_loader: Hive::Config.method(:load),
                      task_factory: Hive::Task.method(:new),
-                     task_closure: Hive::TaskClosure,
-                     attempt_store_factory:, dry_run: false)
+                     task_closure: Hive::TaskClosure, dry_run: false)
         @poll_interval_sec = positive_number(poll_interval_sec, "poll interval", allow_zero: true)
         @poll_timeout_sec = positive_number(poll_timeout_sec, "poll timeout")
         @merge_intake = merge_intake
@@ -45,7 +44,6 @@ module Hive
         @config_loader = config_loader
         @task_factory = task_factory
         @task_closure = task_closure
-        @attempt_store_factory = attempt_store_factory
         @dry_run = dry_run
         @contexts = {}
         @last_observation_results = []
@@ -112,21 +110,12 @@ module Hive
       # consume every opportunity or permanently evict another task.
       def tick(now: Time.now.utc, projects: nil)
         selected = projects ? @contexts.keys & Array(projects).map(&:to_s) : @contexts.keys
-        attempt_store = nil
-        projection_reader = lambda do
-          attempt_store ||= @attempt_store_factory.call
-        end
         selected.sort.filter_map do |project|
           identity = @contexts.fetch(project)
-          state = @store.load(identity)
-          next unless state
-
-          candidate = @store.next_candidate(state, now: now)
+          candidate = @store.next_candidate(identity, now: now)
           next unless candidate
 
-          process_and_record(
-            identity, candidate, now: now, projection_reader: projection_reader
-          )
+          process_and_record(identity, candidate, now: now)
         rescue StandardError => e
           {
             status: :blocked, project: project,
@@ -168,61 +157,53 @@ module Hive
         terminal_slugs = Array(rows).select { |row| terminal_row?(row) }.to_h do |row|
           [ row.slug.to_s, true ]
         end
-        @store.transaction(identity, now: now) do |state|
-          candidates = state.fetch("candidates")
-          candidates_by_task = candidates.values.group_by do |candidate|
+        candidates = @store.candidates(identity).to_h do |candidate|
+          [ candidate.fetch("key"), candidate ]
+        end
+        candidates_by_task = candidates.values.group_by do |candidate|
             [ candidate.dig("task", "project"), candidate.dig("task", "slug") ]
+        end
+        observed.each do |candidate|
+          key = candidate.fetch("key")
+          task_key = [ candidate.dig("task", "project"), candidate.dig("task", "slug") ]
+          task_candidates = candidates_by_task.fetch(task_key, [])
+          same_generation = task_candidates.find do |existing|
+            existing.dig("observation", "task_generation") ==
+                candidate.dig("observation", "task_generation") &&
+              existing.fetch("key") != key && existing.dig("archive", "status") != "archived"
           end
-          observed.each do |candidate|
-            key = candidate.fetch("key")
-            task_key = [
-              candidate.dig("task", "project"),
-              candidate.dig("task", "slug")
-            ]
-            task_candidates = candidates_by_task.fetch(task_key, [])
-            same_generation = task_candidates.find do |existing|
+          if same_generation && binding_drift?(same_generation, candidate)
+            candidate["observation"]["held"] = true
+            candidate["observation"]["hold_reason"] ||=
+              binding_drift_reason(same_generation, candidate)
+          end
+          task_candidates.each do |existing|
+            next if existing.fetch("key") == key ||
+              existing.dig("archive", "status") == "archived"
+
+            existing["archive"]["status"] = "superseded"
+            existing["archive"]["last_error"] = if
               existing.dig("observation", "task_generation") ==
-                  candidate.dig("observation", "task_generation") &&
-                existing.fetch("key") != key &&
-                existing.dig("archive", "status") != "archived"
+                candidate.dig("observation", "task_generation")
+              "pull request binding changed within one task generation"
+            else
+              "a newer task generation was observed"
             end
-            if same_generation && binding_drift?(same_generation, candidate)
-              candidate["observation"]["held"] = true
-              candidate["observation"]["hold_reason"] ||=
-                binding_drift_reason(same_generation, candidate)
-            end
-            task_candidates.each do |existing|
-              next if existing.fetch("key") == key
-              next if existing.dig("archive", "status") == "archived"
-
-              existing["archive"]["status"] = "superseded"
-              existing["archive"]["last_error"] =
-                if existing.dig("observation", "task_generation") ==
-                   candidate.dig("observation", "task_generation")
-                  "pull request binding changed within one task generation"
-                else
-                  "a newer task generation was observed"
-                end
-              existing["updated_at"] = now.utc.iso8601(6)
-            end
-            candidates[key] = merge_observation(candidates[key], candidate)
-            task_candidates.reject! { |existing| existing.fetch("key") == key }
-            task_candidates << candidates.fetch(key)
-            candidates_by_task[task_key] = task_candidates
+            existing["updated_at"] = now.utc.iso8601(6)
           end
-          candidates.each_value do |candidate|
-            next unless terminal_slugs.key?(candidate.dig("task", "slug"))
-            next if observed_by_key.key?(candidate.fetch("key"))
-
+          candidates[key] = merge_observation(candidates[key], candidate)
+          task_candidates.reject! { |existing| existing.fetch("key") == key }
+          task_candidates << candidates.fetch(key)
+          candidates_by_task[task_key] = task_candidates
+        end
+        candidates.each_value do |candidate|
+          if terminal_slugs.key?(candidate.dig("task", "slug")) &&
+             !observed_by_key.key?(candidate.fetch("key"))
             mark_terminal_candidate(candidate, identity, now: now)
           end
-          state["backlog"] = {
-            "watermark" => state.dig("backlog", "watermark") || now.utc.iso8601(6),
-            "scanned_at" => now.utc.iso8601(6),
-            "complete" => true,
-            "outcomes" => outcomes.to_h { |outcome| [ outcome.fetch("key"), outcome ] }
-          }
+          @store.upsert_candidate(identity, candidate, now: now)
         end
+        @store.update_backlog(identity, outcomes: outcomes, now: now)
       end
 
       def candidate_for(row, identity, now:)
@@ -313,32 +294,33 @@ module Hive
         ]
       end
 
-      def process_and_record(identity, candidate, now:, projection_reader:)
-        result = process_candidate(
-          identity, candidate, now: now, projection_reader: projection_reader
-        )
-        @store.transaction(identity, now: now) do |state|
-          current = state.fetch("candidates")[candidate.fetch("key")]
-          next unless current
-          next unless current.dig("observation", "task_generation") ==
-            candidate.dig("observation", "task_generation")
-
-          apply_result!(current, result, now: now)
-          @store.advance_cursor!(state, current.fetch("key"))
+      def process_and_record(identity, candidate, now:)
+        result = process_candidate(identity, candidate, now: now)
+        current = @store.candidates(identity).find do |item|
+          item.fetch("key") == candidate.fetch("key")
         end
+        return result unless current
+        apply_result!(current, result, now: now)
+        @store.checkpoint(
+          identity, current,
+          expected_task_generation: candidate.dig("observation", "task_generation"), now: now
+        )
+        @store.advance_cursor(identity, current.fetch("key"), now: now)
         result.merge(
           project: identity.fetch("registration"),
           slug: candidate.dig("task", "slug")
         )
       rescue StandardError => e
-        @store.transaction(identity, now: now) do |state|
-          current = state.fetch("candidates")[candidate.fetch("key")]
-          if current
-            message = @store.record_failure!(current, e, now: now)
-            current["archive"]["status"] = "failed"
-            current["archive"]["last_error"] = message
-            @store.advance_cursor!(state, current.fetch("key"))
-          end
+        current = @store.candidates(identity).find do |item|
+          item.fetch("key") == candidate.fetch("key")
+        end
+        if current
+          failed, = @store.retry_after_failure(current, e, now: now)
+          @store.checkpoint(
+            identity, failed,
+            expected_task_generation: candidate.dig("observation", "task_generation"), now: now
+          )
+          @store.advance_cursor(identity, current.fetch("key"), now: now)
         end
         {
           status: :failed,
@@ -348,12 +330,10 @@ module Hive
         }
       end
 
-      def process_candidate(identity, candidate, now:, projection_reader:)
+      def process_candidate(identity, candidate, now:)
         task = resolve_candidate_task(candidate)
         return terminal_result(task, identity, now: now) if Hive::TaskClosure.terminal_task?(task)
-        generation = generation_status(
-          task, candidate, attempt_store: projection_reader.call
-        )
+        generation = generation_status(task, candidate)
         if generation.fetch(:status) == :unavailable
           return {
             status: :blocked,
@@ -596,14 +576,18 @@ module Hive
         candidate["archive"].merge!(result[:archive]) if result[:archive]
         candidate["updated_at"] = now.utc.iso8601(6)
         if result[:status] == :failed
-          @store.record_failure!(candidate, Hive::Error.new(result[:reason]), now: now)
+          candidate.replace(
+            @store.retry_after_failure(
+              candidate, Hive::Error.new(result[:reason]), now: now
+            ).fetch(0)
+          )
         elsif result[:next_poll_at]
           candidate["retry"] = {
             "failures" => candidate.dig("retry", "failures").to_i,
             "not_before" => result.fetch(:next_poll_at).utc.iso8601(6)
           }
         else
-          @store.clear_retry!(candidate)
+          candidate["retry"] = { "failures" => 0, "not_before" => nil }
         end
       end
 
@@ -612,17 +596,18 @@ module Hive
       # therefore resumes from that receipt instead of repeating the earlier
       # side effect.
       def checkpoint!(identity, candidate, result, now:)
-        @store.transaction(identity, now: now) do |state|
-          current = state.fetch("candidates")[candidate.fetch("key")]
-          unless current &&
-                 current.dig("observation", "task_generation") ==
-                   candidate.dig("observation", "task_generation")
-            raise Hive::ConcurrentRunError,
-                  "merge reconciliation candidate changed before checkpoint"
-          end
-
-          apply_result!(current, result, now: now)
+        current = @store.candidates(identity).find do |item|
+          item.fetch("key") == candidate.fetch("key")
         end
+        unless current
+          raise Hive::ConcurrentRunError,
+                "merge reconciliation candidate changed before checkpoint"
+        end
+        apply_result!(current, result, now: now)
+        @store.checkpoint(
+          identity, current,
+          expected_task_generation: candidate.dig("observation", "task_generation"), now: now
+        )
         apply_result!(candidate, result, now: now)
       end
 
@@ -661,16 +646,16 @@ module Hive
         nil
       end
 
-      def generation_status(task, candidate, attempt_store:)
+      def generation_status(task, candidate)
         marker = Hive::Markers.current(task.state_file)
-        bounded = Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: attempt_store
+        bounded = Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
         ).read_routine(marker: marker)
         unless bounded.current?
           reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
           return {
             status: :unavailable,
-            reason: "task projection requires repair before reconciliation (#{reason})"
+            reason: "task journal is invalid (#{reason})"
           }
         end
 
@@ -725,7 +710,7 @@ module Hive
       def tracked_row?(row)
         SUPPORTED_STAGES.include?(row.stage.to_s) &&
           row.workflow.to_s == "coding" &&
-          !Hive::TaskProjection.repair_required_row?(row)
+          !Hive::TaskProjection.history_invalid_row?(row)
       end
 
       def backlog_outcome(row, task_generation, status:, reason:,
@@ -832,7 +817,7 @@ module Hive
       def candidates_for(project)
         identity = @contexts[project.to_s] || identity_for(project)
         @contexts[project.to_s] = identity
-        @store.load(identity)&.fetch("candidates", {})&.values || []
+        @store.candidates(identity)
       rescue StandardError
         []
       end
@@ -877,7 +862,7 @@ module Hive
       end
 
       def bounded_error(error)
-        "#{error.class}: #{error.message}"[0, PrMergeReconciliationStore::MAX_DIAGNOSTIC_BYTES]
+        "#{error.class}: #{error.message}"[0, PrMergeRepository::MAX_DIAGNOSTIC_BYTES]
       end
 
       def positive_number(value, label, allow_zero: false)

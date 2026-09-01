@@ -53,9 +53,10 @@ module Hive
           unless agent_setup_refused?
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
+            enroll_project unless @no_init
+            bootstrap_runtime_control_plane
             install_daemon
             install_babysitter
-            enroll_project unless @no_init
             if @service
               if web_config_error
                 # A malformed global `web` block must never be silently
@@ -202,6 +203,30 @@ module Hive
             "target_path" => installer.target_path,
             "messages" => installer.messages
           } ]
+        end
+      end
+
+      def bootstrap_runtime_control_plane
+        phase("runtime_control_plane") do
+          require "hive/runtime_control_plane"
+          database = Hive::RuntimeControlPlane::Database.new(
+            path: Hive::Paths.runtime_control_plane_path
+          )
+          diagnosis = database.diagnostics
+          if diagnosis.ok?
+            require "hive/runtime_control_plane/cutover"
+            status = Hive::RuntimeControlPlane::Cutover.inspect_status(
+              state_home: Hive::Paths.state_home, database: database
+            )
+            next [ true, { "phase" => status.fetch("phase"), "database" => database.path } ]
+          end
+          raise diagnosis.error unless diagnosis.status == :missing
+
+          require "hive/runtime_control_plane/cutover"
+          result = Hive::RuntimeControlPlane::Cutover.bootstrap(
+            confirm: true, projects: Hive::Config.registered_projects
+          )
+          [ true, { "phase" => result.phase, "database" => result.database_path } ]
         end
       end
 

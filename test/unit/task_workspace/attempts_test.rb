@@ -17,7 +17,7 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
       @records[id]
     end
 
-    def scan
+    def active_attempts
       raise "attempt workspace must never scan the global store"
     end
   end
@@ -27,10 +27,7 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
       "attempt-a" => attempt("attempt-a", state: "terminal", outcome: "failed"),
       "attempt-b" => attempt("attempt-b", predecessor: "attempt-a")
     )
-    projection = projection(
-      current: "attempt-b",
-      bindings: [ binding("attempt-a", predecessor: nil), binding("attempt-b", predecessor: "attempt-a") ]
-    )
+    projection = projection(current: "attempt-b")
     panel = Hive::TaskWorkspace::Attempts.new(
       projection: projection, attempt_store: store,
       activities: [
@@ -58,22 +55,41 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
     assert_equal %w[attempt-b attempt-a], store.fetches
   end
 
-  def test_multiple_live_attempts_without_projection_binding_are_conflicting_not_current
+  def test_missing_history_binding_does_not_scan_live_attempts
     store = ExactStore.new(
       "attempt-a" => attempt("attempt-a"), "attempt-b" => attempt("attempt-b")
     )
     panel = Hive::TaskWorkspace::Attempts.new(
-      projection: projection(
-        current: nil,
-        bindings: [ binding("attempt-a", predecessor: nil), binding("attempt-b", predecessor: nil) ]
-      ),
+      projection: projection(current: nil),
       attempt_store: store, activities: []
     ).call
 
-    assert_equal "conflicting", panel.fetch("state")
+    assert_equal "missing", panel.fetch("state")
+    assert_empty store.fetches
     refute panel.fetch("records").any? { |row| row.fetch("current") }
-    assert_includes panel.fetch("diagnostics").map { |row| row.fetch("reason") },
-                    "current_attempt_unbound"
+    assert_empty panel.fetch("diagnostics")
+  end
+
+  def test_journal_attempt_ids_preserve_independent_manual_retry_usage
+    store = ExactStore.new(
+      "attempt-old" => attempt("attempt-old", state: "terminal", outcome: "failed"),
+      "attempt-current" => attempt("attempt-current")
+    )
+    activities = [
+      session_event("old-session", "session_finished", attempt_id: "attempt-old"),
+      session_event("current-session", "session_started", attempt_id: "attempt-current")
+    ]
+
+    panel = Hive::TaskWorkspace::Attempts.new(
+      projection: projection(current: "attempt-current"),
+      attempt_store: store, activities: activities
+    ).call
+
+    assert_equal %w[attempt-current attempt-old], store.fetches
+    assert_equal %w[attempt-current attempt-old],
+                 panel.fetch("records").map { |row| row.fetch("attempt_id") }
+    old = panel.fetch("records").find { |row| row["attempt_id"] == "attempt-old" }
+    assert_equal "old-session", old.fetch("sessions").first.fetch("session_id")
   end
 
   def test_predecessor_lookup_is_exact_bounded_and_missing_nodes_are_partial
@@ -84,7 +100,7 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
       "attempt-a" => attempt("attempt-a")
     )
     panel = Hive::TaskWorkspace::Attempts.new(
-      projection: projection(current: "attempt-c", bindings: []),
+      projection: projection(current: "attempt-c"),
       attempt_store: store, activities: [], limits: limits
     ).call
 
@@ -95,19 +111,26 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
                     "predecessor_fetches_exhausted"
   end
 
-  private
+  def test_oversized_seed_attempt_exhausts_the_byte_budget_before_projection
+    store = ExactStore.new("attempt-a" => attempt("attempt-a").merge("padding" => "x" * 500))
+    panel = Hive::TaskWorkspace::Attempts.new(
+      projection: projection(current: "attempt-a"), attempt_store: store,
+      activities: [], limits: Hive::TaskWorkspace::Limits.new(attempt_bytes: 100)
+    ).call
 
-  def projection(current:, bindings:)
-    {
-      "identity" => { "attempt_id" => current, "task_generation" => 3 },
-      "journal" => { "attempts" => bindings }
-    }
+    assert_equal "unavailable", panel.fetch("state")
+    assert panel.fetch("truncated")
+    assert_empty panel.fetch("records")
+    assert_equal 0, panel.fetch("observed_bytes")
+    assert_equal "attempt_bytes_exhausted", panel.dig("diagnostics", 0, "reason")
   end
 
-  def binding(id, predecessor:)
+  private
+
+  def projection(current:)
     {
-      "attempt_id" => id, "predecessor_attempt_id" => predecessor,
-      "stage" => "4-execute", "task_generation" => 3
+      "identity" => { "attempt_id" => current, "task_generation" => 3 },
+      "journal" => {}
     }
   end
 
@@ -122,9 +145,9 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
     }
   end
 
-  def session_event(id, kind, **payload)
+  def session_event(id, kind, attempt_id: "attempt-b", **payload)
     {
-      "event_type" => "activity_recorded", "attempt_id" => "attempt-b",
+      "event_type" => "activity_recorded", "attempt_id" => attempt_id,
       "occurred_at" => NOW,
       "payload" => {
         "activity_kind" => kind, "session_id" => id,

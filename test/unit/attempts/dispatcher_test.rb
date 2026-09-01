@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/context"
 require "hive/attempts/dispatcher"
+require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
 require "hive/workflows/patrol_fix"
@@ -87,7 +88,7 @@ class AttemptsDispatcherTest < Minitest::Test
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "request-one")
       File.write(task.state_file, "changed\n<!-- WAITING -->\n")
-      changed = dispatch(dispatcher, task, request_id: "request-two")
+      changed = dispatch(dispatcher, task, request_id: "request-two", now: NOW + 1)
 
       assert_equal :deferred, changed.status
       assert_equal "in_flight", changed.reason
@@ -181,11 +182,7 @@ class AttemptsDispatcherTest < Minitest::Test
         project: "demo", task_slug: task.slug, intended_stage: "1-inbox",
         progress_token: advance.attempt["progress_token"]
       )
-      with_replaced_singleton_method(
-        Hive::Attempts::Generation, :default_attempt_store, -> { store }
-      ) do
-        assert worker_context.validate_generation!(task)
-      end
+      assert worker_context.validate_generation!(task)
     end
   end
 
@@ -230,8 +227,7 @@ class AttemptsDispatcherTest < Minitest::Test
     provenance.define_singleton_method(:capture_launch) do |task:, attempt:, generation:,
                                                         attempt_store:, clock:|
       journal = Hive::TaskProjection.read_journal(
-        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME),
-        attempt_store: attempt_store
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       )
       admitted = journal.any? do |record|
         record.dig("payload", "activity_kind") == "attempt_admitted" &&
@@ -322,6 +318,42 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_automatic_advance_replays_failed_generation_but_recovery_retries
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
+      request = lambda do |request_id, requestor:, trigger:|
+        FakeRequest.new(
+          slug: task.slug, project: "demo",
+          argv: [ "hive", "run", task.slug ], request_id: request_id,
+          inherited_outputs: [], requestor: requestor, trigger: trigger
+        )
+      end
+
+      first = dispatcher.dispatch_request(
+        request.call("advance-one", requestor: "daemon", trigger: "advance"),
+        now: NOW
+      )
+      failed = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1, now: NOW + 3
+      )
+      replay = dispatcher.dispatch_request(
+        request.call("advance-two", requestor: "daemon", trigger: "advance"),
+        now: NOW + 4, replay_semantic_terminal: true
+      )
+      recovery = dispatcher.dispatch_request(
+        request.call("recovery-one", requestor: "healer", trigger: "recovery"),
+        now: NOW + 5
+      )
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal failed.attempt_id, replay.attempt.attempt_id
+      assert_equal :accepted, recovery.status
+      refute_equal failed.attempt_id, recovery.attempt.attempt_id
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
   def test_successful_retry_replays_for_new_requests_without_changing_old_request_result
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
@@ -359,12 +391,12 @@ class AttemptsDispatcherTest < Minitest::Test
       )
 
       repair = dispatch(
-        dispatcher, task, request_id: "request-one",
-        intended_stage: "2-brainstorm"
+        dispatcher, task, request_id: "request-two",
+        intended_stage: "2-brainstorm", now: NOW + 4
       )
       duplicate = dispatch(
-        dispatcher, task, request_id: "request-two",
-        intended_stage: "2-brainstorm"
+        dispatcher, task, request_id: "request-three",
+        intended_stage: "2-brainstorm", now: NOW + 4
       )
 
       assert_equal :accepted, repair.status
@@ -381,9 +413,9 @@ class AttemptsDispatcherTest < Minitest::Test
         store, launcher, repair, outcome: "succeeded", exit_status: 0, now: NOW + 6
       )
       later = dispatch(
-        dispatcher, task, request_id: "request-one",
+        dispatcher, task, request_id: "request-two",
         intended_stage: "2-brainstorm",
-        generation: repair.attempt.task_generation
+        generation: repair.attempt.task_generation, now: NOW + 7
       )
 
       assert_equal :terminal_replay, later.status
@@ -464,7 +496,7 @@ class AttemptsDispatcherTest < Minitest::Test
         store, launcher, successor, outcome: "failed", exit_status: 1, now: NOW + 5
       )
 
-      retry_result = dispatch(dispatcher, task, request_id: "request-three")
+      retry_result = dispatch(dispatcher, task, request_id: "request-three", now: NOW + 6)
 
       assert_equal :accepted, retry_result.status
       assert_equal "attempt-three", retry_result.attempt.attempt_id
@@ -479,13 +511,29 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :deferred, result.status
       assert_equal "capacity", result.reason
       assert_empty launcher.launched
-      assert_empty store.scan.records
+      assert_empty store.active_attempts
+    end
+  end
+
+  def test_capacity_race_inside_atomic_admission_returns_a_deferred_result
+    with_dispatcher do |dispatcher, launcher, task, store|
+      store.define_singleton_method(:create_launching) do |**|
+        raise Hive::Attempts::CapacityExceeded, "final slot was claimed"
+      end
+      result = dispatch(dispatcher, task, request_id: "request-race")
+
+      assert_equal :deferred, result.status
+      assert_equal "capacity", result.reason
+      assert_empty launcher.launched
     end
   end
 
   def test_patrol_failure_cohort_survives_restart_and_runtime_change_releases_it
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      database = attempt_database(root, projects: [ "demo" ])
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: database
+      )
       launcher = FakeLauncher.new
       ids = (1..8).map { |index| "attempt-#{index}" }.each
       runtime_digest = "a" * 64
@@ -497,11 +545,11 @@ class AttemptsDispatcherTest < Minitest::Test
         runtime_digest: runtime_digest
       )
       tasks = 3.times.map do |index|
-        task_fixture(root, id: index + 1, slug: "patrol-#{index}").tap do |task|
+        task_fixture(
+          project_state_root(root, "demo"), id: index + 1,
+          slug: "patrol-#{index}", stage: "2-fix"
+        ).tap do |task|
           task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
-          task.stage_index = 2
-          task.stage_name = "fix"
-          task.folder = File.dirname(task.state_file)
         end
       end
       failures = tasks.each_with_index.map do |task, index|
@@ -509,15 +557,19 @@ class AttemptsDispatcherTest < Minitest::Test
           dispatcher, task, request_id: "failure-#{index}", intended_stage: "2-fix",
           now: NOW + (index * 10)
         )
-        terminalize_attempt(
+        terminal = terminalize_attempt(
           store, launcher, result, outcome: "failed", exit_status: 7,
           now: NOW + (index * 10) + 3, diagnostic: true
+        )
+        assert Hive::Attempts::FailureCohortReconciler.new(store: store).reconcile(
+          record: terminal,
+          admission: store.reservation_metadata(terminal.attempt_id).fetch("admission")
         )
         result
       end
 
       capped = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Store.new(root: store.root), launcher: launcher,
+        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
         limits: { max_global: 6, max_per_project: 6, max_daily: 3 },
         clock: -> { NOW + 40 }, id_generator: -> { ids.next },
         capability_generator: -> { CLAIM_CAPABILITY },
@@ -531,7 +583,7 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "capacity", hard_capped.reason
 
       restarted = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Store.new(root: store.root), launcher: launcher,
+        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
         limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
         clock: -> { NOW + 40 }, id_generator: -> { ids.next },
         capability_generator: -> { CLAIM_CAPABILITY },
@@ -562,7 +614,7 @@ class AttemptsDispatcherTest < Minitest::Test
       restarted_store = restarted.instance_variable_get(:@store)
       original_create = restarted_store.method(:create_launching)
       restarted_store.define_singleton_method(:create_launching) do |**|
-        raise Hive::Attempts::StoreError, "injected create failure"
+        raise Hive::Attempts::RepositoryError, "injected create failure"
       end
       failed_release = FakeRequest.new(
         slug: tasks[1].slug, project: "demo",
@@ -571,7 +623,7 @@ class AttemptsDispatcherTest < Minitest::Test
         recovery: { "phase" => "cleared" }, requestor: "action",
         trigger: "recovery"
       )
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         restarted.dispatch_request(failed_release, now: NOW + 40)
       end
       restarted_store.define_singleton_method(:create_launching, original_create)
@@ -621,7 +673,7 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "failure_cohort_cooldown", second_release.reason
 
       repaired = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Store.new(root: store.root), launcher: launcher,
+        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
         limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
         clock: -> { NOW + 41 }, id_generator: -> { ids.next },
         capability_generator: -> { CLAIM_CAPABILITY },
@@ -660,7 +712,9 @@ class AttemptsDispatcherTest < Minitest::Test
     with_tmp_dir do |root|
       assert_raises(ArgumentError) do
         Hive::Attempts::Dispatcher.new(
-          store: Hive::Attempts::Store.new(root: File.join(root, "attempts")),
+          store: Hive::Attempts::Repository.new(
+            root: File.join(root, "attempts"), migrate: true
+          ),
           launcher: FakeLauncher.new,
           runtime_digest: "invalid"
         )
@@ -672,142 +726,23 @@ class AttemptsDispatcherTest < Minitest::Test
     with_dispatcher do |dispatcher, _launcher, task, store|
       created = dispatch(dispatcher, task, request_id: "lost-handoff").attempt
       lost = store.mark_lost(created, reason: "owner_gone", now: NOW + 1)
-      3.times do |index|
-        store.decision_index.record_failure_cohort(
-          attempt_id: "failure-#{index}", identity: failure_cohort_identity,
-          occurred_at: NOW + index
-        )
-      end
-      assert store.decision_index.claim_failure_cohort_probe(
+      seed_failure_cohort(store, identity: failure_cohort_identity, date: NOW.to_date)
+      assert store.claim_failure_cohort_probe(
         identity: failure_cohort_identity, date: NOW.to_date,
         attempt_id: lost.attempt_id, now: NOW + 4_000
       )
-      view = Object.new
-      view.define_singleton_method(:record) { |_record| true }
-
       result = dispatcher.send(
         :resolve_failed_handoff, lost, interactive: false,
-        admission_view: view, cohort_identity: failure_cohort_identity,
+        cohort_identity: failure_cohort_identity,
         cohort_date: NOW.to_date
       )
 
       assert_equal :deferred, result.status
       assert_equal "launch_handoff_failed", result.reason
-      assert store.decision_index.claim_failure_cohort_probe(
+      assert store.claim_failure_cohort_probe(
         identity: failure_cohort_identity, date: NOW.to_date,
-        attempt_id: "probe-2", now: NOW + 4_001, explicit_release: true
+        attempt_id: lost.attempt_id, now: NOW + 4_001, explicit_release: true
       )
-    end
-  end
-
-  def test_unpersisted_probe_release_fails_closed_on_store_error
-    with_dispatcher do |dispatcher|
-      view = Object.new
-      view.define_singleton_method(:release_failure_cohort_probe) do |**|
-        raise Hive::Attempts::StoreError, "injected release failure"
-      end
-
-      refute dispatcher.send(
-        :release_unpersisted_failure_probe,
-        view: view, identity: failure_cohort_identity,
-        date: NOW.to_date, attempt_id: "missing-attempt"
-      )
-    end
-  end
-
-  def test_distinct_generations_share_one_multiprocess_capacity_transaction
-    skip "fork is unavailable" unless Process.respond_to?(:fork)
-
-    with_tmp_dir do |root|
-      attempt_root = File.join(root, "attempts")
-      tasks = 2.times.map do |index|
-        state_file = File.join(root, "task-#{index}.md")
-        File.write(state_file, "task #{index}\n<!-- WAITING -->\n")
-        FakeTask.new(
-          id: 100 + index, slug: "durable-task-#{index}", state_file: state_file,
-          stage_index: 4, stage_name: "execute"
-        )
-      end
-      children = []
-
-      spawn_dispatch = lambda do |task, index|
-        entered_r, entered_w = IO.pipe
-        release_r, release_w = IO.pipe
-        result_r, result_w = IO.pipe
-        pid = fork do
-          entered_r.close
-          release_w.close
-          result_r.close
-          store = Hive::Attempts::Store.new(root: attempt_root)
-          original_generation_lock = store.method(:with_generation_lock)
-          admission_generation_lock = true
-          store.define_singleton_method(:with_generation_lock) do |generation, &block|
-            unless admission_generation_lock
-              next original_generation_lock.call(generation, &block)
-            end
-
-            admission_generation_lock = false
-            original_generation_lock.call(generation) do
-              entered_w.write("1")
-              entered_w.close
-              release_r.read(1)
-              block.call
-            end
-          end
-          dispatcher = Hive::Attempts::Dispatcher.new(
-            store: store, launcher: FakeLauncher.new,
-            limits: { max_global: 1, max_per_project: 1, max_daily: 50 },
-            clock: -> { NOW }, id_generator: -> { "attempt-#{index}" },
-            capability_generator: -> { CLAIM_CAPABILITY }
-          )
-          result = dispatch(dispatcher, task, request_id: "request-#{index}")
-          Marshal.dump([ result.status, result.reason ], result_w)
-        rescue StandardError => e
-          Marshal.dump([ :error, e.class.name, e.message, e.backtrace ], result_w)
-        ensure
-          [ entered_w, release_r, result_w ].each do |io|
-            io.close unless io.closed?
-          rescue IOError
-            nil
-          end
-          exit! 0
-        end
-        entered_w.close
-        release_r.close
-        result_w.close
-        child = { pid: pid, entered: entered_r, release: release_w, result: result_r }
-        children << child
-        child
-      end
-
-      first = spawn_dispatch.call(tasks.fetch(0), 0)
-      assert_equal "1", first.fetch(:entered).read(1)
-      second = spawn_dispatch.call(tasks.fetch(1), 1)
-      assert_nil IO.select([ second.fetch(:entered) ], nil, nil, 0.2),
-                 "second generation entered while the first held admission"
-
-      first.fetch(:release).write("1")
-      first.fetch(:release).close
-      first_result = Marshal.load(first.fetch(:result))
-      Process.wait(first.fetch(:pid))
-
-      assert_equal "1", second.fetch(:entered).read(1)
-      second.fetch(:release).write("1")
-      second.fetch(:release).close
-      second_result = Marshal.load(second.fetch(:result))
-      Process.wait(second.fetch(:pid))
-
-      assert_equal [ :accepted, nil ], first_result
-      assert_equal [ :deferred, "capacity" ], second_result
-      assert_equal 1, Hive::Attempts::Store.new(root: attempt_root).scan.records.length
-      children.clear
-    ensure
-      children.each do |child|
-        Process.kill("TERM", child.fetch(:pid))
-        Process.wait(child.fetch(:pid))
-      rescue Errno::ESRCH, Errno::ECHILD
-        nil
-      end
     end
   end
 
@@ -1045,7 +980,7 @@ class AttemptsDispatcherTest < Minitest::Test
 
     with_dispatcher do |dispatcher, _launcher, task|
       with_tmp_dir do |other_root|
-        other_store = Hive::Attempts::Store.new(root: other_root)
+        other_store = Hive::Attempts::Repository.new(root: other_root, migrate: true)
         generation = Hive::Attempts::Generation.resolve(
           task: task, project: "demo", intended_stage: "4-execute"
         )
@@ -1134,29 +1069,15 @@ class AttemptsDispatcherTest < Minitest::Test
   def test_shared_admission_view_applies_multi_admission_capacity_delta_without_rescanning
     with_dispatcher(limits: { max_global: 2, max_per_project: 2, max_daily: 2 }) do |dispatcher, launcher, task, store|
       scans = 0
-      original_scan = store.method(:scan)
-      store.define_singleton_method(:scan) do
+      original_active_attempts = store.method(:active_attempts)
+      store.define_singleton_method(:active_attempts) do
         scans += 1
-        original_scan.call
-      end
-      proof_reads = 0
-      proofs = store.permanent_proofs
-      original_fetch = proofs.method(:fetch)
-      proofs.define_singleton_method(:fetch) do |attempt_id|
-        proof_reads += 1
-        original_fetch.call(attempt_id)
+        original_active_attempts.call
       end
       admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
-      second_task = task.dup
-      second_task.id = 43
-      second_task.slug = "durable-task-two"
-      second_task.state_file = File.join(File.dirname(task.state_file), "task-two.md")
-      File.write(second_task.state_file, "task two\n<!-- WAITING -->\n")
-      third_task = task.dup
-      third_task.id = 44
-      third_task.slug = "durable-task-three"
-      third_task.state_file = File.join(File.dirname(task.state_file), "task-three.md")
-      File.write(third_task.state_file, "task three\n<!-- WAITING -->\n")
+      state_root = task_state_root(task)
+      second_task = task_fixture(state_root, id: 43, slug: "durable-task-two")
+      third_task = task_fixture(state_root, id: 44, slug: "durable-task-three")
 
       first = dispatch(
         dispatcher, task, request_id: "request-one", admission_view: admission_view
@@ -1172,35 +1093,35 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "capacity", blocked.reason
       assert_equal 2, launcher.launched.size
       assert_equal 1, scans
-      assert_equal 0, proof_reads
     end
   end
 
   def test_stale_tick_view_observes_external_dispatch_through_live_capacity_cell
     with_tmp_dir do |root|
+      database = attempt_database(root, projects: %w[external daemon])
       attempt_root = File.join(root, "attempts")
-      tick_store = Hive::Attempts::Store.new(root: attempt_root)
-      external_store = Hive::Attempts::Store.new(root: attempt_root)
-      tick_scans = 0
-      external_scans = 0
-      tick_scan = tick_store.method(:scan)
-      external_scan = external_store.method(:scan)
-      tick_store.define_singleton_method(:scan) do
-        tick_scans += 1
-        tick_scan.call
+      tick_store = Hive::Attempts::Repository.new(root: attempt_root, database: database)
+      external_store = Hive::Attempts::Repository.new(root: attempt_root, database: database)
+      tick_active_attemptss = 0
+      external_active_attemptss = 0
+      tick_active_attempts = tick_store.method(:active_attempts)
+      external_active_attempts = external_store.method(:active_attempts)
+      tick_store.define_singleton_method(:active_attempts) do
+        tick_active_attemptss += 1
+        tick_active_attempts.call
       end
-      external_store.define_singleton_method(:scan) do
-        external_scans += 1
-        external_scan.call
+      external_store.define_singleton_method(:active_attempts) do
+        external_active_attemptss += 1
+        external_active_attempts.call
       end
       admission_view = Hive::Attempts::Reconciler.new(store: tick_store)
                                                   .reconcile(now: NOW)
                                                   .admission_view
-      assert_equal 1, tick_scans
-      assert_equal 0, external_scans
+      assert_equal 1, tick_active_attemptss
+      assert_equal 0, external_active_attemptss
 
-      external_task = task_fixture(root, id: 41, slug: "external-task")
-      daemon_task = task_fixture(root, id: 42, slug: "daemon-task")
+      external_task = task_fixture(project_state_root(root, "external"), id: 41, slug: "external-task")
+      daemon_task = task_fixture(project_state_root(root, "daemon"), id: 42, slug: "daemon-task")
       limits = { max_global: 1, max_per_project: 1, max_daily: 50 }
       external = Hive::Attempts::Dispatcher.new(
         store: external_store, launcher: FakeLauncher.new, limits: limits,
@@ -1219,7 +1140,7 @@ class AttemptsDispatcherTest < Minitest::Test
         provider: "codex", now: NOW + 1
       )
       assert_equal :accepted, external_result.status
-      assert_equal 1, external_scans
+      assert_equal 1, external_active_attemptss
 
       daemon_result = daemon.dispatch(
         task: daemon_task, project: "daemon", intended_stage: "4-execute",
@@ -1229,45 +1150,21 @@ class AttemptsDispatcherTest < Minitest::Test
 
       assert_equal :deferred, daemon_result.status
       assert_equal "capacity", daemon_result.reason
-      assert_equal 1, tick_scans,
+      assert_equal 1, tick_active_attemptss,
                    "the daemon must not rescan its stale tick view"
-      assert_equal 1, external_scans,
+      assert_equal 1, external_active_attemptss,
                    "the direct dispatcher owns its separate admission scan"
     end
   end
 
-  def test_pending_live_capacity_reservation_without_a_record_converges_under_admission_lock
-    with_dispatcher(limits: { max_global: 1, max_per_project: 1, max_daily: 50 }) do |dispatcher, _launcher, task, store|
-      store.with_admission_lock do
-        store.decision_index.reserve_live(
-          attempt_id: "crashed-before-create", project: "demo", task_slug: "missing-task"
-        )
-      end
-      admission_view = Hive::Attempts::Reconciler.new(store: store)
-                                                  .reconcile(now: NOW)
-                                                  .admission_view
-
-      result = dispatch(
-        dispatcher, task, request_id: "request-one",
-        admission_view: admission_view
-      )
-
-      assert_equal :accepted, result.status
-      assert_equal [ result.attempt.attempt_id ],
-                   store.decision_index.live_reservations.keys
-    end
-  end
-
-  def test_cold_terminal_proof_releases_active_capacity_but_missing_active_record_fails_closed
+  def test_terminal_transition_releases_active_capacity
     with_dispatcher(limits: { max_global: 1, max_per_project: 1, max_daily: 50 }) do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
-      terminal = terminalize_attempt(
+      terminalize_attempt(
         store, launcher, first, outcome: "failed", exit_status: 1,
         now: NOW + 3
       )
-      store.permanent_proofs.publish(terminal)
-      File.unlink(store.record_path(terminal.attempt_id))
-      other_task = task_fixture(File.dirname(task.state_file), id: 43, slug: "other-task")
+      other_task = task_fixture(task_state_root(task), id: 43, slug: "other-task")
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 4)
                                                   .admission_view
@@ -1278,28 +1175,6 @@ class AttemptsDispatcherTest < Minitest::Test
       )
 
       assert_equal :accepted, result.status
-    end
-
-    with_dispatcher(limits: { max_global: 1, max_per_project: 1, max_daily: 50 }) do |dispatcher, _launcher, task, store|
-      store.with_admission_lock do
-        store.decision_index.reserve_live(
-          attempt_id: "missing-active", project: "other", task_slug: "missing-task"
-        )
-        store.decision_index.confirm_live(
-          attempt_id: "missing-active", project: "other", task_slug: "missing-task"
-        )
-      end
-      admission_view = Hive::Attempts::Reconciler.new(store: store)
-                                                  .reconcile(now: NOW)
-                                                  .admission_view
-
-      result = dispatch(
-        dispatcher, task, request_id: "request-one",
-        admission_view: admission_view
-      )
-
-      assert_equal :deferred, result.status
-      assert_equal "capacity", result.reason
     end
   end
 
@@ -1343,7 +1218,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_admission_point_fetches_cold_terminal_request_and_successful_owner_proofs
+  def test_admission_queries_terminal_request_and_successful_owner_after_publication
     with_dispatcher do |dispatcher, launcher, task, store|
       failed_result = dispatch(dispatcher, task, request_id: "request-one")
       failed = terminalize_attempt(
@@ -1356,9 +1231,7 @@ class AttemptsDispatcherTest < Minitest::Test
         now: NOW + 6
       )
       [ failed, successful ].each do |record|
-        store.decision_index.record_terminal(record)
-        store.permanent_proofs.publish(record)
-        File.unlink(store.record_path(record.attempt_id))
+        finish_publication(store, record)
       end
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 7)
@@ -1379,7 +1252,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_cold_daily_index_enforces_utc_capacity_and_tempfail_refund
+  def test_sql_daily_accounting_enforces_utc_capacity_and_tempfail_refund
     with_dispatcher(limits: { max_global: 3, max_per_project: 3, max_daily: 1 }) do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       failed = terminalize_attempt(
@@ -1387,16 +1260,11 @@ class AttemptsDispatcherTest < Minitest::Test
         now: NOW + 3
       )
       Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4)
-      store.permanent_proofs.publish(failed)
-      File.unlink(store.record_path(failed.attempt_id))
+      finish_publication(store, failed)
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 5)
                                                   .admission_view
-      other_task = task.dup
-      other_task.id = 43
-      other_task.slug = "other-task"
-      other_task.state_file = File.join(File.dirname(task.state_file), "other.md")
-      File.write(other_task.state_file, "other\n<!-- WAITING -->\n")
+      other_task = task_fixture(task_state_root(task), id: 43, slug: "other-task")
 
       blocked = dispatch(
         dispatcher, other_task, request_id: "request-two",
@@ -1415,16 +1283,12 @@ class AttemptsDispatcherTest < Minitest::Test
         exit_status: Hive::ExitCodes::TEMPFAIL, now: NOW + 3
       )
       2.times { Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4) }
-      store.permanent_proofs.publish(tempfail)
-      File.unlink(store.record_path(tempfail.attempt_id))
+      store.refund_tempfail(tempfail)
+      finish_publication(store, tempfail)
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 5)
                                                   .admission_view
-      other_task = task.dup
-      other_task.id = 43
-      other_task.slug = "other-task"
-      other_task.state_file = File.join(File.dirname(task.state_file), "other.md")
-      File.write(other_task.state_file, "other\n<!-- WAITING -->\n")
+      other_task = task_fixture(task_state_root(task), id: 43, slug: "other-task")
 
       accepted = dispatch(
         dispatcher, other_task, request_id: "request-two",
@@ -1433,12 +1297,9 @@ class AttemptsDispatcherTest < Minitest::Test
       )
 
       assert_equal :accepted, accepted.status
-      assert_equal 0, store.decision_index.daily_count(
-        project: "demo", date: Date.new(2026, 7, 17)
-      )
-      assert_equal 1, store.decision_index.daily_count(
-        project: "demo", date: NOW.utc.to_date
-      )
+      snapshot = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW)
+      assert_equal 0, snapshot.daily_count("demo", Date.new(2026, 7, 17))
+      assert_equal 1, snapshot.daily_count("demo", NOW.utc.to_date)
     end
   end
 
@@ -1450,8 +1311,7 @@ class AttemptsDispatcherTest < Minitest::Test
         exit_status: Hive::ExitCodes::TEMPFAIL, now: NOW + 3
       )
       Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4)
-      store.permanent_proofs.publish(terminal)
-      File.unlink(store.record_path(terminal.attempt_id))
+      finish_publication(store, terminal)
       admission_view = Hive::Attempts::Reconciler.new(store: store)
                                                   .reconcile(now: NOW + 5)
                                                   .admission_view
@@ -1498,28 +1358,11 @@ class AttemptsDispatcherTest < Minitest::Test
         ->(_task, stage) { Hive::ProviderRouting::Policy.legacy(stage: stage) }
       )
 
-      result = dispatch(dispatcher, task, request_id: "request-one")
-      state = dispatcher.send(:health_attempt_state, result.attempt.attempt_id)
-      assert_equal result.attempt.attempt_id, state.fetch("attempt_id")
-      assert_equal "launching", state.fetch("state")
-      assert_empty state.fetch("probe_bindings")
-
-      original_fetch = store.method(:fetch_hot)
-      store.define_singleton_method(:fetch_hot) do |_attempt_id|
-        raise Hive::Attempts::StoreError, "unavailable"
-      end
-      assert_nil dispatcher.send(:health_attempt_state, result.attempt.attempt_id)
-      store.define_singleton_method(:fetch_hot, original_fetch)
-
       opened = Object.new
-      test_case = self
       dispatcher.instance_variable_set(:@health_store, nil)
       with_replaced_singleton_method(
         Hive::ProviderHealth, :open,
-        lambda { |attempt_reader:|
-          test_case.assert_kind_of Method, attempt_reader
-          opened
-        }
+        -> { opened }
       ) do
         assert_same opened, dispatcher.send(:provider_health_store)
       end
@@ -1543,8 +1386,11 @@ class AttemptsDispatcherTest < Minitest::Test
                       transient_retry_backoff_sec: 60,
                       clock: -> { NOW })
     with_tmp_dir do |root|
-      task = task_fixture(root, id: 42, slug: "durable-task")
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      database = attempt_database(root, projects: [ "demo" ])
+      task = task_fixture(project_state_root(root, "demo"), id: 42, slug: "durable-task")
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: database
+      )
       launcher = FakeLauncher.new
       ids = %w[attempt-one attempt-two attempt-three].each
       dispatcher = Hive::Attempts::Dispatcher.new(
@@ -1557,17 +1403,46 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def task_fixture(root, id:, slug:)
-    folder = File.join(root, slug)
+  def task_fixture(state_root, id:, slug:, stage: "4-execute")
+    folder = File.join(state_root, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
-    state_file = File.join(folder, "task.md")
+    state_file = File.join(folder, "state.md")
     File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
     task = FakeTask.new(
       id: id, slug: slug, state_file: state_file,
-      stage_index: 4, stage_name: "execute"
+      stage_index: Integer(stage.split("-", 2).first), stage_name: stage.split("-", 2).last,
+      project_root: File.dirname(state_root), folder: folder
     )
-    seed_task_projection(folder, state_file: state_file)
     task
+  end
+
+  def project_state_root(root, project)
+    File.join(root, "projects", project, ".hive-state")
+  end
+
+  def task_state_root(task)
+    File.dirname(File.dirname(File.dirname(task.folder)))
+  end
+
+  def attempt_database(root, projects:)
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(root, "runtime-control-plane.sqlite3")
+    ).migrate!
+    timestamp = Hive::Attempts::Record.iso8601(NOW)
+    installation = database.read { |db| db[:installations].get(:installation_id) }
+    database.transaction do |db|
+      projects.each do |name|
+        state_root = project_state_root(root, name)
+        FileUtils.mkdir_p(state_root)
+        db[:projects].insert(
+          project_id: "test-#{name}", installation_id: installation,
+          registration_id: "test-#{name}", name: name,
+          observed_path: File.dirname(state_root), state_root_path: state_root,
+          active: 1, registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+    end
+    database
   end
 
   def dispatch(dispatcher, task, request_id:, interactive: false, intended_stage: "4-execute",
@@ -1634,6 +1509,25 @@ class AttemptsDispatcherTest < Minitest::Test
       log_reference: log_reference,
       now: now
     )
+  end
+
+  def finish_publication(store, record)
+    store.prepare_publication(attempt_id: record.attempt_id, consumers: [ "journal" ])
+    store.acknowledge_publication(record.attempt_id, consumer: "journal")
+    assert store.finish_publication(record.attempt_id)
+  end
+
+  def seed_failure_cohort(store, identity:, date:)
+    normalized = Hive::RuntimeControlPlane::Codec.normalize(identity)
+    encoded = Hive::RuntimeControlPlane::Codec.dump_json(normalized)
+    store.database.transaction do |db|
+      db[:attempt_failure_cohorts].insert(
+        utc_date: date.iso8601, identity_digest: Digest::SHA256.hexdigest(encoded),
+        identity_json: encoded, failure_count: 3,
+        retry_at: Hive::Attempts::Record.iso8601(NOW + 3_600),
+        updated_at: Hive::Attempts::Record.iso8601(NOW)
+      )
+    end
   end
 
   def patrol_fix_decision_receipt(slug)

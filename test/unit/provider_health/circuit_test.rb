@@ -159,6 +159,67 @@ class ProviderHealthCircuitTest < Minitest::Test
     assert_equal "closed", rejected.automatic_state
   end
 
+  def test_reopen_reset_and_snapshot_replay_their_complete_state
+    opened = open_event(
+      Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
+      id: "open", eligible_at: fixture_time(0)
+    ).apply(Hive::ProviderHealth::Circuit.closed(scope: provider_scope))
+    binding = Hive::ProviderHealth::ProbeBinding.new(
+      scope: provider_scope, journal_epoch: 0, observed_generation: 1,
+      claim_generation: 2, attempt_id: "attempt-1",
+      task_generation: "generation-1", ownership_fence: "fence-1"
+    )
+    claimed = event(
+      opened, kind: "probe_claimed", id: "claim", payload: { "probe" => binding.to_h }
+    ).apply(opened)
+    reopened = event(
+      claimed, kind: "probe_reopened", id: "reopen",
+      payload: {
+        "eligible_at" => fixture_time(4).iso8601(6),
+        "receipt_identity" => digest("reopen")
+      }
+    ).apply(claimed)
+    reset = event(
+      reopened, kind: "reset", id: "reset",
+      payload: { "manual_block" => nil, "audit" => audit("reset", 4) }
+    ).apply(reopened)
+    state = {
+      "automatic_state" => reset.automatic_state,
+      "eligible_at" => reset.eligible_at,
+      "evidence" => reset.evidence,
+      "manual_block" => reset.manual_block,
+      "probe" => reset.probe,
+      "last_event_id" => reset.last_event_id
+    }
+    snapshot = Hive::ProviderHealth::Event.new(
+      event_id: "snapshot", sequence: 5, scope: provider_scope, journal_epoch: 0,
+      kind: "snapshot", occurred_at: fixture_time(0), idempotency_key: digest("snapshot"),
+      expected_generation: 4, previous_generation: 4, resulting_generation: 4,
+      payload: { "state" => state }
+    ).apply(reset)
+
+    assert_equal "open", reopened.automatic_state
+    assert_nil reopened.probe
+    assert_equal "closed", reset.automatic_state
+    assert_equal reset.to_h, snapshot.to_h
+  end
+
+  def test_snapshot_validation_rejects_unexpected_state_fields
+    state = {
+      "automatic_state" => "closed", "eligible_at" => nil, "evidence" => nil,
+      "manual_block" => nil, "probe" => nil, "last_event_id" => nil,
+      "extra" => true
+    }
+    assert_raises(Hive::ProviderHealth::InvalidMutation) do
+      Hive::ProviderHealth::Event.new(
+        event_id: "snapshot", sequence: 1, scope: provider_scope, journal_epoch: 0,
+        kind: "snapshot", occurred_at: fixture_time(0), idempotency_key: digest("snapshot"),
+        expected_generation: 0, previous_generation: 0, resulting_generation: 0,
+        payload: { "state" => state }
+      )
+    end
+  end
+
   def test_circuit_round_trip_and_invalid_compositions
     closed = Hive::ProviderHealth::Circuit.closed(scope: provider_scope)
 

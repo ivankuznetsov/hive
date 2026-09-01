@@ -3,7 +3,7 @@ require "json"
 require "open3"
 require "time"
 require "hive/atomic_file"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 
 module Hive
   module Attempts
@@ -17,7 +17,7 @@ module Hive
       end
 
       def capture(attempt:, worktree:, now: Time.now.utc)
-        raise StoreError, "attempt worktree is unavailable" unless worktree && File.directory?(worktree)
+        raise RepositoryError, "attempt worktree is unavailable" unless worktree && File.directory?(worktree)
 
         directory = @store.output_directory(
           attempt.attempt_id,
@@ -68,7 +68,7 @@ module Hive
           { "GIT_OPTIONAL_LOCKS" => "0" },
           "git", "-C", worktree, *args
         )
-        raise StoreError, "dirty-state git #{args.first} failed: #{stderr.strip}" unless status.success?
+        raise RepositoryError, "dirty-state git #{args.first} failed: #{stderr.strip}" unless status.success?
 
         stdout.b
       end

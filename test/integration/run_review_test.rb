@@ -61,6 +61,7 @@ class RunReviewTest < Minitest::Test
     slug = "feat-x-260424-aaaa"
     folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
     FileUtils.mkdir_p(folder)
+    ensure_test_task_identity(folder)
     File.write(File.join(folder, "plan.md"), "## Overview\nstub\n<!-- COMPLETE -->\n")
     File.write(File.join(folder, "task.md"), <<~MD)
       ---

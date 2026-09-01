@@ -137,6 +137,17 @@ class TaskProjectionTest < Minitest::Test
     end
   end
 
+  def test_replay_rejects_a_wrong_top_level_record_schema
+    record = event(event_id: "wrong-schema")
+    record["schema"] = "not-a-task-journal"
+
+    error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+      Hive::TaskProjection.replay_journal("#{JSON.generate(record)}\n")
+    end
+
+    assert_includes error.message, "unexpected record schema"
+  end
+
   def test_parse_journal_normalizes_lines_without_trailing_newlines
     event = condition_event("AgentHealthy", event_id: "parsed")
 
@@ -145,64 +156,37 @@ class TaskProjectionTest < Minitest::Test
     assert_equal [ "parsed" ], records.map { |record| record.fetch("event_id") }
   end
 
-  def test_repair_marker_distinguishes_transient_and_terminal_failures
-    projection = Hive::TaskProjection.project(records: [])
-    transient = Hive::TaskProjection::Store::BoundedRead.new(
-      projection: projection, state: "repair_required",
-      diagnostics: [ { "reason" => "journal_lock_busy" } ], truncated: false,
-      journal_cursor: 0, journal_records: []
-    )
-    terminal = Hive::TaskProjection::Store::BoundedRead.new(
-      projection: projection, state: "repair_required",
-      diagnostics: [ {
-        "reason" => "checkpoint_oversized",
-        "message" => "checkpoint is too large",
-        "details" => { "cap" => "projection_snapshot_bytes" }
-      } ],
-      truncated: true, journal_cursor: 0, journal_records: []
+  def test_invalid_journal_marker_has_no_repair_protocol
+    bounded = Hive::TaskProjection::Reader::BoundedRead.new(
+      projection: nil, state: "invalid",
+      diagnostics: [ { "reason" => "journal_invalid", "message" => "invalid JSON" } ],
+      truncated: false, journal_cursor: 0, journal_records: []
     )
 
-    transient_attrs = Hive::TaskProjection.repair_marker_attrs(
-      bounded: transient, project: "demo", slug: "task", stage: "4-execute"
-    )
-    terminal_attrs = Hive::TaskProjection.repair_marker_attrs(
-      bounded: terminal, project: "demo", slug: "task", stage: "4-execute"
-    )
+    attrs = Hive::TaskProjection.invalid_journal_marker_attrs(bounded: bounded)
 
-    assert_match(/locked by an exact-task repair/, transient_attrs.fetch("message"))
-    refute transient_attrs.key?("repair_command")
-    assert_match(/compact.*retained projection history/, terminal_attrs.fetch("message"))
-    assert_equal "projection_snapshot_bytes", terminal_attrs.fetch("projection_cap")
-    refute terminal_attrs.key?("repair_command")
+    assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON, attrs.fetch("reason")
+    assert_equal "journal_invalid", attrs.fetch("journal_reason")
+    assert_equal "invalid JSON", attrs.fetch("message")
+    refute attrs.key?("repair_command")
   end
 
-  def test_snapshot_and_hash_attempt_metadata_validation_fail_closed
+  def test_projection_envelope_validation_fails_closed
     assert_raises(Hive::TaskProjection::InvalidJournal) do
       Hive::TaskProjection.from_data("schema" => "wrong", "schema_version" => 1)
     end
-
-    metadata = Hive::TaskProjection.durable_attempt_metadata(
-      "attempt_id" => "attempt-a", "task_id" => "42", "task_slug" => "task",
-      "intended_stage" => "4-execute", "task_input_epoch" => 3,
-      "ownership_generation" => "owner-a", "accepted_at" => NOW.iso8601(6),
-      "predecessor_attempt_id" => nil, "state" => "running",
-      "outcome" => nil, "lease_version" => 2
-    )
-    assert_equal 3, metadata.fetch("task_generation")
-    assert_equal "owner-a", metadata.fetch("ownership_generation")
-    assert_equal 2, metadata.fetch("lease_version")
   end
 
-  def test_causal_attempt_lookup_walks_multi_hop_predecessors
-    lineage = [
-      attempt_binding("attempt-a", predecessor: nil),
-      attempt_binding("attempt-b", predecessor: "attempt-a"),
-      attempt_binding("attempt-c", predecessor: "attempt-b")
+  def test_causal_attempt_lookup_uses_self_contained_provenance
+    records = [
+      event(event_id: "attempt-a", attempt_id: "attempt-a"),
+      event(event_id: "attempt-b", attempt_id: "attempt-b",
+            provenance: { "source" => "test", "predecessor_attempt_id" => "attempt-a" }),
+      event(event_id: "attempt-c", attempt_id: "attempt-c",
+            provenance: { "source" => "test", "predecessor_attempt_id" => "attempt-b" })
     ]
-    record = generation_event(event_id: "generation", task_generation: 1)
-    record["__attempt_lineage"] = lineage
     projection = Hive::TaskProjection.new(
-      records: [ record ], cursor: nil, journal_hash: nil,
+      records: records, cursor: nil, journal_hash: nil,
       marker: nil, registry: Hive::Conditions::Registry.default
     )
 
@@ -403,20 +387,5 @@ class TaskProjectionTest < Minitest::Test
 
   def commit_evidence(sha)
     [ { "type" => "commit", "sha" => sha, "branch" => "feature" } ]
-  end
-
-  def attempt_binding(attempt_id, predecessor:)
-    {
-      "attempt_id" => attempt_id,
-      "task" => { "id" => "42", "slug" => "task" },
-      "stage" => "4-execute",
-      "task_generation" => 1,
-      "ownership_generation" => "owner-#{attempt_id}",
-      "accepted_at" => NOW.iso8601(6),
-      "predecessor_attempt_id" => predecessor,
-      "state" => "running",
-      "outcome" => nil,
-      "lease_version" => 1
-    }
   end
 end

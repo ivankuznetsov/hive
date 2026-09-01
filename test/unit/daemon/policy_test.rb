@@ -393,9 +393,8 @@ class HiveDaemonPolicyTest < Minitest::Test
   end
 
   def test_agent_running_skips
-    # In-flight task — per-task .lock would block double-spawn anyway,
-    # but skipping here saves the noise and keeps the global concurrency
-    # cap accurate.
+    # The typed task lease blocks double-spawn; skipping here also avoids
+    # noise and keeps the global concurrency cap accurate.
     assert_equal :skip, decide(action: "agent_running",
                                command: nil)
   end

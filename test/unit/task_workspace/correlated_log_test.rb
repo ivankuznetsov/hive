@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/output_reference"
 require "hive/task_workspace/correlated_log"
 
@@ -8,7 +8,7 @@ class TaskWorkspaceCorrelatedLogTest < Minitest::Test
 
   def test_reads_one_verified_bounded_frame_tail_and_fails_inert
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       writer = store.log_archive.open_writer("attempt-log")
       writer.append("stdout", "receipt-correlated line\n")
       writer.close
@@ -28,6 +28,30 @@ class TaskWorkspaceCorrelatedLogTest < Minitest::Test
       )
     ensure
       writer&.close unless writer&.closed?
+    end
+  end
+
+  def test_resolves_an_original_receipt_reference_to_content_addressed_bytes
+    with_tmp_dir do |root|
+      payloads = Hive::RuntimeControlPlane::PayloadStore.new(root: root)
+      frame = JSON.generate(
+        "sequence" => 1, "timestamp" => Time.now.utc.iso8601(6),
+        "channel" => "stdout", "data" => Base64.strict_encode64("sealed line\n")
+      ) + "\n"
+      source = payloads.write_open(
+        attempt_id: "attempt-1", name: "attempt-1.frames", bytes: frame
+      )
+      original = Hive::OutputReference.build(source, root: root)
+      sealed = payloads.seal(
+        source, expected_sha256: original.fetch("sha256"),
+        expected_size: original.fetch("size")
+      ).slice("path", "size", "sha256")
+      File.unlink(source)
+      reader = Hive::TaskWorkspace::CorrelatedLog.new(
+        root: root, reference_resolver: ->(reference) { reference == original ? sealed : nil }
+      )
+
+      assert_equal "sealed line\n", reader.read(original).fetch("tail")
     end
   end
 

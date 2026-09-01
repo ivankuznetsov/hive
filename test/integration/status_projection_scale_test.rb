@@ -7,7 +7,7 @@ class StatusProjectionScaleTest < Minitest::Test
 
   Fixture = HiveStatusProjectionScaleFixture
 
-  def test_routine_status_work_is_independent_of_permanent_proof_cardinality
+  def test_routine_status_reuses_journal_folds_regardless_of_proof_cardinality
     with_tmp_global_config do |home|
       fixture = Fixture.build(root: File.join(home, "projects"))
 
@@ -20,26 +20,20 @@ class StatusProjectionScaleTest < Minitest::Test
                    full.fetch(:attempt_store).logical_proof_count
       assert_equal 0, empty.fetch(:attempt_store).proof_directory_enumerations
       assert_equal 0, full.fetch(:attempt_store).proof_directory_enumerations
-      assert_equal 0, empty.dig(:counters, :full_journal_reads)
-      assert_equal 0, full.dig(:counters, :full_journal_reads)
-      assert_operator empty.dig(:counters, :journal_suffix_bytes), :>, 0
-      assert_operator full.dig(:counters, :journal_suffix_bytes), :>, 0
-      suffixes = full.dig(:counters, :journal_suffix_bytes_by_task)
-      assert_equal Fixture::TASK_COUNT - 1, suffixes.length
-      assert suffixes.values.all?(&:positive?),
-             "every healthy task must replay its own bounded journal suffix"
-      refute suffixes.key?(fixture.invalid_slug)
-      assert_equal empty.fetch(:counters), full.fetch(:counters)
+      assert_equal Fixture::TASK_COUNT, empty.dig(:counters, :journal_reads)
+      assert_equal 0, full.dig(:counters, :journal_reads)
+      assert_operator empty.dig(:counters, :journal_bytes), :>, 0
+      assert_equal 0, full.dig(:counters, :journal_bytes)
+      journals = empty.dig(:counters, :journal_bytes_by_task)
+      assert_equal Fixture::TASK_COUNT, journals.length
+      assert journals.values.all?(&:positive?),
+             "every task must read its own bounded journal"
+      assert_empty full.dig(:counters, :journal_bytes_by_task)
       assert_equal Fixture::TASK_COUNT, full.dig(:counters, :stores)
       assert_equal empty.fetch(:attempt_store).point_fetches,
                    full.fetch(:attempt_store).point_fetches
-      assert_equal Fixture::TASK_COUNT - 1,
-                   full.fetch(:attempt_store).point_fetches
-      assert_equal 1,
-                   full.fetch(:attempt_store).fetches_by_id.fetch(
-                     attempt_id_for(fixture.deep_slug)
-                   ),
-                   "deep pre-checkpoint history must still require one exact attempt binding"
+      assert_equal 0, full.fetch(:attempt_store).point_fetches,
+                   "historical task replay must not query live attempts"
     end
   end
 
@@ -54,10 +48,10 @@ class StatusProjectionScaleTest < Minitest::Test
       refute_nil invalid
       refute_nil patrol
       assert_equal "error", invalid.fetch("action")
-      assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+      assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON,
                    invalid.fetch("attrs").fetch("reason")
-      assert_equal "checkpoint_invalid",
-                   invalid.fetch("attrs").fetch("projection_reason")
+      assert_equal "journal_invalid",
+                   invalid.fetch("attrs").fetch("journal_reason")
       assert_equal "ready_to_run", patrol.fetch("action")
       assert_equal "patrol-fix", patrol.fetch("workflow")
       assert_equal "2-fix", patrol.fetch("stage")
@@ -70,19 +64,19 @@ class StatusProjectionScaleTest < Minitest::Test
 
   def scan(fixture, logical_proof_count:)
     counters = Fixture.counters
-    attempt_store = Fixture::AttemptProjectionFacade.new(
+    attempt_store = Fixture::AttemptStoreFacade.new(
       attempts: fixture.attempts,
       logical_proof_count: logical_proof_count
     )
     command = Hive::Commands::Status.new
     command.instance_variable_set(:@status_attempt_store, attempt_store)
     factory = lambda do |**options|
-      Fixture::InstrumentedStore.allocate.tap do |store|
+      Fixture::InstrumentedJournalReader.allocate.tap do |store|
         store.send(:initialize, counters: counters, **options)
       end
     end
     payload = nil
-    with_replaced_singleton_method(Hive::TaskProjection::Store, :new, factory) do
+    with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, factory) do
       payload = command.project_payload(
         fixture.project,
         project_count: 1,
@@ -94,10 +88,5 @@ class StatusProjectionScaleTest < Minitest::Test
       counters: counters,
       attempt_store: attempt_store
     }
-  end
-
-  def attempt_id_for(slug)
-    index = Integer(slug.split("-").last)
-    "scale-attempt-#{index}"
   end
 end

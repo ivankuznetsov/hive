@@ -14,6 +14,8 @@ class StatusFeedTest < Minitest::Test
   # which StatusFeed#snapshot reaches the (real, but here counted) status
   # command, so every per-tick filesystem scan flows through `calls`.
   class CountingStatus
+    include Hive::Web::StatusCommand
+
     attr_reader :calls
 
     def initialize(payloads)
@@ -37,6 +39,8 @@ class StatusFeedTest < Minitest::Test
   # `max_active` detects a second poller even if both eventually dedupe to the
   # same published value.
   class ControlledStatus
+    include Hive::Web::StatusCommand
+
     def initialize
       @started = Queue.new
       @releases = Queue.new
@@ -78,6 +82,24 @@ class StatusFeedTest < Minitest::Test
     def token_for(key)
       @token_calls += 1
       super
+    end
+  end
+
+  # Fails any capability discovery: the authoritative StatusCommand contract
+  # must be invoked directly, never probed with respond_to?.
+  class CapabilityProbeDetector
+    def respond_to?(name, include_all = false)
+      raise "capability probed: #{name}" if name == :dependency_context_snapshot
+
+      super
+    end
+
+    def refresh_payload_now
+      { "projects" => [] }
+    end
+
+    def dependency_context_snapshot
+      { fingerprint: "direct" }
     end
   end
 
@@ -147,6 +169,49 @@ class StatusFeedTest < Minitest::Test
     assert_equal 1, first.fetch("call")
     assert_equal 2, second.fetch("call")
     assert_equal 2, source.calls
+  end
+
+  def test_cached_status_command_calls_the_source_contract_without_probing
+    source = CapabilityProbeDetector.new
+    command = Hive::Web::CachedStatusCommand.new(source: source)
+
+    assert_equal "direct", command.dependency_context_snapshot.fetch(:fingerprint)
+  end
+
+  def test_status_commands_declare_the_authoritative_contract
+    assert Hive::Web::CachedStatusCommand.include?(Hive::Web::StatusCommand)
+    feed = Hive::Web::StatusFeed.new
+
+    assert_instance_of Hive::Web::CachedStatusCommand,
+                       feed.instance_variable_get(:@status_command)
+  ensure
+    feed&.stop
+  end
+
+  def test_status_command_requires_a_payload_implementation
+    command = Object.new.extend(Hive::Web::StatusCommand)
+
+    error = assert_raises(NotImplementedError) { command.json_payload([]) }
+
+    assert_equal "status commands must implement json_payload", error.message
+  end
+
+  def test_contract_defaults_keep_minimal_producers_authoritative
+    with_tmp_global_config do
+      feed = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([
+        { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+      ]))
+
+      payload = nil
+      _out, err = capture_io { payload = feed.snapshot }
+
+      assert_equal [ { "name" => "demo", "tasks" => [] } ], payload.fetch("projects")
+      assert_empty err,
+                   "a conforming producer without optional capabilities must not warn"
+      assert_nil feed.dependency_context_snapshot
+    ensure
+      feed&.stop
+    end
   end
 
   def test_dependency_context_is_a_non_scanning_read_through_feed_and_command
@@ -746,6 +811,8 @@ class StatusFeedTest < Minitest::Test
   # the scan) must not kill the shared poller: a dead poller stops ticks,
   # which silently freezes every subscriber AND the on_idle keep-alive path.
   class FlakyOnceStatus
+    include Hive::Web::StatusCommand
+
     def initialize(payloads)
       @payloads = payloads
       @calls = 0
@@ -791,6 +858,7 @@ class StatusFeedTest < Minitest::Test
   def test_initial_snapshot_failure_is_explicitly_unavailable_and_recovers
     calls = 0
     status = Object.new
+    status.extend(Hive::Web::StatusCommand)
     status.define_singleton_method(:json_payload) do |*|
       calls += 1
       raise "boom" if calls == 1
@@ -863,6 +931,7 @@ class StatusFeedTest < Minitest::Test
     first = { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
     second = { "projects" => [ { "name" => "demo", "tasks" => [ { "slug" => "new" } ] } ] }
     status = Object.new
+    status.extend(Hive::Web::StatusCommand)
     status.define_singleton_method(:json_payload) do |*|
       calls += 1
       raise "mid-edit" if calls == 2

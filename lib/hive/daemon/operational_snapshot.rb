@@ -1,15 +1,13 @@
 require "digest"
-require "fileutils"
-require "json"
 require "time"
 require "yaml"
 
 require "hive/agent_limit"
-require "hive/atomic_file"
-require "hive/attempts/storage_health"
+require "hive/attempts/storage_status"
 require "hive/lock"
 require "hive/paths"
 require "hive/recovery"
+require "hive/runtime_control_plane/operational_repository"
 require "hive/runtime_identity"
 
 module Hive
@@ -23,8 +21,6 @@ module Hive
       SCHEMA_VERSION = 1
       PHASES = %w[started failed complete].freeze
       MAX_VALIDITY_MULTIPLIER = 3
-
-      class SecurityError < StandardError; end
 
       module_function
 
@@ -45,104 +41,24 @@ module Hive
         end
       end
 
-      def validate_read_path!(path, label: "snapshot")
-        parent_stat = File.lstat(File.dirname(path))
-        raise SecurityError, "#{label} directory is a symlink" if parent_stat.symlink?
-        raise SecurityError, "#{label} parent is not a directory" unless parent_stat.directory?
-        raise SecurityError, "#{label} directory has unsafe ownership" unless parent_stat.uid == Process.uid
-        raise SecurityError, "#{label} directory is not owner-private" unless (parent_stat.mode & 0o077).zero?
-
-        stat = File.lstat(path)
-        raise SecurityError, "#{label} file is a symlink" if stat.symlink?
-        raise SecurityError, "#{label} path is not a regular file" unless stat.file?
-        raise SecurityError, "#{label} file has multiple hard links" unless stat.nlink == 1
-        raise SecurityError, "#{label} file has unsafe ownership" unless stat.uid == Process.uid
-        raise SecurityError, "#{label} file is not owner-private" unless (stat.mode & 0o077).zero?
-      end
-
-      # Owner-private atomic persistence. The dedicated parent directory and
-      # final inode are both checked before and after replacement so a symlink
-      # or permissive path never becomes an authority source.
-      class Store
-        attr_reader :path
-
-        def initialize(path: Hive::Paths.operational_snapshot_path)
-          @path = File.expand_path(path)
-        end
-
-        def write(record)
-          secure_parent!
-          secure_target!
-          Hive::AtomicFile.write(path, "#{JSON.generate(record)}\n", mode: 0o600)
-          secure_target!(required: true)
-          Hive::AtomicFile.fsync_directory(File.dirname(path))
-          path
-        end
-
-        private
-
-        def secure_parent!
-          parent = File.dirname(path)
-          if lexical_entry?(parent)
-            stat = File.lstat(parent)
-            reject!("snapshot directory is a symlink") if stat.symlink?
-            reject!("snapshot parent is not a directory") unless stat.directory?
-          else
-            FileUtils.mkdir_p(parent, mode: 0o700)
-          end
-          File.chmod(0o700, parent)
-          stat = File.lstat(parent)
-          reject!("snapshot directory is not owned by the current user") unless stat.uid == Process.uid
-          reject!("snapshot directory is not owner-private") unless (stat.mode & 0o077).zero?
-        end
-
-        def secure_target!(required: false)
-          unless lexical_entry?(path)
-            reject!("snapshot file disappeared during publication") if required
-            return
-          end
-
-          stat = File.lstat(path)
-          reject!("snapshot file is a symlink") if stat.symlink?
-          reject!("snapshot path is not a regular file") unless stat.file?
-          reject!("snapshot file has multiple hard links") unless stat.nlink == 1
-          reject!("snapshot file is not owned by the current user") unless stat.uid == Process.uid
-          reject!("snapshot file is not owner-private") unless (stat.mode & 0o077).zero?
-        end
-
-        def lexical_entry?(candidate)
-          File.exist?(candidate) || File.symlink?(candidate)
-        end
-
-        def reject!(message)
-          raise SecurityError, "#{message}: #{path}"
-        end
-      end
-
-      # Large full-graph cache published once per successful daemon scan.
-      # It is deliberately separate from the scheduler snapshot: web/watch
-      # consumers read the small snapshot, while concise status opts into this
-      # file and joins it only to a generation-bound scheduler record.
+      # Complete full-graph generation stored alongside the scheduler record.
       module StatusCache
         SCHEMA = "hive-daemon-status-cache".freeze
         SCHEMA_VERSION = 1
 
-        class Store < OperationalSnapshot::Store
-          def initialize(path: Hive::Paths.operational_status_cache_path)
-            super
-          end
-        end
-
         class Reader
-          def initialize(path: Hive::Paths.operational_status_cache_path)
-            @path = File.expand_path(path)
+          def initialize(database: nil, repository: nil)
+            @repository = repository || Hive::RuntimeControlPlane::OperationalRepository.new(
+              database: database || Hive::RuntimeControlPlane.database
+            )
           end
 
           def read(snapshot:, now: Time.now.utc)
             return unless eligible_snapshot?(snapshot, now)
 
-            OperationalSnapshot.validate_read_path!(@path, label: "cache")
-            record = JSON.parse(File.read(@path))
+            record = @repository.status_projection
+            return unless record
+
             validate_record!(record)
             return unless OperationalSnapshot.daemon_identity_matches?(
               record.fetch("daemon"), snapshot.fetch("daemon")
@@ -153,8 +69,8 @@ module Hive
             return if deadline < now
 
             record.merge("valid_until" => deadline.iso8601(6))
-          rescue Errno::ENOENT, SecurityError, JSON::ParserError, ArgumentError,
-                 TypeError, KeyError, SystemCallError, IOError
+          rescue Hive::RuntimeControlPlane::Error, ArgumentError, TypeError, KeyError,
+                 SystemCallError, IOError
             nil
           end
 
@@ -211,10 +127,9 @@ module Hive
       class Assembler
         attr_reader :tick_sequence
 
-        def initialize(store:, daemon_identity:, poll_interval_sec:, status_cache_store: nil,
+        def initialize(repository:, daemon_identity:, poll_interval_sec:,
                        runtime_identity: Hive::RuntimeIdentity.new.to_h)
-          @store = store
-          @status_cache_store = status_cache_store
+          @repository = repository
           @daemon_identity = stringify_keys(daemon_identity)
           @runtime_identity = Hive::RuntimeIdentity.parse(runtime_identity) ||
             Hive::RuntimeIdentity.unknown
@@ -223,7 +138,7 @@ module Hive
           @started_at = nil
           @observations = {}
           @runtime_ready = false
-          @attempt_storage = Hive::Attempts::StorageHealth.unknown_snapshot
+          @attempt_storage = Hive::Attempts::StorageStatus.unknown
           @last_completed_record = nil
         end
 
@@ -238,7 +153,7 @@ module Hive
           if @last_completed_record
             retain_completed_record
           else
-            @store.write(base_record(phase: "started", now: now).merge("tasks" => []))
+            @repository.publish(base_record(phase: "started", now: now).merge("tasks" => []))
           end
           tick_sequence
         end
@@ -249,7 +164,7 @@ module Hive
         # a short-lived ready record cannot be missed by a waiting maintainer.
         def runtime_ready(now: Time.now.utc)
           @runtime_ready = true
-          @store.write(
+          @repository.publish(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
               "capacity" => {}, "queue" => {},
@@ -275,7 +190,7 @@ module Hive
         def fail(reason:, now: Time.now.utc)
           return if @last_completed_record
 
-          @store.write(
+          @repository.publish(
             base_record(phase: "failed", now: now).merge(
               "reason" => reason.to_s,
               "capacity" => nil,
@@ -308,7 +223,6 @@ module Hive
           holds = provider_holds(rows)
           overlay_provider_dispositions!(task_index, holds)
           overlay_recovery_dispositions!(task_index, recoveries || {})
-          publish_status_cache(status_payload, now: now)
           record = base_record(phase: "complete", now: now).merge(
             "reason" => nil,
             "hidden_archived_task_count" => hidden_archived_task_count,
@@ -318,7 +232,8 @@ module Hive
             "recoveries" => recoveries || {},
             "tasks" => tasks
           )
-          published = @store.write(record)
+          status_cache = status_cache_record(status_payload, now: now)
+          published = @repository.publish(record, status_projection: status_cache)
           @last_completed_record = record
           published
         end
@@ -328,7 +243,7 @@ module Hive
         # a generation-bound receipt for an updater that must verify shutdown
         # after the daemon PID has exited.
         def shutdown(admission_closed:, child_inventory:, drained:, now: Time.now.utc)
-          @store.write(
+          @repository.publish(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
               "capacity" => {}, "queue" => {}, "provider_holds" => [],
@@ -352,7 +267,7 @@ module Hive
           return if @last_completed_record.fetch("valid_until") == deadline_string
 
           retained = @last_completed_record.merge("valid_until" => deadline_string)
-          @store.write(retained)
+          @repository.publish(retained)
           @last_completed_record = retained
         end
 
@@ -376,11 +291,11 @@ module Hive
           }
         end
 
-        def publish_status_cache(payload, now:)
-          return unless @status_cache_store && valid_status_cache_payload?(payload)
+        def status_cache_record(payload, now:)
+          return unless valid_status_cache_payload?(payload)
 
           instant = now.utc
-          @status_cache_store.write(
+          {
             "schema" => StatusCache::SCHEMA,
             "schema_version" => StatusCache::SCHEMA_VERSION,
             "daemon" => @daemon_identity,
@@ -389,7 +304,7 @@ module Hive
             "valid_until" => (instant + @validity_sec).iso8601(6),
             "runtime" => @runtime_identity,
             "payload" => payload
-          )
+          }
         rescue StandardError
           nil
         end
@@ -626,10 +541,12 @@ module Hive
       class Reader
         AUTO_DAEMON = Object.new.freeze
 
-        def initialize(path: Hive::Paths.operational_snapshot_path,
+        def initialize(database: nil, repository: nil,
                        expected_daemon: AUTO_DAEMON,
                        pid_path: File.join(Hive::Paths.state_home, ".daemon.pid"))
-          @path = File.expand_path(path)
+          @repository = repository || Hive::RuntimeControlPlane::OperationalRepository.new(
+            database: database || Hive::RuntimeControlPlane.database
+          )
           @expected_daemon = expected_daemon
           @pid_path = File.expand_path(pid_path)
         end
@@ -638,8 +555,9 @@ module Hive
           expected = expected_daemon
           return unavailable("daemon_not_running") if expected == :unavailable
 
-          OperationalSnapshot.validate_read_path!(@path)
-          record = JSON.parse(File.read(@path))
+          record = @repository.snapshot
+          return unavailable("snapshot_missing") unless record
+
           validate_record!(record)
           return invalid("daemon_generation_mismatch", record) unless
             OperationalSnapshot.daemon_identity_matches?(record.fetch("daemon"), expected)
@@ -648,12 +566,10 @@ module Hive
           return stale("snapshot_expired", record) if Time.parse(record.fetch("valid_until")) < now
 
           record.merge("status" => "current")
-        rescue Errno::ENOENT
-          unavailable("snapshot_missing")
-        rescue SecurityError => e
-          invalid("snapshot_path_unsafe", nil, e.message)
-        rescue JSON::ParserError, ArgumentError, TypeError, KeyError => e
+        rescue Hive::RuntimeControlPlane::CodecError, ArgumentError, TypeError, KeyError => e
           invalid("snapshot_invalid", nil, "#{e.class}: #{e.message}")
+        rescue Hive::RuntimeControlPlane::Error => e
+          invalid("snapshot_database_invalid", nil, "#{e.class}: #{e.message}")
         rescue SystemCallError, IOError => e
           unavailable("snapshot_unreadable", nil, "#{e.class}: #{e.message}")
         end
@@ -662,8 +578,9 @@ module Hive
         # expected generation is captured from the verified live PID before
         # shutdown, so a stale receipt cannot authorize package replacement.
         def shutdown_acknowledgement(expected_daemon:, now: Time.now.utc)
-          OperationalSnapshot.validate_read_path!(@path)
-          record = JSON.parse(File.read(@path))
+          record = @repository.snapshot
+          return nil unless record
+
           validate_record!(record)
           return nil unless OperationalSnapshot.daemon_identity_matches?(
             record.fetch("daemon"), expected_daemon
@@ -678,8 +595,8 @@ module Hive
                             shutdown_inventory?(shutdown["child_inventory"])
 
           shutdown
-        rescue Errno::ENOENT, SecurityError, JSON::ParserError,
-               ArgumentError, TypeError, KeyError, SystemCallError, IOError
+        rescue Hive::RuntimeControlPlane::Error, ArgumentError, TypeError, KeyError,
+               SystemCallError, IOError
           nil
         end
 

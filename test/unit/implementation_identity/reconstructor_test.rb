@@ -55,6 +55,9 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         },
         now: Time.now.utc
       )
+      log_path = File.join(store.root, "logs", "historical-execute.frames")
+      FileUtils.mkdir_p(File.dirname(log_path))
+      File.binwrite(log_path, "")
       terminal = store.terminalize(
         historical,
         outcome: "succeeded", exit_status: 0,
@@ -69,6 +72,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
       maintenance.prepare(terminal)
       maintenance.acknowledge(terminal, :journal)
+      assert maintenance.publish_after_journal(terminal)
       maintenance.acknowledge(terminal, :request_delivery)
       assert maintenance.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
@@ -94,6 +98,26 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
+  def test_successful_reconstruction_does_not_re_read_the_appended_journal
+    with_attempt_history do |task, store, current|
+      reads = 0
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
+        reads += 1
+        { "implementation_identity" => {} }
+      end
+      reconstructor = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(task.project_root), attempt_store: store,
+        history_reader: history_reader
+      )
+
+      selection = with_context(current) { reconstructor.reconstruct! }
+
+      assert_equal "legacy_backfill", selection.source
+      assert_equal 1, reads
+    end
+  end
+
   def test_structured_history_is_bound_to_project_task_and_generation
     with_attempt_history do |task, store, current|
       matching = running_attempt(store, "matching-execute", "4-execute", "codex")
@@ -107,7 +131,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
         now: Time.now.utc
       )
       foreign = running_attempt(
-        store, "foreign-execute", "4-execute", "claude", project: "other"
+        store, "foreign-execute", "4-execute", "claude", project: "other", task_id: "43"
       )
       store.checkpoint(
         foreign,
@@ -187,7 +211,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       attempt_store = Struct.new(:unused) { def fetch(*) = nil }.new
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: attempt_store,
-        projection_store: projection
+        history_reader: projection
       )
 
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
@@ -265,7 +289,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end.new({ "implementation_identity" => { "execute" => identity } })
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection
+        history_reader: projection
       )
 
       selection = with_attempt_context(
@@ -298,7 +322,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end.new({ "implementation_identity" => { "execute" => identity } })
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection
+        history_reader: projection
       )
 
       selection = with_attempt_context(
@@ -337,7 +361,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection, resolver: resolver
+        history_reader: projection, resolver: resolver
       )
 
       selection = with_attempt_context(
@@ -367,7 +391,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       )
       File.write(task.state_file, "body")
       @explicit_execute = explicit_execute
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       current = running_attempt(store, "current-open-pr", "5-open-pr", "claude")
       yield task, store, current
     ensure
@@ -375,11 +399,11 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
-  def running_attempt(store, id, stage, provider, project: "demo", input_epoch: 0)
+  def running_attempt(store, id, stage, provider, project: "demo", task_id: "42", input_epoch: 0)
     now = Time.now.utc
     claim_capability = "c" * 64
     launching = store.create_launching(
-      attempt_id: id, task_id: "42", project: project, task_slug: "legacy-task",
+      attempt_id: id, task_id: task_id, project: project, task_slug: "legacy-task",
       intended_stage: stage, task_generation: "owner-0", ownership_generation: "owner-0",
       task_input_epoch: input_epoch, progress_token: "progress-#{id}",
       provider: provider, starting_revision: nil,

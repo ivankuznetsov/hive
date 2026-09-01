@@ -8,11 +8,12 @@ require "hive/task_action/diagnostic"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
 require "hive/plan_frontmatter"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
+require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/planner_revision"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
@@ -676,7 +677,7 @@ module Hive
     def load_projection(marker)
       folder = task.respond_to?(:folder) && task.folder
       if folder
-        Hive::TaskProjection::Store.new(task_folder: folder).read(marker: marker)
+        Hive::TaskProjection::Reader.new(task_folder: folder, task: task).read(marker: marker)
       else
         Hive::TaskProjection.project(records: [], marker: marker)
       end
@@ -746,11 +747,15 @@ module Hive
       when "blocked"
         if recoverable_planner_identity_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_planner_revision?
+          ACTIONS.fetch(:plan_reviewing)
         elsif stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_adversarial_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_checkpoint_custody_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_selected_lenses_contract_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -987,6 +992,25 @@ module Hive
       true
     end
 
+    # Older builds terminalized an exhausted transient planner-revision series.
+    # The orchestrator now owns opening cooled attempt series until that route
+    # recovers, so expose only the exact old planner-owned transient block as
+    # runnable. Invalid candidates and other terminal planner verdicts stay
+    # operator-owned.
+    def recoverable_transient_planner_revision?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner_revision"
+      end
+      return false unless route
+      return false if route["attempt_id"].to_s.empty?
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+
+      expected_reason = "planner_revision_#{route.fetch('outcome')}"
+      Array(plan_review["blockers"]).any? do |blocker|
+        blocker["owner"] == "planner" && blocker["reason"] == expected_reason
+      end
+    end
+
     def recoverable_planner_identity_review?
       route = Array(plan_review["routes"]).reverse.find do |entry|
         entry["role"] == "planner"
@@ -1053,6 +1077,14 @@ module Hive
       !Hive::PlanReview::RouteResolver.recoverable_identity_route(
         routes:, planner_identity:
       ).nil?
+    end
+
+    # Builds that first protected the bounded projection checkpoint included
+    # Hive's own session write in reviewer custody. Surface only the adapter's
+    # exact runner-provenance false positive as runnable until the orchestrator
+    # records its versioned one-time reset.
+    def recoverable_checkpoint_custody_review?
+      Hive::PlanReview::CheckpointCustody.recoverable?(plan_review["routes"])
     end
 
     # The old selected-lens grammar rejected natural lowercase kebab-case

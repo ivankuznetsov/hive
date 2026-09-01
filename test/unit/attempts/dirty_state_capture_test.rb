@@ -1,7 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/attempts/dirty_state_capture"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class AttemptsDirtyStateCaptureTest < Minitest::Test
   include HiveTestHelper
@@ -25,7 +25,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
       untracked_hash = Digest::SHA256.file(File.join(worktree, "binary.bin")).hexdigest
 
       with_tmp_dir do |root|
-        store = Hive::Attempts::Store.new(root: root)
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
         capture = Hive::Attempts::DirtyStateCapture.new(store: store).capture(
           attempt: lost_attempt(store), worktree: worktree, now: NOW
         )
@@ -33,7 +33,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
         assert_equal before_revision, run!("git", "-C", worktree, "rev-parse", "HEAD")
         assert_equal before_status,
                      run!("git", "-C", worktree, "status", "--porcelain=v2", "--untracked-files=all")
-        assert capture.references.all? { |reference| Hive::Attempts::OutputReference.verify(reference, root: root) }
+        assert capture.references.all? { |reference| Hive::OutputReference.verify(reference, root: root) }
         manifest = JSON.parse(File.binread(File.join(capture.directory, "manifest.json")))
         binary = manifest.fetch("untracked").find do |entry|
           Base64.strict_decode64(entry.fetch("path_base64")) == "binary.bin"

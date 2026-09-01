@@ -1,6 +1,6 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/inspector"
@@ -37,9 +37,8 @@ class ModulesStatusTest < Minitest::Test
     def module_hook? = true
   end
 
-  FakeScan = Data.define(:records)
   FakeAttemptStore = Data.define(:records) do
-    def scan = FakeScan.new(records: records)
+    def active_attempts = records
   end
 
   def test_projects_one_redacted_status_with_next_trigger
@@ -317,12 +316,13 @@ class ModulesStatusTest < Minitest::Test
       end
       projected = Hive::Modules::Inspector.new(
         store: store, project_id: "project-1", decision_journal: journal,
-        clock: -> { NOW }
+        attempt_store: empty_attempt_store, clock: -> { NOW }
       ).inspect("demo")
       assert_equal "local", projected.dig("latest_decision", "decision_id")
 
       inspector = Hive::Modules::Inspector.new(
-        store: store, project_id: "project-1", clock: -> { NOW }
+        store: store, project_id: "project-1",
+        attempt_store: empty_attempt_store, clock: -> { NOW }
       )
       tombstone = {
         "name" => "demo", "installed" => false, "enabled" => false,
@@ -399,7 +399,7 @@ class ModulesStatusTest < Minitest::Test
   def inspector(store, root, available: {})
     Hive::Modules::Inspector.new(
       store: store, project_id: "project-1",
-      attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
+      attempt_store: empty_attempt_store,
       secret_availability: ->(name) { available.fetch(name, false) }, clock: -> { NOW }
     )
   end

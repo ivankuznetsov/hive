@@ -1,6 +1,7 @@
 require "open3"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/process_identity"
+require "hive/attempts/storage_status"
 require "hive/markers"
 require "hive/task"
 
@@ -9,11 +10,10 @@ module Hive
     ReconciledAttempt = Data.define(:attempt, :classification, :owner_status, :evidence)
     ReconciliationSnapshot = Data.define(
       :capacity, :attempts, :lost_attempts, :newly_lost_attempts,
-      :terminal_attempts, :invalid_records, :hot_scan, :admission_view
+      :terminal_attempts, :admission_view
     ) do
       def initialize(capacity:, attempts:, lost_attempts:, newly_lost_attempts:,
-                     terminal_attempts:, invalid_records:, hot_scan: nil,
-                     admission_view: nil)
+                     terminal_attempts:, admission_view: nil)
         super
       end
     end
@@ -37,31 +37,21 @@ module Hive
         @store.fetch(attempt_id)
       end
 
-      # Recover dispatch-request correlation when the daemon crashed after
-      # durable admission but before it could stamp the request claim sidecar.
-      def find_by_request_id(request_id)
-        @store.scan.records
-              .select { |record| record["request_id"] == request_id.to_s }
-              .max_by { |record| [ record["accepted_at"], record.lease_version ] }
-      end
-
       def reconcile(now: Time.now.utc)
-        scan = @store.scan
+        records = @store.active_attempts
         statuses = []
         newly_lost = []
         all_lost = []
         terminals = []
         effective_records = []
 
-        scan.records.each do |record|
+        records.each do |record|
           reconciled = reconcile_record(record, now: now)
           prepared = @finalization_maintenance&.prepare(reconciled.attempt)
-          if @finalization_maintenance&.respond_to?(:acknowledge_provider_health)
-            @finalization_maintenance.acknowledge_provider_health(reconciled.attempt)
-          end
           observation = observe_condition(reconciled, now: now)
           if prepared && %i[delivered acknowledged not_applicable].include?(observation)
             @finalization_maintenance.acknowledge(reconciled.attempt, :journal)
+            @finalization_maintenance.publish_after_journal(reconciled.attempt)
           end
           statuses << reconciled
           newly_lost << reconciled.attempt if reconciled.classification == :lost
@@ -77,19 +67,9 @@ module Hive
           effective_records << current if current
           next
         end
-        log_invalid_records(scan.invalid_records)
-
-        hot_scan = Scan.new(
-          records: effective_records.freeze,
-          invalid_records: scan.invalid_records.freeze
-        )
-        admission_view = AdmissionView.new(store: @store, hot_scan: hot_scan)
-        capacity = CapacitySnapshot.build(
-          store: @store,
-          scan: hot_scan,
-          now: now,
-          daily_counts: @store.decision_index.daily_counts(date: now.utc.to_date)
-        )
+        hot_attempts = effective_records.freeze
+        admission_view = AdmissionView.new(store: @store, records: hot_attempts)
+        capacity = admission_view.capacity(now: now)
 
         ReconciliationSnapshot.new(
           capacity: capacity,
@@ -97,8 +77,6 @@ module Hive
           lost_attempts: all_lost.freeze,
           newly_lost_attempts: newly_lost.freeze,
           terminal_attempts: terminals.freeze,
-          invalid_records: scan.invalid_records.freeze,
-          hot_scan: hot_scan,
           admission_view: admission_view
         )
       end
@@ -116,10 +94,19 @@ module Hive
       end
 
       def operational_storage_status(snapshot)
-        scan = snapshot&.hot_scan
-        @store.storage_health.snapshot(
-          hot_count: scan&.records&.size,
-          invalid_hot_count: scan&.invalid_records&.size
+        attempts = snapshot&.admission_view&.records
+        unless @finalization_maintenance
+          return StorageStatus.unknown.merge(
+            "hot" => {
+              "records" => attempts&.size,
+              "invalid" => attempts ? 0 : nil
+            }
+          )
+        end
+
+        @finalization_maintenance.storage_snapshot(
+          hot_count: attempts&.size,
+          invalid_hot_count: attempts ? 0 : nil
         )
       end
 
@@ -277,23 +264,6 @@ module Hive
             slug: status.attempt["task_slug"],
             state: status.attempt.state,
             owner_status: status.owner_status.to_s
-          )
-          @logged[key] = true
-        end
-      end
-
-      def log_invalid_records(records)
-        return unless @logger
-
-        records.each do |record|
-          key = [ :invalid_record, record.path, record.error ]
-          next if @logged[key]
-
-          @logger.event(
-            :fatal,
-            message: "attempt record is invalid and reserves capacity: #{record.error}",
-            path: record.path,
-            keeping_previous: true
           )
           @logged[key] = true
         end

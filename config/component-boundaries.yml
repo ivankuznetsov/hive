@@ -4,6 +4,82 @@ schema_version: 1
 # its test-only contract enforce declared source boundaries; they are not a
 # runtime security sandbox and cannot prevent reflection or monkeypatching.
 components:
+  - id: runtime-control-plane
+    name: Runtime Control Plane
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/runtime_control_plane.rb
+      require: hive/runtime_control_plane
+      constant: Hive::RuntimeControlPlane
+    public_contract:
+      values:
+        - Hive::RuntimeControlPlane::Database
+        - Hive::RuntimeControlPlane::Diagnosis
+        - Hive::RuntimeControlPlane::Identity::Project
+        - Hive::RuntimeControlPlane::OperationalRepository
+        - Hive::RuntimeControlPlane::ProcessGuard
+      errors:
+        - Hive::RuntimeControlPlane::CodecError
+        - Hive::RuntimeControlPlane::ForkUnsafe
+        - Hive::RuntimeControlPlane::IdentityError
+        - Hive::RuntimeControlPlane::IntegrityError
+        - Hive::RuntimeControlPlane::MigrationRequired
+        - Hive::RuntimeControlPlane::Unavailable
+    owned_paths:
+      - lib/hive/runtime_control_plane.rb
+      - lib/hive/runtime_control_plane/codec.rb
+      - lib/hive/runtime_control_plane/database.rb
+      - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
+      - lib/hive/runtime_control_plane/operational_repository.rb
+      - lib/hive/runtime_control_plane/process_guard.rb
+      - lib/hive/runtime_control_plane/task_lease_repository.rb
+    state_contracts:
+      - "One process-local lazy Sequel owner opens the installation-wide SQLite database; validation-only calls never create it"
+      - "Task folders remain workflow authority while the database schema declares only machine-local runtime coordination domains"
+      - "Installation, registered-project, and task-subject identities are stable observations rather than path-derived aliases"
+      - "Stable-id task leases, task counters, and bounded coordination rows have no filesystem compatibility authority"
+      - "Usage telemetry and complete daemon/status generations share this database; operational projections are atomically paired and source-bound"
+    schema_contracts:
+      - "A fixed application ID, exact consecutive IntegerMigrator version, complete table inventory, foreign keys, checks, and partial unique indexes fail closed"
+      - "Bounded JSON is canonical UTF-8 text and timestamps are canonical UTC strings with six fractional digits"
+      - "SQLite must support partial indexes and RETURNING; live connections use WAL, foreign keys, FULL synchronous mode, trusted_schema off, DQS disabled, and the five-second busy timeout"
+    lock_contracts:
+      - "The Sequel pool has one connection per process and ProcessGuard disconnects every registered wrapper before a child may exist"
+      - "Only bounded immediate transactions are exposed; one process-wide guard serializes fork requests against checkouts and rejects active transactions"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/config
+      - hive/errors
+      - hive/paths
+      - hive/task_meta
+    internal_collaborators:
+      - Sequel::Database
+      - Sequel::IntegerMigrator
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/attempts/detached_launcher.rb
+      - lib/hive/babysitter/passthrough_runner.rb
+      - lib/hive/commands/daemon.rb
+      - lib/hive/commands/migrate.rb
+      - lib/hive/commands/web.rb
+      - lib/hive/daemon/dispatcher.rb
+      - lib/hive/daemon/operational_snapshot.rb
+      - lib/hive/lock.rb
+      - lib/hive/patrol/launch_budget.rb
+      - lib/hive/task_counter.rb
+      - lib/hive/usage_db.rb
+      - web/config/puma.rb
+    mutation_authority: "The one runtime SQLite file, its exact schema, installation/project/task identity, task leases, counters, usage telemetry, complete operational projections, and connection/process lifecycle only; no task artifact or legacy runtime store is read or mutated."
+    recovery_surface: "Missing, older, newer, partial, unrelated, corrupt, unsupported-feature, and integrity failures remain typed and fail closed with offline migration or restore guidance."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/runtime_control_plane/database_test.rb
+      - test/unit/runtime_control_plane/process_guard_test.rb
+      - test/unit/runtime_control_plane/schema_test.rb
+      - test/unit/lock_test.rb
+    migration_exceptions: []
+
   - id: provider-health
     name: Provider Health
     state: candidate
@@ -17,15 +93,13 @@ components:
         - Hive::ProviderHealth::AttemptObserver
         - Hive::ProviderHealth::AttemptBinding
         - Hive::ProviderHealth::Circuit
-        - Hive::ProviderHealth::CorruptionToken
         - Hive::ProviderHealth::Evidence
         - Hive::ProviderHealth::Inspection
         - Hive::ProviderHealth::ProbeBinding
-        - Hive::ProviderHealth::ProbeIntent
         - Hive::ProviderHealth::ProbeRequirement
+        - Hive::ProviderHealth::Repository
         - Hive::ProviderHealth::RouteEvaluation
         - Hive::ProviderHealth::RouteIdentity
-        - Hive::ProviderHealth::Store
       errors:
         - Hive::ProviderHealth::Error
         - Hive::ProviderHealth::InvalidScope
@@ -40,33 +114,30 @@ components:
       - lib/hive/provider_health/circuit.rb
       - lib/hive/provider_health/evidence.rb
       - lib/hive/provider_health/event.rb
-      - lib/hive/provider_health/store.rb
-      - schemas/hive-provider-health.v1.json
-      - schemas/hive-provider-health-event.v1.json
+      - lib/hive/provider_health/repository.rb
     state_contracts:
-      - "Provider-account and exact-model circuits are independent scoped journals composed only at read time"
-      - "The authoritative journal event contains its sanitized operator audit; current.json is a rebuildable projection"
-      - "Evidence, probe, and operator mutations use scoped generation CAS under one host-global health lock"
-      - "Probe intents bind only to durable attempt identity and ownership fences; no timer, lease, retry, successor, or dispatch owner exists here"
-      - "Only a malformed torn final suffix is automatically repaired; interior corruption and gaps fail the affected scope closed"
+      - "Provider-account and exact-model circuits are constrained runtime-control-plane rows composed only at read time"
+      - "Evidence, probe, and operator mutations use generation CAS in short immediate transactions"
+      - "Probe ownership binds directly to durable attempt identity and ownership fences; no timer, lease, retry, successor, or dispatch owner exists here"
+      - "Malformed or corrupt SQL rows fail closed without a filesystem fallback"
     schema_contracts:
-      - "Projection and event schemas are recursively closed against raw prompts, messages, stdout, stderr, tool output, tokens, and credentials"
+      - "Circuit and event value objects are recursively closed against raw prompts, messages, stdout, stderr, tool output, tokens, and credentials before database writes"
       - "Evidence fingerprints derive only from canonical allowlisted class, scope, provenance, route ID, and bounded reset hint"
-      - "Corrupt-scope reset requires a fresh epoch, fingerprint, and last-verified-generation token and quarantines exact owner-private bytes"
+      - "Audit rows are bounded and idempotent per circuit without retaining raw provider output"
     lock_contracts:
-      - "The host-global provider-health mutation lock is innermost after admission and task-generation locks"
-      - "Store code holding the health lock must not acquire admission or task-generation locks"
-    component_dependencies: []
+      - "AdmissionTransition is the only cross-domain transaction that binds provider probes to a launching attempt"
+      - "Repository transactions acquire no filesystem, provider, process, or task-generation lock"
+    component_dependencies:
+      - runtime-control-plane
     allowed_hive_dependencies:
       - hive
       - hive/canonical_json
-      - hive/managed_directory
       - hive/output_reference
-      - hive/paths
+      - hive/runtime_control_plane
       - hive/secret_patterns
     internal_collaborators:
-      - Hive::ManagedDirectory
       - Hive::OutputReference
+      - Hive::RuntimeControlPlane
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -77,16 +148,16 @@ components:
       - lib/hive/attempts/finalization_maintenance.rb
       - lib/hive/commands/circuits.rb
       - lib/hive/provider_routing/operational_projection.rb
-    mutation_authority: "Scoped provider-health journals, rebuildable projections, probe intents, quarantine artifacts, and their typed audit receipts only."
+    mutation_authority: "Provider circuit and bounded audit rows in the runtime control plane only."
     recovery_surface: "Conservative eligibility and attempt-fenced probe reconciliation only; RecoveryCoordinator remains the sole retry, charge, deadline, successor, and dispatch owner."
     wiki_page: wiki/modules/provider_health.md
     focused_tests:
       - test/unit/provider_health/audit_test.rb
       - test/unit/provider_health/circuit_test.rb
       - test/unit/provider_health/evidence_test.rb
-      - test/unit/provider_health/schema_test.rb
-      - test/unit/provider_health/store_test.rb
-      - test/integration/provider_health_replay_test.rb
+      - test/unit/provider_health/value_objects_test.rb
+      - test/unit/provider_health/repository_test.rb
+      - test/unit/provider_health/attempt_observer_test.rb
     migration_exceptions: []
 
   - id: provider-routing-policy
@@ -104,39 +175,39 @@ components:
         - Hive::ProviderRouting::Decision
         - Hive::ProviderRouting::Pin
         - Hive::ProviderRouting::Policy
-        - Hive::ProviderRouting::PolicyStore
+        - Hive::ProviderRouting::PolicyRepository
         - Hive::ProviderRouting::Request
         - Hive::ProviderRouting::Requirements
         - Hive::ProviderRouting::Route
         - Hive::ProviderRouting::Router
       errors:
         - Hive::ConfigError
-        - Hive::ProviderRouting::PolicyStore::InvalidSnapshot
-        - Hive::ProviderRouting::PolicyStore::StoreError
+        - Hive::ProviderRouting::PolicyRepository::InvalidSnapshot
+        - Hive::ProviderRouting::PolicyRepository::Error
     owned_paths:
       - lib/hive/provider_routing.rb
       - lib/hive/provider_routing/configuration.rb
       - lib/hive/provider_routing/candidate.rb
       - lib/hive/provider_routing/decision.rb
       - lib/hive/provider_routing/policy.rb
-      - lib/hive/provider_routing/policy_store.rb
+      - lib/hive/provider_routing/policy_repository.rb
       - lib/hive/provider_routing/request.rb
       - lib/hive/provider_routing/route.rb
       - lib/hive/provider_routing/router.rb
-      - schemas/hive-routing-policy.v1.json
     state_contracts:
       - "An absent routing.pool returns a structural legacy policy before global account, health, or capacity state is consulted"
       - "An explicit policy freezes ordered account, adapter, launch-binding, model, effort, capability, requirement, and pin identity"
       - "Provider-account identity is separate from the existing adapter/profile provider identity"
-      - "Explicit policies are first-writer-wins snapshots keyed by ownership generation and durable subject; legacy mode performs no policy-store I/O"
+      - "Explicit policies are first-writer-wins runtime-control-plane rows keyed by ownership generation and durable subject; legacy mode performs no repository I/O"
     schema_contracts:
-      - "The v1 canonical digest covers every normalized selection input and no credential material"
+      - "The canonical digest covers every normalized selection input and no credential material"
       - "Account, route, requirements, pin, policy, request, and decision values are deeply immutable"
     lock_contracts:
       - "Policy construction and static compatibility filtering are pure and acquire no lock"
       - "Router selection consumes immutable health and capacity observations and acquires no lock"
       - "Admission, health, capacity, retry, and recovery locks remain outside this component"
-    component_dependencies: []
+    component_dependencies:
+      - runtime-control-plane
     allowed_hive_dependencies:
       - hive
       - hive/agent_profiles
@@ -144,25 +215,25 @@ components:
       - hive/canonical_json
       - hive/implementation_identity
       - hive/model_routing
-      - hive/point_storage
+      - hive/runtime_control_plane
     internal_collaborators:
       - Hive::ModelRouting
-      - Hive::PointStorage
+      - Hive::RuntimeControlPlane
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/config.rb
       - lib/hive/attempts/configured_dispatcher.rb
       - lib/hive/attempts/dispatcher.rb
-      - lib/hive/attempts/decision_index.rb
+      - lib/hive/attempts/coordination.rb
       - lib/hive/attempts/entrypoint.rb
-      - lib/hive/attempts/store.rb
+      - lib/hive/attempts/repository.rb
       - lib/hive/commands/circuits.rb
-      - lib/hive/daemon/dispatch_request_queue.rb
+      - lib/hive/runtime_control_plane/dispatch_repository.rb
       - lib/hive/daemon/recovery_coordinator.rb
       - lib/hive/implementation_identity/resolver.rb
       - lib/hive/provider_routing/operational_projection.rb
-    mutation_authority: "First-writer-wins routing-policy snapshots below attempts/v4/routing-policies/v1 only; configuration normalization and route decisions remain pure immutable values."
+    mutation_authority: "First-writer-wins routing-policy rows in the runtime control plane only; configuration normalization and route decisions remain pure immutable values."
     recovery_surface: "No retry or recovery surface; invalid configuration fails before dispatch and legacy mode bypasses the domain."
     wiki_page: wiki/modules/provider_routing.md
     focused_tests:
@@ -186,7 +257,7 @@ components:
         - Hive::ProviderRouting::OperationalProjection
       errors:
         - Hive::ConfigError
-        - Hive::Attempts::StoreError
+        - Hive::Attempts::RepositoryError
     owned_paths:
       - lib/hive/provider_routing/operational_projection.rb
     state_contracts:
@@ -205,13 +276,13 @@ components:
       - provider-routing-policy
     allowed_hive_dependencies:
       - hive/attempts/capacity_snapshot
-      - hive/attempts/store
+      - hive/attempts/repository
       - hive/provider_health
       - hive/provider_routing
     internal_collaborators:
       - Hive::Attempts::CapacitySnapshot
-      - Hive::Attempts::Store
-      - Hive::ProviderHealth::Store
+      - Hive::Attempts::Repository
+      - Hive::ProviderHealth::Repository
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
@@ -390,17 +461,18 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v4 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, routing-policy snapshots, routing-decision projections, and finalization state"
+      - "Runtime-control-plane attempt rows, relationships, accounting, capacity, routing decisions, and terminal publication transitions; PayloadStore retains only large framed logs and outputs"
       - "Explicit workers alone receive a capability-bound write-once safe-evidence descriptor; stdout and stderr cannot populate provider evidence"
       - "Provider health is a named terminal consumer and must durably acknowledge each explicit receipt before archival"
     schema_contracts:
-      - "hive-attempt v4 is the only runtime reader/writer; Hive::Recovery::Migration exclusively converts schema-v3 state into explicit legacy routing mode"
+      - "hive-attempt v4 remains the immutable public value contract; the runtime repository validates every encoded row before returning it"
       - "hive-routing-policy v1 is the admission-owned first-writer-wins task-generation policy snapshot"
     lock_contracts:
-      - "admission lock before generation lock before the host-global provider-health lock; record transitions use guarded CAS"
+      - "Admission and lifecycle changes use one immediate database transaction; record transitions use version, state, and digest guarded CAS"
     component_dependencies:
       - provider-health
       - provider-routing-policy
+      - runtime-control-plane
     allowed_hive_dependencies:
       - hive/agent_limit
       - hive/atomic_file
@@ -408,18 +480,18 @@ components:
       - hive/config
       - hive/dependency_snapshot
       - hive/lock
-      - hive/managed_directory
       - hive/markers
       - hive/output_reference
       - hive/paths
-      - hive/point_storage
       - hive/provider_health
       - hive/provider_health/attempt_observer
       - hive/provider_health/evidence
-      - hive/provider_health/store
+      - hive/provider_health/repository
       - hive/provider_routing
       - hive/provider_routing/decision
-      - hive/provider_routing/policy_store
+      - hive/provider_routing/policy_repository
+      - hive/runtime_control_plane
+      - hive/runtime_control_plane/payload_store
       - hive/stringify_keys
       - hive/task
       - hive/task_resolver
@@ -429,20 +501,15 @@ components:
       - Hive::Attempts::Dispatcher
       - Hive::Attempts::DetachedLauncher
       - Hive::Attempts::Client
-      - Hive::Attempts::Store
+      - Hive::Attempts::Repository
       - Hive::Attempts::Supervisor
       - Hive::Attempts::Reconciler
       - Hive::Attempts::ProcessIdentity
       - Hive::Attempts::CapacitySnapshot
-      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeTransition
       - Hive::Attempts::LostOutcomeProcessor
-      - Hive::Attempts::PermanentProofStore
-      - Hive::Attempts::DecisionIndex
-      - Hive::Attempts::PendingFinalizationStore
       - Hive::Attempts::FinalizationMaintenance
       - Hive::Attempts::LogArchive
-      - Hive::Attempts::StorageHealth
-      - Hive::Attempts::PointStorage
       - Hive::Attempts::AdmissionView
     forbidden_constructions:
       - Hive::Attempts::Entrypoint
@@ -450,23 +517,18 @@ components:
       - Hive::Attempts::Dispatcher
       - Hive::Attempts::DetachedLauncher
       - Hive::Attempts::Client
-      - Hive::Attempts::Store
+      - Hive::Attempts::Repository
       - Hive::Attempts::Supervisor
       - Hive::Attempts::Reconciler
       - Hive::Attempts::ProcessIdentity
       - Hive::Attempts::CapacitySnapshot
-      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeTransition
       - Hive::Attempts::LostOutcomeProcessor
-      - Hive::Attempts::PermanentProofStore
-      - Hive::Attempts::DecisionIndex
-      - Hive::Attempts::PendingFinalizationStore
       - Hive::Attempts::FinalizationMaintenance
       - Hive::Attempts::LogArchive
-      - Hive::Attempts::StorageHealth
-      - Hive::Attempts::PointStorage
       - Hive::Attempts::AdmissionView
     authorized_internal_constructions:
-      - constant: Hive::Attempts::Store
+      - constant: Hive::Attempts::Repository
         files:
           - lib/hive/commands/attempt_supervise.rb
           - lib/hive/commands/circuits.rb
@@ -474,16 +536,16 @@ components:
           - lib/hive/commands/module/dry_run.rb
           - lib/hive/commands/status.rb
           - lib/hive/conditions/execute_boundary.rb
+          - lib/hive/conditions/transition_guard.rb
           - lib/hive/artifacts/outcome_evidence/store.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
           - lib/hive/provider_routing/operational_projection.rb
           - lib/hive/daemon/recovery_coordinator.rb
-          - lib/hive/recovery/migration.rb
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
-          - lib/hive/task_projection/store.rb
-        reason: "Existing Hive composition, the task-activity validation facade, read-only consumers and previews, execution-boundary and outcome-evidence ownership checks, and closure verification share the canonical durable store; the status scan hoists that same read-only handle once per scan instead of per row. They are not alternate admission producers."
+          - lib/hive/task_workspace/builder.rb
+        reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb
@@ -495,9 +557,8 @@ components:
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-          - lib/hive/recovery/migration.rb
-        reason: "The daemon composition root and v3-to-v4 migration share the process-identity verifier needed to classify persisted live workers safely."
-      - constant: Hive::Attempts::LostOutcomeStore
+        reason: "The daemon composition root uses the process-identity verifier to classify live workers safely."
+      - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb
         reason: "The daemon composition root owns internal loss evidence persistence and injection."
@@ -508,22 +569,13 @@ components:
       - constant: Hive::Attempts::FinalizationMaintenance
         files:
           - lib/hive/commands/daemon.rb
-          - lib/hive/recovery/migration.rb
-        reason: "The runtime factory and daemon composition root own finalization wiring; callers receive the composed service."
-      - constant: Hive::Attempts::StorageHealth
-        files:
-          - lib/hive/recovery/migration.rb
-        reason: "Store and the one-off migration publish the bounded storage-health cell."
-      - constant: Hive::Attempts::AdmissionView
-        files:
-          - lib/hive/recovery/migration.rb
-        reason: "Admission, reconciliation, and one-off migration are the only builders of the bounded decision view."
+        reason: "The daemon composition root owns finalization wiring; callers receive the composed service."
     hive_consumers:
       - lib/hive/commands/run.rb
       - lib/hive/commands/stage_action.rb
       - lib/hive/commands/daemon.rb
       - lib/hive/bot/dispatch_request_writer.rb
-    mutation_authority: "The facade accepts explicit admission requests; named Hive composition sites wire internal stores and supervisors that retain durable transition authority."
+    mutation_authority: "The facade accepts explicit admission requests; the repository owns atomic admission, lifecycle, capacity, routing, and terminal-publication transitions."
     recovery_surface: "The facade admits successors; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."
     wiki_page: wiki/modules/attempts.md
     focused_tests:
@@ -1022,7 +1074,7 @@ components:
     focused_tests:
       - test/unit/work_ledger_test.rb
       - test/unit/task_journal_test.rb
-      - test/unit/task_projection/store_test.rb
+      - test/unit/task_projection/reader_test.rb
       - test/unit/task_projection_test.rb
       - test/unit/workflow_test.rb
     migration_exceptions: []

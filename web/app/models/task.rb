@@ -9,7 +9,6 @@ require "hive/task_workspace/artifacts"
 require "hive/task_workspace/publication"
 require "hive/task_workspace/correlated_log"
 require "hive/artifacts/outcome_evidence/store"
-require "hive/attempts/store"
 require "hive/output_reference"
 
 class Task
@@ -482,20 +481,12 @@ class Task
   # this seam. Large or changed files fail inert instead of becoming an
   # unbounded request-time read.
   def correlated_log(reference)
-    store = attempt_store_for_read
-    Hive::TaskWorkspace::CorrelatedLog.new(root: store.root).read(reference)
+    Hive::Attempts::API.new.correlated_log_reader.read(reference)
   rescue Hive::Error, SystemCallError, IOError, ArgumentError, TypeError
     nil
   end
 
   private
-
-  def attempt_store_for_read
-    root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-    return Hive::Attempts::Store.new(create_directories: false) if root.empty?
-
-    Hive::Attempts::Store.new(root: root, create_directories: false)
-  end
 
   def safe_plan_review_artifacts(store, references)
     references.sort.filter_map do |name, reference|

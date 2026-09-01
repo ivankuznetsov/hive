@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/conditions/reconcilers/execute"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class ConditionsReconcilersExecuteTest < Minitest::Test
   include HiveTestHelper
@@ -200,7 +200,7 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
           worktree_path: worktree, workflow: workflow
         )
         baseline = Hive::GitOps.new(worktree).head_sha
-        store = Hive::Attempts::Store.new(root: File.join(state_root, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(state_root, "attempts"), migrate: true)
         attempt = store.create_launching(
           attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
           task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",

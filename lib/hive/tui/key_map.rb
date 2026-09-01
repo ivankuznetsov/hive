@@ -1,5 +1,6 @@
 require "shellwords"
 require "hive/markers"
+require "hive/task_action"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
 require "hive/tui/red_status_detail_keys"

@@ -33,6 +33,7 @@ class AgentTest < Minitest::Test
   def make_task(dir, stage = "2-brainstorm", slug = "agent-test-260424-aaaa")
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     Hive::Task.new(folder)
   end
 
@@ -696,9 +697,12 @@ class AgentTest < Minitest::Test
       ENV["HIVE_FAKE_CLAUDE_RELEASE_FILE"] = release
       ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      release_test_task_run(task.folder)
 
       worker = Thread.new do
-        Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+        Hive::Lock.with_task_lock(task.folder) do
+          Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+        end
       end
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
       sleep 0.01 until File.exist?(ready) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
@@ -2167,7 +2171,7 @@ class AgentTest < Minitest::Test
         result = Hive::Agent.new(
           task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
         ).run!
-        lock = YAML.safe_load_file(File.join(task.folder, ".lock"))
+        lock = Hive::Lock.read_task_lock(task.folder)
 
         assert_equal :waiting, result[:status]
         refute lock.key?("claude_pid")
@@ -2414,6 +2418,58 @@ class AgentTest < Minitest::Test
       assert_equal :error, result[:status]
       assert_match(/\Alimits reached for claude:/, result[:error_message].to_s,
                    "must classify as limits-reached, not a generic exit_code failure")
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
+  def test_captures_claude_rejected_subscription_window_without_message_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "rate_limit_event",
+        "rate_limit_info" => {
+          "status" => "rejected",
+          "rateLimitType" => "seven_day",
+          "resetsAt" => 1_788_400_800,
+          "overageDisabledReason" => "out_of_credits"
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      ).run!
+
+      assert_equal "Claude account quota reached (seven_day)", result[:limit_text]
+      assert_equal :error, result[:status]
+      assert_equal "limits_reached", result[:error_reason]
+      assert_match(/\Alimits reached for claude:/, result[:error_message])
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
+  def test_unknown_claude_rate_window_retains_raw_limit_fallback
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "rate_limit_event",
+        "rate_limit_info" => {
+          "status" => "rejected",
+          "rateLimitType" => "future_window"
+        },
+        "detail" => "account quota reached"
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5
+      ).run!
+
+      assert_match(/account quota reached/i, result[:limit_text])
+      assert_equal :error, result[:status]
+      assert_equal "limits_reached", result[:error_reason]
       assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
     end
   end

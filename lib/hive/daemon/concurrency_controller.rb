@@ -9,7 +9,7 @@ module Hive
     # daily-rate state across the daemon's lifetime.
     #
     # The controller is the single load-bearing budget gate inside the
-    # daemon. Per-task `.lock` (ADR-007) is the last-resort safety net,
+    # daemon. Per-task SQL leases (ADR-007) are the last-resort safety net,
     # but the goal is to prevent the daemon from racing toward the lock
     # in the first place — the controller is what stops 40 enrolled
     # projects from fanning out 40 simultaneous `hive run` children.

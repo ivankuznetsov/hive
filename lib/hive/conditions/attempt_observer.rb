@@ -1,9 +1,8 @@
 require "hive/config"
 require "hive/lock"
-require "hive/markers"
 require "hive/task"
 require "hive/task_journal"
-require "hive/task_projection/store"
+require "hive/task_projection"
 require "set"
 
 module Hive
@@ -46,7 +45,7 @@ module Hive
 
         # A terminal execute observation may arrive just after the daemon has
         # advanced the task into open-pr. Open-pr's provider custody protects
-        # the same journal and projection this observer updates, so writing
+        # the same journal this observer updates, so writing
         # through its live stage lock creates an indistinguishable
         # open_pr_tampered false positive. Acquire the ordinary task ownership
         # lock non-blockingly instead: contention is expected and returns
@@ -57,19 +56,13 @@ module Hive
           writer = Hive::TaskJournal::Writer.new(
             task_folder: task.folder, attempt_store: @store, clock: -> { now }
           )
-          records = Hive::TaskProjection.read_journal(
-            writer.path, attempt_store: @store
-          )
+          records = Hive::TaskProjection.read_journal(writer.path)
           if observed?(records, attempt)
             @delivered.add(key)
             next :acknowledged
           end
 
           writer.append(observation(task, attempt, status, records))
-          marker = Hive::Markers.current(task.state_file)
-          Hive::TaskProjection::Store.new(
-            task_folder: task.folder, attempt_store: @store
-          ).rebuild!(marker: marker)
           @delivered.add(key)
           :delivered
         end
@@ -90,9 +83,10 @@ module Hive
 
       def observed?(records, attempt)
         records.any? do |record|
-          record["event_type"] == "condition_observed" &&
-            record["attempt_id"] == attempt.attempt_id &&
-            record.dig("payload", "condition") == "AgentHealthy" &&
+          record["attempt_id"] == attempt.attempt_id &&
+            (record["condition"] == "AgentHealthy" ||
+             (record["event_type"] == "condition_observed" &&
+              record.dig("payload", "condition") == "AgentHealthy")) &&
             record.fetch("evidence", []).any? do |entry|
               entry["type"] == "attempt_lease" &&
                 entry["state"] == attempt.state &&

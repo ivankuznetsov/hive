@@ -58,7 +58,8 @@ class AttemptsAPITest < Minitest::Test
     api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
 
     result = api.dispatch_request(
-      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick
+      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick,
+      replay_semantic_terminal: true
     )
 
     assert_equal :accepted, result
@@ -66,6 +67,7 @@ class AttemptsAPITest < Minitest::Test
     assert_equal false, call.last.fetch(:interactive)
     assert_equal Time.at(1).utc, call.last.fetch(:now)
     assert_equal :tick, call.last.fetch(:admission_view)
+    assert_equal true, call.last.fetch(:replay_semantic_terminal)
   end
 
   def test_dispatch_successor_delegates_recovery_admission
@@ -176,5 +178,17 @@ class AttemptsAPITest < Minitest::Test
 
     assert_same store, foreground_store
     assert_same store, daemon_store
+  end
+
+  def test_correlated_log_reader_resolves_sealed_references_through_the_store
+    with_tmp_dir do |root|
+      store = Struct.new(:root) do
+        def sealed_payload_reference(reference) = reference.merge("sealed" => true)
+      end.new(root)
+      reader = Hive::Attempts::API.new(store: store).correlated_log_reader
+      resolver = reader.instance_variable_get(:@reference_resolver)
+
+      assert_equal({ "path" => "log", "sealed" => true }, resolver.call("path" => "log"))
+    end
   end
 end

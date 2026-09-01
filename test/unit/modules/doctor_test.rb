@@ -1,6 +1,6 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/doctor"
@@ -34,7 +34,7 @@ class ModulesDoctorTest < Minitest::Test
       File.write(barrier, "{}")
       inspector = Hive::Modules::Inspector.new(
         store: store, project_id: "project-1",
-        attempt_store: Hive::Attempts::Store.new(root: File.join(root, "attempts"), create_directories: false),
+        attempt_store: empty_attempt_store,
         secret_availability: ->(_name) { false }, clock: -> { NOW }
       )
       before = tree_digest(root)
@@ -77,7 +77,8 @@ class ModulesDoctorTest < Minitest::Test
         )
       )
       inspector = Hive::Modules::Inspector.new(
-        store: store, project_id: "project-1", clock: -> { NOW }
+        store: store, project_id: "project-1",
+        attempt_store: empty_attempt_store, clock: -> { NOW }
       )
       doctor = Hive::Modules::Doctor.new(inspector: inspector, store: store)
 

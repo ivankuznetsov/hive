@@ -33,15 +33,13 @@ class JsonOutputTest < Minitest::Test
   def seed_execute_waiting_task(dir, slug:, reason:, worktree_path: dir)
     execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(execute_dir)
+    ensure_test_task_identity(execute_dir)
     File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=#{reason} -->\n")
     File.write(File.join(execute_dir, "plan.md"), "# Plan\n")
     File.write(File.join(execute_dir, "worktree.yml"), {
       "path" => worktree_path,
       "branch" => slug
     }.to_yaml)
-    seed_task_projection(
-      execute_dir, state_file: File.join(execute_dir, "task.md")
-    )
     execute_dir
   end
 
@@ -201,6 +199,7 @@ class JsonOutputTest < Minitest::Test
         slug = "review-complete-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
+        ensure_test_task_identity(review_dir)
         File.write(File.join(review_dir, "task.md"), "<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
 
         out, _err = capture_io { Hive::Commands::Run.new(review_dir, json: true).call }
@@ -224,6 +223,7 @@ class JsonOutputTest < Minitest::Test
         slug = "execute-complete-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(execute_dir)
+        ensure_test_task_identity(execute_dir)
         File.write(File.join(execute_dir, "plan.md"), "# Plan\n")
         File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
 
@@ -250,6 +250,7 @@ class JsonOutputTest < Minitest::Test
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         worktree_path = File.join(dir, "worktree")
         FileUtils.mkdir_p(execute_dir)
+        ensure_test_task_identity(execute_dir)
         FileUtils.mkdir_p(worktree_path)
         File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=dirty_worktree -->\n")
         File.write(File.join(execute_dir, "worktree.yml"), {
@@ -315,6 +316,7 @@ class JsonOutputTest < Minitest::Test
         slug = "execute-no-change-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(execute_dir)
+        ensure_test_task_identity(execute_dir)
         File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=no_worktree_changes -->\n")
         File.write(File.join(execute_dir, "plan.md"), "# Plan\n")
         File.write(File.join(execute_dir, "worktree.yml"), {
@@ -374,6 +376,7 @@ class JsonOutputTest < Minitest::Test
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         worktree_path = File.join(dir, "worktree")
         FileUtils.mkdir_p(execute_dir)
+        ensure_test_task_identity(execute_dir)
         FileUtils.mkdir_p(worktree_path)
         File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=dirty_worktree -->\n")
         File.write(File.join(execute_dir, "worktree.yml"), {
@@ -439,6 +442,7 @@ class JsonOutputTest < Minitest::Test
         slug = "execute-no-change-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(execute_dir)
+        ensure_test_task_identity(execute_dir)
         File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=no_worktree_changes -->\n")
         File.write(File.join(execute_dir, "plan.md"), "# Plan\n")
         File.write(File.join(execute_dir, "worktree.yml"), {
@@ -532,6 +536,7 @@ class JsonOutputTest < Minitest::Test
         slug = "review-waiting-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
+        ensure_test_task_identity(review_dir)
         File.write(File.join(review_dir, "task.md"),
                    "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
 
@@ -567,6 +572,7 @@ class JsonOutputTest < Minitest::Test
         slug = "review-stale-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
+        ensure_test_task_identity(review_dir)
         File.write(File.join(review_dir, "task.md"),
                    "<!-- REVIEW_STALE pass=4 -->\n")
 
@@ -589,6 +595,7 @@ class JsonOutputTest < Minitest::Test
         slug = "review-ci-stale-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
+        ensure_test_task_identity(review_dir)
         File.write(File.join(review_dir, "task.md"),
                    "<!-- REVIEW_CI_STALE attempts=3 -->\n")
 

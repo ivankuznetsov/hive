@@ -9,6 +9,7 @@ require "hive/web/environment"
 require "hive/web/loopback"
 require "hive/web/service_status"
 require "hive/invoked_binary"
+require "hive/runtime_control_plane"
 
 module Hive
   module Commands
@@ -258,7 +259,9 @@ module Hive
           puts "hive web: listening on http://#{bind}:#{port}"
           # Replace this process with the Rails server (array form, env hash;
           # Kernel#exec never touches a shell when given an argv list).
-          Kernel.exec env, *rails_argv, "server", "-b", bind, "-p", port.to_s
+          Hive::RuntimeControlPlane::ProcessGuard.exec(
+            env, *rails_argv, "server", "-b", bind, "-p", port.to_s
+          )
         end
       end
 

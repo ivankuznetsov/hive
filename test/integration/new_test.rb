@@ -44,20 +44,19 @@ class NewTest < Minitest::Test
         refute File.directory?(File.join(glob.first, "assets")),
                "plain CLI-compatible ideas must not create an empty assets directory"
         marker = Hive::Markers.current(File.join(glob.first, "idea.md"))
-        projection = Hive::TaskProjection::Store.new(
+        projection = Hive::TaskProjection::Reader.new(
           task_folder: glob.first
         ).read_routine(marker: marker)
         assert projection.current?
-        assert File.file?(File.join(glob.first, "task-projection.json"))
-        assert File.file?(File.join(glob.first, "task-projection.checkpoint.json"))
+        refute File.exist?(File.join(glob.first, "task-projection.json"))
+        refute File.exist?(File.join(glob.first, "task-projection.checkpoint.json"))
         refute File.exist?(File.join(glob.first, "task-journal.jsonl"))
 
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
         assert_match(%r{\Ahive: 1-inbox/add-inbox-filter-\d{6}-[0-9a-f]{4} captured\z}, log)
         diff_files = run!("git", "-C", File.join(dir, ".hive-state"), "show", "--name-only", "--format=")
         assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/meta.yml"
-        assert_includes diff_files,
-                        "stages/1-inbox/#{File.basename(glob.first)}/task-projection.checkpoint.json"
+        refute_includes diff_files, "task-projection"
       end
     end
   end
@@ -496,14 +495,12 @@ class NewTest < Minitest::Test
     end
   end
 
-  def test_counter_failure_writes_null_id_and_still_captures
+  def test_unavailable_counter_writes_null_id_and_still_captures
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
-        error = Hive::ConcurrentRunError.new("busy", lock_path: "/tmp/counter")
-
-        with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise error }) do
+        with_replaced_singleton_method(Hive::TaskCounter, :next_or_nil, -> { nil }) do
           capture_io { Hive::Commands::New.new(project, "counter busy").call }
         end
 

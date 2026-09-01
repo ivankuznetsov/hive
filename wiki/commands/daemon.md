@@ -48,7 +48,7 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Platform-neutral inspect/plan/apply mechanics live in `Hive::UserService`; `Daemon::ServiceInstaller` remains the thin Hive adapter for templates, binary resolution, the 900-second restart warning, and command wording. Command-side summaries, JSON envelopes, and typed outcome translation are shared with bot install through `ServiceInstaller::ResultPresenter`. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
-| `queue`    | Read-only inspection of the dispatch-request queue all adapters write and the daemon consumes. Runtime files use only `hive-dispatch-request.v5`; the one-off state migration upgrades pending v1-v4 files before the queue opens. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. Existing `list`/`show`/`prune` JSON and human contracts remain unchanged. |
+| `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. Existing `list`/`show`/`prune` JSON and human contracts remain unchanged. |
 
 ## What the daemon dispatches
 
@@ -104,9 +104,20 @@ they never claim a later daemon tick will allocate the id.
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered. A non-empty, fully answered brainstorm observed before any baseline dispatches after the same debounce instead of consuming the answers as its baseline, so answers written while the daemon was down resume automatically. See [[modules/daemon]] "Brainstorm answers-pending gate". |
 | `recover_execute` | Skip — `EXECUTE_STALE` / waiting findings are explicit human-input gates. |
 | `recover_review` | Policy skips the row. `REVIEW_ERROR` is handled earlier by the universal recovery scheduler; `REVIEW_STALE` / `REVIEW_CI_STALE` remain explicit operator submissions after inspection or edits. |
-| `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
+| `agent_running`       | Skip — task is in flight; the typed task lease blocks double-spawn, while the skip also preserves capacity accounting. |
 | `archived`            | Skip — terminal. |
 | `error`               | Keep durable `ERROR` / `REVIEW_ERROR` rows scheduler-owned while the universal healer waits for its shared cooldown and temporary safety gates. Task-bound merge reconciliation runs first, so already merged work closes without another provider attempt when every closure guard passes. |
+
+Markerless automatic advance actions also stop at one failed durable attempt
+per unchanged task generation. A later daemon tick replays that terminal
+receipt and enters the same `markerless_stalled` recovery path instead of
+launching the broken command again. The resulting error or controller recovery
+request observes the shared cooldown; an explicit recovery delivery remains
+authorized to create a fresh attempt after the cause is fixed. Each terminal
+controller-recovery retry receives a deterministic new delivery id, so the
+original request remains idempotent without trapping later retries behind its
+failed receipt. Advance rows
+that still carry a terminal marker retain their existing transition semantics.
 
 `agent_running` rows also feed daemon capacity accounting when status
 has positive liveness evidence. The dispatcher counts both rows with a
@@ -125,6 +136,19 @@ and reconsiders the whole queue. Project and daily caps fence only later rows
 from that project, so unrelated projects can still use available global
 capacity. Non-dispatch policy rows are still classified and published in the
 operational snapshot.
+
+Durable dispatch requests and unrelated status rows use that same
+stage-plus-age ordering. Requests age from queue creation and retain FIFO plus
+same-task precedence; direct rows age from their state-file mtime. A later
+request lends its priority backward through the FIFO prefix when Hive compares
+the request lane with direct rows. Older requests still run first, but a
+blocked low-priority head cannot make the higher-priority suffix invisible.
+This lets an old runnable plan or retry claim a newly opened slot ahead of a
+younger request backlog without allowing the request and automatic row for one
+task to launch twice. Global and project capacity fences propagate in both
+directions across the two sources for the rest of the scan.
+Invalid and expired request files are rejected or pruned before that admission
+arbitration, so a persistent capacity fence cannot retain stale queue work.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.

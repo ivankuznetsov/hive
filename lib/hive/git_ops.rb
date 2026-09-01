@@ -162,15 +162,10 @@ module Hive
       :created
     end
 
-    # Per-task and per-project lock metadata. PIDs and process_start_time
-    # values are local to each process invocation; tracking them in
-    # hive/state would commit lock state into history every `hive run` and
-    # `hive approve`. The patterns below match each lock-file location.
+    # The repository commit lock and marker writer mutex are machine-local
+    # filesystem coordination. Ordinary task leases live in SQLite and never
+    # enter the state worktree.
     HIVE_STATE_GITIGNORE = <<~GITIGNORE.freeze
-      # Per-task lock metadata (Hive::Lock.with_task_lock).
-      stages/*/*/.lock
-      stages/*/*/.lock.tmp.*
-
       # Per-marker atomic-write lock (Hive::Markers).
       stages/*/*/*.markers-lock
 

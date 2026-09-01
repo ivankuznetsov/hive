@@ -3,7 +3,7 @@ title: hive evidence
 type: command
 source: lib/hive/commands/evidence.rb, lib/hive/artifacts/browser_gateway.rb, lib/hive/artifacts/terminal_recorder.rb
 created: 2026-08-14
-updated: 2026-08-30
+updated: 2026-08-31
 tags: [command, artifacts, evidence, recovery]
 ---
 
@@ -52,9 +52,12 @@ recorded in both the receipt and text rather than erasing the evidence. On Linux
 the recorder runs inside Hive's child-subreaper custody boundary; timeout,
 overflow, success, and failure all terminate and reap the complete descendant
 tree, and any detached child makes the capture invalid.
-The worker carries the exact already-loaded `agent-cli-runtime` require path;
-this works for both a packaged gem and a source checkout whose `bin/hive`
-loaded the monorepo component without activating a RubyGems specification.
+The scrubbed worker carries the require paths for every RubyGems specification
+already loaded by the controller, plus the exact loaded
+`agent-cli-runtime` require path. This keeps runtime dependencies such as
+Sequel available after Bundler and ambient Ruby load paths are removed, and it
+also works for a source checkout whose `bin/hive` loaded the monorepo component
+without activating a RubyGems specification.
 
 Both internal forms send bounded JSON through a controller-owned filesystem
 mailbox; the producer does not execute the PTY recorder or browser gateway.
@@ -81,7 +84,9 @@ and the daemon dispatches it as the next ready action. Its queue grammar accepts
 only the explicit target, `7-artifacts`, both 64-hex bindings, an optional safe
 project, and optional `--json`. Because the command launches no model, durable
 attempt admission uses the controller-only route and does not wait for provider
-health or capacity.
+health or capacity. The durable worker authenticates the task from the fourth
+argument in this nested command shape (`hive evidence rework TARGET`), while
+binding the attempt to the task's current `7-artifacts` stage.
 
 ## Guards and effects
 

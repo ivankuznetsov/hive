@@ -138,6 +138,7 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
 
   def test_task_requires_migration_when_the_selected_mapping_changes
     with_tmp_dir do |dir|
+      prepare_test_runtime_project(dir)
       hive_state = File.join(dir, ".hive-state")
       FileUtils.mkdir_p(hive_state)
       File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml)
@@ -183,6 +184,7 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
 
   def test_legacy_v1_lock_and_tasks_are_migrated_to_the_derived_current_configuration
     with_tmp_dir do |dir|
+      prepare_test_runtime_project(dir)
       hive_state = File.join(dir, ".hive-state")
       package = File.join(dir, "package")
       resolution = write_package(package, "a" * 40)

@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-08-20
+updated: 2026-08-30
 tags: [decisions, adr, plan-review]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — producers now submit SQLite dispatch rows that the daemon consumes, making it the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
 
 ## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
 
@@ -26,9 +26,9 @@ composition sites without adding generic lifecycle, cancellation, export, or
 raw-store APIs. The former Patrol Effect Evidence candidate and its migration
 exception were retired when Patrol discovery moved to direct native stores and
 direct Patrol Fix admission. U8
-removed the former reciprocal Attempts/WorkLedger catalog edge by keeping
-`TaskProjection::Store` as a Hive-owned adapter rather than WorkLedger-owned
-source. RunReceipt remains the strongest standalone opportunity without
+removed the former reciprocal Attempts/WorkLedger catalog edge by keeping the
+direct `TaskProjection::Reader` as a Hive-owned adapter rather than
+WorkLedger-owned source. RunReceipt remains the strongest standalone opportunity without
 forcing the largest refactor first. Operational
 status/Statewatch, layout migration, standalone capability probes, separate
 lease/capsule products, generic status rendering, and a new local-agent
@@ -195,15 +195,15 @@ callback-host override.
 The local design note is `docs/notes/hive-web-agent-oauth-relay.md`; route-level
 behavior is covered in [[commands/web]].
 
-## ADR-033: Single-dispatcher for state-mutating `hive` verbs via file-backed request queue
+## ADR-033: Single-dispatcher for state-mutating `hive` verbs
 
-**Status:** Active (shipped with plan `2026-05-28-002-refactor-single-dispatcher-via-request-queue`; supersedes the "subprocess caller" portion of ADR-026 for the allowlisted verb set).
+**Status:** Active; storage amended 2026-08-29 from a file queue to the SQLite runtime control plane.
 
 **Context:** ADR-026 made the Telegram bot a subprocess caller — it directly `Process.spawn`ed `hive run` (and friends) on its own. ADR-024 made the daemon track per-slug `state_file_mtime` baselines to suppress redundant edit-resume dispatches; that tracking relies on the daemon being the writer that observes the post-completion mtime via its own `ChildSupervisor.reap_all`. When the bot was a parallel writer of `hive run`, the daemon's `ConcurrencyController#observe_state_file_mtime` was never called for bot-driven children. The daemon's baseline went stale, and on its next tick the agent's own write to brainstorm.md looked like a "new user edit" — the daemon dispatched a redundant runner that held `Hive::Lock.with_task_lock` for 1–2 min, during which the bot rejected legitimate user answers with "Try again — another run holds the lock." Diagnosed 2026-05-28 on `explore-the-simplest-way-to-260528-2503`.
 
-**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). Hive web later reused the same producer path. Recoverable-marker adapters now submit observations through `Hive::Recovery::API`; one `RecoveryCoordinator` persists the retry request and owns the guarded marker transition. `StaleAgentHealer` is only the automatic scheduler, with no special `3-plan` clear/requeue path. The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same durable-attempt path as auto-advance. The daemon's completion observation then keeps the baseline current.
+**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through one daemon-owned dispatch lane. The bot and Hive Web submit validated requests through `Hive::Bot::DispatchRequestWriter`; recoverable-marker adapters submit observations through `Hive::Recovery::API`; `RecoveryCoordinator` owns guarded recovery transitions. Since the 2026-08-29 cutover, `RuntimeControlPlane::DispatchRepository` stores request, claim, sequence, recovery, and completion-outbox rows. The daemon reads bounded SQL projections and dispatches through the same durable-attempt path as auto-advance.
 
-The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v5`. V5 carries generation intent for ordinary delivery and, for recovery, canonical task/stage identity plus marker-bound failures, markerless provider-admission observations, or markerless controller failures, all on the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Pending v1-v4 delivery records are upgraded by the one-off migration before the runtime queue opens; no producer emits them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
+The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v5`. V5 carries generation intent for ordinary delivery and, for recovery, canonical task/stage identity plus marker-bound failures, markerless provider-admission observations, or markerless controller failures, all on the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Runtime readers accept v5 SQL rows only; the irreversible fleet cutover discards pending v1-v4 file deliveries rather than importing them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
 
 The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
 
@@ -211,10 +211,10 @@ The allowlist is closed: `run develop brainstorm plan review open-pr artifacts f
 
 **Consequences:**
 - The daemon is now the SOLE process that spawns `hive run`-class children. The structural cause of the cross-process mtime-baseline bug is gone.
-- The queue dir is created with mode 0700: the producer/consumer authentication boundary is the filesystem-permissions invariant. The `requestor` field in each request is informational only; the daemon does NOT verify it against process credentials. Multi-user hosts therefore depend on per-user `~/.local/state/hive/` ownership, which is the existing operating-system assumption.
+- The SQLite database and payload root are owner-private. The `requestor` field remains informational; the trust boundary is the per-user Hive runtime.
 - A new request type expires after 600s. If the daemon is down for longer, queued requests are pruned on its next tick (logged as `dispatch_request_expired`). Operators restarting after extended outage see no automatic re-trigger.
 - Telemetry: 5 daemon events (`dispatch_request_observed/dispatched/completed/rejected/blocked/expired`) provide a full lifecycle trace keyed by `request_id`. The bot continues to log via `:dispatched_command` with `via=queue` and `request_id` so the same correlation ID grep works across daemon.log and bot.log.
-- A per-iteration rescue in `process_dispatch_requests` ensures one request's `Process.spawn` failure (Errno::EAGAIN under fork-exhaustion etc.) does not abort the rest of the tick — the failing request's file stays on disk for the next tick to retry.
+- A per-request rescue in `process_dispatch_requests` ensures one request's `Process.spawn` failure does not abort the rest of the tick; the durable row remains retryable.
 - Notification preservation: the bot's "next question" message is now driven exclusively by the daemon's notification path (status-poll). A `notification_exactly_once` integration test pins the invariant. There is a slightly larger latency window (one tick) between agent completion and operator notification compared to the pre-refactor bot-side reaper, but the deduplication guarantee is stronger.
 
 ## ADR-034: Hive-owned fallback commits for successful fix-agent edits
@@ -228,8 +228,17 @@ The allowlist is closed: `run develop brainstorm plan review open-pr artifacts f
 
 **Status:** Active
 **Context:** The daemon is a long-running Ruby process whose in-memory constants freeze at load time, while shelled-out `hive` subprocesses load fresh code on every invocation. PR #78 (2026-05-15) bumped `SCHEMA_VERSIONS["hive-status"]` from 1 to 2 in `lib/hive.rb`. Because the daemon process loaded before that bump and was not restarted, `StatusConsumer#validate_envelope!` (in-memory `expected=1`) kept rejecting every status envelope the subprocess emitted (`got 2, want 1`) — 8,946 events over ~3 days until the operator manually restarted on 2026-05-20. Every future schema bump silently reproduces the same incident without a restart-in-lockstep discipline.
-**Decision:** The dispatcher captures a SHA-256 fingerprint of `lib/hive.rb` at startup and rehashes the file on every tick. On mismatch it logs a `version_drift` event with both digests, sets `reexec_requested?`, and breaks the run loop. `Hive::Commands::Daemon#start_daemon` then calls `Kernel#exec` to replace the process with a fresh `hive daemon start` invocation — same PID (so the PID file stays valid), fresh code on both sides. `--detach` is omitted from the re-exec argv because we are already the daemonized child. Rate-limited to one re-exec per 60s. Operators can disable via `HIVE_DAEMON_NO_AUTO_REEXEC=1`.
-**Consequences:** Schema bumps no longer require a coordinated daemon restart — the next tick after `git pull` self-heals. The blast radius is bounded by `@shutdown_grace_sec` (existing terminate_all path runs before re-exec, so in-flight children are properly drained). The `dispatcher_started` event now carries `code_fingerprint` and `dispatcher_stopping` carries `reexec_requested`, both for observability. Detection is file-mtime/hash based on `lib/hive.rb`; edits that don't touch that file (e.g. dispatcher-only changes) DO NOT trigger re-exec, so reload semantics for non-schema code changes still require a manual restart — fine because the schema-version mismatch was the only failure mode that hard-blocked operation.
+**Decision:** The dispatcher captures one SHA-256 fingerprint over the source files that own schema identity and the in-process status producer, resolving both through Ruby `source_location`. It recomputes the fingerprint on every full tick. On mismatch it logs a `version_drift` event with both digests, sets `reexec_requested?`, and breaks the run loop. `Hive::Commands::Daemon#start_daemon` then calls `Kernel#exec` to replace the process with a fresh `hive daemon start` invocation — same PID (so the PID file stays valid), fresh code on both sides. `--detach` is omitted from the re-exec argv because we are already the daemonized child. Rate-limited to one re-exec per 60s. Operators can disable via `HIVE_DAEMON_NO_AUTO_REEXEC=1`.
+**Consequences:** Schema or status-producer updates no longer require a coordinated daemon restart — the next full tick after an in-place checkout update self-heals. The blast radius is bounded by `@shutdown_grace_sec` (existing terminate_all path runs before re-exec, so in-flight children are properly drained). The `dispatcher_started` event now carries `code_fingerprint` and `dispatcher_stopping` carries `reexec_requested`, both for observability. Other source-file edits still require deployment-managed restart or manual restart.
+
+**2026-08-30 amendment:** `StatusConsumer` now calls the status graph producer in
+the daemon process. This removes the subprocess/JSON boundary and makes the
+original producer-consumer schema mismatch impossible on daemon scans. Source
+drift re-exec remains active for in-place schema and status-entrypoint updates.
+Its fingerprint covers both schema identity and the in-process status producer;
+other runtime source changes retain the deployment-managed/manual restart
+contract above. The bot's separate `StatusWatcher` compatibility policy is
+unchanged.
 
 ## ADR-032: Release artifacts are the `hive-cli` rubygem; brew + AUR publish from CI
 
@@ -313,10 +322,19 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 **Status:** Active
 **Context:** Original design used one `.hive/.lock` per project, but execute pass takes ~45 minutes — that would block all other tasks. Need finer locking.
 **Decision:**
-- **Per-task lock** `<task folder>/.lock` — held for the entire `hive run`, allowing parallel runs on *different* tasks.
+- **Per-task lease** in the SQLite runtime control plane — keyed by stable task
+  id and held logically for the entire `hive run`, allowing parallel runs on
+  *different* tasks. Typed process identity, holder nonce, and lease-version
+  CAS replace the former task-folder `.lock` and its guard/temp files.
 - **Per-project commit lock** `<.hive-state>/.commit-lock` — short-lived flock around `git add && git commit` in the hive-state worktree.
-- PID-reuse defence: the lock payload includes `process_start_time` from `/proc/<pid>/stat` field 22; stale-check compares.
-**Consequences:** Multiple long-running stage agents on the same project can run concurrently; only the brief commit window is serialised.
+- PID-reuse defence: typed holder identity includes `process_start_time` from
+  `/proc/<pid>/stat` field 22; stale-check compares.
+- Every Sequel checkout participates in one process-wide fork/exec barrier, so
+  a fork cannot copy active SQLite descriptors or transactions.
+**Consequences:** Multiple long-running stage agents on the same project can
+run concurrently; only the brief commit window is serialised. Ordinary task
+lock files are retired in one cutover, while `.commit-lock` remains the Git
+index mutex.
 
 ## ADR-008: Default Claude bypassPermissions secured by other means
 
@@ -647,7 +665,7 @@ shapes. The universal recovery and evidence-closure rollout needs one truthful
 projection, not another compatibility layer beside the earlier mechanisms.
 
 **Decision:** Migrate every in-repository producer and consumer in one change,
-then publish only the current `hive-status.v7`,
+then publish only the current `hive-status.v8`,
 `hive-operational-status.v4`, and `hive-act.v2` contracts. Operational-status
 v4 adds the coordinated required nullable exact-routing projection. Remove their
 superseded schema files and compatibility assertions instead of accepting or

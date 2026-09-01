@@ -90,6 +90,66 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_reuses_clearance_only_after_validated_reviewed_rework
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      calls = []
+      guard = lambda do |**kwargs|
+        calls << kwargs
+        raise Hive::PlanReview::TransitionBlocked, "policy changed" if calls.one?
+
+        true
+      end
+      package = {
+        "current" => {
+          "status" => "rework", "reason" => "implementation_rework",
+          "generation" => "a" * 64, "recovery_digest" => "b" * 64,
+          "failed_targets" => [ "claim-interface" ],
+          "reviewer_reasons" => [ "Repair and recapture the interface." ],
+          "attempts" => []
+        },
+        "requirement" => {
+          "generation" => "a" * 64,
+          "implementation" => {
+            "implementation_base" => "a" * 40,
+            "implementation_head" => "b" * 40
+          }
+        },
+        "attempts" => []
+      }
+      Hive::Artifacts::OutcomeEvidence::Rework.new(
+        task:, project: File.basename(task.project_root)
+      ).record!(
+        package:, expected_generation: "a" * 64, expected_digest: "b" * 64
+      )
+      store = Object.new
+      store.define_singleton_method(:package_metadata) do
+        package
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :validate_execute_entry!, guard
+      ) do
+        with_replaced_singleton_method(
+          Hive::Artifacts::OutcomeEvidence::Store, :new, ->(**) { store }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Stages::Execute, :task_state, ->(*) { :complete }
+          ) do
+            captured = nil
+            capture_io { captured = Hive::Stages::Execute.run!(task, {}) }
+            captured
+          end
+        end
+      end
+
+      assert_equal({ commit: nil, status: :execute_complete }, result)
+      assert_nil calls.fetch(0)[:reviewed_rework]
+      assert_equal true, calls.fetch(1).fetch(:reviewed_rework)
+    end
+  end
+
   def test_apply_execute_outcome_publishes_projection_before_compatibility_marker
     with_tmp_git_repo do |worktree|
       with_tmp_dir do |dir|
@@ -98,7 +158,7 @@ class HiveStagesExecuteTest < Minitest::Test
         task.define_singleton_method(:worktree_path) { worktree }
         write_plan(task)
         baseline = Hive::GitOps.new(worktree).head_sha
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         policy = Hive::Workflows::Coding::DESCRIPTOR.stage_named("execute").condition_policy.to_h
         attempt = store.create_launching(
           attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
@@ -116,13 +176,12 @@ class HiveStagesExecuteTest < Minitest::Test
         original = Hive::Markers.method(:set)
         observed = []
         Hive::Markers.define_singleton_method(:set) do |path, name, attrs = {}|
-          projection_path = File.join(File.dirname(path), "task-projection.json")
           journal_path = File.join(File.dirname(path), "task-journal.jsonl")
-          observed << [ File.exist?(journal_path), File.exist?(projection_path), name ]
+          observed << [ File.exist?(journal_path), name ]
           original.call(path, name, attrs)
         end
 
-        with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "attempts")) do
+        with_env("HIVE_HOME" => store.root) do
           with_attempt_context(
             attempt_id: attempt.attempt_id, task_generation: 1,
             ownership_generation: attempt.ownership_generation
@@ -138,7 +197,7 @@ class HiveStagesExecuteTest < Minitest::Test
             assert_equal :execute_complete, result.fetch(:status)
           end
         end
-        assert_equal [ [ true, true, :execute_complete ] ], observed
+        assert_equal [ [ true, :execute_complete ] ], observed
       ensure
         Hive::Markers.define_singleton_method(:set, original) if original
       end
@@ -877,7 +936,7 @@ class HiveStagesExecuteTest < Minitest::Test
 
       protected = Hive::Stages::Execute.execute_protected_files(task)
 
-      assert_includes protected, "task-projection.checkpoint.json"
+      assert_includes protected, "task-journal.jsonl"
       assert_includes protected, "context-receipts/older.launch.json"
       assert_includes protected, "activity-operations/operation.json"
       refute_includes protected, "context-receipts/current.json.next"
@@ -942,6 +1001,50 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "trusted\n", File.binread(tampered)
       assert_includes Hive::Markers.current(task.state_file).attrs.fetch("files"),
                       File.basename(tampered)
+    end
+  end
+
+  def test_run_pass_appends_controller_output_after_implementer_custody
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      File.write(task.state_file, "# Task\n\n## Implementation\n")
+      worktree = File.join(dir, "worktree")
+      write_pointer(
+        task,
+        "path" => worktree,
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      trailer = Hive::Stages::Execute.completion_trailer(
+        File.binread(File.join(task.folder, "plan.md"))
+      )
+      git = FakeGit.new(
+        head: "new-head", branch: task.slug, dirty: false,
+        ancestor_result: true, message: "done\n\n#{trailer}\n"
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, agent_custody:, **_kwargs|
+            agent_custody.call do
+              {
+                status: :ok,
+                final_message: "implementation summary",
+                final_message_source: :structured
+              }
+            end
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, worktree)
+
+          assert_equal({ commit: "execute_complete", status: :execute_complete }, result)
+        end
+      end
+
+      assert_includes File.read(task.state_file), "## Execute Output\n\nimplementation summary"
+      assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
     end
   end
 
@@ -1548,6 +1651,15 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal expected, context
 
       tracker.define_singleton_method(:records) { [] }
+      required = with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
+      ) do
+        Hive::Stages::Execute.outcome_evidence_rework_context(
+          task, require_receipt: true
+        )
+      end
+      assert_nil required
+
       empty = with_replaced_singleton_method(
         Hive::Artifacts::OutcomeEvidence::Rework, :new, ->(**) { tracker }
       ) do

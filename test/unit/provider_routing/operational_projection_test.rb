@@ -6,13 +6,14 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
 
-  class DecisionIndex
+  class DecisionQuery
     def initialize(rows = []) = @rows = rows
     def routing_decisions(limit:) = @rows.first(limit).freeze
   end
 
-  AttemptStore = Data.define(:scan_result, :decision_index) do
-    def scan = scan_result
+  AttemptStore = Data.define(:records, :decision_query, :database) do
+    def active_attempts = records
+    def routing_decisions(limit:) = decision_query.routing_decisions(limit: limit)
   end
 
   FakeRecord = Data.define(:attempt_id, :provider, :routing, :live) do
@@ -23,14 +24,18 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
 
   def setup
     @root = Dir.mktmpdir("routing-operational-projection")
-    @health = Hive::ProviderHealth::Store.new(root: File.join(@root, "health"), clock: -> { NOW })
+    @database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(@root, "runtime.sqlite3")
+    ).migrate!
+    @health = Hive::ProviderHealth::Repository.new(database: @database, clock: -> { NOW })
     @attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: [].freeze, invalid_records: [].freeze),
-      decision_index: DecisionIndex.new
+      records: [].freeze,
+      decision_query: DecisionQuery.new, database: @database
     )
   end
 
   def teardown
+    @database.disconnect
     FileUtils.remove_entry(@root)
   end
 
@@ -73,10 +78,15 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     end
 
     failing_attempts = Object.new
-    failing_attempts.define_singleton_method(:scan) do
-      raise Hive::Attempts::StoreError, "unavailable"
+    failing_attempts.define_singleton_method(:active_attempts) do
+      raise Hive::Attempts::RepositoryError, "unavailable"
     end
-    failing_attempts.define_singleton_method(:decision_index) { DecisionIndex.new }
+    failing_attempts.define_singleton_method(:database) do
+      raise Hive::Attempts::RepositoryError, "unavailable"
+    end
+    failing_attempts.define_singleton_method(:routing_decisions) do |limit:|
+      raise Hive::Attempts::RepositoryError, "unavailable" if limit
+    end
     payload = Hive::ProviderRouting::OperationalProjection.new(
       accounts: { "account-a" => account }, attempt_store: failing_attempts,
       health_store: @health, now: NOW
@@ -107,12 +117,12 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
       FakeRecord.new("terminal", "codex", { "mode" => "legacy" }, false)
     ]
     attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: records, invalid_records: []),
-      decision_index: DecisionIndex.new
+      records: records,
+      decision_query: DecisionQuery.new, database: @database
     )
     with_replaced_singleton_method(
       Hive::Attempts::CapacitySnapshot, :build,
-      ->(**) { raise Hive::Attempts::StoreError, "snapshot unavailable" }
+      ->(**) { raise Hive::Attempts::RepositoryError, "snapshot unavailable" }
     ) do
       payload = Hive::ProviderRouting::OperationalProjection.new(
         accounts: { "account-a" => account }, attempt_store: attempts,
@@ -125,11 +135,11 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
   def test_decision_projection_failure_is_reported_without_dropping_health
     index = Object.new
     index.define_singleton_method(:routing_decisions) do |limit:|
-      raise Hive::Attempts::StoreError, "decision index unavailable" if limit
+      raise Hive::Attempts::RepositoryError, "decision index unavailable" if limit
     end
     attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: [], invalid_records: []),
-      decision_index: index
+      records: [],
+      decision_query: index, database: @database
     )
     payload = Hive::ProviderRouting::OperationalProjection.new(
       accounts: { "account-a" => account }, attempt_store: attempts,
@@ -144,8 +154,8 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     matching = decision_entry("account-a/model-a")
     unrelated = decision_entry("account-b/model-b")
     attempts = AttemptStore.new(
-      scan_result: Hive::Attempts::Scan.new(records: [], invalid_records: []),
-      decision_index: DecisionIndex.new([ matching, unrelated ])
+      records: [],
+      decision_query: DecisionQuery.new([ matching, unrelated ]), database: @database
     )
 
     payload = Hive::ProviderRouting::OperationalProjection.new(

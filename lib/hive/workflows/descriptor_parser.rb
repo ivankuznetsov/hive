@@ -3,6 +3,7 @@ require "hive/agent_profiles"
 require "hive/conditions/policy"
 require "hive/permission_scope"
 require "hive/workflow"
+require "hive/warnings"
 
 module Hive
   module Workflows
@@ -637,16 +638,20 @@ module Hive
         # so pairing revise with max_rounds: 1 is a silent no-op. Warn at load
         # time rather than fail — the descriptor is still runnable.
         if revise && max_rounds <= 1
-          warn "hive: #{@path}: #{label} council declares a revise agent with max_rounds: 1; " \
-               "revise never runs at max_rounds 1 (increase max_rounds to enable it)"
+          Hive::Warnings.emit(
+            "hive: #{@path}: #{label} council declares a revise agent with max_rounds: 1; " \
+            "revise never runs at max_rounds 1 (increase max_rounds to enable it)"
+          )
         end
         # The council loop also refuses to revise unless `exit_rule == :consensus`
         # (Stages::Council#run!); `exit_rule` defaults to "human". So a revise
         # agent under any non-consensus exit_rule is the same silent no-op —
         # warn at load time here too, rather than let it vanish at run time.
         if revise && exit_rule != "consensus"
-          warn "hive: #{@path}: #{label} council declares a revise agent with exit_rule: #{exit_rule}; " \
-               "revise only runs under exit_rule: consensus (set exit_rule: consensus to enable it)"
+          Hive::Warnings.emit(
+            "hive: #{@path}: #{label} council declares a revise agent with exit_rule: #{exit_rule}; " \
+            "revise only runs under exit_rule: consensus (set exit_rule: consensus to enable it)"
+          )
         end
 
         Hive::Workflow::Council.new(

@@ -8,6 +8,10 @@ class OperationalStatusTest < Minitest::Test
     waiting_on_provider_or_scheduler completion_ready idle
   ].freeze
 
+  def setup
+    Hive::RuntimeControlPlane.database.migrate!
+  end
+
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts
     payload = status_payload(
       task(action: "agent_running", slug: "running", live_task_lock: true, task_lock_pid: 42),
@@ -368,18 +372,18 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
-  def test_projection_repair_is_operator_owned_even_when_daemon_is_enabled
+  def test_task_history_invalid_is_operator_owned_even_when_daemon_is_enabled
     repair = task(
       action: "error",
-      slug: "projection-repair",
+      slug: "invalid-history",
       stage: "4-execute",
       marker: "error",
       attrs: {
-        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON,
         "owner" => "operator",
-        "message" => "bounded task projection needs exact-task repair"
+        "message" => "task journal is invalid"
       },
-      projection_repair: true
+      task_history_invalid: true
     )
 
     projected = project(
@@ -391,6 +395,28 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", projected.fetch("blocker_owner")
     assert_equal "task_repair", projected.dig("reasons", 0, "code")
     assert_nil projected.fetch("action")
+  end
+
+  def test_busy_task_history_is_transient_scheduler_work_not_repair
+    busy = task(
+      action: "error", slug: "busy-history", stage: "4-execute", marker: "error",
+      attrs: {
+        "reason" => "condition_task_history_unavailable",
+        "owner" => "scheduler",
+        "journal_reason" => "journal_lock_busy",
+        "message" => "task journal writer holds the task lock"
+      }
+    )
+
+    projected = project(
+      status_payload(busy),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_provider_or_scheduler", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "task_history_unavailable", projected.dig("reasons", 0, "code")
+    refute_equal "needs_repair", projected.fetch("state")
   end
 
   def test_terminal_outcome_errors_are_retried_like_any_other_error
@@ -523,7 +549,10 @@ class OperationalStatusTest < Minitest::Test
     )
     snapshot["attempt_storage"] = {
       "status" => "degraded",
-      "layout" => { "generation" => 4, "migration" => "complete" },
+      "layout" => {
+        "generation" => 4, "migration" => "failed",
+        "last_migrated_at" => nil, "last_result" => nil
+      },
       "hot" => { "records" => 1, "invalid" => 0 },
       "maintenance" => {
         "last_started_at" => "2026-07-20T09:00:00.000000Z",
@@ -531,7 +560,7 @@ class OperationalStatusTest < Minitest::Test
         "last_result" => nil
       },
       "last_error" => {
-        "operation" => "maintenance", "class" => "Hive::Attempts::StoreError",
+        "operation" => "maintenance", "class" => "Hive::Attempts::RepositoryError",
         "observed_at" => "2026-07-20T09:00:01.000000Z"
       },
       "degraded_reason" => "maintenance_failed"
@@ -559,7 +588,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v7 payload", error.message
+    assert_equal "operational status requires a successful hive-status v8 payload", error.message
   end
 
   def test_rejects_an_older_status_schema
@@ -568,7 +597,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v7 payload", error.message
+    assert_equal "operational status requires a successful hive-status v8 payload", error.message
   end
 
   def test_noncurrent_scheduler_snapshot_propagates_its_freshness
@@ -1601,7 +1630,7 @@ class OperationalStatusTest < Minitest::Test
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
            admission_error: nil, closure: nil, plan_review: nil,
-           projection_repair: false)
+           task_history_invalid: false)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -1623,7 +1652,7 @@ class OperationalStatusTest < Minitest::Test
       "pr_url" => nil,
       "marker" => marker,
       "attrs" => attrs,
-      "projection_repair" => projection_repair,
+      "task_history_invalid" => task_history_invalid,
       "mtime" => "2026-07-20T10:00:00.000000Z",
       "folder_mtime" => "2026-07-20T10:00:00.000000Z",
       "age_seconds" => 2,

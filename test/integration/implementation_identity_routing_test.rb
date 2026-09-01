@@ -1,10 +1,10 @@
 require "test_helper"
 require "hive/attempts/context"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/status"
 require "hive/implementation_identity/resolver"
 require "hive/implementation_identity/store"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 
 class ImplementationIdentityRoutingTest < Minitest::Test
   include HiveTestHelper
@@ -27,8 +27,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
                      selection.native_arguments
       end
 
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempts
+      projection = Hive::TaskProjection::Reader.new(
+        task_folder: task.folder
       ).read
       journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       journal_before = File.binread(journal_path)
@@ -55,8 +55,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
 
       File.write(File.join(task.folder, "plan.md"), "# accepted replacement plan\n")
       second = capture_execute(task, attempts, claude_cfg, generation: 2, attempt_id: "execute-generation-2")
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempts
+      projection = Hive::TaskProjection::Reader.new(
+        task_folder: task.folder
       ).read
       identity = projection["implementation_identity"]
 
@@ -249,7 +249,9 @@ class ImplementationIdentityRoutingTest < Minitest::Test
       )
       File.write(task.state_file, "<!-- EXECUTE_WAITING -->\n")
       File.write(File.join(folder, "plan.md"), "# accepted plan\n")
-      attempts = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempts = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), migrate: true
+      )
       yield task, attempts
     end
   end
@@ -264,6 +266,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
         task: task, cfg: cfg, attempt_store: attempts
       ).capture_execute!
     end
+  ensure
+    finish_attempt(attempts, attempt)
   end
 
   def resolve_stage(task, attempts, cfg, stage, intended_stage, generation:,
@@ -277,6 +281,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
         task: task, cfg: cfg, attempt_store: attempts
       ).resolve_stage!(stage)
     end
+  ensure
+    finish_attempt(attempts, attempt)
   end
 
   def create_attempt(task, attempts, attempt_id:, stage:, generation:, provider:)
@@ -296,6 +302,17 @@ class ImplementationIdentityRoutingTest < Minitest::Test
     with_attempt_context(
       attempt_id: attempt.attempt_id, task_generation: generation,
       ownership_generation: attempt.ownership_generation, &block
+    )
+  end
+
+  def finish_attempt(attempts, attempt)
+    return unless attempts && attempt
+
+    current = attempts.fetch(attempt.attempt_id)
+    return unless current&.live?
+
+    attempts.mark_lost(
+      current, reason: "integration_fixture_complete", now: Time.now.utc
     )
   end
 

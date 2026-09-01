@@ -1082,15 +1082,12 @@ class StagesArtifactsTest < Minitest::Test
       identity = { "implementation_head" => "a" * 40 }
       resolver = Struct.new(:value) { def resolve = value }.new(identity)
       journal = File.join(task.folder, "task-journal.jsonl")
-      projection = File.join(task.folder, "task-projection.json")
       spawn = lambda do |_task, agent_custody:, **|
         File.write(journal, "controller session start\n")
-        File.write(projection, "controller session start\n")
         result = agent_custody.call do
           { status: :ok, final_message: '{"claims":[],"exclusions":[]}' }
         end
         File.open(journal, "ab") { |file| file.write("controller session finish\n") }
-        File.write(projection, "controller session finish\n")
         result
       end
 
@@ -1107,7 +1104,6 @@ class StagesArtifactsTest < Minitest::Test
           assert_equal [], result.dig(:output, "claims")
           assert_equal "controller session start\ncontroller session finish\n",
                        File.binread(journal)
-          assert_equal "controller session finish\n", File.binread(projection)
         end
       end
     end

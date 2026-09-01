@@ -3,7 +3,7 @@ require "securerandom"
 require "time"
 require "hive/atomic_file"
 require "hive/paths"
-require "hive/daemon/queue_directory"
+require "fileutils"
 
 module Hive
   module Bot
@@ -26,7 +26,10 @@ module Hive
       end
 
       def directory(state_home: Hive::Paths.state_home)
-        Hive::Daemon::QueueDirectory.directory_for(dirname: DIRNAME, state_home: state_home)
+        path = File.join(state_home, DIRNAME)
+        FileUtils.mkdir_p(path, mode: 0o700)
+        File.chmod(0o700, path)
+        path
       end
 
       def write!(chat_id:, state_home: Hive::Paths.state_home, now: Time.now)

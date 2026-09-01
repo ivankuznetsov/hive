@@ -3,7 +3,7 @@
 ## Choose the status surface
 
 - Use `hive status` for bounded daemon health and currently live tasks.
-- Use `hive status --json` for the same bounded `hive-running-status.v1`
+- Use `hive status --json` for the same bounded `hive-running-status.v2`
   projection in machine-readable form.
 - Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v4`.
 - Use `hive task TARGET --project NAME --json` for one task's semantic result,
@@ -23,24 +23,17 @@ maintenance fault; do not call the pipeline healthy merely because task rows
 are advancing. `unknown` means the bounded health cell has not yet established
 a successful migration or maintenance result.
 
-When a task is `needs_repair`, inspect `evidence.marker_attrs`. A reason of
-`condition_projection_repair_required` means routine status could not verify
-that task's checkpoint and bounded journal suffix. The row is synthetic,
-operator-owned, and non-retryable; it does not mean the project or fleet scan
-failed, and unrelated tasks may continue. Canonical task creation publishes a
-zero-history checkpoint before exposing new work; status never backfills an
-older missing checkpoint. Run the exact
-`evidence.marker_attrs.repair_command` when present:
-
-```bash
-hive repair-projection TASK-SLUG --project PROJECT --stage STAGE
-```
+When a task is `needs_repair`, inspect `task_history_invalid` and
+`evidence.marker_attrs`. A reason of `condition_task_history_invalid` means
+routine status could not fold that task's authoritative `task-journal.jsonl`.
+The row is synthetic, operator-owned, and non-retryable; it does not mean the
+project or fleet scan failed, and unrelated tasks may continue. Preserve the
+task folder and report the task-local journal diagnostic. Hive has no projection
+repair or history backfill command. Recover the JSONL only from verified task
+evidence or a trusted backup, and only with explicit operator approval.
 
 Refresh operational status afterward. Do not use `workflow.retry`, restart the
-daemon, or create migration/watcher machinery. If no repair command is present
-and `projection_reason` is `checkpoint_oversized`,
-`attempt_ids_exhausted`, or `predecessor_fetches_exhausted`, report the named
-`projection_cap` and task-local retained-history compaction requirement.
+daemon, or create migration, checkpoint, projection, or watcher machinery.
 
 ## Report a useful snapshot
 

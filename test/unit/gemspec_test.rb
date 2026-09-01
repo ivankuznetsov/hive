@@ -20,6 +20,13 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "lib/hive/scripts/stop_hook.sh"
   end
 
+  def test_gem_package_includes_the_explicit_runtime_migration_set
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    assert_includes spec.files,
+                    "lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb"
+  end
+
   def test_gem_package_includes_builtin_bench_instructions
     spec = Gem::Specification.load(GEMSPEC_PATH)
 

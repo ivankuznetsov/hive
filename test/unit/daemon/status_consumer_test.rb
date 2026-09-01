@@ -3,29 +3,149 @@ require "json"
 require "tmpdir"
 require "hive/daemon/status_consumer"
 
-# Pin StatusConsumer's parsing of Hive's internal task-graph output. We
-# stand in a tiny ruby script that emits a controlled JSON envelope on
-# stdout, since calling the real binary would couple this test to the
-# whole status implementation.
+# Pin StatusConsumer's mapping of Hive's in-process task graph into daemon
+# rows. Tests inject hashes at the object boundary; the real-producer test
+# separately proves the default path stays in-process.
 class HiveDaemonStatusConsumerTest < Minitest::Test
   include HiveTestHelper
 
-  def with_fake_status(payload, exit_code: 0, stderr_text: "", expected_args: %w[status --internal-task-graph --json])
-    with_tmp_dir do |dir|
-      script = File.join(dir, "fake-hive")
-      File.write(script, <<~RUBY)
-        #!/usr/bin/env ruby
-        if ARGV != #{expected_args.inspect}
-          $stderr.puts "fake-hive: unexpected argv \#{ARGV.inspect}"
-          exit 64
-        end
-        $stderr.write #{stderr_text.inspect}
-        $stdout.write #{payload.inspect}
-        exit #{exit_code}
-      RUBY
-      File.chmod(0o755, script)
-      yield(script)
+  def test_injected_producer_passes_the_graph_without_serialization
+    payload = make_envelope(projects: [])
+    producer = lambda do |task_keys:, warnings:|
+      assert_nil task_keys
+      assert_empty warnings
+      payload
     end
+
+    with_replaced_singleton_method(
+      Open3, :capture3, ->(*) { flunk "daemon status must not spawn the Hive CLI" }
+    ) do
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
+
+      assert result.ok, result.error
+      assert_same payload, result.status_payload
+    end
+  end
+
+  def test_default_producer_builds_the_graph_without_a_status_subprocess
+    require "hive/commands/status"
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*) { flunk "daemon status must not spawn the Hive CLI" }
+      ) do
+        result = Hive::Daemon::StatusConsumer.new.fetch
+
+        assert result.ok, result.error
+        assert_equal [], result.rows
+        assert_equal [], result.status_payload.fetch("projects")
+      end
+    end
+  end
+
+  def test_default_bounded_producer_maps_a_real_task_and_captures_nested_warnings
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "changed-task-260830-abcd"
+      folder = File.join(hive_state, "stages", "1-inbox", slug)
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "idea.md")
+      File.write(state_file, "<!-- WAITING -->\n")
+      File.write(File.join(folder, "meta.yml"), "id: [not-valid\n")
+      Hive::TaskProjection::Reader.new(task_folder: folder).read(
+        marker: Hive::Markers.current(state_file)
+      )
+
+      completed_slug = "completed-task-260830-abcd"
+      completed_folder = File.join(hive_state, "stages", "9-done", completed_slug)
+      FileUtils.mkdir_p(completed_folder)
+      completed_state_file = File.join(completed_folder, "task.md")
+      File.write(completed_state_file, "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(
+        completed_folder, id: nil, slug: completed_slug, display_name: nil,
+        completed_at: Time.now.utc
+      )
+      Hive::TaskProjection::Reader.new(task_folder: completed_folder).read(
+        marker: Hive::Markers.current(completed_state_file)
+      )
+
+      workflows_dir = File.join(hive_state, "workflows")
+      FileUtils.mkdir_p(workflows_dir)
+      File.write(File.join(workflows_dir, "broken.yml"), "id: [not-valid\n")
+      File.write(File.join(workflows_dir, "warning-flow.yml"), <<~YAML)
+        id: warning-flow
+        stages:
+          - name: review
+            kind: council
+            state_file: review.md
+            reviewers:
+              - name: one
+                prompt: Review.
+            council:
+              revise:
+                skill: /revise
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      managed_lock = File.join(
+        workflows_dir, "managed", Hive::WorkflowPackage::ManagedStore::LOCK_FILE
+      )
+      FileUtils.mkdir_p(File.dirname(managed_lock))
+      File.write(managed_lock, "{not-json")
+      File.write(File.join(hive_state, "config.yml"), <<~YAML)
+        bot:
+          notification_dedupe_window_sec: 600
+      YAML
+      Hive::Workflows::Project.reset!
+      project = {
+        "name" => "demo", "path" => project_root, "hive_state_path" => hive_state
+      }
+      task_meta_read = Hive::TaskMeta.method(:read)
+      invalid_completion_time = lambda do |task_folder|
+        meta = task_meta_read.call(task_folder)
+        task_folder == completed_folder ? meta.merge(completed_at: "not-a-timestamp") : meta
+      end
+
+      result = nil
+      _stdout, stderr = capture_io do
+        with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+          with_replaced_singleton_method(Hive::TaskMeta, :read, invalid_completion_time) do
+            with_replaced_singleton_method(
+              Open3, :capture3, ->(*) { flunk "bounded daemon status must not spawn the Hive CLI" }
+            ) do
+              result = Hive::Daemon::StatusConsumer.new.fetch_tasks(
+                [ [ "demo", slug ], [ "demo", completed_slug ] ]
+              )
+            end
+          end
+        end
+      end
+
+      assert result.ok, result.error
+      assert_equal [ slug, completed_slug ].sort, result.rows.map(&:slug).sort
+      assert_nil result.status_payload
+      assert_includes result.warning, "hive: skipping"
+      assert_includes result.warning, "broken.yml"
+      assert_includes result.warning, "hive: task_meta: failed to read"
+      assert_includes result.warning, "council declares a revise agent with max_rounds: 1"
+      assert_includes result.warning, "bot.notification_dedupe_window_sec"
+      assert_includes result.warning, 'skipping managed workflow "managed"'
+      assert_includes result.warning, "hive: completion_time: invalid completed_at"
+      assert_empty stderr
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
+  def with_status(payload, expected_task_keys: nil, warning_text: "")
+    warning_messages = warning_text.to_s.lines(chomp: true).reject(&:empty?)
+    producer = lambda do |task_keys:, warnings:|
+      expected_task_keys.nil? ? assert_nil(task_keys) : assert_equal(expected_task_keys, task_keys)
+      warnings.concat(warning_messages)
+      payload
+    end
+    yield(producer)
   end
 
   def make_envelope(projects: [])
@@ -79,12 +199,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
         task_row(slug: "fix-bug").merge(
           "pr_url" => "https://github.com/acme/writero/pull/42",
           "plan_review" => plan_review,
-          "projection_repair" => true
+          "task_history_invalid" => true
         )
       ]
     } ])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       assert result.ok, "expected ok=true; got error #{result.error.inspect}"
       assert_equal 1, result.rows.size
@@ -95,26 +215,26 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
       assert_equal plan_review, row.plan_review
-      assert_equal true, row.projection_repair
+      assert_equal true, row.task_history_invalid
       assert_equal payload, result.status_payload
       assert_equal 3, result.hidden_archived_task_count
       assert_equal 3, result.projects.first.hidden_archived_task_count
     end
   end
 
-  def test_projection_repair_requires_a_literal_json_boolean
+  def test_task_history_invalid_requires_a_literal_json_boolean
     payload = make_envelope(projects: [ {
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [
-        task_row(slug: "true").merge("projection_repair" => true),
-        task_row(slug: "false").merge("projection_repair" => false),
-        task_row(slug: "string").merge("projection_repair" => "true")
+        task_row(slug: "true").merge("task_history_invalid" => true),
+        task_row(slug: "false").merge("task_history_invalid" => false),
+        task_row(slug: "string").merge("task_history_invalid" => "true")
       ]
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      rows = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows
-      assert_equal [ true, false, false ], rows.map(&:projection_repair)
+    with_status(payload) do |producer|
+      rows = Hive::Daemon::StatusConsumer.new(producer: producer).fetch.rows
+      assert_equal [ true, false, false ], rows.map(&:task_history_invalid)
     end
   end
 
@@ -123,10 +243,10 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [ task_row(slug: "changed") ]
     } ]).merge("partial" => true)
-    expected = %w[status --internal-task-graph --json --daemon-task p:changed p:other]
+    expected = [ [ "p", "changed" ], [ "p", "other" ] ]
 
-    with_fake_status(JSON.generate(payload), expected_args: expected) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+    with_status(payload, expected_task_keys: expected) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch_tasks(
         [ [ "p", "changed" ], [ "p", "other" ] ]
       )
 
@@ -137,8 +257,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
 
     without_partial = payload.reject { |key, _value| key == "partial" }
-    with_fake_status(JSON.generate(without_partial), expected_args: expected) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+    with_status(without_partial, expected_task_keys: expected) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch_tasks(
         [ [ "p", "changed" ], [ "p", "other" ] ]
       )
 
@@ -147,8 +267,9 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
-  def test_fetch_tasks_skips_the_subprocess_for_an_empty_change_set
-    consumer = Hive::Daemon::StatusConsumer.new(hive_bin: "/definitely/missing/hive")
+  def test_fetch_tasks_skips_the_producer_for_an_empty_change_set
+    producer = ->(**) { flunk "empty bounded fetch must not build a graph" }
+    consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
 
     result = consumer.fetch_tasks([])
 
@@ -157,12 +278,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
   end
 
   def test_fetch_tasks_rejects_project_errors_and_unrequested_rows
-    expected = %w[status --internal-task-graph --json --daemon-task p:changed]
+    expected = [ [ "p", "changed" ] ]
     failed = make_envelope(projects: [ {
       "name" => "p", "error" => "project_load_failed", "tasks" => []
     } ]).merge("partial" => true)
-    with_fake_status(JSON.generate(failed), expected_args: expected) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+    with_status(failed, expected_task_keys: expected) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch_tasks(
         [ [ "p", "changed" ] ]
       )
 
@@ -173,8 +294,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     wrong_project = make_envelope(projects: [ {
       "name" => "other", "tasks" => []
     } ]).merge("partial" => true)
-    with_fake_status(JSON.generate(wrong_project), expected_args: expected) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+    with_status(wrong_project, expected_task_keys: expected) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch_tasks(
         [ [ "p", "changed" ] ]
       )
 
@@ -185,8 +306,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     extra = make_envelope(projects: [ {
       "name" => "p", "tasks" => [ task_row(slug: "other") ]
     } ]).merge("partial" => true)
-    with_fake_status(JSON.generate(extra), expected_args: expected) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch_tasks(
+    with_status(extra, expected_task_keys: expected) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch_tasks(
         [ [ "p", "changed" ] ]
       )
 
@@ -200,8 +321,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "legacy", "path" => "/tmp/legacy", "hive_state_path" => "/tmp/legacy/.h",
       "tasks" => []
     } ])
-    with_fake_status(JSON.generate(legacy)) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+    with_status(legacy) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
       assert result.ok
       assert_equal 0, result.hidden_archived_task_count
       assert_equal 0, result.projects.first.hidden_archived_task_count
@@ -211,8 +332,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "bad", "path" => "/tmp/bad", "hive_state_path" => "/tmp/bad/.h",
       "hidden_archived_task_count" => -1, "tasks" => []
     } ])
-    with_fake_status(JSON.generate(malformed)) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+    with_status(malformed) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
       refute result.ok
       assert_match(/hidden_archived_task_count/, result.error)
     end
@@ -236,8 +357,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [ task_true, task_false, task_missing ]
     } ])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       assert result.ok
       rows = result.rows.each_with_object({}) { |r, h| h[r.slug] = r }
@@ -276,8 +397,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => [ task ]
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.fetch(0)
+    with_status(payload) do |producer|
+      row = Hive::Daemon::StatusConsumer.new(producer: producer).fetch.rows.fetch(0)
       assert_equal 3, row.condition_task_generation
       assert_equal 2, row.commit_generation
       assert_equal "attempt-b", row.current_attempt
@@ -301,8 +422,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => [ task_blocked, task_missing ]
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+    with_status(payload) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
 
       assert result.ok
       rows = result.rows.each_with_object({}) { |row, hash| hash[row.slug] = row }
@@ -330,8 +451,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => [ task ]
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.first
+    with_status(payload) do |producer|
+      row = Hive::Daemon::StatusConsumer.new(producer: producer).fetch.rows.first
 
       assert_equal true, row.blocked
       assert_equal "admission_error", row.action
@@ -349,8 +470,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => [ task ]
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.first
+    with_status(payload) do |producer|
+      row = Hive::Daemon::StatusConsumer.new(producer: producer).fetch.rows.first
 
       assert_equal true, row.blocked
       assert_equal "admission_error", row.action
@@ -377,8 +498,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => tasks
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      rows = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows
+    with_status(payload) do |producer|
+      rows = Hive::Daemon::StatusConsumer.new(producer: producer).fetch.rows
 
       assert_equal malformed.size, rows.size
       rows.each do |row|
@@ -405,8 +526,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
                               command: "hive archive s3 --from 8-finalize") ]
       }
     ])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       assert result.ok
       assert_equal 3, result.rows.size
@@ -417,8 +538,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
 
   def test_empty_projects_returns_empty_rows
     payload = make_envelope(projects: [])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       assert result.ok
       assert_equal [], result.rows
@@ -434,8 +555,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       { "name" => "ok", "path" => "/tmp/ok", "hive_state_path" => "/tmp/ok/.h",
         "tasks" => [ task_row(slug: "s1") ] }
     ])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       assert result.ok
       assert_equal 1, result.rows.size
@@ -458,8 +579,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
         "tasks" => [ task ]
       } ])
 
-      with_fake_status(JSON.generate(payload)) do |bin|
-        consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      with_status(payload) do |producer|
+        consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
         result = consumer.fetch
 
         assert result.ok, "expected ok=true; got error #{result.error.inspect}"
@@ -478,8 +599,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "tasks" => [ task ]
     } ])
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
 
       assert result.ok, "expected ok=true; got error #{result.error.inspect}"
@@ -503,8 +624,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
         "tasks" => [ task ]
       } ])
 
-      with_fake_status(JSON.generate(payload)) do |bin|
-        consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      with_status(payload) do |producer|
+        consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
         result = consumer.fetch
 
         assert result.ok, "expected ok=true; got error #{result.error.inspect}"
@@ -536,8 +657,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
         "tasks" => [ task ]
       } ])
 
-      with_fake_status(JSON.generate(payload)) do |bin|
-        result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+      with_status(payload) do |producer|
+        result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
 
         assert result.ok, "expected ok=true; got error #{result.error.inspect}"
         assert_equal payload_mtime, result.rows.first.status_payload_mtime
@@ -549,176 +670,76 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
 
   # ── failure modes ─────────────────────────────────────────────────────
 
-  def test_non_zero_exit_returns_not_ok
-    with_fake_status("", exit_code: 1, stderr_text: "boom\n") do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
-      result = consumer.fetch
-      refute result.ok
-      assert_match(/exited 1/, result.error)
+  def test_producer_failure_preserves_warnings_emitted_before_the_error
+    producer = lambda do |task_keys:, warnings:|
+      assert_nil task_keys
+      warnings << "project demo degraded"
+      raise "projection aborted"
     end
-  end
 
-  def test_malformed_json_returns_not_ok
-    with_fake_status("not json at all") do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
-      result = consumer.fetch
-      refute result.ok
-      assert_match(/malformed JSON/, result.error)
-    end
+    result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
+
+    refute result.ok
+    assert_includes result.error, "RuntimeError: projection aborted"
+    assert_includes result.error, "projection warnings: project demo degraded"
   end
 
   def test_wrong_schema_returns_not_ok
     payload = { "schema" => "hive-something-else", "schema_version" => 1, "ok" => true }
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       refute result.ok
       assert_match(/missing schema=hive-status/, result.error)
     end
   end
 
-  # ── schema_version skew (forward-tolerant; must never crash a tick) ────
-
-  # A NEWER envelope (expected+1) from an updated `hive` binary that the
-  # long-running daemon hasn't restarted to match. hive-status envelopes
-  # are additive, so rows still parse — the daemon keeps dispatching and
-  # surfaces a non-fatal `warning` the dispatcher logs once per tick.
-  def test_newer_schema_version_parses_best_effort_with_warning
+  def test_mismatched_schema_version_returns_not_ok
     expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-    payload = make_envelope(projects: [ {
-      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
-      "tasks" => [ task_row(slug: "newer") ]
-    } ]).merge("schema_version" => expected + 1)
+    payload = make_envelope.merge("schema_version" => expected + 1)
 
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
-      result = consumer.fetch
-      assert result.ok, "newer schema must parse best-effort: #{result.error.inspect}"
-      assert_equal [ "newer" ], result.rows.map(&:slug)
-      refute_nil result.warning, "expected a best-effort skew warning"
-      assert_match(/newer than this process/, result.warning)
-      assert_match(/restart the hive daemon/i, result.warning)
-    end
-  end
-
-  # An OLDER envelope (expected-1): a stale `hive` binary on PATH. The
-  # daemon refuses to advance on untrustworthy data and surfaces a clear,
-  # actionable message instead of crashing the tick.
-  def test_older_schema_version_returns_actionable_failure
-    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-    payload = make_envelope.merge("schema_version" => expected - 1)
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
-      result = consumer.fetch
+    with_status(payload) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
       refute result.ok
-      assert_match(/older than this process/, result.error)
-      assert_match(/update\/reinstall the hive binary/, result.error)
+      assert_match(/schema version must be #{expected}/, result.error)
     end
   end
 
-  # A NEWER envelope whose best-effort extraction still throws degrades to
-  # the actionable restart message instead of crashing the tick — AND
-  # preserves the underlying exception in the surfaced error so a genuine
-  # extraction bug, falsely presenting as a version skew, stays diagnosable.
-  def test_newer_schema_failing_extraction_degrades_to_restart_message
-    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-    # A non-Hash project entry makes extract_rows raise (Integer#[] with a
-    # String key), exercising the newer-skew rescue path.
-    payload = make_envelope(projects: [ 42 ]).merge("schema_version" => expected + 1)
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
-      result = consumer.fetch
-      refute result.ok, "a newer payload that fails extraction must surface a failure, not raise"
-      assert_match(/restart the hive daemon to pick up the new version/i, result.error)
-      assert_match(/underlying error: TypeError:/, result.error,
-                   "the real exception must be preserved in the surfaced error, not swallowed")
-    end
-  end
-
-  # An EXACT/equal-version envelope whose extraction throws is NOT a skew —
-  # it must surface the raw "#{e.class}: ..." line, never the friendly
-  # restart hint (which would mislead an operator into a no-op restart).
-  def test_exact_schema_failing_extraction_surfaces_raw_error_not_skew_hint
+  def test_extraction_failure_returns_not_ok
     payload = make_envelope(projects: [ 42 ])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       refute result.ok
       assert_match(/TypeError:/, result.error)
-      refute_match(/restart the hive daemon/i, result.error,
-                   "an exact-version extraction bug must not be relabeled a version skew")
     end
   end
 
-  # FINDING 1(b): a NEWER envelope that ALSO fails validate (ok=false) must
-  # surface the REAL ok=false reason, never the skew restart hint.
-  def test_newer_schema_with_ok_false_surfaces_real_reason_not_skew_hint
-    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-    payload = {
-      "schema" => "hive-status",
-      "schema_version" => expected + 1,
-      "ok" => false,
-      "error_class" => "ConfigError",
-      "message" => "bad config"
-    }
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
-      result = consumer.fetch
-      refute result.ok
-      assert_match(/envelope ok=false: ConfigError bad config/, result.error,
-                   "the real ok=false reason must surface even on a newer-schema doc")
-      refute_match(/restart the hive daemon to pick up the new version/i, result.error,
-                   "an ok=false envelope must NOT be relabeled as a version skew")
-    end
-  end
-
-  # Exact match keeps the pre-existing happy path: ok, no warning.
-  def test_exact_schema_version_match_has_no_warning
+  def test_clean_fetch_has_no_warning
     payload = make_envelope(projects: [ {
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [ task_row(slug: "exact") ]
     } ])
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       assert result.ok, result.error
       assert_equal [ "exact" ], result.rows.map(&:slug)
-      assert_nil result.warning, "exact-match fetch must not carry a skew warning"
+      assert_nil result.warning
     end
   end
 
-  # A successful (exit-0) fetch whose stderr is non-empty carries the status
-  # command's own degradation breadcrumbs (fail-open dependency gate, dropped
-  # depends_on). Surface them via the warning channel so the dispatcher logs
-  # them once per tick instead of discarding them.
-  def test_successful_fetch_surfaces_nonempty_stderr_as_warning
+  def test_successful_fetch_surfaces_projection_warning
     payload = make_envelope(projects: [ {
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [ task_row(slug: "s1") ]
     } ])
     breadcrumb = "hive: status: dependency resolve failed for \"dep\"; treating as unblocked\n"
-    with_fake_status(JSON.generate(payload), stderr_text: breadcrumb) do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
-      assert result.ok, "non-empty stderr on an exit-0 fetch must not fail the result: #{result.error.inspect}"
-      assert_equal [ "s1" ], result.rows.map(&:slug)
-      refute_nil result.warning, "non-empty stderr on a healthy fetch must surface as a warning"
-      assert_match(/treating as unblocked/, result.warning)
-    end
-  end
-
-  # Forward skew AND non-empty stderr coexist: the single warning channel
-  # must carry both advisories, not drop one for the other.
-  def test_successful_fetch_combines_skew_and_stderr_warnings
-    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-    payload = make_envelope(projects: [ {
-      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
-      "tasks" => [ task_row(slug: "s1") ]
-    } ]).merge("schema_version" => expected + 1)
-    with_fake_status(JSON.generate(payload), stderr_text: "depends_on dropped\n") do |bin|
-      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+    with_status(payload, warning_text: breadcrumb) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
       assert result.ok, result.error
-      assert_match(/newer than this process/, result.warning)
-      assert_match(/depends_on dropped/, result.warning)
+      assert_equal [ "s1" ], result.rows.map(&:slug)
+      assert_match(/treating as unblocked/, result.warning)
     end
   end
 
@@ -730,8 +751,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "error_class" => "ConfigError",
       "message" => "bad config"
     }
-    with_fake_status(JSON.generate(payload)) do |bin|
-      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+    with_status(payload) do |producer|
+      consumer = Hive::Daemon::StatusConsumer.new(producer: producer)
       result = consumer.fetch
       refute result.ok
       assert_match(/envelope ok=false/, result.error)

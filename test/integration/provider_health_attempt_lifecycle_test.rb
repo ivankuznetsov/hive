@@ -10,20 +10,12 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
 
   def test_terminal_archival_waits_for_idempotent_health_acknowledgement
     with_tmp_dir do |root|
-      attempts = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempts = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), migrate: true
+      )
       terminal = terminal_attempt(attempts)
-      health = Hive::ProviderHealth::Store.new(
-        root: File.join(root, "health"),
-        clock: -> { NOW },
-        attempt_reader: lambda do |id|
-          record = attempts.fetch(id)
-          record && {
-            "attempt_id" => record.attempt_id,
-            "task_generation" => record.task_generation,
-            "ownership_fence" => record.ownership_generation,
-            "state" => record.state
-          }
-        end
+      health = Hive::ProviderHealth::Repository.new(
+        database: attempts.database, clock: -> { NOW }
       )
       factory = -> { Hive::ProviderHealth::AttemptObserver.new(store: health) }
       maintenance = Hive::Attempts::FinalizationMaintenance.new(
@@ -33,7 +25,7 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
       )
 
       assert maintenance.prepare(terminal)
-      pending = attempts.pending_finalizations.fetch(terminal.attempt_id)
+      pending = attempts.publication(terminal.attempt_id)
       assert_equal false, pending.dig("consumers", "provider_health")
       refute maintenance.promote(terminal)
 
@@ -46,7 +38,8 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
       assert restarted.acknowledge_provider_health(terminal)
       assert_equal 1, health.inspect_scope(model_scope).generation
 
-      restarted.acknowledge(terminal, :journal)
+      assert restarted.acknowledge(terminal, :journal)
+      assert restarted.publish_after_journal(terminal)
       restarted.acknowledge(terminal, :request_delivery)
       assert restarted.promote(terminal)
       assert_nil attempts.fetch_hot(terminal.attempt_id)
@@ -72,6 +65,10 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
       first_heartbeat_timeout_sec: 30, now: NOW + 1
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+    File.binwrite(store.log_archive.hot_path(running.attempt_id), "")
+    @reference = Hive::OutputReference.build(
+      store.log_archive.hot_path(running.attempt_id), root: store.root
+    )
     store.terminalize(
       running, outcome: "failed", exit_status: 70,
       final_checkpoint: running.checkpoint, output_references: [],
@@ -127,6 +124,6 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
   end
 
   def reference
-    { "path" => "logs/attempt.frames", "size" => 0, "sha256" => Digest::SHA256.hexdigest("") }
+    @reference || raise("attempt log reference is unavailable")
   end
 end

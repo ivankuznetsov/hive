@@ -1,12 +1,9 @@
 require "securerandom"
 require "hive/attempts/client"
-require "hive/attempts/detached_launcher"
-require "hive/attempts/dispatcher"
-require "hive/attempts/launch_policy"
+require "hive/attempts/configured_dispatcher"
 require "hive/attempts/finalization_maintenance"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/recovery_coordinator"
-require "hive/provider_routing"
 
 module Hive
   module Attempts
@@ -15,37 +12,29 @@ module Hive
     # command implementation runs later inside the wrapper.
     class Entrypoint
       def initialize(store: nil, dispatcher: nil, client: nil,
-                     maintenance: nil, recovery_coordinator: nil, state_home: nil,
-                     config_loader: Hive::Config.method(:load),
-                     daemon_config_loader: Hive::Config.method(:load_global_daemon))
+                     maintenance: nil, recovery_coordinator: nil, state_home: nil)
         @store = store
         @dispatcher = dispatcher
         @client = client
         @maintenance = maintenance
         @recovery_coordinator = recovery_coordinator
         @state_home = state_home
-        @config_loader = config_loader
-        @daemon_config_loader = daemon_config_loader
       end
 
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc)
-        cfg = @config_loader.call(task.project_root)
-        store = @store || Store.new
-        maintenance = @maintenance
-        maintenance ||= foreground_maintenance(store) unless @store
-        run_opportunistic_maintenance(maintenance, now: now)
-        dispatcher = @dispatcher || build_dispatcher(
-          store, cfg, @daemon_config_loader.call, argv
-        )
+        store = @store ||= Repository.open_default
+        @maintenance ||= FinalizationMaintenance.runtime(store: store)
+        run_opportunistic_maintenance(@maintenance, now: now)
+        dispatcher = @dispatcher ||= ConfiguredDispatcher.new(store: store)
+        project = project_name_for(task)
         result = dispatcher.dispatch(
           task: task,
-          project: project_name_for(task),
+          project: project,
           intended_stage: intended_stage,
           argv: argv,
           request_id: request_id,
-          provider: provider || provider_for(cfg, intended_stage),
-          routing_policy: routing_policy_for(cfg, intended_stage),
+          provider: provider,
           interactive: interactive,
           now: now
         )
@@ -55,8 +44,7 @@ module Hive
         end
         if result.status == :no_route
           receipt = request_admission_recovery(
-            result: result,
-            task: task,
+            result: result, task: task, project: project,
             argv: argv,
             request_id: request_id,
             store: store,
@@ -76,18 +64,25 @@ module Hive
 
       private
 
-      def request_admission_recovery(result:, task:, argv:, request_id:, store:, now:)
+      def request_admission_recovery(result:, task:, project:, argv:, request_id:, store:, now:)
         coordinator = @recovery_coordinator || Hive::Daemon::RecoveryCoordinator.new(
-          state_home: @state_home || state_home_for(store)
+          state_home: @state_home || state_home_for(store),
+          dispatch_repository: Hive::RuntimeControlPlane::DispatchRepository.new(
+            database: store.database
+          )
         )
-        request = Hive::Daemon::DispatchRequestQueue::Request.new(
+        request = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
           request_id: request_id.to_s,
-          project: project_name_for(task),
+          project: project,
           slug: task.slug,
           argv: argv,
           requestor: "cli",
           predecessor_attempt_id: nil,
-          inherited_outputs: []
+          inherited_outputs: [], chat_id: nil, update_id: nil, trigger: "recovery",
+          task_generation: nil, task_id: task.id, expected_stage: task.stage_name,
+          expected_marker_name: nil, expected_marker_id: nil, recovery: nil,
+          schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION,
+          state: "queued", revision: 0, created_at: now
         )
         coordinator.request_admission_failure(
           request: request,
@@ -111,45 +106,9 @@ module Hive
         nil
       end
 
-      def foreground_maintenance(store)
-        @maintenance = FinalizationMaintenance.runtime(store: store)
-      end
-
-      def build_dispatcher(store, cfg, daemon, argv)
-        launcher = DetachedLauncher.new(
-          store: store,
-          heartbeat_sec: cfg.fetch("attempt_heartbeat_sec"),
-          stale_sec: cfg.fetch("attempt_stale_sec"),
-          first_heartbeat_timeout_sec: cfg.fetch("attempt_first_heartbeat_timeout_sec"),
-          timeout_sec: LaunchPolicy.timeout_sec(daemon: daemon, argv: argv),
-          kill_grace_sec: LaunchPolicy.kill_grace_sec(daemon: daemon)
-        )
-        Dispatcher.new(
-          store: store,
-          launcher: launcher,
-          launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
-          limits: LaunchPolicy.limits(daemon: daemon)
-        )
-      end
-
       def project_name_for(task)
-        project = Hive::Config.registered_projects.find do |candidate|
-          File.expand_path(candidate["path"]) == File.expand_path(task.project_root)
-        end
+        project = Hive::Config.project_for_path(task.project_root)
         project ? project.fetch("name") : task.project_name
-      end
-
-      def provider_for(cfg, intended_stage)
-        stage = intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
-        cfg.dig(stage, "agent") || Hive::Config::DEFAULTS.dig(stage, "agent") || "claude"
-      end
-
-      def routing_policy_for(cfg, intended_stage)
-        stage = intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
-        Hive::ProviderRouting::Configuration.from(
-          cfg: cfg,
-          stage_name: stage
-        ).policy
       end
     end
   end

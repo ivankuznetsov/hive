@@ -1,7 +1,8 @@
 require "test_helper"
-require "hive/daemon/dispatch_request_queue"
+require "open3"
+require "rbconfig"
 require "hive/attempts/finalization_maintenance"
-require "hive/attempts/log_archive"
+require "hive/attempts/reconciler"
 require "hive/task_action"
 
 class AttemptsFinalizationMaintenanceTest < Minitest::Test
@@ -10,237 +11,102 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   NOW = Time.utc(2026, 8, 10, 12, 0, 0)
   CAPABILITY = "c" * 64
 
-  def test_proof_and_indexes_survive_a_crash_before_pending_publication
-    with_store do |store|
+  def test_partial_acknowledgements_resume_and_publish_terminal_payloads_once
+    with_repository do |store|
       terminal = terminal_attempt(store)
-      maintenance = maintenance(store)
-      pending = store.pending_finalizations
-      pending.define_singleton_method(:create) do |**|
-        raise Hive::Attempts::StoreError, "injected pending crash"
-      end
+      subject = maintenance(store)
 
-      assert_raises(Hive::Attempts::StoreError) { maintenance.prepare(terminal) }
-
-      assert_equal terminal.to_h, store.fetch_hot(terminal.attempt_id).to_h
-      assert_equal terminal.to_h, store.permanent_proofs.fetch(terminal.attempt_id).to_h
-      assert_equal terminal.attempt_id,
-                   store.decision_index.terminal_attempt_id(request_id: terminal["request_id"])
-      assert_nil store.pending_finalizations.fetch(terminal.attempt_id)
-    end
-  end
-
-  def test_partial_acknowledgements_resume_and_remove_hot_only_when_complete
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      maintenance = maintenance(store)
-
-      assert maintenance.prepare(terminal)
-      pending = store.pending_finalizations.fetch(terminal.attempt_id)
-      assert_equal true, pending.dig("consumers", "accounting")
-      assert_equal false, pending.dig("consumers", "journal")
-      assert_equal false, pending.dig("consumers", "request_delivery")
-      refute maintenance.promote(terminal)
+      assert subject.prepare(terminal)
+      subject.acknowledge(terminal, :journal)
+      refute subject.promote(terminal)
       assert store.fetch_hot(terminal.attempt_id)
 
-      maintenance.acknowledge(terminal, :journal)
-      restarted = maintenance(store)
-      restarted.acknowledge(terminal, :request_delivery)
-      assert restarted.promote(terminal)
-
+      subject.acknowledge(terminal, :request_delivery)
+      subject.acknowledge(terminal, :accounting)
+      assert subject.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
-      assert_nil store.pending_finalizations.fetch(terminal.attempt_id)
       assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
-      refute_includes store.decision_index.live_reservations.keys, terminal.attempt_id
-    end
-  end
-
-  def test_promotion_accounts_patrol_failure_before_removing_hot_evidence
-    with_store do |store|
-      admission = {
-        "workflow" => "patrol_fix", "stage" => "2-fix",
-        "runtime_digest" => "a" * 64, "utc_date" => NOW.to_date.iso8601
-      }
-      service = maintenance(store)
-
-      3.times do |index|
-        attempt_id = "patrol-failure-#{index}"
-        store.decision_index.reserve_live(
-          attempt_id: attempt_id, project: "demo", task_slug: "task",
-          admission: admission
-        )
-        terminal = terminal_attempt(
-          store, attempt_id: attempt_id, request_id: "request-#{index}",
-          now: NOW + (index * 10), exit_status: 7,
-          intended_stage: "2-fix", diagnostic: true
-        )
-        store.decision_index.confirm_live(
-          attempt_id: attempt_id, project: "demo", task_slug: "task",
-          admission: admission
-        )
-        assert service.prepare(terminal)
-        service.acknowledge(terminal, :journal)
-        service.acknowledge(terminal, :request_delivery)
-        assert service.promote(terminal)
+      assert_equal :available, store.log_archive.resolve(terminal.attempt_id).availability
+      count = store.database.read do |db|
+        db[:payload_references].where(attempt_id: terminal.attempt_id, kind: "attempt_log").count
       end
-
-      result = store.decision_index.failure_cohort_admission(
-        identity: {
-          "runtime_digest" => "a" * 64, "project" => "demo",
-          "workflow" => "patrol_fix", "stage" => "2-fix",
-          "code" => "agent_exit_nonzero"
-        },
-        date: NOW.to_date, now: NOW + 40
-      )
-      assert_equal "blocked", result.fetch("status")
+      assert_equal 1, count
     end
   end
 
-  def test_unresolved_loss_stays_hot_and_resolved_loss_promotes
-    with_store do |store|
-      lost = store.mark_lost(
-        create_attempt(store), reason: "launch_timeout", now: NOW + 1
-      )
-      maintenance = maintenance(store)
-
-      refute maintenance.prepare(lost)
-      assert store.fetch_hot(lost.attempt_id)
-      assert_nil store.permanent_proofs.fetch(lost.attempt_id)
-
-      outcome_store = Hive::Attempts::LostOutcomeStore.new(store: store)
-      outcome_store.ensure_for(lost, now: NOW + 2)
-      successor = create_attempt(
-        store, attempt_id: "attempt-2", request_id: "request-2",
-        predecessor_attempt_id: lost.attempt_id, now: NOW + 2
-      )
-      store.decision_index.record_successor(successor)
-      outcome_store.update(
-        lost, now: NOW + 3, status: "successor_dispatched",
-        cleanup: "no_worker", successor_attempt_id: successor.attempt_id,
-        diagnostic: nil
-      )
-
-      assert maintenance.prepare(store.fetch_hot(lost.attempt_id))
-      maintenance.acknowledge(lost, :journal)
-      maintenance.acknowledge(lost, :request_delivery)
-      assert maintenance.promote(lost)
-      assert_nil store.fetch_hot(lost.attempt_id)
-      assert_equal successor.attempt_id,
-                   store.decision_index.successor_attempt_id(
-                     predecessor_attempt_id: lost.attempt_id
-                   )
-    end
-  end
-
-  def test_completed_pending_cleanup_is_idempotent_when_hot_removal_crashes
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      maintenance = maintenance(store)
-      maintenance.prepare(terminal)
-      maintenance.acknowledge(terminal, :journal)
-      maintenance.acknowledge(terminal, :request_delivery)
-      original_remove = store.method(:remove_hot_final)
-      store.define_singleton_method(:remove_hot_final) do |_record|
-        raise Hive::Attempts::StoreError, "injected hot removal crash"
-      end
-
-      assert_raises(Hive::Attempts::StoreError) { maintenance.promote(terminal) }
-      assert_nil store.pending_finalizations.fetch(terminal.attempt_id)
-      assert store.fetch_hot(terminal.attempt_id)
-
-      store.define_singleton_method(:remove_hot_final, original_remove)
-      assert maintenance.prepare(store.fetch_hot(terminal.attempt_id))
-      maintenance.acknowledge(terminal, :journal)
-      maintenance.acknowledge(terminal, :request_delivery)
-      assert maintenance.promote(terminal)
-      assert_nil store.fetch_hot(terminal.attempt_id)
-    end
-  end
-
-  def test_active_log_writer_keeps_completed_finalization_hot
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      writer = store.log_archive.open_writer(terminal.attempt_id, clock: -> { NOW })
+  def test_active_log_writer_keeps_completed_publication_pending
+    with_repository do |store|
+      running = running_attempt(store)
+      writer = store.log_archive.open_writer(running.attempt_id, clock: -> { NOW })
       writer.append(:stdout, "still open\n")
-      maintenance = maintenance(store)
-      maintenance.prepare(terminal)
-      maintenance.acknowledge(terminal, :journal)
-      maintenance.acknowledge(terminal, :request_delivery)
+      reference = Hive::OutputReference.build(writer.path, root: store.root)
+      terminal = terminalize(store, running, log_reference: reference)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
 
-      refute maintenance.promote(terminal)
+      refute subject.promote(terminal)
       assert store.fetch_hot(terminal.attempt_id)
-      assert File.file?(store.log_archive.hot_path(terminal.attempt_id))
-      refute File.exist?(store.log_archive.cold_path(terminal.attempt_id))
-
       writer.close
-      assert maintenance.promote(terminal)
-      assert File.file?(store.log_archive.cold_path(terminal.attempt_id))
+      assert subject.promote(terminal)
+      assert_nil store.fetch_hot(terminal.attempt_id)
     ensure
       writer&.close unless writer&.closed?
     end
   end
 
-  def test_three_day_and_canonical_archive_log_expiry_preserve_proof
-    with_store do |store|
-      aged = terminal_attempt(
-        store, attempt_id: "aged", request_id: "aged-request", write_log: true
-      )
-      archived = terminal_attempt(
-        store, attempt_id: "archived", request_id: "archived-request",
-        now: NOW + 60, write_log: true
-      )
-      maintenance = maintenance(
-        store, task_archived: ->(record) { record.attempt_id == archived.attempt_id }
-      )
-      [ aged, archived ].each do |record|
-        maintenance.prepare(record)
-        maintenance.acknowledge(record, :journal)
-        maintenance.acknowledge(record, :request_delivery)
-        assert maintenance.promote(record)
-      end
+  def test_retention_sweep_is_sql_bounded_and_preserves_attempt_proof
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
+      assert subject.promote(terminal)
 
-      assert_equal 1, maintenance.sweep_logs(now: NOW + 120).fetch(:deleted)
-      assert_equal :available, store.log_archive.resolve(aged.attempt_id).availability
-      assert_equal :expired, store.log_archive.resolve(archived.attempt_id).availability
-      assert_equal 1,
-                   maintenance.sweep_logs(now: NOW + (3 * 86_400) + 4).fetch(:deleted)
-      assert store.fetch(aged.attempt_id).receipt
-      assert store.fetch(archived.attempt_id).receipt
+      early = subject.sweep_logs(now: NOW + 86_400)
+      assert_equal 0, early.fetch(:deleted)
+      assert_operator early.fetch(:cold_examined), :<=,
+                      Hive::Attempts::FinalizationMaintenance::COLD_SWEEP_LIMIT
+
+      expired = subject.sweep_logs(now: NOW + (3 * 86_400) + 4)
+      assert_equal 1, expired.fetch(:deleted)
+      assert_equal :expired, store.log_archive.resolve(terminal.attempt_id).availability
+      assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
     end
   end
 
-  def test_missing_or_noncanonical_done_task_falls_back_to_age
-    with_store do |store|
-      terminal = terminal_attempt(store, write_log: true)
-      maintenance = maintenance(store, task_archived: ->(_record) { nil })
-      maintenance.prepare(terminal)
-      maintenance.acknowledge(terminal, :journal)
-      maintenance.acknowledge(terminal, :request_delivery)
-      assert maintenance.promote(terminal)
+  def test_archived_task_can_release_terminal_payloads_before_age_retention
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      subject = maintenance(store, task_archived: ->(record) { record.attempt_id == terminal.attempt_id })
+      prepare_all(subject, terminal)
+      assert subject.promote(terminal)
 
-      assert_equal 0, maintenance.sweep_logs(now: NOW + 86_400).fetch(:deleted)
-      assert_equal :available, store.log_archive.resolve(terminal.attempt_id).availability
-      assert_equal 1,
-                   maintenance.sweep_logs(now: NOW + (3 * 86_400) + 4).fetch(:deleted)
+      assert_equal 1, subject.sweep_logs(now: NOW + 60).fetch(:deleted)
+      assert_equal :expired, store.log_archive.resolve(terminal.attempt_id).availability
     end
   end
 
-  def test_canonical_task_action_not_folder_name_controls_early_expiry
-    with_store do |store|
-      state_root = File.join(File.dirname(store.root), "state")
-      folder = File.join(state_root, "stages", "9-done", "task")
+  def test_canonical_task_action_not_done_folder_controls_early_expiry
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      state_root = File.join(store.root, "project-state")
+      folder = File.join(state_root, "stages", "9-done", terminal["task_slug"])
       FileUtils.mkdir_p(folder)
       state_file = File.join(folder, "task.md")
       File.write(state_file, "<!-- COMPLETE -->\n")
       task = Struct.new(:id, :state_file, :project_root, :folder)
-        .new("42", state_file, "/demo", folder)
+        .new(terminal["task_id"], state_file, "/demo", folder)
       marker = Struct.new(:name).new(:complete)
       action = Struct.new(:key).new(Hive::Schemas::TaskActionKind::READY_TO_ARCHIVE)
       projection = Object.new
       bounded = Struct.new(:projection) { def current? = true }.new(projection)
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read_routine) { |**| bounded }
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read_routine) { |**| bounded }
       observed_projections = []
-      maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
+      subject = Hive::Attempts::FinalizationMaintenance.new(store: store)
+      assert_equal [ folder ], Dir.glob(
+        File.join(state_root, "stages", "*", terminal["task_slug"])
+      )
+      assert_equal terminal["task_id"].to_s, task.id.to_s
 
       with_replaced_singleton_method(
         Hive::Config, :find_project,
@@ -250,20 +116,17 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
           with_replaced_singleton_method(Hive::Markers, :current, ->(_path) { marker }) do
             with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
               with_replaced_singleton_method(
-                Hive::TaskProjection::Store, :pristine_task?, ->(*) { false }
+                Hive::TaskProjection::Reader, :new, ->(**) { history_reader }
               ) do
-                with_replaced_singleton_method(
-                  Hive::TaskProjection::Store, :new, ->(**) { projection_store }
-                ) do
-                  action_for = lambda do |*_args, **kwargs|
-                    observed_projections << kwargs.fetch(:projection)
-                    action
-                  end
-                  with_replaced_singleton_method(Hive::TaskAction, :for, action_for) do
-                    refute maintenance.send(:task_archived?, terminal_attempt(store))
-                    action.key = Hive::Schemas::TaskActionKind::ARCHIVED
-                    assert maintenance.send(:task_archived?, store.fetch_hot("attempt-1"))
-                  end
+                action_for = lambda do |*_args, **kwargs|
+                  observed_projections << kwargs.fetch(:projection)
+                  action
+                end
+                with_replaced_singleton_method(Hive::TaskAction, :for, action_for) do
+                  refute subject.send(:task_archived?, terminal)
+                  assert_equal [ projection ], observed_projections
+                  action.key = Hive::Schemas::TaskActionKind::ARCHIVED
+                  assert subject.send(:task_archived?, terminal)
                 end
               end
             end
@@ -274,463 +137,378 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
-  def test_due_stamped_foreground_catch_up_runs_at_most_hourly
-    with_store do |store|
-      terminal = terminal_attempt(store, write_log: true)
+  def test_tempfail_refund_is_typed_and_idempotent
+    with_repository do |store|
+      terminal = terminal_attempt(store, exit_status: Hive::ExitCodes::TEMPFAIL)
+      subject = maintenance(store)
+
+      2.times { assert subject.prepare(terminal) }
+      assert subject.finalize(terminal, now: NOW + 4)
+      accounting = store.database.read do |db|
+        db[:attempt_accounting].where(attempt_id: terminal.attempt_id).first
+      end
+      assert_equal 1, accounting.fetch(:refunded)
+    end
+  end
+
+  def test_downstream_delivery_starts_only_after_task_journal_acknowledgement
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      order = []
+      results = [ :unavailable, :delivered ]
       observer = Object.new
-      observer.define_singleton_method(:observe) { |_status, now:| :not_applicable }
-      maintenance = maintenance(store, condition_observer: observer)
-
-      first = maintenance.run_if_due(now: NOW + 10)
-      second = maintenance.run_if_due(now: NOW + 20)
-
-      assert_equal true, first.fetch(:ran)
-      assert_equal 1, first.fetch(:promoted)
-      assert_equal false, second.fetch(:ran)
-      assert_nil store.fetch_hot(terminal.attempt_id)
-      assert store.fetch(terminal.attempt_id).receipt
-      status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
-      assert_equal "healthy", status.fetch("status")
-      assert_equal 1, status.dig("maintenance", "last_result", "promoted")
-      assert_equal 1, status.dig("maintenance", "last_result", "cold_examined")
-    end
-  end
-
-  def test_due_cold_sweep_is_fixed_size_even_with_thirty_thousand_logs
-    attempt_ids = 30_000.times.map { |index| "cold-#{index}" }
-    cursor = { "shard" => 0, "after" => nil }
-    archive = Object.new
-    archive.define_singleton_method(:cold_attempt_ids_page) do |cursor:, limit:|
-      raise "unexpected cursor" unless cursor == { "shard" => 0, "after" => nil }
-
-      Hive::Attempts::LogArchive::ColdPage.new(
-        attempt_ids: attempt_ids.first(limit),
-        cursor: { "shard" => 4, "after" => attempt_ids.fetch(limit - 1) }
-      )
-    end
-    health = Object.new
-    health.define_singleton_method(:cold_sweep_cursor) { cursor }
-    health.define_singleton_method(:advance_cold_sweep) { |value| cursor = value }
-    store = Object.new
-    store.define_singleton_method(:log_archive) { archive }
-    store.define_singleton_method(:storage_health) { health }
-    store.define_singleton_method(:fetch) { |_attempt_id| nil }
-    maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
-
-    result = maintenance.sweep_logs(now: NOW)
-
-    assert_equal Hive::Attempts::FinalizationMaintenance::COLD_SWEEP_LIMIT,
-                 result.fetch(:cold_examined)
-    assert_equal "cold-511", cursor.fetch("after")
-  end
-
-  def test_failed_maintenance_degrades_health_and_a_later_success_clears_it
-    with_store do |store|
-      archive = store.log_archive
-      original = archive.method(:cold_attempt_ids_page)
-      archive.define_singleton_method(:cold_attempt_ids_page) do |**|
-        raise Hive::Attempts::StoreError, "cold archive unavailable"
+      observer.define_singleton_method(:observe) do |*|
+        order << :journal
+        results.shift
       end
-      maintenance = maintenance(store)
-
-      assert_raises(Hive::Attempts::StoreError) do
-        maintenance.run_if_due(now: NOW)
-      end
-      failed = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
-      assert_equal "degraded", failed.fetch("status")
-      assert_equal "maintenance_failed", failed.fetch("degraded_reason")
-
-      archive.define_singleton_method(:cold_attempt_ids_page, original)
-      result = maintenance.run_if_due(
-        now: NOW + Hive::Attempts::FinalizationMaintenance::MAINTENANCE_INTERVAL_SEC
-      )
-      assert result.fetch(:ran)
-      recovered = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
-      assert_equal "healthy", recovered.fetch("status")
-      assert_nil recovered.fetch("degraded_reason")
-    end
-  end
-
-  def test_runtime_delivery_probe_matches_the_exact_claimed_attempt
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      claims = [
-        Struct.new(:claim).new({ "attempt_id" => "another-attempt" }),
-        Struct.new(:claim).new({ "attempt_id" => terminal.attempt_id })
-      ]
-      observed_state_home = nil
-
-      with_replaced_singleton_method(
-        Hive::Daemon::DispatchRequestQueue, :claimed,
-        lambda { |state_home:|
-          observed_state_home = state_home
-          claims
-        }
-      ) do
-        runtime = Hive::Attempts::FinalizationMaintenance.runtime(
-          store: store, state_home: "/state"
-        )
-
-        assert runtime.send(:delivery_pending?, terminal)
-      end
-
-      assert_equal "/state", observed_state_home
-    end
-  end
-
-  def test_runtime_provider_health_factory_binds_reads_to_the_attempt_store
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      with_tmp_dir do |state_home|
-        runtime = Hive::Attempts::FinalizationMaintenance.runtime(
-          store: store, state_home: state_home
-        )
-        observer = runtime.instance_variable_get(:@provider_health_observer_factory).call
-        health_store = observer.instance_variable_get(:@store)
-        current = health_store.instance_variable_get(:@attempt_reader).call(terminal.attempt_id)
-
-        assert_equal terminal.attempt_id, current.fetch("attempt_id")
-        assert_equal terminal.task_generation, current.fetch("task_generation")
-        assert_equal terminal.ownership_generation, current.fetch("ownership_fence")
-        assert_equal "terminal", current.fetch("state")
-      end
-    end
-  end
-
-  def test_provider_health_acknowledgement_is_isolated_per_terminal_record
-    with_store do |store|
-      observer = Object.new
-      observer.define_singleton_method(:observe) do |_record|
-        raise Hive::ProviderHealth::Unavailable, "health_state_unavailable"
-      end
-      service = maintenance(
-        store,
-        provider_health_observer_factory: -> { observer }
-      )
-      record = Struct.new(:explicit_routing?).new(true)
-
-      refute service.acknowledge_provider_health(record)
-    end
-  end
-
-  def test_runtime_cooldown_resolver_uses_the_frozen_account_policy
-    policy = Struct.new(:account_policy).new({
-      "account-a" => {
-        "cooldown_sec" => { "provider_rate_limit" => 47 }
-      }
-    })
-    policy_store = Object.new
-    policy_store.define_singleton_method(:fetch_snapshot) { |**_kwargs| policy }
-    record = Struct.new(:ownership_generation, :subject).new(
-      "generation-1", { "kind" => "task_stage" }
-    )
-    store = Object.new
-    store.define_singleton_method(:fetch) { |_attempt_id| record }
-    store.define_singleton_method(:routing_policies) { policy_store }
-    route = Struct.new(:account_id).new("account-a")
-    evidence = Struct.new(:attempt_id, :route, :failure_class).new(
-      "attempt-1", route, "provider_rate_limit"
-    )
-
-    resolver = Hive::Attempts::FinalizationMaintenance.cooldown_resolver(store)
-
-    assert_equal 47, resolver.call(evidence)
-  end
-
-  def test_runtime_cooldown_resolver_falls_back_when_attempt_storage_is_unavailable
-    store = Object.new
-    store.define_singleton_method(:fetch) do |_attempt_id|
-      raise Hive::Attempts::StoreError, "attempt store unavailable"
-    end
-    evidence = Struct.new(:attempt_id).new("attempt-1")
-
-    resolver = Hive::Attempts::FinalizationMaintenance.cooldown_resolver(store)
-
-    assert_equal Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS,
-                 resolver.call(evidence)
-  end
-
-  def test_promotion_rejects_a_mismatched_permanent_proof
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      service = Hive::Attempts::FinalizationMaintenance.new(store: store)
-      service.prepare(terminal)
-      service.acknowledge(terminal, :journal)
-      service.acknowledge(terminal, :request_delivery)
-      mismatched = Object.new
-      mismatched.define_singleton_method(:to_h) do
-        terminal.to_h.merge("attempt_id" => "another-attempt")
-      end
-      store.permanent_proofs.define_singleton_method(:fetch) { |_attempt_id| mismatched }
-
-      error = assert_raises(Hive::Attempts::StoreError) { service.promote(terminal) }
-
-      assert_match(/proof does not match/, error.message)
-      assert store.fetch_hot(terminal.attempt_id)
-      assert store.pending_finalizations.fetch(terminal.attempt_id)
-    end
-  end
-
-  def test_promotion_rejects_a_hot_record_changed_after_proof_publication
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      changed = terminal_attempt(
-        store, attempt_id: "attempt-2", request_id: "request-2", now: NOW + 10
-      )
-      service = maintenance(store)
-      service.prepare(terminal)
-      service.acknowledge(terminal, :journal)
-      service.acknowledge(terminal, :request_delivery)
-      store.define_singleton_method(:fetch_hot) { |_attempt_id| changed }
-
-      error = assert_raises(Hive::Attempts::StoreError) { service.promote(terminal) }
-
-      assert_match(/changed after final proof/, error.message)
-      assert store.pending_finalizations.fetch(terminal.attempt_id)
-    end
-  end
-
-  def test_due_sweep_records_a_degraded_health_result_when_archive_scan_fails
-    with_store do |store|
-      store.log_archive.define_singleton_method(:cold_attempt_ids_page) do |**|
-        raise Hive::Attempts::StoreError, "cold archive unavailable"
-      end
-      service = maintenance(store)
-
-      assert_raises(Hive::Attempts::StoreError) do
-        service.sweep_if_due(now: NOW)
-      end
-
-      status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
-      assert_equal "degraded", status.fetch("status")
-      assert_equal "maintenance_failed", status.fetch("degraded_reason")
-    end
-  end
-
-  def test_delivery_probe_errors_keep_finalization_pending_for_retry
-    with_store do |store|
-      terminal = terminal_attempt(store)
-      observer = Object.new
-      observer.define_singleton_method(:observe) { |_status, now:| :delivered }
-      service = Hive::Attempts::FinalizationMaintenance.new(
-        store: store,
-        condition_observer: observer,
-        delivery_pending: ->(_record) { raise Hive::Attempts::StoreError, "queue unavailable" },
+      subject = Hive::Attempts::FinalizationMaintenance.new(
+        store: store, condition_observer: observer,
+        delivery_pending: lambda do |_record|
+          order << :delivery
+          false
+        end,
         task_archived: ->(_record) { false }
       )
 
-      refute service.finalize(terminal, now: NOW + 4)
+      refute subject.finalize(terminal, now: NOW + 4)
+      assert_equal [ :journal ], order
+      assert_equal({
+        "accounting" => false, "journal" => false, "request_delivery" => false
+      }, store.publication(terminal.attempt_id).fetch("consumers"))
 
-      pending = store.pending_finalizations.fetch(terminal.attempt_id)
-      assert_equal true, pending.dig("consumers", "journal")
-      assert_equal false, pending.dig("consumers", "request_delivery")
-      assert store.fetch_hot(terminal.attempt_id)
+      assert subject.finalize(terminal, now: NOW + 5)
+      assert_equal [ :journal, :journal, :delivery ], order
+      assert_nil store.fetch_hot(terminal.attempt_id)
     end
   end
 
-  def test_incomplete_or_unreadable_pending_state_pins_cold_logs
-    with_store do |store|
-      incomplete = terminal_attempt(store, write_log: true)
-      unreadable = terminal_attempt(
-        store, attempt_id: "attempt-2", request_id: "request-2",
-        now: NOW + 10, write_log: true
-      )
-      service = maintenance(store)
-      service.prepare(incomplete)
-      assert_equal :archived, store.log_archive.archive(incomplete.attempt_id)
-      assert_equal :archived, store.log_archive.archive(unreadable.attempt_id)
-      pending = store.pending_finalizations
-      original_complete = pending.method(:complete?)
-      pending.define_singleton_method(:complete?) do |attempt_id|
-        raise Hive::Attempts::StoreError, "pending state unreadable" if attempt_id == unreadable.attempt_id
-
-        original_complete.call(attempt_id)
-      end
-
-      result = service.sweep_logs(now: NOW + (4 * 86_400))
-
-      assert_equal 0, result.fetch(:deleted)
-      assert_equal :available, store.log_archive.resolve(incomplete.attempt_id).availability
-      assert_equal :available, store.log_archive.resolve(unreadable.attempt_id).availability
-    end
-  end
-
-  def test_invalid_end_time_and_archive_lookup_errors_fail_closed
-    with_store do |store|
+  def test_daemon_reconciliation_makes_terminal_publication_promotable_without_another_dispatch
+    with_repository do |store|
       terminal = terminal_attempt(store)
-      service = Hive::Attempts::FinalizationMaintenance.new(store: store)
-
-      refute service.send(:retention_expired?, { "ended_at" => "not-a-time" }, now: NOW)
-
-      state_root = File.join(File.dirname(store.root), "state")
-      broken_folder = File.join(state_root, "stages", "4-execute", terminal["task_slug"])
-      valid_folder = File.join(state_root, "stages", "9-done", terminal["task_slug"])
-      FileUtils.mkdir_p([ broken_folder, valid_folder ])
-      task = Struct.new(:id, :state_file, :project_root, :folder).new(
-        terminal["task_id"], File.join(valid_folder, "task.md"), "/demo", valid_folder
+      observer = Struct.new(:result) do
+        def observe(*) = result
+      end.new(:delivered)
+      finalization = Hive::Attempts::FinalizationMaintenance.new(
+        store: store, condition_observer: observer,
+        delivery_pending: ->(_record) { false },
+        task_archived: ->(_record) { false }
       )
-      marker = Struct.new(:name).new(:complete)
-      action = Struct.new(:key).new(Hive::Schemas::TaskActionKind::ARCHIVED)
-      bounded = Struct.new(:projection) { def current? = true }.new(Object.new)
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read_routine) { |**| bounded }
-      archive_calls = []
-      assert_equal [ broken_folder, valid_folder ].sort,
-                   Dir.glob(File.join(state_root, "stages", "*", terminal["task_slug"])).sort
+      reconciler = Hive::Attempts::Reconciler.new(
+        store: store, condition_observer: observer,
+        finalization_maintenance: finalization
+      )
 
+      reconciler.reconcile(now: NOW + 4)
+      pending = store.publication(terminal.attempt_id)
+      assert_equal true, pending.dig("consumers", "journal")
+      assert_equal true, pending.dig("consumers", "accounting")
+      assert_equal false, pending.dig("consumers", "request_delivery")
+
+      assert reconciler.acknowledge_finalization(terminal, :request_delivery)
+      assert reconciler.promote_finalization(terminal)
+      assert_nil store.fetch_hot(terminal.attempt_id)
+    end
+  end
+
+  def test_due_maintenance_records_success_and_respects_its_interval
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
+
+      first = subject.run_if_due(now: NOW + 60)
+      assert first.fetch(:ran)
+      refute maintenance(store).run_if_due(now: NOW + 61).fetch(:ran)
+      snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "healthy", snapshot.fetch("status")
+      assert_equal({
+        "promoted" => 1, "deleted" => 0, "cold_examined" => 0
+      }, snapshot.dig("maintenance", "last_result"))
+    end
+  end
+
+  def test_cold_sweep_cursor_resumes_in_a_new_maintenance_instance
+    with_repository do |store|
+      seen = []
+      page = Data.define(:attempt_ids, :cursor)
+      archive = Object.new
+      archive.define_singleton_method(:cold_attempt_ids_page) do |cursor:, limit:|
+        seen << [ cursor, limit ]
+        after = seen.one? ? "attempt-1" : "attempt-2"
+        page.new(
+          attempt_ids: [].freeze, cursor: { "after" => after }.freeze
+        )
+      end
+      store.define_singleton_method(:log_archive) { archive }
+
+      assert maintenance(store).sweep_if_due(now: NOW).fetch(:ran)
+      assert maintenance(store).sweep_if_due(
+        now: NOW + Hive::Attempts::FinalizationMaintenance::MAINTENANCE_INTERVAL_SEC
+      ).fetch(:ran)
+      assert_equal [ nil, "attempt-1" ], seen.map { |cursor, _limit| cursor.fetch("after") }
+    end
+  end
+
+  def test_maintenance_error_is_visible_to_a_new_instance
+    with_repository do |store|
+      archive = Object.new
+      archive.define_singleton_method(:cold_attempt_ids_page) { |**| raise ArgumentError, "bad page" }
+      store.define_singleton_method(:log_archive) { archive }
+
+      assert_raises(ArgumentError) { maintenance(store).sweep_if_due(now: NOW) }
+      snapshot = maintenance(store).storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "degraded", snapshot.fetch("status")
+      assert_equal "maintenance_failed", snapshot.fetch("degraded_reason")
+      assert_equal "ArgumentError", snapshot.dig("last_error", "class")
+      assert_equal NOW.iso8601(6), snapshot.dig("last_error", "observed_at")
+    end
+  end
+
+  def test_due_claim_serializes_across_processes
+    with_repository do |store|
+      store.database.disconnect
+      script = <<~'RUBY'
+        require "time"
+        require "hive/attempts/finalization_maintenance"
+        database = Hive::RuntimeControlPlane::Database.new(path: ARGV.fetch(0)).open!
+        store = Hive::Attempts::Repository.new(database: database, root: ARGV.fetch(1))
+        STDIN.read(1)
+        result = Hive::Attempts::FinalizationMaintenance.new(store: store)
+          .sweep_if_due(now: Time.iso8601(ARGV.fetch(2)))
+        puts(result.fetch(:ran) ? "1" : "0")
+      RUBY
+      processes = 2.times.map do
+        Open3.popen3(
+          RbConfig.ruby, "-Ilib", "-rbundler/setup", "-e", script,
+          store.database.path, store.root, NOW.iso8601(6)
+        )
+      end
+      processes.each { |stdin, *_rest| stdin.write("x"); stdin.close }
+      outcomes = processes.map { |_stdin, stdout, _stderr, _wait| stdout.read.strip }.sort
+      errors = processes.map { |_stdin, _stdout, stderr, _wait| stderr.read }
+      statuses = processes.map { |_stdin, _stdout, _stderr, wait| wait.value }
+
+      assert_equal %w[0 1], outcomes
+      assert statuses.all?(&:success?), errors.join
+    end
+  end
+
+  def test_runtime_wires_provider_health_and_dispatch_delivery_to_the_shared_database
+    with_repository do |store|
+      subject = Hive::Attempts::FinalizationMaintenance.runtime(store: store)
+      observer = subject.instance_variable_get(:@provider_health_observer_factory).call
+      delivery = subject.instance_variable_get(:@delivery_pending)
+
+      assert_instance_of Hive::ProviderHealth::AttemptObserver, observer
+      refute delivery.call(Struct.new(:attempt_id).new("missing"))
+    end
+  end
+
+  def test_provider_health_and_delivery_fail_closed_on_collaborator_errors
+    record = Struct.new(:attempt_id) do
+      def explicit_routing? = true
+    end.new("attempt")
+    observer = Object.new
+    observer.define_singleton_method(:observe) { |_| raise Hive::ProviderHealth::Error, "bad" }
+    store = Object.new
+    subject = Hive::Attempts::FinalizationMaintenance.new(
+      store: store, provider_health_observer_factory: -> { observer },
+      delivery_pending: ->(_) { raise Hive::Error, "bad" }
+    )
+
+    refute subject.acknowledge_provider_health(record)
+    assert subject.send(:delivery_pending?, record)
+  end
+
+  def test_promote_rejects_mismatched_proof_and_post_archive_hot_mutation
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
+      forged = terminal.with("diagnostics" => terminal["diagnostics"].merge("forged" => true))
+      assert_raises(Hive::Attempts::RepositoryError) { subject.promote(forged) }
+
+      archive = Object.new
+      archive.define_singleton_method(:archive) do |_attempt_id|
+        changed = terminal.with("diagnostics" => terminal["diagnostics"].merge("changed" => true))
+        payload = Hive::RuntimeControlPlane::Codec.dump_json(changed.to_h)
+        store.database.transaction do |db|
+          db[:attempts].where(attempt_id: terminal.attempt_id).update(
+            record_json: payload, record_digest: Digest::SHA256.hexdigest(payload)
+          )
+        end
+        :archived
+      end
+      store.define_singleton_method(:log_archive) { archive }
+      assert_raises(Hive::Attempts::RepositoryError) { subject.promote(terminal) }
+    end
+  end
+
+  def test_storage_and_retention_helpers_fail_closed
+    with_repository do |store|
+      subject = maintenance(store)
+      store.database.define_singleton_method(:diagnostics) do
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "degraded", snapshot.fetch("status")
+      assert_equal "database_unhealthy", snapshot.fetch("degraded_reason")
+    end
+
+    broken_store = Object.new
+    broken_store.define_singleton_method(:fetch_hot) do |_|
+      raise Hive::Attempts::RepositoryError, "bad"
+    end
+    subject = Hive::Attempts::FinalizationMaintenance.new(store: broken_store)
+    record = Struct.new(:attempt_id) do
+      def [](key) = key == "ended_at" ? "not-a-time" : nil
+    end.new("attempt")
+    assert subject.send(:recovery_pinned?, record)
+    refute subject.send(:retention_expired?, record, now: NOW)
+
+    pending_store = Object.new
+    pending_store.define_singleton_method(:fetch_hot) { |_| Object.new }
+    pending_store.define_singleton_method(:publication_complete?) { |_| false }
+    pending = Hive::Attempts::FinalizationMaintenance.new(store: pending_store)
+    assert pending.send(:recovery_pinned?, record)
+  end
+
+  def test_successful_patrol_attempt_closes_its_failure_cohort
+    calls = []
+    store = Object.new
+    store.define_singleton_method(:record_failure_cohort_success) do |**attributes|
+      calls << attributes
+      true
+    end
+    reconciler = Hive::Attempts::FailureCohortReconciler.new(store: store)
+    record = Struct.new(:state, :outcome, :attempt_id) do
+      def [](key) = key == "intended_stage" ? "2-fix" : nil
+    end.new("terminal", "succeeded", "attempt-1")
+    admission = { "workflow" => "patrol_fix", "stage" => "2-fix", "utc_date" => "2026-08-10" }
+
+    assert reconciler.reconcile(record: record, admission: admission)
+    assert_equal [ { attempt_id: "attempt-1", date: "2026-08-10" } ], calls
+  end
+
+  def test_archived_task_lookup_and_loss_successor_checks_are_bounded
+    record = Struct.new(:attempt_id, :task_generation, :subject) do
+      def [](key)
+        { "project" => "demo", "task_slug" => "task", "task_id" => "42" }[key]
+      end
+    end.new("lost", "generation", { "kind" => "task_stage" })
+    successor = Struct.new(:attempt_id, :task_generation, :subject) do
+      def [](key) = key == "predecessor_attempt_id" ? "lost" : nil
+    end.new("successor", "generation", record.subject)
+    store = Object.new
+    store.define_singleton_method(:successor_attempt_id) { |**| "successor" }
+    store.define_singleton_method(:fetch) { |_| successor }
+    subject = Hive::Attempts::FinalizationMaintenance.new(store: store)
+    transition = Object.new
+    transition.define_singleton_method(:fetch) do |_|
+      { "status" => "successor_dispatched", "cleanup" => "absent",
+        "successor_attempt_id" => "successor" }
+    end
+
+    with_replaced_singleton_method(Hive::Attempts::LostOutcomeTransition, :new, ->(**) { transition }) do
+      assert_same successor, subject.send(:resolved_loss_successor, record)
+    end
+    with_replaced_singleton_method(
+      Hive::Attempts::LostOutcomeTransition, :new,
+      ->(**) { raise Hive::Attempts::RepositoryError, "bad" }
+    ) do
+      refute subject.send(:resolved_loss?, record)
+    end
+
+    with_replaced_singleton_method(Hive::Config, :find_project, lambda { |_|
+      raise Hive::Error, "bad"
+    }) do
+      refute subject.send(:task_archived?, record)
+    end
+
+    with_tmp_dir do |state_root|
+      FileUtils.mkdir_p(File.join(state_root, "stages", "4-execute", "task"))
       with_replaced_singleton_method(
-        Hive::Config, :find_project,
-        lambda { |name|
-          archive_calls << [ :project, name ]
-          { "hive_state_path" => state_root }
-        }
+        Hive::Config, :find_project, ->(_) { { "hive_state_path" => state_root } }
       ) do
-        with_replaced_singleton_method(
-          Hive::Task, :new,
-          lambda { |folder|
-            archive_calls << [ :task, folder ]
-            raise Hive::InvalidTaskPath if folder == broken_folder
-
-            task
-          }
-        ) do
-          with_replaced_singleton_method(Hive::Markers, :current, ->(_path) { marker }) do
-            with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
-              with_replaced_singleton_method(
-                Hive::TaskProjection::Store, :pristine_task?, ->(*) { false }
-              ) do
-                with_replaced_singleton_method(
-                  Hive::TaskProjection::Store, :new, ->(**) { projection_store }
-                ) do
-                  with_replaced_singleton_method(
-                    Hive::TaskAction, :for,
-                    lambda { |*_args, **_kwargs|
-                      archive_calls << [ :action ]
-                      action
-                    }
-                  ) do
-                    assert service.send(:task_archived?, terminal), archive_calls.inspect
-                  end
-                end
-              end
-            end
-          end
+        with_replaced_singleton_method(Hive::Task, :new, ->(_) { raise Hive::Error, "bad" }) do
+          refute subject.send(:task_archived?, record)
         end
       end
-
-      with_replaced_singleton_method(
-        Hive::Config, :find_project, ->(_name) { raise KeyError, "project unavailable" }
-      ) do
-        refute service.send(:task_archived?, terminal)
-      end
     end
-  end
 
-  def test_tempfail_finalization_refunds_daily_admission_accounting
-    with_store do |store|
-      terminal = terminal_attempt(store, exit_status: Hive::ExitCodes::TEMPFAIL)
-
-      assert maintenance(store).prepare(terminal)
-
-      assert_equal 0,
-                   store.decision_index.daily_count(project: "demo", date: NOW.to_date)
-    end
-  end
-
-  def test_corrupt_loss_outcome_cannot_make_a_lost_attempt_finalizable
-    with_store do |store|
-      lost = store.mark_lost(
-        create_attempt(store), reason: "launch_timeout", now: NOW + 1
-      )
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
-      outcomes.ensure_for(lost, now: NOW + 2)
-      File.write(outcomes.send(:path, lost.attempt_id), "{")
-
-      refute maintenance(store).prepare(lost)
-
-      assert store.fetch_hot(lost.attempt_id)
-      assert_nil store.permanent_proofs.fetch(lost.attempt_id)
-    end
+    refunded = []
+    store.define_singleton_method(:refund_unstarted) { |value| refunded << value }
+    lost = Struct.new(:state) do
+      def [](key) = key == "started_at" ? nil : nil
+    end.new("lost")
+    subject.send(:publish_indexes, lost)
+    assert_equal [ lost ], refunded
   end
 
   private
 
-  def with_store
+  def with_repository
     with_tmp_dir do |root|
-      yield Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      yield Hive::Attempts::Repository.new(root: root, migrate: true)
     end
   end
 
   def maintenance(store, **options)
+    observer = Struct.new(:result) do
+      def observe(*) = result
+    end.new(:delivered)
     Hive::Attempts::FinalizationMaintenance.new(
       store: store,
+      condition_observer: observer,
       delivery_pending: ->(_record) { false },
       task_archived: ->(_record) { false },
       **options
     )
   end
 
-  def create_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                     predecessor_attempt_id: nil, now: NOW,
-                     intended_stage: "4-execute")
-    store.create_launching(
-      attempt_id: attempt_id, request_id: request_id,
-      predecessor_attempt_id: predecessor_attempt_id,
-      task_id: "42", project: "demo", task_slug: "task",
-      intended_stage: intended_stage, task_generation: "generation-1",
-      ownership_generation: "generation-1", task_input_epoch: 1,
-      progress_token: "progress", provider: "codex",
-      worker_argv: [ "hive", "run", "task" ],
-      claim_capability_digest: Hive::Attempts::Capability.digest(CAPABILITY),
-      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 30, now: now
-    )
+  def prepare_all(subject, record)
+    assert subject.prepare(record)
+    assert subject.acknowledge(record, :journal)
+    assert subject.acknowledge(record, :accounting)
+    assert subject.acknowledge(record, :request_delivery)
   end
 
-  def terminal_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                       now: NOW, write_log: false, exit_status: 0,
-                       intended_stage: "4-execute", diagnostic: false)
-    launching = create_attempt(
-      store, attempt_id: attempt_id, request_id: request_id, now: now,
-      intended_stage: intended_stage
-    )
-    if write_log
-      writer = store.log_archive.open_writer(attempt_id, clock: -> { now })
-      writer.append(:stdout, "done\n")
-      writer.close
-    end
-    claimed = store.claim(
-      launching, owner: { "pid" => Process.pid },
-      claim_capability: CAPABILITY, first_heartbeat_timeout_sec: 30,
-      now: now + 1
-    )
-    running = store.first_heartbeat(claimed, stale_sec: 30, now: now + 2)
-    log_reference = {
-      "path" => "logs/#{attempt_id}.frames", "size" => 0,
-      "sha256" => Digest::SHA256.hexdigest("")
-    }
-    output_references = []
-    if diagnostic
-      document = Hive::PatrolFix::AttemptDiagnostic.normalize(
-        { "exit_code" => exit_status, "status" => "error" },
-        stage: intended_stage, task_generation: running.task_generation,
-        attempt_id: attempt_id, recorded_at: now + 3,
-        log_reference: log_reference
-      )
-      path = store.output_path(
-        attempt_id, Hive::PatrolFix::AttemptDiagnostic::FILENAME,
-        create_directory: true
-      )
-      File.write(path, JSON.generate(document))
-      output_references << Hive::OutputReference.build(path, root: store.root)
-    end
+  def terminal_attempt(store, exit_status: 0)
+    running = running_attempt(store)
+    writer = store.log_archive.open_writer(running.attempt_id, clock: -> { NOW })
+    writer.append(:stdout, "done\n")
+    writer.close
+    reference = Hive::OutputReference.build(writer.path, root: store.root)
+    terminalize(store, running, log_reference: reference, exit_status: exit_status)
+  ensure
+    writer&.close unless writer&.closed?
+  end
+
+  def terminalize(store, running, log_reference:, exit_status: 0)
     store.terminalize(
       running, outcome: exit_status.zero? ? "succeeded" : "failed",
       exit_status: exit_status,
-      final_checkpoint: running.checkpoint,
-      output_references: output_references,
-      log_reference: log_reference,
-      now: now + 3
+      final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
+      log_reference: log_reference, now: NOW + 3
     )
+  end
+
+  def running_attempt(store)
+    launching = store.create_launching(
+      attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+      task_id: "42", project: "demo", task_slug: "task",
+      intended_stage: "4-execute", task_generation: "generation-1",
+      ownership_generation: "owner-1", task_input_epoch: 1,
+      progress_token: "progress-1", provider: "codex",
+      worker_argv: [ "hive", "run", "task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CAPABILITY),
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: NOW
+    )
+    claimed = store.claim(
+      launching, owner: { "pid" => Process.pid }, claim_capability: CAPABILITY,
+      first_heartbeat_timeout_sec: 30, now: NOW + 1
+    )
+    store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
   end
 end

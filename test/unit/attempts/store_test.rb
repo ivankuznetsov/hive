@@ -1,557 +1,461 @@
 require "test_helper"
-require "hive/attempts/store"
+require "hive/attempts/capacity_snapshot"
+require "hive/attempts/repository"
 
-class AttemptsStoreTest < Minitest::Test
+class AttemptsRepositoryTest < Minitest::Test
   include HiveTestHelper
 
-  NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  class GuardedDataset
+    TERMINALS = %i[all any? count delete each first get insert select_map update].freeze
+
+    def initialize(dataset, active)
+      @dataset = dataset
+      @active = active
+    end
+
+    def method_missing(name, *arguments, **keywords, &block)
+      raise "dataset executed outside Database#read" if TERMINALS.include?(name) && !@active.call
+
+      result = @dataset.public_send(name, *arguments, **keywords, &block)
+      result.is_a?(Sequel::Dataset) ? self.class.new(result, @active) : result
+    end
+
+    def respond_to_missing?(name, include_private = false) =
+      @dataset.respond_to?(name, include_private) || super
+  end
+
+  GuardedDatabase = Data.define(:connection, :active) do
+    def [](table) = GuardedDataset.new(connection[table], active)
+  end
+
+  NOW = Time.utc(2026, 7, 16, 12)
   CLAIM_CAPABILITY = "c" * 64
 
-  def test_legal_lifecycle_increments_version_and_persists_terminal_receipt
-    with_store do |store|
-      launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      claimed = store.claim(
+  def test_public_record_lifecycle_and_terminal_publication_survive_restart
+    with_tmp_dir do |root|
+      repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
         launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
         first_heartbeat_timeout_sec: 30, now: NOW + 1
       )
-      first_heartbeat = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
-      heartbeat = store.heartbeat(first_heartbeat, stale_sec: 30, now: NOW + 3)
-      checkpointed = store.checkpoint(heartbeat, checkpoint: checkpoint, now: NOW + 4)
-      terminal = store.terminalize(
-        checkpointed,
-        outcome: "succeeded",
-        exit_status: 0,
-        final_checkpoint: checkpoint,
-        output_references: [ output_reference ],
-        log_reference: log_reference,
-        now: NOW + 5
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      checkpointed = repository.checkpoint(
+        running, checkpoint: checkpoint, now: NOW + 3
+      )
+      terminal = repository.terminalize(
+        checkpointed, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: checkpoint, output_references: [ output_reference ],
+        log_reference: log_reference, now: NOW + 4
       )
 
-      assert_equal [ 0, 1, 2, 3, 4, 5 ],
-                   [ launching, claimed, first_heartbeat, heartbeat, checkpointed, terminal ].map(&:lease_version)
-      assert_equal "terminal", terminal.state
-      assert_equal "succeeded", terminal.outcome
-      assert_equal terminal.attempt_id, terminal.receipt.fetch("attempt_id")
-      assert_equal terminal.task_generation, terminal.receipt.fetch("task_generation")
-      assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
-      assert_equal 0o600, File.stat(store.record_path(terminal.attempt_id)).mode & 0o777
+      assert_equal [ 0, 1, 2, 3, 4 ],
+                   [ launching, claimed, running, checkpointed, terminal ].map(&:lease_version)
+      assert_equal terminal.to_h, repository.fetch(terminal.attempt_id).to_h
+      assert_equal terminal.attempt_id,
+                   repository.terminal_attempt_id(request_id: terminal["request_id"])
+      assert repository.publication(terminal.attempt_id).nil?
+      repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: %w[journal])
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
+
+      restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
+      assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
+      assert restarted.publication_complete?(terminal.attempt_id)
+      assert restarted.finish_publication(terminal.attempt_id)
+      assert_nil restarted.fetch_hot(terminal.attempt_id)
+      assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
     end
   end
 
-  def test_projection_reader_caches_terminal_diagnostic_bindings_including_absence
-    terminal = Object.new
-    terminal.define_singleton_method(:final?) { true }
-    terminal.define_singleton_method(:attempt_id) { "attempt-1" }
-    terminal.define_singleton_method(:task_generation) { "generation-1" }
-    terminal.define_singleton_method(:receipt) { { "outcome" => "failed" } }
-    terminal.define_singleton_method(:[]) do |key|
-      raise KeyError, key unless key == "intended_stage"
-
-      "4-review"
-    end
-    store = Struct.new(:record, :fetches) do
-      def fetch(_attempt_id)
-        self.fetches += 1
-        record
+  def test_coordination_queries_execute_before_the_process_guard_checkout_ends
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      terminal = repository.terminalize(
+        running,
+        outcome: "succeeded", exit_status: 0, final_checkpoint: checkpoint,
+        output_references: [ output_reference ], log_reference: log_reference, now: NOW + 3
+      )
+      database = repository.database
+      original_read = database.method(:read)
+      active = false
+      database.define_singleton_method(:read) do |&block|
+        original_read.call do |connection|
+          active = true
+          block.call(GuardedDatabase.new(connection, -> { active }))
+        ensure
+          active = false
+        end
       end
-    end.new(terminal, 0)
-    reader = Hive::Attempts::Store::ProjectionReader.new(store)
 
-    expected = {
-      "attempt_id" => "attempt-1", "stage" => "4-review",
-      "task_generation" => "generation-1", "receipt" => { "outcome" => "failed" }
-    }
-    assert_equal expected, reader.fetch_terminal_diagnostic_binding("attempt-1")
-    assert_equal expected, reader.fetch_terminal_diagnostic_binding("attempt-1")
-    assert_equal 1, store.fetches
-
-    nonterminal = Object.new
-    nonterminal.define_singleton_method(:final?) { false }
-    store.record = nonterminal
-    missing_reader = Hive::Attempts::Store::ProjectionReader.new(store)
-    assert_nil missing_reader.fetch_terminal_diagnostic_binding("attempt-2")
-    assert_nil missing_reader.fetch_terminal_diagnostic_binding("attempt-2")
-    assert_equal 2, store.fetches
+      assert_equal terminal.attempt_id,
+                   repository.terminal_attempt_id(request_id: terminal["request_id"])
+      assert_equal terminal.attempt_id,
+                   repository.successful_attempt_id(
+                     task_generation: terminal.task_generation, subject: terminal.subject
+                   )
+    end
   end
 
-  def test_stale_version_wrong_generation_and_wrong_deadline_do_not_mutate
-    with_store do |store|
-      launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      stale_version = launching.with("lease_version" => 99)
-      wrong_generation = launching.with("task_generation" => "wrong")
-      wrong_deadline = launching.with("claim_deadline" => (NOW + 99).iso8601(6))
+  def test_conditional_lifecycle_updates_reject_stale_observations
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      stale = launching.with("lease_version" => 99)
 
-      [ stale_version, wrong_generation, wrong_deadline ].each do |observed|
-        assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-          store.claim(
-            observed, owner: owner, claim_capability: CLAIM_CAPABILITY,
-            first_heartbeat_timeout_sec: 30, now: NOW + 1
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.claim(
+          stale, owner: owner, claim_capability: CLAIM_CAPABILITY,
+          first_heartbeat_timeout_sec: 30, now: NOW + 1
+        )
+      end
+      assert_equal launching.to_h, repository.fetch(launching.attempt_id).to_h
+    end
+  end
+
+  def test_unique_index_allows_only_one_live_attempt_for_a_subject_generation
+    with_repository do |repository|
+      gate = Queue.new
+      results = 6.times.map do |index|
+        Thread.new do
+          gate.pop
+          repository.create_launching(
+            **identity(attempt_id: "attempt-#{index}", request_id: "request-#{index}"),
+            launch_timeout_sec: 30, now: NOW
           )
+        rescue Hive::Attempts::RepositoryError => error
+          error
+        end
+      end
+      6.times { gate << true }
+
+      values = results.map(&:value)
+      assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::Record) }
+      assert_equal 5, values.count { |value| value.is_a?(Hive::Attempts::RepositoryError) }
+      assert_equal 1, repository.active_attempts.length
+    end
+  end
+
+  def test_live_attempt_for_returns_only_the_exact_task_attempt
+    with_repository do |repository|
+      expected = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      repository.create_launching(
+        **identity(
+          attempt_id: "attempt-2", request_id: "request-2", task_id: "43",
+          task_slug: "other-task", task_generation: "generation-2"
+        ),
+        launch_timeout_sec: 30, now: NOW
+      )
+
+      assert_equal expected.attempt_id,
+                   repository.live_attempt_for(task_id: "42").attempt_id
+      assert_nil repository.live_attempt_for(task_id: "missing")
+    end
+  end
+
+  def test_live_attempt_for_includes_terminal_attempt_pending_publication
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      terminal = terminal_attempt(repository, launching)
+
+      assert terminal.final?
+      assert_equal terminal.attempt_id,
+                   repository.live_attempt_for(task_id: "42").attempt_id
+      assert_nil repository.live_attempt_for(task_id: "unrelated")
+    end
+  end
+
+  def test_live_attempt_for_translates_database_errors
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_match(/live attempt query failed/, error.message)
+    end
+  end
+
+  def test_immediate_transaction_does_not_over_reserve_the_final_global_slot
+    with_repository do |repository|
+      limits = { max_global: 1, max_per_project: 2, max_daily: 10 }
+      gate = Queue.new
+      results = 2.times.map do |index|
+        Thread.new do
+          gate.pop
+          repository.create_launching(
+            **identity(
+              attempt_id: "attempt-#{index}", request_id: "request-#{index}",
+              task_slug: "task-#{index}", task_id: (index + 1).to_s,
+              task_generation: "generation-#{index}"
+            ),
+            limits: limits, launch_timeout_sec: 30, now: NOW
+          )
+        rescue Hive::Attempts::CapacityExceeded => error
+          error
+        end
+      end
+      2.times { gate << true }
+
+      values = results.map(&:value)
+      assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::Record) }
+      assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::CapacityExceeded) }
+      assert_equal 1, Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW).global_count
+    end
+  end
+
+  def test_malformed_database_record_fails_the_authoritative_scan_closed
+    with_repository do |repository|
+      record = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: record.attempt_id).update(record_json: "{")
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.active_attempts }
+      assert_match(/record digest is invalid/, error.message)
+    end
+  end
+
+  def test_source_fingerprint_and_record_digest_are_bound_to_the_row
+    with_repository do |repository|
+      record = repository.create_launching(
+        **identity, source_fingerprint: "source-v1", launch_timeout_sec: 30, now: NOW
+      )
+      row = repository.database.read do |db|
+        db[:attempts].where(attempt_id: record.attempt_id).first
+      end
+
+      assert_equal "source-v1", row.fetch(:source_fingerprint)
+      assert_equal Digest::SHA256.hexdigest(row.fetch(:record_json)), row.fetch(:record_digest)
+      assert_equal record.subject, Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json))
+    end
+  end
+
+  def test_missing_database_never_creates_payload_state_or_honors_legacy_root_override
+    with_tmp_dir do |root|
+      state_home = File.join(root, "state")
+      payload_root = Hive::Paths.runtime_payload_root(state_home)
+      legacy_root = File.join(root, "legacy-attempts")
+      FileUtils.mkdir_p(legacy_root)
+
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => legacy_root) do
+        assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Repository.open_default(state_home: state_home)
         end
       end
 
-      assert_equal launching.to_h, store.fetch(launching.attempt_id).to_h
+      refute_path_exists payload_root
+      refute_path_exists File.join(legacy_root, ".runtime-control-plane.sqlite3")
     end
   end
 
-  def test_claim_and_expiry_have_one_winner_and_final_state_cannot_revive
-    with_store do |store|
-      launching = store.create_launching(**identity, launch_timeout_sec: 1, now: NOW)
-      lost = store.mark_lost(launching, reason: "launch_timeout", now: NOW + 2)
+  def test_repository_reuses_an_already_validated_database
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      revalidations = []
+      database.define_singleton_method(:open!) do |revalidate: true|
+        revalidations << revalidate
+        raise "repository forced runtime validation" if revalidate
 
-      assert_equal "lost", lost.state
-      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.claim(
-          launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
-          first_heartbeat_timeout_sec: 30, now: NOW + 2
-        )
+        self
       end
-      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.first_heartbeat(lost, stale_sec: 30, now: NOW + 3)
-      end
-    end
-  end
 
-  def test_claim_requires_the_one_time_capability
-    with_store do |store|
-      launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-
-      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.claim(
-          launching, owner: owner, claim_capability: "f" * 64,
-          first_heartbeat_timeout_sec: 30, now: NOW + 1
-        )
-      end
-      assert_equal launching.to_h, store.fetch(launching.attempt_id).to_h
-
-      forged_observation = launching.with(
-        "claim_capability_digest" => Hive::Attempts::Capability.digest("f" * 64)
+      repository = Hive::Attempts::Repository.new(
+        database: database, root: File.join(root, "payloads")
       )
-      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.claim(
-          forged_observation, owner: owner, claim_capability: "f" * 64,
-          first_heartbeat_timeout_sec: 30, now: NOW + 1
+
+      assert_same database, repository.database
+      assert_equal [ false ], revalidations
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_repository_revalidates_when_the_database_file_disappears
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      FileUtils.rm_f(database.path)
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Repository.new(
+          database: database, root: File.join(root, "payloads")
         )
       end
 
-      claimed = store.claim(
+      assert_match(/database is missing/, error.message)
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_lost_transition_releases_capacity_once_in_the_same_transaction
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      lost = repository.mark_lost(launching, reason: "stale_generation", now: NOW + 1)
+
+      reservation, request = repository.database.read do |db|
+        [
+          db[:capacity_reservations].where(attempt_id: lost.attempt_id).first,
+          db[:dispatch_requests].where(request_id: lost["request_id"]).first
+        ]
+      end
+      assert_equal "released", reservation.fetch(:state)
+      assert_equal Hive::Attempts::Record.iso8601(NOW + 1), reservation.fetch(:released_at)
+      assert_equal "awaiting_delivery", request.fetch(:state)
+      assert_equal lost.attempt_id, request.fetch(:claim_attempt_id)
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.mark_lost(launching, reason: "stale_generation", now: NOW + 2)
+      end
+      assert_equal 0, Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW).global_count
+    end
+  end
+
+  def test_existing_dispatch_request_must_match_the_attempt_identity
+    with_repository do |repository|
+      first = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      repository.mark_lost(first, reason: "stale_generation", now: NOW + 1)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.create_launching(
+          **identity(
+            attempt_id: "attempt-2", request_id: "request-1",
+            task_id: "43", task_slug: "other-task", task_generation: "generation-2"
+          ),
+          launch_timeout_sec: 30, now: NOW + 2
+        )
+      end
+      assert_equal 1, repository.database.read { |db| db[:attempts].count }
+    end
+  end
+
+  def test_read_session_caches_records_and_terminal_diagnostics
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      reader = repository.read_session
+      assert_same reader.fetch(launching.attempt_id), reader.fetch(launching.attempt_id)
+      assert_nil reader.fetch_terminal_diagnostic_binding(launching.attempt_id)
+
+      terminal = terminal_attempt(repository, launching)
+      terminal_reader = repository.read_session
+      diagnostic = terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
+      assert_equal terminal.receipt, diagnostic.fetch("receipt")
+      assert_same diagnostic, terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
+    end
+  end
+
+  def test_payload_paths_fail_closed_for_io_non_files_missing_paths_and_escapes
+    with_repository do |repository|
+      with_replaced_singleton_method(FileUtils, :mkdir_p, ->(*) { raise Errno::EACCES, "denied" }) do
+        assert_raises(Hive::Attempts::RepositoryError) do
+          repository.output_directory("attempt", "segment", create: true)
+        end
+      end
+
+      directory = repository.output_directory("attempt", create: true)
+      FileUtils.mkdir_p(File.join(directory, "not-a-file"))
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.output_path("attempt", "not-a-file")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.send(:validate_directory!, File.join(repository.root, "missing"), "missing")
+      end
+
+      with_tmp_dir do |outside|
+        assert_raises(Hive::Attempts::RepositoryError) do
+          repository.send(:ensure_contained!, outside, repository.root)
+        end
+      end
+    end
+  end
+
+  def test_transition_and_record_corruption_errors_remain_typed
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
         launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
         first_heartbeat_timeout_sec: 30, now: NOW + 1
       )
-      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.claim(
-          launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
-          first_heartbeat_timeout_sec: 30, now: NOW + 1
-        )
-      end
-      assert claimed.claimed?
-    end
-  end
-
-  def test_task_generation_lock_serializes_competing_creates
-    skip "fork unavailable" unless Process.respond_to?(:fork)
-
-    with_tmp_dir do |root|
-      readers, writers = 4.times.map { IO.pipe }.transpose
-      pids = writers.each_with_index.map do |writer, index|
-        fork do
-          readers.each(&:close)
-          begin
-            store = Hive::Attempts::Store.new(root: root)
-            created = nil
-            store.with_generation_lock("generation-1") do
-              existing = store.scan.records.select { |record| record.task_generation == "generation-1" }
-              created = existing.first || store.create_launching(
-                **identity.merge(attempt_id: "attempt-#{index}"), launch_timeout_sec: 30, now: NOW
-              )
-            end
-            writer.write(created.attempt_id)
-          ensure
-            writer.close
-          end
-          exit! 0
-        end
-      end
-      writers.each(&:close)
-      ids = readers.map(&:read)
-      pids.each { |pid| Process.wait(pid) }
-
-      assert_equal 1, ids.uniq.size
-      records = Hive::Attempts::Store.new(root: root).scan.records
-      assert_equal 1, records.count { |record| record.task_generation == "generation-1" }
-    end
-  end
-
-  def test_corrupt_and_newer_records_fail_closed_during_scan
-    with_store do |store|
-      FileUtils.mkdir_p(store.records_root)
-      File.write(File.join(store.records_root, "broken.json"), "{")
-      newer = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
-      newer["schema_version"] = Hive::Attempts::Record::SCHEMA_VERSION + 1
-      File.write(File.join(store.records_root, "newer.json"), JSON.generate(newer))
-
-      scan = store.scan
-      assert_empty scan.records
-      assert_equal 2, scan.invalid_records.size
-      assert_equal %w[broken.json newer.json], scan.invalid_records.map { |record| File.basename(record.path) }
-    end
-  end
-
-  def test_store_surfaces_unreadable_records_and_filesystem_failures
-    with_store do |store|
-      assert_nil store.fetch("missing")
-      File.write(store.record_path("broken"), "{")
-      assert_raises(Hive::Attempts::StoreError) { store.fetch("broken") }
-
-      with_replaced_singleton_method(File, :open, ->(*_args) { raise Errno::EACCES }) do
-        assert_raises(Hive::Attempts::StoreError) { store.with_generation_lock("generation") { } }
-        assert_raises(Hive::Attempts::StoreError) { store.with_admission_lock { } }
-      end
-
-      with_replaced_singleton_method(Hive::AtomicFile, :write, ->(*_args, **_kwargs) { raise Errno::ENOSPC }) do
-        assert_raises(Hive::Attempts::StoreError) do
-          store.create_launching(**identity.merge(attempt_id: "persist-failure"), launch_timeout_sec: 30, now: NOW)
-        end
-      end
-    end
-
-    with_replaced_singleton_method(FileUtils, :mkdir_p, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
-      assert_raises(Hive::Attempts::StoreError) { Hive::Attempts::Store.new(root: "/unavailable") }
-    end
-  end
-
-  def test_read_only_store_does_not_create_directories
-    with_tmp_dir do |dir|
-      root = File.join(dir, "missing-attempts")
-      store = Hive::Attempts::Store.new(root: root, create_directories: false)
-
-      refute File.exist?(root)
-      assert_nil store.fetch("missing")
-      assert_empty store.scan.records
-      refute File.exist?(root)
-    end
-  end
-
-  def test_store_exposes_the_lazy_versioned_routing_policy_snapshot_root
-    with_store do |store|
-      policies = store.routing_policies
-
-      assert_instance_of Hive::ProviderRouting::PolicyStore, policies
-      assert_equal File.join(store.routing_policies_root, "v1"), policies.root
-      assert_equal 0o700, File.stat(store.routing_policies_root).mode & 0o777
-      refute File.exist?(policies.root)
-    end
-  end
-
-  def test_managed_directories_refuse_symlinks_before_chmod_or_state_access
-    %w[
-      records logs outputs generation-locks proof decision-indexes
-      pending-finalization cold-logs log-state maintenance routing-policies
-    ].each do |managed_name|
-      with_tmp_dir do |dir|
-        root = File.join(dir, "attempts")
-        outside = File.join(dir, "outside")
-        FileUtils.mkdir_p([ root, outside ])
-        File.chmod(0o755, outside)
-        File.symlink(outside, File.join(root, managed_name))
-
-        error = assert_raises(Hive::Attempts::StoreError) do
-          Hive::Attempts::Store.new(root: root)
-        end
-
-        assert_match(/#{Regexp.escape(managed_name)}.*symlink/, error.message)
-        assert_equal 0o755, File.stat(outside).mode & 0o777
-        assert_empty Dir.children(outside)
-      end
-    end
-
-    with_store do |store|
-      records_root = store.records_root
-      outside = File.join(File.dirname(store.root), "replacement")
-      FileUtils.mkdir_p(outside)
-      File.chmod(0o755, outside)
-      FileUtils.rmdir(records_root)
-      File.symlink(outside, records_root)
-
-      error = assert_raises(Hive::Attempts::StoreError) do
-        store.create_launching(
-          **identity.merge(attempt_id: "escaped-attempt"),
-          launch_timeout_sec: 30,
-          now: NOW
-        )
-      end
-
-      assert_match(/records.*symlink/, error.message)
-      assert_equal 0o755, File.stat(outside).mode & 0o777
-      assert_empty Dir.children(outside)
-    end
-  end
-
-  def test_configured_store_root_may_resolve_through_a_trusted_symlink
-    with_tmp_dir do |dir|
-      actual_root = File.join(dir, "actual-attempts")
-      linked_root = File.join(dir, "configured-attempts")
-      FileUtils.mkdir_p(actual_root)
-      File.symlink(actual_root, linked_root)
-
-      store = Hive::Attempts::Store.new(root: linked_root)
-      attempt = store.create_launching(
-        **identity.merge(attempt_id: "linked-root-attempt"),
-        launch_timeout_sec: 30,
-        now: NOW
-      )
-
-      assert_equal File.expand_path(linked_root), store.root
-      assert_equal attempt.to_h, store.fetch(attempt.attempt_id).to_h
-      assert File.file?(File.join(actual_root, "records", "linked-root-attempt.json"))
-    end
-  end
-
-  def test_concurrent_output_directory_creation_revalidates_the_eexist_winner
-    with_store do |store|
-      target = File.join(store.outputs_root, "race-attempt")
-      original_mkdir = Dir.method(:mkdir)
-      mutex = Mutex.new
-      condition = ConditionVariable.new
-      arrived = 0
-      barrier_mkdir = lambda do |path, mode|
-        if path == target
-          mutex.synchronize do
-            arrived += 1
-            condition.broadcast if arrived == 2
-            condition.wait(mutex) while arrived < 2
-          end
-        end
-        original_mkdir.call(path, mode)
-      end
-      results = Queue.new
-
-      with_replaced_singleton_method(Dir, :mkdir, barrier_mkdir) do
-        threads = 2.times.map do
-          Thread.new do
-            results << store.output_directory("race-attempt", create: true)
-          rescue StandardError => error
-            results << error
-          end
-        end
-        threads.each(&:join)
-      end
-
-      observed = 2.times.map { results.pop }
-      assert_equal [ target ], observed.grep(String).uniq
-      assert_empty observed.grep(Exception)
-      assert File.directory?(target)
-      refute File.symlink?(target)
-    end
-  end
-
-  def test_record_and_lock_leaf_symlinks_are_never_followed
-    with_store do |store|
-      outside_record = File.join(File.dirname(store.root), "outside-record.json")
-      File.write(outside_record, JSON.generate(
-        Hive::Attempts::Record.launching(
-          **identity.merge(attempt_id: "linked-record"),
-          launch_timeout_sec: 30,
-          now: NOW
-        ).to_h
-      ))
-      File.chmod(0o644, outside_record)
-      File.symlink(outside_record, store.record_path("linked-record"))
-
-      error = assert_raises(Hive::Attempts::StoreError) { store.fetch("linked-record") }
-      assert_match(/record.*symlink/, error.message)
-      scan = store.scan
-      assert_empty scan.records
-      assert_equal 1, scan.invalid_records.size
-      assert_match(/record.*symlink/, scan.invalid_records.first.error)
-      assert_equal 0o644, File.stat(outside_record).mode & 0o777
-
-      outside_lock = File.join(File.dirname(store.root), "outside.lock")
-      File.write(outside_lock, "sentinel")
-      File.chmod(0o644, outside_lock)
-      File.symlink(outside_lock, File.join(store.generation_locks_root, "admission.lock"))
-
-      error = assert_raises(Hive::Attempts::StoreError) { store.with_admission_lock { flunk } }
-      assert_match(/lock.*symlink/, error.message)
-      assert_equal "sentinel", File.binread(outside_lock)
-      assert_equal 0o644, File.stat(outside_lock).mode & 0o777
-    end
-  end
-
-  def test_custody_guards_fail_closed_for_replaced_paths_and_filesystem_errors
-    with_store do |store|
-      output_file = File.join(store.outputs_root, "not-a-directory")
-      File.write(output_file, "operator data")
-      error = assert_raises(Hive::Attempts::StoreError) do
-        store.output_directory("not-a-directory")
-      end
-      assert_match(/not a directory/, error.message)
-
-      outputs_root = store.outputs_root
-      original_lstat = File.method(:lstat)
-      with_replaced_singleton_method(File, :lstat, lambda { |path|
-        raise Errno::EACCES, path if path == File.join(outputs_root, "unreadable")
-
-        original_lstat.call(path)
-      }) do
-        error = assert_raises(Hive::Attempts::StoreError) do
-          store.output_directory("unreadable")
-        end
-        assert_match(/unavailable/, error.message)
-      end
-
-      records_root = store.records_root
-      FileUtils.rmdir(records_root)
-      File.write(records_root, "operator data")
-      error = assert_raises(Hive::Attempts::StoreError) { store.records_root }
-      assert_match(/records.*not a directory/, error.message)
-
-      FileUtils.rm_f(records_root)
-      error = assert_raises(Hive::Attempts::StoreError) { store.records_root }
-      assert_match(/records.*missing/, error.message)
-
-      logs_root = store.logs_root
-      with_replaced_singleton_method(File, :lstat, lambda { |path|
-        raise Errno::EACCES, path if path == logs_root
-
-        original_lstat.call(path)
-      }) do
-        error = assert_raises(Hive::Attempts::StoreError) { store.logs_root }
-        assert_match(/logs.*unavailable/, error.message)
-      end
-    end
-
-    with_tmp_dir do |root|
-      FileUtils.remove_entry(root)
-      File.write(root, "not a store directory")
-      store = Hive::Attempts::Store.new(root: root, create_directories: false)
-      error = assert_raises(Hive::Attempts::StoreError) { store.root }
-      assert_match(/root path is not a directory/, error.message)
-    end
-  end
-
-  def test_custody_helpers_reject_escaped_roots_and_replaced_locks
-    with_store do |store|
-      outside = File.join(File.dirname(store.root), "outside")
-      FileUtils.mkdir_p(outside)
-      error = assert_raises(Hive::Attempts::StoreError) do
-        store.send(
-          :validate_descendant!, outside, root: store.outputs_root,
-          error: "attempt output directory escapes the outputs root"
-        )
-      end
-      assert_match(/escapes the outputs root/, error.message)
-
-      records_root = store.records_root
-      root = store.root
-      FileUtils.remove_entry(root)
-      File.write(root, "replaced root")
-      error = assert_raises(Hive::Attempts::StoreError) do
-        store.send(:validate_root_custody!, records_root, label: "records")
-      end
-      assert_match(/root path is not a directory/, error.message)
-    end
-
-    with_store do |store|
-      lock_path = File.join(store.generation_locks_root, "admission.lock")
-      original_lstat = File.method(:lstat)
-      replaced = false
-      with_replaced_singleton_method(File, :lstat, lambda { |path|
-        if path == lock_path && !replaced
-          replaced = true
-          FileUtils.rm_f(path)
-          Dir.mkdir(path)
-        end
-        original_lstat.call(path)
-      }) do
-        error = assert_raises(Hive::Attempts::StoreError) { store.with_admission_lock { flunk } }
-        assert_match(/lock is not a regular file/, error.message)
-      end
-    end
-  end
-
-  def test_invalid_mutation_immutable_identity_and_unsafe_ids_fail_closed
-    with_store do |store|
-      launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      claimed = store.claim(
-        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
-        first_heartbeat_timeout_sec: 30, now: NOW + 1
-      )
-      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
-      assert_raises(Hive::Attempts::StoreError) do
-        store.checkpoint(
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.checkpoint(
           running, checkpoint: checkpoint, now: NOW + 3,
-          output_references: [ { "path" => "../escape", "size" => 1, "sha256" => "0" * 64 } ]
+          output_references: [ { "path" => "../escape" } ]
         )
       end
 
-      changed = launching.with("request_id" => "different")
-      assert_raises(Hive::Attempts::StoreError) { store.send(:verify_immutable!, launching, changed) }
-      changed = launching.with("worker_argv" => [ "hive", "run", "other-task" ])
-      assert_raises(Hive::Attempts::StoreError) { store.send(:verify_immutable!, launching, changed) }
-      assert_raises(Hive::Attempts::StoreError) { store.record_path("../unsafe") }
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: running.attempt_id).update(task_generation: "different")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(running.attempt_id) }
+
+      invalid = "{"
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: running.attempt_id).update(
+          record_json: invalid, record_digest: Digest::SHA256.hexdigest(invalid)
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(running.attempt_id) }
     end
-  end
 
-  def test_projection_reader_fetches_each_binding_once_and_caches_missing
-    store = Object.new
-    calls = []
-    store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
-      calls << attempt_id
-      attempt_id == "known" ? { "attempt_id" => attempt_id } : nil
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
+      end
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.fetch("attempt") }
+      assert_match(/lookup failed/, error.message)
     end
-    reader = Hive::Attempts::Store::ProjectionReader.new(store)
-
-    2.times { assert_equal({ "attempt_id" => "known" }, reader.fetch_projection_binding("known")) }
-    2.times { assert_nil reader.fetch_projection_binding("missing") }
-
-    assert_equal %w[known missing], calls
   end
 
   private
 
-  def with_store
-    with_tmp_dir { |root| yield Hive::Attempts::Store.new(root: root) }
+  def with_repository
+    with_tmp_dir { |root| yield Hive::Attempts::Repository.new(root: root, migrate: true) }
   end
 
-  def identity
+  def identity(attempt_id: "attempt-1", request_id: "request-1", task_id: "42",
+               task_slug: "durable-task", task_generation: "generation-1")
     {
-      attempt_id: "attempt-1",
-      request_id: "request-1",
-      predecessor_attempt_id: nil,
-      task_id: "42",
-      project: "demo",
-      task_slug: "durable-task",
-      intended_stage: "4-execute",
-      task_generation: "generation-1",
-      progress_token: "progress-1",
-      provider: "codex",
-      worker_argv: [ "hive", "run", "durable-task" ],
+      attempt_id: attempt_id, request_id: request_id,
+      predecessor_attempt_id: nil, task_id: task_id, project: "demo",
+      task_slug: task_slug, intended_stage: "4-execute",
+      task_generation: task_generation, ownership_generation: "owner-1",
+      task_input_epoch: 1, progress_token: "progress-1", provider: "codex",
+      worker_argv: [ "hive", "run", task_slug ],
       claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-      starting_revision: "a" * 40,
-      retry_charge: 0,
-      inherited_outputs: []
+      starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: []
     }
   end
 
   def owner
     {
-      "pid" => Process.pid,
-      "start_fingerprint" => "pid-start",
-      "session_id" => Process.getsid(0),
-      "process_group_id" => Process.getpgrp
+      "pid" => Process.pid, "start_fingerprint" => "pid-start",
+      "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp
     }
   end
 
-  def checkpoint
-    { "revision" => "b" * 40, "progress_token" => "progress-1" }
-  end
+  def checkpoint = { "revision" => "b" * 40, "progress_token" => "progress-1" }
+  def output_reference = { "path" => "open/attempt-1/result.json", "size" => 2, "sha256" => "0" * 64 }
+  def log_reference = { "path" => "open/attempt-1.frames", "size" => 4, "sha256" => "1" * 64 }
 
-  def output_reference
-    { "path" => "outputs/attempt-1/result.json", "size" => 2, "sha256" => "0" * 64 }
-  end
-
-  def log_reference
-    { "path" => "logs/attempt-1.frames", "size" => 4, "sha256" => "1" * 64 }
+  def terminal_attempt(repository, launching)
+    claimed = repository.claim(
+      launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+      first_heartbeat_timeout_sec: 30, now: NOW + 1
+    )
+    running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+    repository.terminalize(
+      running, outcome: "succeeded", exit_status: 0,
+      final_checkpoint: checkpoint, output_references: [],
+      log_reference: log_reference, now: NOW + 3
+    )
   end
 end

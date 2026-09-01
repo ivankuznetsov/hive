@@ -120,6 +120,10 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes text, "bin/hive-release-candidate plan --sha FULL_SHA --json"
     assert_includes text, "`dispatch` is the only release-candidate verb that writes to GitHub"
     assert_includes text, "Never execute `next_action.argv`"
+    assert_includes text, "condition_task_history_invalid"
+    assert_includes text, "task_history_invalid"
+    refute_includes text, "repair-projection"
+    refute_includes text, "condition_projection_repair_required"
 
     %w[HIVE_WATCH_INTERVAL HIVE_WATCH_TIMEOUT mapfile].each do |legacy|
       refute_includes text, legacy

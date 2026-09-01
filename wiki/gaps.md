@@ -3,9 +3,22 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Task-journal growth and compaction
+
+`task-journal.jsonl` is append-only and routine reads must validate and fold its
+complete history. The bounded process-local Reader cache avoids repeating that
+work while a journal and marker are unchanged, but the first read after each
+append remains O(history), cache entries retain the folded records in memory,
+and no compaction or retention protocol bounds long-lived journals. In
+particular, high-volume `activity_recorded` timeline events share the authority
+stream even when most do not affect the current condition projection. Moving
+timeline-only activity to a sibling stream or introducing a compaction protocol
+requires a separate design that preserves JSONL as the sole persistent history
+authority.
 
 ## Main-wiki QMD freshness
 
@@ -126,7 +139,7 @@ diagnostic instead of degrading to a generic missing-evidence message. The
 strict six-task OpenCode campaign subsequently completed generation, dual
 three-sample judging, deliberation, validation, and publication. Its original
 token gap is an extraction issue rather than missing provider evidence: Hive
-records OpenCode usage in `.hb/hive-home/usage.db` while redacting raw stream
+records OpenCode usage in `.hb/hive-home/runtime-control-plane.sqlite3` while redacting raw stream
 events. The packaged harness now reads those normalized rows when stream tokens
 are absent. The first OpenRouter-backed Sol
 deliberation also exposed that the pinned npm Codex entrypoint could see a mise
@@ -1105,16 +1118,20 @@ version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
 the candidate blocked. No version choice, tag, publication, deployment, or
 release was authorized.
 
-## Automatic post-update migration needs installed-channel smoke (2026-08-03)
+## Confirmed fleet cutover needs installed-channel smoke (updated 2026-08-30)
 
-Focused source tests prove that brew, AUR, and bash update commands complete
-before the newly resolved Hive binary runs `hive migrate --all`; fleet tests
-prove visible progress, continue-after-project-failure behavior, readable
-errors, and exact recovery commands. No real package-manager installation was
-mutated during this implementation. Before calling the operational path proven
-on every channel, run one disposable installed upgrade for brew, AUR, and bash
-and retain the updater plus migration output. This gap does not weaken the
-local command contract or its deterministic tests.
+Focused source tests prove that brew, AUR, and bash update commands finish
+before the newly resolved Hive binary runs the confirmed, fleet-wide
+`hive migrate --all --yes` cutover. The immediately previous packaged release
+and each enumerated retired writer have a release-candidate test that requires
+real extracted target roots; it remains an honest CI-only skip when those roots
+are absent locally. That test reaches the old Update-to-candidate invocation,
+the candidate's interactive/non-interactive confirmation boundary, activation,
+and exact writer tombstones. No real package-manager installation was mutated
+during this implementation. Before calling every installed channel
+operationally proven, run one disposable installed upgrade for brew, AUR, and
+bash and retain the updater, activation-gate, cutover, and resume output. This
+gap does not weaken the focused command or crash-forward cutover contracts.
 
 ## Provider transport coverage remains intentionally partial (2026-08-11)
 
@@ -1279,7 +1296,7 @@ the source checkout against the live Hivebox registry. That proves the compact
 producer over current task data, but not the final installed dogfood binary plus
 authenticated Omarchy plugin invocation. Keep this gap open until the feature
 PR is deployed and the plugin's unchanged bare status command consumes
-`hive-running-status.v1` below its 1 MiB capture limit.
+`hive-running-status.v2` below its 1 MiB capture limit.
 
 The public fleet-wide v7 status mode is removed, but daemon, bot, TUI, and web
 still share parts of its in-process producer. Daemon and bot temporarily reach

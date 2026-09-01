@@ -493,15 +493,13 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "diagnostic log affordance reads only the receipt-correlated reference" do
-    root = Dir.mktmpdir("hive-web-correlated-log")
-    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
-    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
-    store = Hive::Attempts::Store.new(root: root)
-    writer = store.log_archive.open_writer("receipt-attempt")
+    store = Hive::Attempts::Repository.open_default
+    attempt_id = "receipt-attempt-#{SecureRandom.hex(4)}"
+    writer = store.log_archive.open_writer(attempt_id)
     writer.append("stderr", "exact receipt failure\n")
     writer.close
     reference = Hive::OutputReference.build(
-      store.log_archive.hot_path("receipt-attempt"), root: store.root
+      store.log_archive.hot_path(attempt_id), root: store.root
     )
     newest_dir = stage_dir(@project, "1-inbox").join("..", "..", "logs", @slug)
     newest_dir.mkpath
@@ -570,8 +568,6 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   ensure
     writer&.close unless writer&.closed?
-    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
-    FileUtils.rm_rf(root) if root
   end
 
   test "usage summary and one stable disclosure render semantic coverage without provider cost" do
@@ -964,18 +960,12 @@ class TasksTest < ActionDispatch::IntegrationTest
     post "/tasks/#{@project}/#{@slug}/recover"
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
     assert_match(/\ARecovery queued — request /, flash[:notice])
-    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_request*", "**", "*"))
-               .select { |f| File.file?(f) }
-    payload = queue.filter_map do |path|
-      JSON.parse(File.read(path))
-    rescue JSON::ParserError
-      nil
-    end.find { |entry| entry["slug"] == @slug }
-    refute_nil payload
-    assert_equal "web", payload.fetch("requestor")
-    assert_equal "admitted", payload.dig("recovery", "phase")
-    assert_equal marker_id, payload.fetch("expected_marker_id")
-    refute_equal "markers", payload.fetch("argv")[1],
+    request = runtime_dispatch_repository.recovery_requests.find { |entry| entry.slug == @slug }
+    refute_nil request
+    assert_equal "web", request.requestor
+    assert_equal "admitted", request.recovery.fetch("phase")
+    assert_equal marker_id, request.expected_marker_id
+    refute_equal "markers", request.argv[1],
                  "the web surface must not recreate marker-clear authority"
   end
 
@@ -1179,9 +1169,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
 
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
-    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_requests", "**", "*"))
-               .select { |file| File.file?(file) }
-    assert queue.any? { |file| File.read(file).include?(@slug) },
+    assert runtime_dispatch_requests.any? { |request| request.slug == @slug },
            "the exact task resolver must revalidate the current row instead of trusting a degraded cache"
   end
 
@@ -1191,9 +1179,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     assert_redirected_to "/tasks/#{@project}/#{@slug}",
                          "a queued dispatch returns to the task page"
-    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_requests", "**", "*"))
-               .select { |f| File.file?(f) }
-    assert queue.any? { |f| File.read(f).include?(@slug) },
+    assert runtime_dispatch_requests.any? { |request| request.slug == @slug },
            "the dispatch request must land in the daemon queue"
   end
 

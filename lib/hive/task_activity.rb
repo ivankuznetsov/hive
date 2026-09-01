@@ -3,10 +3,10 @@ require "digest"
 require "fileutils"
 require "time"
 require "hive/atomic_file"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/secret_patterns"
 require "hive/task_journal"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_workspace"
 
 module Hive
@@ -41,9 +41,9 @@ module Hive
     # Legacy tasks deliberately return nil rather than acquiring guessed
     # authority from timestamps, markers, or process state.
     def self.for_task(task, attempt_store: nil, clock: -> { Time.now.utc })
-      attempt_store ||= Hive::Attempts::Store.new
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
+      attempt_store ||= Hive::Attempts::Repository.open_default
+      projection = Hive::TaskProjection::Reader.new(
+        task_folder: task.folder, task: task
       ).read.to_h
       attempt_id = projection.dig("identity", "attempt_id").to_s
       return nil if attempt_id.empty?
@@ -76,7 +76,7 @@ module Hive
       return nil unless context && !context.attempt_id.to_s.empty? &&
                         !context.task_generation.nil?
 
-      attempt_store ||= Hive::Attempts::Store.new
+      attempt_store ||= Hive::Attempts::Repository.open_default
       workflow = task.respond_to?(:workflow) ? task.workflow : nil
       workflow = workflow.id if workflow.respond_to?(:id)
       new(
@@ -354,7 +354,6 @@ module Hive
         },
         idempotency_key: operation_id
       )
-      refresh_projection_checkpoint
       result
     rescue Hive::TaskJournal::Conflict => e
       raise Conflict, safe_error(e)
@@ -367,23 +366,6 @@ module Hive
     end
 
     private
-
-    # The journal remains lifecycle authority; this checkpoint only lets the
-    # bounded Web reader prove that it consumed the complete authoritative
-    # prefix. Refresh it after every successful append so a newly admitted
-    # task does not remain permanently degraded until an unrelated projection
-    # rebuild happens. A checkpoint failure cannot turn an already-durable
-    # activity into a failed mutation acknowledgement.
-    def refresh_projection_checkpoint
-      return unless @writer.respond_to?(:attempt_store) && @writer.attempt_store
-
-      Hive::TaskProjection::Store.new(
-        task_folder: task_folder, attempt_store: @writer.attempt_store
-      ).rebuild!
-    rescue StandardError => e
-      warn "[hive] task workspace checkpoint refresh failed: #{e.class}"
-      nil
-    end
 
     def reconciliation_verdict(value)
       if value.is_a?(Hash)
@@ -649,9 +631,7 @@ module Hive
       # second event for the same operation id.
       def restore_authoritative!
         path = File.join(@activity.task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
-        events = Hive::TaskProjection.read_journal(
-          path, attempt_store: @activity.attempt_store
-        ).select do |event|
+        events = Hive::TaskProjection.read_journal(path).select do |event|
           event.dig("payload", "idempotency_key") == operation_id
         end
         unless events.length == 1 && authoritative_event_matches?(events.first)

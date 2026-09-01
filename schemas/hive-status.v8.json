@@ -1,0 +1,704 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:status:v8",
+  "title": "hive status output (v8)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "generated_at", "projects"],
+      "properties": {
+        "schema": { "const": "hive-status" },
+        "schema_version": { "const": 8 },
+        "ok": { "const": true },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "partial": { "type": "boolean" },
+        "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-status" },
+        "schema_version": { "const": 8 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
+        "id": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "hive_state_path", "tasks"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "hive_state_path": { "type": "string" },
+        "error": {
+          "type": "string",
+          "enum": ["missing_project_path", "not_initialised", "project_load_failed"]
+        },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } },
+        "config_summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stages"],
+          "properties": {
+            "stages": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ensure_clean_on_exit"],
+              "properties": {
+                "ensure_clean_on_exit": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        "legacy_stage_dirs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stage_dir", "task_count"],
+            "properties": {
+              "stage_dir": { "type": "string" },
+              "task_count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "legacy_migrate_command": { "type": ["string", "null"] },
+        "hidden_archived_task_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "AdmissionError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code", "offending_ref", "safe_correction"],
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "dependency_metadata_unreadable",
+            "dependency_metadata_invalid",
+            "dependency_reference_invalid",
+            "dependency_task_missing",
+            "dependency_self_reference",
+            "dependency_cycle",
+            "dependency_gate_unknown",
+            "dependency_gate_unreachable",
+            "dependency_project_unknown",
+            "dependency_repository_identity_missing",
+            "dependency_repository_mismatch",
+            "plan_dependency_invalid",
+            "plan_dependency_missing",
+            "plan_dependency_mismatch",
+            "dependency_validation_failed"
+          ]
+        },
+        "offending_ref": { "type": "string" },
+        "safe_correction": { "type": "string" }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage", "slug", "id", "display_name", "depends_on", "blocked_by",
+        "dependency_stage", "blocked", "admission_error", "folder", "state_file",
+        "worktree_path", "pr_url", "marker", "attrs", "task_history_invalid", "mtime", "observation_mtime", "folder_mtime",
+        "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
+        "attempt_id", "task_generation",
+        "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
+        "condition_task_generation",
+         "commit_generation", "current_attempt", "action_receipt_id", "conditions", "condition_history",
+         "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
+         "shadow_audit", "condition_warning", "plan_review", "auto_residue", "unanswered_questions", "action",
+         "action_label", "suggested_command", "outcomes",
+        "next_action", "diagnostic"
+      ],
+      "properties": {
+        "stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "slug": { "type": "string" },
+        "id": { "type": ["integer", "null"] },
+        "display_name": { "type": ["string", "null"] },
+        "workflow": { "type": ["string", "null"] },
+        "depends_on": { "type": ["string", "null"] },
+        "blocked_by": { "type": ["string", "null"] },
+        "dependency_stage": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        },
+        "blocked": { "type": "boolean" },
+        "admission_error": {
+          "oneOf": [
+            { "$ref": "#/$defs/AdmissionError" },
+            { "type": "null" }
+          ]
+        },
+        "folder": { "type": "string" },
+        "state_file": { "type": "string" },
+        "worktree_path": { "type": ["string", "null"] },
+        "pr_url": { "type": ["string", "null"] },
+        "marker": {
+          "type": "string",
+          "enum": [
+            "none", "waiting", "complete", "agent_working", "manual_steering",
+            "execute_waiting", "execute_complete", "execute_stale", "review_working",
+            "review_waiting", "review_ci_stale", "review_stale", "review_complete",
+            "review_error", "error"
+          ]
+        },
+        "attrs": { "type": "object", "additionalProperties": true },
+        "task_history_invalid": { "type": "boolean" },
+        "held": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason", "provider", "retry_after"],
+          "properties": {
+            "reason": { "const": "quota" },
+            "provider": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" },
+            "retry_after": { "type": ["string", "null"], "format": "date-time" }
+          }
+        },
+        "mtime": { "type": "string", "format": "date-time" },
+        "observation_mtime": { "type": "string", "format": "date-time" },
+        "folder_mtime": { "type": "string", "format": "date-time" },
+        "age_seconds": { "type": "integer", "minimum": 0 },
+        "claude_pid": { "type": ["integer", "null"], "minimum": 1 },
+        "claude_pid_alive": { "type": ["boolean", "null"] },
+        "live_task_lock": { "type": "boolean" },
+        "attempt_id": {
+          "description": "Durable attempt projected into the compatibility lock, or null for legacy work.",
+          "type": ["string", "null"]
+        },
+        "task_generation": {
+          "description": "Durable task-generation owner projected into the compatibility lock, or null for legacy work.",
+          "type": ["string", "null"]
+        },
+        "task_lock_pid": { "type": ["integer", "null"], "minimum": 1 },
+        "task_lock_process_start_time": { "type": ["string", "null"] },
+        "task_lock_id": { "type": ["string", "null"] },
+         "condition_task_generation": {
+          "description": "Monotonic condition input epoch folded from the task journal.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "commit_generation": {
+          "description": "Monotonic exact-HEAD revision within the condition task generation.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "current_attempt": {
+          "description": "Current attempt selected from task-journal history, or null before handoff.",
+          "type": ["string", "null"]
+        },
+        "action_receipt_id": {
+          "description": "Exact current semantic receipt bound into an operator action, or null.",
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "conditions": {
+          "description": "Current condition facts selected by generation, attempt family, and commit scope.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_history": {
+          "description": "Historical and superseded condition facts retained for audit.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "evidence": {
+          "description": "Typed evidence referenced by current condition facts.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "closure": {
+          "description": "Validated evidence-bound closure receipt, invalid-receipt blocker, or null.",
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "condition_overrides": {
+          "description": "Latest durable forced condition-gate overrides, retained in full in the journal.",
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_gate": {
+          "description": "Canonical gate evaluation for the row's condition-capable transition, or null.",
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "condition_migration": {
+          "description": "Configured/effective marker-shadow-condition authority selection, or null for invalid rows.",
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "condition_provenance": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "shadow_audit": {
+          "description": "Read-only parity evidence and explicit promotion-readiness summary.",
+          "type": "object",
+          "additionalProperties": true
+        },
+         "condition_warning": {
+           "description": "Operator-visible shadow divergence warning, or null.",
+           "type": ["string", "null"]
+         },
+        "plan_review": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/PlanReviewSummary" }
+          ]
+        },
+        "implementation_identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/ImplementationIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "auto_residue": {
+          "description": "CleanExit commits made during the current stage invocation, or null.",
+          "oneOf": [
+            { "$ref": "#/$defs/AutoResidue" },
+            { "type": "null" }
+          ]
+        },
+        "unanswered_questions": { "type": "integer", "minimum": 0 },
+        "action": {
+          "type": "string",
+          "enum": [
+            "ready_to_brainstorm", "ready_to_plan", "ready_to_develop",
+            "outcome_evidence_rework",
+            "ready_to_open_pr", "ready_for_review", "ready_to_artifacts",
+            "ready_to_finalize", "ready_to_archive", "ready_to_advance",
+            "ready_to_run", "recover_draft_pr", "review_parked", "needs_input", "recover_execute",
+            "recover_review", "agent_running", "archived", "manual_steering",
+            "plan_reviewing", "plan_review_retry", "plan_review_decision",
+            "plan_review_degraded", "plan_review_unsupported", "plan_review_blocked",
+            "patrol_fix_publication_blocked", "error", "admission_error"
+          ]
+        },
+        "action_label": { "type": "string" },
+        "suggested_command": { "type": ["string", "null"] },
+        "outcomes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HumanOutcome" }
+        },
+        "next_action": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+            }
+          }
+        },
+        "diagnostic": {
+          "oneOf": [
+            { "$ref": "#/$defs/Diagnostic" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "PlanReviewSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicable", "review_id", "version", "observation_digest", "task_generation", "plan_digest",
+        "policy_fingerprint", "computed_level", "effective_level", "state", "outcome",
+        "degraded", "degradation_reason", "attempt_count", "current_attempt_id",
+        "coverage_counts", "finding_counts", "blockers", "blocker_owner", "blocker_reason",
+        "required_action", "retry_at", "routes", "artifacts", "freshness", "execution_allowed"
+      ],
+      "properties": {
+        "applicable": { "const": true },
+        "review_id": { "type": ["string", "null"], "pattern": "^pr-[0-9a-f]{64}$" },
+        "version": { "type": ["integer", "null"], "minimum": 1 },
+        "observation_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "task_generation": { "type": ["string", "integer", "null"] },
+        "plan_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "policy_fingerprint": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "computed_level": { "enum": ["skip", "standard", "mandatory", null] },
+        "effective_level": { "enum": ["skip", "standard", "mandatory", null] },
+        "state": {
+          "enum": [
+            "uninitialized", "skipped", "reviewing", "retry_scheduled", "awaiting_decision",
+            "revising", "verifying", "cleared", "degraded_cleared", "blocked"
+          ]
+        },
+        "outcome": { "enum": ["skipped", "cleared", "degraded_cleared", "blocked", null] },
+        "degraded": { "type": "boolean" },
+        "degradation_reason": {
+          "enum": ["partial_coverage", "review_unavailable", "terminal_failure", null]
+        },
+        "attempt_count": { "type": "integer", "minimum": 0 },
+        "current_attempt_id": {
+          "type": ["string", "null"], "pattern": "^pra-[0-9a-f]{64}$"
+        },
+        "coverage_counts": { "$ref": "#/$defs/PlanReviewCoverageCounts" },
+        "finding_counts": { "$ref": "#/$defs/PlanReviewFindingCounts" },
+        "blockers": {
+          "type": "array", "items": { "$ref": "#/$defs/PlanReviewBlocker" }
+        },
+        "blocker_owner": {
+          "enum": ["agent", "operator", "provider", "reviewer", "planner", "scheduler", "hive", "none", "unknown"]
+        },
+        "blocker_reason": { "type": ["string", "null"] },
+        "required_action": { "type": ["string", "object", "null"] },
+        "retry_at": { "type": ["string", "null"], "format": "date-time" },
+        "routes": { "type": "array", "items": { "$ref": "#/$defs/PlanReviewRoute" } },
+        "artifacts": {
+          "type": "object", "additionalProperties": { "$ref": "#/$defs/PlanReviewArtifact" }
+        },
+        "freshness": { "$ref": "#/$defs/PlanReviewFreshness" },
+        "execution_allowed": { "type": "boolean" }
+      }
+    },
+    "PlanReviewCoverageCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "completed", "failed", "unsupported", "waived"],
+      "properties": {
+        "requested": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "unsupported": { "type": "integer", "minimum": 0 },
+        "waived": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PlanReviewFindingCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "open", "approved", "answered", "incorporated", "verified", "resolved", "waived",
+        "total", "open_gated", "open_manual", "fyi"
+      ],
+      "properties": {
+        "open": { "type": "integer", "minimum": 0 },
+        "approved": { "type": "integer", "minimum": 0 },
+        "answered": { "type": "integer", "minimum": 0 },
+        "incorporated": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "integer", "minimum": 0 },
+        "resolved": { "type": "integer", "minimum": 0 },
+        "waived": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "open_gated": { "type": "integer", "minimum": 0 },
+        "open_manual": { "type": "integer", "minimum": 0 },
+        "fyi": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PlanReviewBlocker": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["owner", "reason"],
+          "properties": {
+            "owner": { "type": "string" }, "reason": { "type": "string" },
+            "coverage": { "type": "string" },
+            "finding_fingerprint": { "type": "string", "pattern": "^prf-[0-9a-f]{64}$" },
+            "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "diagnostic": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "PlanReviewRouteIdentity": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" }, "model": { "type": "string" },
+        "family": { "type": ["string", "null"] }, "effort": { "type": "string" },
+        "route": { "type": "string" }, "reconstructed": { "type": "boolean" }
+      }
+    },
+    "PlanReviewRoute": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "requested", "actual", "independence_verified"],
+      "properties": {
+        "role": { "type": "string" },
+        "requested": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
+        "actual": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
+        "capability_result": { "type": ["string", "null"] },
+        "diagnostic": { "type": ["string", "null"] },
+        "diagnostic_source": { "enum": ["adapter", "parser", "reviewer", "runner"] },
+        "independence_verified": { "type": "boolean" },
+        "independence_reason": { "type": ["string", "null"] },
+        "attempt_id": { "type": ["string", "null"], "pattern": "^pra-[0-9a-f]{64}$" },
+        "outcome": {
+          "enum": ["success", "partial_coverage", "unsupported", "provider_limit", "timeout", "retryable_failure", "terminal_failure", null]
+        },
+        "retry_at": { "type": ["string", "null"], "format": "date-time" },
+        "recovery_reset": { "type": "boolean" },
+        "identity_contract_recovery": { "type": "boolean" },
+        "identity_contract_version": { "type": "integer", "minimum": 1 },
+        "planner_identity_contract_recovery": { "type": "boolean" },
+        "planner_identity_contract_version": { "type": "integer", "minimum": 1 },
+        "selected_lenses_contract_recovery": { "type": "boolean" },
+        "selected_lenses_contract_version": { "type": "integer", "minimum": 1 },
+        "residual_evidence_contract_recovery": { "type": "boolean" },
+        "residual_evidence_contract_version": { "type": "integer", "minimum": 1 },
+        "planner_revision_contract_version": { "type": "integer", "minimum": 1 },
+        "contract_upgrade_recovery": { "type": "boolean" },
+        "transient_series_recovery": { "type": "boolean" },
+        "transient_series": { "type": "integer", "minimum": 1 },
+        "capability_probe_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "capability_probe_count": { "type": "integer", "minimum": 1 },
+        "verification_followup": { "type": "boolean" },
+        "incomplete_attestation_retry": { "type": "boolean" },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["candidate", "status"],
+            "properties": {
+              "candidate": { "$ref": "#/$defs/PlanReviewRouteIdentity" },
+              "status": { "type": "string" },
+              "diagnostic": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "PlanReviewArtifact": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PlanReviewFreshness": {
+      "type": "object", "additionalProperties": false, "required": ["status", "reason"],
+      "properties": {
+        "status": { "enum": ["current", "stale", "not_initialized", "invalid", "unknown"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "AutoResidue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commits", "path_count", "paths", "latest_head", "latest_reason", "latest_at"],
+      "properties": {
+        "commits": { "type": "integer", "minimum": 1 },
+        "path_count": { "type": "integer", "minimum": 0 },
+        "paths": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string" }
+        },
+        "latest_head": { "type": ["string", "null"] },
+        "latest_reason": { "type": "string" },
+        "latest_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "complete", "artifact", "to"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]*$" }
+      }
+    },
+    "ImplementationIdentity": {
+      "description": "Generation-scoped implementation ownership projected from the task journal. Status reads are pure: preview entries describe the policy that would be used if the stage launched now, while resolved entries came from launch events.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "pending", "stages"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "boolean" },
+        "stages": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "execute": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "open_pr": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "review.fix": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "review.ci": { "$ref": "#/$defs/ImplementationIdentityStage" }
+          }
+        }
+      }
+    },
+    "ImplementationIdentityStage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider", "model", "requested_effort", "effective_effort",
+            "effort_supported", "source", "originating_attempt", "resolved_attempt", "status"
+          ],
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "requested_effort": { "type": ["string", "null"] },
+            "effective_effort": { "type": ["string", "null"] },
+            "effort_supported": { "type": "boolean" },
+            "source": {
+              "type": "string",
+              "enum": ["persisted_execute", "explicit_override", "legacy_backfill"]
+            },
+            "originating_attempt": { "type": ["string", "null"] },
+            "resolved_attempt": { "type": ["string", "null"] },
+            "observed_attempt": { "type": ["string", "null"] },
+            "requested_backend": { "type": "string", "minLength": 1 },
+            "requested_model": { "type": "string", "minLength": 1 },
+            "actual_backend": { "type": ["string", "null"] },
+            "actual_model": { "type": ["string", "null"] },
+            "route_resolution_status": {
+              "type": "string",
+              "enum": ["unobserved", "matched", "resolved_differently"]
+            },
+            "outcome_kind": {
+              "type": "string",
+              "enum": [
+                "completed", "authentication_failure", "configuration_failure",
+                "cli_failure", "malformed_output", "cancelled", "timed_out"
+              ]
+            },
+            "usage": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": [
+                "input", "output", "cache_read", "cache_write", "reasoning", "cost"
+              ],
+              "properties": {
+                "input": { "type": ["integer", "null"], "minimum": 0 },
+                "output": { "type": ["integer", "null"], "minimum": 0 },
+                "cache_read": { "type": ["integer", "null"], "minimum": 0 },
+                "cache_write": { "type": ["integer", "null"], "minimum": 0 },
+                "reasoning": { "type": ["integer", "null"], "minimum": 0 },
+                "cost": { "type": ["number", "null"], "minimum": 0 }
+              }
+            },
+            "status": { "type": "string", "enum": ["resolved", "preview"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "source", "resolution_error"],
+          "properties": {
+            "status": { "const": "resolution_error" },
+            "source": {
+              "type": "string",
+              "enum": ["persisted_execute", "explicit_override", "legacy_backfill"]
+            },
+            "resolution_error": { "type": "string", "minLength": 1, "maxLength": 240 }
+          }
+        }
+      ]
+    },
+    "OutputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "AttemptDiagnosticProvider": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "failure_class", "retry_hint", "provenance"],
+          "properties": {
+            "name": { "type": ["string", "null"], "maxLength": 128 },
+            "failure_class": { "type": ["string", "null"], "maxLength": 128 },
+            "retry_hint": { "type": ["string", "null"], "maxLength": 128 },
+            "provenance": { "type": ["string", "null"], "maxLength": 128 }
+          }
+        }
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary", "detail", "source", "source_path", "artifact_paths",
+        "generated_by", "marker_signature", "suggested_next_action", "updated_at"
+      ],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 120 },
+        "detail": { "type": "string", "maxLength": 4000 },
+        "source": { "type": "string", "enum": ["marker", "artifact"] },
+        "source_path": { "type": ["string", "null"] },
+        "artifact_paths": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+        "generated_by": { "type": "string", "enum": ["local", "claude", "codex", "pi", "grok", "opencode"] },
+        "marker_signature": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "suggested_next_action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "command"],
+              "properties": {
+                "kind": { "type": "string", "enum": ["retry", "clear_marker", "manual_fix"] },
+                "command": { "type": ["string", "null"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 128 },
+        "owner": { "enum": ["agent", "provider", "hive", "operator", "unknown"] },
+        "workflow": { "const": "patrol_fix" },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "agent_reason": { "type": ["string", "null"], "maxLength": 128 },
+        "exit_code": { "type": ["integer", "null"] },
+        "timed_out": { "type": "boolean" },
+        "cancelled": { "type": "boolean" },
+        "signal": { "type": ["string", "null"], "maxLength": 128 },
+        "provider": { "$ref": "#/$defs/AttemptDiagnosticProvider" },
+        "attempt_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "correlation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "task_generation": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "diagnostic_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "diagnostic_reference": { "$ref": "#/$defs/OutputReference" },
+        "log_reference": { "$ref": "#/$defs/OutputReference" },
+        "report_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "report_parser": { "type": ["string", "null"], "maxLength": 128 },
+        "firewall_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "firewall_restoration": { "type": ["string", "null"], "maxLength": 128 },
+        "custody_status": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "transport_status": { "enum": ["valid", "missing", "oversized", "malformed", "duplicate", "unavailable"] },
+        "redaction_status": { "enum": ["applied", "omitted", "failed"] },
+        "secret_policy_version": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

@@ -160,7 +160,9 @@ repaired indexes, answer admission queries.
 Finalization seals every receipt log and output through `PayloadStore#seal`
 with the receipt's expected size and SHA-256. `payload_references` stores the
 canonical content address; repeated publication verifies and reuses it, and a
-missing or corrupt sealed object fails closed. Original receipt references
+missing or corrupt sealed object fails closed. Empty logs and outputs are valid
+payloads: their shared empty content address verifies, reuses, and reads back as
+zero bytes without interrupting finalization. Original receipt references
 remain API-stable: repository and correlated-log readers resolve their digest
 to the canonical row. A SQL keyset cursor examines at most 512 retained logs
 per maintenance pass, and expiry removes shared content only after no sealed or

@@ -196,7 +196,7 @@ module Hive
         File.open(path, flags) do |file|
           before = file.stat
           same_inode!(before, path_status, path)
-          bytes = file.read(size + 1)
+          bytes = file.read(size + 1) || "".b
           after = file.stat
           after_path = File.lstat(path)
           unless same_snapshot?(before, after) && same_snapshot?(before, after_path)

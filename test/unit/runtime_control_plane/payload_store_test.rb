@@ -21,6 +21,22 @@ class RuntimeControlPlanePayloadStoreTest < Minitest::Test
     end
   end
 
+  def test_empty_payload_seals_reuses_and_round_trips
+    with_tmp_dir do |root|
+      subject = store(root)
+      first = subject.write_open(attempt_id: "attempt-1", name: "worker.frames", bytes: "")
+      reference = subject.seal(first)
+
+      assert_equal Digest::SHA256.hexdigest(""), reference.fetch("sha256")
+      assert_equal 0, reference.fetch("size")
+      assert_equal "", subject.read_sealed(reference)
+
+      second = subject.write_open(attempt_id: "attempt-2", name: "worker.frames", bytes: "")
+      assert_equal reference, subject.seal(second)
+      assert_equal "", subject.read_sealed(reference)
+    end
+  end
+
   def test_traversal_symlinks_and_hardlinks_are_rejected
     with_tmp_dir do |root|
       store = store(root)

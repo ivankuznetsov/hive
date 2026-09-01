@@ -16,7 +16,7 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
     end
 
     def json_payload(_registered_projects)
-      return command.active_payload([ project ], now: now) if active
+      return command.json_payload([ project ], now: now, exclude_archived: true) if active
 
       command.json_payload([ project ], now: now)
     end
@@ -73,7 +73,7 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
         daemon_projects = consumer.send(:extract_projects, ordinary)
         daemon_rows = consumer.send(:extract_rows, ordinary)
         assert_equal 1, daemon_projects.size
-        refute_respond_to daemon_projects.fetch(0), :hidden_archived_task_count
+        assert_equal 0, daemon_projects.fetch(0).hidden_archived_task_count
         assert_equal ordinary_slugs, daemon_rows.map(&:slug).sort
 
         tui = Hive::Tui::Snapshot.from_payload(ordinary, archive_payload: archive)

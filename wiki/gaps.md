@@ -3,9 +3,22 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Task-journal growth and compaction
+
+`task-journal.jsonl` is append-only and routine reads must validate and fold its
+complete history. The bounded process-local Reader cache avoids repeating that
+work while a journal and marker are unchanged, but the first read after each
+append remains O(history), cache entries retain the folded records in memory,
+and no compaction or retention protocol bounds long-lived journals. In
+particular, high-volume `activity_recorded` timeline events share the authority
+stream even when most do not affect the current condition projection. Moving
+timeline-only activity to a sibling stream or introducing a compaction protocol
+requires a separate design that preserves JSONL as the sole persistent history
+authority.
 
 ## Main-wiki QMD freshness
 

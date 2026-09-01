@@ -291,6 +291,39 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
+  def test_stage_resolution_and_route_observation_each_read_one_projection_snapshot
+    with_identity_attempt(
+      intended_stage: "6-review", attempt_id: "review-opencode-single-read"
+    ) do |task, attempt_store, attempt|
+      cfg = execute_config("opencode", "anthropic/claude-sonnet-4-5")
+      seed_execute_identity(task, attempt_store, cfg)
+      history_reader = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task)
+      original_read = history_reader.method(:read)
+      reads = 0
+      history_reader.define_singleton_method(:read) do |**kwargs|
+        reads += 1
+        original_read.call(**kwargs)
+      end
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: cfg, attempt_store: attempt_store, history_reader: history_reader
+      )
+
+      with_attempt_context(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) do
+        selected = store.resolve_stage!("review.fix")
+        store.observe_route!(
+          stage: "review.fix", requested_route: selected.model,
+          actual_route: nil, resolution_status: :unobserved,
+          outcome_kind: :configuration_failure, usage: nil
+        )
+      end
+
+      assert_equal 2, reads
+    end
+  end
+
   def test_downstream_resolution_is_journaled_before_launch_and_matches_native_arguments
     with_identity_attempt(intended_stage: "5-open-pr", attempt_id: "open-pr-attempt") do |task, attempt_store, attempt|
       execute_cfg = execute_config("codex", "gpt-5.6-sol")

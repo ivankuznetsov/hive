@@ -98,6 +98,26 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
+  def test_successful_reconstruction_does_not_re_read_the_appended_journal
+    with_attempt_history do |task, store, current|
+      reads = 0
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
+        reads += 1
+        { "implementation_identity" => {} }
+      end
+      reconstructor = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(task.project_root), attempt_store: store,
+        history_reader: history_reader
+      )
+
+      selection = with_context(current) { reconstructor.reconstruct! }
+
+      assert_equal "legacy_backfill", selection.source
+      assert_equal 1, reads
+    end
+  end
+
   def test_structured_history_is_bound_to_project_task_and_generation
     with_attempt_history do |task, store, current|
       matching = running_attempt(store, "matching-execute", "4-execute", "codex")

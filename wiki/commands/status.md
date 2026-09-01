@@ -156,6 +156,11 @@ task-workspace presentation: they may truncate detail, but cannot permanently
 disable a valid long-running task. New tasks begin with no journal; the first
 authoritative event creates it.
 
+Unchanged routine reads reuse a bounded process-local fold keyed by the
+journal's path, file identity, and marker identity. The reader still acquires
+the nonblocking shared journal lock before serving a hit; a busy writer never
+receives stale cached state, and an append or replacement forces a new fold.
+
 If the routine read cannot prove one task's current state, status emits a
 synthetic `ERROR` row with reason `condition_task_history_invalid`, owner
 `operator`, and the journal diagnostic under
@@ -164,10 +169,11 @@ synthetic `ERROR` row with reason `condition_task_history_invalid`, owner
 Operational status classifies only that row as `needs_repair`; healthy rows
 remain available and the daemon may continue unrelated work. The state is
 recomputed on every scan and is never written as a marker. There is no repair
-command or derived cache to rebuild: restore or correct the journal itself.
+command or persisted derived cache to rebuild: restore or correct the journal
+itself.
 
-If a writer currently owns the journal lock, the bounded scan returns
-immediately with `condition_task_history_unavailable` and
+If a writer currently owns the journal lock, the routine read returns
+immediately in `busy` state with `condition_task_history_unavailable` and
 `journal_reason: journal_lock_busy`. This is transient scheduler-owned state,
 not corruption; the next scan retries it while other tasks remain visible.
 

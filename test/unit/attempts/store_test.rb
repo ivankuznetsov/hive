@@ -139,6 +139,48 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_live_attempt_for_returns_only_the_exact_task_attempt
+    with_repository do |repository|
+      expected = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      repository.create_launching(
+        **identity(
+          attempt_id: "attempt-2", request_id: "request-2", task_id: "43",
+          task_slug: "other-task", task_generation: "generation-2"
+        ),
+        launch_timeout_sec: 30, now: NOW
+      )
+
+      assert_equal expected.attempt_id,
+                   repository.live_attempt_for(task_id: "42").attempt_id
+      assert_nil repository.live_attempt_for(task_id: "missing")
+    end
+  end
+
+  def test_live_attempt_for_includes_terminal_attempt_pending_publication
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      terminal = terminal_attempt(repository, launching)
+
+      assert terminal.final?
+      assert_equal terminal.attempt_id,
+                   repository.live_attempt_for(task_id: "42").attempt_id
+      assert_nil repository.live_attempt_for(task_id: "unrelated")
+    end
+  end
+
+  def test_live_attempt_for_translates_database_errors
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_match(/live attempt query failed/, error.message)
+    end
+  end
+
   def test_immediate_transaction_does_not_over_reserve_the_final_global_slot
     with_repository do |repository|
       limits = { max_global: 1, max_per_project: 2, max_daily: 10 }

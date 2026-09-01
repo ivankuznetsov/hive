@@ -6,7 +6,7 @@ tags: [task-journal, status, attempts, simplification]
 
 - Made `task-journal.jsonl` the sole persistent task-history authority. Status,
   task detail, closure, recovery, and generation checks now take a shared lock
-  and fold the bounded journal directly in memory.
+  and fold the complete journal directly in memory.
 - Removed `task-projection.json`, `task-projection.checkpoint.json`, the
   projection repair command/schema, checkpoint refresh/repair paths, and
   SQLite-dependent historical replay. Invalid history now fails only its task
@@ -20,7 +20,7 @@ tags: [task-journal, status, attempts, simplification]
 - Treat an absent journal as an empty stream, while malformed or truncated
   JSONL remains invalid. A live admitted attempt with missing history still
   blocks its condition transition using the SQLite live-attempt authority.
-  A busy writer makes bounded scans return immediately as transient
+  A busy writer makes routine scans return immediately as transient
   scheduler-owned unavailability rather than stalling the fleet or reporting
   corruption.
 - Kept routine scheduler folds complete while limiting only task-workspace

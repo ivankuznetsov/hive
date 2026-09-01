@@ -643,6 +643,7 @@ module Hive
           in [ "unavailable", _ ] then "unavailable"
           in [ "stale", _ ] then "stale"
           in [ _, "stale" ] then "stale"
+          in [ _, "busy" ] then "unavailable"
           in [ _, "partial" ] then "partial"
           else "current"
           end

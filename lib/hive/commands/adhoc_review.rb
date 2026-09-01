@@ -5,13 +5,11 @@ require "time"
 require "yaml"
 require "hive/config"
 require "hive/gh"
-require "hive/markers"
 require "hive/pr"
 require "hive/task_counter"
 require "hive/task"
 require "hive/task_journal"
 require "hive/task_meta"
-require "hive/task_projection/reader"
 require "hive/workflows"
 require "hive/worktree"
 
@@ -261,16 +259,15 @@ module Hive
         materialized = materialize(project_root, slug, pr_number)
         verify_head!(pr_number, metadata, materialized)
         write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
-        initialize_projection!(task_folder, materialized, now)
+        initialize_journal!(task_folder, materialized, now)
         task_folder
       rescue StandardError
         cleanup_failed_task!(project_root, slug, pr_number, task_folder)
         raise
       end
 
-      def initialize_projection!(task_folder, materialized, now)
+      def initialize_journal!(task_folder, materialized, now)
         task = Hive::Task.new(task_folder)
-        marker = Hive::Markers.current(task.state_file)
         Hive::TaskJournal::Writer.new(
           task_folder: task_folder, clock: -> { now }
         ).append(
@@ -289,9 +286,6 @@ module Hive
           } ],
           provenance: { "source" => "ad_hoc_review" },
           payload: {}
-        )
-        Hive::TaskProjection::Reader.new(task_folder: task_folder, task: task).read(
-          marker: marker
         )
       end
 

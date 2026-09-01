@@ -312,7 +312,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       error = assert_raises(Hive::TaskProjection::InvalidJournal) do
         Hive::Conditions::TransitionGuard.audit_force!(
           task: task, projection: projection, history_reader: history_reader,
-          result: result, source: "approve"
+          result: result, source: "approve", repository: Object.new
         )
       end
       assert_includes error.message, "cannot identify its durable attempt"

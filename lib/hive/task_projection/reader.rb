@@ -11,6 +11,11 @@ module Hive
     # protocol: the journal is the task-history authority and the projection is
     # disposable command output.
     class Reader
+      ROUTINE_CACHE_MAX_ENTRIES = 512
+      ROUTINE_CACHE_MAX_SOURCE_BYTES = 64 * 1024 * 1024
+      ROUTINE_CACHE = {}
+      ROUTINE_CACHE_MUTEX = Mutex.new
+
       BoundedRead = Data.define(
         :projection, :state, :diagnostics, :truncated, :journal_cursor,
         :journal_records
@@ -43,7 +48,7 @@ module Hive
         replay(Hive::TaskProjection.replay_journal(journal_snapshot), marker: marker)
       end
 
-      def read_routine(marker: nil) = bounded_replay(marker: marker)
+      def read_routine(marker: nil) = bounded_replay(marker: marker, memoize: true)
 
       def read_bounded(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
                        journal_suffix_max_bytes: nil, journal_event_limit: nil)
@@ -54,24 +59,32 @@ module Hive
 
       private
 
-      def bounded_replay(marker:, byte_limit: nil, event_limit: nil)
-        bytes = journal_snapshot(limit: byte_limit, nonblock: true)
+      def bounded_replay(marker:, byte_limit: nil, event_limit: nil, memoize: false)
+        cached, cache_key, bytes = if memoize
+          routine_snapshot(marker)
+        else
+          [ nil, nil, journal_snapshot(limit: byte_limit, nonblock: true) ]
+        end
+        return cached if cached
+
         records = non_empty_line_count(bytes)
         if event_limit && records > event_limit
-          raise Hive::TaskProjection::InvalidJournal,
+          raise Hive::TaskProjection::JournalTooLarge,
                 "task journal has #{records} events (limit #{event_limit})"
         end
         receipt = Hive::TaskProjection.replay_journal(bytes)
-        BoundedRead.new(
+        result = BoundedRead.new(
           projection: replay(receipt, marker: marker),
           state: "current",
           diagnostics: [], truncated: false,
           journal_cursor: receipt.cursor,
           journal_records: receipt.records
         )
+        routine_cache_store(cache_key, result) if cache_key
+        result
       rescue Hive::TaskProjection::JournalLockBusy => error
         BoundedRead.new(
-          projection: nil, state: "partial",
+          projection: nil, state: "busy",
           diagnostics: [ {
             "source" => "task_journal",
             "reason" => "journal_lock_busy",
@@ -80,10 +93,16 @@ module Hive
           } ],
           truncated: false, journal_cursor: 0, journal_records: []
         )
+      rescue Hive::TaskProjection::JournalTooLarge => error
+        invalid_read(error, truncated: true, cache_key: cache_key)
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              JSON::ParserError, KeyError, TypeError, ArgumentError,
              SystemCallError, IOError => error
-        BoundedRead.new(
+        invalid_read(error, truncated: false, cache_key: cache_key)
+      end
+
+      def invalid_read(error, truncated:, cache_key: nil)
+        result = BoundedRead.new(
           projection: nil, state: "invalid",
           diagnostics: [ {
             "source" => "task_journal",
@@ -91,9 +110,10 @@ module Hive
             "message" => error.message,
             "details" => { "error_class" => error.class.name }
           } ],
-          truncated: error.message.include?("limit"), journal_cursor: 0,
-          journal_records: []
+          truncated: truncated, journal_cursor: 0, journal_records: []
         )
+        routine_cache_store(cache_key, result) if cache_key
+        result
       end
 
       def replay(receipt, marker:)
@@ -110,13 +130,25 @@ module Hive
         with_read_lock(nonblock: nonblock) { journal_bytes(limit: limit) }
       end
 
+      def routine_snapshot(marker)
+        with_read_lock(nonblock: true) do
+          journal = open_regular(journal_path, "task journal", missing: true)
+          identity = journal ? file_identity(journal.stat) : [ :missing ].freeze
+          cache_key = routine_cache_key(identity, marker)
+          cached = routine_cache_fetch(cache_key)
+          [ cached, cache_key, cached ? nil : journal&.read.to_s ]
+        ensure
+          journal&.close
+        end
+      end
+
       def journal_bytes(limit: nil)
         journal = open_regular(journal_path, "task journal", missing: true)
         return "" unless journal
 
         stat = journal.stat
         if limit && stat.size > limit
-          raise Hive::TaskProjection::InvalidJournal,
+          raise Hive::TaskProjection::JournalTooLarge,
                 "task journal is #{stat.size} bytes (limit #{limit})"
         end
 
@@ -168,6 +200,73 @@ module Hive
         end
       end
 
+      def routine_cache_key(identity, marker)
+        [
+          journal_path.dup.freeze,
+          identity,
+          marker_identity(marker),
+          expected_task_identity,
+          @projector.object_id
+        ].freeze
+      end
+
+      def marker_identity(marker)
+        return nil unless marker
+
+        value = {
+          "name" => marker.respond_to?(:name) ? marker.name.to_s : marker.fetch("name").to_s,
+          "attrs" => Hive::StringifyKeys.call(
+            marker.respond_to?(:attrs) ? marker.attrs : marker.fetch("attrs", {})
+          )
+        }
+        Digest::SHA256.hexdigest(Hive::TaskProjection.canonical_json(value)).freeze
+      end
+
+      def expected_task_identity
+        return nil unless @expected_task&.respond_to?(:slug)
+
+        workflow = @expected_task.respond_to?(:workflow) ? @expected_task.workflow : nil
+        [
+          @expected_task.slug.to_s,
+          @expected_task.respond_to?(:id) ? @expected_task.id&.to_s : nil,
+          workflow.respond_to?(:id) ? workflow.id.to_s : nil
+        ].freeze
+      end
+
+      def file_identity(stat)
+        [
+          stat.dev, stat.ino, stat.size,
+          stat.mtime.to_i, stat.mtime.nsec,
+          stat.ctime.to_i, stat.ctime.nsec
+        ].freeze
+      end
+
+      def routine_cache_fetch(key)
+        ROUTINE_CACHE_MUTEX.synchronize do
+          cached = ROUTINE_CACHE.delete(key)
+          ROUTINE_CACHE[key] = cached if cached
+          cached
+        end
+      end
+
+      def routine_cache_store(key, result)
+        ROUTINE_CACHE_MUTEX.synchronize do
+          ROUTINE_CACHE.delete_if do |cached_key, _|
+            cached_key[0] == key[0] && cached_key[1] != key[1]
+          end
+          ROUTINE_CACHE.delete(key)
+          ROUTINE_CACHE[key] = result
+          while ROUTINE_CACHE.size > ROUTINE_CACHE_MAX_ENTRIES ||
+                routine_cache_source_bytes > ROUTINE_CACHE_MAX_SOURCE_BYTES
+            ROUTINE_CACHE.shift
+          end
+        end
+      end
+
+      def routine_cache_source_bytes
+        ROUTINE_CACHE.sum { |cache_key, _| cache_key[1][2].to_i }
+      end
+
       def lock_path_present?
         File.lstat(lock_path)
         true
@@ -192,6 +291,8 @@ module Hive
       end
 
       def lock_path = File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME)
+
+      private_constant :ROUTINE_CACHE, :ROUTINE_CACHE_MUTEX
     end
   end
 end

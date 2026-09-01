@@ -180,6 +180,38 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
+  def test_validator_rejects_mixed_task_workflow_and_task_id_streams
+    record = lambda do |event_id, **overrides|
+      Hive::TaskJournal::Envelope.authoritative(
+        event("reconciliation", overrides),
+        id_generator: -> { event_id }, clock: -> { NOW }
+      )
+    end
+    first = record.call("event-first")
+
+    [
+      record.call("event-other-slug", task: { "id" => "42", "slug" => "other" }),
+      record.call("event-other-workflow", workflow: "writing")
+    ].each do |mixed_identity|
+      validator = Hive::TaskJournal::Validator.new
+      validator.validate!(first)
+
+      error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
+        validator.validate!(mixed_identity)
+      end
+      assert_includes error.message, "mixes task or workflow identities"
+    end
+
+    validator = Hive::TaskJournal::Validator.new
+    validator.validate!(first)
+    error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
+      validator.validate!(
+        record.call("event-other-task-id", task: { "id" => "43", "slug" => "durable-task" })
+      )
+    end
+    assert_includes error.message, "mixes task IDs"
+  end
+
   def test_strict_io_failure_surfaces_instead_of_becoming_acknowledgement
     with_writer do |writer, dir|
       original_open = File.method(:open)

@@ -17,6 +17,7 @@ module Hive
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
+    class JournalTooLarge < InvalidJournal; end
     class JournalLockBusy < Error; end
 
     # An unreadable journal is classified by the producer. Agent-authored
@@ -207,17 +208,6 @@ module Hive
 
     def current_condition(name)
       self["conditions"].fetch("current").find { |fact| fact["condition"] == name.to_s }
-    end
-
-    # Compatibility markers remain a current-state input. Overlay their value
-    # after folding history so status does not need another persisted cache.
-    def with_marker(marker)
-      copy = Hive::StringifyKeys.call(to_h)
-      copy["compatibility"] = compatibility_for(
-        baseline: copy.dig("compatibility", "baseline_present") == true,
-        marker: marker
-      )
-      self.class.from_data(copy)
     end
 
     # Closure is a dedicated task-local authority, not a journal fact. Status

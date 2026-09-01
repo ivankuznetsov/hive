@@ -119,11 +119,19 @@ module Hive
 
       def reserve(candidate, now: Time.now)
         project = candidate.fetch(:project)
-        entry = candidate.fetch(:entry)
+        entry = current_entry_for(project, candidate.fetch(:entry))
+        return nil unless entry
         return nil if pending?(project)
+        # Candidate discovery may run beside the daemon's authoritative task
+        # tick. A Patrol child can fail after this hint was produced but before
+        # the main thread reserves it; recheck the newer backoff here so a
+        # stale hint cannot immediately undo failure pacing.
+        return nil if backed_off?(project, now)
 
         cfg = @config_loader.call(entry.fetch("path"))
+        return nil unless cfg.dig("patrol", "enabled") == true
         return nil unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+        return nil unless launch_capacity_available?(entry, cfg, now)
         cycle_admitted, = state_store(entry).try_with_cycle_admission { true }
         return nil unless cycle_admitted
         @pending[project] = {
@@ -169,6 +177,30 @@ module Hive
       end
 
       private
+
+      # Candidate rows are hints captured before the dispatcher regains
+      # control. Re-resolve the registration so a removed/replaced project
+      # cannot launch against its former path or state home.
+      def current_entry_for(project, observed)
+        current = Array(@registry.call).find do |entry|
+          entry.fetch("name") == project
+        end
+        return unless current
+        return unless same_registration?(observed, current)
+
+        current
+      end
+
+      def same_registration?(observed, current)
+        %w[project_id registration_id].all? do |key|
+          observed[key].to_s == current[key].to_s
+        end && %w[path hive_state_path].all? do |key|
+          File.expand_path(observed.fetch(key)) ==
+            File.expand_path(current.fetch(key))
+        end
+      rescue KeyError, TypeError
+        false
+      end
 
       def launch_capacity_available?(entry, cfg, now)
         budget = allowance_budget(entry, now, cfg: cfg)

@@ -57,6 +57,7 @@ module Hive
       OperationalQueueState = Data.define(:pending, :claimed, :malformed, :error)
       FastProbe = Data.define(:task_keys, :full_tick)
       DISPATCH_AGING_STEP_SEC = 30 * 60
+      PatrolDiscoveryResult = Data.define(:candidates, :error)
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
       STATE_FILE_PROBE_BATCH_SIZE = 64
       STALE_RECOVERY_BLOCK_REASONS = %w[
@@ -77,6 +78,9 @@ module Hive
       # @param logger [Hive::Daemon::Logger]
       # @param merge_watcher [PrMergeWatcher, nil]
       # @param patrol_scheduler [PatrolScheduler, nil]
+      # @param patrol_discovery_async [Boolean] discover Patrol candidates on
+      #   one background thread while keeping reservation and spawn on the
+      #   dispatcher thread
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
@@ -92,7 +96,8 @@ module Hive
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      runtime_ready_callback: nil,
-                     clock: nil)
+                     clock: nil,
+                     patrol_discovery_async: false)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -104,6 +109,10 @@ module Hive
         @refactor_patrol_scheduler = refactor_patrol_scheduler
         @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
         @patrol_arbiter = patrol_arbiter
+        @patrol_discovery_async = patrol_discovery_async == true
+        @patrol_discovery_thread = nil
+        @patrol_discovery_started_at = nil
+        @patrol_discovery_stall_reported = false
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
@@ -450,43 +459,11 @@ module Hive
           now: now
         )
 
-        # Patrol discovery can block on project-level Git/config inspection.
-        # Publish the completed task scheduler snapshot first, then use the
-        # separate patrol concurrency budget for any discovered work.
-        patrol_candidates = if @patrol_arbiter
-          begin
-            @patrol_arbiter.candidates(now: now)
-          rescue Hive::Daemon::PatrolArbiter::StateError => e
-            @logger.event(
-              :architecture_patrol_blocked,
-              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
-            )
-            []
-          end
-        else
-          @patrol_scheduler&.tick(now: now)
-        end
-        Array(@patrol_scheduler&.drain_events).each do |event|
-          @logger.event(:patrol_recovery_blocked, **event.reject { |key, _value| key == :status })
-        end
-        Array(@refactor_patrol_scheduler&.drain_events).each do |event|
-          @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
-        end
-        Array(patrol_candidates).each do |patrol_dispatch|
-          unless admission_open?
-            unless @patrol_arbiter
-              close_patrol_admission(
-                project: patrol_dispatch[:project],
-                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
-                reserved: patrol_dispatch,
-                now: now
-              )
-            end
-            next
-          end
-
-          dispatch_patrol_with_gates(patrol_dispatch, now: now)
-        end
+        # Publish task reconciliation before polling the one-slot Patrol
+        # discovery worker. Git/config inspection can be slow or blocked on one
+        # repository; only candidate enumeration leaves the dispatcher thread.
+        # Reservation, gates, and spawn remain serialized here on a later tick.
+        poll_patrol_scheduler(now: now)
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -616,6 +593,7 @@ module Hive
           interruptible_sleep(@fast_poll_sec)
         end
 
+        patrol_discovery_drained = join_patrol_discovery
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
                                             grace_sec: @shutdown_grace_sec,
                                             reexec_requested: @reexec_requested)
@@ -623,7 +601,10 @@ module Hive
         record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
-        publish_shutdown_acknowledgement(now: Time.now)
+        publish_shutdown_acknowledgement(
+          now: Time.now,
+          patrol_discovery_drained: patrol_discovery_drained
+        )
         @logger.close
       end
 
@@ -646,13 +627,13 @@ module Hive
         raise if @runtime_ready_callback
       end
 
-      def publish_shutdown_acknowledgement(now:)
+      def publish_shutdown_acknowledgement(now:, patrol_discovery_drained: true)
         return unless @operational_snapshot
 
         proof = @supervisor.respond_to?(:shutdown_proof) ? @supervisor.shutdown_proof : nil
         @operational_snapshot.shutdown(
           admission_closed: true,
-          drained: proof && proof.fetch(:drained, false),
+          drained: proof && proof.fetch(:drained, false) && patrol_discovery_drained,
           child_inventory: proof ? proof.fetch(:child_inventory, []) : [],
           now: now
         )
@@ -1036,6 +1017,156 @@ module Hive
           message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
           keeping_previous: true
         )
+      end
+
+      def run_patrol_scheduler_tick(now:)
+        consume_patrol_discovery(discover_patrol_candidates(now: now), now: now)
+      end
+
+      def poll_patrol_scheduler(now:)
+        # The arbiter's candidate API leaves reservation on this thread. The
+        # legacy scheduler-only API returns already-reserved rows, so it must
+        # remain synchronous even if an embedding caller enables async mode.
+        return run_patrol_scheduler_tick(now: now) unless
+          @patrol_discovery_async && @patrol_arbiter
+        return unless @patrol_arbiter || @patrol_scheduler || @refactor_patrol_scheduler
+
+        thread = @patrol_discovery_thread
+        if thread&.alive?
+          report_patrol_discovery_stall
+          return
+        elsif thread
+          result = thread.value
+          @patrol_discovery_thread = nil
+          @patrol_discovery_started_at = nil
+          @patrol_discovery_stall_reported = false
+          consume_patrol_discovery(result, now: now)
+        end
+        if admission_open? && !@patrol_discovery_thread
+          start_patrol_discovery(now: now)
+        end
+      end
+
+      def start_patrol_discovery(now:)
+        @patrol_discovery_started_at = full_tick_clock_time
+        @patrol_discovery_stall_reported = false
+        @patrol_discovery_thread = Thread.new(now) do |observed_at|
+          Thread.current.name = "hive-patrol-discovery" if Thread.current.respond_to?(:name=)
+          discover_patrol_candidates(now: observed_at)
+        end
+        @patrol_discovery_thread.report_on_exception = false
+      end
+
+      def discover_patrol_candidates(now:)
+        candidates = []
+        error = nil
+        begin
+          candidates = if @patrol_arbiter
+            @patrol_arbiter.candidates(now: now)
+          else
+            @patrol_scheduler&.tick(now: now)
+          end
+        rescue StandardError => discovery_error
+          error = discovery_error
+        end
+        PatrolDiscoveryResult.new(
+          candidates: Array(candidates),
+          error: error
+        )
+      end
+
+      def drain_patrol_discovery_events(scheduler, prior_error)
+        return [ [], prior_error ] unless scheduler
+
+        [ Array(scheduler.drain_events), prior_error ]
+      rescue StandardError => error
+        [ [], prior_error || error ]
+      end
+
+      def consume_patrol_discovery(result, now:)
+        patrol_events, error = drain_patrol_discovery_events(
+          @patrol_scheduler, result.error
+        )
+        architecture_events, error = drain_patrol_discovery_events(
+          @refactor_patrol_scheduler, error
+        )
+        if error.is_a?(Hive::Daemon::PatrolArbiter::StateError)
+          @logger.event(
+            :architecture_patrol_blocked,
+            reason: "arbiter_state_error",
+            error: "#{error.class}: #{error.message}"
+          )
+        elsif error
+          @logger.event(
+            :fatal,
+            message: "patrol discovery raised: #{error.class}: #{error.message}",
+            keeping_previous: true
+          )
+        end
+        patrol_events.each do |event|
+          @logger.event(
+            :patrol_recovery_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
+        architecture_events.each do |event|
+          @logger.event(
+            :architecture_patrol_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
+        result.candidates.each do |patrol_dispatch|
+          unless admission_open?
+            unless @patrol_arbiter
+              close_patrol_admission(
+                project: patrol_dispatch[:project],
+                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
+                reserved: patrol_dispatch,
+                now: now
+              )
+            end
+            next
+          end
+
+          dispatch_patrol_with_gates(patrol_dispatch, now: now)
+        end
+      end
+
+      def join_patrol_discovery
+        thread = @patrol_discovery_thread
+        return true unless thread
+        return true if thread.join(0.5)
+
+        @logger.event(
+          :fatal,
+          message: "patrol discovery did not stop before daemon shutdown",
+          elapsed_sec: patrol_discovery_elapsed.round(3),
+          keeping_previous: true
+        )
+        false
+      end
+
+      def report_patrol_discovery_stall
+        return if @patrol_discovery_stall_reported
+
+        threshold = [ @poll_interval_sec.to_f * 3, 1.0 ].max
+        elapsed = patrol_discovery_elapsed
+        return if elapsed < threshold
+
+        @patrol_discovery_stall_reported = true
+        @logger.event(
+          :fatal,
+          message: "patrol discovery is stalled; scheduler snapshots remain live",
+          elapsed_sec: elapsed.round(3),
+          threshold_sec: threshold,
+          keeping_previous: true
+        )
+      end
+
+      def patrol_discovery_elapsed
+        return 0.0 unless @patrol_discovery_started_at
+
+        [ full_tick_clock_time - @patrol_discovery_started_at, 0.0 ].max
       end
 
       def dispatch_patrol_fix_semantic(result, now:)

@@ -138,6 +138,30 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reservation_rejects_a_replaced_registration_identity
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      registrations = [ entry ]
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { registrations },
+        config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
+        claim_resolver: ->(_attempt) { :resolved }
+      )
+      candidate = scheduler.candidates(now: T0).fetch(0)
+      registrations = [ entry.merge("project_id" => "replacement-id") ]
+
+      error = assert_raises(
+        Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked
+      ) { scheduler.reserve(candidate, now: T0 + 1) }
+
+      assert_equal "registration_identity_changed", error.reason
+      assert_equal "queued", store.read_job(candidate.fetch(:job_id)).fetch("state")
+    end
+  end
+
   def test_scheduler_uses_the_registered_state_path_for_jobs_and_manifests
     with_tmp_dir do |dir|
       configured = File.join(dir, "state", "hive")
@@ -1116,13 +1140,40 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       )
 
       scheduler.send(
-        :block, entry, { "job_id" => "job-7", "source" => {} },
+        :block, entry, {
+          "job_id" => "job-7", "source" => {},
+          "updated_at" => T0.iso8601
+        },
         reason: "test_block", evidence: {}, now: T0
       )
 
       event = scheduler.drain_events.fetch(0)
       assert_equal "test_block", event.fetch(:reason)
       assert_match(/write failed/, event.fetch(:error))
+    end
+  end
+
+  def test_stale_discovery_block_is_discarded_without_a_false_event
+    with_tmp_dir do |dir|
+      entry = entry(dir, "demo")
+      store = Object.new
+      store.define_singleton_method(:block_discovery!) do |*|
+        raise Hive::RefactorPatrol::JobStore::StaleClaim, "observation changed"
+      end
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, job_store_factory: ->(_path) { store },
+        repository_ownership: ->(**) { flunk "ownership is not consulted" }
+      )
+
+      scheduler.send(
+        :block, entry, {
+          "job_id" => "job-7", "source" => {},
+          "updated_at" => T0.iso8601
+        },
+        reason: "stale_ownership", evidence: {}, now: T0
+      )
+
+      assert_empty scheduler.drain_events
     end
   end
 

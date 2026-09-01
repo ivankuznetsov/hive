@@ -1363,7 +1363,7 @@ installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
 
-## Active-only status projections still need installed dogfood and Patrol decoupling (2026-08-28)
+## Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
 
 Routine daemon, bot, TUI, Web, and watch consumers now request an active-only
 projection, while archive history is loaded only on demand. Focused tests and a
@@ -1379,13 +1379,20 @@ v7 producer emitted 1,578,516 JSON bytes and took 9.56 seconds; its admission
 pre-scan alone took 2.16 seconds before the 6.30-second rich row projection.
 Removing terminal transport therefore prevents unbounded archive growth but
 does not solve active-controller scale or the duplicate active metadata reads.
-Patrol discovery also still executes inside the
-coordinator tick. Publishing the operational snapshot before that scan keeps a
-completed scheduler pass visible sooner, but a Patrol scan that runs longer
-than the snapshot-validity window can still make scheduler status expire while
-work is running. A later change must decouple Patrol discovery from scheduler
-snapshot cadence rather than extending freshness or reintroducing a full-fleet
-projection.
+Patrol candidate enumeration is now decoupled from scheduler cadence through a
+one-slot background worker. The dispatcher can publish another authoritative
+task snapshot while a prior discovery pass is still running; it harvests the
+completed hints later and keeps reservation, capacity gates, and spawn on the
+main thread. Architecture discovery's durable maintenance stays under its
+existing store locks, with stale diagnostic writes rejected by an observation
+fence. Focused source tests prove non-overlap, repeated publication carrying a
+fresh task source, once-only stall telemetry, truthful non-drained shutdown,
+retry-deadline enforcement, and rejection of candidates made stale by newer
+failure backoff or registration/config changes. This has not yet been installed
+and observed through a discovery pass longer than the snapshot-validity window,
+so the live cadence claim remains a dogfood gap, not a source-code gap. The
+harvest-time reservation/ownership checks still run on the dispatcher thread;
+live timing should determine whether they need a separate bounded optimization.
 
 Finally, bot delivery of `auto_residue` on a row that becomes archived between
 polls has not been proven under the active-only transport. If that terminal

@@ -96,7 +96,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); restored keys retain one-process provenance until a real observation or dispatch consumes them. Everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Maps `Status#internal_task_graph_payload` directly into typed visible rows without a child process or JSON round trip. Full and exact-task reads include `workflow`, canonical `pr_url`, and structured `admission_error`; full results also carry the validated source payload, project information, and summed `hidden_archived_task_count`. Each row retains the task payload's exact `mtime` separately from the local state file's precise stat: scheduler/status identity uses the former, while edit-resume and recovery policy use the latter. Bounded responses never carry a fleet payload: they must declare `partial: true`, match the requested project/task identities, and contain no project error; a mismatch fails without replacing cached daemon state. Missing or malformed admission state becomes `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Producer failures and malformed envelopes return a structured failed result instead of crashing the tick. |
-| `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel backed directly by `RuntimeControlPlane::OperationalRepository`. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery. Before the first successful reconciliation, `started` and `failed` remain explicit; afterward, an in-progress or failed tick cannot overwrite the same generation's still-valid completed scheduler authority. Scheduler task records bind to the exact source-payload `mtime`, including controller workflows whose folder and manifest mtimes differ, without changing the precise state-file timestamp used by recovery. Tick completion atomically publishes the scheduler observation and optional full `hive-status` projection in one immediate transaction. The projection row is bound to the daemon identity, tick generation, and a fingerprint covering both canonical records; readers reject mismatched or corrupt pairs. Canonical SQL JSON treats valid UTF-8 marker text as NFC text even when binary scanning supplied an `ASCII-8BIT` Ruby string, while genuinely malformed bytes still fail closed; scheduler comparisons use the same canonical form. SIGHUP can only shorten retained authority to the reloaded poll interval; recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. No snapshot JSON or status-cache file remains. |
+| `Hive::Daemon::OperationalSnapshot` | `lib/hive/daemon/operational_snapshot.rb` | Private daemon-to-status observation channel backed directly by `RuntimeControlPlane::OperationalRepository`. `Assembler` first publishes a generation-bound `runtime_ready` acknowledgement after signal installation and inherited-claim recovery. Before the first successful reconciliation, `started` and `failed` remain explicit; afterward, an in-progress or failed tick cannot overwrite the same generation's still-valid completed scheduler authority. Scheduler task records bind to the exact source-payload `mtime`, including controller workflows whose folder and manifest mtimes differ, without changing the precise state-file timestamp used by recovery. Tick completion atomically publishes the scheduler observation and optional full `hive-status` projection in one immediate transaction before polling the one-slot Patrol discovery worker, so a slow repository scan cannot delay the next scheduler tick. The projection row is bound to the daemon identity, tick generation, and a fingerprint covering both canonical records; readers reject mismatched or corrupt pairs. Canonical SQL JSON treats valid UTF-8 marker text as NFC text even when binary scanning supplied an `ASCII-8BIT` Ruby string, while genuinely malformed bytes still fail closed; scheduler comparisons use the same canonical form. SIGHUP can only shorten retained authority to the reloaded poll interval; recovery receipts are overlaid only when task, stage, marker identity, and lifecycle still match. No snapshot JSON or status-cache file remains. |
 | `Hive::Daemon::PatrolFixCandidateInventory` | `lib/hive/daemon/patrol_fix_candidate_inventory.rb` | Opens only exact `patrol-fix-manifest.json` files under workflow stage/task owners. It binds every owned manifest's canonical bytes into one full inventory count/digest, fails on owned corruption, ignores unrelated task metadata, and selects one deterministic relevance-ranked context of at most 64 rows and 192 KiB. Exact source identity, alias, and semantic-lineage overlap rank before path/lexical fallback; each selected row carries bounded secret-scanned remediation evidence and its own context digest. |
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared read-only `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, suppresses update-state orphan cleanup, bounds `installed_binary --version` probes to 10s, treats a stable service symlink and its current deployment target as the same binary by filesystem identity, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
@@ -137,6 +137,7 @@ hive daemon start
             ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
+            ├─ one-slot Patrol discovery thread (no reservation or spawn)
             ├─ Hive::Daemon::StatusConsumer      (in-process internal task graph)
             ├─ Hive::Daemon::OperationalSnapshot (atomic scheduler observation)
             ├─ Hive::RuntimeControlPlane::DispatchRepository (request/claim/outbox rows)
@@ -218,7 +219,9 @@ stages 5–8 -> advance one observed merge candidate per project -> run
 repository-wide architecture catch-up -> heal stale ownership and cooled
 durable errors -> **arbitrate dispatch requests with higher-priority unrelated
 task rows** -> patrol dispatches -> remaining per-row dispatch -> prune baselines ->
-refresh cheap-probe mtime fingerprints. Merge reconciliation runs before
+refresh cheap-probe mtime fingerprints -> publish the completed scheduler snapshot ->
+harvest a completed Patrol discovery batch and start the next background discovery pass.
+Merge reconciliation runs before
 automatic recovery so a safely delivered task cannot launch another provider
 attempt. Dependency/admission-held tasks remain ineligible; each observation
 rebuilds candidates from current task metadata, so a later cleared hold makes
@@ -301,6 +304,25 @@ dispatch decision from one row cannot be attached to another. The record also
 carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
+
+One Patrol discovery pass runs on the background thread at a time. Ordinary
+candidate selection changes only its in-memory schedule bookkeeping;
+Architecture discovery may also perform idempotent recovery, batch
+materialization, and diagnostic maintenance in its durable stores. Those
+writes retain their existing file/job locks, and a diagnostic block is accepted
+only while the authoritative job still exactly matches the observed record. A
+later full tick does
+not wait for or overlap a still-running pass, so it can publish another
+authoritative scheduler snapshot on cadence. A completed batch is harvested on
+a later tick; reservation, capacity/config gates, child spawn, and arbiter
+commit remain serialized on the dispatcher thread. Candidate rows are hints,
+not ownership. Ordinary Patrol reservation re-resolves registration identity,
+enablement, capacity, and newer failure backoff. Architecture reservation also
+rejects registration replacement, reloads configuration, enforces the latest
+durable retry deadline under the claim lock, and then uses its durable claim
+fence. A pass lasting three poll intervals emits one degraded warning while
+scheduler publication continues. Shutdown never starts a replacement pass and
+reports `drained: false` if the worker does not finish during the bounded join.
 An explicit admission also contributes its exact sanitized routing decision to
 that row's in-memory disposition. The completed snapshot keeps that value only
 when the same coherence checks pass; operational status renders it directly
@@ -391,7 +413,8 @@ can resolve a definitely dead PID but fails closed for a live process whose
 identity cannot be proven. A replacement generation is allowed only after the
 expired owner is proven gone or its process group is terminated. The scheduler
 takes one immutable ownership snapshot per candidate-selection pass. Reservation
-resolves the live registration and configuration again before claiming.
+resolves the live registration identity and configuration again before
+claiming.
 Missing registration, duplicate enabled owners, and unreadable identity state
 fail closed. Feature checkpoints live in the authoritative job aggregate, so
 daemon restart reconstructs discovery rather than trusting in-memory slots.
@@ -751,7 +774,9 @@ immediately before the durable-attempt or
 made before the signal is released if the final check closes admission. Work
 accepted before the signal enters the normal `ChildSupervisor`
 termination-and-drain path, but no later candidate from the same tick may
-start while shutdown is pending.
+start while shutdown is pending. The in-process Patrol discovery worker receives
+a bounded join; if it is still running, shutdown acknowledgement remains
+`drained: false` rather than claiming all daemon-owned mutation has stopped.
 
 `3-plan`/`needs_input` is the policy exception to the generic
 edit-resume debounce. A generated plan in `WAITING` is an approval

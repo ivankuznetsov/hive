@@ -8,7 +8,8 @@ tags: [command, watch, agents, status, jsonl, observability]
 ---
 
 **TLDR**: `hive watch` is a bounded, read-only semantic observer for agents.
-It resolves explicit tasks from one exact-target status projection (or uses
+It resolves explicit tasks from one exact-target status projection with
+authoritative dependency admission (or uses
 the active project projection for `--project` selection), emits an initial
 event and only meaningful transitions, then emits a final event on the
 requested terminal condition, timeout, event cap, interruption, or source

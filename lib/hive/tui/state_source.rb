@@ -274,6 +274,7 @@ module Hive
             projects,
             admission_context: admission_context,
             now: refresh_now,
+            exclude_archived: complete_archive_cache?,
             include_archive_index: !complete_archive_cache?
           )
           next_archived_cache =
@@ -316,6 +317,7 @@ module Hive
             projects,
             admission_context: admission_context,
             now: refresh_now,
+            exclude_archived: complete_archive_cache?,
             include_archive_index: !complete_archive_cache?
           )
           if complete_archive_cache?

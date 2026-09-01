@@ -347,7 +347,7 @@ class TuiStateSourceTest < Minitest::Test
       source.send(:refresh_once)
 
       assert_equal 1, source.current.rows.count { |row| row.folder == done_folder },
-                   "the bounded active reparse must merge the refreshed terminal cache exactly once"
+                   "the bounded active reparse must retain the refreshed terminal row exactly once"
       refute source.instance_variable_get(:@archive_refresh_thread)&.alive?,
              "a Hive-signalled terminal move must rebuild the visible cache synchronously"
     ensure
@@ -367,24 +367,25 @@ class TuiStateSourceTest < Minitest::Test
 
       refute_includes hidden.rows.map(&:slug), "retained-task-260719-abcd"
       assert_includes hidden.archive_rows.map(&:slug), "retained-task-260719-abcd"
-      assert_equal 1, hidden.hidden_archived_task_count
 
       write_retention_workflow(hive_state, 0)
       File.utime(descriptor_mtime, descriptor_mtime, descriptor)
       invalid = source.refresh_now
 
-      error_row = invalid.rows.find { |row| row.slug == "retained-task-260719-abcd" }
-      refute_nil error_row, "an invalid resolved descriptor must surface instead of reusing policy 3"
-      assert_includes %w[error admission_error], error_row.action_key
-      assert_equal 0, invalid.hidden_archived_task_count
+      refute_includes invalid.rows.map(&:slug), "retained-task-260719-abcd"
+      assert_includes invalid.archive_rows.map(&:slug), "retained-task-260719-abcd"
+      assert_equal 0, source.instance_variable_get(:@current_payload).dig(
+        "projects", 0, "hidden_archived_task_count"
+      )
 
       write_retention_workflow(hive_state, 7)
       File.utime(descriptor_mtime, descriptor_mtime, descriptor)
       restored = source.refresh_now
 
-      assert_includes restored.rows.map(&:slug), "retained-task-260719-abcd"
       assert_includes restored.archive_rows.map(&:slug), "retained-task-260719-abcd"
-      assert_equal 0, restored.hidden_archived_task_count
+      assert_equal 0, source.instance_variable_get(:@current_payload).dig(
+        "projects", 0, "hidden_archived_task_count"
+      )
       assert_nil source.last_error
     ensure
       source&.stop
@@ -762,8 +763,10 @@ class TuiStateSourceTest < Minitest::Test
       )
       source.send(:refresh_once)
 
-      assert_includes source.current.rows.map(&:slug), File.basename(folder)
-      assert_equal 0, source.current.hidden_archived_task_count
+      assert_includes source.current.archive_rows.map(&:slug), File.basename(folder)
+      assert_equal 0, source.instance_variable_get(:@current_payload).dig(
+        "projects", 0, "hidden_archived_task_count"
+      )
     ensure
       source&.stop
       Hive::Workflows::Project.reset!
@@ -784,14 +787,13 @@ class TuiStateSourceTest < Minitest::Test
       with_replaced_singleton_method(Time, :now, -> { before_boundary }) do
         source.send(:refresh_once)
       end
-      assert_includes source.current.rows.map(&:slug), File.basename(folder)
+      assert_includes source.current.archive_rows.map(&:slug), File.basename(folder)
 
       with_replaced_singleton_method(Time, :now, -> { after_boundary }) do
         source.send(:refresh_once)
       end
 
       refute_includes source.current.rows.map(&:slug), File.basename(folder)
-      assert_equal 1, source.current.hidden_archived_task_count
     ensure
       source&.stop
       Hive::Workflows::Project.reset!
@@ -874,7 +876,7 @@ class TuiStateSourceTest < Minitest::Test
       assert_equal 2, active_calls,
                    "a new completion must enter the ordinary projection immediately"
       refute_same first, source.current
-      assert_includes source.current.rows.map(&:slug), "archived-task-260626-abcd"
+      refute_includes source.current.rows.map(&:slug), "archived-task-260626-abcd"
       refreshed = wait_for { archive_calls.positive? && source.instance_variable_get(:@archived_cache) }
       refute_nil refreshed, "archive dir changes should trigger a background archive refresh"
     ensure
@@ -892,10 +894,8 @@ class TuiStateSourceTest < Minitest::Test
       done_folder = File.join(hive_state, "stages", "9-done", File.basename(folder))
       FileUtils.mv(folder, done_folder)
       source.send(:refresh_once)
-      immediate = source.current.rows.select { |row| row.slug == "moving-task-260626-abcd" }
-      assert_equal 1, immediate.size,
-                   "a newly completed task remains visible in the ordinary projection"
-      assert_equal "9-done", immediate.first.stage
+      refute_includes source.current.rows.map(&:slug), "moving-task-260626-abcd",
+                      "a newly completed task leaves the active projection immediately"
 
       wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
       source.send(:refresh_once)
@@ -1043,7 +1043,7 @@ class TuiStateSourceTest < Minitest::Test
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
       assert_equal [ "alpha" ], source.current.projects.map(&:name)
-      assert_includes source.current.rows.map(&:slug), "alpha-done-260626-abcd"
+      assert_includes source.current.archive_rows.map(&:slug), "alpha-done-260626-abcd"
 
       _project_b, state_b = add_direct_project(home, name: "beta")
       write_state_task(state_b, "4-execute", "beta-active-260626-abcd",
@@ -1358,8 +1358,8 @@ class TuiStateSourceTest < Minitest::Test
                        marker: "COMPLETE", id: 3)
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
-      assert_includes source.current.rows.map(&:slug), "done-one-260626-abcd"
-      assert_includes source.current.rows.map(&:slug), "done-two-260626-abcd"
+      assert_includes source.current.archive_rows.map(&:slug), "done-one-260626-abcd"
+      assert_includes source.current.archive_rows.map(&:slug), "done-two-260626-abcd"
 
       FileUtils.rm_r(first_done)
       File.utime(Time.now + 5, Time.now + 5, File.join(hive_state, "stages", "9-done"))
@@ -1367,7 +1367,7 @@ class TuiStateSourceTest < Minitest::Test
       wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
       source.send(:refresh_once)
 
-      slugs = source.current.rows.map(&:slug)
+      slugs = source.current.archive_rows.map(&:slug)
       refute_includes slugs, "done-one-260626-abcd",
                       "dropping an archived folder must update the cache on the next refresh"
       assert_includes slugs, "done-two-260626-abcd",
@@ -1390,7 +1390,7 @@ class TuiStateSourceTest < Minitest::Test
                                    marker: "COMPLETE", id: 2)
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
-      assert_includes source.current.rows.map(&:slug), "done-only-260626-abcd"
+      assert_includes source.current.archive_rows.map(&:slug), "done-only-260626-abcd"
 
       FileUtils.rm_r(only_done)
       File.utime(Time.now + 5, Time.now + 5, File.join(hive_state, "stages", "9-done"))
@@ -1398,7 +1398,7 @@ class TuiStateSourceTest < Minitest::Test
       wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
       source.send(:refresh_once)
 
-      refute_includes source.current.rows.map(&:slug), "done-only-260626-abcd",
+      refute_includes source.current.archive_rows.map(&:slug), "done-only-260626-abcd",
                       "dropping a project's LAST archived folder must clear the ghost, not retain it forever"
     ensure
       source&.stop
@@ -1416,7 +1416,7 @@ class TuiStateSourceTest < Minitest::Test
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
       source.send(:refresh_once)
       assert_equal "9-done",
-                   source.current.rows.find { |r| r.slug == "resurrecting-task-260626-abcd" }.stage
+                   source.current.archive_rows.find { |r| r.slug == "resurrecting-task-260626-abcd" }.stage
 
       active_folder = File.join(hive_state, "stages", "4-execute", File.basename(done_folder))
       FileUtils.mv(done_folder, active_folder)
@@ -1675,7 +1675,7 @@ class TuiStateSourceTest < Minitest::Test
 
       source.send(:refresh_once)
       assert_equal [ "alpha", "beta" ], source.current.projects.map(&:name)
-      assert_includes source.current.rows.map(&:slug), "beta-done-260626-abcd"
+      refute_includes source.current.rows.map(&:slug), "beta-done-260626-abcd"
 
       surfaced = wait_for do
         source.send(:refresh_once)

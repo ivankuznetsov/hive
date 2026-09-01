@@ -42,8 +42,15 @@ module Hive
     # writer; serialize those synchronous refreshes here.
     class CachedStatusCommand
       include StatusCommand
+
+      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
+
       def initialize(
-        source: Hive::Tui::StateSource.new(poll_interval_seconds: 60),
+        source: Hive::Tui::StateSource.new(
+          poll_interval_seconds: 60,
+          archive_cache_mode: :visible,
+          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+        ),
         recovery_status_command: Hive::Commands::Status.new(json: true),
         scheduler_snapshot_reader: Hive::Daemon::OperationalSnapshot::Reader.new,
         clock: -> { Time.now.utc }
@@ -86,9 +93,10 @@ module Hive
     #
     # The Cable poller enters refresh_state while HTTP status renders only read
     # the latest completed state. The default command makes each background
-    # scan a bounded active-task refresh. Terminal history remains outside the
-    # feed and is loaded only by an explicit archive request. An idle server
-    # performs no scans.
+    # scan a bounded active-task refresh:
+    # terminal membership/policy changes and a five-minute archive backstop
+    # refresh the ordinary archive projection, while complete archive reads
+    # remain on-demand. An idle server performs no scans.
     #
     # Failures never manufacture a healthy empty fleet: they publish either a
     # degraded latest-good snapshot or an explicit unavailable envelope. A new

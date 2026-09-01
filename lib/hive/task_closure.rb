@@ -871,8 +871,13 @@ module Hive
       return [ blocker("unique_worktree_changes", "owned worktree has uncommitted changes") ] unless status.empty?
 
       head = local_git(path, "rev-parse", "HEAD").strip.downcase
-      verified_heads = Array(delivered_heads).map { |oid| oid.to_s.downcase }
-      return [] if head.match?(FULL_OID_RE) && verified_heads.include?(head)
+      verified_heads = Array(delivered_heads).filter_map do |oid|
+        oid = oid.to_s.downcase
+        oid if oid.match?(FULL_OID_RE)
+      end
+      return [] if head.match?(FULL_OID_RE) && verified_heads.any? do |delivered_head|
+        worktree_head_delivered?(path, head, delivered_head)
+      end
 
       config = Hive::Config.load(task.project_root)
       branch = config["default_branch"].to_s.strip
@@ -895,6 +900,15 @@ module Hive
       unique ? [ blocker("unique_worktree_changes", "owned worktree has unique commits") ] : []
     rescue Hive::Error, KeyError, SystemCallError, IOError => e
       [ blocker("worktree_unverifiable", e.message) ]
+    end
+
+    def worktree_head_delivered?(path, head, delivered_head)
+      return true if head == delivered_head
+
+      _out, _err, status = local_git_capture(
+        path, "merge-base", "--is-ancestor", head, delivered_head
+      )
+      status.success?
     end
 
     def local_git(path, *args)

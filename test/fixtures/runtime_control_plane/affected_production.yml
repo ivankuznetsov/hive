@@ -6,9 +6,9 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 9202
-outside_inventory_net_lines: -2817
-final_lines: 6385
+final_inventory_lines: 9228
+outside_inventory_net_lines: -2452
+final_lines: 6776
 final_paths:
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 104
@@ -19,13 +19,13 @@ final_paths:
 - path: lib/hive/attempts/publication.rb
   lines: 299
 - path: lib/hive/attempts/repository.rb
-  lines: 685
+  lines: 703
 - path: lib/hive/attempts/storage_status.rb
   lines: 20
 - path: lib/hive/commands/runtime.rb
   lines: 87
 - path: lib/hive/daemon/pr_merge_repository.rb
-  lines: 342
+  lines: 350
 - path: lib/hive/lock.rb
   lines: 242
 - path: lib/hive/metrics.rb

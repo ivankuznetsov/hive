@@ -218,6 +218,49 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_repository_reuses_an_already_validated_database
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      revalidations = []
+      database.define_singleton_method(:open!) do |revalidate: true|
+        revalidations << revalidate
+        raise "repository forced runtime validation" if revalidate
+
+        self
+      end
+
+      repository = Hive::Attempts::Repository.new(
+        database: database, root: File.join(root, "payloads")
+      )
+
+      assert_same database, repository.database
+      assert_equal [ false ], revalidations
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_repository_revalidates_when_the_database_file_disappears
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      FileUtils.rm_f(database.path)
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Repository.new(
+          database: database, root: File.join(root, "payloads")
+        )
+      end
+
+      assert_match(/database is missing/, error.message)
+    ensure
+      database&.disconnect
+    end
+  end
+
   def test_lost_transition_releases_capacity_once_in_the_same_transaction
     with_repository do |repository|
       launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)

@@ -33,8 +33,8 @@ module Hive
         @validated = false
       end
 
-      def open!
-        ProcessGuard.checkout { open_uncoordinated! }
+      def open!(revalidate: true)
+        ProcessGuard.checkout { revalidate ? open_uncoordinated! : ensure_open! }
         self
       end
 

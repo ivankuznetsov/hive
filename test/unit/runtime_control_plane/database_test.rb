@@ -136,6 +136,37 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_non_revalidating_open_reuses_validation_until_the_connection_is_lost
+    with_database do |database|
+      capability_checks = 0
+      diagnoses = 0
+      verify_capabilities = database.method(:verify_runtime_capabilities!)
+      diagnose = database.method(:diagnostics_uncoordinated)
+      database.define_singleton_method(:verify_runtime_capabilities!) do
+        capability_checks += 1
+        verify_capabilities.call
+      end
+      database.define_singleton_method(:diagnostics_uncoordinated) do
+        diagnoses += 1
+        diagnose.call
+      end
+
+      assert_same database, database.open!(revalidate: false)
+      assert_same database, database.open!(revalidate: false)
+      assert_equal 0, capability_checks
+      assert_equal 0, diagnoses
+
+      database.open!
+      assert_equal 1, capability_checks
+      assert_equal 1, diagnoses
+
+      database.disconnect
+      database.open!(revalidate: false)
+      assert_equal 2, capability_checks
+      assert_equal 2, diagnoses
+    end
+  end
+
   def test_old_new_missing_duplicate_and_partial_migrations_fail_closed
     with_database do |database, path|
       set_schema_version(path, 0)

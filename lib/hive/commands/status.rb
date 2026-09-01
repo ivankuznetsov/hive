@@ -17,7 +17,7 @@ require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/patrol_fix/attempt_diagnostic"
 require "hive/task_projection/store"
 require "hive/task_closure"
@@ -856,7 +856,7 @@ module Hive
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
           # Coerced to boolean so nil never leaks into JSON: live_task_lock is
-          # a tri-state internally (nil = no .lock, true/false = liveness),
+          # a tri-state internally (nil = no lease, true/false = liveness),
           # but external consumers only need "is the runner still holding it"
           # and would have to handle JSON null otherwise. Additive field per
           # the SCHEMA_VERSIONS policy in lib/hive.rb — no version bump.
@@ -1483,9 +1483,8 @@ module Hive
               # state-file/directory meaning because the daemon's dispatch
               # baseline relies on a stage move changing that value.
               #
-              # acquiring `.lock` changes the directory mtime and would make a
-              # freshly emitted operational action invalidate itself inside
-              # the command's lock.
+              # The runtime lease is outside the task tree, so it does not
+              # perturb the filesystem observation used by this action.
               observation_source = Hive::OperationalAction.observation_mtime_source(task)
               observation_mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
               lock_holder = task_lock_holder(task)
@@ -1541,7 +1540,7 @@ module Hive
             # :423 File.directory? guard already passed. The rescue wraps the
             # whole begin, so the ENOENT can surface from ANY in-folder read —
             # File.mtime(entry) at :433, Markers.current's File.exist?->File.read
-            # (markers.rb:59-61), or the .lock read in task_lock_holder — all of
+            # (markers.rb:59-61), or the lease read in task_lock_holder — all of
             # which behave identically here. We swallow it and `next`: on a
             # forward stage-move the task resurfaces under its new (higher-
             # numbered) stage later in this same scan, and
@@ -1654,7 +1653,7 @@ module Hive
       def acquire_status_attempt_store
         return false if @status_attempt_store
 
-        @status_attempt_store = Hive::Attempts::Store.runtime(
+        @status_attempt_store = Hive::Attempts::Repository.runtime(
           create_directories: false
         ).projection_reader
         true
@@ -1862,7 +1861,7 @@ module Hive
         nil
       rescue SystemCallError => e
         # Any other I/O fault reading pr.md (EACCES/ENOTDIR/ESTALE/…): warn so
-        # the inconsistency is visible (mirrors task_lock_holder's .lock
+        # the inconsistency is visible (mirrors task_lock_holder's lease
         # reader) but still degrade rather than crash this poll-heavy
         # surface, preserving the plan's never-crash-on-bad-pr.md contract.
         # Narrowed from a blanket `rescue StandardError` so genuine
@@ -1900,7 +1899,7 @@ module Hive
       def decorate(task, marker, lock_holder: nil, live_task_lock: false)
         if marker.name == :agent_working
           # Marker only carries the hive runner PID; the claude subprocess PID
-          # is recorded in the per-task .lock file by Hive::Agent.
+          # is recorded in the task's runtime lease by Hive::Agent.
           pid = claude_pid_from_lock(lock_holder) || marker.attrs["pid"]
           if pid && pid_alive?(pid.to_i)
             [ "🤖", "agent_working pid=#{pid}" ]
@@ -2203,18 +2202,9 @@ module Hive
       end
 
       def task_lock_holder(task)
-        lock_file = File.join(task.folder, ".lock")
-        return nil unless File.exist?(lock_file)
-
-        data = YAML.safe_load(File.read(lock_file), permitted_classes: [ Time ]) || {}
-        data.is_a?(Hash) ? data : nil
+        Hive::Lock.read_task_lock(task.folder)
       rescue StandardError => e
-        # A corrupt or unparseable .lock used to silently drop us into the
-        # "no lock" branch; ops would then see a row classified as ready
-        # despite the disk state showing something was running. Emit a
-        # warn so the inconsistency is visible without changing classifier
-        # semantics (still returning nil).
-        warn "hive: status: failed to read .lock at #{File.join(task.folder, '.lock')}: #{e.class}: #{e.message}"
+        warn "hive: status: failed to read task lease for #{task.folder}: #{e.class}: #{e.message}"
         nil
       end
 

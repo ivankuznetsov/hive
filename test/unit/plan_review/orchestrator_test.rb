@@ -5,6 +5,8 @@ require "hive/plan_review/orchestrator"
 require "tmpdir"
 
 class PlanReviewOrchestratorTest < Minitest::Test
+  include HiveTestHelper
+
   # A plan containing any non-ASCII character (em dash, arrow, curly quote)
   # used to crash the whole plan-review stage with
   # `Encoding::CompatibilityError: incompatible character encodings: UTF-8 and
@@ -837,9 +839,10 @@ class PlanReviewOrchestratorTest < Minitest::Test
   def test_checkpoint_custody_false_positive_recovers_every_affected_role_once
     with_task(mandatory_plan) do |task, cfg|
       calls = Hash.new(0)
+      revision = FakeRevision.new(mandatory_plan.sub("# Plan", "# Revised"))
       adapter = FakeAdapter.new do |request|
         calls[request.kind] += 1
-        if %w[primary adversarial].include?(request.kind) && calls.fetch(request.kind) == 1
+        if calls.fetch(request.kind) == 1
           next Hive::PlanReview::Adapters::Base::Result.new(
             outcome: "terminal_failure",
             diagnostic: "reviewer modified protected artifacts: task-projection.checkpoint.json",
@@ -847,24 +850,33 @@ class PlanReviewOrchestratorTest < Minitest::Test
           )
         end
 
-        successful_result(request)
+        successful_result(
+          request,
+          findings: request.kind == "primary" ? [ finding("safe_auto", "Clarify tests") ] : []
+        )
       end
+      runner = -> { orchestrator(task, cfg, adapter:, planner_revision: revision) }
 
-      blocked = orchestrator(task, cfg, adapter:).advance!.record
+      blocked = runner.call.advance!.record
 
       assert_equal "blocked", blocked.state
       assert_equal({ "primary" => 1, "adversarial" => 1 }, calls)
 
-      cleared = orchestrator(task, cfg, adapter:).advance!.record
+      verification_blocked = runner.call.advance!.record
+
+      assert_equal "blocked", verification_blocked.state
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+      cleared = runner.call.advance!.record
 
       assert_equal "cleared", cleared.state
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 2 }, calls)
       resets = cleared["routes"].select { |route| route["checkpoint_custody_recovery"] }
-      assert_equal %w[adversarial primary], resets.map { |route| route.fetch("role") }.sort
+      assert_equal %w[adversarial primary verification],
+                   resets.map { |route| route.fetch("role") }.sort
       assert resets.all? { |route| route.fetch("checkpoint_custody_contract_version") == 1 }
 
-      orchestrator(task, cfg, adapter:).advance!
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
+      runner.call.advance!
+      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 2 }, calls)
     end
   end
 
@@ -1768,6 +1780,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       meta = File.join(folder, "meta.yml")
       File.write(meta, "id: task-1\nslug: demo-task\nworkflow: coding\n")
+      prepare_test_task_lease_repository(folder)
       File.write(File.join(folder, "plan.md"), plan)
       task = Task.new(
         folder:, project_root: project, slug: "demo-task", id: "task-1",

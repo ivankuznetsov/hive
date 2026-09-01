@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/attempts/lost_outcome"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class AttemptsLostOutcomeTest < Minitest::Test
   include HiveTestHelper
@@ -23,9 +23,9 @@ class AttemptsLostOutcomeTest < Minitest::Test
     with_task do |task, worktree|
       File.write(File.join(worktree, "partial.txt"), "partial\n")
       with_tmp_dir do |root|
-        store = Hive::Attempts::Store.new(root: root)
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store)
-        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
         identity = FakeIdentity.new(:terminated, [])
         processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: store, outcome_store: outcomes, process_identity: identity,
@@ -52,9 +52,9 @@ class AttemptsLostOutcomeTest < Minitest::Test
   def test_unverified_orphan_remains_pending_until_identity_becomes_safe
     with_task do |task, _worktree|
       with_tmp_dir do |root|
-        store = Hive::Attempts::Store.new(root: root)
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store)
-        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
         identity = FakeIdentity.new(:identity_mismatch, [])
         processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: store, outcome_store: outcomes, process_identity: identity,
@@ -87,52 +87,34 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_outcome_store_rejects_corruption_identity_changes_and_write_failures
+  def test_transition_rejects_corrupt_or_identity_mismatched_rows
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_without_worker(store)
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       outcome = outcomes.ensure_for(lost, now: NOW)
-      path = outcomes.send(:path, lost.attempt_id)
 
-      File.write(path, "{")
-      assert_raises(Hive::Attempts::StoreError) { outcomes.fetch(lost.attempt_id) }
-      changed = outcome.merge("idempotency_key" => "wrong")
-      File.write(path, JSON.generate(changed))
-      assert_raises(Hive::Attempts::StoreError) { outcomes.update(lost, status: "ready") }
-
-      FileUtils.rm_f(path)
-      with_replaced_singleton_method(Hive::AtomicFile, :write, ->(*_args, **_kwargs) { raise Errno::ENOSPC }) do
-        assert_raises(Hive::Attempts::StoreError) { outcomes.ensure_for(lost, now: NOW) }
+      store.database.transaction do |db|
+        db[:attempt_lost_outcomes].where(attempt_id: lost.attempt_id).update(value_json: "{")
       end
-    end
-  end
-
-  def test_outcome_store_refuses_a_symlinked_attempt_output_directory
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
-      lost = lost_without_worker(store)
-      outside = File.join(root, "outside")
-      FileUtils.mkdir_p(outside)
-      File.chmod(0o755, outside)
-      File.symlink(outside, File.join(store.outputs_root, lost.attempt_id))
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
-
-      error = assert_raises(Hive::Attempts::StoreError) do
-        outcomes.ensure_for(lost, now: NOW)
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.fetch(lost.attempt_id) }
+      store.database.transaction do |db|
+        db[:attempt_lost_outcomes].where(attempt_id: lost.attempt_id).update(
+          value_json: Hive::RuntimeControlPlane::Codec.dump_json(outcome),
+          idempotency_key: "wrong"
+        )
       end
-
-      assert_match(/output directory.*symlink/, error.message)
-      assert_equal 0o755, File.stat(outside).mode & 0o777
-      assert_empty Dir.children(outside)
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(lost, status: "ready")
+      end
     end
   end
 
   def test_workerless_loss_without_a_worktree_becomes_ready
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_without_worker(store)
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       processor = Hive::Attempts::LostOutcomeProcessor.new(
         store: store, outcome_store: outcomes,
         process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil }
@@ -145,37 +127,11 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_legacy_manual_and_exhausted_outcomes_upgrade_back_to_ready
-    %w[manual exhausted].each do |legacy_status|
-      with_tmp_dir do |root|
-        store = Hive::Attempts::Store.new(root: root)
-        lost = lost_without_worker(store)
-        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
-        outcomes.ensure_for(lost, now: NOW)
-        outcomes.update(
-          lost, now: NOW, status: legacy_status,
-          diagnostic: "legacy terminal outcome"
-        )
-        processor = Hive::Attempts::LostOutcomeProcessor.new(
-          store: store,
-          outcome_store: outcomes,
-          process_identity: FakeIdentity.new(:absent, []),
-          task_resolver: ->(_attempt) { nil }
-        )
-
-        upgraded = processor.process(lost, now: NOW + 1)
-
-        assert_equal "ready", upgraded.fetch("status"), "legacy status=#{legacy_status}"
-        assert_nil upgraded.fetch("diagnostic")
-      end
-    end
-  end
-
   def test_competing_annotation_is_idempotent
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_without_worker(store)
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       processor = Hive::Attempts::LostOutcomeProcessor.new(
         store: store, outcome_store: outcomes,
         process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil }
@@ -190,9 +146,9 @@ class AttemptsLostOutcomeTest < Minitest::Test
 
   def test_default_task_resolution_uses_id_and_contains_lookup_errors
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_without_worker(store)
-      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       processor = Hive::Attempts::LostOutcomeProcessor.new(
         store: store, outcome_store: outcomes, process_identity: FakeIdentity.new(:absent, [])
       )
@@ -209,6 +165,29 @@ class AttemptsLostOutcomeTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { raise Hive::InvalidTaskPath }) do
         assert_nil processor.send(:resolve_task, lost)
+      end
+    end
+  end
+
+  def test_transition_persistence_and_attempt_identity_errors_are_typed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+      changed = lost.with("loss" => lost["loss"].merge("at" => (NOW + 99).iso8601(6)))
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(changed, status: "ready")
+      end
+
+      store.database.define_singleton_method(:transaction) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.ensure_for(lost, now: NOW)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(lost, status: "ready")
       end
     end
   end

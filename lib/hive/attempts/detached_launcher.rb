@@ -2,7 +2,8 @@ require "json"
 require "rbconfig"
 require "digest"
 require "hive/attempts/contracts"
-require "hive/attempts/store"
+require "hive/attempts/repository"
+require "hive/runtime_control_plane"
 
 module Hive
   module Attempts
@@ -96,6 +97,14 @@ module Hive
 
       private
 
+      def fork(&block)
+        Hive::RuntimeControlPlane::ProcessGuard.fork(&block)
+      end
+
+      def exec(*arguments, **options)
+        Hive::RuntimeControlPlane::ProcessGuard.exec(*arguments, **options)
+      end
+
       def fork_wrapper(record, claim_capability, writer, use_systemd_scope: false)
         claim_reader, claim_writer = IO.pipe
         claim_writer.write(claim_capability)
@@ -106,6 +115,7 @@ module Hive
           command = [
             RbConfig.ruby, @hive_executable, "__attempt-supervise", record.attempt_id,
             "--store-root", @store.root,
+            "--database-path", @store.database.path,
             "--heartbeat-sec", @heartbeat_sec.to_s,
             "--stale-sec", @stale_sec.to_s,
             "--first-heartbeat-timeout-sec", @first_heartbeat_timeout_sec.to_s,

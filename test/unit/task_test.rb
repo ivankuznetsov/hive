@@ -106,7 +106,6 @@ class TaskTest < Minitest::Test
 
       task = Hive::Task.new(folder)
 
-      assert_equal File.join(folder, ".lock"), task.lock_file
       assert_equal File.join(dir, ".hive-state", ".commit-lock"), task.commit_lock_file
     end
   end

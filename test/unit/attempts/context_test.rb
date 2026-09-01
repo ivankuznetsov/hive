@@ -180,14 +180,14 @@ class AttemptsContextTest < Minitest::Test
       )
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
         with_context_environment(store, capability: "f" * 64) do
-          error = assert_raises(Hive::Attempts::StoreError) do
+          error = assert_raises(Hive::Attempts::RepositoryError) do
             Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
           end
           assert_includes error.message, "capability"
         end
 
         with_context_environment(store, capability: CLAIM_CAPABILITY) do
-          error = assert_raises(Hive::Attempts::StoreError) do
+          error = assert_raises(Hive::Attempts::RepositoryError) do
             Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
           end
           assert_includes error.message, "task or intended stage"
@@ -200,14 +200,14 @@ class AttemptsContextTest < Minitest::Test
   def test_wrong_argv_and_unreleased_gate_fail_closed
     with_running_attempt do |store, _record|
       with_context_environment(store, capability: CLAIM_CAPABILITY) do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           Hive::Attempts::Context.install_from_env!(argv: [ "hive", "run", "other" ])
         end
         assert_includes error.message, "argv"
       end
 
       with_context_environment(store, capability: CLAIM_CAPABILITY, gate: "") do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
         end
         assert_includes error.message, "gate"
@@ -224,7 +224,7 @@ class AttemptsContextTest < Minitest::Test
       )
 
       with_context_environment(store, capability: CLAIM_CAPABILITY) do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
         end
         assert_includes error.message, "process identity"
@@ -329,7 +329,7 @@ class AttemptsContextTest < Minitest::Test
       )
     end
 
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(:read_inherited, "not-an-fd", limit: 1)
     end
   end
@@ -394,7 +394,7 @@ class AttemptsContextTest < Minitest::Test
     )
 
     assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(
         :validate_task_binding!, record, argv.take(6) + [ "other-event" ]
       )
@@ -408,7 +408,7 @@ class AttemptsContextTest < Minitest::Test
         }[key]
       end
     end.new(subject.except("event_id"))
-    error = assert_raises(Hive::Attempts::StoreError) do
+    error = assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(
         :validate_module_hook_binding!, incomplete, argv
       )
@@ -473,7 +473,7 @@ class AttemptsContextTest < Minitest::Test
 
   def with_running_attempt(routing: { "mode" => "legacy" })
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       record = store.create_launching(
         attempt_id: "attempt-env", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
@@ -510,7 +510,7 @@ class AttemptsContextTest < Minitest::Test
     gate_w.write(gate) unless gate.empty?
     gate_w.close
     test_case = self
-    with_replaced_singleton_method(Hive::Attempts::Store, :new, lambda { |**options|
+    with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, lambda { |**options|
       test_case.assert_empty options, "worker context must not accept an environment-selected store root"
       store
     }) do

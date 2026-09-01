@@ -1,7 +1,7 @@
 require "test_helper"
 require "hive/conditions/attempt_observer"
 require "hive/attempts/reconciler"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class ConditionsAttemptObserverTest < Minitest::Test
   include HiveTestHelper
@@ -13,7 +13,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
   def test_failed_terminal_attempt_replaces_live_health_and_is_idempotent
     with_tmp_dir do |dir|
       task = build_task(dir)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = create_attempt(store)
       terminal = terminalize(store, launching, outcome: "failed")
       status = Hive::Attempts::ReconciledAttempt.new(
@@ -43,6 +43,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
                    File.binread(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME))
       assert_equal 1, locator_calls, "delivered terminal attempts must be skipped before task lookup"
 
+      FileUtils.rm(File.join(task.folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME))
       restarted = Hive::Conditions::AttemptObserver.new(
         store: store, task_locator: ->(_attempt) { task }
       )
@@ -53,10 +54,77 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
+  def test_post_cutover_attempt_advances_from_the_retained_projection_checkpoint
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      legacy_store = Hive::Attempts::Repository.new(
+        root: File.join(dir, "legacy-attempts"), migrate: true
+      )
+      legacy = terminalize(legacy_store, create_attempt(legacy_store), outcome: "failed")
+      legacy_status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: legacy, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+      assert_equal :delivered, Hive::Conditions::AttemptObserver.new(
+        store: legacy_store, task_locator: ->(_attempt) { task }
+      ).observe(legacy_status, now: NOW + 3)
+
+      store = Hive::Attempts::Repository.new(
+        root: File.join(dir, "current-attempts"), migrate: true
+      )
+      activated_at = NOW + 10
+      store.database.transaction do |database|
+        database[:installations].update(
+          activated_at: Hive::RuntimeControlPlane::Codec.dump_time(activated_at)
+        )
+      end
+      current = terminalize(
+        store,
+        create_attempt(
+          store, attempt_id: "attempt-2", request_id: "request-2",
+          now: activated_at + 1
+        ),
+        outcome: "succeeded", now: activated_at + 1
+      )
+      status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: current, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+
+      observer = Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      )
+      assert_equal :delivered, observer.observe(status, now: activated_at + 4)
+
+      projection = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: store
+      ).read_routine
+      assert_equal "current", projection.state
+      assert_equal "attempt-2",
+                   projection.projection.current_condition("AgentHealthy").fetch("attempt_id")
+      journal = File.binread(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
+      assert_equal :acknowledged, Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      ).observe(status, now: activated_at + 5)
+      assert_equal journal, File.binread(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
+      strict = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::TaskProjection.read_journal(
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME),
+          attempt_store: store
+        )
+      end
+      assert_includes strict.message, "unknown durable attempt attempt-1"
+    end
+  end
+
   def test_tempfail_terminal_attempt_remains_a_scheduler_owned_pending_retry
     with_tmp_dir do |dir|
       task = build_task(dir)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminalize(
         store, create_attempt(store), outcome: "failed",
         exit_status: Hive::ExitCodes::TEMPFAIL
@@ -81,7 +149,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
 
   def test_non_execute_live_and_unlocatable_attempts_are_ignored
     with_tmp_dir do |dir|
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       live = create_attempt(store)
       status = Hive::Attempts::ReconciledAttempt.new(
         attempt: live, classification: :reserved,
@@ -102,7 +170,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
   def test_lost_attempt_replaces_live_health_with_fail_closed_observation
     with_tmp_dir do |dir|
       task = build_task(dir)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = create_attempt(store)
       lost = store.mark_lost(launching, reason: "launch_timeout", now: NOW + 1)
       status = Hive::Attempts::ReconciledAttempt.new(
@@ -126,7 +194,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
   def test_live_stage_lock_defers_terminal_delivery_without_blocking_then_retries
     with_tmp_dir do |dir|
       task = build_task(dir)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminalize(store, create_attempt(store), outcome: "succeeded")
       status = Hive::Attempts::ReconciledAttempt.new(
         attempt: terminal, classification: :terminal,
@@ -136,25 +204,37 @@ class ConditionsAttemptObserverTest < Minitest::Test
         store: store, task_locator: ->(_attempt) { task }
       )
       journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      ready = Queue.new
+      release = Queue.new
+      holder = Thread.new do
+        Hive::Lock.with_task_lock(task.folder, op: "open_pr") do
+          ready << true
+          release.pop
+        end
+      end
+      ready.pop
 
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      Hive::Lock.with_task_lock(task.folder, op: "open_pr") do
-        assert_equal :pending, observer.observe(status, now: NOW + 3)
-      end
+      assert_equal :pending, observer.observe(status, now: NOW + 3)
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
       assert_operator elapsed, :<, 0.5
       refute File.exist?(journal_path), "contended delivery must not touch task state"
+      release << true
+      holder.join
       assert_equal :delivered, observer.observe(status, now: NOW + 4)
       assert File.exist?(journal_path)
       assert_equal :acknowledged, observer.observe(status, now: NOW + 5)
+    ensure
+      release << true if release && holder&.alive?
+      holder&.join
     end
   end
 
   def test_deleted_task_during_lock_claim_is_quietly_not_applicable
     with_tmp_dir do |dir|
       task = build_task(dir)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminalize(store, create_attempt(store), outcome: "succeeded")
       status = Hive::Attempts::ReconciledAttempt.new(
         attempt: terminal, classification: :terminal,
@@ -180,7 +260,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
     with_tmp_dir do |dir|
       task = build_task(dir)
       task.workflow = Struct.new(:id).new("custom")
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminalize(store, create_attempt(store), outcome: "succeeded")
       status = Hive::Attempts::ReconciledAttempt.new(
         attempt: terminal, classification: :terminal,
@@ -198,7 +278,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
   def test_successor_stays_current_when_its_clock_regresses_and_predecessor_arrives_late
     with_tmp_dir do |dir|
       task = build_task(dir)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       predecessor = create_attempt(store, now: NOW)
       lost = store.mark_lost(predecessor, reason: "launch_timeout", now: NOW + 1)
       successor = create_attempt(
@@ -241,7 +321,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       %w[1-inbox 2-brainstorm 4-execute].each do |stage|
         FileUtils.mkdir_p(File.join(hive_state, "stages", stage, "task"))
       end
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminalize(store, create_attempt(store), outcome: "succeeded")
       status = Hive::Attempts::ReconciledAttempt.new(
         attempt: terminal, classification: :terminal,
@@ -270,7 +350,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
 
   def test_default_locator_and_observation_errors_are_reported_without_raising
     with_tmp_dir do |dir|
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       terminal = terminalize(store, create_attempt(store), outcome: "failed")
       status = Hive::Attempts::ReconciledAttempt.new(
         attempt: terminal, classification: :terminal,
@@ -304,8 +384,10 @@ class ConditionsAttemptObserverTest < Minitest::Test
   private
 
   def build_task(dir)
-    folder = File.join(dir, "task")
+    folder = File.join(dir, ".hive-state", "stages", "4-execute", "task")
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: 42, slug: "task", display_name: nil, workflow: "coding")
+    prepare_test_task_lease_repository(folder)
     state_file = File.join(folder, "task.md")
     File.write(state_file, "<!-- ERROR reason=implementer_failed -->\n")
     TaskStub.new(

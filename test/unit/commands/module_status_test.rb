@@ -1,6 +1,6 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/module/doctor"
 require "hive/commands/module/inspect"
 require "hive/commands/module/list"
@@ -65,7 +65,7 @@ class ModuleStatusCommandTest < Minitest::Test
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
       inspector = Hive::Modules::Inspector.new(
         store: store, project_id: "project-1",
-        attempt_store: Hive::Attempts::Store.new(root: File.join(project, "attempts"), create_directories: false),
+        attempt_store: Hive::Attempts::Repository.new(root: File.join(project, "attempts"), create_directories: false),
         secret_availability: ->(_name) { false }, clock: -> { NOW }
       )
       yield project, store, inspector

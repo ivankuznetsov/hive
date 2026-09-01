@@ -21,6 +21,14 @@ for `4-execute`. `BranchPushed`, `ArtifactCurrent`, `BabysitterActive`, and
 stages yet. Observations use `pending`, `satisfied`, `unsatisfied`, or
 `unverifiable`; the projector alone adds `superseded` history.
 
+Transition membership has exactly one internal representation: the gate
+rules registered in `Conditions::Policy.default`. The registry owns only
+condition semantics (family, supersession family, scope, allowed evidence,
+gate role, authoritative stages) and carries no condition-to-transition
+membership; `Definition` exposes no `default_transitions` field. Policy
+descriptors are validated against registered vocabulary, so an unknown or
+wrong-role condition in a gate rule raises `InvalidPolicy`.
+
 Every condition observation has a durable attempt ID, numeric task input
 epoch, optional commit generation, explicit reason/time, typed evidence, and
 provenance. The numeric epoch is distinct from the opaque attempt ownership
@@ -93,6 +101,13 @@ An unsafe or replaced lock entry is instead the durable task-local
 for malformed storage. Exact repair also takes its exclusive journal lock
 nonblockingly and fails with a bounded retryable error when another writer owns
 it; it never waits indefinitely.
+
+Terminal-attempt reconciliation uses that same authenticated checkpoint before
+it appends `AgentHealthy`. The checkpoint projection supplies restart
+idempotency and commit-generation facts, the new observation is validated
+against its SQLite attempt, and `refresh_after_append!` advances only the
+bounded suffix. If no valid checkpoint exists, the historical strict replay
+path remains fail closed.
 
 Canonical initial-stage task creation publishes a zero-history snapshot and
 checkpoint before the task is committed or admitted. The checkpoint is valid

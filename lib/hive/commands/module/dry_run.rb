@@ -1,5 +1,5 @@
 require "hive/commands/module/base"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/modules/dry_run"
 
 module Hive
@@ -22,7 +22,7 @@ module Hive
           identity = @project_identity || registered_identity
           evaluator = @evaluator || Hive::Modules::DryRun.new(
             store: store,
-            attempt_store: Hive::Attempts::Store.new(create_directories: false),
+            attempt_store: Hive::Attempts::Repository.open_default(create_directories: false),
             project_id: identity.fetch("project_id"),
             project: identity.fetch("name")
           )

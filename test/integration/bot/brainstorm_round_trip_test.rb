@@ -9,6 +9,7 @@ class HiveBotBrainstormRoundTripTest < Minitest::Test
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "slug-260514-abcd")
       FileUtils.mkdir_p(folder)
+      prepare_test_task_lease_repository(folder)
       path = File.join(folder, "brainstorm.md")
       File.write(path, <<~MARKDOWN)
         ## Round 2

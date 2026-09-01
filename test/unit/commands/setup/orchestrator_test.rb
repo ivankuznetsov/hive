@@ -16,6 +16,7 @@ require "hive/commands/daemon/service_installer"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
+require "hive/runtime_control_plane/cutover"
 
 # End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
 # #call phase ordering, the --no-bootstrap / --no-init / --service branches, each
@@ -163,7 +164,11 @@ class SetupOrchestratorTest < Minitest::Test
                     )
                     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                       ->(**_kw) { status }) do
-                      stub_web_config { yield }
+                      runtime = Struct.new(:phase, :database_path).new("active", "/runtime.sqlite3")
+                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Cutover, :bootstrap,
+                        ->(**) { runtime }) do
+                        stub_web_config { yield }
+                      end
                     end
                   end
                 end
@@ -252,7 +257,7 @@ class SetupOrchestratorTest < Minitest::Test
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-setup"))))
     assert_empty schema.validate(payload).to_a
     names = payload["phases"].map { |p| p["name"] }
-    assert_equal %w[diagnostics agent_skills web_bundle daemon_service babysitter_service enroll web_service web], names,
+    assert_equal %w[diagnostics agent_skills web_bundle enroll runtime_control_plane daemon_service babysitter_service web_service web], names,
                  "phases must be recorded in provisioning order"
     assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
   end
@@ -435,7 +440,43 @@ class SetupOrchestratorTest < Minitest::Test
 
     names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
     refute_includes names, "enroll", "--no-init must not record an enroll phase"
-    assert_equal %w[diagnostics agent_skills web_bundle daemon_service babysitter_service web_service web], names
+    assert_equal %w[diagnostics agent_skills web_bundle runtime_control_plane daemon_service babysitter_service web_service web], names
+  end
+
+  def test_setup_does_not_accept_a_healthy_but_unactivated_runtime_database
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime-control-plane.sqlite3")
+      Hive::RuntimeControlPlane::Database.new(path: path).migrate!.disconnect
+      setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+
+      with_replaced_singleton_method(Hive::Paths, :runtime_control_plane_path, ->(*) { path }) do
+        with_replaced_singleton_method(Hive::Paths, :state_home, -> { root }) do
+          setup.send(:bootstrap_runtime_control_plane)
+        end
+      end
+
+      phase = setup.instance_variable_get(:@phases).last
+      refute phase.fetch("ok")
+      assert_includes phase.fetch("message"), "active cutover manifest"
+    end
+  end
+
+  def test_setup_reuses_an_active_runtime_control_plane
+    with_tmp_dir do |root|
+      activate_test_control_plane(root)
+      path = Hive::Paths.runtime_control_plane_path(root)
+      setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+
+      with_replaced_singleton_method(Hive::Paths, :runtime_control_plane_path, ->(*) { path }) do
+        with_replaced_singleton_method(Hive::Paths, :state_home, -> { root }) do
+          setup.send(:bootstrap_runtime_control_plane)
+        end
+      end
+
+      phase = setup.instance_variable_get(:@phases).last
+      assert phase.fetch("ok")
+      assert_equal "active", phase.fetch("phase")
+    end
   end
 
   # ── --service: web service installed ─────────────────────────────────

@@ -1,0 +1,176 @@
+schema: hive-runtime-control-plane-affected-production
+schema_version: 1
+base_commit: 1eab41d6b4bdac6664dc1e94ad1ccfb6ef604dd1
+outside_inventory_reference_commit: 62ca15ddbce7ab8e53f836069a1c52978fbd66dc
+baseline_lines: 9951
+counting_rule: physical_source_lines
+includes_new_production_files: true
+maximum_final_lines: 7960
+final_inventory_lines: 9220
+outside_inventory_net_lines: -2717
+final_lines: 6503
+final_paths:
+- path: lib/hive/attempts/capacity_snapshot.rb
+  lines: 104
+- path: lib/hive/attempts/coordination.rb
+  lines: 451
+- path: lib/hive/attempts/finalization_maintenance.rb
+  lines: 350
+- path: lib/hive/attempts/publication.rb
+  lines: 299
+- path: lib/hive/attempts/repository.rb
+  lines: 703
+- path: lib/hive/attempts/storage_status.rb
+  lines: 20
+- path: lib/hive/commands/runtime.rb
+  lines: 87
+- path: lib/hive/daemon/pr_merge_repository.rb
+  lines: 342
+- path: lib/hive/lock.rb
+  lines: 242
+- path: lib/hive/metrics.rb
+  lines: 85
+- path: lib/hive/patrol/launch_budget.rb
+  lines: 361
+- path: lib/hive/provider_health/attempt_observer.rb
+  lines: 88
+- path: lib/hive/provider_health/repository.rb
+  lines: 442
+- path: lib/hive/provider_routing/operational_projection.rb
+  lines: 145
+- path: lib/hive/provider_routing/policy_repository.rb
+  lines: 227
+- path: lib/hive/runtime_control_plane.rb
+  lines: 96
+- path: lib/hive/runtime_control_plane/activation_gate.rb
+  lines: 113
+- path: lib/hive/runtime_control_plane/admission_transition.rb
+  lines: 265
+- path: lib/hive/runtime_control_plane/codec.rb
+  lines: 92
+- path: lib/hive/runtime_control_plane/cutover.rb
+  lines: 841
+- path: lib/hive/runtime_control_plane/cutover_manifest.rb
+  lines: 114
+- path: lib/hive/runtime_control_plane/database.rb
+  lines: 366
+- path: lib/hive/runtime_control_plane/dispatch_repository.rb
+  lines: 696
+- path: lib/hive/runtime_control_plane/maintenance.rb
+  lines: 113
+- path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
+  lines: 492
+- path: lib/hive/runtime_control_plane/operational_repository.rb
+  lines: 77
+- path: lib/hive/runtime_control_plane/payload_store.rb
+  lines: 342
+- path: lib/hive/runtime_control_plane/process_guard.rb
+  lines: 168
+- path: lib/hive/runtime_control_plane/task_lease_repository.rb
+  lines: 316
+- path: lib/hive/task_counter.rb
+  lines: 62
+- path: lib/hive/task_journal.rb
+  lines: 368
+- path: lib/hive/usage_db.rb
+  lines: 428
+- path: schemas/hive-running-status.v2.json
+  lines: 217
+- path: schemas/hive-runtime-maintenance.v1.json
+  lines: 108
+paths:
+- path: lib/hive/attempts/store.rb
+  lines: 686
+- path: lib/hive/attempts/decision_index.rb
+  lines: 959
+- path: lib/hive/attempts/capacity_snapshot.rb
+  lines: 403
+- path: lib/hive/attempts/permanent_proof_store.rb
+  lines: 256
+- path: lib/hive/attempts/pending_finalization_store.rb
+  lines: 157
+- path: lib/hive/attempts/storage_health.rb
+  lines: 251
+- path: lib/hive/attempts/record_migration.rb
+  lines: 66
+- path: lib/hive/provider_routing/policy_store.rb
+  lines: 247
+- path: lib/hive/point_storage.rb
+  lines: 198
+- path: lib/hive/daemon/dispatch_request_queue.rb
+  lines: 1485
+- path: lib/hive/daemon/dispatch_result_queue.rb
+  lines: 209
+- path: lib/hive/daemon/queue_directory.rb
+  lines: 26
+- path: lib/hive/provider_health/store.rb
+  lines: 1547
+- path: lib/hive/provider_health/attempt_observer.rb
+  lines: 132
+- path: lib/hive/provider_routing/operational_projection.rb
+  lines: 258
+- path: lib/hive/daemon/pr_merge_reconciliation_store.rb
+  lines: 463
+- path: lib/hive/lock.rb
+  lines: 289
+- path: lib/hive/task_counter.rb
+  lines: 77
+- path: lib/hive/patrol/launch_budget.rb
+  lines: 614
+- path: lib/hive/usage_db.rb
+  lines: 741
+- path: lib/hive/attempts/finalization_maintenance.rb
+  lines: 332
+- path: lib/hive/task_journal.rb
+  lines: 379
+- path: lib/hive/metrics.rb
+  lines: 176
+legacy_authorities:
+- state/dispatch_requests
+- state/dispatch_results
+- state/attempts/v4
+- state/provider-health/v1
+- state/task-counter.yml
+- data/usage.db
+- data/usage.db.patrol-discovery-allowances
+- project/.hive-state/daemon/pr-merge-reconciliation.json
+- project/**/task-journal.jsonl
+- project/**/task-projection.json
+legacy_writers:
+- Hive::Attempts::Store
+- Hive::Attempts::DecisionIndex
+- Hive::Attempts::FinalizationMaintenance
+- Hive::Daemon::DispatchRequestQueue
+- Hive::Daemon::DispatchResultQueue
+- Hive::Daemon::OperationalSnapshot::Store
+- Hive::Daemon::PrMergeReconciliationStore
+- Hive::ProviderHealth::Store
+- Hive::ProviderRouting::PolicyStore
+- Hive::Lock
+- Hive::TaskCounter
+- Hive::Patrol::LaunchBudget
+- Hive::UsageDb
+domains:
+  dispatch_sequence: discard_runtime
+  dispatch_requests: discard_runtime
+  dispatch_results: discard_runtime
+  attempts: discard_runtime
+  attempt_revisions: discard_runtime
+  capacity_reservations: refuse_live_owners_then_discard
+  provider_probes: discard_runtime
+  task_leases: refuse_live_owners_then_discard
+  task_counters: rebuild_from_file_authority
+  patrol_allowances: discard_runtime
+  usage_sessions: import_each_row
+  terminal_receipts: discard_runtime
+  terminal_pending: discard_runtime
+  routing_policies: discard_runtime
+  pr_merge_reconciliations: discard_runtime
+  operational_projections: discard_derived
+  retained_payloads: preserve_file_authority
+path_overrides:
+- HIVE_ATTEMPT_STORE_ROOT
+- HIVE_USAGE_DB_PATH
+required_absences:
+- runtime-control-plane.sqlite3
+- runtime-payloads/v1

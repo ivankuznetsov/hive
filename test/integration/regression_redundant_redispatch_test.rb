@@ -4,7 +4,7 @@ require "fileutils"
 require "tmpdir"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/bot/dispatch_request_writer"
 
 # Regression test for the 2026-05-28 redundant-redispatch bug.
@@ -100,6 +100,10 @@ class HiveRegressionRedundantRedispatchTest < Minitest::Test
     FileUtils.mkdir_p(@stage_dir)
     @brainstorm_path = File.join(@stage_dir, "brainstorm.md")
     File.write(@brainstorm_path, "## Round 1\n\n<!-- WAITING -->\n")
+    prepare_runtime_project(
+      state_home: @state_home, name: @project, path: @state_home,
+      state_root_path: @hive_state_path
+    )
     # Pre-set the brainstorm.md mtime to T_BOT_ANSWER (the answer write
     # bumped it before the agent's tick).
     File.utime(T_BOT_ANSWER, T_BOT_ANSWER, @brainstorm_path)

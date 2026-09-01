@@ -1,7 +1,7 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
 require "hive/modules/daemon_runtime"
@@ -315,7 +315,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
 
   def test_empty_and_corrupt_projects_return_idle_or_bounded_blocked_results
     with_tmp_dir do |root|
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,
         capability_generator: -> { CAPABILITY }
@@ -425,7 +425,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         setup_context: { project_id: "project-1", project: "demo" },
         now: NOW - 60
       )
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      register_runtime_project(
+        database: attempt_store.database, name: "demo", path: File.join(root, "project"),
+        state_root_path: state, project_id: "project-1"
+      )
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,
         capability_generator: -> { CAPABILITY }
@@ -480,7 +484,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
-      attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
+      register_runtime_project(
+        database: attempt_store.database, name: "demo", path: File.join(root, "project"),
+        state_root_path: state, project_id: "project-1"
+      )
       counter = 0
       attempt_dispatcher = Hive::Attempts::Dispatcher.new(
         store: attempt_store, launcher: Launcher.new,

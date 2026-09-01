@@ -75,12 +75,16 @@ class ModuleDryRunCommandTest < Minitest::Test
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)
       before = tree_digest(state)
+      state_home = tracked_tmp_dir("hive-test-module-dry-run-runtime")
+      prepare_test_runtime_project(project, state_home: state_home)
 
-      payload = Hive::Commands::Module::DryRun.new(
-        "demo", event_name: "task.completed", hook_id: "schedule", occurred_at: NOW,
-        project_identity: { "project_id" => "project-1", "name" => "demo" },
-        project_root: project, json: true, stdout: StringIO.new, store: store
-      ).call!
+      payload = with_env("HIVE_HOME" => state_home) do
+        Hive::Commands::Module::DryRun.new(
+          "demo", event_name: "task.completed", hook_id: "schedule", occurred_at: NOW,
+          project_identity: { "project_id" => "project-1", "name" => "demo" },
+          project_root: project, json: true, stdout: StringIO.new, store: store
+        ).call!
+      end
 
       assert_equal "no_match", payload.fetch("decisions").first.fetch("reason")
       assert_equal before, tree_digest(state)

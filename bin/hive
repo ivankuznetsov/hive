@@ -10,6 +10,28 @@ end
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
+require "hive/runtime_control_plane/activation_gate"
+
+begin
+  Hive::RuntimeControlPlane::ActivationGate.check!(argv: ARGV)
+rescue Hive::RuntimeControlPlane::MigrationRequired => e
+  if ARGV.include?("--json")
+    require "json"
+    require "hive/schemas"
+    puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-runtime-maintenance", error: e, error_kind: "runtime",
+      extras: {
+        "action" => Hive::RuntimeControlPlane::ActivationGate.command(ARGV).to_s,
+        "runtime_code" => e.code.to_s, "next_action" => e.action,
+        "details" => Hive::RuntimeControlPlane::Codec.normalize(e.details)
+      }
+    ))
+  end
+  warn "hive: #{e.message}"
+  warn "hive: next action: #{e.action}" if e.action
+  exit e.exit_code
+end
+
 require "hive/llm_wiki_bootstrap"
 
 # The workflow creator owns two strict observation routes. They must stay
@@ -119,6 +141,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "status" => { schema: "hive-running-status", error_kind: "error" },
+  "runtime" => { schema: "hive-runtime-maintenance", error_kind: "usage" },
   "repair-projection" => {
     schema: "hive-repair-projection", error_kind: "invalid_arguments",
     extras: { "outcome" => "failed" }
@@ -243,6 +266,15 @@ def json_usage_error_contract(argv)
       arg.valid_encoding? && (arg == "--daemon-task" || arg.start_with?("--daemon-task="))
     end
     return { schema: "hive-status", error_kind: "error" } if internal_task_graph || daemon_task
+  when "runtime"
+    action = json_usage_positionals(argv, command_index).first || "status"
+    return {
+      schema: "hive-runtime-maintenance", error_kind: "usage",
+      extras: {
+        "action" => action, "runtime_code" => "usage",
+        "next_action" => nil, "details" => {}
+      }
+    }
   when "web"
     subcommand = json_usage_subcommand(argv, command_index, value_options: %w[--bind --port])
     return unless %w[install status].include?(subcommand)

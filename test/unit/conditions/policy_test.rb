@@ -15,6 +15,17 @@ class ConditionsPolicyTest < Minitest::Test
     refute policy.rule_for("finalize_to_archive").authoritative_capable
   end
 
+  def test_every_policy_condition_is_registered_vocabulary
+    policy = Hive::Conditions::Policy.default
+    registry = Hive::Conditions::Registry.default
+
+    policy.instance_variable_get(:@rules).each_value do |rule|
+      (rule.required + rule.inhibitors).each do |name|
+        assert registry.key?(name), "policy references unregistered condition #{name}"
+      end
+    end
+  end
+
   def test_descriptor_rule_accepts_registered_semantics_and_research_option
     rule = Hive::Conditions::Policy.rule_from_descriptor({
       "version" => 1,

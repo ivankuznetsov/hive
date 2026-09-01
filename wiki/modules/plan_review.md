@@ -384,6 +384,13 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
+A projection-checkpoint rollout briefly included Hive's own
+`task-projection.checkpoint.json` write in reviewer custody. The current
+reviewer firewall excludes that orchestrator-owned file. Exact historical
+runner diagnostics for this false positive receive one versioned recovery
+reset for primary, adversarial, or verification; unrelated diagnostics and a
+second failure under the current contract remain terminal.
+
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An
 agent with unrestricted same-user shell access therefore has CLI authority.

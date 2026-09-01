@@ -103,19 +103,18 @@ class TaskCommandTest < Minitest::Test
     assert_match(/no receipt-correlated diagnostic log/, error.message)
   end
 
-  def test_default_log_reader_uses_explicit_and_default_attempt_roots
+  def test_default_log_reader_uses_only_the_activated_runtime_payload_root
     with_tmp_global_config do |home|
-      default_root = File.join(home, "attempts", "v4")
-      explicit_root = File.join(home, "explicit-attempts")
-      FileUtils.mkdir_p(default_root)
-      FileUtils.mkdir_p(explicit_root)
+      Hive::Attempts::Repository.new(
+        root: Hive::Paths.runtime_payload_root(home),
+        database: Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(home)
+        ),
+        migrate: true
+      )
       command = Hive::Commands::Task.new("unused", log: true)
 
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => nil) do
-        assert_instance_of Hive::TaskWorkspace::CorrelatedLog,
-                           command.send(:default_log_reader)
-      end
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => explicit_root) do
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(home, "legacy-attempts")) do
         assert_instance_of Hive::TaskWorkspace::CorrelatedLog,
                            command.send(:default_log_reader)
       end

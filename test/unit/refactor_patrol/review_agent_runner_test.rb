@@ -564,6 +564,14 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
 
   private
 
+  def with_tmp_dir
+    super do |dir|
+      state_home = tracked_tmp_dir("hive-test-refactor-patrol-runtime")
+      prepare_test_runtime_project(dir, state_home: state_home)
+      with_env("HIVE_HOME" => state_home) { yield dir }
+    end
+  end
+
   def assert_discovery_allowance_available(project_root)
     snapshot = Hive::Patrol::LaunchBudget.new(
       project_root, cfg: cfg, engine: :architecture

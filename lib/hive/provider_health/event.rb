@@ -271,16 +271,7 @@ module Hive
         unless data.is_a?(Hash) && data.keys.sort == fields.sort
           raise InvalidMutation, "probe payload has unexpected fields"
         end
-        binding_scope = ProviderHealth.scope_from_h(data.fetch("scope"))
-        ProbeBinding.new(
-          scope: binding_scope,
-          journal_epoch: data.fetch("journal_epoch"),
-          observed_generation: data.fetch("observed_generation"),
-          claim_generation: data.fetch("claim_generation"),
-          attempt_id: data.fetch("attempt_id"),
-          task_generation: data.fetch("task_generation"),
-          ownership_fence: data.fetch("ownership_fence")
-        )
+        ProbeBinding.from_h(data)
       end
 
       def validate_manual_block!(data)

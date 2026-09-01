@@ -8,6 +8,10 @@ class OperationalStatusTest < Minitest::Test
     waiting_on_provider_or_scheduler completion_ready idle
   ].freeze
 
+  def setup
+    Hive::RuntimeControlPlane.database.migrate!
+  end
+
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts
     payload = status_payload(
       task(action: "agent_running", slug: "running", live_task_lock: true, task_lock_pid: 42),
@@ -501,7 +505,10 @@ class OperationalStatusTest < Minitest::Test
     )
     snapshot["attempt_storage"] = {
       "status" => "degraded",
-      "layout" => { "generation" => 4, "migration" => "complete" },
+      "layout" => {
+        "generation" => 4, "migration" => "failed",
+        "last_migrated_at" => nil, "last_result" => nil
+      },
       "hot" => { "records" => 1, "invalid" => 0 },
       "maintenance" => {
         "last_started_at" => "2026-07-20T09:00:00.000000Z",
@@ -509,7 +516,7 @@ class OperationalStatusTest < Minitest::Test
         "last_result" => nil
       },
       "last_error" => {
-        "operation" => "maintenance", "class" => "Hive::Attempts::StoreError",
+        "operation" => "maintenance", "class" => "Hive::Attempts::RepositoryError",
         "observed_at" => "2026-07-20T09:00:01.000000Z"
       },
       "degraded_reason" => "maintenance_failed"

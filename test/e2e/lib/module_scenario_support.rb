@@ -3,7 +3,7 @@ require "fileutils"
 require "json"
 require "time"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/module/install"
 require "hive/commands/module/update"
 require "hive/module_package/catalog_client"
@@ -60,13 +60,14 @@ module Hive
         install!(store, package, resolution, descriptor, now: START)
 
         attempt_store = attempt_store(run_home)
+        project_id = registered_project_id(run_home, sandbox)
         inspector_rows = Hive::Modules::Inspector.new(
-          store: store, project_id: PROJECT_ID,
+          store: store, project_id: project_id,
           attempt_store: attempt_store, clock: -> { START + 60 }
         ).all.map(&:to_h)
         project = {
           "path" => sandbox, "hive_state_path" => state_path(sandbox),
-          "project_id" => PROJECT_ID
+          "project_id" => project_id
         }
         web_rows = Hive::Web::ModuleLifecycle.new(
           attempt_store: attempt_store, clock: -> { START + 60 }
@@ -185,6 +186,7 @@ module Hive
         resolution, descriptor = write_demo_package(package, version: "1.0.0", commit: "d" * 40)
         install!(store, package, resolution, descriptor, now: installed_at)
         attempts = attempt_store(run_home)
+        project_id = registered_project_id(run_home, sandbox)
         launcher = RecordingLauncher.new
         attempt_number = 0
         attempt_dispatcher = Hive::Attempts::Dispatcher.new(
@@ -201,11 +203,12 @@ module Hive
         )
         dispatcher = Hive::Modules::Dispatcher.new(
           store: store, attempt_store: attempts, attempt_dispatcher: attempt_dispatcher,
-          project_id: PROJECT_ID, project: File.basename(sandbox),
+          project_id: project_id, project: File.basename(sandbox),
           decision_journal: journal, clock: -> { START + 600 }
         )
         { store: store, attempt_store: attempts, launcher: launcher,
-          ledger: ledger, journal: journal, dispatcher: dispatcher }
+          ledger: ledger, journal: journal, dispatcher: dispatcher,
+          project_id: project_id }
       end
 
       def record_event(runtime, key:, occurred_at:)
@@ -214,7 +217,8 @@ module Hive
           Time.iso8601(selection.fetch("high_water_at")) + 1
         occurred_at = [ occurred_at, watermark ].compact.max
         runtime.fetch(:ledger).record(
-          project_id: PROJECT_ID, project: "sandbox", event_name: "task.completed",
+          project_id: runtime.fetch(:project_id), project: "sandbox",
+          event_name: "task.completed",
           occurred_at: occurred_at, source: { type: "task", id: key },
           idempotency_key: key, payload: { "task_id" => key }, recorded_at: occurred_at
         ).event
@@ -349,7 +353,15 @@ module Hive
       end
 
       def attempt_store(run_home)
-        Hive::Attempts::Store.new(root: File.join(run_home, "attempts"))
+        Hive::Attempts::Repository.open_default(state_home: run_home)
+      end
+
+      def registered_project_id(run_home, sandbox)
+        config = YAML.safe_load(File.read(File.join(run_home, "config.yml"))) || {}
+        project = Array(config["registered_projects"]).find do |entry|
+          File.expand_path(entry.fetch("path")) == File.expand_path(sandbox)
+        end
+        project&.fetch("project_id") || raise("sandbox project has no registered identity")
       end
 
       def state_path(sandbox) = File.join(sandbox, ".hive-state")

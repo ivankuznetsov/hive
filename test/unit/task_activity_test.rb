@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/task_activity"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 
 class TaskActivityTest < Minitest::Test
   include HiveTestHelper
@@ -36,7 +36,9 @@ class TaskActivityTest < Minitest::Test
   def test_checkpoint_refresh_failure_does_not_reject_a_durable_activity
     with_activity do |activity, dir|
       broken_store = Object.new
-      broken_store.define_singleton_method(:rebuild!) { raise "checkpoint unavailable" }
+      broken_store.define_singleton_method(:refresh_after_append!) do
+        raise "checkpoint unavailable"
+      end
       original_new = Hive::TaskProjection::Store.method(:new)
       Hive::TaskProjection::Store.define_singleton_method(:new) { |**| broken_store }
       begin
@@ -422,7 +424,7 @@ class TaskActivityTest < Minitest::Test
 
   def with_activity(task_generation: 3)
     with_tmp_dir do |dir|
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task",

@@ -13,6 +13,8 @@ require "hive/task_meta"
 # arm surfaces in this file rather than in a noisier integration
 # failure.
 class HiveDaemonPlanApprovalTest < Minitest::Test
+  include HiveTestHelper
+
   PA = Hive::Daemon::PlanApproval
 
   def with_state_file(marker_line)
@@ -158,7 +160,7 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
   end
 
   def test_prepare_production_path_uses_current_clearance_without_launching_review
-    with_reviewed_task("cleared") do |task, cfg|
+    with_reviewed_task("cleared", task_id: 42) do |task, cfg|
       command = PA.prepare("hive plan #{task.slug} --from 3-plan", task.state_file)
 
       assert_equal "hive develop #{task.slug} --from 3-plan", command
@@ -166,7 +168,7 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
       assert_equal "cleared", Hive::PlanReview::Store.new(task_folder: task.folder).current.state
     end
 
-    with_reviewed_task("blocked") do |task, _cfg|
+    with_reviewed_task("blocked", task_id: 43) do |task, _cfg|
       error = assert_raises(PA::NotApprovable) do
         PA.prepare("hive plan #{task.slug} --from 3-plan", task.state_file)
       end
@@ -175,14 +177,15 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     end
   end
 
-  def with_reviewed_task(state)
+  def with_reviewed_task(state, task_id:)
     Dir.mktmpdir("plan-approval-production") do |root|
       folder = File.join(root, ".hive-state", "stages", "3-plan", "reviewed-task")
       FileUtils.mkdir_p(folder)
       Hive::TaskMeta.write(
-        folder, id: 42, slug: "reviewed-task", display_name: nil,
+        folder, id: task_id, slug: "reviewed-task", display_name: nil,
         workflow: "coding", plan_review_required: true
       )
+      prepare_test_runtime_project(root)
       File.write(File.join(folder, "plan.md"), "# reviewed plan\n<!-- WAITING -->\n")
       task = Hive::Task.new(folder)
       cfg = Hive::Config.load(root)

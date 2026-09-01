@@ -38,9 +38,9 @@ steps:
     id: temporary-caller
   - kind: ruby_block
     block: |
-      require "hive/attempts/store"
-      store = Hive::Attempts::Store.open_default(state_home: run_home)
-      records = store.scan.records.select { |candidate| candidate["intended_stage"] == "4-execute" }
+      require "hive/attempts/repository"
+      repository = Hive::Attempts::Repository.open_default(state_home: run_home)
+      records = repository.scan.records.select { |candidate| candidate["intended_stage"] == "4-execute" }
       raise "expected one execute attempt, got #{records.size}" unless records.size == 1
       record = records.first
       raise "attempt was not still running after caller termination: #{record['state']}" unless record["state"] == "running"
@@ -58,15 +58,15 @@ steps:
     timeout: 30
   - kind: ruby_block
     block: |
-      require "hive/attempts/store"
-      store = Hive::Attempts::Store.open_default(state_home: run_home)
+      require "hive/attempts/repository"
+      repository = Hive::Attempts::Repository.open_default(state_home: run_home)
       attempt_id = File.read(File.join(run_home, "1849-attempt-id")).strip
       deadline = Time.now + 10
       record = nil
       loop do
-        record = store.fetch(attempt_id)
+        record = repository.fetch(attempt_id)
         raise "execute attempt disappeared" unless record
-        duplicates = store.scan.records.select do |candidate|
+        duplicates = repository.scan.records.select do |candidate|
           candidate["intended_stage"] == "4-execute" && candidate.attempt_id != attempt_id
         end
         raise "duplicate execute attempt appeared: #{duplicates.size}" unless duplicates.empty?

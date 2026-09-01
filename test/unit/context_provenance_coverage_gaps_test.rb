@@ -421,6 +421,24 @@ class ContextProvenanceCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_activity_for_context_delegates_to_the_shared_task_activity_boundary
+    with_fixture do |task, _attempt, context|
+      sentinel = Object.new
+      observed = nil
+      factory = lambda do |received_task, context:, clock:|
+        observed = [ received_task, context, clock.call ]
+        sentinel
+      end
+
+      result = with_replaced_singleton_method(Hive::TaskActivity, :for_context, factory) do
+        Hive::ContextProvenance.activity_for_context(task, context, clock: -> { NOW })
+      end
+
+      assert_same sentinel, result
+      assert_equal [ task, context, NOW ], observed
+    end
+  end
+
   private
 
   def with_fixture

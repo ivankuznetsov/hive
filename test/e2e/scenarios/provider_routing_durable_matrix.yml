@@ -10,7 +10,7 @@ steps:
     args: [new, "{project}", "legacy provider limit isolation"]
 
   - kind: ruby_block
-    description: Exercise durable restart, probe, strict-pin, capacity, exhaustion, operator, corruption, and implicit-versus-explicit one-route behavior.
+    description: Exercise durable restart, probe, strict-pin, capacity, exhaustion, operator, and implicit-versus-explicit one-route behavior.
     block: |
       require File.expand_path("../lib/provider_routing_incident_matrix", __dir__)
       Hive::E2E::ProviderRoutingIncidentMatrix.new(
@@ -49,14 +49,14 @@ steps:
   - kind: ruby_block
     description: Legacy task-local failure creates neither provider-health evidence nor a routed recovery request.
     block: |
-      require "hive/daemon/dispatch_request_queue"
+      require "hive/attempts/repository"
+      require "hive/runtime_control_plane/dispatch_repository"
 
-      health_root = File.join(run_home, "provider-health", "v1")
-      durable_health_files = Dir.glob(
-        File.join(health_root, "**", "*"), File::FNM_DOTMATCH
-      ).select { |path| File.file?(path) }
-      raise "legacy limit mutated provider health: #{durable_health_files.inspect}" unless durable_health_files.empty?
+      attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
+      health_rows = attempts.database.read { |db| db[:provider_circuits].count }
+      raise "legacy limit mutated provider health" unless health_rows.zero?
 
-      requests = Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home)
+      requests = Hive::RuntimeControlPlane::DispatchRepository
+        .open_default(state_home: run_home).pending
       legacy_requests = requests.select { |request| request.slug == slug }
       raise "legacy limit created a markerless routed recovery" unless legacy_requests.empty?

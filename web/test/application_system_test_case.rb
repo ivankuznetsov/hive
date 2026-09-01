@@ -66,10 +66,10 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
       raise "refusing to reset a non-test Hive sandbox: #{sandbox}"
     end
 
-    FileUtils.rm_rf(File.join(sandbox, "repos"))
-    Hive::Config.update_global_config! do |config|
-      config["registered_projects"] = []
+    Hive::Config.registered_projects.each do |project|
+      Hive::Config.unregister_project(name: project.fetch("name"))
     end
+    FileUtils.rm_rf(File.join(sandbox, "repos"))
     Hive::Workflows::Project.reset!
   end
 end

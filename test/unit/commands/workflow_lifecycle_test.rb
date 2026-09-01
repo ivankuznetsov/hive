@@ -616,6 +616,7 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       hive_state = File.join(project, ".hive-state")
       FileUtils.mkdir_p(File.join(hive_state, "stages"))
       File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml)
+      prepare_test_runtime_project(project)
       package = File.join(dir, "package")
       resolution = write_package(package, permission_spec: permission_spec)
       yield project, package, resolution

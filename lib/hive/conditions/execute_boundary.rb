@@ -1,5 +1,5 @@
 require "hive/attempts/context"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
 require "hive/conditions/reconcilers/execute"
@@ -105,7 +105,7 @@ module Hive
       def default_attempt_store
         return nil unless @context
 
-        Hive::Attempts::Store.runtime
+        Hive::Attempts::Repository.runtime
       end
 
       def verify_context!

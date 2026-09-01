@@ -1,5 +1,19 @@
 # Recovery
 
+## Runtime cutover recovery
+
+A `fleet_cutover_required` error is a controller-wide maintenance fence, not a
+task retry. Run the read-only `hive runtime status --json` first and report its
+`phase`, database status, `runtime_code`, and `next_action`. Do not run ordinary
+workflow commands while the fence is active.
+
+The SQLite cutover is irreversible. `hive migrate --all --yes` starts it and
+`hive runtime resume` advances an interrupted cutover; both change controller
+state and require explicit operator approval. There is no rollback, restore, or
+downgrade path. Never invent one or remove cutover evidence. After an approved
+resume, re-run `hive runtime status --json` and require `phase: active` with an
+`ok` database before returning to task operations.
+
 ## Diagnose before changing state
 
 Start with native evidence:

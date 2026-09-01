@@ -8,7 +8,7 @@ class TaskProjectionStoreTest < Minitest::Test
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::TaskProjection::Store.new(task_folder: root)
-        assert_equal File.join(root, "attempts", "v4"),
+        assert_equal File.join(root, "runtime-payloads"),
                      store.attempt_store.instance_variable_get(:@root)
       end
       refute File.exist?(File.join(root, "attempts", "v2"))
@@ -203,7 +203,7 @@ class TaskProjectionStoreTest < Minitest::Test
       projection_store(dir).rebuild!
       exploding_store = Object.new
       exploding_store.define_singleton_method(:fetch) do |_attempt_id|
-        raise Hive::Attempts::StoreError, "attempt store unavailable"
+        raise Hive::Attempts::RepositoryError, "attempt store unavailable"
       end
       store = Hive::TaskProjection::Store.new(
         task_folder: dir, attempt_store: exploding_store
@@ -311,6 +311,252 @@ class TaskProjectionStoreTest < Minitest::Test
       assert_equal "current", result.state
       assert_equal "attempt_terminal_failed",
                    result.projection.current_condition("AgentHealthy").fetch("reason")
+    end
+  end
+
+  def test_rebuild_classifies_a_missing_pre_activation_attempt_as_lost
+    with_tmp_dir do |dir|
+      legacy = durable_attempt
+      attempts = { "attempt-1" => legacy }
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) { |attempt_id| attempts[attempt_id] }
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        attempts[attempt_id]
+      end
+      activation = Time.iso8601("2026-07-17T12:01:00Z")
+      attempt_store.define_singleton_method(:pre_activation_projection?) do |observed_at|
+        Time.iso8601(observed_at) < activation
+      end
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+
+      current = durable_attempt.merge(
+        "attempt_id" => "attempt-2", "ownership_generation" => "owner-2",
+        "state" => "terminal", "outcome" => "failed", "lease_version" => 2
+      )
+      attempts = { "attempt-2" => current }
+      event = condition_event("event-2", state: "unsatisfied")
+      event["attempt_id"] = "attempt-2"
+      event["ownership_generation"] = "owner-2"
+      event["occurred_at"] = "2026-07-17T12:02:00.000000Z"
+      event["observed_at"] = "2026-07-17T12:02:00.000000Z"
+      event.dig("evidence", 0)["attempt_id"] = "attempt-2"
+      File.open(store.journal_path, "a") { |journal| journal.puts(JSON.generate(event)) }
+
+      strict = assert_raises(Hive::TaskProjection::InvalidJournal) { store.rebuild! }
+      assert_includes strict.message, "unknown durable attempt attempt-1"
+      projection = store.refresh_after_append!
+      bounded = store.read_routine
+
+      assert_equal "event-2", projection.to_h.dig("journal", "event_id")
+      assert_equal Digest::SHA256.file(store.journal_path).hexdigest,
+                   projection.to_h.dig("journal", "hash")
+      assert_equal "current", bounded.state
+      assert_equal projection.to_h, bounded.projection.to_h
+    end
+  end
+
+  def test_lifecycle_read_resumes_from_checkpoint_when_pre_activation_attempt_is_missing
+    with_tmp_dir do |dir|
+      attempt_store, attempts = pre_activation_attempt_store
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      attempts.clear
+
+      projection = store.read
+
+      assert_equal "event-1", projection.to_h.dig("journal", "event_id")
+      assert_equal "attempt_lost",
+                   projection.current_condition("AgentHealthy").fetch("reason")
+      strict = assert_raises(Hive::TaskProjection::InvalidJournal) { store.rebuild! }
+      assert_includes strict.message, "unknown durable attempt attempt-1"
+      FileUtils.rm(store.checkpoint_path)
+      uncheckpointed = assert_raises(Hive::TaskProjection::InvalidJournal) { store.read }
+      assert_includes uncheckpointed.message, "unknown durable attempt attempt-1"
+    end
+  end
+
+  def test_repair_rebuilds_a_checkpoint_from_exact_pre_activation_snapshot_bindings
+    with_tmp_dir do |dir|
+      attempt_store, attempts = pre_activation_attempt_store
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      attempts.clear
+      FileUtils.rm(store.checkpoint_path)
+      snapshot = JSON.parse(File.binread(store.snapshot_path))
+      snapshot.dig("journal", "attempts", 0).delete("exit_status")
+      snapshot["compatibility"]["marker"] = {
+        "name" => "execute_waiting", "attrs" => { "reason" => "legacy_wait" }
+      }
+      snapshot["compatibility"]["marker_fallback"] =
+        snapshot.dig("compatibility", "marker")
+      snapshot["implementation_identity"]["stages"] = {
+        "execute" => { "event_id" => "legacy-projector-choice" }
+      }
+      File.binwrite(store.snapshot_path, JSON.generate(snapshot))
+
+      repaired = store.repair!
+
+      assert_equal "current", repaired.bounded.state
+      assert_equal "attempt_lost",
+                   repaired.projection.current_condition("AgentHealthy").fetch("reason")
+      assert_equal repaired.projection.to_h, store.read_routine.projection.to_h
+    end
+  end
+
+  def test_repair_falls_back_when_pre_activation_checkpoint_is_not_current
+    with_tmp_dir do |dir|
+      attempt_store, attempts = pre_activation_attempt_store
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      projection = store.read_routine.projection
+      attempts.clear
+      FileUtils.rm(store.checkpoint_path)
+      store.define_singleton_method(:read_bounded_unlocked) do |**|
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: projection, state: "partial",
+          diagnostics: [ { "reason" => "checkpoint_invalid" } ],
+          truncated: false, journal_cursor: File.size(journal_path)
+        )
+      end
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+
+      assert_includes error.message, "unknown durable attempt attempt-1"
+    end
+  end
+
+  def test_repair_refuses_post_activation_or_journal_divergent_snapshot_bindings
+    with_tmp_dir do |dir|
+      attempt_store, attempts = pre_activation_attempt_store
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      snapshot = JSON.parse(File.binread(store.snapshot_path))
+      journal = File.binread(store.journal_path)
+      FileUtils.rm(store.checkpoint_path)
+      attempts.clear
+
+      post_activation = JSON.parse(JSON.generate(snapshot))
+      post_activation.dig("journal", "attempts", 0)["accepted_at"] =
+        "2026-07-17T12:02:00.000000Z"
+      File.binwrite(store.snapshot_path, JSON.generate(post_activation))
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+      refute_path_exists store.checkpoint_path
+
+      File.binwrite(store.snapshot_path, JSON.generate(snapshot))
+      File.open(store.journal_path, "a") { |file| file.puts(JSON.generate(condition_event("event-2"))) }
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+      refute_path_exists store.checkpoint_path
+      File.binwrite(store.journal_path, journal)
+    end
+  end
+
+  def test_repair_never_replaces_a_conflicting_current_attempt_with_snapshot_evidence
+    with_tmp_dir do |dir|
+      attempt_store, attempts = pre_activation_attempt_store
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      FileUtils.rm(store.checkpoint_path)
+      attempts["attempt-1"] = durable_attempt.tap { |attempt| attempt["task_id"] = "99" }
+
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+      refute_path_exists store.checkpoint_path
+    end
+  end
+
+  def test_repair_rejects_a_backdated_snapshot_without_pre_activation_journal_evidence
+    with_tmp_dir do |dir|
+      post_activation_attempt = durable_attempt.tap do |attempt|
+        attempt["accepted_at"] = "2026-07-17T12:02:00.000000Z"
+      end
+      attempt_store, attempts = pre_activation_attempt_store(attempt: post_activation_attempt)
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      event = condition_event("event-1")
+      event["occurred_at"] = "2026-07-17T12:03:00.000000Z"
+      event["observed_at"] = "2026-07-17T12:03:00.000000Z"
+      write_journal(dir, [ event ])
+      store.rebuild!
+      snapshot = JSON.parse(File.binread(store.snapshot_path))
+      snapshot.dig("journal", "attempts", 0)["accepted_at"] =
+        "2026-07-17T11:59:00.000000Z"
+      File.binwrite(store.snapshot_path, JSON.generate(snapshot))
+      FileUtils.rm(store.checkpoint_path)
+      attempts.clear
+
+      assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+      refute_path_exists store.checkpoint_path
+    end
+  end
+
+  def test_missing_post_activation_attempt_still_fails_closed
+    with_tmp_dir do |dir|
+      legacy = durable_attempt
+      attempts = { "attempt-1" => legacy }
+      attempt_store = Object.new
+      attempt_store.define_singleton_method(:fetch) { |attempt_id| attempts[attempt_id] }
+      attempt_store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+        attempts[attempt_id]
+      end
+      activation = Time.iso8601("2026-07-17T12:01:00Z")
+      attempt_store.define_singleton_method(:pre_activation_projection?) do |observed_at|
+        Time.iso8601(observed_at) < activation
+      end
+      write_journal(dir, [ condition_event("event-1") ])
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      store.rebuild!
+      attempts = {}
+      event = condition_event("event-2")
+      event["attempt_id"] = "missing-current-attempt"
+      event["occurred_at"] = "2026-07-17T12:02:00.000000Z"
+      event["observed_at"] = "2026-07-17T12:02:00.000000Z"
+      event.dig("evidence", 0)["attempt_id"] = "missing-current-attempt"
+      File.open(store.journal_path, "a") { |journal| journal.puts(JSON.generate(event)) }
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.refresh_after_append!
+      end
+
+      assert_includes error.message, "unknown durable attempt missing-current-attempt"
+    end
+  end
+
+  def test_append_refresh_refuses_a_journal_change_after_bounded_validation
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = projection_store(dir)
+      store.rebuild!
+      store.define_singleton_method(:journal_bytes) do
+        "#{File.binread(journal_path)}changed"
+      end
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        store.refresh_after_append!
+      end
+
+      assert_includes error.message,
+                      "journal changed while advancing its projection checkpoint"
     end
   end
 
@@ -961,6 +1207,20 @@ class TaskProjectionStoreTest < Minitest::Test
     Object.new.tap do |store|
       store.define_singleton_method(:fetch) { |attempt_id| attempt if attempt_id == "attempt-1" }
     end
+  end
+
+  def pre_activation_attempt_store(attempt: durable_attempt)
+    attempts = { "attempt-1" => attempt }
+    activation = Time.iso8601("2026-07-17T12:01:00Z")
+    store = Object.new
+    store.define_singleton_method(:fetch) { |attempt_id| attempts[attempt_id] }
+    store.define_singleton_method(:fetch_projection_binding) do |attempt_id|
+      attempts[attempt_id]
+    end
+    store.define_singleton_method(:pre_activation_projection?) do |observed_at|
+      Time.iso8601(observed_at) < activation
+    end
+    [ store, attempts ]
   end
 
   def durable_attempt

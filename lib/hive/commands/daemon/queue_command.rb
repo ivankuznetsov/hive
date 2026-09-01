@@ -1,7 +1,6 @@
 require "json"
-require "fileutils"
 require "time"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 
 module Hive
   module Commands
@@ -14,10 +13,11 @@ module Hive
       # `ServiceInstaller` extraction. `Commands::Daemon#queue_command`
       # delegates here.
       class QueueCommand
-        def initialize(queue_args:, json:, hive_home:)
+        def initialize(queue_args:, json:, hive_home:, dispatch_repository: nil)
           @queue_args = Array(queue_args)
           @json = json
           @hive_home = hive_home
+          @dispatch_repository = dispatch_repository
         end
 
         def call
@@ -33,6 +33,11 @@ module Hive
           when "show"  then queue_show(@queue_args[1])
           when "prune" then queue_prune
           end
+        rescue Hive::RuntimeControlPlane::Error => e
+          emit_queue_error_envelope(action: @queue_args[0], error_kind: "internal",
+                                    message: "#{e.class}: #{e.message}") if @json
+          raise Hive::InternalError,
+                "hive daemon queue #{@queue_args[0]}: #{e.class}: #{e.message}"
         rescue Hive::InvalidTaskPath, Hive::Error
           # Already-structured failures (queue_usage_error! / queue_show
           # not-found) — re-raise for the exit code without re-emitting.
@@ -49,6 +54,11 @@ module Hive
         end
 
         private
+
+        def dispatch_repository
+          @dispatch_repository ||=
+            Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: @hive_home)
+        end
 
         # Emit a hive-daemon-queue error envelope (under --json) and raise a
         # USAGE-class error so the exit code is non-zero and a human sees
@@ -108,45 +118,34 @@ module Hive
           end
         end
 
-        # `prune` runs in a separate CLI process against the live queue dir
-        # with no lock, so a request can be claimed+dispatched by the daemon
-        # between the `pending` scan and removal. `remove_if_unclaimed` skips
-        # any id the daemon has since claimed (never deleting a `.claimed`
-        # file's crash-recovery state), and we count only files actually
-        # unlinked — so the reported count is advisory under concurrency but
-        # never over-reports a removal that a racing claim turned into a no-op
-        # (#265).
+        # Each removal is conditional on the row still being queued, so a
+        # concurrent daemon claim wins without losing recovery state. The
+        # reported count therefore reflects only committed removals.
         def queue_prune
-          requests, malformed = load_queue_requests
+          requests, = load_queue_requests
           expired = requests.select do |req|
-            Hive::Daemon::DispatchRequestQueue.expired?(req) &&
-              Hive::Daemon::DispatchRequestQueue.remove_if_unclaimed(req.request_id, state_home: @hive_home)
+            dispatch_repository.expired?(req) &&
+              dispatch_repository.remove_if_unclaimed(req.request_id, state_home: @hive_home)
           end
-          malformed.each { |bad| FileUtils.rm_f(bad[:path]) }
-
-          pruned = expired.length + malformed.length
+          pruned = expired.length
           if @json
             puts JSON.generate(queue_envelope(
                                  action: "prune",
                                  pruned_count: pruned,
                                  requests: expired.map { |req| queue_request_hash(req) },
-                                 malformed: malformed
+                                 malformed: []
                                ))
           else
             puts "hive daemon queue: pruned #{pruned} request(s) " \
-                 "(#{expired.length} expired, #{malformed.length} malformed)"
+                 "(#{expired.length} expired, 0 malformed)"
           end
         end
 
-        # Read + parse every pending request file, collecting malformed
-        # entries separately so a single corrupt file never hides the rest.
+        # SQLite validates persisted request rows at the repository boundary;
+        # corruption fails the command closed instead of becoming a second
+        # collection of removable queue entries.
         def load_queue_requests
-          malformed = []
-          requests = Hive::Daemon::DispatchRequestQueue.pending(
-            state_home: @hive_home,
-            bad_handler: ->(path:, reason:) { malformed << { path: path, reason: reason } }
-          )
-          [ requests, malformed ]
+          [ dispatch_repository.pending(state_home: @hive_home), [] ]
         end
 
         def queue_request_hash(req)
@@ -162,8 +161,8 @@ module Hive
             "requestor" => req.requestor,
             "chat_id" => req.chat_id,
             "update_id" => req.update_id,
-            "expired" => Hive::Daemon::DispatchRequestQueue.expired?(req),
-            "allowlisted" => Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
+            "expired" => dispatch_repository.expired?(req),
+            "allowlisted" => dispatch_repository.valid_argv?(req.argv)
           }
         end
 
@@ -184,8 +183,8 @@ module Hive
 
           requests.each do |req|
             flags = []
-            flags << "EXPIRED" if Hive::Daemon::DispatchRequestQueue.expired?(req)
-            flags << "NOT-ALLOWLISTED" unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
+            flags << "EXPIRED" if dispatch_repository.expired?(req)
+            flags << "NOT-ALLOWLISTED" unless dispatch_repository.valid_argv?(req.argv)
             suffix = flags.empty? ? "" : " [#{flags.join(' ')}]"
             puts "#{req.request_id}  #{(Time.now - req.created_at).to_i}s  " \
                  "#{req.project}/#{req.slug}  #{req.argv[1]}#{suffix}"
@@ -204,8 +203,8 @@ module Hive
           puts "requestor:  #{req.requestor}"
           puts "chat_id:    #{req.chat_id.inspect}"
           puts "update_id:  #{req.update_id.inspect}"
-          puts "expired:    #{Hive::Daemon::DispatchRequestQueue.expired?(req)}"
-          puts "allowlisted:#{Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)}"
+          puts "expired:    #{dispatch_repository.expired?(req)}"
+          puts "allowlisted:#{dispatch_repository.valid_argv?(req.argv)}"
         end
       end
     end

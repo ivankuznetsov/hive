@@ -28,6 +28,7 @@ class TriageTest < Minitest::Test
     with_tmp_dir do |dir|
       task_folder = File.join(dir, ".hive-state", "stages", "6-review", "test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+      prepare_test_task_run(task_folder)
       yield(dir, task_folder)
     end
   end

@@ -1,18 +1,16 @@
 require "digest"
-require "json"
 require "time"
-require "hive/atomic_file"
 require "hive/agent_limit"
 require "hive/attempts/dirty_state_capture"
+require "hive/runtime_control_plane"
 require "hive/task_resolver"
 
 module Hive
   module Attempts
-    # Durable, idempotent policy projection of an irreversible lost lease.
-    # The attempt record remains ownership truth; this small sidecar records
-    # cleanup/preservation progress so daemon restarts cannot repeat signals
-    # or mint another successor.
-    class LostOutcomeStore
+    # Transactional policy for cleanup after an irreversible lost lease. The
+    # attempt remains ownership truth; this row prevents repeated signals and
+    # duplicate successors across daemon restarts.
+    class LostOutcomeTransition
       FINAL_STATUSES = %w[successor_dispatched].freeze
       SAFE_CLEANUPS = %w[absent terminated no_worker].freeze
 
@@ -21,8 +19,7 @@ module Hive
       end
 
       def ensure_for(attempt, now: Time.now.utc)
-        @store.with_generation_lock(attempt.task_generation) do
-          fetch(attempt.attempt_id) || persist(attempt, {
+        expected = {
             "schema" => "hive-attempt-lost-outcome",
             "schema_version" => 1,
             "idempotency_key" => idempotency_key(attempt),
@@ -40,29 +37,48 @@ module Hive
             "last_cleanup_at" => nil,
             "last_retry_at" => nil,
             "diagnostic" => nil
-          })
+        }
+        @store.database.transaction do |db|
+          row = db[:attempt_lost_outcomes].where(attempt_id: attempt.attempt_id).first
+          next parse(row) if row
+
+          db[:attempt_lost_outcomes].insert(row_for(expected, revision: 0))
+          expected.freeze
         end
+      rescue Sequel::Error, RuntimeControlPlane::Error => error
+        raise RepositoryError, "lost outcome could not be created: #{error.message}"
       end
 
       def fetch(attempt_id)
-        JSON.parse(File.binread(path(attempt_id)))
-      rescue Errno::ENOENT
-        nil
-      rescue JSON::ParserError => e
-        raise StoreError, "lost outcome #{attempt_id} is unreadable: #{e.message}"
+        row = @store.database.read do |db|
+          db[:attempt_lost_outcomes].where(attempt_id: attempt_id.to_s).first
+        end
+        row && parse(row)
+      rescue Sequel::Error, RuntimeControlPlane::Error => error
+        raise RepositoryError, "lost outcome #{attempt_id} is unreadable: #{error.message}"
       end
 
       def update(attempt, now: Time.now.utc, **changes)
-        @store.with_generation_lock(attempt.task_generation) do
-          current = fetch(attempt.attempt_id) || raise(StoreError, "lost outcome is missing")
+        replacement = nil
+        @store.database.transaction do |db|
+          row = db[:attempt_lost_outcomes].where(attempt_id: attempt.attempt_id).first
+          current = row && parse(row)
+          raise RepositoryError, "lost outcome is missing" unless current
           unless current["idempotency_key"] == idempotency_key(attempt)
-            raise StoreError, "lost outcome identity does not match attempt"
+            raise RepositoryError, "lost outcome identity does not match attempt"
           end
 
-          persist(attempt, current.merge(stringify(changes)).merge(
+          replacement = current.merge(stringify(changes)).merge(
             "updated_at" => now.utc.iso8601(6)
-          ))
+          )
+          changed = db[:attempt_lost_outcomes].where(
+            attempt_id: attempt.attempt_id, revision: row.fetch(:revision)
+          ).update(row_for(replacement, revision: row.fetch(:revision) + 1))
+          raise RepositoryError, "lost outcome changed concurrently" unless changed == 1
         end
+        replacement.freeze
+      rescue Sequel::Error, RuntimeControlPlane::Error => error
+        raise RepositoryError, "lost outcome could not be updated: #{error.message}"
       end
 
       private
@@ -73,21 +89,37 @@ module Hive
         )
       end
 
-      def path(attempt_id)
-        @store.output_path(attempt_id, "lost-outcome.json")
+      def row_for(data, revision:)
+        validate!(data)
+        {
+          attempt_id: data.fetch("attempt_id"),
+          idempotency_key: data.fetch("idempotency_key"),
+          status: data.fetch("status"), cleanup: data["cleanup"],
+          successor_attempt_id: data["successor_attempt_id"],
+          value_json: RuntimeControlPlane::Codec.dump_json(data),
+          revision: revision, updated_at: data.fetch("updated_at")
+        }
       end
 
-      def persist(attempt, data)
-        output_path = @store.output_path(
-          attempt.attempt_id,
-          "lost-outcome.json",
-          create_directory: true
-        )
-        Hive::AtomicFile.write(output_path, JSON.generate(data) + "\n", mode: 0o600)
-        File.chmod(0o600, output_path)
-        data
-      rescue SystemCallError, IOError => e
-        raise StoreError, "lost outcome could not be persisted: #{e.message}"
+      def parse(row)
+        data = RuntimeControlPlane::Codec.load_json(row.fetch(:value_json))
+        validate!(data)
+        unless data["attempt_id"] == row.fetch(:attempt_id) &&
+               data["idempotency_key"] == row.fetch(:idempotency_key) &&
+               data["status"] == row.fetch(:status) &&
+               data["cleanup"] == row[:cleanup] &&
+               data["successor_attempt_id"] == row[:successor_attempt_id]
+          raise RepositoryError, "lost outcome indexed fields disagree with its value"
+        end
+        data.freeze
+      end
+
+      def validate!(data)
+        valid = data.is_a?(Hash) && data["schema"] == "hive-attempt-lost-outcome" &&
+          data["schema_version"] == 1 && !data["attempt_id"].to_s.empty? &&
+          !data["idempotency_key"].to_s.empty? &&
+          %w[pending ready successor_dispatched].include?(data["status"])
+        raise RepositoryError, "lost outcome is invalid" unless valid
       end
 
       def stringify(hash)
@@ -112,12 +144,12 @@ module Hive
 
       def process(attempt, now: Time.now.utc)
         outcome = @outcome_store.ensure_for(attempt, now: now)
-        return outcome if LostOutcomeStore::FINAL_STATUSES.include?(outcome["status"])
+        return outcome if LostOutcomeTransition::FINAL_STATUSES.include?(outcome["status"])
         return outcome if outcome["status"] == "ready"
         return outcome unless cleanup_retry_due?(outcome, now: now)
 
         cleanup = cleanup_orphan(attempt)
-        unless LostOutcomeStore::SAFE_CLEANUPS.include?(cleanup)
+        unless LostOutcomeTransition::SAFE_CLEANUPS.include?(cleanup)
           diagnostic = "worker group identity is not safe to terminate yet; retrying"
           return @outcome_store.update(
             attempt, now: now, status: "pending", cleanup: cleanup,

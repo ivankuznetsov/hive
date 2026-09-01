@@ -46,6 +46,12 @@ class ConditionsRegistryTest < Minitest::Test
     definition = Hive::Conditions::Registry.default.fetch("Merged")
     assert_equal "pull_request", definition.to_h.fetch("scope")
     assert_equal [ "pull_request", "journal_event" ], definition.to_h.fetch("allowed_evidence")
-    assert_equal [ "finalize_to_archive" ], definition.to_h.fetch("default_transitions")
+    refute definition.to_h.key?("default_transitions")
+  end
+
+  def test_registry_does_not_own_transition_membership
+    # Transition membership has exactly one internal representation: the gate
+    # rules in Conditions::Policy. The registry must not carry a parallel copy.
+    refute_respond_to Hive::Conditions::Registry.default.fetch("AgentHealthy"), :default_transitions
   end
 end

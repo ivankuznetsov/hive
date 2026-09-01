@@ -3,7 +3,7 @@ title: Hive::ProviderRouting policy
 type: module
 source: lib/hive/provider_routing.rb, lib/hive/provider_routing/*.rb
 created: 2026-08-10
-updated: 2026-08-12
+updated: 2026-08-29
 tags: [config, provider-accounts, routing, policy, validation]
 ---
 
@@ -16,7 +16,7 @@ and a canonical digest. Health, admission, capacity, attempts, retry, and
 recovery are not owned here. `Router` consumes immutable health and durable
 capacity observations and returns an explainable decision without reserving a
 route. The public `require "hive/provider_routing"` entrypoint resolves both
-the immutable values and `ProviderRouting::PolicyStore` without relying on an
+the immutable values and `ProviderRouting::PolicyRepository` without relying on an
 Attempts require to have run first.
 
 ## Global provider accounts
@@ -139,19 +139,18 @@ half-open and ordinary admission may claim its probe instead of emitting either
 exclusion.
 
 Before the first explicit selection for a durable subject generation,
-`ProviderRouting::PolicyStore` records the complete normalized policy under
-`$HIVE_HOME/attempts/v4/routing-policies/v1/`. The cell is point-addressed by
-the opaque ownership generation and strict attempt subject, owner-private, and
-first-writer-wins. Reads reconstruct the policy and recompute its canonical
-digest; schema-valid tampering therefore still fails closed. Only symbolic
-launch-binding identity is stored. Legacy policies return before key validation,
-schema loading, directory creation, or any policy-store I/O.
+`ProviderRouting::PolicyRepository` inserts the complete normalized policy in
+the runtime control plane. The primary key combines installation, opaque
+ownership generation, strict subject kind, and subject key. `INSERT ... ON
+CONFLICT DO NOTHING` makes the first writer authoritative; reads reconstruct
+the policy and recompute its canonical digest so schema-valid tampering still
+fails closed. Only symbolic launch-binding identity is stored. Legacy policies
+return before key validation, schema loading, or repository I/O.
 
-The routing-policy component owns those first-writer-wins snapshot mutations;
-it uses the lower-level `Hive::PointStorage` custody primitive rather than an
-Attempts-internal store. Attempts owns admission and supplies the root and lock
-ordering, but it is not a hidden dependency of policy normalization or
-persistence.
+The routing-policy component owns those snapshot semantics while the injected
+runtime-control-plane repository owns transaction and connection custody.
+There is no point-store, routing-policy directory, repair scan, or routing
+filesystem lock.
 
 Release incident coverage uses that same production admission boundary. The
 AE2-AE8 matrix admits routed work through `Attempts::Dispatcher`, derives
@@ -174,8 +173,8 @@ consulted only for an explicit pool; the structural legacy policy never opens
 that store. Health cooldown controls half-open route eligibility only and does
 not schedule a retry.
 
-The Attempts dispatcher freezes the policy and invokes this pure router while
-holding its existing admission and task-generation locks. It then asks health
+The Attempts dispatcher freezes the policy and invokes this pure router before
+the launching-attempt transaction. It then asks health
 to revalidate the selected route's complete generation vector. Any concurrent
 health mutation causes a bounded re-selection; only a still-current decision
 may be persisted with a launching attempt.
@@ -191,9 +190,9 @@ health read per candidate.
 routing policy, Attempts, and Provider Health. It joins bounded current
 decision cells, durable live-attempt account counts, and authoritative scoped
 health inspection. It does not call `Router`, select a route, or acquire an
-admission/task-generation lock. The Attempts decision index returns immutable
-snapshots; projection filtering allocates its own array rather than mutating
-that shared reader result.
+admission transaction. Indexed `attempt_routing_decisions` rows return
+immutable snapshots; projection filtering allocates its own array rather than
+mutating that shared reader result.
 
 Account and model circuits for one route are sampled under one provider-health
 lock hold, without repairing journals or publishing projections. Provider and

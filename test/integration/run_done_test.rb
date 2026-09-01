@@ -14,6 +14,7 @@ class RunDoneTest < Minitest::Test
         slug = "feat-x-260424-aaaa"
         done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
         FileUtils.mkdir_p(done_dir)
+        ensure_test_task_identity(done_dir)
         File.write(File.join(done_dir, "task.md"), "## work\n<!-- EXECUTE_COMPLETE -->\n")
         File.write(File.join(done_dir, "worktree.yml"),
                    { "path" => "/tmp/wt-feat-x", "branch" => slug }.to_yaml)
@@ -32,6 +33,7 @@ class RunDoneTest < Minitest::Test
         slug = "feat-y-260424-aaaa"
         done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
         FileUtils.mkdir_p(done_dir)
+        ensure_test_task_identity(done_dir)
         out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }
         assert_includes out, "archived"
       end
@@ -49,6 +51,7 @@ class RunDoneTest < Minitest::Test
         slug = "feat-json-260424-aaaa"
         done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
         FileUtils.mkdir_p(done_dir)
+        ensure_test_task_identity(done_dir)
         File.write(File.join(done_dir, "task.md"), "## work\n<!-- EXECUTE_COMPLETE -->\n")
         File.write(File.join(done_dir, "worktree.yml"),
                    { "path" => "/tmp/wt-feat-json", "branch" => slug }.to_yaml)
@@ -83,6 +86,7 @@ class RunDoneTest < Minitest::Test
         slug = "feat-json-archived-260424-aaaa"
         done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
         FileUtils.mkdir_p(done_dir)
+        ensure_test_task_identity(done_dir)
 
         out, _err = capture_io { Hive::Commands::Run.new(done_dir, json: true).call }
 
@@ -105,6 +109,7 @@ class RunDoneTest < Minitest::Test
         slug = "feat-human-260424-aaaa"
         done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
         FileUtils.mkdir_p(done_dir)
+        ensure_test_task_identity(done_dir)
         File.write(File.join(done_dir, "task.md"), "## work\n<!-- EXECUTE_COMPLETE -->\n")
         File.write(File.join(done_dir, "worktree.yml"),
                    { "path" => "/tmp/wt-feat-human", "branch" => slug }.to_yaml)

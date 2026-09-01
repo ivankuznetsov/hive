@@ -6,15 +6,15 @@ module Hive
       CONTRACT_VERSION = 1
       BASENAME = "task-projection.checkpoint.json".freeze
       DIAGNOSTIC = "reviewer modified protected artifacts: #{BASENAME}".freeze
-      INITIAL_REVIEW_ROLES = ResultParser::INITIAL_REVIEW_RECOVERY_ROLES
+      RECOVERY_ROLES = Adapters::Base::KINDS
 
       module_function
 
-      # Recover only exact, runner-authored initial-review failures. A
+      # Recover only exact, runner-authored review failures. A
       # versioned reset suppresses later replays of the same lineage; malformed
       # recovery metadata fails closed instead of creating a retry loop.
       def recoverable_routes(routes)
-        recoverable_by_role(routes).values_at(*INITIAL_REVIEW_ROLES).compact
+        recoverable_by_role(routes).values_at(*RECOVERY_ROLES).compact
       end
 
       def recoverable?(routes)
@@ -27,7 +27,7 @@ module Hive
         attempted_roles = {}
         Array(routes).reverse_each do |route|
           role = route["role"]
-          next unless INITIAL_REVIEW_ROLES.include?(role)
+          next unless RECOVERY_ROLES.include?(role)
 
           if route["checkpoint_custody_recovery"] == true
             status = contract_status(route)

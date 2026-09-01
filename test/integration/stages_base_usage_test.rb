@@ -11,14 +11,14 @@ class StagesBaseUsageTest < Minitest::Test
 
   def setup
     @old_bin = ENV["HIVE_CLAUDE_BIN"]
-    @old_usage_path = Hive::UsageDb.path
+    @old_usage_database = Hive::UsageDb.database
     ENV["HIVE_CLAUDE_BIN"] = FAKE_BIN
     Hive::AgentProfile.reset_version_cache!
   end
 
   def teardown
     ENV["HIVE_CLAUDE_BIN"] = @old_bin
-    Hive::UsageDb.path = @old_usage_path
+    Hive::UsageDb.database = @old_usage_database
     %w[
       HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
       HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
@@ -29,11 +29,12 @@ class StagesBaseUsageTest < Minitest::Test
   def make_task(root, stage = "2-brainstorm", slug = "usage-task-260524-abcd")
     folder = File.join(root, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_lease_repository(folder)
     Hive::Task.new(folder)
   end
 
-  def with_usage_db(root)
-    Hive::UsageDb.path = File.join(root, "usage.db")
+  def with_usage_db(_root)
+    Hive::UsageDb.database = Hive::TaskCounter.database
     yield
   end
 
@@ -63,7 +64,7 @@ class StagesBaseUsageTest < Minitest::Test
   def token_usage_rows
     require "sqlite3"
 
-    db = SQLite3::Database.new(Hive::UsageDb.path)
+    db = SQLite3::Database.new(Hive::UsageDb.database.path)
     db.results_as_hash = true
     db.execute("SELECT * FROM token_usage ORDER BY started_at")
   ensure
@@ -71,14 +72,16 @@ class StagesBaseUsageTest < Minitest::Test
   end
 
   def spawn(task, profile: nil, **kwargs)
-    Hive::Stages::Base.spawn_agent(
-      task,
-      prompt: "collect usage",
-      max_budget_usd: 1,
-      timeout_sec: 5,
-      profile: profile,
-      **kwargs
-    )
+    Hive::Lock.with_task_lock(task.folder, op: "test-stage-usage") do
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "collect usage",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        **kwargs
+      )
+    end
   end
 
   def test_spawn_agent_records_one_usage_row
@@ -108,16 +111,29 @@ class StagesBaseUsageTest < Minitest::Test
   def test_attempt_bound_spawn_records_one_session_and_exact_usage_attribution
     with_tmp_dir do |root|
       task = make_task(root, "2-brainstorm", "usage-task-260524-abcd")
+      registered_project = Hive::TaskCounter.database.read do |db|
+        db[:projects].where(state_root_path: File.join(root, ".hive-state")).get(:name)
+      end
       context = Hive::Attempts::Context.send(
         :new, attempt_id: "attempt-1", task_generation: 3,
-        ownership_generation: "owner-3", project: task.project_name,
+        ownership_generation: "owner-3", project: registered_project,
         task_slug: task.slug, intended_stage: "2-brainstorm"
       )
-      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"),
+        database: Hive::TaskCounter.database,
+        migrate: false
+      )
+      generation = Struct.new(
+        :task_id, :project, :task_slug, :progress_token, :task_input_epoch
+      ).new(task.id, registered_project, task.slug, "progress-1", 3)
+      store.observe_task_source(
+        task: task, generation: generation, observed_at: Time.utc(2026, 8, 12, 10)
+      )
       store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1",
         predecessor_attempt_id: nil, task_id: task.id,
-        project: task.project_name, task_slug: task.slug,
+        project: registered_project, task_slug: task.slug,
         intended_stage: "2-brainstorm", task_generation: "owner-3",
         ownership_generation: "owner-3", task_input_epoch: 3,
         progress_token: "progress-1", provider: "claude",
@@ -145,7 +161,7 @@ class StagesBaseUsageTest < Minitest::Test
           result
         end
         with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
-          with_replaced_singleton_method(Hive::Attempts::Store, :new, ->(**) { store }) do
+          with_replaced_singleton_method(Hive::Attempts::Repository, :new, ->(**) { store }) do
             result = spawn(task, agent_custody: agent_custody)
             assert_equal :waiting, result[:status]
           end
@@ -242,7 +258,7 @@ class StagesBaseUsageTest < Minitest::Test
         result = spawn(task, profile: profile)
 
         assert_equal :waiting, result[:status]
-        refute File.exist?(Hive::UsageDb.path)
+        assert_empty token_usage_rows
       end
     end
   end
@@ -262,15 +278,7 @@ class StagesBaseUsageTest < Minitest::Test
           status_detection_mode: :state_file_marker
         )
 
-        result = Hive::Stages::Base.spawn_agent(
-          task,
-          prompt: "collect usage",
-          max_budget_usd: 1,
-          timeout_sec: 5,
-          profile: profile,
-          model: "opus",
-          effort: "high"
-        )
+        result = spawn(task, profile: profile, model: "opus", effort: "high")
 
         assert_equal :waiting, result[:status]
         warning = File.read(File.join(task.log_dir, "config-warnings.log"))
@@ -313,7 +321,7 @@ class StagesBaseUsageTest < Minitest::Test
     with_tmp_dir do |root|
       task = make_task(root)
       configure_fake_agent(task)
-      Hive::UsageDb.path = root
+      Hive::UsageDb.database = Hive::RuntimeControlPlane::Database.new(path: root)
 
       _out, err = capture_io do
         result = spawn(task)

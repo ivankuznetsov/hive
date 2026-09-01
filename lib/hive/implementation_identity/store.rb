@@ -1,5 +1,5 @@
 require "hive/attempts/context"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/conditions/generation_tracker"
 require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
@@ -221,7 +221,7 @@ module Hive
       end
 
       def default_attempt_store
-        Hive::Attempts::Store.runtime
+        Hive::Attempts::Repository.runtime
       end
     end
   end

@@ -2,7 +2,7 @@ require "test_helper"
 require "hive/conditions/execute_boundary"
 require "hive/conditions/transition_guard"
 require "hive/attempts/generation"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/workflows/coding"
 
 class ConditionsExecuteBoundaryTest < Minitest::Test
@@ -11,10 +11,13 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
   def test_default_attempt_store_opens_current_layout_without_migration
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
+        Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(root)
+        ).migrate!.disconnect
         boundary = Hive::Conditions::ExecuteBoundary.allocate
         boundary.instance_variable_set(:@context, Object.new)
         store = boundary.send(:default_attempt_store)
-        assert_equal File.join(root, "attempts", "v4"), store.root
+        assert_equal File.join(root, "runtime-payloads"), store.root
       end
       refute File.exist?(File.join(root, "attempts", "v2"))
       refute File.exist?(File.join(root, "recovery-migration-v6.json"))
@@ -171,7 +174,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       assert_equal :execute_waiting, outcome.marker_name
       Hive::Markers.set(task.state_file, :execute_complete)
 
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => store.root) do
+      with_env("HIVE_HOME" => store.root) do
         error = assert_raises(Hive::ConditionGateBlocked) do
           Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
         end
@@ -229,7 +232,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       journal = File.binread(journal_path)
 
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => store.root) do
+      with_env("HIVE_HOME" => store.root) do
         File.delete(journal_path)
         assert_raises(Hive::TaskProjection::InvalidJournal) do
           Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
@@ -253,7 +256,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
         raise Hive::TaskJournal::Error, "audit disk full"
       end
 
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => store.root) do
+      with_env("HIVE_HOME" => store.root) do
         with_replaced_singleton_method(
           Hive::TaskJournal::Writer, :new, ->(**) { failing_writer }
         ) do
@@ -373,7 +376,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     with_tmp_git_repo do |worktree|
       with_tmp_dir do |dir|
         task = build_task(dir, worktree)
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         context = Hive::Attempts::Context.send(
           :new, attempt_id: "deleted-attempt", task_generation: 1,
           ownership_generation: "owner-deleted"
@@ -436,7 +439,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       with_tmp_dir do |dir|
         task = build_task(dir, worktree, research: research)
         baseline = Hive::GitOps.new(worktree).head_sha
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         attempt = store.create_launching(
           **attempt_identity(task, baseline), launch_timeout_sec: 30, now: Time.now.utc
         )

@@ -13,6 +13,9 @@ class RunningStatusTest < Minitest::Test
       payload = status.payload([ project ], now: NOW)
 
       assert_equal "hive-running-status", payload.fetch("schema")
+      assert_equal 2, payload.fetch("schema_version")
+      assert_equal 0, payload.dig("source", "lease_rows_scanned")
+      assert_equal 10_000, payload.dig("limits", "max_lease_rows_scanned")
       assert_equal [], payload.fetch("tasks")
       assert_equal 0, payload.fetch("count")
       assert_equal 0, payload.fetch("observed_count")
@@ -120,6 +123,35 @@ class RunningStatusTest < Minitest::Test
     assert_equal false, payload.fetch("complete")
   end
 
+  def test_lease_query_failure_marks_registered_projects_unavailable
+    with_project do |project, _hive_state|
+      unavailable = Object.new
+      unavailable.define_singleton_method(:active_leases) do |**|
+        raise Hive::RuntimeControlPlane::Unavailable.new(
+          "database unavailable", code: :unavailable
+        )
+      end
+      Hive::Lock.task_lease_repository = unavailable
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_empty payload.fetch("tasks")
+      assert_equal 1, payload.dig("source", "projects_unavailable")
+      assert_equal false, payload.fetch("complete")
+    end
+  end
+
+  def test_missing_metadata_is_absent_only_while_task_folder_exists
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      FileUtils.mkdir_p(task)
+
+      assert_equal [ "absent", {} ], status.send(:read_metadata, task)
+      FileUtils.rmdir(task)
+      assert_raises(Errno::ENOENT) { status.send(:read_metadata, task) }
+    end
+  end
+
   def test_live_task_lock_without_agent_pid_is_running
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "lock-only-task")
@@ -140,9 +172,10 @@ class RunningStatusTest < Minitest::Test
   def test_live_pid_without_recorded_identity_is_stale
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "unverified-task")
-      File.write(
-        File.join(folder, ".lock"),
-        { "pid" => Process.pid, "lock_id" => "unverified" }.to_yaml
+      write_lock(
+        folder,
+        "pid" => Process.pid, "process_start_time" => nil,
+        "lock_id" => "unverified"
       )
 
       payload = status.payload([ project ], now: NOW)
@@ -237,6 +270,23 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
+  def test_stale_sql_holders_before_a_live_holder_do_not_hide_live_work
+    with_project do |project, hive_state|
+      (Hive::RunningStatus::MAX_TASKS + 2).times do |index|
+        folder = task_folder(hive_state, "3-plan", format("stale-%03d", index))
+        write_lock(folder, "pid" => 2_147_483_647, "process_start_time" => "dead")
+      end
+      live = task_folder(hive_state, "4-execute", "live-after-stale")
+      write_lock(live, "pid" => Process.pid)
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_equal [ "live-after-stale" ], payload.fetch("tasks").map { |row| row.fetch("slug") }
+      assert_equal Hive::RunningStatus::MAX_TASKS + 2,
+                   payload.dig("source", "stale_locks")
+    end
+  end
+
   def test_reused_runner_pid_with_mismatched_start_time_is_stale
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "3-plan", "reused-pid-task")
@@ -294,14 +344,9 @@ class RunningStatusTest < Minitest::Test
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "2-brainstorm", "moving-task")
       write_lock(folder, "pid" => Process.pid, "lock_id" => "moving")
-      moving_status = Class.new(Hive::RunningStatus) do
-        def read_lock_payload(lock_path)
-          FileUtils.rm_rf(File.dirname(lock_path))
-          super
-        end
-      end.new(daemon_state: daemon_state)
+      FileUtils.mv(folder, "#{folder}-moved")
 
-      payload = moving_status.payload([ project ], now: NOW)
+      payload = status.payload([ project ], now: NOW)
 
       assert_equal [], payload.fetch("tasks")
       assert_equal 1, payload.dig("source", "transition_skips")
@@ -326,7 +371,7 @@ class RunningStatusTest < Minitest::Test
   def test_malformed_lock_is_omitted_and_counted
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "bad-lock-task")
-      File.write(File.join(folder, ".lock"), "pid: [unterminated\n")
+      write_corrupt_lease(folder, "[")
 
       payload = status.payload([ project ], now: NOW)
 
@@ -335,10 +380,26 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
+  def test_structurally_invalid_lease_is_omitted_without_hiding_other_live_work
+    with_project do |project, hive_state|
+      invalid = task_folder(hive_state, "1-inbox", "invalid-holder")
+      write_lock(invalid, "pid" => "not-an-integer")
+      live = task_folder(hive_state, "4-execute", "live-holder")
+      write_lock(live, "pid" => Process.pid)
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_equal [ "live-holder" ], payload.fetch("tasks").map { |row| row.fetch("slug") }
+      assert_equal 1, payload.dig("source", "malformed_locks")
+    end
+  end
+
   def test_deeply_nested_lock_is_omitted_and_counted
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "nested-lock-task")
-      File.write(File.join(folder, ".lock"), "pid: #{deeply_nested_flow_yaml}\n")
+      write_corrupt_lease(
+        folder, Hive::RuntimeControlPlane::Codec.dump_json("x" * (Hive::RunningStatus::MAX_LOCK_BYTES + 1))
+      )
 
       payload = status.payload([ project ], now: NOW)
 
@@ -364,36 +425,11 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
-  def test_symlink_lock_is_never_followed
-    with_project do |project, hive_state|
-      folder = task_folder(hive_state, "1-inbox", "symlink-lock-task")
-      target = File.join(hive_state, "outside-lock.yml")
-      File.write(target, { "pid" => Process.pid }.to_yaml)
-      File.symlink(target, File.join(folder, ".lock"))
-
-      payload = status.payload([ project ], now: NOW)
-
-      assert_equal [], payload.fetch("tasks")
-      assert_equal 1, payload.dig("source", "malformed_locks")
-    end
-  end
-
-  def test_fifo_lock_returns_promptly_and_is_malformed
-    with_project do |project, hive_state|
-      folder = task_folder(hive_state, "1-inbox", "fifo-lock-task")
-      File.mkfifo(File.join(folder, ".lock"))
-
-      payload = Timeout.timeout(1) { status.payload([ project ], now: NOW) }
-
-      assert_equal [], payload.fetch("tasks")
-      assert_equal 1, payload.dig("source", "malformed_locks")
-    end
-  end
-
   def test_fifo_metadata_returns_promptly_without_hiding_live_task
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "fifo-meta-task")
       write_lock(folder, "pid" => Process.pid, "lock_id" => "fifo-meta")
+      File.unlink(File.join(folder, "meta.yml"))
       File.mkfifo(File.join(folder, "meta.yml"))
 
       row = Timeout.timeout(1) do
@@ -443,7 +479,7 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
-  def test_bounded_reader_uses_inode_checked_fallback_without_o_nofollow
+  def test_metadata_reader_uses_inode_checked_fallback_without_o_nofollow
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "portable-lock-reader")
       write_lock(folder, "pid" => Process.pid, "lock_id" => "portable-reader")
@@ -470,6 +506,12 @@ class RunningStatusTest < Minitest::Test
           folder, id: index, slug: slug, display_name: "d" * 1_000, workflow: "coding"
         )
       end
+      database_reads = 0
+      original_read = @database.method(:read)
+      @database.define_singleton_method(:read) do |&block|
+        database_reads += 1
+        original_read.call(&block)
+      end
 
       payload = status.payload([ project ], now: NOW)
       encoded = JSON.generate(payload) + "\n"
@@ -486,6 +528,7 @@ class RunningStatusTest < Minitest::Test
       assert_operator payload.dig("tasks", 0, "display_name").bytesize,
                       :<=, Hive::RunningStatus::MAX_STRING_BYTES
       assert_operator encoded.bytesize, :<=, Hive::RunningStatus::MAX_OUTPUT_BYTES
+      assert_equal 1, database_reads, "live lease discovery must be one bounded SQL query"
       assert_schema_valid(payload)
     end
   end
@@ -509,19 +552,20 @@ class RunningStatusTest < Minitest::Test
     assert_equal false, document.fetch("complete")
   end
 
-  def test_filesystem_entry_budget_stops_scan_and_marks_counts_inexact
+  def test_active_lease_budget_marks_counts_inexact
     with_project do |project, hive_state|
-      task_folder(hive_state, "1-inbox", "not-inspected")
+      folder = task_folder(hive_state, "1-inbox", "not-inspected")
+      write_lock(folder, "pid" => Process.pid)
       capped_status = Class.new(Hive::RunningStatus) do
         private
 
-        def max_filesystem_entries_scanned = 0
+        def max_leases_scanned = 0
       end.new(daemon_state: daemon_state)
 
       payload = capped_status.payload([ project ], now: NOW)
 
       assert_equal [], payload.fetch("tasks")
-      assert_equal 0, payload.dig("source", "filesystem_entries_scanned")
+      assert_equal 0, payload.dig("source", "lease_rows_scanned")
       assert_equal 0, payload.dig("source", "tasks_scanned")
       assert_equal true, payload.dig("source", "scan_truncated")
       assert_equal false, payload.fetch("observed_count_exact")
@@ -643,10 +687,29 @@ class RunningStatusTest < Minitest::Test
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       FileUtils.mkdir_p(File.join(hive_state, "stages"))
+      @database = prepare_runtime_project(
+        state_home: project_root, name: name, path: project_root,
+        state_root_path: hive_state
+      )
+      prior_repository = Hive::Lock.task_lease_repository
+      Hive::Lock.task_lease_repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: @database,
+        process_start_time: Hive::Lock.method(:process_start_time),
+        process_alive: lambda { |pid, recorded_start_time:|
+          Hive::Lock.send(
+            :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+          )
+        }
+      )
+      @next_task_id = 0
       yield(
         { "name" => name, "path" => project_root, "hive_state_path" => hive_state },
         hive_state
       )
+    ensure
+      Hive::Lock.task_lease_repository = prior_repository if prior_repository
+      @database&.disconnect
+      @database = nil
     end
   end
 
@@ -659,7 +722,29 @@ class RunningStatusTest < Minitest::Test
     if attributes["pid"] == Process.pid && !attributes.key?("process_start_time")
       attributes["process_start_time"] = live_start_time
     end
-    File.write(File.join(folder, ".lock"), attributes.to_yaml)
+    ensure_task_identity(folder)
+    repository = Hive::Lock.task_lease_repository
+    held = repository.acquire(folder, { "op" => "running-status-test" }, create: false)
+    repository.update(folder, attributes, lock_id: held.fetch("lock_id"))
+    held
+  end
+
+  def write_corrupt_lease(folder, payload_json)
+    held = write_lock(folder, "pid" => Process.pid)
+    @database.transaction do |db|
+      db[:task_leases].where(holder_id: held.fetch("lock_id")).update(
+        payload_json: payload_json
+      )
+    end
+  end
+
+  def ensure_task_identity(folder)
+    return if Hive::TaskMeta.read(folder)[:id]
+
+    @next_task_id += 1
+    Hive::TaskMeta.write(
+      folder, id: @next_task_id, slug: File.basename(folder), display_name: nil
+    )
   end
 
   def live_start_time

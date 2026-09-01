@@ -5,13 +5,13 @@ require "rbconfig"
 require "hive/provider_routing"
 
 class ProviderRoutingValueObjectsTest < Minitest::Test
-  def test_public_entrypoint_resolves_policy_store_without_attempts_internals
+  def test_public_entrypoint_resolves_policy_repository_without_legacy_storage
     lib = File.expand_path("../../../lib", __dir__)
     script = <<~'RUBY'
       require "json"
       require "hive/provider_routing"
       puts JSON.generate(
-        "constant" => Hive::ProviderRouting::PolicyStore.name,
+        "constant" => Hive::ProviderRouting::PolicyRepository.name,
         "attempts_point_storage_loaded" => $LOADED_FEATURES.any? do |feature|
           feature.end_with?("/hive/attempts/point_storage.rb")
         end
@@ -27,7 +27,7 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
 
     assert status.success?, err
     payload = JSON.parse(out)
-    assert_equal "Hive::ProviderRouting::PolicyStore", payload.fetch("constant")
+    assert_equal "Hive::ProviderRouting::PolicyRepository", payload.fetch("constant")
     assert_equal false, payload.fetch("attempts_point_storage_loaded")
   end
 

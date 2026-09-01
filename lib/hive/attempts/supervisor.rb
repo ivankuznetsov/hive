@@ -5,7 +5,7 @@ require "hive/attempts/capability"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
 require "hive/attempts/command_progress"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/attempts/stream_log"
 require "hive/lock"
 require "hive/patrol_fix/attempt_diagnostic"
@@ -90,7 +90,7 @@ module Hive
           now: @clock.call
         )
         terminal.receipt.fetch("exit_status")
-      rescue CompareAndSwapFailed, StoreError => e
+      rescue CompareAndSwapFailed, RepositoryError => e
         terminate_worker_group
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => e.message)
         Hive::ExitCodes::TEMPFAIL
@@ -232,8 +232,15 @@ module Hive
           end
           wait_for = [ wait_for, post_exit_deadline - now_mono ].min if post_exit_deadline
           wait_for = 0 if wait_for.negative?
-          ready = readers.empty? ? nil : IO.select(readers.keys, nil, nil, wait_for)
-          Array(ready&.first).each { |io| drain_reader(io, readers, log) }
+          if readers.empty?
+            # With every output pipe at EOF there is nothing to select on, but
+            # the loop may still be awaiting worker exit or a lingering group.
+            # Sleep the computed budget so WNOHANG polling does not busy-spin.
+            sleep(wait_for) if wait_for.positive?
+          else
+            ready = IO.select(readers.keys, nil, nil, wait_for)
+            Array(ready&.first).each { |io| drain_reader(io, readers, log) }
+          end
 
           if status.nil?
             waited = Process.wait2(@worker_pid, Process::WNOHANG)
@@ -365,11 +372,11 @@ module Hive
         true
       rescue Errno::EEXIST
         existing = read_existing_diagnostic(path)
-        raise Hive::Attempts::StoreError, "attempt diagnostic immutable bytes conflict" unless existing == document
+        raise Hive::Attempts::RepositoryError, "attempt diagnostic immutable bytes conflict" unless existing == document
 
         true
       rescue JSON::ParserError, SystemCallError, IOError => e
-        raise Hive::Attempts::StoreError, "attempt diagnostic storage failed: #{e.message}"
+        raise Hive::Attempts::RepositoryError, "attempt diagnostic storage failed: #{e.message}"
       end
 
       def read_existing_diagnostic(path)
@@ -378,16 +385,16 @@ module Hive
         bytes = File.open(path, flags) do |file|
           stat = file.stat
           unless stat.file? && stat.nlink == 1
-            raise Hive::Attempts::StoreError, "attempt diagnostic is not a single regular file"
+            raise Hive::Attempts::RepositoryError, "attempt diagnostic is not a single regular file"
           end
           if stat.size > Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
-            raise Hive::Attempts::StoreError, "attempt diagnostic exceeds its size limit"
+            raise Hive::Attempts::RepositoryError, "attempt diagnostic exceeds its size limit"
           end
 
           file.read(Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES + 1).to_s
         end
         if bytes.bytesize > Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES
-          raise Hive::Attempts::StoreError, "attempt diagnostic exceeds its size limit"
+          raise Hive::Attempts::RepositoryError, "attempt diagnostic exceeds its size limit"
         end
 
         document = JSON.parse(bytes)
@@ -395,7 +402,7 @@ module Hive
         document
       rescue JSON::ParserError, Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic,
              SystemCallError, IOError => e
-        raise Hive::Attempts::StoreError, "attempt diagnostic storage failed: #{e.message}"
+        raise Hive::Attempts::RepositoryError, "attempt diagnostic storage failed: #{e.message}"
       end
 
       def drain_reader(io, readers, log)
@@ -443,7 +450,7 @@ module Hive
         pgid = Process.getpgid(@worker_pid)
         expected_pgid = @worker_pgid || @worker_pid
         unless pgid == @worker_pid && pgid == expected_pgid
-          raise StoreError, "worker process group identity changed"
+          raise RepositoryError, "worker process group identity changed"
         end
 
         Process.kill(signal, -pgid)
@@ -457,7 +464,7 @@ module Hive
       rescue Errno::ESRCH
         false
       rescue Errno::EPERM
-        raise StoreError, "worker process group cannot be signalled"
+        raise RepositoryError, "worker process group cannot be signalled"
       end
 
       def recorded_worker_group_alive?
@@ -486,7 +493,7 @@ module Hive
           "process_group_id" => Process.getpgid(pid)
         }
       rescue Errno::ESRCH
-        raise StoreError, "process #{pid} disappeared before identity capture"
+        raise RepositoryError, "process #{pid} disappeared before identity capture"
       end
 
       def resolved_worker_argv(record)

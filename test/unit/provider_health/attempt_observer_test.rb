@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/attempts/repository"
 require "hive/provider_health/attempt_observer"
 
 class ProviderHealthAttemptObserverTest < Minitest::Test
@@ -12,16 +13,33 @@ class ProviderHealthAttemptObserverTest < Minitest::Test
 
   def setup
     @tmp = Dir.mktmpdir("provider-health-observer")
-    @attempts = {}
-    @store = Hive::ProviderHealth::Store.new(
-      root: File.join(@tmp, "health"),
-      clock: -> { Time.utc(2026, 8, 10, 12) },
-      attempt_reader: ->(id) { @attempts[id] }
+    setup_repositories
+  end
+
+  def setup_repositories
+    @attempt_repository = Hive::Attempts::Repository.new(
+      root: File.join(@tmp, "attempts"), migrate: true
+    )
+    @attempt_repository.create_launching(
+      attempt_id: "attempt-1", request_id: "request-1",
+      predecessor_attempt_id: nil, task_id: "task-1", project: "demo",
+      task_slug: "task-1", intended_stage: "4-execute",
+      task_generation: "generation-1", ownership_generation: "generation-1",
+      task_input_epoch: 1, progress_token: "source-1", provider: "codex",
+      worker_argv: %w[hive run task-1],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+      starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: Time.utc(2026, 8, 10, 12)
+    )
+    @store = Hive::ProviderHealth::Repository.new(
+      database: @attempt_repository.database,
+      clock: -> { Time.utc(2026, 8, 10, 12) }
     )
     @observer = Hive::ProviderHealth::AttemptObserver.new(store: @store)
   end
 
   def teardown
+    @attempt_repository.database.disconnect
     FileUtils.remove_entry(@tmp)
   end
 
@@ -137,15 +155,10 @@ class ProviderHealthAttemptObserverTest < Minitest::Test
   private
 
   def reset_store
+    @attempt_repository.database.disconnect
     FileUtils.remove_entry(@tmp)
     FileUtils.mkdir_p(@tmp)
-    @attempts.clear
-    @store = Hive::ProviderHealth::Store.new(
-      root: File.join(@tmp, "health"),
-      clock: -> { Time.utc(2026, 8, 10, 12) },
-      attempt_reader: ->(id) { @attempts[id] }
-    )
-    @observer = Hive::ProviderHealth::AttemptObserver.new(store: @store)
+    setup_repositories
   end
 
   def claim_probe(scope)
@@ -170,17 +183,14 @@ class ProviderHealthAttemptObserverTest < Minitest::Test
       now: Time.utc(2026, 8, 10, 12)
     )
     requirement = evaluation.probe_requirements.find { |candidate| candidate.scope == scope }
-    intent = Hive::ProviderHealth::ProbeIntent.new(
-      intent_id: "intent-1", attempt_id: "attempt-1",
-      task_generation: "generation-1", ownership_fence: "generation-1",
-      requirements: [ requirement ]
-    )
-    binding = nil
-    @store.with_probe_intent(intent: intent) do |bindings|
-      binding = bindings.fetch(0)
-      @attempts["attempt-1"] = observer_attempt(probe_bindings: bindings)
+    bindings = @store.database.transaction do |db|
+      @store.claim_probe_bindings_in(
+        db, requirements: [ requirement ], attempt_id: "attempt-1",
+        task_generation: "generation-1", ownership_fence: "generation-1",
+        now: Time.utc(2026, 8, 10, 12)
+      )
     end
-    binding
+    bindings.fetch(0)
   end
 
   def observer_attempt(probe_bindings: [])
@@ -192,12 +202,16 @@ class ProviderHealthAttemptObserverTest < Minitest::Test
   end
 
   def bind(record)
-    @attempts[record.attempt_id] = {
-      "attempt_id" => record.attempt_id,
-      "task_generation" => record.task_generation,
-      "ownership_fence" => record.ownership_generation,
-      "state" => record.state
-    }
+    outcome = record.state == "terminal" ? record.receipt.fetch("outcome") : nil
+    @attempt_repository.database.transaction do |db|
+      db[:attempts].where(attempt_id: record.attempt_id).update(
+        state: record.state, outcome: outcome,
+        ended_at: Time.utc(2026, 8, 10, 12).iso8601(6)
+      )
+      db[:capacity_reservations].where(attempt_id: record.attempt_id).update(
+        state: "released", released_at: Time.utc(2026, 8, 10, 12).iso8601(6)
+      )
+    end
   end
 
   def terminal_record(evidence_scope:)

@@ -3,7 +3,7 @@ require "hive/patrol_fix/attempt_diagnostic"
 module Hive
   module Attempts
     # Consumes one terminal Patrol attempt while both its immutable receipt and
-    # live admission metadata are still available. DecisionIndex makes this
+    # live admission metadata are still available. The control plane makes this
     # idempotent when admission refresh and finalization observe the same row.
     class FailureCohortReconciler
       def initialize(store:)
@@ -15,7 +15,7 @@ module Hive
 
         date = admission.fetch("utc_date")
         if record.outcome == "succeeded"
-          return decision_index.record_failure_cohort_success(
+          return @store.record_failure_cohort_success(
             attempt_id: record.attempt_id, date: date
           )
         end
@@ -32,7 +32,7 @@ module Hive
         )
         return false unless bound
 
-        decision_index.record_failure_cohort(
+        @store.record_failure_cohort(
           attempt_id: record.attempt_id,
           identity: {
             "runtime_digest" => admission.fetch("runtime_digest"),
@@ -47,10 +47,6 @@ module Hive
       end
 
       private
-
-      def decision_index
-        @store.decision_index
-      end
 
       def eligible?(record, admission)
         record.state == "terminal" && admission.is_a?(Hash) &&

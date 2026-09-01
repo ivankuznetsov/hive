@@ -28,6 +28,7 @@ class MarkersCommandTest < Minitest::Test
     FileUtils.touch(state)
     File.write(state, "# my task\n\n## Implementation\n\nwip\n")
     Hive::Markers.set(state, marker)
+    prepare_test_task_lease_repository(review)
 
     [ project, review, File.basename(review) ]
   end
@@ -100,6 +101,7 @@ class MarkersCommandTest < Minitest::Test
     state = File.join(folder, descriptor.stages[1].state_file.to_s)
     File.write(state, "# custom task\n\nwip\n")
     Hive::Markers.set(state, :review_stale)
+    prepare_test_task_lease_repository(folder)
 
     [ project, folder, "custom-task", state ]
   end
@@ -186,6 +188,29 @@ class MarkersCommandTest < Minitest::Test
                        payload.keys.sort
           refute payload.key?("lock_path")
         end
+      end
+    end
+  end
+
+  def test_task_lease_contention_refuses_to_clear_or_commit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, folder, _slug = seed_review_task(dir, marker: :review_stale)
+        state = File.join(folder, "task.md")
+        publish_test_task_lease(folder, { "owner" => "replacement-runner" })
+        before_head = run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD")
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "REVIEW_STALE", json: true
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::TEMPFAIL, status
+        assert_equal "error", JSON.parse(out).fetch("error_kind")
+        assert_equal :review_stale, Hive::Markers.current(state).name
+        assert_equal before_head.strip,
+                     run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD").strip
       end
     end
   end
@@ -507,6 +532,7 @@ class MarkersCommandTest < Minitest::Test
     state = File.join(review, "task.md")
     File.write(state, "# my task\n\n## Implementation\n\nwip\n")
     Hive::Markers.set(state, :error, marker_attrs)
+    prepare_test_task_lease_repository(review)
 
     [ project, review, File.basename(review) ]
   end

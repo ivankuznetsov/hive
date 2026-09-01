@@ -13,6 +13,11 @@ steps:
     files:
       - path: plan.md
         content: "# Plan\n\n<!-- COMPLETE -->\n"
+      - path: meta.yml
+        content: |
+          id: 98101
+          slug: stale-lock-task
+          display_name: Stale lock task
   - kind: ruby_block
     block: |
       path = File.join(sandbox, ".hive-state", "config.yml")
@@ -21,22 +26,22 @@ steps:
       File.write(path, config.to_yaml)
   - kind: ruby_block
     block: |
-      lock_path = File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock")
-      File.write(lock_path, {
-        "pid" => Process.pid,
-        "started_at" => Time.now.utc.iso8601,
-        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
-      }.to_yaml)
+      task_folder = File.join(sandbox, ".hive-state/stages/4-execute", slug)
+      @scenario_lease_database, @scenario_lease_repository, @scenario_lock_id =
+        hold_task_lease(task_folder)
   - kind: cli
     args: [run, "{slug}", --stage, 4-execute]
     expect_exit: 75
   - kind: ruby_block
     block: |
-      FileUtils.rm_f(File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock"))
+      task_folder = File.join(sandbox, ".hive-state/stages/4-execute", slug)
+      @scenario_lease_repository.release(task_folder, lock_id: @scenario_lock_id)
   - kind: cli
     args: [markers, clear, "{task_dir:4-execute}", --name, EXECUTE_STALE]
   - kind: cli
     args: [run, "{slug}", --stage, 4-execute]
-  - kind: state_assert
-    path: "{task_dir:4-execute}/.lock"
-    absent: true
+  - kind: ruby_block
+    block: |
+      task_folder = File.join(sandbox, ".hive-state/stages/4-execute", slug)
+      raise "task lease remained held" if @scenario_lease_repository.read(task_folder)
+      @scenario_lease_database.disconnect

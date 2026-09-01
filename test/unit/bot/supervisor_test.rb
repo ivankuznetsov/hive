@@ -2451,11 +2451,11 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_drain_dispatch_results_relays_failure_to_chat_and_removes
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      Hive::Daemon::DispatchResultQueue.write!(
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(repository,
         chat_id: 42, update_id: 7, project: "hive", slug: "stuck-task",
         request_id: "rq000001", exit_code: 4,
-        command: "hive markers clear stuck-task", state_home: home
+        command: "hive markers clear stuck-task"
       )
 
       @supervisor.send(:drain_dispatch_results)
@@ -2465,18 +2465,18 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_equal 42, msg[:chat_id]
       assert_includes msg[:text], "stuck-task"
       assert_includes msg[:text], "exit 4"
-      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+      assert_empty repository.pending_results,
                    "a relayed notice must be removed so it isn't sent twice"
     end
   end
 
   def test_drain_dispatch_results_relays_success_to_chat_and_removes
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      Hive::Daemon::DispatchResultQueue.write!(
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(repository,
         chat_id: 42, update_id: 7, project: "hive", slug: "done-task",
         request_id: "rq000002", exit_code: 0,
-        command: "hive run done-task --json", state_home: home
+        command: "hive run done-task --json"
       )
 
       @supervisor.send(:drain_dispatch_results)
@@ -2486,7 +2486,7 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_equal 42, msg[:chat_id]
       assert_equal "Run completed for hive/done-task.", msg[:text]
       refute_includes msg[:text], "exit 0"
-      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+      assert_empty repository.pending_results,
                    "a relayed notice must be removed so it isn't sent twice"
     end
   end
@@ -2496,18 +2496,18 @@ class HiveBotSupervisorTest < Minitest::Test
   # dropped + removed without relaying — defense-in-depth re-validation.
   def test_drain_dispatch_results_drops_notice_for_unauthorized_chat
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      Hive::Daemon::DispatchResultQueue.write!(
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(repository,
         chat_id: 999, project: "hive", slug: "stuck-task",
         request_id: "rq000099", exit_code: 4,
-        command: "hive markers clear stuck-task", state_home: home
+        command: "hive markers clear stuck-task"
       )
 
       @supervisor.send(:drain_dispatch_results)
 
       assert_empty @telegram.messages,
                    "a notice for a non-allowlisted chat must not be relayed"
-      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+      assert_empty repository.pending_results,
                    "the unauthorized notice must be removed, not left to retry forever"
       rejected = @logger.events.find { |e| e[:name] == :dispatch_result_rejected_unauthorized }
       refute_nil rejected, "the drop must be logged for an audit trail"
@@ -2515,17 +2515,22 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_drain_dispatch_results_removes_malformed_notice
+  def test_drain_dispatch_results_fails_closed_on_a_corrupt_row
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      dir = Hive::Daemon::DispatchResultQueue.directory(state_home: home)
-      bad = File.join(dir, "20260528-bad.json")
-      File.write(bad, "{not json")
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(
+        repository, chat_id: 42, project: "hive", slug: "bad-result",
+        request_id: "rqbad", exit_code: 1, command: "hive review bad-result"
+      )
+      repository.database.transaction do |db|
+        db[:dispatch_outbox].where(request_id: "rqbad").update(payload_json: "{")
+      end
 
-      @supervisor.send(:drain_dispatch_results)
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        @supervisor.send(:drain_dispatch_results)
+      end
 
-      assert_empty @telegram.messages, "a malformed notice has no chat to reply to"
-      refute File.exist?(bad), "malformed notice must be removed so it can't wedge the drain"
+      assert_empty @telegram.messages, "a corrupt row has no trusted chat to reply to"
     end
   end
 
@@ -2533,17 +2538,17 @@ class HiveBotSupervisorTest < Minitest::Test
   # never silently dropped.
   def test_drain_dispatch_results_keeps_notice_when_send_fails
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      Hive::Daemon::DispatchResultQueue.write!(
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(repository,
         chat_id: 42, project: "hive", slug: "t", request_id: "rq1", exit_code: 1,
-        command: "hive review t", state_home: home
+        command: "hive review t"
       )
       @telegram.raise_on_send = IOError.new("telegram down")
 
       @supervisor.send(:drain_dispatch_results)
 
       assert_empty @telegram.messages
-      refute_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+      refute_empty repository.pending_results,
                    "a notice must be kept for retry when the Telegram relay fails (#1)"
     end
   end
@@ -2552,10 +2557,10 @@ class HiveBotSupervisorTest < Minitest::Test
   # kill, not "exit ".
   def test_drain_dispatch_results_renders_nil_exit_as_killed
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      Hive::Daemon::DispatchResultQueue.write!(
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(repository,
         chat_id: 42, project: "hive", slug: "wedged", request_id: "rqk", exit_code: nil,
-        command: "hive review wedged", state_home: home
+        command: "hive review wedged"
       )
 
       @supervisor.send(:drain_dispatch_results)
@@ -2568,16 +2573,16 @@ class HiveBotSupervisorTest < Minitest::Test
   # pruned to bound growth.
   def test_drain_dispatch_results_drops_stale_without_sending
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
-      Hive::Daemon::DispatchResultQueue.write!(
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(repository,
         chat_id: 42, project: "hive", slug: "old", request_id: "rqold", exit_code: 1,
-        command: "hive review old", state_home: home, now: Time.now - 7200
+        command: "hive review old", now: Time.now - 7200
       )
 
       @supervisor.send(:drain_dispatch_results)
 
       assert_empty @telegram.messages, "a stale notice must not be relayed"
-      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+      assert_empty repository.pending_results,
                    "a stale notice must be pruned"
     end
   end
@@ -2586,21 +2591,21 @@ class HiveBotSupervisorTest < Minitest::Test
   # per chat so a reconnect can't flood Telegram.
   def test_drain_dispatch_results_caps_and_summarizes_overflow
     Dir.mktmpdir("hive-dispatch-result") do |home|
-      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      repository = install_dispatch_repository(home)
       14.times do |i|
-        Hive::Daemon::DispatchResultQueue.write!(
+        write_dispatch_result(repository,
           chat_id: 42, project: "hive", slug: "t#{i}", request_id: "rq#{i}", exit_code: 1,
-          command: "hive review t#{i}", state_home: home, now: Time.now + i
+          command: "hive review t#{i}", now: Time.now + i
         )
       end
 
-      @supervisor.send(:drain_dispatch_results)
+      @supervisor.send(:drain_dispatch_results, now: Time.now + 20)
 
       cap = Hive::Bot::Supervisor::DISPATCH_RESULT_SEND_CAP
       assert_equal cap + 1, @telegram.messages.size,
                    "#{cap} individual relays + one overflow summary"
       assert_includes @telegram.messages.last[:text], "more dispatch failures suppressed"
-      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+      assert_empty repository.pending_results,
                    "the whole backlog is cleared after a successful drain"
     end
   end
@@ -3466,6 +3471,37 @@ class HiveBotSupervisorTest < Minitest::Test
     yield
   ensure
     Hive::Config.define_singleton_method(:registered_projects, original)
+  end
+
+  def install_dispatch_repository(state_home)
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).migrate!
+    timestamp = Time.now.utc.iso8601(6)
+    database.transaction do |db|
+      installation = db[:installations].first.fetch(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: "supervisor-project", installation_id: installation,
+        registration_id: "hive", name: "hive", observed_path: "/tmp/hive",
+        state_root_path: "/tmp/hive/.hive-state", active: 1,
+        registered_at: timestamp, last_observed_at: timestamp
+      )
+    end
+    repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+    @supervisor.instance_variable_set(:@dispatch_result_state_home, state_home)
+    @supervisor.instance_variable_set(:@dispatch_repository, repository)
+    repository
+  end
+
+  def write_dispatch_result(repository, **attributes)
+    request_id = attributes.fetch(:request_id)
+    slug = "result-#{request_id.downcase.gsub(/[^a-z0-9-]/, "-")}"
+    now = attributes.fetch(:now, Time.now)
+    repository.write_request!(
+      project: "hive", slug: slug, argv: [ "hive", "run", slug ],
+      request_id: request_id, now: now
+    )
+    repository.write_result!(**attributes)
   end
 
   def test_interruptible_sleep_sleeps_until_flag_changes

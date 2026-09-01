@@ -1,8 +1,7 @@
-require "yaml"
 require "fileutils"
 require "time"
-require "securerandom"
 require "hive/attempts/context"
+require "hive/runtime_control_plane/task_lease_repository"
 
 module Hive
   module Lock
@@ -12,154 +11,89 @@ module Hive
 
     def with_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
+      lock_key = task_lease_repository.lease_key(task_folder)
+      held = (Thread.current[:hive_task_locks] ||= {})
+      if held.dig(lock_key, :pid) == Process.pid
+        entry = held.fetch(lock_key)
+        entry[:depth] += 1
+        begin
+          return yield
+        ensure
+          entry[:depth] -= 1
+        end
+      end
+
+      held.delete(lock_key)
       lock_data = acquire_task_lock(task_folder, payload, create: create)
-      lock_key = File.expand_path(task_folder)
-      held = (Thread.current[:hive_task_locks] ||= Hash.new(0))
-      held[lock_key] += 1
+      held[lock_key] = { depth: 1, lock_id: lock_data.fetch("lock_id"), pid: Process.pid }
       begin
         yield
       ensure
-        held[lock_key] -= 1
-        held.delete(lock_key) if held[lock_key].zero?
-        release_task_lock(task_folder, lock_id: lock_data.fetch("lock_id"))
+        entry = held.fetch(lock_key)
+        entry[:depth] -= 1
+        if entry[:depth].zero?
+          held.delete(lock_key)
+          release_task_lock(task_folder, lock_id: entry.fetch(:lock_id))
+        end
       end
     end
 
     def task_lock_held?(task_folder)
-      Thread.current[:hive_task_locks].to_h.fetch(File.expand_path(task_folder), 0).positive?
+      key = task_lease_repository.lease_key(task_folder)
+      Thread.current[:hive_task_locks].to_h.dig(key, :pid) == Process.pid
+    rescue RuntimeControlPlane::IdentityError
+      false
     end
 
     def acquire_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
-      lock_path = File.join(task_folder, ".lock")
-      if create
-        FileUtils.mkdir_p(task_folder)
-      elsif !File.directory?(task_folder)
-        raise Errno::ENOENT, task_folder
-      end
       data = base_payload
              .merge(payload.transform_keys(&:to_s))
              .merge(Hive::Attempts::Context.projection)
-             .merge("lock_id" => SecureRandom.hex(16))
-
-      with_task_lock_guard(lock_path) do
-        attempts = 0
-        begin
-          attempts += 1
-          publish_task_lock(lock_path, data)
-        rescue Errno::EEXIST
-          if stale_lock?(lock_path)
-            File.delete(lock_path)
-            retry if attempts < 3
-          end
-          holder = read_task_lock(lock_path)
-          raise ConcurrentRunError.new(
-            "another hive run is active for #{task_folder} (lock at #{lock_path})",
-            holder: holder,
-            lock_path: lock_path
-          )
-        end
-      end
-      data
+      task_lease_repository.acquire(task_folder, data, create: create)
     end
 
     def release_task_lock(task_folder, lock_id:)
-      lock_path = File.join(task_folder, ".lock")
-      return false unless File.directory?(task_folder)
-
-      with_task_lock_guard(lock_path) do
-        return false unless File.exist?(lock_path)
-
-        current = read_task_lock(lock_path)
-        return false unless current && current["lock_id"] == lock_id
-
-        File.delete(lock_path)
-        true
-      end
-    rescue Errno::ENOENT
-      # Stage transitions may atomically move the locked task folder. Never
-      # recreate the vanished source merely to release a lock that moved with
-      # it; the transition owner removes that orphan at the destination.
-      false
+      task_lease_repository.release(task_folder, lock_id: lock_id)
     end
 
     # Atomic read-modify-write to prevent torn reads during stale-lock checks
-    # by a concurrent process. Writes via tempfile + rename.
+    # by a concurrent process. Only the current thread's fenced holder nonce
+    # can mutate the lease payload.
     def update_task_lock(task_folder, additions)
-      lock_path = File.join(task_folder, ".lock")
-      tmp = nil
-      with_task_lock_guard(lock_path) do
-        return unless File.exist?(lock_path)
-
-        data = YAML.safe_load(File.read(lock_path)) || {}
-        additions.each { |k, v| data[k.to_s] = v }
-        tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
-        File.write(tmp, data.to_yaml)
-        File.rename(tmp, lock_path)
+      key = task_lease_repository.lease_key(task_folder)
+      entry = Thread.current[:hive_task_locks].to_h[key]
+      unless entry && entry[:pid] == Process.pid
+        raise ConcurrentRunError.new(
+          "task lease update requires ownership",
+          lock_path: "runtime-control-plane:task:#{key}"
+        )
       end
-    ensure
-      File.delete(tmp) if tmp && File.exist?(tmp)
+
+      task_lease_repository.update(
+        task_folder, additions, lock_id: entry.fetch(:lock_id)
+      )
     end
 
-    # Drop a completed child only when the lock still names that exact process
-    # identity. A later child may already have replaced the recorded PID, so a
-    # plain nil update would let an older completion erase the new owner's
-    # liveness evidence.
+    def read_task_lock(task_folder_or_lock)
+      task_lease_repository.read(task_folder_or_lock)
+    end
+
+    # Drop a completed child only when the lease still names that exact
+    # process identity. A later child may already have replaced the recorded
+    # PID, so an unconditional update would erase the new owner's liveness
+    # evidence.
     def clear_task_lock_child(task_folder, pid:, process_start_time:)
-      lock_path = File.join(task_folder, ".lock")
-      tmp = nil
-      with_task_lock_guard(lock_path) do
-        return false unless File.exist?(lock_path)
+      key = task_lease_repository.lease_key(task_folder)
+      entry = Thread.current[:hive_task_locks].to_h[key]
+      return false unless entry && entry[:pid] == Process.pid
 
-        data = read_task_lock(lock_path)
-        return false unless data
-        return false unless data["claude_pid"] == pid
-        return false unless data["claude_pid_start_time"].to_s == process_start_time.to_s
-
-        data.delete("claude_pid")
-        data.delete("claude_pid_start_time")
-        tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
-        File.write(tmp, data.to_yaml)
-        File.rename(tmp, lock_path)
-      end
-      true
-    ensure
-      File.delete(tmp) if tmp && File.exist?(tmp)
-    end
-
-    # Serialize lock-path publication, stale replacement, updates, and
-    # ownership-checked release on a stable sidecar inode. The guard is held
-    # only for these short filesystem operations, never for the task run.
-    def with_task_lock_guard(lock_path)
-      # `.lock.tmp.*` is already ignored by every existing hive-state repo.
-      # Keep the stable guard in that namespace so it never enters commits.
-      guard_path = "#{lock_path}.tmp.guard"
-      File.open(guard_path, File::RDWR | File::CREAT, 0o644) do |guard|
-        guard.flock(File::LOCK_EX)
-        yield
-      end
-    end
-
-    # Publish a fully initialized YAML inode with no replacement semantics.
-    # A contender can observe either no .lock or the complete payload, never
-    # the empty/partial O_EXCL file that older code misclassified as stale.
-    def publish_task_lock(lock_path, data)
-      tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(8)}"
-      File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o644) do |file|
-        file.write(data.to_yaml)
-        file.flush
-        file.fsync
-      end
-      File.link(tmp, lock_path)
-    ensure
-      File.delete(tmp) if tmp && File.exist?(tmp)
-    end
-
-    def read_task_lock(lock_path)
-      data = YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) || {}
-      data.is_a?(Hash) ? data : nil
-    rescue StandardError
-      nil
+      task_lease_repository.clear_child(
+        task_folder, pid: pid, process_start_time: process_start_time,
+        lock_id: entry.fetch(:lock_id)
+      )
+    rescue RuntimeControlPlane::IdentityError
+      false
     end
 
     COMMIT_LOCK_TIMEOUT_SEC = 30
@@ -204,35 +138,6 @@ module Hive
         "started_at" => Time.now.utc.iso8601,
         "process_start_time" => process_start_time(Process.pid)
       }
-    end
-
-    def stale_lock?(lock_path)
-      raw = File.read(lock_path)
-      data = begin
-        YAML.safe_load(raw) || {}
-      rescue StandardError
-        return true
-      end
-      return true unless data.is_a?(Hash)
-
-      pid = data["pid"]
-      return true unless pid.is_a?(Integer)
-
-      begin
-        Process.kill(0, pid)
-      rescue Errno::ESRCH
-        return true
-      rescue Errno::EPERM
-        return false
-      end
-
-      recorded = data["process_start_time"]
-      live = process_start_time(pid)
-      return true if recorded && live && recorded != live
-
-      false
-    rescue Errno::ENOENT
-      true
     end
 
     # PID-reuse defense: capture a process start time so a re-used PID looks
@@ -310,6 +215,28 @@ module Hive
     rescue Errno::ECHILD
       nil
     end
-    private_class_method :wait_for_process, :terminate_and_detach
+
+    def task_lease_repository
+      @task_lease_repository ||= RuntimeControlPlane::TaskLeaseRepository.new(
+        process_start_time: method(:process_start_time),
+        process_alive: method(:process_identity_alive?)
+      )
+    end
+
+    def task_lease_repository=(repository)
+      @task_lease_repository = repository
+    end
+
+    def process_identity_alive?(pid, recorded_start_time:)
+      Process.kill(0, pid)
+      live = process_start_time(pid)
+      recorded_start_time.nil? || live.nil? || recorded_start_time == live
+    rescue Errno::ESRCH, RangeError
+      false
+    rescue Errno::EPERM
+      true
+    end
+
+    private_class_method :wait_for_process, :terminate_and_detach, :process_identity_alive?
   end
 end

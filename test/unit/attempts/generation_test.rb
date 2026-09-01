@@ -14,11 +14,11 @@ class AttemptsGenerationTest < Minitest::Test
   FolderTask = Struct.new(:folder, :state_file, keyword_init: true)
   WorkflowIdTask = Struct.new(:folder, :state_file, :workflow, keyword_init: true)
 
-  def test_default_attempt_store_opens_current_layout_without_migration
+  def test_default_attempt_store_opens_runtime_payload_layout_without_migration
     with_tmp_dir do |state_home|
       with_env("HIVE_HOME" => state_home, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::Attempts::Generation.send(:default_attempt_store)
-        assert_equal File.join(state_home, "attempts", "v4"),
+        assert_equal Hive::Paths.runtime_payload_root(state_home),
                      store.instance_variable_get(:@root)
       end
       refute File.exist?(File.join(state_home, "attempts", "v2"))
@@ -154,7 +154,7 @@ class AttemptsGenerationTest < Minitest::Test
         File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME),
         "#{JSON.generate(record)}\n"
       )
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       create_running_attempt(
         store,
         attempt_id: "attempt-1", task_id: "42", project: "demo", task_slug: "task-one",
@@ -183,7 +183,7 @@ class AttemptsGenerationTest < Minitest::Test
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
       journal = File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)
-      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
 
       File.write(journal, "not-json\n")
       assert_raises(Hive::TaskProjection::InvalidJournal) do
@@ -259,33 +259,15 @@ class AttemptsGenerationTest < Minitest::Test
     end
   end
 
-  def test_current_input_epoch_builds_default_read_only_attempt_store
+  def test_current_input_epoch_ignores_legacy_attempt_store_override
     with_tmp_dir do |dir|
       task = FolderTask.new(folder: dir, state_file: File.join(dir, "pr.md"))
-      attempt_root = File.join(dir, "attempts")
-      store = Hive::Attempts::Store.new(root: attempt_root)
-      create_running_attempt(
-        store,
-        attempt_id: "attempt-3", task_id: "42", project: "demo", task_slug: "task",
-        intended_stage: "4-execute", task_generation: "owner-3",
-        ownership_generation: "owner-3", task_input_epoch: 3,
-        progress_token: "progress-attempt-3", provider: "codex"
-      )
-      record = Hive::TaskJournal::Envelope.authoritative(
-        {
-          event_type: "generation_advanced", task: { "id" => "42", "slug" => "task" },
-          workflow: "coding", stage: "4-execute", attempt_id: "attempt-3", task_generation: 3,
-          ownership_generation: "owner-3", commit_generation: 0, reason: "input_changed",
-          evidence: [], provenance: {}, payload: {}
-        }
-      )
-      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "#{JSON.generate(record)}\n")
-      Hive::TaskProjection::Store.new(
-        task_folder: dir, attempt_store: store
-      ).rebuild!
-
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => attempt_root) do
-        assert_equal 3, Hive::Attempts::Generation.current_task_input_epoch(task)
+      with_env("HIVE_HOME" => dir, "HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "legacy-attempts")) do
+        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+          Hive::Attempts::Generation.current_task_input_epoch(task)
+        end
+        assert_match(/checkpoint_missing/, error.message)
+        refute File.exist?(File.join(dir, "legacy-attempts"))
       end
     end
   end

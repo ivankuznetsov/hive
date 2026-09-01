@@ -110,7 +110,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
           build_agent(task, fixture).run!
         end
-        lock = YAML.safe_load_file(File.join(task.folder, ".lock"))
+        lock = Hive::Lock.read_task_lock(task.folder)
 
         assert_equal :ok, result.fetch(:status)
         refute lock.key?("claude_pid")
@@ -746,6 +746,7 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   def make_task(dir, slug: "opencode-agent-260812-aaaa")
     folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     Hive::Task.new(folder)
   end
 

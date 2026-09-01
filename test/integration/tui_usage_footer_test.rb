@@ -6,11 +6,11 @@ class TuiUsageFooterTest < Minitest::Test
   include HiveTestHelper
 
   def setup
-    @old_usage_path = Hive::UsageDb.path
+    @old_usage_database = Hive::UsageDb.database
   end
 
   def teardown
-    Hive::UsageDb.path = @old_usage_path
+    Hive::UsageDb.database = @old_usage_database
   end
 
   def row
@@ -47,7 +47,10 @@ class TuiUsageFooterTest < Minitest::Test
 
   def test_footer_reads_task_scoped_usage_from_db
     with_tmp_dir do |dir|
-      Hive::UsageDb.path = File.join(dir, "usage.db")
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime-control-plane.sqlite3")
+      ).migrate!
+      Hive::UsageDb.database = database
       Hive::UsageDb.record!(
         agent: "claude",
         model: "model",
@@ -75,6 +78,8 @@ class TuiUsageFooterTest < Minitest::Test
       assert_includes out, " • all 1.5k/100/0 • tokens"
       refute_includes out, "30d"
       assert_includes out, "[Tab] switch"
+    ensure
+      database&.disconnect
     end
   end
 end

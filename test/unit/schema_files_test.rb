@@ -24,8 +24,7 @@ require "hive/agent_skills/provisioner"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
-require "hive/daemon/dispatch_request_queue"
-require "hive/daemon/dispatch_result_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/attempts/record"
 require "hive/provider_health"
 require "tmpdir"
@@ -100,10 +99,9 @@ class SchemaFilesTest < Minitest::Test
   end
 
   def test_provider_routing_exclusion_reason_vocabularies_do_not_drift
-    expected = Hive::Daemon::DispatchRequestQueue::ADMISSION_EXCLUSIONS.sort
+    expected = Hive::ProviderRouting::EXCLUSION_REASONS.sort
     %w[
       hive-dispatch-request.v5.json
-      hive-attempt.v4.json
       hive-circuits.v1.json
       hive-operational-status.v4.json
     ].each do |name|
@@ -1443,7 +1441,7 @@ class SchemaFilesTest < Minitest::Test
     error = Hive::ConcurrentRunError.new(
       "lock held",
       holder: { "pid" => 123, "slug" => "task", "stage" => "4-execute" },
-      lock_path: "/tmp/task.lock"
+      lock_path: "runtime-control-plane:task:task-1"
     )
     {
       "hive-stage-action" => { "verb" => "develop" },
@@ -2690,94 +2688,9 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_internal_attempt_schema_pins_state_and_receipt_contract
-    path = Hive::Schemas.schema_path("hive-attempt")
-    doc = JSON.parse(File.read(path))
-
-    assert_equal Hive::Attempts::Record::SCHEMA_VERSION,
-                 doc.fetch("properties").dig("schema_version", "const")
-    assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
-    assert_includes doc.fetch("required"), "worker_argv"
-    assert_includes doc.fetch("required"), "claim_capability_digest"
-    assert_includes doc.fetch("required"), "ownership_generation"
-    assert_includes doc.fetch("required"), "task_input_epoch"
-    assert_includes doc.fetch("required"), "routing"
-    refute_includes doc.fetch("required"), "compatibility"
-    refute_includes doc.fetch("properties").keys, "compatibility"
-    assert_equal 1, doc.fetch("properties").dig("worker_argv", "minItems")
-    assert_equal "string", doc.fetch("properties").dig("claim_capability_digest", "type")
-    assert_includes doc.fetch("required"), "subject"
-    assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
-    receipt_required = doc.dig("$defs", "Receipt", "required")
-    %w[receipt_version terminal_lease_version attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference provider_evidence].each do |key|
-      assert_includes receipt_required, key
-    end
-    assert_equal false, doc.dig("$defs", "ProviderEvidence", "additionalProperties")
-    refute_includes doc.dig("$defs", "ProviderEvidence", "properties").keys, "message"
-    refute_includes doc.dig("$defs", "ProviderEvidence", "properties").keys, "raw_output"
-  end
-
-  def test_internal_attempt_routing_schema_is_a_strict_tagged_union
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt")))
-    schemer = JSONSchemer.schema(
-      {
-        "$schema" => "https://json-schema.org/draft/2020-12/schema",
-        "$ref" => "#/$defs/Routing",
-        "$defs" => doc.fetch("$defs")
-      }
-    )
-    legacy = { "mode" => "legacy" }
-    explicit = {
-      "mode" => "explicit",
-      "policy_digest" => "a" * 64,
-      "decision" => {
-        "decision_id" => "decision-1",
-        "policy_digest" => "a" * 64,
-        "decided_at" => "2026-08-10T12:00:00.000000Z",
-        "exclusions" => [
-          { "route_id" => "route-0", "reason" => "circuit_cooldown", "detail" => nil }
-        ]
-      },
-      "route" => {
-        "route_id" => "route-1", "provider_account_id" => "codex-account-a",
-        "adapter" => "codex", "launch_binding_id" => "codex-home-a",
-        "model" => "gpt-5.6-sol", "effort" => "high",
-        "billing_route" => "subscription",
-        "billing_evidence_source" => "agent_profile_contract"
-      },
-      "circuit_generations" => [
-        {
-          "scope" => {
-            "kind" => "provider_account", "provider_account_id" => "codex-account-a",
-            "model" => nil
-          },
-          "journal_epoch" => 1, "observed_generation" => 4
-        },
-        {
-          "scope" => {
-            "kind" => "model", "provider_account_id" => "codex-account-a",
-            "model" => "gpt-5.6-sol"
-          },
-          "journal_epoch" => 2, "observed_generation" => 7
-        }
-      ],
-      "probe_bindings" => []
-    }
-
-    assert schemer.valid?(legacy)
-    assert schemer.valid?(explicit), schemer.validate(explicit).to_a.inspect
-    refute schemer.valid?(legacy.merge("route" => explicit.fetch("route")))
-    nested_raw = JSON.parse(JSON.generate(explicit))
-    nested_raw.fetch("route")["credentials"] = "secret"
-    refute schemer.valid?(nested_raw)
-    nested_raw = JSON.parse(JSON.generate(explicit))
-    nested_raw.fetch("decision").fetch("exclusions").first["message"] = "raw"
-    refute schemer.valid?(nested_raw)
-  end
-
   def test_legacy_recovery_schema_files_are_removed_after_one_off_cutover
     obsolete = {
-      "hive-attempt" => [ 1, 2 ],
+      "hive-attempt" => [ 1, 2, 3, 4 ],
       "hive-dispatch-request" => [ 1, 2, 3 ],
       "hive-dispatch-result" => [ 1 ]
     }
@@ -2941,29 +2854,6 @@ class SchemaFilesTest < Minitest::Test
     }
   end
 
-  # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
-
-  # A `<id>.json.claimed` file still self-declares schema=hive-dispatch-request
-  # /schema_version=1. The sidecar design (claim metadata in a separate
-  # `.claim` file) keeps the claimed JSON byte-identical to the original
-  # request, so it must still validate against the strict
-  # additionalProperties:false schema — no stray `claim` key.
-  def test_hive_dispatch_request_claimed_file_stays_schema_valid
-    q = Hive::Daemon::DispatchRequestQueue
-    Dir.mktmpdir("hive-dispatch-queue") do |dir|
-      q.write_request!(project: "hive", slug: "my-task",
-                       argv: [ "hive", "review", "my-task", "--json" ],
-                       request_id: "abc12345", state_home: dir,
-                       now: Time.utc(2026, 6, 3, 12, 0, 0))
-      claimed = q.claim("abc12345", pid: 4321, state_home: dir,
-                        now: Time.utc(2026, 6, 3, 12, 0, 1))
-      payload = JSON.parse(File.read(claimed))
-      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request"))))
-      assert_empty schemer.validate(payload).to_a,
-                   "claimed request JSON must remain a valid hive-dispatch-request (no extra `claim` key)"
-    end
-  end
-
   # ── hive-dispatch-result (#256, #258) ───────────────────────────────────
 
   def test_hive_dispatch_result_schema_file_exists_and_is_valid_json
@@ -2979,7 +2869,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_required_keys_match_producer
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result")))
     schema_required = doc["required"].sort
-    # Mirrors Hive::Daemon::DispatchResultQueue.write! — every emitted key
+    # Mirrors the runtime control-plane outbox producer — every emitted key
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
@@ -2991,18 +2881,35 @@ class SchemaFilesTest < Minitest::Test
 
   def test_hive_dispatch_result_producer_round_trip_validates
     Dir.mktmpdir("hive-dispatch-result") do |dir|
-      # Actual producer output, with a nil update_id and a negative
-      # (group/supergroup) chat_id — both must validate.
-      Hive::Daemon::DispatchResultQueue.write!(
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      timestamp = Time.utc(2026, 6, 3, 12, 0, 0).iso8601(6)
+      database.transaction do |db|
+        installation = db[:installations].first.fetch(:installation_id)
+        db[:projects].insert(
+          project_id: "project-hive", installation_id: installation,
+          registration_id: "hive", name: "hive", observed_path: "/tmp/hive",
+          state_root_path: "/tmp/hive/.hive-state", active: 1,
+          registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+      repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+      repository.write_request!(
+        project: "hive", slug: "my-task", argv: %w[hive review my-task --json],
+        request_id: "abc12345", now: Time.iso8601(timestamp)
+      )
+      repository.write_result!(
         chat_id: -1001234567890, project: "hive", slug: "my-task",
         request_id: "abc12345", exit_code: 1, command: "hive review my-task --json",
-        update_id: nil, state_home: dir, now: Time.utc(2026, 6, 3, 12, 0, 0)
+        update_id: nil, now: Time.iso8601(timestamp)
       )
-      written = Dir.glob(File.join(dir, "dispatch_results", "*.json")).first
-      payload = JSON.parse(File.read(written))
+      payload = database.read do |db|
+        Hive::RuntimeControlPlane::Codec.load_json(db[:dispatch_outbox].get(:payload_json))
+      end
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
       assert_empty schemer.validate(payload).to_a,
-                   "DispatchResultQueue.write! output (nil update_id, negative chat_id) must validate"
+                   "SQL outbox output (nil update_id, negative chat_id) must validate"
     end
   end
 
@@ -3028,13 +2935,17 @@ class SchemaFilesTest < Minitest::Test
     # queue_request_hash / queue_envelope were extracted from Commands::Daemon
     # into QueueCommand (#254); exercise them on the extracted class.
     require "hive/commands/daemon/queue_command"
+    repository = Object.new
+    repository.define_singleton_method(:expired?) { |_request| false }
+    repository.define_singleton_method(:valid_argv?) { |_argv| true }
     queue_cmd = Hive::Commands::Daemon::QueueCommand.new(
-      queue_args: [ "list" ], json: false, hive_home: Dir.mktmpdir
+      queue_args: [ "list" ], json: false, hive_home: Dir.mktmpdir,
+      dispatch_repository: repository
     )
-    req = Hive::Daemon::DispatchRequestQueue::Request.new(
+    req = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
       request_id: "req00001", created_at: Time.utc(2026, 6, 3, 12, 0, 0),
       project: "hive", slug: "my-task", argv: [ "hive", "review", "my-task", "--json" ],
-      requestor: "bot", chat_id: 12_345, update_id: nil, trigger: "autofix", path: nil
+      requestor: "bot", chat_id: 12_345, update_id: nil, trigger: "autofix"
     )
     request_hash = queue_cmd.send(:queue_request_hash, req)
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue"))))

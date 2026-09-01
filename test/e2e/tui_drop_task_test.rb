@@ -18,6 +18,9 @@ class TuiDropTaskE2ETest < Minitest::Test
         ops.hive_state_init
         project = File.basename(dir)
         Hive::Config.register_project(name: project, path: dir)
+        # The real subprocess opens the installation database through HIVE_HOME;
+        # point this explicit process-boundary fixture at that same test-local path.
+        prepare_test_runtime_project(dir, state_home: Hive::Paths.state_home)
         File.write(
           File.join(dir, ".hive-state", "config.yml"),
           { "worktree_root" => File.join(File.dirname(dir), "#{project}.worktrees") }.to_yaml
@@ -36,6 +39,12 @@ class TuiDropTaskE2ETest < Minitest::Test
     FileUtils.mkdir_p(folder)
     state_name = Hive::Task::STATE_FILES.fetch(stage.split("-", 2).last)
     File.write(File.join(folder, state_name), body || "# #{slug}\n\n<!-- WAITING -->\n")
+    Hive::TaskMeta.write(
+      folder,
+      id: Digest::SHA256.hexdigest("#{File.expand_path(dir)}\0#{slug}")[0, 12].to_i(16),
+      slug: slug,
+      display_name: nil
+    )
     folder
   end
 
@@ -108,7 +117,6 @@ class TuiDropTaskE2ETest < Minitest::Test
     with_tui_drop_project do |dir, _ops, project|
       slug = "tui-drop-brainstorm-260522-aaaa"
       folder = create_task(dir, "2-brainstorm", slug)
-      File.write(File.join(folder, ".lock"), { "pid" => 999_999 }.to_yaml)
       markers_lock_path = File.join(folder, ".markers-lock")
       File.write(markers_lock_path, "locked\n")
 

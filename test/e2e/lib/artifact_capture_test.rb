@@ -286,19 +286,21 @@ class E2EArtifactCaptureTest < Minitest::Test
     with_dirs do |scenario_dir, sandbox, run_home|
       task_dir = File.join(sandbox, ".hive-state", "stages", "2-brainstorm", "task-1")
       FileUtils.mkdir_p(task_dir)
-      lock_path = File.join(task_dir, ".lock")
-      File.write(lock_path, "pid: 123\n")
+      hidden_path = File.join(task_dir, ".capture-note")
+      File.write(hidden_path, "evidence: present\n")
 
       collect(scenario_dir, sandbox, run_home)
 
-      copied_lock = File.join(scenario_dir, "state", "2-brainstorm", "task-1", ".lock")
-      assert File.exist?(copied_lock), "hidden task lock should be copied into the artifact bundle"
+      copied_hidden = File.join(scenario_dir, "state", "2-brainstorm", "task-1", ".capture-note")
+      assert File.exist?(copied_hidden), "hidden state should be copied into the artifact bundle"
 
       manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
-      lock_entry = manifest.fetch("files").find { |file| file.fetch("path") == "state/2-brainstorm/task-1/.lock" }
-      assert lock_entry, "manifest should include copied hidden state files"
-      assert_equal File.size(copied_lock), lock_entry.fetch("size")
-      assert_equal Digest::SHA256.file(copied_lock).hexdigest, lock_entry.fetch("sha256")
+      hidden_entry = manifest.fetch("files").find do |file|
+        file.fetch("path") == "state/2-brainstorm/task-1/.capture-note"
+      end
+      assert hidden_entry, "manifest should include copied hidden state files"
+      assert_equal File.size(copied_hidden), hidden_entry.fetch("size")
+      assert_equal Digest::SHA256.file(copied_hidden).hexdigest, hidden_entry.fetch("sha256")
     end
   end
 

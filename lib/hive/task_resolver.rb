@@ -76,7 +76,11 @@ module Hive
     end
 
     def resolve_numeric_id
-      matches = find_id_across_projects(Integer(@target))
+      # Force base 10: bare Integer() treats a leading "0" as an octal prefix,
+      # so TARGET "010" would silently select task 8 and "09" would raise
+      # ArgumentError. The /\A\d+\z/ guard above already proved the string is
+      # all decimal digits.
+      matches = find_id_across_projects(Integer(@target, 10))
       case matches.size
       when 0
         Hive::Workflows.assert_known_stage_filter!(@stage_filter, filtered_projects)

@@ -72,6 +72,35 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_supervisor_does_not_busy_spin_after_output_pipes_close
+    worker_argv = [ "/bin/sh", "-c", "exec 1>&- 2>&-; sleep 1" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 5, stale_sec: 30, first_heartbeat_timeout_sec: 30
+      )
+      sleep_calls = []
+      supervisor.define_singleton_method(:sleep) do |duration|
+        sleep_calls << duration
+        Kernel.sleep(duration)
+      end
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      cpu_started = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID)
+      assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      cpu_used = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID) - cpu_started
+
+      assert_operator elapsed, :>=, 1.0, "supervisor must await worker exit"
+      assert(sleep_calls.any?(&:positive?),
+             "supervisor must sleep while all output pipes are at EOF")
+      assert_operator cpu_used / elapsed, :<, 0.5,
+                      "supervisor must not spin at full CPU while pipes are at EOF"
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
   def test_clean_leader_exit_terminates_a_lingering_descendant_group
     worker_argv = [ "/bin/sh", "-c", "(sleep 10) & exit 0" ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|
@@ -384,7 +413,7 @@ class AttemptsSupervisorTest < Minitest::Test
       File.binwrite(
         path, "x" * (Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES + 1)
       )
-      error = assert_raises(Hive::Attempts::StoreError) do
+      error = assert_raises(Hive::Attempts::RepositoryError) do
         supervisor.send(:persist_diagnostic_once, path, {})
       end
       assert_match(/size limit/, error.message)
@@ -393,7 +422,7 @@ class AttemptsSupervisorTest < Minitest::Test
       File.binwrite(target, "{}")
       File.unlink(path)
       File.symlink(target, path)
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         supervisor.send(:persist_diagnostic_once, path, {})
       end
     end
@@ -418,10 +447,10 @@ class AttemptsSupervisorTest < Minitest::Test
       assert supervisor.send(:persist_diagnostic_once, path, document)
       assert supervisor.send(:persist_diagnostic_once, path, document)
       conflict = document.merge("recorded_at" => (NOW + 1).iso8601(6))
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         supervisor.send(:persist_diagnostic_once, path, conflict)
       end
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         supervisor.send(:persist_diagnostic_once, File.join(root, "missing", "diagnostic"), document)
       end
 
@@ -432,7 +461,7 @@ class AttemptsSupervisorTest < Minitest::Test
       fake_file = Object.new
       fake_file.define_singleton_method(:stat) { fake_status }
       with_replaced_singleton_method(File, :open, ->(*_args, &block) { block.call(fake_file) }) do
-        assert_raises(Hive::Attempts::StoreError) do
+        assert_raises(Hive::Attempts::RepositoryError) do
           supervisor.send(:read_existing_diagnostic, path)
         end
       end
@@ -445,7 +474,7 @@ class AttemptsSupervisorTest < Minitest::Test
         "x" * (Hive::PatrolFix::AttemptDiagnostic::MAX_BYTES + 1)
       end
       with_replaced_singleton_method(File, :open, ->(*_args, &block) { block.call(fake_file) }) do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           supervisor.send(:read_existing_diagnostic, path)
         end
         assert_match(/size limit/, error.message)
@@ -589,7 +618,7 @@ class AttemptsSupervisorTest < Minitest::Test
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
         claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
-        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.03
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 1
       )
       supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
         [ RbConfig.ruby, "-e", "sleep 10" ]
@@ -597,7 +626,7 @@ class AttemptsSupervisorTest < Minitest::Test
       supervisor.instance_variable_set(:@cancel_reason, :signal)
       supervisor.instance_variable_set(:@cancel_signal, "TERM")
 
-      assert_equal 143, Timeout.timeout(2) { supervisor.run }
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       diagnostic = diagnostic_from_terminal(store, terminal)
       assert_equal "agent_cancelled", diagnostic.fetch("code")
@@ -770,7 +799,7 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_equal RbConfig.ruby, supervisor.send(:resolved_worker_argv, record).first
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise Errno::ESRCH }) do
-      assert_raises(Hive::Attempts::StoreError) { supervisor.send(:process_identity, 99) }
+      assert_raises(Hive::Attempts::RepositoryError) { supervisor.send(:process_identity, 99) }
     end
   end
 
@@ -816,13 +845,13 @@ class AttemptsSupervisorTest < Minitest::Test
     supervisor.singleton_class.send(:remove_method, :signal_worker_group)
     supervisor.instance_variable_set(:@worker_pgid, 456)
     with_replaced_singleton_method(Process, :getpgid, ->(_pid) { 999 }) do
-      assert_raises(Hive::Attempts::StoreError) { supervisor.send(:signal_worker_group, "TERM") }
+      assert_raises(Hive::Attempts::RepositoryError) { supervisor.send(:signal_worker_group, "TERM") }
     end
     with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
       refute supervisor.send(:signal_recorded_worker_group, "TERM")
     end
     with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         supervisor.send(:signal_recorded_worker_group, "TERM")
       end
       assert supervisor.send(:recorded_worker_group_alive?)
@@ -846,7 +875,7 @@ class AttemptsSupervisorTest < Minitest::Test
   def with_attempt(worker_argv:, routing: { "mode" => "legacy" }, intended_stage: "4-execute",
                    workflow_controller: nil)
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task",

@@ -4,7 +4,7 @@ require "fileutils"
 require "tmpdir"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/bot/dispatch_request_writer"
 
 # Plan 2026-05-28-002 §"Tests":
@@ -58,6 +58,7 @@ class HiveDispatchRequestUniquenessTest < Minitest::Test
     @state_home = Dir.mktmpdir("hive-uniqueness-state")
     @project = "hive"
     @slug = "stale-260528-aaaa"
+    prepare_runtime_project(state_home: @state_home, name: @project)
     @supervisor = FakeSupervisor.new
     @logger = StubLogger.new
     @controller = Hive::Daemon::ConcurrencyController.new(
@@ -94,8 +95,8 @@ class HiveDispatchRequestUniquenessTest < Minitest::Test
     end
   end
 
-  def queue_files
-    Dir.glob(File.join(@state_home, "dispatch_requests", "*.json"))
+  def queued_requests
+    with_runtime_dispatch_repository(@state_home, &:pending)
   end
 
   def test_request_older_than_ten_minutes_is_pruned_without_dispatch
@@ -113,7 +114,7 @@ class HiveDispatchRequestUniquenessTest < Minitest::Test
       n == :dispatch_request_expired && attrs[:request_id] == request_id
     }
     refute_nil expired, "the expired request must log :dispatch_request_expired"
-    assert_empty queue_files, "expired request files must be removed from the queue dir"
+    assert_empty queued_requests, "expired request rows must be removed"
   end
 
   def test_request_within_window_still_dispatches

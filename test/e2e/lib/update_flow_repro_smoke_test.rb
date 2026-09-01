@@ -4,6 +4,7 @@ require "json"
 require_relative "paths"
 require_relative "repro_script_writer"
 require_relative "scenario_parser"
+require_relative "../../support/runtime_control_plane_fixture"
 
 # Real-process smoke test for the repro.sh artifact the harness writes when a
 # CLI/daemon scenario fails. The update-flow scenarios added in PR #225 use
@@ -87,6 +88,7 @@ class E2EUpdateFlowReproSmokeTest < Minitest::Test
       run_home = File.join(root, "home")
       FileUtils.mkdir_p([ scenario_dir, sandbox, run_home ])
       File.write(File.join(sandbox, "Gemfile"), "source 'https://rubygems.org'\n")
+      HiveRuntimeControlPlaneFixture.activate!(run_home)
 
       path = Hive::E2E::ReproScriptWriter.new(
         scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,

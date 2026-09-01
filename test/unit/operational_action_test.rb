@@ -525,9 +525,10 @@ class OperationalActionTest < Minitest::Test
         slug = "advance-260720-real"
         brainstorm = File.join(project_root, ".hive-state", "stages", "2-brainstorm", slug)
         FileUtils.mkdir_p(brainstorm)
-        state_file = File.join(brainstorm, "brainstorm.md")
-        File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
-        seed_task_projection(brainstorm, state_file: state_file)
+      Hive::TaskMeta.write(brainstorm, id: 42, slug: slug, display_name: nil, workflow: "coding")
+      state_file = File.join(brainstorm, "brainstorm.md")
+      File.write(state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
+      seed_task_projection(brainstorm, state_file: state_file)
         action = Hive::OperationalAction.descriptor_for_task(
           Hive::Task.new(brainstorm), project: project.fetch("name")
         )

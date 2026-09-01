@@ -231,10 +231,15 @@ module Hive
         [ "", false ]
       end
 
+      # Escalation is keyed on the timed-out decision, never on liveness of
+      # the process-group leader: a shell whose wait builtin is interrupted
+      # by TERM can exit while group members that trap TERM survive, so an
+      # early return on waiter.join would leak them. After the grace period
+      # we always attempt the group KILL; Errno::ESRCH then reports that no
+      # group member (leader included) remains.
       def terminate(waiter)
         Process.kill("TERM", -waiter.pid)
-        return if waiter.join(TERM_GRACE_SEC)
-
+        waiter.join(TERM_GRACE_SEC)
         Process.kill("KILL", -waiter.pid)
         waiter.join(TERM_GRACE_SEC)
       rescue Errno::ESRCH, Errno::ECHILD

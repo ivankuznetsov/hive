@@ -226,7 +226,7 @@ module Hive
         result = primary_error = custody_error = nil
         begin
           reader, writer = IO.pipe
-          custody_pid = Process.fork do
+          custody_pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
             reader.close
             payload = begin
               Process.setsid
@@ -316,7 +316,7 @@ module Hive
           parent_custody_active = true
 
           reader, writer = IO.pipe
-          supervisor_pid = Process.fork do
+          supervisor_pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
             reader.close
             payload = begin
               Process.setsid
@@ -557,7 +557,8 @@ module Hive
           out: stdout_writer,
           err: stderr_writer,
           pgroup: true,
-          unsetenv_others: true
+          unsetenv_others: true,
+          close_others: true
         )
         [ stdin_reader, stdout_writer, stderr_writer ].each(&:close)
         stdin_writer.write("#{JSON.generate(request)}\n") if request

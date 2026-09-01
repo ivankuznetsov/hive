@@ -2449,7 +2449,7 @@ module Hive
       # row = one would-be `hive run`-class spawn. The daemon is the single
       # dispatcher; the bot is a producer only.
       #
-      # The first three cleanup checks run across every pending request before
+      # The first four cleanup checks run across every pending request before
       # admission arbitration. Capacity fences must not leave an expired or
       # invalid row resident forever. Eligible requests then continue from
       # step 4 in FIFO order:
@@ -2459,19 +2459,21 @@ module Hive
       #      validates) → remove + `:dispatch_request_rejected`.
       #   3. Expiry (10 min default) → remove +
       #      `:dispatch_request_expired`.
-      #   4. Unknown project → remove + `:dispatch_request_rejected`, except a
+      #   4. Immutable recovery conflict → remove +
+      #      `:dispatch_request_rejected reason=stale_task_identity`.
+      #   5. Unknown project → remove + `:dispatch_request_rejected`, except a
       #      healer-owned ERROR retry remains queued because config
       #      may be restored or reloaded later.
-      #   5. Current status-row dependency/admission gate for every
+      #   6. Current status-row dependency/admission gate for every
       #      task-advancing request; marker repair is exempt → leave
       #      the row queued, `:dispatch_request_blocked`.
-      #   6. Per-slug in-flight gate (controller's running_task?) →
+      #   7. Per-slug in-flight gate (controller's running_task?) →
       #      leave the row queued, `:dispatch_request_blocked
       #      reason=in_flight`. Picked up next tick.
-      #   7. Concurrency gate (caps / cooldown / quarantine) → leave
+      #   8. Concurrency gate (caps / cooldown / quarantine) → leave
       #      the row queued, `:dispatch_request_blocked
       #      reason=<gate>`. Picked up next tick.
-      #   8. Spawn via `dispatch_command`, threading `request_id`
+      #   9. Spawn via `dispatch_command`, threading `request_id`
       #      through the supervisor so `reap_completed` can complete the
       #      row and log `:dispatch_request_completed`.
       def process_dispatch_requests(now:, rows:, projects: nil)
@@ -2650,6 +2652,10 @@ module Hive
           elsif dispatch_repository.expired?(request, now: now)
             observe_dispatch_request(request)
             expire_request(request)
+            next
+          elsif classified_stale_recovery_request?(request)
+            observe_dispatch_request(request)
+            reject_request(request, reason: "stale_task_identity")
             next
           end
 
@@ -3109,9 +3115,7 @@ module Hive
       end
 
       def stale_recovery_request?(request, row, project_observation:)
-        return true if STALE_RECOVERY_BLOCK_REASONS.include?(
-          request.recovery["blocked_reason"].to_s
-        )
+        return true if classified_stale_recovery_request?(request)
 
         if row
           identity_changed =
@@ -3127,6 +3131,9 @@ module Hive
 
         exact_recovery_task_stale?(request)
       end
+
+      def classified_stale_recovery_request?(request) =
+        request.recovery.is_a?(Hash) && STALE_RECOVERY_BLOCK_REASONS.include?(request.recovery["blocked_reason"].to_s)
 
       def exact_recovery_task_stale?(request)
         task = Hive::TaskResolver.new(

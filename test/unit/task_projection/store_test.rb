@@ -413,6 +413,31 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_repair_falls_back_when_pre_activation_checkpoint_is_not_current
+    with_tmp_dir do |dir|
+      attempt_store, attempts = pre_activation_attempt_store
+      store = Hive::TaskProjection::Store.new(
+        task_folder: dir, attempt_store: attempt_store
+      )
+      write_journal(dir, [ condition_event("event-1") ])
+      store.rebuild!
+      projection = store.read_routine.projection
+      attempts.clear
+      FileUtils.rm(store.checkpoint_path)
+      store.define_singleton_method(:read_bounded_unlocked) do |**|
+        Hive::TaskProjection::Store::BoundedRead.new(
+          projection: projection, state: "partial",
+          diagnostics: [ { "reason" => "checkpoint_invalid" } ],
+          truncated: false, journal_cursor: File.size(journal_path)
+        )
+      end
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
+
+      assert_includes error.message, "unknown durable attempt attempt-1"
+    end
+  end
+
   def test_repair_refuses_post_activation_or_journal_divergent_snapshot_bindings
     with_tmp_dir do |dir|
       attempt_store, attempts = pre_activation_attempt_store
@@ -480,42 +505,6 @@ class TaskProjectionStoreTest < Minitest::Test
 
       assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
       refute_path_exists store.checkpoint_path
-    end
-  end
-
-  def test_snapshot_validity_rejects_noncanonical_or_mismatched_snapshots
-    with_tmp_dir do |dir|
-      store = projection_store(dir)
-      binding = { "cursor" => 1, "hash" => "hash", "event_id" => "event-1" }
-      snapshot = {
-        "schema" => Hive::TaskProjection::SCHEMA,
-        "schema_version" => Hive::TaskProjection::SCHEMA_VERSION,
-        "journal" => binding
-      }
-
-      refute store.send(:valid?, nil, binding)
-      refute store.send(:valid?, snapshot.merge("schema" => "other"), binding)
-      refute store.send(:valid?, snapshot.merge("schema_version" => -1), binding)
-      refute store.send(:valid?, snapshot.merge("journal" => nil), binding)
-      refute store.send(:valid?, snapshot.merge("journal" => binding.merge("hash" => "other")), binding)
-    end
-  end
-
-  def test_repair_falls_back_when_compatibility_checkpoint_is_not_current
-    with_tmp_dir do |dir|
-      attempt_store, attempts = pre_activation_attempt_store
-      store = Hive::TaskProjection::Store.new(task_folder: dir, attempt_store: attempt_store)
-      write_journal(dir, [ condition_event("event-1") ])
-      store.rebuild!
-      attempts.clear
-      FileUtils.rm(store.checkpoint_path)
-      store.define_singleton_method(:read_bounded_unlocked) do |**|
-        Object.new.tap { |result| result.define_singleton_method(:current?) { false } }
-      end
-
-      error = assert_raises(Hive::TaskProjection::InvalidJournal) { store.repair! }
-
-      assert_includes error.message, "unknown durable attempt attempt-1"
     end
   end
 

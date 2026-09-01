@@ -365,18 +365,6 @@ module Hive
         snapshot_path
       end
 
-      def valid?(snapshot, binding = journal_binding)
-        return false unless snapshot.is_a?(Hash)
-        return false unless snapshot["schema"] == Hive::TaskProjection::SCHEMA
-        return false unless snapshot["schema_version"] == Hive::TaskProjection::SCHEMA_VERSION
-
-        journal = snapshot["journal"]
-        journal.is_a?(Hash) &&
-          journal["cursor"] == binding.fetch("cursor") &&
-          journal["hash"] == binding.fetch("hash") &&
-          journal["event_id"] == binding.fetch("event_id")
-      end
-
       private
 
       def publish_zero_history!(marker:, limits:)

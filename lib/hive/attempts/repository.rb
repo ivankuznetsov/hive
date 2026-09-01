@@ -79,10 +79,10 @@ module Hive
       end
 
       def initialize(database:, root: Hive::Paths.runtime_payload_root, create_directories: true)
-        @root = File.expand_path(root)
-        @create_directories = create_directories
+        @root, @create_directories = File.expand_path(root), create_directories
         @database = database
-        database.open! if File.file?(database.path) || create_directories
+        database_exists = File.file?(database.path)
+        database.open!(revalidate: !database_exists) if database_exists || create_directories
         prepare_payload_root! if create_directories
       rescue RuntimeControlPlane::Error, SystemCallError, IOError => error
         raise RepositoryError, "attempt runtime control plane is unavailable: #{error.message}"

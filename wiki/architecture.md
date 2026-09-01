@@ -63,7 +63,13 @@ The installation runtime database is a private Sequel/SQLite authority. Every
 query is materialized inside `RuntimeControlPlane::Database#read` or a short
 transaction; no lazy dataset may outlive the process-wide fork barrier. Puma
 cluster hooks and Hive fork/daemonize seams disconnect all registered pools
-before process creation. Content-addressed attempt payloads use digest-sharded
+before process creation. Repository facades reuse an already validated
+process-owned connection; the first open and every reopen after disconnect or
+fork still perform the complete capability, custody, integrity, and schema
+checks. A missing database path also forces those checks so a live connection
+cannot hide a removed database. Explicit `Database#open!` remains the
+force-validation path.
+Content-addressed attempt payloads use digest-sharded
 custody locks across both SQL reference publication and expiry, so expiring one
 attempt cannot unlink bytes while another attempt publishes the same digest.
 

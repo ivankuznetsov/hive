@@ -642,8 +642,9 @@ advances a workflow stage directly:
    recovery receipt, not runnable backlog. Already-classified
    `generation_conflict` and `task_identity_conflict` requests are different:
    those receipts prove that their bound recovery transition can never resume,
-   so the dispatcher retires them instead of leaving inert operator rows in
-   the queue forever.
+   so the dispatcher's capacity-independent cleanup pass retires them before
+   project or global admission fences can leave inert operator rows in the
+   queue forever.
 
    `StaleAgentHealer` is the automatic scheduler for those durable errors and
    for `REVIEW_STALE` whose pass-completion receipt is newer than its escalation

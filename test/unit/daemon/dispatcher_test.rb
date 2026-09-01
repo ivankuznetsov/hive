@@ -8131,6 +8131,53 @@ end
     end
   end
 
+  def test_dispatcher_removes_stale_recovery_conflict_behind_project_capacity_fence
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "queued")
+      dispatcher, sup, controller, logger, = make_dispatcher(
+        rows: [
+          row(id: 42, slug: "current", stage: "4-review", action: "blocked"),
+          row(id: 43, slug: "stale", stage: "4-review", action: "blocked")
+        ],
+        dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator
+      )
+      controller.define_singleton_method(:can_dispatch?) { |**| :daily_cap }
+      Q.write_request!(
+        project: "p1", slug: "current", argv: %w[hive run current --json],
+        requestor: "healer", request_id: "CAP-FENCE", task_id: 42,
+        expected_stage: "4-review", task_generation: "current-generation",
+        recovery: dispatcher_recovery(phase: "cleared"),
+        state_home: state_home, now: T0
+      )
+      Q.write_request!(
+        project: "p1", slug: "stale", argv: %w[hive run stale --json],
+        requestor: "healer", request_id: "STALE-BEHIND-FENCE", task_id: 43,
+        expected_stage: "4-review", task_generation: "stale-generation",
+        recovery: dispatcher_recovery(phase: "cleared").merge(
+          "owner" => "operator", "blocked_reason" => "generation_conflict"
+        ),
+        state_home: state_home, now: T0 + 1
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0 + 2)
+      ensure
+        restore_find_project!
+      end
+
+      assert_equal [ "CAP-FENCE" ], Q.pending(state_home: state_home).map(&:request_id)
+      rejected = logger.events.find do |name, attrs|
+        name == :dispatch_request_rejected &&
+          attrs[:request_id] == "STALE-BEHIND-FENCE"
+      end
+      refute_nil rejected
+      assert_equal "stale_task_identity", rejected.last.fetch(:reason)
+      assert_equal [ "CAP-FENCE" ], coordinator.resumes.map { |entry| entry[:request].request_id }
+      assert_empty sup.spawned
+    end
+  end
+
   def test_dispatcher_removes_a_recovery_request_after_the_task_is_archived
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       coordinator = FakeRecoveryCoordinator.new(status: "blocked")

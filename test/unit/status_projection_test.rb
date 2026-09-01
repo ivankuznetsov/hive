@@ -31,4 +31,35 @@ class StatusProjectionTest < Minitest::Test
       Hive::Commands::Status::ACTION_LABEL_ORDER
     )
   end
+
+  def test_archive_helpers_keep_input_immutable_and_merge_cached_rows
+    ordinary = {
+      "projects" => [
+        { "path" => "/alpha", "tasks" => [ row("active", "/active") ], "hidden_archived_task_count" => 2 }
+      ]
+    }
+    before = Marshal.dump(ordinary)
+    cache = {
+      rows_by_path: { "/alpha" => [ row("archived", "/archived") ].freeze }.freeze,
+      visible_rows_by_path: {
+        "/alpha" => [ row("duplicate", "/active"), row("archived", "/archived") ].freeze
+      }.freeze,
+      hidden_counts_by_path: { "/alpha" => 3 }.freeze
+    }
+
+    archive = Hive::StatusProjection.archive_payload_from_cache(ordinary, cache)
+    merged = Hive::StatusProjection.merge_visible_archived_payload(ordinary, cache)
+
+    assert_equal [ "archived" ], archive.dig("projects", 0, "tasks").map { |task| task.fetch("slug") }
+    refute archive.dig("projects", 0).key?("hidden_archived_task_count")
+    assert_equal %w[active archived], merged.dig("projects", 0, "tasks").map { |task| task.fetch("slug") }
+    assert_equal 3, merged.dig("projects", 0, "hidden_archived_task_count")
+    assert_equal before, Marshal.dump(ordinary)
+  end
+
+  private
+
+  def row(slug, folder)
+    { "slug" => slug, "folder" => folder }
+  end
 end

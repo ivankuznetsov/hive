@@ -67,5 +67,40 @@ module Hive
     def self.label_position(label)
       ACTION_LABEL_ORDER.index(label) || ACTION_LABEL_ORDER.length
     end
+
+    # Rebuild an archive-only payload from the immutable cache maintained by
+    # the TUI state source. Consumers must not reinterpret raw task arrays.
+    def self.archive_payload_from_cache(ordinary_payload, archived_cache)
+      cached_rows_by_path = archived_cache.fetch(:rows_by_path)
+      copy = ordinary_payload.dup
+      copy["projects"] = Array(ordinary_payload["projects"]).map do |project|
+        project_copy = project.dup
+        cached_rows = project["error"] ? [] : cached_rows_by_path.fetch(project["path"], [])
+        project_copy["tasks"] = cached_rows
+        project_copy.delete("hidden_archived_task_count")
+        project_copy
+      end
+      copy
+    end
+
+    # Merge cached, still-visible terminal rows into an active-only payload.
+    # Active rows win on folder collisions, and the cached hidden count stays
+    # authoritative for each healthy project.
+    def self.merge_visible_archived_payload(active_payload, archived_cache)
+      visible_rows_by_path = archived_cache.fetch(:visible_rows_by_path)
+      hidden_counts_by_path = archived_cache.fetch(:hidden_counts_by_path)
+      copy = active_payload.dup
+      copy["projects"] = Array(active_payload["projects"]).map do |project|
+        project_copy = project.dup
+        active_rows = Array(project["tasks"])
+        active_folders = active_rows.to_h { |row| [ row["folder"], true ] }
+        cached_rows = project["error"] ? [] : visible_rows_by_path.fetch(project["path"], [])
+        project_copy["tasks"] = active_rows + cached_rows.reject { |row| active_folders.key?(row["folder"]) }
+        project_copy["hidden_archived_task_count"] =
+          project["error"] ? 0 : hidden_counts_by_path.fetch(project["path"], 0)
+        project_copy
+      end
+      copy
+    end
   end
 end

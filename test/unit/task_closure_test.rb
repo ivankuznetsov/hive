@@ -743,6 +743,32 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_owned_worktree_head_ancestor_of_verified_pr_head_allows_closure
+    with_closure_project do |task, project|
+      root = Hive::Worktree.canonical_root(task.project_root)
+      worktree = Hive::Worktree.new(task.project_root, task.slug, worktree_root: root)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+
+      File.write(File.join(worktree.path, "task-change.txt"), "task work\n")
+      run!("git", "-C", worktree.path, "add", "task-change.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "task change", "--quiet")
+      task_head = Hive::GitOps.new(worktree.path).head_sha
+
+      File.write(File.join(worktree.path, "review-fix.txt"), "later PR fix\n")
+      run!("git", "-C", worktree.path, "add", "review-fix.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "review fix", "--quiet")
+      delivered_head = Hive::GitOps.new(worktree.path).head_sha
+      run!("git", "-C", worktree.path, "reset", "--hard", task_head)
+
+      preview = service_for(gh: FakeGh.new(head_oid: delivered_head)).preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+
+      assert preview.valid?, preview.to_h.inspect
+    end
+  end
+
   def test_public_helpers_and_fallbacks_fail_closed
     with_closure_project do |task, project|
       input = input_for("acme/app#42")

@@ -156,6 +156,12 @@ strictly owned canonical worktree when one exists and otherwise uses the
 controller-observed head in current `pr.md` metadata. For tasks created before
 that field existed, only the owned worktree can supply the binding; an
 arbitrary path, missing worktree, or different HEAD remains unverifiable.
+For operator closure, a clean owned worktree is considered delivered when its
+HEAD either equals a verified same-repository merged PR head or is an ancestor
+of that head. This admits review-fix commits added later on the same PR branch,
+including squash merges where the task commits are not ancestors of the
+default branch; unrelated unique work remains blocked. If the verified PR head
+object is unavailable locally, the ancestry check fails closed.
 That channel is not accepted by the public confirmation API and
 cannot take over an operator receipt. `closure.json` is mode 0600 and is
 written/fsynced before the centralized move to `9-done`; a restart resumes the

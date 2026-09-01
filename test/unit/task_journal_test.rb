@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/task_journal"
 require "hive/attempts/repository"
+require "hive/task_projection/reader"
 
 class TaskJournalTest < Minitest::Test
   include HiveTestHelper
@@ -22,6 +23,45 @@ class TaskJournalTest < Minitest::Test
       assert_equal Digest::SHA256.hexdigest(bytes), result.journal_hash
       assert_equal %w[event-1 event-2], result.records.map { |record| record.fetch("event_id") }
       assert lines.all? { |record| record["task_generation"] == 3 }
+    end
+  end
+
+  def test_reader_waits_for_complete_writer_append
+    with_writer do |writer, dir|
+      ledger = writer.instance_variable_get(:@ledger).instance_variable_get(:@journal)
+      write_started = Queue.new
+      finish_write = Queue.new
+      ledger.define_singleton_method(:write_all) do |file, bytes|
+        split = bytes.bytesize / 2
+        file.syswrite(bytes.byteslice(0, split))
+        write_started << true
+        finish_write.pop
+        file.syswrite(bytes.byteslice(split..))
+      end
+
+      append = Thread.new { writer.append(event("condition_observed")) }
+      write_started.pop
+      read_started = Queue.new
+      read = Thread.new do
+        read_started << true
+        Hive::TaskProjection::Reader.new(task_folder: dir).read
+      end
+      read_started.pop
+      100.times do
+        break if read.status == "sleep"
+
+        Thread.pass
+      end
+      assert read.alive?, "reader observed a partial append instead of waiting for the journal lock"
+
+      finish_write << true
+      append.value
+      projection = read.value
+      assert_equal "satisfied", projection.current_condition("ChangesPresent").fetch("state")
+    ensure
+      finish_write << true if append&.alive?
+      append&.join
+      read&.join
     end
   end
 

@@ -34,9 +34,7 @@ module Hive
 
           {
             "attempt_id" => context.attempt_id,
-            # Compatibility consumers have always treated task_generation as
-            # the opaque durable owner token. Keep that wire meaning stable;
-            # the numeric condition epoch is additive and explicitly named.
+            # Ownership and the numeric task-input epoch are distinct.
             "task_generation" => context.ownership_generation,
             "ownership_generation" => context.ownership_generation,
             "task_input_epoch" => context.task_generation
@@ -190,9 +188,8 @@ module Hive
                      diagnostic_writer: nil,
                      progress_token: nil, predecessor_attempt_id: nil)
         @attempt_id = attempt_id.to_s
-        @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
-        @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
-        @ownership_generation = ownership_generation&.to_s || bridged_ownership
+        @task_generation = Integer(task_generation)
+        @ownership_generation = ownership_generation&.to_s
         @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
@@ -263,7 +260,7 @@ module Hive
                                      !progress_token.to_s.empty? &&
                                      current.respond_to?(:progress_token) &&
                                      current.progress_token == progress_token
-        epoch_matches = @legacy_opaque_generation || current.task_input_epoch == task_generation
+        epoch_matches = current.task_input_epoch == task_generation
         unless (ownership_matches || successor_progress_matches) && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
@@ -284,15 +281,6 @@ module Hive
           value.freeze
         end
         value.freeze
-      end
-
-      def numeric_generation_or_legacy(value)
-        return [ Integer(value), nil ] if value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)
-
-        token = value.to_s
-        raise ArgumentError, "attempt context requires a task generation" if token.empty?
-
-        [ 0, token ]
       end
 
       private_class_method :new

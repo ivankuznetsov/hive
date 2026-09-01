@@ -5,7 +5,7 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
   include HiveTestHelper
 
   SECRET = "workspace-builder-coverage-secret-32-bytes".freeze
-  Read = Hive::TaskWorkspace::Builder::ProjectionRead
+  Read = Hive::TaskProjection::Reader::BoundedRead
   Native = Data.define(:folder, :project_root, :slug, :id)
 
   class Task
@@ -52,15 +52,15 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
 
       store = Object.new
       store.define_singleton_method(:read_bounded) { |**| raise "projection failed" }
-      subject.instance_variable_set(:@projection_store, store)
-      read = subject.send(:projection_read)
+      subject.instance_variable_set(:@history_reader, store)
+      read = subject.send(:history_read)
       assert_equal "partial", read.state
       assert_equal "bounded_projection_failed", read.diagnostics.first.fetch("reason")
 
       with_attempts = builder(task, native, attempt_store: Object.new)
-      assert_instance_of Hive::TaskProjection::Store, with_attempts.send(:projection_store)
+      assert_instance_of Hive::TaskProjection::Reader, with_attempts.send(:history_reader)
       without_attempts = builder(task, native)
-      assert_instance_of Hive::TaskProjection::Store, without_attempts.send(:projection_store)
+      assert_instance_of Hive::TaskProjection::Reader, without_attempts.send(:history_reader)
 
       marker = subject.send(:marker)
       assert_equal :none, marker.name

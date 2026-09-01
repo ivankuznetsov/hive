@@ -3,7 +3,7 @@ require "json"
 require "open3"
 require "time"
 require "hive/atomic_file"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 
 module Hive
   module Attempts

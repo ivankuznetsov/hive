@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-09-01
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -357,57 +357,34 @@ without creating an infinite loop.
   closed; a lease-created placeholder is never treated as an admitted source.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
-## Task condition journal and projection
+## Task condition journal
 
-The task-local durability contracts are deliberately separate. Legacy,
-fail-soft operational telemetry remains in `events.jsonl` under
-`Hive::Events`. Versioned condition/generation/evidence/audit records live in
-the strict `task-journal.jsonl` and are appended synchronously through
-`Hive::TaskJournal::Writer` with a separate task-local journal flock, complete
-JSON-line batch, short-write retry, flush, and fsync. A failed append truncates
-and re-syncs to the pre-append byte boundary before reporting failure. Those
-records reuse the durable attempt ID from [[modules/attempts]] and add a
-numeric task input epoch plus exact-HEAD commit generation. Projection replay
-applies the same structural, schema-version, and durable attempt task/stage/
-generation checks as the writer; unknown record shapes fail closed.
-Validation follows predecessor lineage and rejects missing, incompatible, or
-cyclic links. Projection selection uses that causal chain before timestamps,
-so clock regression cannot reverse retry order.
+Legacy, fail-soft operational telemetry remains in `events.jsonl` under
+`Hive::Events`. Versioned condition, generation, evidence, audit, and
+implementation-identity records live in the strict `task-journal.jsonl`.
+`Hive::TaskJournal::Writer` appends complete JSON-line batches under a
+task-local flock, flushes and fsyncs them, and truncates back to the previous
+byte boundary when a write fails. New records are checked against their live
+SQLite attempt before append.
 
-The underlying storage/replay mechanics now enter through
-`require "hive/work_ledger"`. `Hive::WorkLedger` owns only policy-light ordered
-descriptor validation, JSONL locking/complete-write/fsync/rollback,
-idempotency-key conflict detection, byte-bound replay, and duplicate record
-identity rejection. `Hive::TaskJournal` still creates and validates the
-Hive-owned authoritative event schema, and `Hive::TaskProjection` supplies
-attempt enrichment plus condition/projection compatibility policy through the
-replay callback. Consequently `task-journal.jsonl` and
-`task-projection.json` remain internal Hive compatibility formats, not public
-WorkLedger formats. Task paths, store selection, migrations, transitions,
-overlays, Git actions, and status policy remain above the mechanism.
+Historical task state has one authority: the JSONL journal. Readers take a
+shared lock, validate every record and hash-chain link, bind the stream to one
+task/workflow and each attempt to one stage/generation identity, then fold it
+directly in memory through `Hive::TaskProjection`. Routine scheduling reads the
+complete stream; only bounded task-workspace presentation enforces byte and
+event limits. Replay is self-contained and never asks SQLite to reinterpret old
+history. Attempt lineage used by the fold comes from journal provenance. A
+malformed or incomplete journal fails that task closed as
+`task_history_invalid`; Hive does not create a checkpoint, snapshot, or repair
+sidecar. If the lock sidecar appears during a first append, a reader retries
+through the shared lock instead of consuming an unlocked partial write.
 
-Append and replay receipts contain detached, deeply frozen JSON record
-snapshots. Replay hashes a private copy of its source bytes, and idempotent
-append validates every historical record sharing the requested key before it
-returns an existing receipt.
-
-`<task>/task-projection.json` is an atomic, disposable materialized view bound
-to the journal cursor, last event ID, and SHA-256. It contains projected
-identity, current and superseded conditions, evidence, gate diagnostics,
-compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
-replay from the journal without git/GitHub calls. A binding-matched cached view
-hashes the journal bytes and revalidates each unique current/predecessor attempt
-binding, including mutable state/outcome/lease; changed bindings take the full
-parse/replay path. A missing or empty journal after a durable snapshot or
-attempt-stamped `execute_*` marker fails both read and rebuild without
-replacing the last snapshot; non-execute markers do not claim an execute
-condition-journal handoff. Status replay is
-read-only; the next mutating execute boundary republishes the view. The view
-also carries at most the latest 20 `condition_overrides` projected from forced-
-transition `operator_action` records; the journal keeps all of them. Terminal/
-lost attempt state reconciles current `AgentHealthy` even before the daemon
-lifecycle observation lands.
-See [[modules/conditions]].
+The low-level append/replay mechanics enter through `require
+"hive/work_ledger"`. `Hive::WorkLedger` owns JSONL locking, complete-write
+rollback, byte-bounded replay, and duplicate record identity rejection.
+`Hive::TaskJournal` owns the Hive event schema and `Hive::TaskProjection` owns
+the in-memory fold and marker overlay. Task paths, transitions, Git actions,
+and status policy remain above that mechanism. See [[modules/conditions]].
 
 ### Implementation identity events
 
@@ -475,29 +452,18 @@ start again. There is no general legacy decoder, attempts-v4 migration state
 machine, dual reader/writer, reverse hydration, implicit database creation,
 rollback, or downgrade.
 
-The cutover deliberately retains task journals and their validated projection
-checkpoints while resetting legacy attempt rows. A checkpoint prefix whose
-attempt was accepted before the durable installation activation boundary may
-classify that missing legacy attempt as lost; the prefix must still pass its
-cursor, inode, and anchor checks. The appended suffix is validated against
-SQLite. Ordinary lifecycle reads prefer this validated checkpoint and bounded
-suffix so retained tasks can resume after cutover. Strict full replay remains
-the fallback when no trusted checkpoint exists and remains mandatory for an
-explicit rebuild. Exact-task repair has one cutover-only compatibility route:
-it may use a retained snapshot binding for an unknown pre-activation attempt,
-but only when the journal itself also contains a pre-activation observation for
-that attempt. Hive then replays the complete journal under the task lock and
-publishes only when the ledger and complete projection match. The comparison ignores only recomputed
-marker overlays, an omitted optional null exit status, and the historical
-per-stage implementation-identity summary; its underlying identity events and
-history must still match. Post-activation unknown attempts, changed journals,
-and every other projection mismatch remain strict failures.
+The cutover retains task journals while resetting legacy attempt rows. Current
+Hive validates and folds those journals directly; it neither retains nor
+rebuilds a projection checkpoint. Historical attempt IDs remain journal facts,
+while SQLite starts with only post-cutover live runtime state and the imported
+token-usage history. A pending terminal publication is a transient live fence
+until its journal append is acknowledged, not a second historical read path.
 
 The package manager publishes the candidate normally; Hive never renames
 package-owned launcher entries or retains the previous executable tree.
 `hive runtime` exposes only bounded status and forward resume. The external
 manifest is cutover evidence, not a user-selectable backup or restore source.
-Workflow files, task journals and projections, artifacts, and referenced
+Workflow files, task journals, artifacts, and referenced
 payload files remain under their existing authorities after activation; only
 genuinely retired runtime writer paths receive tombstones.
 

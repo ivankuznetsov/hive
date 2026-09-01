@@ -239,7 +239,6 @@ module Hive
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           merge_intake: refactor_patrol_merge_reconciler,
           store: Hive::Daemon::PrMergeRepository.new(dry_run: @dry_run),
-          attempt_store_factory: -> { attempt_store },
           dry_run: @dry_run
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new

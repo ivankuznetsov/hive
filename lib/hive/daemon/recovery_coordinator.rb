@@ -211,12 +211,11 @@ module Hive
                   now: Time.now.utc)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           return receipt(
             "blocked", failure_origin: failure_origin, owner: "operator",
-            reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: value(row, :suggested_command) ||
-              "repair the exact task projection before retrying"
+            reason: Hive::TaskProjection::INVALID_HISTORY_REASON,
+            remediation: value(row, :suggested_command)
           )
         end
         retry_count = durable_retry_count(row)
@@ -783,13 +782,12 @@ module Hive
         request = rearm_changed_runtime(request, now:)
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           return receipt(
             "blocked", request_id: request.request_id,
             phase: recovery["phase"], failure_origin: recovery["failure_origin"],
-            owner: "operator", reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: value(row, :suggested_command) ||
-              "repair the exact task projection before retrying",
+            owner: "operator", reason: Hive::TaskProjection::INVALID_HISTORY_REASON,
+            remediation: value(row, :suggested_command),
             retry_count: recovery["retry_count"]
           )
         end
@@ -1383,8 +1381,8 @@ module Hive
         attrs.is_a?(Hash) ? attrs.to_h.transform_keys(&:to_s) : {}
       end
 
-      def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_row?(row)
+      def task_history_invalid_row?(row)
+        Hive::TaskProjection.history_invalid_row?(row)
       end
 
       def observed_marker_generation(row)

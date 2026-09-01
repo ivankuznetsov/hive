@@ -536,6 +536,7 @@ components:
           - lib/hive/commands/module/dry_run.rb
           - lib/hive/commands/status.rb
           - lib/hive/conditions/execute_boundary.rb
+          - lib/hive/conditions/transition_guard.rb
           - lib/hive/artifacts/outcome_evidence/store.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
@@ -543,7 +544,7 @@ components:
           - lib/hive/daemon/recovery_coordinator.rb
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
-          - lib/hive/task_projection/store.rb
+          - lib/hive/task_workspace/builder.rb
         reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
@@ -1073,7 +1074,7 @@ components:
     focused_tests:
       - test/unit/work_ledger_test.rb
       - test/unit/task_journal_test.rb
-      - test/unit/task_projection/store_test.rb
+      - test/unit/task_projection/reader_test.rb
       - test/unit/task_projection_test.rb
       - test/unit/workflow_test.rb
     migration_exceptions: []

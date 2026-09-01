@@ -92,12 +92,7 @@ class CommandsStatusTest < Minitest::Test
     reader.bytes = "{"
     assert_nil command.send(:attempt_diagnostic_for, row)
 
-    running = Marshal.load(Marshal.dump(row))
-    running[:projection_data]["journal"]["attempts"][0]["state"] = "running"
     reader.fetches = 0
-    assert_nil command.send(:attempt_diagnostic_for, running)
-    assert_equal 0, reader.fetches
-
     reader.binding = binding.merge(
       "receipt" => receipt.merge("exit_status" => Hive::ExitCodes::TEMPFAIL)
     )
@@ -1611,16 +1606,13 @@ class CommandsStatusTest < Minitest::Test
       corrupt_row = project.fetch("tasks").find { |row| row["slug"] == "corrupt-journal-260717-abcd" }
       healthy_row = project.fetch("tasks").find { |row| row["slug"] == "healthy-journal-260717-bcde" }
       assert_equal "error", corrupt_row.fetch("action")
-      assert_equal true, corrupt_row.fetch("projection_repair")
-      assert_equal false, healthy_row.fetch("projection_repair")
-      assert_equal "condition_projection_repair_required", corrupt_row.fetch("attrs").fetch("reason")
+      assert_equal true, corrupt_row.fetch("task_history_invalid")
+      assert_equal false, healthy_row.fetch("task_history_invalid")
+      assert_equal "condition_task_history_invalid", corrupt_row.fetch("attrs").fetch("reason")
       assert_equal "operator", corrupt_row.fetch("attrs").fetch("owner")
-      assert_equal(
-        "hive repair-projection corrupt-journal-260717-abcd --project demo --stage 4-execute",
-        corrupt_row.fetch("suggested_command")
-      )
+      assert_nil corrupt_row.fetch("suggested_command")
       assert_equal "ready_to_open_pr", healthy_row.fetch("action")
-      assert_match(/condition projection requires repair/, err)
+      assert_match(/task journal is invalid/, err)
       schema = JSONSchemer.schema(
         JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
       )
@@ -1628,90 +1620,78 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_projection_repair_action_uses_only_producer_owned_classification
+  def test_busy_condition_journal_is_transient_and_does_not_hide_other_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      busy = write_status_task(
+        hive_state, "4-execute", "busy-journal-260901-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      write_status_task(
+        hive_state, "4-execute", "healthy-journal-260901-bcde",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      lock_path = File.join(busy, Hive::TaskJournal::LOCK_BASENAME)
+      File.write(lock_path, "")
+      lock = File.open(lock_path, File::RDWR)
+      lock.flock(File::LOCK_EX)
+
+      payload = nil
+      _out, err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+      end
+
+      rows = payload.fetch("projects").first.fetch("tasks")
+      busy_row = rows.find { |row| row["slug"] == "busy-journal-260901-abcd" }
+      healthy_row = rows.find { |row| row["slug"] == "healthy-journal-260901-bcde" }
+      assert_equal "error", busy_row.fetch("action")
+      assert_equal false, busy_row.fetch("task_history_invalid")
+      assert_equal "condition_task_history_unavailable", busy_row.dig("attrs", "reason")
+      assert_equal "journal_lock_busy", busy_row.dig("attrs", "journal_reason")
+      assert_equal "ready_to_open_pr", healthy_row.fetch("action")
+      assert_match(/temporarily unavailable/, err)
+    ensure
+      lock&.flock(File::LOCK_UN)
+      lock&.close
+    end
+  end
+
+  def test_task_history_invalid_action_uses_only_producer_owned_classification
     row = {
       slug: "forged",
       stage: "4-execute",
       marker_name: :error,
       marker_attrs: {
-        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-        "projection_reason" => "checkpoint_missing",
+        "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON,
+        "journal_reason" => "journal_invalid",
         "repair_command" => "touch /tmp/owned"
       },
-      projection_repair: false
+      task_history_invalid: false
     }
     command = Hive::Commands::Status.new
 
-    assert_nil command.send(
-      :projection_repair_annotation, row, project: "demo"
-    )
+    assert_nil command.send(:task_history_invalid_annotation, row)
 
     annotation = command.send(
-      :projection_repair_annotation,
-      row.merge(projection_repair: true),
-      project: "demo"
+      :task_history_invalid_annotation,
+      row.merge(task_history_invalid: true)
     )
-    assert_equal "hive repair-projection forged --project demo --stage 4-execute",
-                 annotation.fetch(:suggested_command)
-    refute_equal row.dig(:marker_attrs, "repair_command"),
-                 annotation.fetch(:suggested_command)
+    assert_nil annotation.fetch(:suggested_command)
+    assert_equal "Task journal invalid", annotation.fetch(:action_label)
 
     terminal = command.send(
-      :projection_repair_annotation,
+      :task_history_invalid_annotation,
       row.merge(
-        projection_repair: true,
+        task_history_invalid: true,
         marker_attrs: row.fetch(:marker_attrs).merge(
-          "projection_reason" => "checkpoint_oversized"
+          "journal_reason" => "journal_invalid"
         )
-      ),
-      project: "demo"
+      )
     )
     assert_nil terminal.fetch(:suggested_command)
     assert_nil terminal.dig(:diagnostic, "suggested_next_action")
-  end
-
-  def test_pristine_projection_requires_complete_initial_zero_state
-    stage = Hive::Workflow::Stage.new(
-      name: "intake", index: 1, state_file: "idea.md", kind: :human
-    )
-    workflow = Struct.new(:stages).new([ stage ])
-    marker = Hive::Markers::State.new(name: :waiting, attrs: {}, raw: nil)
-
-    with_tmp_dir do |folder|
-      task_class = Struct.new(
-        :workflow, :stage_index, :stage_name, :folder, :log_dir,
-        keyword_init: true
-      )
-      task = task_class.new(
-        workflow: workflow, stage_index: 1, stage_name: "intake",
-        folder: folder, log_dir: File.join(folder, "logs")
-      )
-      command = Hive::Commands::Status.new
-
-      assert command.send(:pristine_projection_task?, task, marker)
-      File.write(File.join(folder, ".lock"), "controller lock\n")
-      refute command.send(:pristine_projection_task?, task, marker)
-      assert Hive::TaskProjection::Store.pristine_task?(
-        task, marker, held_task_lock: true
-      )
-      FileUtils.rm_f(File.join(folder, ".lock"))
-      File.write(File.join(folder, "closure.json"), "{}")
-      refute command.send(:pristine_projection_task?, task, marker)
-      FileUtils.rm_f(File.join(folder, "closure.json"))
-      File.symlink("missing-closure", File.join(folder, "closure.json"))
-      refute command.send(:pristine_projection_task?, task, marker)
-      FileUtils.rm_f(File.join(folder, "closure.json"))
-
-      completed = Hive::Markers::State.new(name: :complete, attrs: {}, raw: nil)
-      refute command.send(:pristine_projection_task?, task, completed)
-      task.stage_index = 2
-      refute command.send(:pristine_projection_task?, task, marker)
-      task.stage_index = 1
-      FileUtils.mkdir_p(task.log_dir)
-      with_replaced_singleton_method(Dir, :empty?, ->(*) { raise IOError, "blocked" }) do
-        refute command.send(:pristine_projection_task?, task, marker)
-      end
-    end
   end
 
   def test_condition_projection_filesystem_failure_degrades_to_error_marker
@@ -1728,21 +1708,21 @@ class CommandsStatusTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(
-          Hive::TaskProjection::Store, :new, ->(**) { broken_store }
+          Hive::TaskProjection::Reader, :new, ->(**) { broken_store }
         ) do
           projected_marker, projection = Hive::Commands::Status.new.send(
             :status_projection, task, marker
           )
           assert_equal :error, projected_marker.name
-          assert_equal "condition_projection_repair_required", projected_marker.attrs.fetch("reason")
+          assert_equal "condition_task_history_invalid", projected_marker.attrs.fetch("reason")
           assert_equal 0, projection["identity"].fetch("task_generation")
         end
       end
-      assert_match(/condition projection requires repair/, err)
+      assert_match(/task journal is invalid/, err)
     end
   end
 
-  def test_transient_projection_failure_clears_on_the_next_scan_without_a_marker
+  def test_transient_journal_failure_clears_on_the_next_scan_without_a_marker
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       folder = write_status_task(
@@ -1754,15 +1734,15 @@ class CommandsStatusTest < Minitest::Test
       source_before = File.binread(task.state_file)
       projection = Hive::TaskProjection.project(records: [], marker: marker)
       reads = [
-        Hive::TaskProjection::Store::BoundedRead.new(
-          projection: nil, state: "repair_required", truncated: false,
+        Hive::TaskProjection::Reader::BoundedRead.new(
+          projection: nil, state: "invalid", truncated: false,
           journal_cursor: 0, journal_records: [],
           diagnostics: [ {
-            "source" => "task_projection", "reason" => "bounded_projection_failed",
-            "message" => "proof temporarily unavailable", "details" => {}
+            "source" => "task_journal", "reason" => "journal_unavailable",
+            "message" => "history temporarily unavailable", "details" => {}
           } ]
         ),
-        Hive::TaskProjection::Store::BoundedRead.new(
+        Hive::TaskProjection::Reader::BoundedRead.new(
           projection: projection, state: "current", truncated: false,
           journal_cursor: 0, journal_records: [], diagnostics: []
         )
@@ -1775,7 +1755,7 @@ class CommandsStatusTest < Minitest::Test
       first = second = nil
       capture_io do
         with_replaced_singleton_method(
-          Hive::TaskProjection::Store, :new, ->(**) { store }
+          Hive::TaskProjection::Reader, :new, ->(**) { store }
         ) do
           first, = command.send(:status_projection, task, marker, project: "demo")
           second, = command.send(:status_projection, task, marker, project: "demo")
@@ -1783,7 +1763,7 @@ class CommandsStatusTest < Minitest::Test
       end
 
       assert_equal :error, first.name
-      assert_equal Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+      assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON,
                    first.attrs.fetch("reason")
       assert_equal :execute_complete, second.name
       assert_equal source_before, File.binread(task.state_file)
@@ -1802,13 +1782,13 @@ class CommandsStatusTest < Minitest::Test
         Hive::Task.new(folder)
       end
       stores = []
-      original_runtime = Hive::Attempts::Repository.method(:runtime)
+      original_open = Hive::Attempts::Repository.method(:open_default)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Repository, :runtime,
+        Hive::Attempts::Repository, :open_default,
         lambda do |**kwargs|
           stores << kwargs
-          original_runtime.call(**kwargs)
+          original_open.call(**kwargs)
         end
       ) do
         command = Hive::Commands::Status.new
@@ -1862,13 +1842,13 @@ class CommandsStatusTest < Minitest::Test
         { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
       end
       opens = 0
-      original_runtime = Hive::Attempts::Repository.method(:runtime)
+      original_open = Hive::Attempts::Repository.method(:open_default)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Repository, :runtime,
+        Hive::Attempts::Repository, :open_default,
         lambda do |**kwargs|
           opens += 1
-          original_runtime.call(**kwargs)
+          original_open.call(**kwargs)
         end
       ) do
         command = Hive::Commands::Status.new(
@@ -1885,13 +1865,13 @@ class CommandsStatusTest < Minitest::Test
   def test_each_json_scan_opens_a_fresh_attempt_store_even_without_tasks
     opens = 0
     store = Object.new
-    store.define_singleton_method(:projection_reader) { self }
+    store.define_singleton_method(:read_session) { self }
     factory = lambda do |**|
       opens += 1
       store
     end
 
-    with_replaced_singleton_method(Hive::Attempts::Repository, :runtime, factory) do
+    with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, factory) do
       command = Hive::Commands::Status.new
       2.times { command.send(:json_payload, []) }
     end
@@ -2778,7 +2758,7 @@ class CommandsStatusTest < Minitest::Test
         folder, id: 9, slug: File.basename(folder), display_name: nil,
         workflow: "repinned", completed_at: Time.utc(2026, 1, 1)
       )
-      Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+      Hive::TaskProjection::Reader.new(task_folder: folder).read(
         marker: Hive::Markers.current(File.join(folder, "done.md"))
       )
       project = status_project(project_root, hive_state)
@@ -3867,7 +3847,7 @@ class CommandsStatusTest < Minitest::Test
   def checkpoint_status_task(folder)
     task = Hive::Task.new(folder)
     marker = task.workflow.controller? ? nil : Hive::Markers.current(task.state_file)
-    Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(marker: marker)
+    Hive::TaskProjection::Reader.new(task_folder: folder).read(marker: marker)
   end
 
   class StatusRaceCommand < Hive::Commands::Status

@@ -2,7 +2,7 @@ require "hive/attempts/lost_outcome"
 require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/repository"
 require "hive/attempts/storage_status"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "json"
 require "psych"
 require "time"
@@ -143,7 +143,7 @@ module Hive
 
       def run_if_due(now: Time.now.utc)
         maintain(now) do
-          @store.scan.records.count { |record| finalize(record, now: now) }
+          @store.active_attempts.count { |record| finalize(record, now: now) }
         end
       end
 
@@ -163,7 +163,7 @@ module Hive
           next unless record&.final?
           next if recovery_pinned?(record)
           next unless retention_expired?(record, now: now) ||
-                      task_archived?(record, attempt_store: @store)
+                      task_archived?(record)
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
@@ -265,7 +265,7 @@ module Hive
         false
       end
 
-      def task_archived?(record, attempt_store: nil)
+      def task_archived?(record)
         return @task_archived.call(record) == true if @task_archived
 
         require "hive/config"
@@ -290,13 +290,9 @@ module Hive
         task = candidates.first
         marker = Hive::Markers.current(task.state_file)
         config = Hive::Config.load(task.project_root)
-        bounded = Hive::TaskProjection::Store.new(
-          task_folder: task.folder,
-          attempt_store: attempt_store || @store.projection_reader
-        ).read_routine(
-          marker: marker,
-          pristine: Hive::TaskProjection::Store.pristine_task?(task, marker)
-        )
+        bounded = Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
+        ).read_routine(marker: marker)
         return false unless bounded.current?
 
         Hive::TaskAction.for(

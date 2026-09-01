@@ -19,7 +19,7 @@ require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/attempts/repository"
 require "hive/patrol_fix/attempt_diagnostic"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_closure"
 require "hive/implementation_identity/resolver"
 require "hive/task_resolver"
@@ -848,7 +848,7 @@ module Hive
           "pr_url" => row[:pr_url],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
-          "projection_repair" => row[:projection_repair] == true,
+          "task_history_invalid" => row[:task_history_invalid] == true,
           "mtime" => row[:mtime].utc.iso8601(6),
           "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
@@ -1468,7 +1468,7 @@ module Hive
               else
                 Hive::Markers.current(task.state_file)
               end
-              marker, projection, projection_repair = status_projection(
+              marker, projection, task_history_invalid = status_projection(
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
@@ -1517,7 +1517,7 @@ module Hive
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
-                projection_repair: projection_repair == true,
+                task_history_invalid: task_history_invalid == true,
                 projection: projection,
                 projection_data: projection.to_h,
                 icon: icon,
@@ -1590,12 +1590,15 @@ module Hive
         end
 
         attempt_store = status_attempt_store
-        bounded = Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: attempt_store
-        ).read_routine(marker: marker, pristine: pristine_projection_task?(task, marker))
+        bounded = Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
+        ).read_routine(marker: marker)
         project ||= project_name_for(task)
+        if bounded.state == "invalid"
+          return task_history_invalid_status(task, bounded)
+        end
         unless bounded.current?
-          return projection_repair_status(task, bounded, project: project)
+          return task_history_unavailable_status(task, bounded)
         end
 
         projection = bounded.projection
@@ -1608,34 +1611,39 @@ module Hive
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e
         project ||= project_name_for(task)
-        bounded = Hive::TaskProjection::Store::BoundedRead.new(
-          projection: nil, state: "repair_required", truncated: false,
+        bounded = Hive::TaskProjection::Reader::BoundedRead.new(
+          projection: nil, state: "invalid", truncated: false,
           journal_cursor: 0, journal_records: [],
           diagnostics: [ {
-            "source" => "task_projection", "reason" => "bounded_projection_failed",
-            "message" => "bounded task projection failed",
+            "source" => "task_journal", "reason" => "journal_read_failed",
+            "message" => "task journal read failed",
             "details" => { "error_class" => e.class.name }
           } ]
         )
-        projection_repair_status(task, bounded, project: project)
+        task_history_invalid_status(task, bounded)
       end
 
-      def pristine_projection_task?(task, marker)
-        Hive::TaskProjection::Store.pristine_task?(task, marker)
-      end
-
-      def projection_repair_status(task, bounded, project:)
-        attrs = Hive::TaskProjection.repair_marker_attrs(
-          bounded: bounded, project: project, slug: task.slug,
-          stage: "#{task.stage_index}-#{task.stage_name}"
-        )
+      def task_history_invalid_status(task, bounded)
+        attrs = Hive::TaskProjection.invalid_journal_marker_attrs(bounded: bounded)
         error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
-        warn "hive: status: #{task.folder} condition projection requires repair " \
-             "(#{attrs.fetch('projection_reason')}); surfaced as a task-local Error row"
+        warn "hive: status: #{task.folder} task journal is invalid " \
+             "(#{attrs.fetch('journal_reason')}); surfaced as a task-local Error row"
         [
           error_marker,
           Hive::TaskProjection.project(records: [], marker: error_marker),
           true
+        ]
+      end
+
+      def task_history_unavailable_status(task, bounded)
+        attrs = Hive::TaskProjection.unavailable_journal_marker_attrs(bounded: bounded)
+        error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+        warn "hive: status: #{task.folder} task journal is temporarily unavailable " \
+             "(#{attrs.fetch('journal_reason')}); retrying on the next scan"
+        [
+          error_marker,
+          Hive::TaskProjection.project(records: [], marker: error_marker),
+          false
         ]
       end
 
@@ -1653,9 +1661,9 @@ module Hive
       def acquire_status_attempt_store
         return false if @status_attempt_store
 
-        @status_attempt_store = Hive::Attempts::Repository.runtime(
+        @status_attempt_store = Hive::Attempts::Repository.open_default(
           create_directories: false
-        ).projection_reader
+        ).read_session
         true
       end
 
@@ -1964,7 +1972,7 @@ module Hive
           task: nil,
           marker_name: marker.name,
           marker_attrs: marker.attrs,
-          projection_repair: false,
+          task_history_invalid: false,
           icon: icon,
           state_label: state_label,
           mtime: folder_mtime,
@@ -2031,38 +2039,29 @@ module Hive
             patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
-          projection_repair_annotation(annotation, project: project["name"]) || annotation
+          task_history_invalid_annotation(annotation) || annotation
         end
       end
 
-      def projection_repair_annotation(row, project:)
-        return nil unless Hive::TaskProjection.repair_required_row?(row)
+      def task_history_invalid_annotation(row)
+        return nil unless Hive::TaskProjection.history_invalid_row?(row)
 
-        command = unless Hive::TaskProjection.terminal_repair_reason?(
-          row.dig(:marker_attrs, "projection_reason")
-        ) || row.dig(:marker_attrs, "projection_reason") == "journal_lock_busy"
-          Hive::TaskProjection.repair_command(
-            project: project, slug: row[:slug], stage: row[:stage]
-          )
-        end
         marker = marker_from_row(row)
         row.merge(
           action_key: Hive::Schemas::TaskActionKind::ERROR,
-          action_label: "Projection repair required",
-          suggested_command: command,
+          action_label: "Task journal invalid",
+          suggested_command: nil,
           outcomes: [],
           next_action: nil,
           diagnostic: {
-            "summary" => "Task projection needs exact-task repair",
+            "summary" => "Task history is unreadable",
             "detail" => row.dig(:marker_attrs, "message").to_s[0, 4_000],
             "source" => "marker",
             "source_path" => nil,
             "artifact_paths" => [],
             "generated_by" => "local",
             "marker_signature" => Hive::TaskClosure.marker_generation(marker),
-            "suggested_next_action" => command ? {
-              "kind" => "manual_fix", "command" => command
-            } : nil,
+            "suggested_next_action" => nil,
             "updated_at" => Time.now.utc.iso8601
           }
         )
@@ -2074,12 +2073,6 @@ module Hive
         identity = row[:projection_data].is_a?(Hash) ? row[:projection_data]["identity"] : nil
         attempt_id = identity.is_a?(Hash) ? identity["attempt_id"].to_s : ""
         return nil if attempt_id.empty? || attempt_id == Hive::TaskJournal::LEGACY_ATTEMPT_ID
-
-        attempt = Array(row.dig(:projection_data, "journal", "attempts")).find do |candidate|
-          candidate.is_a?(Hash) && candidate["attempt_id"] == attempt_id
-        end
-        return nil unless attempt && attempt["state"] == "terminal" &&
-                          %w[failed cancelled].include?(attempt["outcome"])
 
         binding = status_attempt_store.fetch_terminal_diagnostic_binding(attempt_id)
         return nil unless binding.is_a?(Hash) && binding["attempt_id"] == attempt_id

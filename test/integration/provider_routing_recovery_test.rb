@@ -112,7 +112,7 @@ class ProviderRoutingRecoveryTest < Minitest::Test
       assert_equal terminal.task_input_epoch, successor.attempt.task_input_epoch
       assert_equal policy.digest, successor.attempt["routing"].fetch("policy_digest")
       assert_equal 1, successor.attempt["retry_charge"]
-      assert_equal 2, attempts.scan.records.size
+      assert_equal 2, attempts.active_attempts.size
       assert_empty dispatch.pending
       assert_equal "admitted", dispatch.fetch(recovery.request_id).state
       assert_equal 1, recovery.recovery.fetch("retry_count")

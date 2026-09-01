@@ -66,7 +66,7 @@ class ProviderHealthAttemptLifecycleTest < Minitest::Test
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
     File.binwrite(store.log_archive.hot_path(running.attempt_id), "")
-    @reference = Hive::Attempts::OutputReference.build(
+    @reference = Hive::OutputReference.build(
       store.log_archive.hot_path(running.attempt_id), root: store.root
     )
     store.terminalize(

@@ -246,7 +246,8 @@ class AttemptsContextTest < Minitest::Test
       current
     end
     context = Hive::Attempts::Context.send(
-      :new, attempt_id: "attempt-1", task_generation: "generation-current",
+      :new, attempt_id: "attempt-1", task_generation: 0,
+      ownership_generation: "generation-current",
       project: "demo", intended_stage: "4-execute"
     )
 
@@ -257,7 +258,8 @@ class AttemptsContextTest < Minitest::Test
     assert_equal 1, calls
 
     stale = Hive::Attempts::Context.send(
-      :new, attempt_id: "attempt-stale", task_generation: "generation-old",
+      :new, attempt_id: "attempt-stale", task_generation: 0,
+      ownership_generation: "generation-old",
       project: "demo", intended_stage: "4-execute"
     )
     with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, resolver) do
@@ -416,13 +418,7 @@ class AttemptsContextTest < Minitest::Test
     assert_includes error.message, "binding is incomplete"
   end
 
-  def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch
-    context = Hive::Attempts::Context.send(
-      :new, attempt_id: "attempt", task_generation: "opaque"
-    )
-
-    assert_equal 0, context.task_generation
-    assert_equal "opaque", context.ownership_generation
+  def test_context_requires_a_numeric_nonnegative_task_epoch
     assert_raises(ArgumentError) do
       Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: -1)
     end

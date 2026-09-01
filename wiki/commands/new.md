@@ -104,7 +104,7 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
    Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing marker. Coding keeps `<!-- WAITING -->` for the historical inbox path. Non-coding workflows remove the waiting marker; if the entry stage is `kind: :inert`, capture writes `<!-- COMPLETE -->` so the real `hive approve` safety gate can move it forward.
 6. If attachments were supplied, copy them into `assets/` beside the state file.
 7. Allocate a monotonic task id via `Hive::TaskCounter.next_or_nil` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil, workflow: ...)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
-8. Publish `task-projection.json` plus a zero-history `task-projection.checkpoint.json` before the task is committed. The checkpoint binds an absent, empty journal without creating `task-journal.jsonl`; later bounded journal suffixes extend it. Initialization refuses any pre-existing journal or projection, so this creation path cannot silently repair or migrate an older task.
+8. Leave task history absent. The first authoritative event creates `task-journal.jsonl`; until then the absent journal is an empty history stream.
 
 Managed selection is resolved once under the store's stable-read lock. Project
 configuration is loaded lazily only for a legacy v1 selection that must derive

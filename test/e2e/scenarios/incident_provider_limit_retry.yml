@@ -100,7 +100,7 @@ steps:
 
       attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
       dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
-      first = attempts.scan.records.select { |record| record["intended_stage"] == "4-execute" }
+      first = attempts.active_attempts.select { |record| record["intended_stage"] == "4-execute" }
       raise "expected exactly one initial execute attempt, got #{first.size}" unless first.size == 1
       first = first.fetch(0)
       route = first["routing"].fetch("route")

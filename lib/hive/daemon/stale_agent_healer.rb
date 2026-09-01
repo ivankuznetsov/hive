@@ -240,7 +240,7 @@ module Hive
 
         rows.each do |row|
           break unless admission_open?
-          next if projection_repair_row?(row)
+          next if task_history_invalid_row?(row)
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
@@ -361,8 +361,8 @@ module Hive
         false
       end
 
-      def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_row?(row)
+      def task_history_invalid_row?(row)
+        Hive::TaskProjection.history_invalid_row?(row)
       end
 
       def controller_workflow?(row)
@@ -389,8 +389,8 @@ module Hive
       end
 
       # Durable workflow errors are healed through the shared coordinator.
-      # Synthetic projection repair never reaches this helper because another
-      # provider run cannot reconstruct the missing derived checkpoint.
+      # Invalid task history never reaches this helper because another provider
+      # run cannot reconstruct authoritative journal events.
       def daemon_enabled_for_row?(row, projects)
         projects.nil? || projects.include?(row.project)
       end

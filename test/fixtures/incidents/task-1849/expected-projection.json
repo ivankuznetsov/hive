@@ -14,5 +14,5 @@
     { "attempt_id": "attempt-a", "commit_generation": 1, "condition": "ChangesPresent", "event_id": "1849-a-changes", "original_state": "unsatisfied", "state": "superseded", "superseded_by_event_id": "1849-b-changes", "superseded_reason": "older_commit_generation", "task_generation": 1 },
     { "attempt_id": "attempt-a", "commit_generation": 1, "condition": "AwaitingHuman", "event_id": "1849-a-wait", "original_state": "satisfied", "state": "superseded", "superseded_by_event_id": "1849-b-wait", "superseded_reason": "newer_incompatible_attempt", "task_generation": 1 }
   ],
-  "identity": { "attempt_id": "attempt-b", "commit_generation": 2, "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "task_generation": 1 }
+  "identity": { "attempt_id": "attempt-b", "commit_generation": 2, "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ownership_generation": "ownership-b", "task_generation": 1 }
 }

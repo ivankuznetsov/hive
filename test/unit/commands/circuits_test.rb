@@ -8,9 +8,7 @@ class CommandsCircuitsTest < Minitest::Test
   NOW = Time.utc(2026, 8, 10, 12)
 
   AttemptStore = Data.define(:rows, :database) do
-    def scan
-      Hive::Attempts::Scan.new(records: [].freeze)
-    end
+    def active_attempts = [].freeze
     def routing_decisions(limit:) = rows.first(limit)
   end
 

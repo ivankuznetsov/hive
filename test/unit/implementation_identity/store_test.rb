@@ -37,9 +37,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
 
       assert_equal %w[generation_advanced implementation_identity_captured],
                    observed.map { |record| record["event_type"] }
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
-      ).read
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       assert_equal "codex", projection["implementation_identity"].dig("execute", "provider")
     end
   end
@@ -108,9 +106,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       assert_nil observation.dig("usage", "input")
       assert_equal 0, observation.dig("usage", "output")
 
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
-      ).read
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       execute = projection["implementation_identity"].fetch("execute")
       assert_equal "anthropic/claude-sonnet-4-5", execute.fetch("model")
       assert_equal "claude-sonnet-4-5-20250929", execute.fetch("actual_model")
@@ -428,19 +424,19 @@ class ImplementationIdentityStoreTest < Minitest::Test
       winner = resolver.resolve_stage(
         "open_pr", execute_identity: execute, attempt_id: "open-pr-winner"
       )
-      rebuilt = false
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read) do
+      reads = 0
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
+        reads += 1
         {
           "implementation_identity" => {
             "execute" => execute.to_h.except("native_arguments"),
             "stages" => (
-              rebuilt ? { "open_pr" => winner.to_h.except("native_arguments") } : {}
+              reads > 1 ? { "open_pr" => winner.to_h.except("native_arguments") } : {}
             )
           }
         }
       end
-      projection_store.define_singleton_method(:rebuild!) { rebuilt = true }
       captured_key = nil
       writer = Object.new
       writer.define_singleton_method(:path) do
@@ -452,7 +448,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       end
       store = Hive::ImplementationIdentity::Store.new(
         task: task, cfg: cfg, attempt_store: attempt_store,
-        writer: writer, projection_store: projection_store, resolver: resolver
+        writer: writer, history_reader: history_reader, resolver: resolver
       )
 
       selection = with_attempt_context(
@@ -473,8 +469,8 @@ class ImplementationIdentityStoreTest < Minitest::Test
       execute = Hive::ImplementationIdentity::Resolver.new(cfg: cfg).resolve_execute(
         generation: 1, attempt_id: "execute-first"
       )
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read) do
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
         {
           "implementation_identity" => {
             "execute" => execute.to_h.except("native_arguments"),
@@ -482,7 +478,6 @@ class ImplementationIdentityStoreTest < Minitest::Test
           }
         }
       end
-      projection_store.define_singleton_method(:rebuild!) { }
       writer = Object.new
       writer.define_singleton_method(:path) do
         File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
@@ -492,7 +487,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       end
       store = Hive::ImplementationIdentity::Store.new(
         task: task, cfg: cfg, attempt_store: attempt_store,
-        writer: writer, projection_store: projection_store
+        writer: writer, history_reader: history_reader
       )
 
       assert_raises(Hive::TaskJournal::Conflict) do

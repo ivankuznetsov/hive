@@ -344,7 +344,7 @@ module Hive
         # repository-wide catch-up runs immediately afterwards with whatever
         # budget remains.
         run_pr_merge_reconciliation(
-          rows_without_projection_repairs(result.rows), projects: result.projects, now: now
+          rows_without_invalid_task_histories(result.rows), projects: result.projects, now: now
         )
         run_refactor_patrol_merge_reconciler_tick(now: now)
 
@@ -1416,11 +1416,11 @@ module Hive
       def handle_row(row, now:, capacity_fence: nil)
         return unless admission_open?
 
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           observe_operational_disposition(
-            row, decision: :projection_repair_required, owner: "operator",
+            row, decision: :task_history_invalid, owner: "operator",
             reason: row.marker_attrs["message"] ||
-              "task projection requires exact-task repair"
+              "task journal is invalid"
           )
           return
         end
@@ -1601,17 +1601,17 @@ module Hive
       end
 
       def rows_eligible_for_error_recovery(rows)
-        rows_without_projection_repairs(rows).reject do |row|
+        rows_without_invalid_task_histories(rows).reject do |row|
           merge_reconciliation_blocks_recovery?(row)
         end
       end
 
-      def rows_without_projection_repairs(rows)
-        Array(rows).reject { |row| projection_repair_row?(row) }
+      def rows_without_invalid_task_histories(rows)
+        Array(rows).reject { |row| task_history_invalid_row?(row) }
       end
 
-      def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_row?(row)
+      def task_history_invalid_row?(row)
+        Hive::TaskProjection.history_invalid_row?(row)
       end
 
       def merge_reconciliation_blocks_recovery?(row)
@@ -2810,11 +2810,11 @@ module Hive
             return
           end
         end
-        if row && projection_repair_row?(row)
+        if row && task_history_invalid_row?(row)
           log_dispatch_request_once(
             :dispatch_request_blocked,
             request_id: req.request_id, project: req.project,
-            slug: req.slug, reason: "projection_repair_required",
+            slug: req.slug, reason: "task_history_invalid",
             remediation: row.suggested_command ||
               "repair the exact task projection before admission"
           )
@@ -3165,7 +3165,6 @@ module Hive
           project: request.project,
           intended_stage: intended_stage,
           task_input_epoch: row&.condition_task_generation,
-          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
           admission_context: admission_context
         )
         request.task_generation.to_s == generation.task_generation.to_s
@@ -3885,7 +3884,7 @@ module Hive
       # strict "claude_pid_alive == true" path (which silently dropped
       # live_task_lock-only rows during the pre-claude window).
       def externally_running?(row)
-        return row.live_task_lock == true if projection_repair_row?(row)
+        return row.live_task_lock == true if task_history_invalid_row?(row)
 
         active_action = row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
         fail_closed_action = !row.admission_error.nil?
@@ -3899,13 +3898,13 @@ module Hive
       end
 
       # Ordinary ERROR markers replay their current stage through the recovery
-      # coordinator. Synthetic projection-repair rows cannot be fixed by an
+      # coordinator. Invalid task-history rows cannot be fixed by an
       # agent attempt. Outcome-evidence rework is the other typed exception:
       # its TaskAction owns a digest-bound backward transition to execute, and
       # same-stage recovery would only review the unchanged implementation.
       def retryable_error_row?(row)
         %w[error review_error].include?(row.marker.to_s) &&
-          !projection_repair_row?(row) &&
+          !task_history_invalid_row?(row) &&
           !Hive::TerminalOutcome.outcome_evidence_rework?(row.marker_attrs)
       end
 

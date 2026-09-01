@@ -182,11 +182,7 @@ class AttemptsDispatcherTest < Minitest::Test
         project: "demo", task_slug: task.slug, intended_stage: "1-inbox",
         progress_token: advance.attempt["progress_token"]
       )
-      with_replaced_singleton_method(
-        Hive::Attempts::Generation, :default_attempt_store, -> { store }
-      ) do
-        assert worker_context.validate_generation!(task)
-      end
+      assert worker_context.validate_generation!(task)
     end
   end
 
@@ -231,8 +227,7 @@ class AttemptsDispatcherTest < Minitest::Test
     provenance.define_singleton_method(:capture_launch) do |task:, attempt:, generation:,
                                                         attempt_store:, clock:|
       journal = Hive::TaskProjection.read_journal(
-        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME),
-        attempt_store: attempt_store
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       )
       admitted = journal.any? do |record|
         record.dig("payload", "activity_kind") == "attempt_admitted" &&
@@ -516,7 +511,7 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :deferred, result.status
       assert_equal "capacity", result.reason
       assert_empty launcher.launched
-      assert_empty store.scan.records
+      assert_empty store.active_attempts
     end
   end
 
@@ -736,12 +731,9 @@ class AttemptsDispatcherTest < Minitest::Test
         identity: failure_cohort_identity, date: NOW.to_date,
         attempt_id: lost.attempt_id, now: NOW + 4_000
       )
-      view = Object.new
-      view.define_singleton_method(:record) { |_record| true }
-
       result = dispatcher.send(
         :resolve_failed_handoff, lost, interactive: false,
-        admission_view: view, cohort_identity: failure_cohort_identity,
+        cohort_identity: failure_cohort_identity,
         cohort_date: NOW.to_date
       )
 
@@ -1077,10 +1069,10 @@ class AttemptsDispatcherTest < Minitest::Test
   def test_shared_admission_view_applies_multi_admission_capacity_delta_without_rescanning
     with_dispatcher(limits: { max_global: 2, max_per_project: 2, max_daily: 2 }) do |dispatcher, launcher, task, store|
       scans = 0
-      original_scan = store.method(:scan)
-      store.define_singleton_method(:scan) do
+      original_active_attempts = store.method(:active_attempts)
+      store.define_singleton_method(:active_attempts) do
         scans += 1
-        original_scan.call
+        original_active_attempts.call
       end
       admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
       state_root = task_state_root(task)
@@ -1110,23 +1102,23 @@ class AttemptsDispatcherTest < Minitest::Test
       attempt_root = File.join(root, "attempts")
       tick_store = Hive::Attempts::Repository.new(root: attempt_root, database: database)
       external_store = Hive::Attempts::Repository.new(root: attempt_root, database: database)
-      tick_scans = 0
-      external_scans = 0
-      tick_scan = tick_store.method(:scan)
-      external_scan = external_store.method(:scan)
-      tick_store.define_singleton_method(:scan) do
-        tick_scans += 1
-        tick_scan.call
+      tick_active_attemptss = 0
+      external_active_attemptss = 0
+      tick_active_attempts = tick_store.method(:active_attempts)
+      external_active_attempts = external_store.method(:active_attempts)
+      tick_store.define_singleton_method(:active_attempts) do
+        tick_active_attemptss += 1
+        tick_active_attempts.call
       end
-      external_store.define_singleton_method(:scan) do
-        external_scans += 1
-        external_scan.call
+      external_store.define_singleton_method(:active_attempts) do
+        external_active_attemptss += 1
+        external_active_attempts.call
       end
       admission_view = Hive::Attempts::Reconciler.new(store: tick_store)
                                                   .reconcile(now: NOW)
                                                   .admission_view
-      assert_equal 1, tick_scans
-      assert_equal 0, external_scans
+      assert_equal 1, tick_active_attemptss
+      assert_equal 0, external_active_attemptss
 
       external_task = task_fixture(project_state_root(root, "external"), id: 41, slug: "external-task")
       daemon_task = task_fixture(project_state_root(root, "daemon"), id: 42, slug: "daemon-task")
@@ -1148,7 +1140,7 @@ class AttemptsDispatcherTest < Minitest::Test
         provider: "codex", now: NOW + 1
       )
       assert_equal :accepted, external_result.status
-      assert_equal 1, external_scans
+      assert_equal 1, external_active_attemptss
 
       daemon_result = daemon.dispatch(
         task: daemon_task, project: "daemon", intended_stage: "4-execute",
@@ -1158,9 +1150,9 @@ class AttemptsDispatcherTest < Minitest::Test
 
       assert_equal :deferred, daemon_result.status
       assert_equal "capacity", daemon_result.reason
-      assert_equal 1, tick_scans,
+      assert_equal 1, tick_active_attemptss,
                    "the daemon must not rescan its stale tick view"
-      assert_equal 1, external_scans,
+      assert_equal 1, external_active_attemptss,
                    "the direct dispatcher owns its separate admission scan"
     end
   end
@@ -1421,7 +1413,6 @@ class AttemptsDispatcherTest < Minitest::Test
       stage_index: Integer(stage.split("-", 2).first), stage_name: stage.split("-", 2).last,
       project_root: File.dirname(state_root), folder: folder
     )
-    seed_task_projection(folder, state_file: state_file)
     task
   end
 

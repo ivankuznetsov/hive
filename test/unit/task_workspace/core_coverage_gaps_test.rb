@@ -90,18 +90,6 @@ class TaskWorkspaceCoreCoverageGapsTest < Minitest::Test
     ).call
     assert_equal "missing", empty.fetch("state")
 
-    attempts = 3.times.to_h { |index| [ "a#{index}", attempt("a#{index}") ] }
-    projection = {
-      "identity" => { "attempt_id" => nil },
-      "journal" => { "attempts" => attempts.keys.map { |id| { "attempt_id" => id } } }
-    }
-    capped = Hive::TaskWorkspace::Attempts.new(
-      projection: projection, attempt_store: Store.new(attempts), activities: [],
-      limits: Hive::TaskWorkspace::Limits.new(attempt_ids: 1)
-    ).call
-    assert capped.fetch("truncated")
-    assert_includes capped.fetch("diagnostics").map { |row| row["reason"] }, "attempt_ids_exhausted"
-
     missing_predecessor = Hive::TaskWorkspace::Attempts.new(
       projection: { "identity" => { "attempt_id" => "a" }, "journal" => { "attempts" => [] } },
       attempt_store: Store.new({ "a" => attempt("a", predecessor: "gone") }), activities: []

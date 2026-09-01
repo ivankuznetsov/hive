@@ -14,23 +14,10 @@ class AttemptsGenerationTest < Minitest::Test
   FolderTask = Struct.new(:folder, :state_file, keyword_init: true)
   WorkflowIdTask = Struct.new(:folder, :state_file, :workflow, keyword_init: true)
 
-  def test_default_attempt_store_opens_runtime_payload_layout_without_migration
-    with_tmp_dir do |state_home|
-      with_env("HIVE_HOME" => state_home, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
-        store = Hive::Attempts::Generation.send(:default_attempt_store)
-        assert_equal Hive::Paths.runtime_payload_root(state_home),
-                     store.instance_variable_get(:@root)
-      end
-      refute File.exist?(File.join(state_home, "attempts", "v2"))
-      refute File.exist?(File.join(state_home, "recovery-migration-v6.json"))
-    end
-  end
-
   def test_stable_task_id_stage_and_artifact_identity_form_generation
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
       File.write(state_file, "body\n<!-- WAITING -->\n")
-      seed_task_projection(dir, state_file: state_file)
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 3, stage_name: "plan")
 
@@ -64,7 +51,6 @@ class AttemptsGenerationTest < Minitest::Test
     with_tmp_dir do |folder|
       state_file = File.join(folder, "task.md")
       File.write(state_file, "task\n<!-- WAITING -->\n")
-      seed_task_projection(folder, state_file: state_file)
       task = WorkflowIdTask.new(
         folder: folder, state_file: state_file, workflow: "routine"
       )
@@ -77,7 +63,6 @@ class AttemptsGenerationTest < Minitest::Test
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
       File.write(state_file, "one")
-      seed_task_projection(dir, state_file: state_file)
       task = FakeTask.new(id: nil, slug: "legacy-task", state_file: state_file,
                           stage_index: 1, stage_name: "inbox")
       one = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "1-inbox")
@@ -154,87 +139,70 @@ class AttemptsGenerationTest < Minitest::Test
         File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME),
         "#{JSON.generate(record)}\n"
       )
-      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-      create_running_attempt(
-        store,
-        attempt_id: "attempt-1", task_id: "42", project: "demo", task_slug: "task-one",
-        intended_stage: "4-execute", task_generation: "owner-7",
-        ownership_generation: "owner-7", task_input_epoch: 7,
-        progress_token: "progress-attempt-1", provider: "codex"
-      )
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
-      Hive::TaskProjection::Store.new(
-        task_folder: folder, attempt_store: store
-      ).rebuild!
 
       generation = Hive::Attempts::Generation.resolve(
-        task: task, project: "demo", intended_stage: "5-open-pr", attempt_store: store
+        task: task, project: "demo", intended_stage: "5-open-pr"
       )
 
       assert_equal 7, generation.task_input_epoch
     end
   end
 
-  def test_downstream_generation_rejects_malformed_or_unbound_journal
+  def test_downstream_generation_rejects_malformed_but_accepts_self_contained_history
     with_tmp_dir do |dir|
       state_file = File.join(dir, "pr.md")
       File.write(state_file, "body")
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
       journal = File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)
-      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-
       File.write(journal, "not-json\n")
       assert_raises(Hive::TaskProjection::InvalidJournal) do
-        Hive::Attempts::Generation.current_task_input_epoch(task, attempt_store: store)
+        Hive::Attempts::Generation.current_task_input_epoch(task)
       end
 
       record = Hive::TaskJournal::Envelope.authoritative(
         {
-          event_type: "implementation_identity_captured",
+          event_type: "generation_advanced",
           task: { "id" => "42", "slug" => "task-one" }, workflow: "coding",
           stage: "4-execute", attempt_id: "missing-attempt", task_generation: 7,
           ownership_generation: "owner-7", commit_generation: 0,
-          reason: "execute_identity_captured", evidence: [], provenance: {}, payload: {}
+          reason: "input_changed", evidence: [], provenance: {}, payload: {}
         }
       )
       File.write(journal, "#{JSON.generate(record)}\n")
-      assert_raises(Hive::TaskProjection::InvalidJournal) do
-        Hive::Attempts::Generation.current_task_input_epoch(task, attempt_store: store)
-      end
+      assert_equal 7, Hive::Attempts::Generation.current_task_input_epoch(task)
     end
   end
 
-  def test_downstream_generation_never_falls_back_to_complete_journal_replay
+  def test_downstream_generation_reads_the_authoritative_journal_directly
     with_tmp_dir do |dir|
       state_file = File.join(dir, "pr.md")
       File.write(state_file, "body")
-      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "{}\n")
+      record = Hive::TaskJournal::Envelope.authoritative(
+        {
+        event_type: "generation_advanced", task: { "id" => "42", "slug" => "task-one" },
+        workflow: "coding", stage: "4-execute", attempt_id: "gone", task_generation: 3,
+        ownership_generation: "owner-3", commit_generation: 0, reason: "input_changed",
+        evidence: [], provenance: { "source" => "test" }, payload: {}
+        }
+      )
+      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "#{JSON.generate(record)}\n")
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
 
-      replacement = ->(*) { raise "complete journal replay must not run" }
-      with_replaced_singleton_method(Hive::TaskProjection, :parse_journal, replacement) do
-        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
-          Hive::Attempts::Generation.current_task_input_epoch(task)
-        end
-        assert_match(/checkpoint_missing/, error.message)
-      end
+      assert_equal 3, Hive::Attempts::Generation.current_task_input_epoch(task)
     end
   end
 
-  def test_current_input_epoch_uses_task_folder_and_rejects_empty_journal
+  def test_current_input_epoch_uses_task_folder_and_accepts_empty_history
     with_tmp_dir do |dir|
       nested_state = File.join(dir, "elsewhere", "pr.md")
       task = FolderTask.new(folder: dir, state_file: nested_state)
       File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "")
 
-      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
-        Hive::Attempts::Generation.current_task_input_epoch(task)
-      end
-
-      assert_match(/checkpoint_missing/, error.message)
+      assert_equal 0, Hive::Attempts::Generation.current_task_input_epoch(task)
     end
   end
 
@@ -243,7 +211,7 @@ class AttemptsGenerationTest < Minitest::Test
     projection.define_singleton_method(:to_h) do
       { "identity" => { "task_generation" => "not-an-integer" } }
     end
-    bounded = Hive::TaskProjection::Store::BoundedRead.new(
+    bounded = Hive::TaskProjection::Reader::BoundedRead.new(
       projection: projection, state: "current", diagnostics: [], truncated: false,
       journal_cursor: 0, journal_records: []
     )
@@ -251,7 +219,7 @@ class AttemptsGenerationTest < Minitest::Test
     store.define_singleton_method(:read_routine) { |**| bounded }
     task = FolderTask.new(folder: "/tmp/task", state_file: "/tmp/task/pr.md")
 
-    with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { store }) do
+    with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { store }) do
       error = assert_raises(Hive::TaskProjection::InvalidJournal) do
         Hive::Attempts::Generation.current_task_input_epoch(task)
       end
@@ -259,49 +227,13 @@ class AttemptsGenerationTest < Minitest::Test
     end
   end
 
-  def test_current_input_epoch_ignores_legacy_attempt_store_override
+  def test_current_input_epoch_does_not_open_legacy_attempt_storage
     with_tmp_dir do |dir|
       task = FolderTask.new(folder: dir, state_file: File.join(dir, "pr.md"))
       with_env("HIVE_HOME" => dir, "HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "legacy-attempts")) do
-        error = assert_raises(Hive::TaskProjection::InvalidJournal) do
-          Hive::Attempts::Generation.current_task_input_epoch(task)
-        end
-        assert_match(/checkpoint_missing/, error.message)
+        assert_equal 0, Hive::Attempts::Generation.current_task_input_epoch(task)
         refute File.exist?(File.join(dir, "legacy-attempts"))
       end
     end
-  end
-
-  private
-
-  def create_running_attempt(store, **attributes)
-    now = Time.now.utc
-    claim_capability = "c" * 64
-    launching = store.create_launching(
-      **attributes,
-      request_id: "request-#{attributes.fetch(:attempt_id)}",
-      predecessor_attempt_id: nil,
-      worker_argv: [ "hive", "run", attributes.fetch(:task_slug) ],
-      claim_capability_digest: Hive::Attempts::Capability.digest(claim_capability),
-      starting_revision: nil,
-      retry_charge: 0,
-      inherited_outputs: [],
-      launch_timeout_sec: 30,
-      now: now
-    )
-    claimed = store.claim(
-      launching, owner: current_owner, claim_capability: claim_capability,
-      first_heartbeat_timeout_sec: 30, now: now
-    )
-    store.first_heartbeat(claimed, stale_sec: 30, now: now)
-  end
-
-  def current_owner
-    {
-      "pid" => Process.pid,
-      "start_fingerprint" => "start",
-      "session_id" => Process.getsid(0),
-      "process_group_id" => Process.getpgrp
-    }
   end
 end

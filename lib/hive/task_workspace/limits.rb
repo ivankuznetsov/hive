@@ -9,7 +9,6 @@ module Hive
         projection_snapshot_bytes: 512 * 1024,
         journal_suffix_bytes: 1024 * 1024,
         journal_events: 2_000,
-        attempt_ids: 100,
         predecessor_fetches: 32,
         attempt_bytes: 512 * 1024,
         usage_sessions_per_attempt: 100,

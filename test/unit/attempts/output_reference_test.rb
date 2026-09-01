@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 require "hive/attempts/repository"
 
 class AttemptsOutputReferenceTest < Minitest::Test
@@ -11,12 +11,12 @@ class AttemptsOutputReferenceTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(path))
       File.binwrite(path, "{}")
 
-      reference = Hive::Attempts::OutputReference.build(path, root: root)
+      reference = Hive::OutputReference.build(path, root: root)
 
       assert_equal "outputs/attempt-1/result.json", reference.fetch("path")
       assert_equal 2, reference.fetch("size")
       assert_match(/\A[0-9a-f]{64}\z/, reference.fetch("sha256"))
-      assert Hive::Attempts::OutputReference.verify(reference, root: root)
+      assert Hive::OutputReference.verify(reference, root: root)
     end
   end
 
@@ -24,20 +24,20 @@ class AttemptsOutputReferenceTest < Minitest::Test
     with_tmp_dir do |root|
       outside = File.join(File.dirname(root), "outside-#{Process.pid}")
       File.binwrite(outside, "secret")
-      assert_raises(Hive::Attempts::InvalidOutputReference) do
-        Hive::Attempts::OutputReference.build(outside, root: root)
+      assert_raises(Hive::InvalidOutputReference) do
+        Hive::OutputReference.build(outside, root: root)
       end
-      assert_raises(Hive::Attempts::InvalidOutputReference) do
-        Hive::Attempts::OutputReference.validate_shape!(
+      assert_raises(Hive::InvalidOutputReference) do
+        Hive::OutputReference.validate_shape!(
           { "path" => "/tmp/result", "size" => 1, "sha256" => "0" * 64 }
         )
       end
 
       path = File.join(root, "result")
       File.binwrite(path, "one")
-      reference = Hive::Attempts::OutputReference.build(path, root: root)
+      reference = Hive::OutputReference.build(path, root: root)
       File.binwrite(path, "two-two")
-      refute Hive::Attempts::OutputReference.verify(reference, root: root)
+      refute Hive::OutputReference.verify(reference, root: root)
     ensure
       FileUtils.rm_f(outside) if outside
     end
@@ -45,28 +45,28 @@ class AttemptsOutputReferenceTest < Minitest::Test
 
   def test_rejects_missing_files_invalid_integrity_and_unverifiable_references
     with_tmp_dir do |root|
-      assert_raises(Hive::Attempts::InvalidOutputReference) do
-        Hive::Attempts::OutputReference.build(File.join(root, "missing"), root: root)
+      assert_raises(Hive::InvalidOutputReference) do
+        Hive::OutputReference.build(File.join(root, "missing"), root: root)
       end
 
       base = { "path" => "result", "size" => 1, "sha256" => "0" * 64 }
-      assert_raises(Hive::Attempts::InvalidOutputReference) do
-        Hive::Attempts::OutputReference.validate_shape!(base.merge("size" => -1))
+      assert_raises(Hive::InvalidOutputReference) do
+        Hive::OutputReference.validate_shape!(base.merge("size" => -1))
       end
-      assert_raises(Hive::Attempts::InvalidOutputReference) do
-        Hive::Attempts::OutputReference.validate_shape!(base.merge("sha256" => "BAD"))
+      assert_raises(Hive::InvalidOutputReference) do
+        Hive::OutputReference.validate_shape!(base.merge("sha256" => "BAD"))
       end
-      refute Hive::Attempts::OutputReference.verify(base.merge("path" => "../escape"), root: root)
+      refute Hive::OutputReference.verify(base.merge("path" => "../escape"), root: root)
     end
   end
 
-  def test_projection_reader_reads_only_verified_bounded_output_bytes
+  def test_read_session_reads_only_verified_bounded_output_bytes
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       path = store.output_path("attempt-1", "diagnostic.json", create_directory: true)
       File.binwrite(path, "typed diagnostic")
-      reference = Hive::Attempts::OutputReference.build(path, root: root)
-      reader = store.projection_reader
+      reference = Hive::OutputReference.build(path, root: root)
+      reader = store.read_session
 
       assert_equal "typed diagnostic", reader.read_output(reference, max_bytes: 64)
       assert_raises(Hive::Attempts::RepositoryError) do
@@ -118,7 +118,7 @@ class AttemptsOutputReferenceTest < Minitest::Test
       File.binwrite(linked_target, "linked diagnostic")
       linked_path = store.output_path("attempt-real", "linked-diagnostic.json")
       File.link(linked_target, linked_path)
-      linked_reference = Hive::Attempts::OutputReference.build(linked_path, root: root)
+      linked_reference = Hive::OutputReference.build(linked_path, root: root)
       assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(linked_reference, max_bytes: 64)
       end

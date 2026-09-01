@@ -158,7 +158,6 @@ class HiveBotWaitingRowsTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       state_file = File.join(folder, "plan.md")
       File.write(state_file, "<!-- WAITING -->\n")
-      seed_task_projection(folder, state_file: state_file)
 
       payload = Hive::Commands::Status.new.json_payload([
         { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }

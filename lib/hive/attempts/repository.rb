@@ -20,31 +20,29 @@ module Hive
     class CapacityExceeded < RepositoryError; end
     class StaleTaskSource < RepositoryError; end
 
-    Scan = Data.define(:records)
-
     # The attempt facade persists lifecycle state in the runtime control plane.
     # The filesystem root contains only retained bytes referenced by those rows.
     class Repository
       include Coordination
       include Publication
 
-      class ProjectionReader
+      class ReadSession
         def initialize(store)
           @repository = store
-          @bindings = {}
+          @records = {}
           @terminal_diagnostic_bindings = {}
         end
 
-        def fetch_projection_binding(attempt_id)
+        def fetch(attempt_id)
           key = attempt_id.to_s
-          @bindings[key] = @repository.fetch_projection_binding(key) unless @bindings.key?(key)
-          @bindings[key]
+          @records[key] = @repository.fetch(key) unless @records.key?(key)
+          @records[key]
         end
 
         def fetch_terminal_diagnostic_binding(attempt_id)
           key = attempt_id.to_s
           unless @terminal_diagnostic_bindings.key?(key)
-            record = @repository.fetch(key)
+            record = fetch(key)
             @terminal_diagnostic_bindings[key] = record&.final? ? {
               "attempt_id" => record.attempt_id,
               "stage" => record["intended_stage"],
@@ -58,17 +56,11 @@ module Hive
         def read_output(reference, max_bytes:)
           @repository.read_output(reference, max_bytes: max_bytes)
         end
-
-        def pre_activation_projection?(observed_at) =
-          @repository.pre_activation_projection?(observed_at)
       end
 
       attr_reader :database
 
-      def self.open_default(state_home: Hive::Paths.state_home, create_directories: true) =
-        runtime(state_home: state_home, create_directories: create_directories)
-
-      def self.runtime(create_directories: true, state_home: Hive::Paths.state_home)
+      def self.open_default(create_directories: true, state_home: Hive::Paths.state_home)
         requested_home = File.expand_path(state_home)
         new(
           database: RuntimeControlPlane.database(
@@ -278,37 +270,7 @@ module Hive
         record_from(row)
       end
 
-      def fetch_projection_binding(attempt_id)
-        record = fetch(attempt_id)
-        return nil unless record
-
-        {
-          "attempt_id" => record.attempt_id,
-          "task_id" => record["task_id"],
-          "task_slug" => record["task_slug"],
-          "intended_stage" => record["intended_stage"],
-          "task_generation" => record.task_generation,
-          "task_input_epoch" => record.task_input_epoch,
-          "ownership_generation" => record.ownership_generation,
-          "predecessor_attempt_id" => record["predecessor_attempt_id"],
-          "accepted_at" => record["accepted_at"],
-          "state" => record.state,
-          "outcome" => record.outcome,
-          "lease_version" => record.lease_version,
-          "receipt" => record.receipt,
-          "subject" => record.subject
-        }
-      end
-
-      def pre_activation_projection?(observed_at)
-        activated_at = database.installation_identity&.fetch(:activated_at)
-        activated_at && RuntimeControlPlane::Codec.load_time(observed_at) <
-          RuntimeControlPlane::Codec.load_time(activated_at)
-      rescue RuntimeControlPlane::Error, KeyError, TypeError
-        false
-      end
-
-      def projection_reader = ProjectionReader.new(self)
+      def read_session = ReadSession.new(self)
 
       # Internal seams used only by AdmissionTransition's one SQL transaction.
       def admission_subject_in(db, record, source_fingerprint:)
@@ -343,14 +305,14 @@ module Hive
         raise RepositoryError, "failure cohort probe claim became stale"
       end
 
-      def scan
+      def active_attempts
         rows = database.read do |db|
-          pending = db[:terminal_pending_publications].select_map(:attempt_id)
+          pending = db[:terminal_pending_publications].select(:attempt_id)
           db[:attempts].where(state: %w[launching running]).or(attempt_id: pending).order(:attempt_id).all
         end
-        Scan.new(records: rows.map { |row| record_from(row) }.freeze)
+        rows.map { |row| record_from(row) }.freeze
       rescue Sequel::Error, RuntimeControlPlane::Error => error
-        translate_store_error(error, "attempt scan failed")
+        translate_store_error(error, "active attempt query failed")
       end
 
       def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)

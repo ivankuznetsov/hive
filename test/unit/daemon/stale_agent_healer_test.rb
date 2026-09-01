@@ -224,18 +224,15 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_projection_repair_row_never_enters_error_recovery
+  def test_task_history_invalid_row_never_enters_error_recovery
     with_marker_file do |state_file|
       row = make_row(
         state_file,
         pid_alive: nil,
         marker: "error",
-        marker_attrs: {
-          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-          "repair_command" => "hive repair-projection s --project p --stage 4-execute"
-        },
+        marker_attrs: { "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON },
         live_task_lock: false,
-        projection_repair: true
+        task_history_invalid: true
       )
 
       heal([ row ])
@@ -1243,7 +1240,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                marker: "agent_working", marker_attrs: {}, action: "error",
                live_task_lock: nil, workflow: nil, task_lock_pid: nil,
                task_lock_process_start_time: nil, task_lock_id: nil,
-               projection_repair: false)
+               task_history_invalid: false)
     Row.new(
       project: project,
       slug: slug,
@@ -1252,7 +1249,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       workflow: workflow,
       marker: marker,
       marker_attrs: marker_attrs,
-      projection_repair: projection_repair,
+      task_history_invalid: task_history_invalid,
       folder: File.dirname(state_file),
       state_file: state_file,
       state_file_mtime: mtime,

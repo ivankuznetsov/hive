@@ -164,7 +164,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
   def test_provider_capacity_is_ledger_derived_and_all_saturation_creates_nothing
     first = dispatch(task("capacity-a", 4), policy: policy)
     second = dispatch(task("capacity-b", 5), policy: policy)
-    before = @store.scan.records.map(&:attempt_id).sort
+    before = @store.active_attempts.map(&:attempt_id).sort
 
     saturated = dispatch(task("capacity-c", 6), policy: policy)
 
@@ -175,7 +175,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert saturated.decision.capacity_saturated?
     assert_equal "scheduler", saturated.decision.next_action_owner
     assert_nil saturated.attempt
-    assert_equal before, @store.scan.records.map(&:attempt_id).sort
+    assert_equal before, @store.active_attempts.map(&:attempt_id).sort
     assert_equal 2, @launcher.launched.length
   end
 
@@ -298,7 +298,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
 
     assert_equal :accepted, result.status
     assert_equal "account-b/model-b", result.decision.route.id
-    assert_equal 1, @store.scan.records.length
+    assert_equal 1, @store.active_attempts.length
     assert_equal 1, @launcher.launched.length
   end
 
@@ -472,8 +472,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     generation = Hive::Attempts::Generation.resolve(
       task: evidence_task, project: "demo", intended_stage: "4-execute",
       progress_token: source, task_generation: attempt.task_generation,
-      ownership_generation: attempt.ownership_fence, task_input_epoch: 1,
-      attempt_store: @store
+      ownership_generation: attempt.ownership_fence, task_input_epoch: 1
     )
     @store.observe_task_source(task: evidence_task, generation: generation, observed_at: NOW)
     @store.create_launching(

@@ -1,9 +1,10 @@
 require "digest"
 require "json"
 require "time"
+require "hive/attempts/repository"
 require "hive/markers"
 require "hive/secret_patterns"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_workspace"
 require "hive/task_workspace/attempts"
 require "hive/task_workspace/dependency_component"
@@ -22,10 +23,6 @@ module Hive
     # panel boundary; the builder never enters fleet discovery or a remote
     # transport and never exposes an executable action token or command.
     class Builder
-      ProjectionRead = Data.define(
-        :projection, :state, :diagnostics, :truncated, :journal_cursor,
-        :journal_records
-      )
       DependencyTask = Data.define(:folder, :project_root, :slug)
 
       def initialize(task:, native_task:, project:, status_availability: "fresh",
@@ -33,7 +30,7 @@ module Hive
                      dependency_context: nil, publication_cache: nil,
                      dependency_publication_reader: nil,
                      cursor_codec:, limits: Limits.new, attempt_store: nil,
-                     projection_store: nil, projection_read: nil,
+                     history_reader: nil, history_read: nil,
                      event_reader: nil, journal_reader: nil, usage_reader: Hive::UsageDb,
                      current_context_observation: nil, questions: nil,
                      daemon_enabled: true, archive: false,
@@ -49,8 +46,8 @@ module Hive
         @dependency_publication_reader = dependency_publication_reader
         @cursor_codec = cursor_codec
         @limits = limits
-        @projection_store = projection_store
-        @supplied_projection_read = projection_read
+        @history_reader = history_reader
+        @supplied_history_read = history_read
         @attempt_store = attempt_store
         @event_reader = event_reader
         @journal_reader = journal_reader
@@ -63,7 +60,7 @@ module Hive
       end
 
       def call
-        read = projection_read
+        read = history_read
         projection = projection_hash(read)
         attempts = attempts_panel(read: read, projection: projection)
         resources = panel("resources") do
@@ -117,7 +114,7 @@ module Hive
       # Concise, workflow-aware read model used by operator HTML and native
       # task inspection. The v1 audit snapshot above remains unchanged.
       def semantic
-        read = projection_read
+        read = history_read
         projection = projection_hash(read)
         attempts = attempts_panel(read: read, projection: projection)
         artifacts = artifacts_panel
@@ -143,7 +140,7 @@ module Hive
       # Used by the authenticated cursor endpoint. It reuses the same bounded
       # projection/event source policy but does not construct unrelated panels.
       def timeline(cursor: nil, raw_cursor: nil)
-        timeline_panel(read: projection_read, cursor: cursor, raw_cursor: raw_cursor)
+        timeline_panel(read: history_read, cursor: cursor, raw_cursor: raw_cursor)
       end
 
       private
@@ -440,11 +437,11 @@ module Hive
         value
       end
 
-      def projection_read
-        @projection_read ||= begin
-          @supplied_projection_read || projection_store.read_bounded(marker: marker, limits: @limits)
+      def history_read
+        @history_read ||= begin
+          @supplied_history_read || history_reader.read_bounded(marker: marker, limits: @limits)
         rescue StandardError => e
-          ProjectionRead.new(
+          Hive::TaskProjection::Reader::BoundedRead.new(
             projection: nil, state: "partial",
             diagnostics: [ diagnostic("task_projection", "bounded_projection_failed", e.class.name) ],
             truncated: false, journal_cursor: 0, journal_records: []
@@ -452,18 +449,14 @@ module Hive
         end
       end
 
-      def projection_store
-        @projection_store ||= if @attempt_store
-          Hive::TaskProjection::Store.new(
-            task_folder: @native_task.folder, attempt_store: @attempt_store
-          )
-        else
-          Hive::TaskProjection::Store.new(task_folder: @native_task.folder)
-        end
+      def history_reader
+        @history_reader ||= Hive::TaskProjection::Reader.new(
+          task_folder: @native_task.folder, task: @native_task
+        )
       end
 
       def attempt_store
-        @attempt_store ||= projection_store.attempt_store
+        @attempt_store ||= Hive::Attempts::Repository.open_default(create_directories: false).read_session
       end
 
       def marker
@@ -485,7 +478,7 @@ module Hive
             "task_generation" => task_value("condition_task_generation") ||
               task_value("task_generation")
           },
-          "journal" => { "attempts" => [] }
+          "journal" => {}
         }
       end
 
@@ -654,7 +647,7 @@ module Hive
           else "current"
           end
         end
-        diagnostics = Array(read.diagnostics)
+        diagnostics = Array(read.diagnostics).dup
         unless @status_availability.empty? || @status_availability == "fresh"
           diagnostics << diagnostic(
             "status_snapshot", "status_#{@status_availability}",

@@ -61,8 +61,8 @@ class ModulesDispatcherTest < Minitest::Test
       assert_equal "launch", first.decision.fetch("outcome")
       refute_equal "launch", second.decision.fetch("outcome")
       assert_equal "duplicate", second.decision.fetch("reason")
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
-      attempt = runtime.fetch(:attempt_store).scan.records.first
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
+      attempt = runtime.fetch(:attempt_store).active_attempts.first
       assert attempt.module_hook?
       assert_equal "demo", attempt.subject.fetch("module")
       assert_equal 2, runtime.fetch(:journal).all.size
@@ -98,7 +98,7 @@ class ModulesDispatcherTest < Minitest::Test
       assert_equal "launch", recovered.decision.fetch("outcome")
       assert_equal admitted.attempt.attempt_id, recovered.decision.fetch("attempt_id")
       assert_equal "recovered_launch", recovered.attempt_result.reason
-      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
       assert_equal 1, runtime.fetch(:launcher).launches.size
       assert_equal 1, runtime.fetch(:journal).all.size
     end
@@ -173,7 +173,7 @@ class ModulesDispatcherTest < Minitest::Test
       assert_equal "activation_fenced", fenced.decision.fetch("reason")
       assert_nil before.dig("hooks", "task", "cursor")
       assert_nil after.dig("hooks", "task", "cursor")
-      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:attempt_store).active_attempts
     end
   end
 
@@ -189,7 +189,7 @@ class ModulesDispatcherTest < Minitest::Test
       assert_equal "launch", result.decision.fetch("outcome")
       assert_nil result.decision.fetch("decision_id")
       assert_empty runtime.fetch(:journal).all
-      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:attempt_store).active_attempts
       assert_equal before, File.binread(hooks_path)
     end
   end
@@ -351,7 +351,7 @@ class ModulesDispatcherTest < Minitest::Test
       )
 
       assert_nil result
-      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:attempt_store).active_attempts
       assert_empty runtime.fetch(:journal).all
     end
   end
@@ -367,7 +367,7 @@ class ModulesDispatcherTest < Minitest::Test
       )
 
       assert_nil result
-      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:attempt_store).active_attempts
       run = JSON.parse(File.binread(Dir[runs].fetch(0)))
       assert_equal "failed", run.fetch("status")
       assert_equal "shutdown_closed", run.dig("retry", "reason")

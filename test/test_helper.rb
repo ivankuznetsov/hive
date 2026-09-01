@@ -744,18 +744,4 @@ module HiveTestHelper
     end
     [ out_pipe.string, err_pipe.string, status ]
   end
-
-  # Direct filesystem fixtures model tasks that were created after the
-  # bounded-projection cutover. Historical/no-checkpoint behavior has its own
-  # explicit repair tests; ordinary fixtures should carry the zero-history
-  # checkpoint that canonical task creators now publish.
-  def seed_task_projection(task_folder, state_file: nil)
-    require "hive/markers"
-    require "hive/task_projection/store"
-
-    marker = Hive::Markers.current(state_file) if state_file
-    Hive::TaskProjection::Store.new(
-      task_folder: task_folder
-    ).initialize_pristine!(marker: marker)
-  end
 end

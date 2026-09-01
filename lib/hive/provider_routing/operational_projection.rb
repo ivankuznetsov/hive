@@ -47,16 +47,16 @@ module Hive
       end
 
       def attempt_scan
-        [ attempts.scan, nil ]
+        [ attempts.active_attempts, nil ]
       rescue Hive::Attempts::RepositoryError, Hive::ConfigError, SystemCallError, IOError
-        [ Hive::Attempts::Scan.new(records: []), "attempt_storage_unavailable" ]
+        [ [], "attempt_storage_unavailable" ]
       end
 
-      def capacity(scan)
+      def capacity(records)
         snapshot = Hive::Attempts::CapacitySnapshot.build(store: attempts, now: @now)
-        capacity_from(scan.records, snapshot.reserved_attempt_ids)
+        capacity_from(records, snapshot.reserved_attempt_ids)
       rescue Hive::Attempts::RepositoryError
-        capacity_from(scan.records, scan.records.select(&:live?).map(&:attempt_id))
+        capacity_from(records, records.select(&:live?).map(&:attempt_id))
       end
 
       def capacity_from(records, reserved_attempt_ids)

@@ -37,9 +37,8 @@ class ModulesStatusTest < Minitest::Test
     def module_hook? = true
   end
 
-  FakeScan = Data.define(:records)
   FakeAttemptStore = Data.define(:records) do
-    def scan = FakeScan.new(records: records)
+    def active_attempts = records
   end
 
   def test_projects_one_redacted_status_with_next_trigger

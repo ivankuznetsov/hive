@@ -125,7 +125,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       row = row_for(tasks.first)
 
       with_replaced_singleton_method(
-        Hive::TaskProjection::Store, :new,
+        Hive::TaskProjection::Reader, :new,
         ->(**) { flunk "PR observation rebuilt the status projection" }
       ) do
         result = watcher.observe([ row ], now: T0)
@@ -147,40 +147,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal true, state.dig("backlog", "complete")
       assert_empty state.dig("backlog", "outcomes")
     end
-  end
-
-  def test_tick_opens_one_attempt_projection_reader_for_all_selected_projects
-    store = Object.new
-    store.define_singleton_method(:load) { |_identity| {} }
-    store.define_singleton_method(:next_candidate) do |_state, now:|
-      { "key" => now.iso8601(6), "task" => { "slug" => "candidate" } }
-    end
-    readers = []
-    reader = Object.new
-    watcher = Hive::Daemon::PrMergeWatcher.new(
-      store: store,
-      attempt_store_factory: lambda {
-        readers << reader
-        reader
-      }
-    )
-    watcher.instance_variable_set(
-      :@contexts,
-      {
-        "app-a" => { "registration" => "app-a" },
-        "app-b" => { "registration" => "app-b" }
-      }
-    )
-    observed_readers = []
-    watcher.define_singleton_method(:process_and_record) do |_identity, _candidate,
-                                                               now:, projection_reader:|
-      observed_readers << projection_reader.call
-      { status: :observed, now: now }
-    end
-
-    assert_equal 2, watcher.tick(now: T0).length
-    assert_equal [ reader ], readers
-    assert_equal [ reader, reader ], observed_readers
   end
 
   def test_observe_retains_held_and_cross_repository_rows_but_excludes_non_coding_rows
@@ -535,7 +501,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
-  def test_projection_outage_blocks_then_resumes_the_same_merge_candidate
+  def test_invalid_journal_blocks_then_resumes_the_same_merge_candidate
     with_merge_project(stages: [ "5-open-pr" ]) do |tasks, _home|
       task = tasks.first
       marker = Hive::Markers.current(task.state_file)
@@ -553,11 +519,12 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         provenance: { "source" => "test" },
         payload: {}
       )
-      projection_store = Hive::TaskProjection::Store.new(task_folder: task.folder)
-      projection_store.rebuild!(marker: marker)
+      history_reader = Hive::TaskProjection::Reader.new(task_folder: task.folder)
+      history_reader.read(marker: marker)
       watcher, store = build_watcher(gh: FakeGh.new(state: "OPEN"))
       watcher.observe([ row_for(task) ], now: T0)
-      File.binwrite(projection_store.checkpoint_path, "{\n")
+      journal = File.binread(history_reader.journal_path)
+      File.open(history_reader.journal_path, "a") { |file| file.write("{\n") }
 
       blocked = watcher.tick(now: T0).first
 
@@ -566,7 +533,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       assert_equal "blocked", candidate.dig("archive", "status")
       refute_equal "superseded", candidate.dig("archive", "status")
 
-      projection_store.repair!(marker: marker)
+      File.binwrite(history_reader.journal_path, journal)
       resumed = watcher.tick(now: T0 + 1).first
 
       assert_equal :open, resumed.fetch(:status)
@@ -1238,7 +1205,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
   def build_watcher(gh: FakeGh.new, task_closure: FakeClosure.new,
                     merge_intake: nil, store: nil, poll_interval_sec: 0,
                     poll_timeout_sec: 7, config_lookup: nil,
-                    attempt_store_factory: nil, dry_run: false)
+                    dry_run: false)
     store ||= Hive::Daemon::PrMergeRepository.new(
       dry_run: true, backoff_base_sec: 1, backoff_max_sec: 3600
     )
@@ -1250,9 +1217,6 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       gh: gh,
       config_lookup: config_lookup || Hive::Config.method(:find_project),
       task_closure: task_closure,
-      attempt_store_factory: attempt_store_factory || lambda {
-        Hive::Attempts::Repository.runtime(create_directories: false)
-      },
       dry_run: dry_run
     )
     [ watcher, store ]
@@ -1260,7 +1224,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
   def row_for(task)
     marker = Hive::Markers.current(task.state_file)
-    projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+    projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read(marker: marker)
     projection_data = projection.to_h
     Row.new(
       project: "app",
@@ -1351,7 +1315,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         )
         Hive::Markers.set(task.state_file, index.odd? ? :error : :complete,
                           "reason" => "dogfood")
-        Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+        Hive::TaskProjection::Reader.new(task_folder: folder).read(
           marker: Hive::Markers.current(task.state_file)
         )
         task

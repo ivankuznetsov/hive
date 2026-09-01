@@ -1597,8 +1597,6 @@ module Hive
         case bounded.state
         when "invalid"
           task_history_invalid_status(task, bounded)
-        when "busy"
-          task_history_unavailable_status(task, bounded)
         when "current"
           projection = bounded.projection
           closure = Hive::TaskClosure.projection(

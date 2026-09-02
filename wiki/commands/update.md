@@ -3,7 +3,7 @@ title: hive update
 type: command
 source: lib/hive/commands/update.rb, lib/hive/commands/migrate_all.rb, lib/hive/install_channel.rb, install.sh
 created: 2026-05-21
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, install, update, migration]
 ---
 
@@ -91,6 +91,12 @@ update action). The daemon-driven [[update-flow]] uses this string when it
 records a per-version nudge. Keeping the user-facing command channel-neutral
 ensures every guided update includes the confirmed fleet cutover; the update
 command itself still selects brew, `yay`/`paru`, or the bash installer.
+
+## Output and serialization
+
+Update has no JSON mode or command schema. It prints the selected channel,
+updater, cutover progress, and exact recovery action as human-readable text;
+JSON serialization and a serialization fallback are not applicable.
 
 ## Tests
 

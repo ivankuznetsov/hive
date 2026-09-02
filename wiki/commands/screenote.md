@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-07-18
+updated: 2026-09-02
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -82,6 +82,10 @@ not prevent local credential removal. Under `--json`, the envelope carries
 `disconnected`, `revoked`, and — when `revoked` is false — a `reason`
 (`no_token`, `unreadable_credential`, or the revoke error) so automation can
 tell the cases apart.
+
+Connect's JSON Lines and disconnect's final JSON document are encoded directly.
+A serialization failure is not replaced with text or a fallback JSON document;
+it propagates.
 
 ## Runtime Use
 

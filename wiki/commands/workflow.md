@@ -280,6 +280,10 @@ so a concurrent or raced scaffold is never overwritten or deleted.
 If a scaffold commit fails after staging, Hive resets those exact index
 pathspecs under the commit lock before removing the generated files.
 
+Workflow JSON success and error documents are encoded directly. A
+`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
+it propagates from the owning subcommand.
+
 ## Backlinks
 
 - [[cli]]

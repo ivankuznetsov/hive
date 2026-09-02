@@ -3,7 +3,7 @@ title: hive task
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/task.rb, lib/hive/task_workspace/builder.rb, schemas/hive-task-workspace.v2.json
 created: 2026-08-16
-updated: 2026-08-28
+updated: 2026-09-02
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
@@ -71,6 +71,18 @@ provider health, quota, credential validity, actual invoice spend, or
 provider-observed billing from it. Use `hive status --operational --json` for
 current workflow/scheduler ownership and `hive circuits inspect --json` for
 the dedicated provider-account/model health projection.
+
+## Serialization and exit codes
+
+The semantic document is encoded directly. A `JSON::GeneratorError` is not
+replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | The semantic document, human summary, or correlated log tail was emitted. |
+| 1 | Current correlated diagnostic evidence was missing or failed integrity validation. |
+| 64 | The target was missing/ambiguous or `--log` was combined with `--json`. |
+| 78 | Project, workflow, or global configuration was invalid. |
 
 ## Tests
 

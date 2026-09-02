@@ -55,6 +55,15 @@ metrics suppresses that serialization failure, emits no fallback document,
 and re-raises the original typed command error so it still controls the exit
 boundary.
 
+## Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | The requested rollback-rate report was emitted. |
+| 64 | Days, project, subcommand, or argument shape was invalid. |
+| 70 | An unexpected producer failure was wrapped as an internal error. |
+| 78 | The global or project configuration was invalid. |
+
 ## Tests
 
 - `test/unit/metrics_test.rb` covers trailer parsing, revert detection, and grouping.

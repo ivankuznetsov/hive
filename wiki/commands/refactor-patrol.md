@@ -123,6 +123,22 @@ errors. New records contain no publication attempts or actions. `--list` and
 `--show` emit `hive-refactor-patrol-jobs.v2`; `--archive` emits the same
 projection after its guarded transition.
 
+## Serialization and exit codes
+
+All three JSON families are encoded directly. If `JSON.generate` fails, no
+prose or fallback JSON document is substituted; the encoding failure
+propagates. A best-effort daemon result-file write does not change that stdout
+contract.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Discovery, query, show, or an idempotent archive completed. |
+| 1 | An ordinary discovery/job-state invariant failed. |
+| 64 | Query pagination, job identity, mode selection, or another public argument was invalid. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 75 | A generation claim, checkout, or state lock was temporarily stale or busy. |
+| 78 | Project, policy, manifest, repository ownership, or scheduled input was invalid. |
+
 ## Backlinks
 
 - [[modules/patrol]] · [[modules/daemon]] · [[commands/patrol]]

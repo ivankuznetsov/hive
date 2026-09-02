@@ -3,7 +3,7 @@ title: hive generate-name
 type: command
 source: lib/hive/commands/generate_name.rb, lib/hive/display_name/generator.rb, lib/hive/display_name/sanitizer.rb, templates/display_name_prompt.md.erb
 created: 2026-06-03
-updated: 2026-08-26
+updated: 2026-09-02
 tags: [command, display-name, task-id]
 ---
 
@@ -52,6 +52,14 @@ hive generate-name <task_dir>
 ```
 
 That spawn redirects the wrapper command's stdout/stderr to `<state_home>/logs/display-name.log` and intentionally does not block capture. If it fails, rerun this command for one task or run [[commands/migrate]] for the project. Daemon and status refreshes never retry name generation.
+
+## Exit codes
+
+The command exits `0` when the generator returns, including its documented
+fail-soft `nil` result. Target-resolution errors retain the shared code `64`,
+invalid configuration uses `78`, and an uncaught agent/Git/software failure
+uses its shared Hive error code. There is no command JSON schema, so a
+serialization fallback is not applicable.
 
 ## Tests
 

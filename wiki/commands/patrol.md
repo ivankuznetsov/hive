@@ -97,6 +97,20 @@ current default-branch revision, and secret-like evidence is redacted before
 it enters admission state. There is no runtime Patrol Fix migration, cutover,
 or dual-write subsystem.
 
+## Serialization and exit codes
+
+Success and error documents are encoded directly. A `JSON::GeneratorError` is
+not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Discovery/listing completed, including a dry run or zero findings. |
+| 1 | An ordinary Patrol state or review invariant failed. |
+| 64 | The public argument shape was invalid before dispatch. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 75 | A concurrent scan/state lock made the cycle temporarily unavailable. |
+| 78 | The project was unknown, ineligible, or had invalid configuration. |
+
 ## Backlinks
 
 - [[modules/patrol]] · [[modules/daemon]] · [[state-model]]

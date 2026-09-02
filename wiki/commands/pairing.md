@@ -67,6 +67,18 @@ reports whether the running bot reloaded or needs a restart.
 If the pending store is unreadable, the page renders that command error in the
 pairing panel; it never substitutes "No pending pairing requests."
 
+## Serialization and exit codes
+
+Both pairing schemas are encoded directly with `JSON.generate`. A serialization
+failure is not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | The pending list was read or the approval transaction completed. |
+| 1 | The code was unknown/expired, the store or notice queue failed, or reload signaling failed after validation. |
+| 64 | The subcommand, platform, code, or argument shape was invalid. |
+| 78 | Global bot configuration was invalid. |
+
 ## Related
 
 - [[commands/bot]]

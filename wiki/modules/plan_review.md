@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-28
+updated: 2026-09-02
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -436,6 +436,22 @@ review without mutation. Its Run action dispatches the projected
 mandatory failed or unsupported coverage row exposes an exact waiver form even
 when that row began as configured optional coverage. While a plan review
 applies, the generic force-approve control is hidden.
+
+## CLI serialization and exit codes
+
+`hive plan-review --json` uses the shared envelope emitter with serialization
+policy `raise`: a `JSON::GeneratorError` is raised and no fallback JSON document
+is emitted. `hive plan-review-run` is text-only, so JSON serialization is not
+applicable to that automation verb.
+
+| Code | Meaning |
+|---:|---|
+| 0 | An action applied/idempotently replayed, or automation completed. |
+| 1 | A plan-review record, evidence, or orchestration invariant failed. |
+| 64 | The action, observation identity, target, or authority was invalid or conflicting. |
+| 70 | Git or another software boundary failed. |
+| 75 | The observation was stale or the task/commit lock was busy. |
+| 78 | Review policy, workflow, or project configuration was invalid. |
 
 ## Tests and proof
 

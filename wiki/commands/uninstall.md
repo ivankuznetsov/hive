@@ -3,7 +3,7 @@ title: hive uninstall
 type: command
 source: lib/hive/commands/uninstall.rb, lib/hive/paths.rb
 created: 2026-05-21
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, install, uninstall, xdg]
 ---
 
@@ -51,6 +51,19 @@ project state directories. `--purge` suppresses the prompt and preserves the
 database/cutover state. `--force-purge-state` is the only path that removes it.
 
 When `HIVE_HOME` is set, `Hive::Paths.hive_home_collapsed?` is true. In that shape config, data, state, and cache all point at one directory, so uninstall skips broad config/cache/data deletion unless `--force-purge-state` is explicit.
+
+## Output, serialization, and exit codes
+
+Uninstall has no success JSON mode or command schema. It reports the cleanup
+plan, preservation decisions, and best-effort service warnings as human text,
+so JSON serialization and a serialization fallback are not applicable.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Cleanup completed; individual best-effort service warnings may still have been reported. |
+| 1 | An ownership/safety invariant or non-best-effort cleanup operation failed. |
+| 64 | The public argument shape was invalid. |
+| 78 | Configuration needed for a non-best-effort boundary was invalid. |
 
 ## Tests
 

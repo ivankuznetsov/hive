@@ -164,6 +164,10 @@ schema rather than a separate pre-dispatch contract. These pre-dispatch errors
 also carry `mode`, effective `url`, migration `warnings`, and the observed
 service lifecycle so automation does not lose semantic context on failures.
 
+The final setup document is encoded directly. A serialization failure is not
+replaced with prose or a fallback JSON document; it propagates rather than
+reporting a successful setup without its contract.
+
 ## Web Bundle
 
 The managed web app lives under `Hive::Paths.web_app_home` and is version-stamped with `.hive-web-version`. `Hive::Web::AppBundle.ensure!` refreshes when the bundle is missing, when the stamp differs from `Hive::VERSION`, or when the compiled asset manifest is missing/broken; this keeps a CLI upgrade from continuing to serve an old or assetless Rails app. `HIVE_WEB_APP_DIR` is the canonical operator-managed override. The deprecated `HIVEBOX_WEB_APP_DIR` alias still works through the next major release and emits migration guidance.

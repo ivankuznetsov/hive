@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, preflight, skills, hive, openclaw, tmux, provisioning]
 ---
 
@@ -162,6 +162,10 @@ These appear under `checks`, not `managed_skills`.
 `schemas/hive-doctor.v1.json` remains packaged for pinned consumers, but the
 command emits v2. The v2 split prevents managed skill evidence from changing
 the meaning of old stage/reviewer check rows.
+
+Both the v2 success document and the compact configuration-error document call
+`JSON.generate` directly. A serialization failure is not converted into a
+text response or fallback JSON document; it propagates as a failed invocation.
 
 ## Init integration
 

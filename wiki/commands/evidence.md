@@ -144,6 +144,19 @@ payload remains recordable. Execute refuses to complete when the
 reviewed-to-final repository diff is empty; a distinct empty commit is not
 progress.
 
+## Serialization and exit codes
+
+JSON output is encoded directly. A `JSON::GeneratorError` is not replaced with
+prose or a fallback JSON document; the encoding failure propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | The requested recovery, rework, or controller capture completed. |
+| 1 | A current evidence/store/capture invariant failed. |
+| 64 | Arguments, target resolution, binding digests, or a gateway request were invalid or unavailable. |
+| 75 | A task lock or freshness-bound transition lost a concurrent race. |
+| 78 | Project or workflow configuration was invalid. |
+
 ## Backlinks
 
 - [[stages/artifacts]] · [[state-model]]

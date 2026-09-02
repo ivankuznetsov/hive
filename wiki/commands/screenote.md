@@ -98,6 +98,13 @@ and no fallback document is emitted. Success exits `0`; invalid arguments exit
 filesystem errors exit non-zero. A disconnect revocation failure remains a
 warning and does not prevent exit `0` after local credential removal.
 
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive connect` | Options: `--base-url`, `--json`; service must be `screenote`. | Discovers metadata, completes OAuth with PKCE, selects a project, and stores the credential. | JSON is explicitly schema-less JSON Lines. | Usage, configuration, OAuth/discovery, and filesystem failures use the Screenote error family. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `78`, or another non-zero OAuth/filesystem failure. |
+| `hive disconnect` | Options: `--json`; service must be `screenote`. | Attempts revocation and always clears a readable or corrupt local credential; missing credentials are a no-op. | JSON is an explicitly schema-less result. | Usage/configuration failures are typed; revocation failure is a warning after local removal. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `78`, or another non-zero local failure. |
+
 ## Runtime Use
 
 Connected credentials are not placed in YAML config and are not exposed through

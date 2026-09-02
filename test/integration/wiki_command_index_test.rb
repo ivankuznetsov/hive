@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "find"
 require "open3"
 require "rbconfig"
 require "hive/cli"
@@ -29,7 +30,8 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
       command_map: Hive::CLI.map
     )
     assert_empty metadata.diagnostics, metadata.diagnostics.map(&:to_s).join("\n")
-    assert_equal metadata.visible, first.help_commands.sort
+    rendered_aliases = first.help_commands & metadata.aliases.keys
+    assert_equal metadata.visible, (first.help_commands - rendered_aliases).sort
     assert_empty metadata.hidden & first.help_commands
     assert_empty metadata.hidden & first.index_commands
 
@@ -45,8 +47,19 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
     assert_equal "open-pr", metadata.aliases.fetch("pr")
     assert_equal "version", metadata.aliases.fetch("--version")
     assert_equal "version", metadata.aliases.fetch("-v")
-    %w[pr --version -v].each do |alias_name|
-      refute_includes first.index_commands, alias_name
+    metadata.aliases.each do |alias_name, canonical|
+      if first.help_commands.include?(alias_name)
+        assert_includes first.index_commands, alias_name
+        assert_equal first.owners.fetch(canonical), first.owners.fetch(alias_name)
+      else
+        refute_includes first.index_commands, alias_name
+      end
+    end
+
+    canonical_version = render_hive("version")
+    [ "--version", "-v" ].each do |wrapper_alias|
+      assert_equal canonical_version, render_hive(wrapper_alias),
+        "bin/hive #{wrapper_alias} diverged from the version command"
     end
 
     assert_equal before, repository_snapshot,
@@ -67,9 +80,29 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
       assert status.success?, stderr
 
       before = repository_snapshot(root)
-      assert_equal %w[.gitignore ignored.txt tracked.txt untracked.txt], before.map(&:first)
+      %w[.gitignore ignored.txt tracked.txt untracked.txt].each do |relative|
+        assert_includes before.map(&:first), relative
+      end
 
       File.write(File.join(root, "ignored.txt"), "changed\n")
+      refute_equal before, repository_snapshot(root)
+
+      before = repository_snapshot(root)
+      FileUtils.mkdir_p(File.join(root, "empty"))
+      refute_equal before, repository_snapshot(root)
+
+      FileUtils.rmdir(File.join(root, "empty"))
+      before = repository_snapshot(root)
+      transient = File.join(root, "transient.txt")
+      File.write(transient, "transient\n")
+      File.unlink(transient)
+      refute_equal before, repository_snapshot(root)
+
+      before = repository_snapshot(root)
+      _stdout, stderr, status = Open3.capture3(
+        "git", "config", "wiki-command-index.probe", "changed", chdir: root
+      )
+      assert status.success?, stderr
       refute_equal before, repository_snapshot(root)
     end
   end
@@ -77,6 +110,10 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
   private
 
   def render_public_help
+    render_hive("help")
+  end
+
+  def render_hive(*argv)
     Dir.mktmpdir("hive-public-help") do |sandbox|
       home = File.join(sandbox, "home")
       hive_home = File.join(sandbox, "hive")
@@ -116,6 +153,9 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
         "HIVE_ATTEMPT_INTERNAL" => nil,
         "NO_COLOR" => "1",
         "TERM" => "dumb",
+        # Thor pads and then truncates usage banners to the terminal width.
+        # Forty columns is the narrowest pinned width that preserves complete
+        # command tokens while still exercising wrapped descriptions.
         "COLUMNS" => "40"
       }
 
@@ -123,15 +163,15 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
         environment,
         RbConfig.ruby,
         File.join(ROOT, "bin/hive"),
-        "help",
+        *argv,
         chdir: ROOT
       )
     end
   end
 
   def repository_snapshot(root = ROOT)
-    repository_paths(root).map do |relative|
-      path = File.join(root, relative)
+    repository_paths(root).map do |path|
+      relative = path == root ? "." : path.delete_prefix("#{root}/")
       begin
         stat = File.lstat(path)
         digest = if stat.symlink?
@@ -141,7 +181,7 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
         else
           stat.ftype
         end
-        [ relative, stat.mode, stat.size, stat.mtime.to_r, digest ]
+        [ relative, stat.ftype, stat.mode, stat.size, stat.mtime.to_r, stat.ctime.to_r, digest ]
       rescue Errno::ENOENT
         [ relative, :missing ]
       end
@@ -149,14 +189,29 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
   end
 
   def repository_paths(root = ROOT)
-    commands = [
-      [ "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z" ],
-      [ "git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z" ]
-    ]
-    commands.flat_map do |command|
-      stdout, stderr, status = Open3.capture3(*command, chdir: root)
-      raise "#{command.join(' ')} failed: #{stderr}" unless status.success?
-      stdout.split("\0")
-    end.sort
+    paths = []
+    Find.find(root) do |path|
+      if path == File.join(root, ".git")
+        paths << path
+        Find.prune
+      else
+        paths << path
+      end
+    end
+    paths.concat(git_control_paths(root)).uniq.sort
+  end
+
+  def git_control_paths(root)
+    stdout, _stderr, status = Open3.capture3(
+      "git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", chdir: root
+    )
+    return [] unless status.success?
+
+    worktree_dir, common_dir = stdout.lines.map(&:strip)
+    paths = %w[HEAD index commondir gitdir config.worktree].map { |name| File.join(worktree_dir, name) }
+    paths.concat(%w[config packed-refs refs].map { |name| File.join(common_dir, name) })
+    refs = File.join(common_dir, "refs")
+    Find.find(refs) { |path| paths << path } if File.directory?(refs)
+    paths
   end
 end

@@ -70,8 +70,13 @@ Every JSON contract is version 1:
 
 Success documents carry `ok: true` and the operation's redacted projection or
 preview. Error documents carry `ok: false`, `error_class`, `error_kind`,
-`exit_code`, and `message`. Missing/unknown subcommands and positional-shape
-errors use `hive-module-lifecycle.v1` with `error_kind: usage`.
+`exit_code`, and `message`. Missing/unknown subcommands use
+`hive-module-lifecycle.v1` with `error_kind: usage`. Once a subcommand is
+selected, positional-shape errors use that subcommand's schema:
+`hive-module-list.v1` for `list`, `hive-module-status.v1` for
+`inspect`/`status`, `hive-module-doctor.v1` for `doctor`, and
+`hive-module-dry-run.v1` for `dry-run`. Lifecycle verbs continue to use
+`hive-module-lifecycle.v1`.
 
 ## Error and serialization policy
 

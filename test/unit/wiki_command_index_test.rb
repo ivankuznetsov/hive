@@ -215,6 +215,187 @@ class WikiCommandIndexTest < Minitest::Test
     assert_owner_contract_diagnostic result, "beta", "commands/shared", :examples
   end
 
+  def test_guard_requires_every_contract_for_the_named_command
+    result = fixture_guard("commands/alpha" => complete_owner("alpha")).evaluate(
+      help_text: help_for("zzz-nonexistent"),
+      index_text: index_for([ "zzz-nonexistent", "[[commands/alpha]]" ])
+    )
+
+    %i[syntax options behavior examples schema output_exceptions serialization_fallback exit_codes].each do |requirement|
+      assert_owner_contract_diagnostic result, "zzz-nonexistent", "commands/alpha", requirement
+    end
+  end
+
+  def test_shared_owner_does_not_lend_page_level_contracts_to_another_command
+    document = complete_owner("alpha") + <<~MARKDOWN
+
+      ## Usage and examples: beta
+
+      `hive beta`
+
+      `hive beta` is the complete example.
+    MARKDOWN
+    result = fixture_guard("commands/shared" => document).evaluate(
+      help_text: help_for("alpha", "beta"),
+      index_text: index_for(
+        [ "alpha", "[[commands/shared]]" ],
+        [ "beta", "[[commands/shared]]" ]
+      )
+    )
+
+    %i[options behavior schema output_exceptions serialization_fallback exit_codes].each do |requirement|
+      assert_owner_contract_diagnostic result, "beta", "commands/shared", requirement
+    end
+  end
+
+  def test_schema_version_token_is_not_an_exit_code_contract
+    document = complete_owner.sub(
+      /^## Exit codes\n.*?(?=^## |\z)/m,
+      "## Output\n\n`hive-alpha.v1`\n\n"
+    )
+    result = fixture_guard("commands/alpha" => document).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ])
+    )
+
+    assert_owner_contract_diagnostic result, "alpha", "commands/alpha", :exit_codes
+  end
+
+  def test_options_schema_and_behavior_require_explicit_meaningful_contracts
+    document = <<~MARKDOWN
+      # Alpha
+
+      ## Usage
+
+      `hive alpha --flag`
+      `hive alpha --flag`
+
+      ## Behavior
+
+      TODO: document this.
+
+      ## Output
+
+      `hive-alpha.v1`
+
+      ## Output exceptions
+
+      Errors are reported on stderr.
+
+      ## Serialization fallback
+
+      Serialization fallback: not applicable.
+
+      ## Exit codes
+
+      Exit code `0` denotes completion.
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => document).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ])
+    )
+
+    %i[options behavior schema].each do |requirement|
+      assert_owner_contract_diagnostic result, "alpha", "commands/alpha", requirement
+    end
+  end
+
+  def test_contract_section_parser_ignores_headings_inside_fences
+    document = remove_section(complete_owner, "Behavior").sub(
+      "## Output and schema",
+      <<~MARKDOWN
+        ```markdown
+        ## Behavior
+
+        Reads state without mutation.
+        ```
+
+        ## Output and schema
+      MARKDOWN
+    )
+    result = fixture_guard("commands/alpha" => document).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ])
+    )
+
+    assert_owner_contract_diagnostic result, "alpha", "commands/alpha", :behavior
+  end
+
+  def test_markdown_parser_ignores_commented_and_indented_structure
+    commented_index = "<!--\n#{index_for([ "alpha", "[[commands/alpha]]" ])}\n-->\n"
+    result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+      help_text: help_for("alpha"),
+      index_text: commented_index
+    )
+    assert_diagnostic result, :missing_index_section
+
+    indented_table = <<~MARKDOWN
+      ## Command index
+
+          | Command | Owner |
+          | --- | --- |
+          | `hive alpha` | [[commands/alpha]] |
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+      help_text: help_for("alpha"),
+      index_text: indented_table
+    )
+    assert_diagnostic result, :missing_index_table
+
+    commented_owner = "<!--\n#{complete_owner}\n-->\n"
+    result = fixture_guard("commands/alpha" => commented_owner).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ])
+    )
+    assert_owner_contract_diagnostic result, "alpha", "commands/alpha", :syntax
+  end
+
+  def test_single_owner_does_not_lend_contracts_from_another_command
+    document = <<~MARKDOWN
+      # Alpha
+
+      ## Usage
+
+      `hive alpha`
+
+      ## Options
+
+      `hive beta` accepts `--force`.
+
+      ## Behavior
+
+      `hive beta` reads state without mutation.
+
+      ## Output and schema
+
+      `hive beta` emits `hive-beta.v1`.
+
+      ## Output exceptions
+
+      `hive beta` reports failures on stderr.
+
+      ## Serialization fallback
+
+      `hive beta` propagates serialization failures.
+
+      ## Exit codes
+
+      `hive beta` uses exit code `0` for completion.
+
+      ## Examples
+
+      `hive beta` is the complete example.
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => document).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ])
+    )
+
+    %i[options behavior examples schema output_exceptions serialization_fallback exit_codes].each do |requirement|
+      assert_owner_contract_diagnostic result, "alpha", "commands/alpha", requirement
+    end
+  end
+
   def test_guard_rejects_an_existing_but_wrong_durable_owner
     result = WikiCommandIndex::Guard.new(
       owner_reader: ->(target) { complete_owner if %w[commands/review commands/stage_action].include?(target) }
@@ -226,7 +407,7 @@ class WikiCommandIndexTest < Minitest::Test
     assert_diagnostic result, :unexpected_owner, "review"
   end
 
-  def test_durable_aggregate_owner_map_is_command_specific
+  def test_durable_aggregate_owners_match_the_authoritative_index
     expected = {
       "brainstorm" => "commands/stage_action",
       "plan" => "commands/stage_action",
@@ -241,7 +422,107 @@ class WikiCommandIndexTest < Minitest::Test
       "worktree" => "modules/worktree"
     }
 
-    assert_equal expected, WikiCommandIndex::COMMAND_OWNERS.slice(*expected.keys)
+    result = WikiCommandIndex::Guard.new(
+      wiki_root: WIKI_ROOT,
+      expected_owners: nil
+    ).evaluate(
+      help_text: help_for(*expected.keys),
+      index_text: page("cli.md"),
+      validate_contracts: false
+    )
+
+    assert_equal expected, result.owners.slice(*expected.keys)
+  end
+
+  def test_unpinned_commands_are_still_resolved_and_contract_checked
+    result = WikiCommandIndex::Guard.new(
+      owner_reader: ->(target) { "# New command\n" if target == "commands/new-command" }
+    ).evaluate(
+      help_text: help_for("new-command"),
+      index_text: index_for([ "new-command", "[[commands/new-command]]" ])
+    )
+
+    refute result.diagnostics.any? { |diagnostic| diagnostic.kind == :missing_expected_owner }
+    assert_owner_contract_diagnostic result, "new-command", "commands/new-command", :syntax
+  end
+
+  def test_guard_reports_a_durable_owner_pin_missing_from_the_index
+    result = WikiCommandIndex::Guard.new(
+      owner_reader: ->(_target) { nil },
+      expected_owners: { "review" => "commands/stage_action" }
+    ).evaluate(help_text: help_for, index_text: index_for, validate_contracts: false)
+
+    assert_diagnostic result, :missing_pinned_owner, "review"
+  end
+
+  def test_navigation_page_rejects_command_contract_tables_outside_the_index
+    leaked_contracts = <<~MARKDOWN
+
+      ## Command synopsis
+
+      | Command | Synopsis |
+      |---|---|
+      | `hive alpha` | Runs alpha. |
+
+      ## Schema versions
+
+      | Schema | Version |
+      |---|---:|
+      | `hive-alpha.v1` | 1 |
+
+      ## Command exit codes
+
+      | Command | Exit codes |
+      |---|---|
+      | `hive alpha` | 0, 64 |
+
+      ## Serialization fallback matrix
+
+      | Command | Fallback |
+      |---|---|
+      | `hive alpha` | Propagate `JSON::GeneratorError`. |
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ]) + leaked_contracts
+    )
+
+    assert_diagnostic result, :command_contract_outside_index
+  end
+
+  def test_navigation_page_allows_command_tables_inside_fenced_examples
+    fenced_example = <<~MARKDOWN
+
+      ## Markdown example
+
+      ```markdown
+      | Command | Synopsis |
+      |---|---|
+      | `hive alpha` | Runs alpha. |
+      ```
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ]) + fenced_example
+    )
+
+    refute result.diagnostics.any? { |diagnostic| diagnostic.kind == :command_contract_outside_index }
+  end
+
+  def test_navigation_page_rejects_command_contract_prose_and_lists_outside_the_index
+    leaked_contracts = <<~MARKDOWN
+
+      ## Alpha options
+
+      - `hive alpha --force` emits `hive-alpha.v9`.
+      - Serialization failures propagate and exit code `64` reports invalid input.
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ]) + leaked_contracts
+    )
+
+    assert_diagnostic result, :command_contract_outside_index
   end
 
   def test_every_contract_section_is_required_and_explicit_not_applicable_is_valid

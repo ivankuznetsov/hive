@@ -160,13 +160,15 @@ unknown subcommands also carry `value` with the rejected
 token.
 
 Pre-dispatch argv-shape failures select the requested subcommand's schema:
-`hive-workflow-install.v1`, `hive-workflow-list.v1`,
-`hive-workflow-remove.v1`, `hive-workflow-update.v1`,
-`hive-workflow-publish.v1`, or `hive-workflow-validate.v1` (with
+`hive-workflow-install.v2`, `hive-workflow-list.v2`,
+`hive-workflow-remove.v1`, `hive-workflow-update.v2`,
+`hive-workflow-publish.v2`, or `hive-workflow-validate.v1` (with
 `valid: false` and the rejected `id`), defaulting to
 `hive-workflow-new.v1`. All use `error_kind: "usage"`. Pre-dispatch failures
 of `hive decide` use `hive-decide.v1` with
-`error_kind: "invalid_task_path"`.
+`error_kind: "invalid_task_path"`. The `hive-workflow-publish.v1` schema file
+remains in tree for pinned readers; the current producer and pre-dispatch error
+surface both use v2.
 
 ## Generated Descriptor
 
@@ -296,6 +298,13 @@ it propagates from the owning subcommand.
 Workflow and decide success/error documents are encoded directly. If
 `JSON.generate` raises `JSON::GeneratorError`, Hive emits no prose or fallback
 JSON document and lets that serialization failure propagate.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive workflow` | Options: subcommand-specific authoring, lifecycle, validation, consent, mapping, publication, and `--json` flags described above. | Scaffolds/validates project workflows or manages reviewed Honeycomb generations and publication review. | JSON schemas are `hive-workflow-new.v1`, `hive-workflow-install.v2`, `hive-workflow-list.v2`, `hive-workflow-remove.v1`, `hive-workflow-update.v2`, `hive-workflow-publish.v2`, and `hive-workflow-validate.v1`. | Usage, consent, configuration, Git, validation, and lifecycle failures use the selected subcommand error surface. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes include `0`, `64`, `70`, `75`, `78`, plus a selected typed Hive failure code. |
+| `hive decide` | Options: required `--from` and `--decision-id`, with optional `--note` and `--json`. | Applies or idempotently replays one current human-stage outcome and rejects stale/conflicting decisions. | JSON schema `hive-decide.v1`. | Invalid paths/outcomes, stale decisions, lock contention, configuration, and write failures use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes include `0`, `64`, `70`, `75`, `78`, plus a selected typed Hive failure code. |
 
 ## Backlinks
 

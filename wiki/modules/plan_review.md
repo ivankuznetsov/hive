@@ -453,6 +453,13 @@ applicable to that automation verb.
 | 75 | The observation was stale or the task/commit lock was busy. |
 | 78 | Review policy, workflow, or project configuration was invalid. |
 
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive plan-review` | Options: observation identity plus action-specific `--answer`, `--coverage`, `--level`, and `--reason`, with optional `--json`. | Revalidates one authority-bearing action and applies or idempotently replays it under the mutation lock. | JSON schema `hive-plan-review-action.v1`. | Invalid/conflicting authority, stale observations, policy/configuration, and software failures use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `1`, `64`, `70`, `75`, `78`. |
+| `hive plan-review-run` | Options: no command-specific options beyond its target. | Dispatches or resumes non-authority review automation and may advance an already-cleared plan. | Output is text-only and has no success JSON schema. | Record, orchestration, target, policy/configuration, stale-lock, and software failures remain explicit. | Serialization fallback is not applicable because no JSON is emitted. | Exit codes `0`, `1`, `64`, `70`, `75`, `78`. |
+
 ## Examples
 
 Use `hive plan-review PROJECT:SLUG ACTION --json` with the complete observation

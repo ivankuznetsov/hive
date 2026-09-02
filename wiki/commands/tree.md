@@ -23,8 +23,9 @@ accepted but ignored: tree output remains text.
 
 ## Behavior
 
-Thor prints the CLI namespace followed by every visible command except `help`,
-sorted by its internal command key. Hidden commands are omitted. Because this
+Thor prints the CLI namespace followed by every visible command except the
+inherited `help` command and `tree` itself, sorted by its internal command key.
+Hidden commands are omitted. Because this
 is a framework diagnostic, mapped Hive names may appear with underscores (for
 example `answer_digest`) rather than the public hyphenated spelling rendered
 by `hive help`.

@@ -151,6 +151,14 @@ serialization rather than suppressing it.
 
 External consumers can validate against `schemas/hive-findings.v1.json`; resolve the path via `Hive::Schemas.schema_path("hive-findings")`.
 
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive findings` | Options: `--project`, `--stage`, `--pass`, `--json`. | Reads and lists the selected review document without taking the task lock. | JSON schema `hive-findings.v1`. | Missing reviews, invalid targets, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `70`. |
+| `hive accept-finding` | Options: `--project`, `--stage`, `--severity`, `--all`, `--json`. | Locks the task, checks selected IDs, atomically accepts findings, and commits the review file. | JSON schema `hive-findings.v1`. | Missing selections/reviews, unknown IDs, lock contention, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `70`, `75`. |
+| `hive reject-finding` | Options: `--project`, `--stage`, `--severity`, `--all`, `--json`. | Locks the task, checks selected IDs, atomically rejects findings, and commits the review file. | JSON schema `hive-findings.v1`. | Missing selections/reviews, unknown IDs, lock contention, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `70`, `75`. |
+
 ## Exit codes
 
 | Condition | Exit | Class |

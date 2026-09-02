@@ -149,10 +149,10 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   def test_oversized_sanitized_export_is_rejected_with_a_bounded_diagnostic
     with_fixture(mode: :oversized_export) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "inspection-oversized-260822-aaaa")
-      result = with_execution_constant(:EXPORT_CAPTURE_BYTES, 4096) do
-        with_runtime_constant(
-          AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
-        ) do
+      result = with_runtime_constant(
+        AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
+      ) do
+        with_execution_constant(:EXPORT_CAPTURE_BYTES, 4096) do
           with_execution_constant(:INSPECTION_RETRY_DELAY_SECONDS, 0) do
             with_env("ANTHROPIC_API_KEY" => "secret-canary") do
               build_agent(task, fixture).run!

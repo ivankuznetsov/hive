@@ -110,9 +110,9 @@ module Hive
           spawn_error = e
         end
         custody_report = agent_custody.report
-        return managed_failure_result(task, error: spawn_error, context: context) if spawn_error && !custody_report
+        return managed_failure_result(task, error: spawn_error, context: context, profile: profile) if spawn_error && !custody_report
         unless result.is_a?(Hash) && result[:status] == :ok
-          return managed_failure_result(task, result: result, context: context) unless custody_report
+          return managed_failure_result(task, result: result, context: context, profile: profile) unless custody_report
         end
 
         unless custody_report
@@ -132,10 +132,10 @@ module Hive
                 "restored=#{custody_report.restored?}" \
                 "#{": #{custody_report.restore_diagnostic}" if custody_report.restore_diagnostic}"
         end
-        return managed_failure_result(task, error: spawn_error, context: context) if spawn_error
+        return managed_failure_result(task, error: spawn_error, context: context, profile: profile) if spawn_error
 
         unless result.is_a?(Hash) && result[:status] == :ok
-          return managed_failure_result(task, result: result, context: context)
+          return managed_failure_result(task, result: result, context: context, profile: profile)
         end
         unless custody_report.required_outputs_valid?
           raise Hive::StageError, custody_report.diagnostic
@@ -155,9 +155,15 @@ module Hive
         managed_failure_result(task, error: e)
       end
 
-      def managed_failure_result(task, result: nil, error: nil, context: nil)
+      def managed_failure_result(task, result: nil, error: nil, context: nil, profile: nil)
         result = result.is_a?(Hash) ? result : {}
-        reason = if !result[:limit_text].to_s.empty?
+        # Route failure classification through the shared spawn-failure
+        # classifier so the worktree stage recognizes the same provider-limit
+        # envelopes as the generic agent stage, and stamps the same
+        # provider/retry_after quota metadata the daemon and status surfaces
+        # expect on a `limits_reached` marker.
+        limit_envelope = Hive::Stages::Agent.limit_error_envelope?(result)
+        reason = if limit_envelope
           "limits_reached"
         elsif result[:timed_out] || result[:status] == :timeout
           "timeout"
@@ -171,6 +177,13 @@ module Hive
           reason: reason,
           message: "The managed repair agent did not produce a controller-validated result."
         }
+        if limit_envelope
+          provider = profile&.name.to_s
+          attrs[:provider] = provider unless provider.empty?
+          attrs[:retry_after] = Hive::AgentLimit.retry_after(
+            text: Hive::Stages::Agent.limit_error_text(result)
+          )
+        end
         attrs[:exception_class] = error.class.name if error
         write_failure_marker!(task, attrs)
         result.merge(

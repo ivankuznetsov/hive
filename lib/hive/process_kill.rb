@@ -64,6 +64,7 @@ module Hive
 
       live.to_s == recorded_start_time.to_s ? :match : :replacement
     end
+    private_class_method :recorded_process_identity
 
     def terminate_process(pid, recorded_start_time: nil, grace_seconds: TERM_GRACE_SECONDS)
       pid = Integer(pid)

@@ -17,9 +17,9 @@ class WikiCommandIndexTest < Minitest::Test
 
   def test_guard_accepts_one_allowed_owner_per_help_command
     documents = {
-      "commands/stage_action" => "#{complete_owner}\n## Related\n\n[[stages/review]]\n",
-      "modules/plan_review" => complete_owner,
-      "modules/worktree" => complete_owner
+      "commands/stage_action" => "#{complete_owner("brainstorm")}\n## Related\n\n[[stages/review]]\n",
+      "modules/plan_review" => complete_owner("plan-review"),
+      "modules/worktree" => complete_owner("worktree")
     }
     result = fixture_guard(documents).evaluate(
       help_text: help_for("brainstorm", "plan-review", "worktree"),
@@ -50,7 +50,7 @@ class WikiCommandIndexTest < Minitest::Test
 
     result = fixture_guard(
       "commands/alpha" => complete_owner,
-      "commands/beta" => complete_owner
+      "commands/beta" => complete_owner("beta")
     ).evaluate(
       help_text: help,
       index_text: index_for(
@@ -170,6 +170,62 @@ class WikiCommandIndexTest < Minitest::Test
     assert_diagnostic result, :malformed_index_row
   end
 
+  def test_guard_rejects_separator_rows_that_are_not_exactly_two_columns
+    [ "| --- |", "| --- | --- | --- |" ].each do |separator|
+      index = index_for([ "alpha", "[[commands/alpha]]" ])
+        .sub("| --- | --- |", separator)
+      result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+        help_text: help_for("alpha"),
+        index_text: index
+      )
+
+      assert_diagnostic result, :malformed_index_header
+    end
+  end
+
+  def test_guard_rejects_incidental_contract_words_outside_contract_sections
+    incidental = <<~MARKDOWN
+      # Alpha
+
+      ## Incidental behavior
+
+      The words options, schema, JSON, error, serialization, and exit code 0
+      appear here, along with `hive alpha` and another `hive alpha` example.
+    MARKDOWN
+    result = fixture_guard("commands/alpha" => incidental).evaluate(
+      help_text: help_for("alpha"),
+      index_text: index_for([ "alpha", "[[commands/alpha]]" ])
+    )
+
+    %i[syntax options examples schema output_exceptions serialization_fallback exit_codes].each do |requirement|
+      assert_owner_contract_diagnostic result, "alpha", "commands/alpha", requirement
+    end
+  end
+
+  def test_guard_validates_each_command_owned_by_a_shared_document
+    result = fixture_guard("commands/shared" => complete_owner).evaluate(
+      help_text: help_for("alpha", "beta"),
+      index_text: index_for(
+        [ "alpha", "[[commands/shared]]" ],
+        [ "beta", "[[commands/shared]]" ]
+      )
+    )
+
+    assert_owner_contract_diagnostic result, "beta", "commands/shared", :syntax
+    assert_owner_contract_diagnostic result, "beta", "commands/shared", :examples
+  end
+
+  def test_guard_rejects_an_existing_but_wrong_durable_owner
+    result = WikiCommandIndex::Guard.new(
+      owner_reader: ->(target) { complete_owner if %w[commands/review commands/stage_action].include?(target) }
+    ).evaluate(
+      help_text: help_for("review"),
+      index_text: index_for([ "review", "[[commands/review]]" ])
+    )
+
+    assert_diagnostic result, :unexpected_owner, "review"
+  end
+
   def test_every_contract_section_is_required_and_explicit_not_applicable_is_valid
     sections = {
       "Usage" => :syntax,
@@ -191,7 +247,7 @@ class WikiCommandIndexTest < Minitest::Test
 
       assert result.diagnostics.any? { |diagnostic|
         diagnostic.kind == :incomplete_owner_contract &&
-          diagnostic.subject == "commands/alpha" && diagnostic.detail == requirement
+          diagnostic.subject == "alpha" && diagnostic.detail == "commands/alpha:#{requirement}"
       }, "removing #{heading.inspect} did not fail #{requirement}: #{result.diagnostics.map(&:to_s)}"
     end
 
@@ -236,6 +292,21 @@ class WikiCommandIndexTest < Minitest::Test
     assert_empty metadata.visible
   end
 
+  def test_metadata_rejects_alias_and_visible_canonical_collisions
+    metadata = fixture_guard.metadata(
+      all_commands: {
+        "open_pr" => FakeCommand.new("open-pr", false),
+        "pr" => FakeCommand.new("pr", false)
+      },
+      command_map: {
+        "open-pr" => "open_pr",
+        "pr" => "open_pr"
+      }
+    )
+
+    assert_diagnostic metadata, :alias_canonical_collision, "pr"
+  end
+
   def test_repeated_guard_evaluation_is_deterministic_and_read_only
     Dir.mktmpdir("wiki-command-index") do |root|
       owner_dir = File.join(root, "commands")
@@ -274,9 +345,24 @@ class WikiCommandIndexTest < Minitest::Test
 
   def test_daemon_exit_table_covers_every_subcommand_family
     daemon = page("commands/daemon.md")
-    %w[start stop status reload tail install enable disable queue].each do |subcommand|
-      assert_match(/^\| `#{Regexp.escape(subcommand)}(?:`|[^|]*`)/, daemon, subcommand)
+    expected = [
+      [ "`start`", "0" ], [ "`start`", "75" ], [ "`stop`", "0" ],
+      [ "`status`", "0" ], [ "`status`", "1" ], [ "`reload`", "0" ],
+      [ "`reload`", "1" ], [ "`tail`", "0" ], [ "`tail`", "1" ],
+      [ "`install`", "0" ], [ "`install`", "64" ], [ "`install`", "70" ],
+      [ "`enable` / `disable`", "0" ], [ "`enable` / `disable`", "64" ],
+      [ "`enable` / `disable`", "70" ], [ "`enable` / `disable`", "78" ],
+      [ "`queue list` / `queue prune`", "0" ], [ "`queue show <id>`", "0" ],
+      [ "`queue show <id>`", "1" ], [ "`queue` (any)", "64" ],
+      [ "`queue` (any)", "70" ], [ "(any)", "64" ]
+    ]
+    exit_section = daemon[/^## Exit codes\n(?<body>.*?)(?=^## |\z)/m, :body]
+    actual = exit_section.lines.filter_map do |line|
+      cells = line.strip.delete_prefix("|").delete_suffix("|").split("|").map(&:strip)
+      cells.first(2) if cells.size == 3 && cells[1].match?(/\A\d+\z/)
     end
+
+    assert_equal expected, actual
   end
 
   def test_metrics_and_act_document_their_asymmetric_serialization_policies
@@ -324,13 +410,13 @@ class WikiCommandIndexTest < Minitest::Test
     MARKDOWN
   end
 
-  def complete_owner
+  def complete_owner(command = "alpha")
     <<~MARKDOWN
       # Alpha
 
       ## Usage
 
-      `hive alpha`
+      `hive #{command}`
 
       ## Options
 
@@ -358,7 +444,7 @@ class WikiCommandIndexTest < Minitest::Test
 
       ## Examples
 
-      The usage form above is the complete example.
+      `hive #{command}` is the complete example.
     MARKDOWN
   end
 
@@ -371,6 +457,13 @@ class WikiCommandIndexTest < Minitest::Test
       diagnostic.kind == kind && (subject.nil? || diagnostic.subject == subject)
     end
     assert match, "expected #{kind}: #{subject}; got #{result.diagnostics.map(&:to_s)}"
+  end
+
+  def assert_owner_contract_diagnostic(result, command, target, requirement)
+    assert result.diagnostics.any? { |diagnostic|
+      diagnostic.kind == :incomplete_owner_contract &&
+        diagnostic.subject == command && diagnostic.detail == "#{target}:#{requirement}"
+    }, "expected incomplete #{requirement} for #{command}; got #{result.diagnostics.map(&:to_s)}"
   end
 
   def tree_snapshot(root)

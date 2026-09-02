@@ -77,6 +77,7 @@ module WikiCommandIndex
   end
 
   Row = Struct.new(:command, :owner, :line, keyword_init: true)
+  Section = Struct.new(:heading, :body, keyword_init: true)
   Result = Struct.new(
     :help_commands,
     :index_commands,
@@ -93,28 +94,15 @@ module WikiCommandIndex
   Metadata = Struct.new(:visible, :hidden, :aliases, :diagnostics, keyword_init: true)
 
   class Guard
-    CONTRACT_CHECKS = {
-      syntax: lambda { |text|
-        text.match?(/^##+ (?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands)\b/i) ||
-          text.scan(/`hive\s|^\s*hive\s/m).size >= 2
-      },
-      options: ->(text) { text.match?(/\boptions?\b|--[a-z]|options?: (?:not applicable|none)/i) },
-      behavior: lambda { |text|
-        text.scan(/^##+ (.+)$/).flatten.any? do |heading|
-          !heading.match?(/\A(?:Usage|Synopsis|CLI|Invocation|Surface|Options?|Output|JSON|Errors?|Serialization|Exit codes?|Examples?|Tests?|Backlinks|Related|Notes)\b/i)
-        end
-      },
-      examples: lambda { |text|
-        text.match?(/^##+ Examples?\b/i) || text.scan(/`hive\s|^\s*hive\s/m).size >= 2
-      },
-      schema: ->(text) { text.match?(/schema|JSON|text-only|human-readable|plain text|no structured output/i) },
-      output_exceptions: ->(text) { text.match?(/error|failure|refus|warning|exception|output exception/i) },
-      serialization_fallback: lambda { |text|
-        text.match?(/serializ|GeneratorError|does not emit JSON|no JSON/i)
-      },
-      exit_codes: lambda { |text|
-        text.match?(/exit code|exit status|exits? (?:with )?[0-9]|returns? (?:success|failure|0|1)|status [0-9]/i)
-      }
+    CONTRACT_HEADINGS = {
+      syntax: /\A(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract)\b/i,
+      options: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Options?)\b/i,
+      behavior: /\b(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?)\b/i,
+      examples: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Examples?)\b/i,
+      schema: /\b(?:JSON|Schema|Output)\b/i,
+      output_exceptions: /\b(?:Errors?|Failures?|Refusals?|Output|Serialization|Exit codes?)\b/i,
+      serialization_fallback: /\b(?:Serialization|JSON|Output)\b/i,
+      exit_codes: /\bExit codes?\b/i
     }.freeze
 
     def initialize(wiki_root: nil, owner_reader: nil, expected_owners: COMMAND_OWNERS)
@@ -142,7 +130,7 @@ module WikiCommandIndex
 
       owners, owner_documents, owner_diagnostics = resolve_owners(rows)
       diagnostics.concat(owner_diagnostics)
-      diagnostics.concat(validate_owner_contracts(owner_documents)) if validate_contracts
+      diagnostics.concat(validate_owner_contracts(owners, owner_documents)) if validate_contracts
 
       Result.new(
         help_commands: help_commands.freeze,
@@ -349,11 +337,63 @@ module WikiCommandIndex
       [ owners, documents, diagnostics ]
     end
 
-    def validate_owner_contracts(documents)
-      documents.flat_map do |target, document|
-        CONTRACT_CHECKS.filter_map do |requirement, check|
-          diagnostic(:incomplete_owner_contract, target, requirement) unless check.call(document)
+    def validate_owner_contracts(owners, documents)
+      owners.flat_map do |command, target|
+        sections = contract_sections(documents.fetch(target))
+        CONTRACT_HEADINGS.keys.filter_map do |requirement|
+          next if contract_requirement?(requirement, command, sections)
+
+          diagnostic(:incomplete_owner_contract, command, "#{target}:#{requirement}")
         end
+      end
+    end
+
+    def contract_sections(document)
+      matches = document.to_enum(:scan, /^## (.+)$/).map { Regexp.last_match }
+      matches.map.with_index do |match, index|
+        body_start = match.end(0)
+        body_end = matches[index + 1]&.begin(0) || document.length
+        Section.new(heading: match[1].strip, body: document[body_start...body_end]).freeze
+      end
+    end
+
+    def contract_requirement?(requirement, command, sections)
+      case requirement
+      when :syntax
+        sections.any? do |section|
+          section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax)) &&
+            section.body.match?(/\bhive #{Regexp.escape(command)}(?:\s|`|\z)/)
+        end
+      when :options
+        sections.any? do |section|
+          (section.heading.match?(/\bOptions?\b/i) ||
+            section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax))) &&
+            section.body.match?(/--[a-z]|options?\s*(?::|are)\s*(?:not applicable|none)|no (?:command-specific )?options?/i)
+        end
+      when :behavior
+        sections.any? { |section| section.heading.match?(CONTRACT_HEADINGS.fetch(:behavior)) && !section.body.strip.empty? }
+      when :examples
+        command_pattern = /\bhive #{Regexp.escape(command)}(?:\s|`|\z)/
+        sections.any? { |section|
+          section.heading.match?(/\bExamples?\b/i) && section.body.match?(command_pattern)
+        } || sections.sum { |section|
+          section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax)) ? section.body.scan(command_pattern).size : 0
+        } >= 2
+      when :schema
+        contract_text?(sections, :schema, /hive-[a-z0-9-]+\.v\d+|schema(?:_version| version|\s*=).*?\d|text-only|human-readable|plain text|no (?:structured|JSON)|unversioned/i)
+      when :output_exceptions
+        contract_text?(sections, :output_exceptions, /error|fail|refus|warn|exception|invalid|not applicable|none/i)
+      when :serialization_fallback
+        contract_text?(sections, :serialization_fallback, /serializ|JSON\.generate|GeneratorError|fallback|propagat|suppress|no JSON|text-only|plain text|human-readable|not applicable/i)
+      when :exit_codes
+        contract_text?(sections, :exit_codes, /(?:^|[^0-9])(?:0|1|2|4|64|65|70|75|78)(?:[^0-9]|$)|not applicable/i)
+      end
+    end
+
+    def contract_text?(sections, requirement, content_pattern)
+      heading_pattern = CONTRACT_HEADINGS.fetch(requirement)
+      sections.any? do |section|
+        section.heading.match?(heading_pattern) && section.body.match?(content_pattern)
       end
     end
 

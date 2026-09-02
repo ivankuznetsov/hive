@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-09-02
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
@@ -356,6 +356,39 @@ without creating an infinite loop.
   admission. A concurrent newer observation makes the older admission fail
   closed; a lease-created placeholder is never treated as an admitted source.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
+
+### Process cleanup identity and Drop fence
+
+A recorded process is the pair of numeric PID and usable start identity. For
+single-PID cleanup, a readable initial mismatch refuses before signalling; an
+unavailable initial lookup retains compatibility trust for TERM. After each
+failed grace wait, `Hive::ProcessKill` retains one authoritative classification:
+`match`, `replacement`, or `unavailable`. A readable post-TERM replacement
+completes without KILL. An unavailable state gets exactly one liveness check:
+absence completes, while a live ambiguous PID fails closed as `kill_failed`.
+Only a readable match may receive KILL. If the KILL wait still reports live,
+the same retained classification rules apply, so a readable replacement is a
+successful cleanup rather than a false failure.
+
+`ProcessKill::Result#killed` is therefore a cleanup outcome for the recorded
+identity, not a record that SIGKILL was sent. Records without a usable start
+time perform the legacy liveness-only TERM-to-KILL path and are outside this
+replacement-identity guarantee. `terminate_process_group` remains a separate
+compatibility path: its initial unavailable lookup is trusted, while its
+confirmed-tree and identity-required KILL rules are unchanged. See
+[[modules/lock]].
+
+Drop retains every candidate result through aggregation. If any result is
+`kill_failed`, the command raises a retryable refusal before task-lease
+acquisition, `cleanup_context`, or the drop audit commit. The task folder,
+lease and marker identities, logs, PR record, worktree, and branch remain the
+recovery authority. Restore identity visibility or stop and verify the
+recorded process, then retry the unchanged Drop command. Non-gating outcomes
+such as `pid_reuse_guard`, `not_alive`, `no_pid`, and
+`process_tree_unavailable` keep their established cleanup behavior. A
+replacement success still contributes the recorded number to v2
+`agent_killed_pids`; that number may now name a live foreign process and is
+never a signalling authority. See [[commands/drop]].
 
 ## Task condition journal
 

@@ -648,6 +648,8 @@ integrity.
 
 56. **Durable merge-reconciliation rollout is not yet live-evidenced.** Source and focused tests prove the v1 ledger's identity binding, private atomic writes, quarantine, fair cursor, held-state retention, uncapped retries, remote/intake checkpoints, and daemon-owned archive replay. U9 still needs to install one immutable current-main SHA, restart the daemon, run the full registered-project backlog scan, retain its per-task outcome ledger, and demonstrate that one failing repository or deferred architecture intake does not block a healthy merged task.
 
+57. **Single-PID TERM-to-KILL escalation still has an identity-check-to-signal race.** `Hive::ProcessKill.terminate_process` now verifies the recorded start identity immediately before escalating to KILL, but the matching process can exit and its PID can be reused between that check and `Process.kill`. The later identity classification cannot undo a signal already delivered to a replacement process. Fully closing this race requires a durable OS process handle such as a pidfd (or an equivalent cross-platform lifetime boundary); repeated start-time checks can narrow but cannot eliminate the window.
+
 ## 2026-06-16/17 refresh uncertainty
 
 The 2026-06-17 audit rechecked recent source, tests, git history, project wiki

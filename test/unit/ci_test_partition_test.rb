@@ -49,6 +49,26 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_split_test_companions_load_only_through_focused_entrypoints
+    with_loaded_rakefile do
+      default_files = Object.const_get(:HIVE_DEFAULT_TEST_FILES).to_a
+      pairs = {
+        "test/unit/process_kill_test.rb" =>
+          "test/unit/process_kill_identity_escalation_cases.rb",
+        "test/unit/commands/drop_test.rb" =>
+          "test/unit/commands/drop_agent_cleanup_cases.rb"
+      }
+
+      pairs.each do |entrypoint, companion|
+        assert_includes default_files, entrypoint
+        refute_includes default_files, companion
+        assert_path_exists File.join(ROOT, companion)
+        assert_includes File.read(File.join(ROOT, entrypoint)),
+                        %(require_relative "#{File.basename(companion, ".rb")}")
+      end
+    end
+  end
+
   def test_coverage_shards_are_complete_disjoint_and_split_the_measured_hot_partition
     with_loaded_rakefile do
       files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)

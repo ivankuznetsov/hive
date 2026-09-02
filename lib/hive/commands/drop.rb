@@ -385,15 +385,15 @@ module Hive
       end
 
       def process_candidates(folders)
-        by_pid = {}
+        by_identity = {}
         folders.each do |entry|
           lock = Hive::Lock.read_task_lock(entry[:folder]) || {}
           if integer_like?(lock["claude_pid"])
-            register_candidate(by_pid, lock["claude_pid"].to_i,
+            register_candidate(by_identity, lock["claude_pid"].to_i,
                                process_start_time: lock["claude_pid_start_time"], group: true)
           end
           if integer_like?(lock["pid"])
-            register_candidate(by_pid, lock["pid"].to_i,
+            register_candidate(by_identity, lock["pid"].to_i,
                                process_start_time: lock["process_start_time"], group: false)
           end
 
@@ -402,22 +402,25 @@ module Hive
           next unless marker.name == :agent_working && integer_like?(marker_pid)
 
           register_candidate(
-            by_pid, marker_pid.to_i,
+            by_identity, marker_pid.to_i,
             process_start_time: lock["pid"].to_i == marker_pid.to_i ? lock["process_start_time"] : nil,
             group: false
           )
         end
-        by_pid.values
+        by_identity.values
       end
 
-      # `group: true` always wins — a claude_pid==pid lock would
+      # Exact PID/start-time duplicates collapse and `group: true` always wins —
+      # a claude_pid==pid lock would
       # otherwise clobber the group-kill into a single-process kill
-      # and orphan the agent's children.
-      def register_candidate(by_pid, pid, process_start_time:, group:)
-        existing = by_pid[pid]
+      # and orphan the agent's children. Distinct start times for one reused PID
+      # remain separate candidates so every recorded identity contributes a result.
+      def register_candidate(by_identity, pid, process_start_time:, group:)
+        key = [ pid, process_start_time.to_s ]
+        existing = by_identity[key]
         merged_start_time = (existing && existing[:process_start_time]) || process_start_time
         merged_group = (existing && existing[:group]) || group
-        by_pid[pid] = {
+        by_identity[key] = {
           pid: pid,
           process_start_time: merged_start_time,
           group: merged_group

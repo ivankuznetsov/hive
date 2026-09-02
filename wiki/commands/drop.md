@@ -67,11 +67,14 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
    marker identities.
 3. Attempt cleanup of recorded agent roots from the lease and
    `AGENT_WORKING pid=...`,
-   guarded by process start time when one was recorded. A readable initial
+   guarded by process start time when one was recorded. Exact PID/start-time
+   duplicates collapse, but different recorded start times for a reused PID
+   remain separate candidates across task folders. A readable initial
    mismatch returns `pid_reuse_guard` without signalling. After TERM, a
    readable replacement proves the recorded process exited and completes
-   without KILL; an unavailable identity succeeds only when one liveness check
-   finds the PID absent, otherwise it returns `kill_failed`. A matching identity
+   without KILL; an unavailable identity, including an identity-source I/O
+   failure, succeeds only when one liveness check finds the PID absent,
+   otherwise it returns `kill_failed`. A matching identity
    alone may receive KILL, and the same replacement/unavailable/match decision
    is retained after the KILL grace period. Descendants are retained only when
    parent, group, and start identity match across two process snapshots. Failed

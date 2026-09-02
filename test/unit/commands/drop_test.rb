@@ -283,6 +283,40 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  def test_drop_retains_distinct_recorded_identities_for_reused_pid
+    with_drop_project do |dir, _ops, project|
+      slug = "reused-pid-identities-260902-abcd"
+      stale_folder = create_task(dir, "3-plan", slug)
+      live_folder = create_task(dir, "4-execute", slug)
+      reused_pid = 81_204
+      locks = {
+        stale_folder => { "pid" => reused_pid, "process_start_time" => "stale-start" },
+        live_folder => { "pid" => reused_pid, "process_start_time" => "live-start" }
+      }
+      calls = []
+      terminate = lambda do |pid, recorded_start_time: nil, **_kwargs|
+        calls << [ pid, recorded_start_time ]
+        reason = recorded_start_time == "live-start" ? "kill_failed" : "pid_reuse_guard"
+        Hive::ProcessKill::Result.new(pid: pid, killed: false, skipped_reason: reason)
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :read_task_lock, ->(folder) { locks.fetch(folder) }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :terminate_process, terminate) do
+          cleanup = Hive::Commands::Drop.new(slug, project: project, json: true).send(
+            :kill_recorded_agents,
+            [ { folder: stale_folder }, { folder: live_folder } ]
+          )
+
+          assert cleanup.fetch(:kill_failed),
+                 "the live identity's kill_failed result must survive a stale record for the reused PID"
+          assert_equal "pid_reuse_guard", cleanup.fetch(:skipped_reason)
+        end
+      end
+
+      assert_equal [ [ reused_pid, "stale-start" ], [ reused_pid, "live-start" ] ], calls
+    end
+  end
+
   def test_drop_keeps_replacement_cleanup_in_v2_success_pid_list
     with_drop_project do |dir, _ops, project|
       slug = "replacement-success-260902-abcd"

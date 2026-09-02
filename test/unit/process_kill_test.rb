@@ -175,6 +175,39 @@ class ProcessKillTest < Minitest::Test
     assert_nil Hive::ProcessKill.process_start_time("not-a-pid")
   end
 
+  def test_terminate_process_treats_post_term_identity_io_failure_as_unavailable
+    start_times = [ "original", Errno::EIO.new ]
+    alive_results = [ true, true ]
+    signals = []
+    start_time_reader = lambda do |_pid|
+      outcome = start_times.shift
+      raise outcome if outcome.is_a?(Exception)
+
+      outcome
+    end
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, start_time_reader) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { alive_results.shift }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, ->(_pid, _seconds) { false }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :safe_kill,
+                                         ->(signal, pid) { signals << [ signal, pid ] }) do
+            result = Hive::ProcessKill.terminate_process(
+              1234, recorded_start_time: "original", grace_seconds: 0
+            )
+
+            refute result.killed
+            assert_equal "kill_failed", result.skipped_reason
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 1234 ] ], signals,
+                 "an unavailable post-TERM identity must fail closed without KILL"
+    assert_empty start_times
+    assert_empty alive_results
+  end
+
   def test_terminate_process_escalates_to_kill_when_term_does_not_stop_process
     alive_sequence = [ true, true, false ]
     signals = []

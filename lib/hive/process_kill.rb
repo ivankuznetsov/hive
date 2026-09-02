@@ -37,7 +37,7 @@ module Hive
     # recorded start-time and a working start-time source.
     def process_start_time(pid)
       Hive::Lock.process_start_time(Integer(pid))
-    rescue ArgumentError, TypeError
+    rescue ArgumentError, TypeError, SystemCallError, IOError
       nil
     end
 

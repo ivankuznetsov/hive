@@ -58,7 +58,9 @@ compare-and-clear prevents an older completion from erasing a replacement
 child's liveness evidence. `hive status` uses the child PID for liveness, while
 cleanup commands use the recorded start time as a best-effort identity signal.
 The single-PID cleanup path has the post-grace fail-closed matrix below; records
-without a usable start time retain the legacy PID-only behavior.
+without a usable start time retain the legacy PID-only behavior. Drop
+deduplicates exact PID/start-time records but retains distinct start identities
+when one numeric PID appears in multiple task folders.
 
 ## Liveness
 
@@ -67,7 +69,8 @@ add `claude_pid + claude_pid_start_time`. Linux reads `/proc/<pid>/stat` field
 22 and other systems fall back to bounded `ps -o lstart=`. Status and cleanup
 compare PID and start identity when the source is readable. Single-PID cleanup
 preserves compatibility trust for an unavailable initial probe, then fails
-conservatively at the post-grace decision as described below.
+conservatively at the post-grace decision as described below. Coercion and
+identity-source I/O failures both classify the lookup as unavailable.
 
 `hive status --json` does one bounded join from active `task_leases` through
 `task_subjects` and `projects`, then validates only those observed folders and

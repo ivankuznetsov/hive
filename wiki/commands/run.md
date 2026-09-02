@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-08-27
+updated: 2026-09-02
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -65,6 +65,11 @@ use the closed codes documented in [[modules/task_dependencies]]. The envelope
 is emitted before the typed exception propagates, so automation receives both
 machine-readable context and the exit code. `--force` is not a run option and
 workflow-verb composition cannot bypass this check.
+
+Pre-dispatch missing/extra-argument failures use the same `hive-run.v2` error
+contract. If command-level error-envelope encoding raises
+`JSON::GeneratorError`, run suppresses the serialization failure and preserves
+the original typed error and exit code without emitting a fallback document.
 
 ## Auto-rebase pre-step (`Hive::Rebase.perform`)
 

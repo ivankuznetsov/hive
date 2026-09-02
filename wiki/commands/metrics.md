@@ -3,7 +3,7 @@ title: hive metrics
 type: command
 source: lib/hive/commands/metrics.rb, lib/hive/metrics.rb
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-09-02
 tags: [command, metrics, review, rollback]
 ---
 
@@ -43,10 +43,17 @@ Text output prints one section per project with total fix commits, reverted coun
 - `by_bias`
 - `by_phase`
 
-Usage failures emit a JSON error envelope with a closed `error_kind` such as `invalid_days`, `unknown_project`, `unknown_subcommand`, or `no_projects_registered`.
+Usage failures, including missing or extra arguments rejected before command
+dispatch, emit a JSON error envelope with a closed `error_kind` such as
+`invalid_days`, `unknown_project`, `unknown_subcommand`, or
+`no_projects_registered`.
 The command uses the shared `Hive::Schemas::EnvelopeEmitter` rescue and
 single-document guard, but overrides its payload builder to preserve the
-published metrics v1 allowlist, which intentionally omits `error_class`.
+published metrics v1 allowlist. Metrics error payloads intentionally omit
+`error_class`. If error-envelope encoding raises `JSON::GeneratorError`,
+metrics suppresses that serialization failure, emits no fallback document,
+and re-raises the original typed command error so it still controls the exit
+boundary.
 
 ## Tests
 

@@ -3,7 +3,7 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-08-28
+updated: 2026-09-02
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
@@ -142,6 +142,12 @@ identity-mismatched receipts are quarantined and never authorize a move.
 
 The enum is classified by the composed Approve command, so direct approve and
 workflow-stage envelopes cannot drift on the same transition exception.
+
+Pre-dispatch argv-shape failures, such as too many positionals, use the same
+`hive-stage-action.v2` envelope with `error_kind: "invalid_task_path"` and a
+`verb` field naming the requested public verb (`pr` maps to `open-pr`).
+Command-level error serialization deliberately propagates
+`JSON::GeneratorError`.
 
 Dependency errors also carry `reason_code`, `offending_ref`, and
 `safe_correction`. `dependency_wait` is retryable after the prerequisite

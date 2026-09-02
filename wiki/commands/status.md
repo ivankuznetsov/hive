@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-09-02
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
 ---
 
@@ -287,6 +287,19 @@ mtime, reason, or another low-cardinality attr.
 and rejects stale tokens or recommendations that are no longer routine. It is
 not a general command executor and cannot represent destructive, release, or
 administrative actions.
+
+`hive-act.v2` errors include the requested `action_id` and `target`; a missing
+pre-dispatch positional is represented by an empty string. Command-level act
+error serialization uses the strict policy: if `JSON.generate` raises
+`JSON::GeneratorError`, that generator exception is raised rather than
+suppressed, and no fallback JSON document is emitted.
+
+Status pre-dispatch errors retain the requested surface. Bare JSON errors use
+`hive-running-status.v2`, `--diagnose` uses `hive-status-diagnose.v2`, and
+`--operational` uses `hive-operational-status.v4`, each with
+`error_kind: "error"`. Status itself suppresses a
+`JSON::GeneratorError` while serializing an error envelope so the original
+typed status error continues to control the exit boundary.
 
 For markerless descriptor tasks, `observation_mtime` and the locked recheck use
 the stable task `meta.yml` mtime when present rather than the task-directory

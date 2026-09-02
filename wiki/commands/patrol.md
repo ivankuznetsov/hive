@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-08-21
+updated: 2026-09-02
 tags: [command, patrol, review, findings]
 ---
 
@@ -51,6 +51,9 @@ validation, review, and publication. Discovery has no publication policy or
 GitHub mutation capability.
 
 ## Output
+
+Pre-dispatch usage failures, including a missing `PROJECT` or extra
+positionals, use the `hive-patrol.v3` error arm with `error_kind: "error"`.
 
 `--json` emits `hive-patrol.v3`. Its historical delivery fields remain present
 for schema compatibility but are fixed to the discovery-only values:

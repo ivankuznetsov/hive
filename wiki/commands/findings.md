@@ -3,7 +3,7 @@ title: hive findings / accept-finding / reject-finding
 type: command
 source: lib/hive/commands/findings.rb, lib/hive/commands/finding_toggle.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-09-02
 tags: [command, findings, review, json]
 ---
 
@@ -142,6 +142,12 @@ The `changes` array is a subset of `selected_ids` — entries with no state chan
 ```
 
 `error_kind` enum: `ambiguous_slug`, `no_review_file`, `unknown_finding`, `invalid_task_path`, `error`.
+
+Pre-dispatch usage failures use the same `hive-findings.v1` envelope with
+`error_kind: "invalid_task_path"`; toggle failures also carry the requested
+`operation` (`accept` or `reject`). Findings and both toggle commands
+deliberately propagate `JSON::GeneratorError` from command-level error
+serialization rather than suppressing it.
 
 External consumers can validate against `schemas/hive-findings.v1.json`; resolve the path via `Hive::Schemas.schema_path("hive-findings")`.
 

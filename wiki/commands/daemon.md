@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -48,7 +48,7 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Platform-neutral inspect/plan/apply mechanics live in `Hive::UserService`; `Daemon::ServiceInstaller` remains the thin Hive adapter for templates, binary resolution, the 900-second restart warning, and command wording. Command-side summaries, JSON envelopes, and typed outcome translation are shared with bot install through `ServiceInstaller::ResultPresenter`. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
-| `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. Existing `list`/`show`/`prune` JSON and human contracts remain unchanged. |
+| `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. `list`/`show`/`prune` JSON uses the `hive-daemon-queue.v1` success or error arm; failures distinguish `unknown_action`, `missing_request_id`, and `internal`. |
 
 ## What the daemon dispatches
 
@@ -271,6 +271,23 @@ outcomes all use registered event names.
   longer classifies as advance-ready. Daemon will skip until you write
   the marker back.
 
+## JSON schemas
+
+Every public daemon JSON contract is version 1:
+
+| Surface | Schema |
+|---|---|
+| `status --json` | `hive-daemon-status.v1` |
+| `stop --json` | `hive-daemon-stop.v1` |
+| `reload --json` | `hive-daemon-reload.v1` |
+| `install --json` | `hive-daemon-install.v1` |
+| `enable --json`, `disable --json` | `hive-daemon-enroll.v1` |
+| `queue ... --json` | `hive-daemon-queue.v1` |
+
+If command-level error-envelope encoding raises `JSON::GeneratorError`, the
+daemon warns on stderr, emits no substitute document, and re-raises the
+original typed failure.
+
 ## Exit codes
 
 | Subcommand | Code | Condition |
@@ -284,6 +301,13 @@ outcomes all use registered event names.
 | `reload`   | 1    | Daemon is not running |
 | `tail`     | 0    | Stream ended via Ctrl-C |
 | `tail`     | 1    | Log file does not exist |
+| `install`  | 0    | Installed, upgraded, unchanged, or written on a host without a usable user service manager |
+| `install`  | 64   | Existing unit requires `--force`, or invalid arguments (USAGE) |
+| `install`  | 70   | Service-manager or internal installation failure (SOFTWARE) |
+| `enable` / `disable` | 0 | Every selected project was updated successfully |
+| `enable` / `disable` | 64 | Missing, unknown, conflicting, or uninitialised project selection (USAGE) |
+| `enable` / `disable` | 70 | Unexpected internal failure (SOFTWARE) |
+| `enable` / `disable` | 78 | Malformed project/global configuration (CONFIG) |
 | `queue list` / `queue prune` | 0 | Always (lists / prunes; empty is still success) |
 | `queue show <id>` | 0 | Request found |
 | `queue show <id>` | 1 | Request not found (GENERIC) |

@@ -3,7 +3,7 @@ title: hive pairing
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/pairing.rb, lib/hive/bot/pairing_store.rb, lib/hive/bot/pairing_approval_queue.rb, lib/hive/web/telegram_pairing.rb, web/app/controllers/telegram_controller.rb
 created: 2026-06-30
-updated: 2026-07-19
+updated: 2026-09-02
 tags: [command, bot, telegram, pairing, json]
 ---
 
@@ -40,6 +40,11 @@ hive pairing approve telegram <CODE> [--json]
   to DM the newly approved chat.
 - Unknown or expired codes fail without mutating `config.yml` or writing an
   approval notice. Invalid argument shapes fail as usage errors.
+
+Pre-dispatch usage failures distinguish `pairing list` from `pairing approve`
+and use the corresponding `hive-pairing-list.v1` or
+`hive-pairing-approve.v1` envelope with
+`error_kind: "invalid_arguments"`.
 
 The approval notice queue is a separate owner-only
 `<state_home>/pairing_approvals/` directory, not an extension of the daemon

@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-08-16
+updated: 2026-09-02
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -151,6 +151,15 @@ lists the closed `new, install, list, update, remove, publish` verb set. With
 such as `["new", "install", "list", "update", "remove", "publish"]`;
 unknown subcommands also carry `value` with the rejected
 token.
+
+Pre-dispatch argv-shape failures select the requested subcommand's schema:
+`hive-workflow-install.v1`, `hive-workflow-list.v1`,
+`hive-workflow-remove.v1`, `hive-workflow-update.v1`,
+`hive-workflow-publish.v1`, or `hive-workflow-validate.v1` (with
+`valid: false` and the rejected `id`), defaulting to
+`hive-workflow-new.v1`. All use `error_kind: "usage"`. Pre-dispatch failures
+of `hive decide` use `hive-decide.v1` with
+`error_kind: "invalid_task_path"`.
 
 ## Generated Descriptor
 

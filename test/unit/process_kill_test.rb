@@ -184,6 +184,28 @@ class ProcessKillTest < Minitest::Test
     end
   end
 
+  def test_terminate_process_does_not_kill_replacement_after_term_grace
+    script = run_scripted_terminate_process(
+      start_times: [ "original", "replacement", nil ],
+      alive_results: [ true, true, false ],
+      wait_results: [ false, false ]
+    )
+
+    assert script.fetch(:result).killed
+    assert_nil script.fetch(:result).skipped_reason
+    assert_equal [
+      [ :alive, 1234 ],
+      [ :start_time, 1234 ],
+      [ :signal, "TERM", 1234 ],
+      [ :wait, 1234, 0 ],
+      [ :start_time, 1234 ]
+    ], script.fetch(:calls)
+    assert_equal [ nil ], script.fetch(:remaining).fetch(:start_times),
+                 "the replacement decision must be retained without a trailing identity read"
+    assert_equal [ true, false ], script.fetch(:remaining).fetch(:alive_results)
+    assert_equal [ false ], script.fetch(:remaining).fetch(:wait_results)
+  end
+
   def test_terminate_process_reports_permission_denied_when_signal_fails
     with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| true }) do
       with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, lambda { |_signal, _pid| raise Errno::EPERM }) do
@@ -616,6 +638,54 @@ class ProcessKillTest < Minitest::Test
 
 
   private
+
+  def run_scripted_terminate_process(start_times:, alive_results:, wait_results:,
+                                     recorded_start_time: "original", signal_results: [])
+    remaining = {
+      start_times: start_times.dup,
+      alive_results: alive_results.dup,
+      wait_results: wait_results.dup,
+      signal_results: signal_results.dup
+    }
+    calls = []
+    read_next = lambda do |name|
+      values = remaining.fetch(name)
+      raise "unexpected #{name.to_s.delete_suffix('_results')} call" if values.empty?
+
+      values.shift
+    end
+    start_time = lambda do |pid|
+      calls << [ :start_time, pid ]
+      read_next.call(:start_times)
+    end
+    alive = lambda do |pid|
+      calls << [ :alive, pid ]
+      read_next.call(:alive_results)
+    end
+    wait = lambda do |pid, seconds|
+      calls << [ :wait, pid, seconds ]
+      read_next.call(:wait_results)
+    end
+    signal = lambda do |name, pid|
+      calls << [ :signal, name, pid ]
+      outcome = remaining.fetch(:signal_results).shift
+      raise outcome if outcome.is_a?(Exception)
+    end
+
+    result = with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, start_time) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, alive) do
+        with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, wait) do
+          with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, signal) do
+            Hive::ProcessKill.terminate_process(
+              1234, recorded_start_time: recorded_start_time, grace_seconds: 0
+            )
+          end
+        end
+      end
+    end
+
+    { result: result, calls: calls, remaining: remaining }
+  end
 
   def wait_for_pid_file(path, timeout: 5)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout

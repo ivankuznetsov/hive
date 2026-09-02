@@ -54,6 +54,17 @@ module Hive
       recorded_start_time.to_s == live.to_s
     end
 
+    # Unlike the compatibility-oriented initial ownership check above, the
+    # post-grace decision must retain an unavailable lookup as its own state.
+    # Only the single-PID escalation path uses this classifier; process-group
+    # cleanup keeps its existing trust-on-unavailable ownership semantics.
+    def recorded_process_identity(pid, recorded_start_time)
+      live = process_start_time(pid)
+      return :unavailable if live.to_s.empty?
+
+      live.to_s == recorded_start_time.to_s ? :match : :replacement
+    end
+
     def terminate_process(pid, recorded_start_time: nil, grace_seconds: TERM_GRACE_SECONDS)
       pid = Integer(pid)
       return Result.new(pid: pid, killed: false, skipped_reason: "invalid_pid") unless valid_target_pid?(pid)
@@ -64,12 +75,37 @@ module Hive
       end
 
       safe_kill("TERM", pid)
-      wait_until_dead(pid, grace_seconds)
-      if pid_alive?(pid)
-        safe_kill("KILL", pid)
-        wait_until_dead(pid, KILL_GRACE_SECONDS)
+      return Result.new(pid: pid, killed: true, skipped_reason: nil) if wait_until_dead(pid, grace_seconds)
+
+      if recorded_start_time.to_s.empty?
+        if pid_alive?(pid)
+          safe_kill("KILL", pid)
+          wait_until_dead(pid, KILL_GRACE_SECONDS)
+        end
+        killed = !pid_alive?(pid)
+        return Result.new(pid: pid, killed: killed, skipped_reason: killed ? nil : "kill_failed")
       end
-      killed = !pid_alive?(pid)
+
+      identity = recorded_process_identity(pid, recorded_start_time)
+      if identity == :replacement
+        return Result.new(pid: pid, killed: true, skipped_reason: nil)
+      end
+      if identity == :unavailable
+        killed = !pid_alive?(pid)
+        return Result.new(pid: pid, killed: killed, skipped_reason: killed ? nil : "kill_failed")
+      end
+
+      safe_kill("KILL", pid)
+      return Result.new(pid: pid, killed: true, skipped_reason: nil) if wait_until_dead(pid, KILL_GRACE_SECONDS)
+
+      identity = recorded_process_identity(pid, recorded_start_time)
+      killed = if identity == :replacement
+        true
+      elsif identity == :unavailable
+        !pid_alive?(pid)
+      else
+        false
+      end
       Result.new(pid: pid, killed: killed, skipped_reason: killed ? nil : "kill_failed")
     rescue ArgumentError, TypeError
       Result.new(pid: nil, killed: false, skipped_reason: "invalid_pid")

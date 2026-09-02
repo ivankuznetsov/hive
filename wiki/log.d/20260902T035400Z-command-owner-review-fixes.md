@@ -16,3 +16,10 @@ tags: [cli, wiki, commands, regression-guard, review]
   evaluations and metadata validation. Its repository snapshot now hashes
   tracked, untracked, and ignored files, including mode, size, mtime, and
   content or symlink identity.
+
+Verification on the completed review-fix state:
+
+- `bundle exec ruby -Itest test/unit/wiki_command_index_test.rb` — 25 runs,
+  91 assertions, 0 failures, 0 errors, 0 skips.
+- `bundle exec ruby -Itest test/integration/wiki_command_index_test.rb` —
+  2 runs, 34 assertions, 0 failures, 0 errors, 0 skips.

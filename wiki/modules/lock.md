@@ -1,9 +1,9 @@
 ---
 title: Hive::Lock
 type: module
-source: lib/hive/lock.rb, lib/hive/runtime_control_plane/task_lease_repository.rb, lib/hive/runtime_control_plane/process_guard.rb
+source: lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/runtime_control_plane/task_lease_repository.rb, lib/hive/runtime_control_plane/process_guard.rb
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [lock, concurrency, sqlite, sequel, lease, fencing, flock, commit-lock, fork]
 ---
 
@@ -56,24 +56,66 @@ exit or shared-session teardown, `clear_task_lock_child` removes both fields
 in a fenced SQL update only when PID and start time still match. That
 compare-and-clear prevents an older completion from erasing a replacement
 child's liveness evidence. `hive status` uses the child PID for liveness, while
-cleanup commands compare the recorded start time with the live process before
-signalling it so a reused PID cannot target an unrelated process. If the
-platform cannot read a start time, the field is nil and that child-specific
-PID-reuse guard degrades to its existing PID-only behavior.
+cleanup commands use the recorded start time as a best-effort identity signal.
+The single-PID cleanup path has the post-grace fail-closed matrix below; records
+without a usable start time retain the legacy PID-only behavior.
 
 ## Liveness
 
 The runner identity is `holder_pid + holder_process_identity`; agent launchers
 add `claude_pid + claude_pid_start_time`. Linux reads `/proc/<pid>/stat` field
 22 and other systems fall back to bounded `ps -o lstart=`. Status and cleanup
-compare both PID and start identity so PID reuse does not target or report an
-unrelated process. An unavailable identity probe fails conservatively.
+compare PID and start identity when the source is readable. Single-PID cleanup
+preserves compatibility trust for an unavailable initial probe, then fails
+conservatively at the post-grace decision as described below.
 
 `hive status --json` does one bounded join from active `task_leases` through
 `task_subjects` and `projects`, then validates only those observed folders and
 process identities. It does not scan every task directory or issue one SQL
 query per task. Stale rows ahead of a live row do not consume the 32-row output
 budget; the source scan is independently capped at 10,000 rows.
+
+## Process cleanup identity
+
+`Hive::ProcessKill.terminate_process` classifies a recorded start identity once
+after each grace wait that still reports the PID live. The classification is
+retained through that branch; a later mutable read cannot overwrite it.
+
+| Observation | Single-PID outcome |
+| --- | --- |
+| Initial readable start time differs | Refuse without signalling: `pid_reuse_guard`. |
+| Initial start-time lookup unavailable | Preserve compatibility: trust the recorded PID for TERM. |
+| TERM wait reports the PID absent | Recorded cleanup succeeds immediately. |
+| Post-TERM readable replacement | Recorded process exited; suppress KILL and succeed. |
+| Post-TERM lookup unavailable, PID absent on one liveness check | Succeed. |
+| Post-TERM lookup unavailable, PID still live | Suppress KILL and return `kill_failed`. |
+| Post-TERM readable match | Send KILL and enter the KILL grace wait. |
+| KILL wait still live, then readable replacement | Recorded process exited; succeed. |
+| KILL wait still live, lookup unavailable | One liveness check distinguishes success from `kill_failed`. |
+| KILL wait still live, readable match | Return `kill_failed`. |
+
+`Result#killed` therefore means successful cleanup of the recorded identity,
+not proof that SIGKILL was sent or delivered. A replacement may remain alive at
+the same numeric PID. Callers must retain the recorded start identity and must
+not reuse a returned PID as a later signal target.
+
+An empty/missing recorded start time performs no identity reads and keeps the
+legacy liveness-only TERM-to-KILL escalation. Marker-only and older records on
+that branch are outside the replacement-identity guarantee. The stronger
+fail-closed rule also begins only after TERM: an unavailable initial lookup may
+still authorize TERM for compatibility.
+
+`terminate_process_group` deliberately keeps its existing shared
+`pid_owned_by_recorded_start?` gate. An unavailable *initial* lookup is trusted;
+the later two-snapshot ancestry/root checks and identity-required KILL pass are
+unchanged and may still refuse. Its production consumers are stale web capture
+cleanup (`lib/hive/web/capture_runtime.rb`), capture-server teardown
+(`lib/hive/commands/web/capture_server.rb`), expired Patrol claim cleanup
+(`lib/hive/refactor_patrol/process_group_resolver.rb`), and Drop's
+`claude_pid` candidates (`lib/hive/commands/drop.rb`). Failed tree discovery
+continues through `best_effort_terminate_root`, but the public
+`process_tree_unavailable` result remains separate and does not inherit the
+single-PID replacement-success rules.
 
 ## Process guard
 

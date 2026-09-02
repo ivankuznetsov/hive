@@ -3,17 +3,19 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, web/app/models/task.rb, web/app/models/concerns/task_mutations.rb, web/app/controllers/tasks/drops_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-07-22
+updated: 2026-09-02
 tags: [command, task, cleanup, json, tui, web]
 ---
 
 **TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]`
 hard-deletes an active task. It identity-checks the agent recorded in the typed
-task lease, kills that process plus identity-stable descendants, fences the
-remaining destructive work with the project commit lock and deterministic
-task leases, closes the draft PR best-effort, removes worktree/branch/folders/
-logs, and records an audit commit on `hive/state`. There is no dropped bucket,
-archive, undo, reason prompt, or confirmation.
+task lease, cleans that recorded process plus identity-stable descendants, and
+fences the remaining destructive work with the project commit lock and
+deterministic task leases. An unresolved `kill_failed` candidate aborts before
+those leases or any PR/worktree/branch/task/log deletion. Successful Drop
+closes the draft PR best-effort, removes worktree/branch/folders/logs, and
+records an audit commit on `hive/state`. There is no dropped bucket, archive,
+undo, reason prompt, or confirmation.
 
 ## Usage
 
@@ -47,6 +49,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 | Internal failure | 70 | `internal` |
 | `hive/state` commit lock contention | 75 | `error` |
 | Replacement task runner wins the cleanup race | 75 | `error` |
+| Any recorded candidate returns `kill_failed` | 75 | `error` |
 | Malformed project / global config | 78 | `config` |
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
@@ -62,17 +65,30 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 1. Resolve the target and refuse archived-only tasks.
 2. Enter the project `.commit-lock`, then read the current typed lease and
    marker identities.
-3. Kill recorded agent roots from the lease and `AGENT_WORKING pid=...`,
-   guarded by process start time. Descendants are retained only when parent,
-   group, and start identity match across two process snapshots. Failed tree
-   discovery falls back to the verified root and reports
+3. Attempt cleanup of recorded agent roots from the lease and
+   `AGENT_WORKING pid=...`,
+   guarded by process start time when one was recorded. A readable initial
+   mismatch returns `pid_reuse_guard` without signalling. After TERM, a
+   readable replacement proves the recorded process exited and completes
+   without KILL; an unavailable identity succeeds only when one liveness check
+   finds the PID absent, otherwise it returns `kill_failed`. A matching identity
+   alone may receive KILL, and the same replacement/unavailable/match decision
+   is retained after the KILL grace period. Descendants are retained only when
+   parent, group, and start identity match across two process snapshots. Failed
+   tree discovery falls back to the verified root and reports
    `process_tree_unavailable`.
-4. Acquire every observed task lease in deterministic folder order. A runner
+4. If any candidate returned `kill_failed`, abort with retryable exit 75 before
+   acquiring task leases or changing the recorded PR, worktree, branch, task
+   folder, logs, lease/marker identity, or hive-state audit history. Restore
+   start-time visibility or stop and verify the recorded process, then rerun the
+   ordinary Drop command. A successful candidate or an earlier non-gating
+   reason cannot hide this fence.
+5. Acquire every observed task lease in deterministic folder order. A runner
    that starts after process cleanup but before this claim wins the lease and
    aborts Drop before deletion.
-5. Re-resolve and revalidate folder/stage context while the commit lock and
+6. Re-resolve and revalidate folder/stage context while the commit lock and
    task leases are held.
-6. Close `pr_url` best-effort; remove owned worktree and branch; delete every
+7. Close `pr_url` best-effort; remove owned worktree and branch; delete every
    active-stage folder and `.hive-state/logs/<slug>/`; then commit
    `hive: dropped/<slug> dropped`.
 
@@ -80,16 +96,30 @@ The logical leases remain held across this external work, but no SQLite
 transaction remains open while GitHub, process, filesystem, or Git operations
 run.
 
-Re-running after an interrupted cleanup converges: already-missing processes, folders, worktrees, PRs, and branches are treated as complete.
+Re-running after an interrupted cleanup converges: already-missing processes,
+folders, worktrees, PRs, and branches are treated as complete. A `kill_failed`
+refusal intentionally leaves the recorded task identity and destructive
+resources in place for remediation and the same retry.
 
 `agent_killed_pids` reports the recorded root candidates whose cleanup
 succeeded. It does not enumerate the descendant PIDs terminated as part of that
-root's process tree. `agent_killed` is true when
-at least one recorded candidate was cleaned up, so
+root's process tree. A post-TERM or post-KILL replacement success remains in
+this v2 compatibility list under its recorded numeric PID, even though that
+number may now identify an unrelated live replacement. The field is audit
+context only and must never be reused as a signalling list. `agent_killed` is
+true when at least one recorded identity was cleaned up; it does not claim that
+SIGKILL, or any signal at all, was sent. Consequently,
 `agent_kill_skipped_reason` can be non-null alongside it when another candidate
 was skipped or only received incomplete cleanup. A
 `process_tree_unavailable` reason means the recorded root cleanup was attempted
 but descendant discovery could not be completed.
+
+Marker-only and older records without a usable process start time retain the
+legacy liveness-only TERM-to-KILL path. They are outside the replacement-PID
+suppression guarantee. `claude_pid` candidates continue through
+`terminate_process_group`, whose initial unavailable-lookup compatibility and
+tree-snapshot behavior are unchanged; `process_tree_unavailable` does not
+inherit the single-PID replacement-success semantics.
 
 The descendant set is captured and identity-confirmed across two consecutive
 snapshots. A process forked after confirmation can escape that cleanup window;

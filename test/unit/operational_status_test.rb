@@ -803,7 +803,7 @@ class OperationalStatusTest < Minitest::Test
   end
 
   def test_scheduler_match_accepts_unicode_marker_attrs_from_binary_task_scan
-    message = "Claude stopped — retry the review"
+    message = "Claude stopped — retry cafe\u0301"
     source_task = task(
       action: "error",
       slug: "unicode-marker",
@@ -816,7 +816,7 @@ class OperationalStatusTest < Minitest::Test
       reason: "global dispatch capacity is exhausted"
     )
     snapshot.dig("tasks", 0)["marker_attrs"] = {
-      "message" => message,
+      "message" => message.unicode_normalize(:nfc),
       "marker_id" => "marker-unicode-marker"
     }
 

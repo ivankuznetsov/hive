@@ -6,9 +6,9 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 10204
+final_inventory_lines: 10208
 outside_inventory_net_lines: -4910
-final_lines: 5294
+final_lines: 5298
 final_paths:
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 104
@@ -47,7 +47,7 @@ final_paths:
 - path: lib/hive/runtime_control_plane/admission_transition.rb
   lines: 265
 - path: lib/hive/runtime_control_plane/codec.rb
-  lines: 92
+  lines: 96
 - path: lib/hive/runtime_control_plane/cutover.rb
   lines: 841
 - path: lib/hive/runtime_control_plane/cutover_manifest.rb

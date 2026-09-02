@@ -3,6 +3,7 @@ require "hive/agent"
 require "hive/agent_profile"
 require "hive/agent_support/opencode"
 require "hive/task"
+require "hive/workflow_package/runtime_policy"
 
 class OpenCodeAgentLifecycleTest < Minitest::Test
   include HiveTestHelper
@@ -987,6 +988,25 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     File.expand_path(
       "../../components/agent-cli-runtime/test/fixtures/opencode/v1.18.16",
       __dir__
+    )
+  end
+
+  def command_wrapper(directory, name, log)
+    path = File.join(directory, name)
+    File.write(path, <<~SH)
+      #!/bin/sh
+      printf '%s\n' "$*" >> #{Shellwords.escape(log)}
+      exec "$@"
+    SH
+    File.chmod(0o755, path)
+    path
+  end
+
+  def runtime_policy_with_prefix(command_prefix)
+    scope = Struct.new(:allowed_tools, :disallowed_tools).new(nil, nil)
+    Hive::WorkflowPackage::RuntimePolicy.portable_policy(
+      scope, task_root: "", directories: [], environment: { "HOME" => ENV.fetch("HOME") }, outputs: {},
+      runtime_root: nil, cli_flags: [], executable: nil, command_prefix:
     )
   end
 

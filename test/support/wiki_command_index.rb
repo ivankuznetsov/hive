@@ -5,6 +5,66 @@ module WikiCommandIndex
   COMMAND_NAME = /\A[a-z0-9_][a-z0-9_-]*\z/.freeze
   OWNER_TARGET = /\A(?:commands|modules)\/[a-z0-9][a-z0-9_-]*\z/.freeze
   WRAPPER_ALIASES = { "-v" => "version" }.freeze
+  COMMAND_OWNERS = {
+    "accept-finding" => "commands/findings",
+    "act" => "commands/status",
+    "answer" => "commands/answer",
+    "answer-digest" => "commands/answer-digest",
+    "approve" => "commands/approve",
+    "archive" => "commands/stage_action",
+    "artifacts" => "commands/stage_action",
+    "babysit" => "commands/babysit",
+    "bench" => "commands/bench-submit",
+    "bot" => "commands/bot",
+    "brainstorm" => "commands/stage_action",
+    "circuits" => "commands/circuits",
+    "connect" => "commands/screenote",
+    "daemon" => "commands/daemon",
+    "decide" => "commands/workflow",
+    "develop" => "commands/stage_action",
+    "disconnect" => "commands/screenote",
+    "doctor" => "commands/doctor",
+    "drop" => "commands/drop",
+    "evidence" => "commands/evidence",
+    "finalize" => "commands/stage_action",
+    "findings" => "commands/findings",
+    "forget" => "commands/forget",
+    "generate-name" => "commands/generate-name",
+    "help" => "commands/help",
+    "init" => "commands/init",
+    "markers" => "commands/markers",
+    "metrics" => "commands/metrics",
+    "migrate" => "commands/migrate",
+    "module" => "commands/module",
+    "new" => "commands/new",
+    "open-pr" => "commands/stage_action",
+    "pairing" => "commands/pairing",
+    "patrol" => "commands/patrol",
+    "plan" => "commands/stage_action",
+    "plan-review" => "modules/plan_review",
+    "plan-review-run" => "modules/plan_review",
+    "prune" => "commands/prune",
+    "rebase-status" => "commands/rebase-status",
+    "refactor-patrol" => "commands/refactor-patrol",
+    "reject-finding" => "commands/findings",
+    "review" => "commands/stage_action",
+    "run" => "commands/run",
+    "runtime" => "commands/runtime",
+    "setup" => "commands/setup",
+    "setup-agents" => "commands/setup-agents",
+    "status" => "commands/status",
+    "task" => "commands/task",
+    "tree" => "commands/tree",
+    "tui" => "commands/tui",
+    "uninstall" => "commands/uninstall",
+    "update" => "commands/update",
+    "version" => "commands/version",
+    "watch" => "commands/watch",
+    "web" => "commands/web",
+    "wiki" => "commands/wiki",
+    "workflow" => "commands/workflow",
+    "worktree" => "modules/worktree"
+  }.freeze
 
   Diagnostic = Struct.new(:kind, :subject, :detail, keyword_init: true) do
     def sort_key
@@ -17,6 +77,7 @@ module WikiCommandIndex
   end
 
   Row = Struct.new(:command, :owner, :line, keyword_init: true)
+  Section = Struct.new(:heading, :body, keyword_init: true)
 
   Result = Struct.new(
     :help_commands,
@@ -34,33 +95,19 @@ module WikiCommandIndex
   Metadata = Struct.new(:visible, :hidden, :aliases, :diagnostics, keyword_init: true)
 
   class Guard
-    CONTRACT_CHECKS = {
-      syntax: lambda { |text|
-        text.match?(/^##+ (?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands)\b/i) ||
-          text.scan(/`hive\s|^\s*hive\s/m).size >= 2
-      },
-      options: ->(text) { text.match?(/\boptions?\b|--[a-z]|options?: (?:not applicable|none)/i) },
-      behavior: lambda { |text|
-        text.scan(/^##+ (.+)$/).flatten.any? do |heading|
-          !heading.match?(/\A(?:Usage|Synopsis|CLI|Invocation|Surface|Options?|Output|JSON|Errors?|Serialization|Exit codes?|Examples?|Tests?|Backlinks|Related|Notes)\b/i)
-        end
-      },
-      examples: lambda { |text|
-        text.match?(/^##+ Examples?\b/i) || text.scan(/`hive\s|^\s*hive\s/m).size >= 2
-      },
-      schema: ->(text) { text.match?(/schema|JSON|text-only|human-readable|plain text|no structured output/i) },
-      output_exceptions: ->(text) { text.match?(/error|failure|refus|warning|exception|output exception/i) },
-      serialization_fallback: lambda { |text|
-        text.match?(/serializ|GeneratorError|does not emit JSON|no JSON/i)
-      },
-      exit_codes: lambda { |text|
-        text.match?(/exit code|exit status|exits? (?:with )?[0-9]|returns? (?:success|failure|0|1)|status [0-9]/i)
-      }
+    CONTRACT_HEADINGS = {
+      syntax: /\A(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract)\b/i,
+      behavior: /\b(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?)\b/i,
+      schema: /\b(?:JSON|Schema|Output)\b/i,
+      output_exceptions: /\b(?:Errors?|Failures?|Refusals?|Output|Serialization|Exit codes?)\b/i,
+      serialization_fallback: /\b(?:Serialization|JSON|Output)\b/i,
+      exit_codes: /\bExit codes?\b/i
     }.freeze
 
-    def initialize(wiki_root: nil, owner_reader: nil)
+    def initialize(wiki_root: nil, owner_reader: nil, expected_owners: COMMAND_OWNERS)
       @wiki_root = wiki_root
       @owner_reader = owner_reader || method(:read_owner)
+      @expected_owners = expected_owners
     end
 
     def evaluate(help_text:, index_text:, validate_contracts: true)
@@ -82,7 +129,7 @@ module WikiCommandIndex
 
       owners, owner_documents, owner_diagnostics = resolve_owners(rows)
       diagnostics.concat(owner_diagnostics)
-      diagnostics.concat(validate_owner_contracts(owner_documents)) if validate_contracts
+      diagnostics.concat(validate_owner_contracts(owners, owner_documents)) if validate_contracts
 
       Result.new(
         help_commands: help_commands.freeze,
@@ -135,6 +182,10 @@ module WikiCommandIndex
         next if public_name == canonical
 
         aliases[public_name] = canonical
+      end
+
+      (visible & aliases.keys).each do |public_name|
+        diagnostics << diagnostic(:alias_canonical_collision, public_name, aliases.fetch(public_name))
       end
 
       Metadata.new(
@@ -190,7 +241,8 @@ module WikiCommandIndex
 
       header = cells(table_lines[0][0])
       separator = cells(table_lines[1][0])
-      unless header == [ "Command", "Owner" ] && separator&.all? { |cell| cell.match?(/\A:?-{3,}:?\z/) }
+      unless header == [ "Command", "Owner" ] && separator&.size == 2 &&
+          separator.all? { |cell| cell.match?(/\A:?-{3,}:?\z/) }
         diagnostics << diagnostic(:malformed_index_header, table_lines[0][1])
       end
 
@@ -254,6 +306,18 @@ module WikiCommandIndex
         next unless targets.one?
 
         target = targets.first
+        if @expected_owners
+          expected = @expected_owners[command]
+          unless expected
+            diagnostics << diagnostic(:missing_expected_owner, command, target)
+            next
+          end
+          unless target == expected
+            diagnostics << diagnostic(:unexpected_owner, command, "expected=#{expected} actual=#{target}")
+            next
+          end
+        end
+
         unless target.match?(OWNER_TARGET)
           diagnostics << diagnostic(:disallowed_owner_target, command, target)
           next
@@ -272,11 +336,62 @@ module WikiCommandIndex
       [ owners, documents, diagnostics ]
     end
 
-    def validate_owner_contracts(documents)
-      documents.flat_map do |target, document|
-        CONTRACT_CHECKS.filter_map do |requirement, check|
-          diagnostic(:incomplete_owner_contract, target, requirement) unless check.call(document)
+    def validate_owner_contracts(owners, documents)
+      owners.flat_map do |command, target|
+        sections = contract_sections(documents.fetch(target))
+        CONTRACT_HEADINGS.keys.filter_map do |requirement|
+          next if contract_requirement?(requirement, command, sections)
+
+          diagnostic(:incomplete_owner_contract, command, "#{target}:#{requirement}")
         end
+      end
+    end
+
+    def contract_sections(document)
+      matches = document.to_enum(:scan, /^## (.+)$/).map { Regexp.last_match }
+      matches.map.with_index do |match, index|
+        body_start = match.end(0)
+        body_end = matches[index + 1]&.begin(0) || document.length
+        Section.new(heading: match[1].strip, body: document[body_start...body_end]).freeze
+      end
+    end
+
+    def contract_requirement?(requirement, command, sections)
+      case requirement
+      when :syntax
+        sections.any? do |section|
+          section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax)) &&
+            section.body.match?(/\bhive #{Regexp.escape(command)}(?:\s|`|\z)/)
+        end
+      when :options
+        sections.any? do |section|
+          (section.heading.match?(/\bOptions?\b/i) ||
+            section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax))) &&
+            section.body.match?(/--[a-z]|options?\s*(?::|are)\s*(?:not applicable|none)|no (?:command-specific )?options?/i)
+        end
+      when :behavior
+        sections.any? { |section| section.heading.match?(CONTRACT_HEADINGS.fetch(:behavior)) && !section.body.strip.empty? }
+      when :examples
+        sections.any? do |section|
+          (section.heading.match?(/\bExamples?\b/i) ||
+            section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax))) &&
+            section.body.match?(/\bhive #{Regexp.escape(command)}(?:\s|`|\z)/)
+        end
+      when :schema
+        contract_text?(sections, :schema, /hive-[a-z0-9-]+\.v\d+|schema(?:_version| version|\s*=).*?\d|text-only|human-readable|plain text|no (?:structured|JSON)|unversioned/i)
+      when :output_exceptions
+        contract_text?(sections, :output_exceptions, /error|fail|refus|warn|exception|invalid|not applicable|none/i)
+      when :serialization_fallback
+        contract_text?(sections, :serialization_fallback, /serializ|JSON\.generate|GeneratorError|fallback|propagat|suppress|no JSON|text-only|plain text|human-readable|not applicable/i)
+      when :exit_codes
+        contract_text?(sections, :exit_codes, /(?:^|[^0-9])(?:0|1|2|4|64|65|70|75|78)(?:[^0-9]|$)|not applicable/i)
+      end
+    end
+
+    def contract_text?(sections, requirement, content_pattern)
+      heading_pattern = CONTRACT_HEADINGS.fetch(requirement)
+      sections.any? do |section|
+        section.heading.match?(heading_pattern) && section.body.match?(content_pattern)
       end
     end
 

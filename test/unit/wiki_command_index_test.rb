@@ -300,7 +300,10 @@ class WikiCommandIndexTest < Minitest::Test
   private
 
   def fixture_guard(documents = {})
-    WikiCommandIndex::Guard.new(owner_reader: ->(target) { documents[target] })
+    WikiCommandIndex::Guard.new(
+      owner_reader: ->(target) { documents[target] },
+      expected_owners: nil
+    )
   end
 
   def help_for(*commands)

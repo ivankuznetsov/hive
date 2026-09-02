@@ -3,11 +3,27 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-08-13
+updated: 2026-09-02
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+
+## Usage and options
+
+Run `hive tui` in an interactive TTY. It has no command-specific options;
+`--json` is explicitly rejected because the dashboard is human-only.
+
+## Examples
+
+`hive tui` opens the fleet dashboard; press `?` after launch for the complete
+per-mode keybinding reference.
+
+## Output, schema, and serialization
+
+Successful TUI operation is human-readable terminal output with no JSON schema,
+so success serialization and a serialization fallback are not applicable. The
+schema-less `--json` refusal is emitted only by the wrapper error boundary.
 
 ## Backend
 
@@ -281,6 +297,10 @@ Every `error` row follows one path: grid Enter opens red-status detail, and Ente
 - **Crash-time cleanup:** there is no `at_exit` hook. Workflow-verb children are spawned with `pgroup: true` and intentionally **detached** — `dispatch_background` never registers them with `SubprocessRegistry`, and the registry's `kill_inflight!` is called only from `App.run_charm`'s normal-exit `ensure` block (not from `at_exit`). A signal that bypasses that ensure (`SIGKILL` of the TUI, kernel OOM kill, etc.) leaves the children running. That is the design — long-running background agents outlive an interrupted dashboard so the user can re-attach with `hive tui` and pick up the in-flight rows. If a durable failure marker lands, the daemon observes it on the next snapshot and owns automatic recovery.
 - **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"invalid_task_path", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema, and `error_kind` matches the value other `InvalidTaskPath` emit sites already use).
 - **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.
+
+The interactive command has no success JSON schema, so success serialization
+and a serialization fallback are not applicable. The schema-less `--json`
+refusal is produced only by the wrapper's pre-dispatch error boundary.
 
 ## Test surface
 

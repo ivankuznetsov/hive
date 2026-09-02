@@ -3,7 +3,7 @@ title: hive circuits
 type: command
 source: lib/hive/commands/circuits.rb, lib/hive/provider_routing/operational_projection.rb, schemas/hive-circuits.v1.json
 created: 2026-08-10
-updated: 2026-08-29
+updated: 2026-09-02
 tags: [command, providers, routing, circuits, sqlite, audit, operator, json]
 ---
 
@@ -71,6 +71,22 @@ repair commands.
 Circuit cooldown controls route eligibility only. `RecoveryCoordinator` owns
 retry admission, pacing, charges, successor creation, and redispatch. Provider
 administration remains intentionally absent from `hive act`.
+
+## Errors, serialization, and exit codes
+
+With `--json`, failures use the `hive-circuits.v1` error arm and never include
+prompts, raw provider output, credentials, or unsanitized provider messages.
+The shared envelope emitter's serialization policy is `warn`: if an error
+envelope raises `JSON::GeneratorError`, Hive warns, emits no fallback document,
+and preserves the original typed or wrapped error as the exit authority.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Inspection or the generation-fenced mutation completed. |
+| 1 | Provider-health/runtime storage was unavailable, a generation was stale, or another ordinary Hive error occurred. |
+| 64 | The action, scope, consent, reason, model, or expected generation was invalid. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 78 | Provider or project configuration was invalid. |
 
 ## Tests
 

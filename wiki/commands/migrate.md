@@ -3,7 +3,7 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/runtime_control_plane/cutover.rb, lib/hive/patrol_fix/admission_store.rb, lib/hive/workflow_package/task_migrator.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, plan-review, update, attempt-storage, patrol]
 ---
 
@@ -258,6 +258,22 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.
+
+## Output, serialization, and exit codes
+
+`migrate` has no JSON mode or command schema; its progress and recovery actions
+are human-readable text. JSON serialization and a serialization fallback are
+therefore not applicable.
+
+| Code | Meaning |
+|---:|---|
+| 0 | The project or confirmed fleet migration completed, including an idempotent no-op. |
+| 1 | A destination collision or another ordinary migration invariant failed. |
+| 64 | The project path, fleet arguments, confirmation, or exclusion selection was invalid. |
+| 69 | A required cutover dependency or runtime owner was unavailable. |
+| 70 | Git, database integrity, or another software boundary failed. |
+| 75 | A lock or live-owner condition made the migration temporarily unsafe. |
+| 78 | Project, workflow, manifest, or runtime configuration was invalid. |
 
 ## Tests
 

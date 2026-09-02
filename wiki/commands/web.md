@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
 ---
 
@@ -103,11 +103,11 @@ intact. Source-checkout dogfood must set `HIVE_WEB_BUNDLE_URL` to that checkout'
 authoritative and suppresses both managed installation and refresh, including
 when combined with `--force`.
 
-`hive web start --detach` starts that service and reloads
-systemd-user first on Linux so a unit written while systemd-user was unavailable
-becomes visible. Foreground
-`hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
+`hive web start --detach` starts that service and reloads systemd-user first on
+Linux so a unit written while systemd-user was unavailable becomes visible.
+Foreground `hive web start` is equivalent to `hive web`. `hive web status --json`
+emits `hive-web-status.v1`; `hive web install --json` emits
+`hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
 separate installed, enabled, running, manager availability, URL, and readiness
 state on success and pre-dispatch/runtime errors. Readiness probes the local
@@ -131,6 +131,18 @@ this status-specific runtime field. Bootstrap and service-install exceptions fro
 `install --json` likewise emit
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
+
+Pre-dispatch argv failures distinguish `web status` from `web install` and use
+the matching versioned envelope with `error_kind: "invalid_task_path"`.
+
+## Output exceptions, serialization, and exit codes
+
+Foreground `hive web` is human-readable. Machine lifecycle modes emit
+`hive-web-status.v1` or `hive-web-install.v1`, including their matching typed
+error arms. Those documents are encoded directly: a JSON serialization failure
+propagates and no prose or fallback JSON document is emitted. Success exits `0`;
+an unready service or ordinary bootstrap/service failure exits `1`, invalid
+arguments exit `64`, and invalid web configuration exits `78`.
 
 ## Environment compatibility
 

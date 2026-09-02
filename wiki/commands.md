@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-08-29
+updated: 2026-09-02
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -19,8 +19,10 @@ semantic `hive task` detail, the
 `hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
-The Ruby command/API contract lives in [[cli]] and the
-per-command pages. OpenClaw does not add a second runtime and does not publish
+[[cli]] is the navigation-only command-to-owner index. Each linked command or
+module page is the sole authority for that command's syntax, behavior, schema,
+serialization policy, and exits; the surface summaries below are orientation,
+not competing contracts. OpenClaw does not add a second runtime and does not publish
 one ClawHub listing per Hive verb.
 
 ## Source Files
@@ -70,9 +72,8 @@ lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer,
 the [[commands/pairing]] Telegram pairing approval surface,
-[[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
-its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
-authorized actions), and
+[[commands/refactor-patrol]] as the language-neutral architecture-patrol
+discovery surface (it routes evidence-backed theses but takes no actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
 [[commands/circuits]] as the generation-fenced provider-health surface,

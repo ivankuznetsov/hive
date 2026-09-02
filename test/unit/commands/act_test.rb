@@ -3,6 +3,8 @@ require "json_schemer"
 require "hive/commands/act"
 
 class CommandsActTest < Minitest::Test
+  include HiveTestHelper
+
   class FakeExecutor
     attr_reader :calls
 
@@ -156,6 +158,27 @@ class CommandsActTest < Minitest::Test
     assert_equal false, payload.fetch("ok")
     assert_equal "stale_observation", payload.fetch("error_kind")
     assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
+  end
+
+  def test_error_envelope_serialization_failure_is_raised
+    executor = FakeExecutor.new(error: Hive::ConfigError.new("bad config"))
+    command = Hive::Commands::Act.new(
+      "workflow.advance", "demo:task", observation: "b" * 64,
+      json: true, executor: executor
+    )
+
+    out, err = capture_io do
+      with_replaced_singleton_method(JSON, :generate, lambda { |_payload|
+        raise JSON::GeneratorError, "forced generator failure"
+      }) do
+        error = assert_raises(JSON::GeneratorError) { command.call }
+        assert_equal "forced generator failure", error.message
+      end
+    end
+
+    assert_empty out
+    assert_empty err
+    assert_equal 1, executor.calls.length
   end
 
   def test_missing_observation_is_a_usage_error_before_executor_call

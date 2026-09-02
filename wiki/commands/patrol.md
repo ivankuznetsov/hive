@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-08-21
+updated: 2026-09-02
 tags: [command, patrol, review, findings]
 ---
 
@@ -52,6 +52,9 @@ GitHub mutation capability.
 
 ## Output
 
+Pre-dispatch usage failures, including a missing `PROJECT` or extra
+positionals, use the `hive-patrol.v3` error arm with `error_kind: "error"`.
+
 `--json` emits `hive-patrol.v3`. Its historical delivery fields remain present
 for schema compatibility but are fixed to the discovery-only values:
 
@@ -93,6 +96,20 @@ capacity admission. Legacy ordinary findings without `target_sha` bind to the
 current default-branch revision, and secret-like evidence is redacted before
 it enters admission state. There is no runtime Patrol Fix migration, cutover,
 or dual-write subsystem.
+
+## Serialization and exit codes
+
+Success and error documents are encoded directly. A `JSON::GeneratorError` is
+not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Discovery/listing completed, including a dry run or zero findings. |
+| 1 | An ordinary Patrol state or review invariant failed. |
+| 64 | The public argument shape was invalid before dispatch. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 75 | A concurrent scan/state lock made the cycle temporarily unavailable. |
+| 78 | The project was unknown, ineligible, or had invalid configuration. |
 
 ## Backlinks
 

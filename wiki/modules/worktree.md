@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-08-24
+updated: 2026-09-02
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -306,6 +306,32 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 - `Hive::Commands::Worktree` — inspects and repairs residue only through a strictly owned coding worktree pointer.
+
+## CLI serialization and exit codes
+
+`hive worktree --json` uses the shared envelope emitter with serialization
+policy `raise`: `JSON::GeneratorError` is raised and no fallback JSON document
+is emitted.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Status or the guarded repair completed. |
+| 1 | A recovery-state invariant failed outside the typed categories below. |
+| 64 | The subcommand, target, strategy, path list, or message was invalid. |
+| 70 | Worktree ownership, Git, or clean-exit repair failed. |
+| 75 | The task lock was busy or freshness changed concurrently. |
+| 78 | Project/workflow configuration was invalid. |
+
+## Examples
+
+Use `hive worktree status TASK --json` to inspect owned residue. A guarded
+repair is explicit, for example
+`hive worktree repair TASK --strategy commit --json`.
+
+## JSON schema
+
+All machine-readable status and repair results use `hive-worktree.v1`, with
+`schema: "hive-worktree"` and `schema_version: 1` on success and error arms.
 
 ## Tests
 

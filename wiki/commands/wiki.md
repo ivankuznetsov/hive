@@ -3,7 +3,7 @@ title: hive wiki
 type: command
 source: lib/hive/commands/wiki.rb, lib/hive/wiki_log.rb, openclaw/skills/hive/SKILL.md
 created: 2026-06-05
-updated: 2026-06-07
+updated: 2026-09-02
 tags: [command, wiki, changelog, generated]
 ---
 
@@ -41,6 +41,19 @@ duplicate entries already inside the generated block.
 
 The command exits with `Hive::InvalidTaskPath` / EX_USAGE when the
 project has no `wiki/` directory or when `--check` finds stale output.
+
+## Output, exceptions, and exit codes
+
+The command has no JSON mode or schema. Output is human-readable text, so JSON
+serialization and a serialization fallback are not applicable. `compile-log`
+writes the generated aggregate; `--check` is the read-only exception and emits
+an error without modifying a stale file.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Compilation completed, or `--check` found the aggregate current. |
+| 64 | The subcommand/project was invalid, the wiki was absent, or `--check` found stale output. |
+| 1 | An unclassified filesystem/compiler failure escaped the command. |
 
 ## OpenClaw Wrapper
 

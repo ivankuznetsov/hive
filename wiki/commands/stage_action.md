@@ -3,7 +3,7 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-08-28
+updated: 2026-09-02
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
@@ -143,6 +143,12 @@ identity-mismatched receipts are quarantined and never authorize a move.
 The enum is classified by the composed Approve command, so direct approve and
 workflow-stage envelopes cannot drift on the same transition exception.
 
+Pre-dispatch argv-shape failures, such as too many positionals, use the same
+`hive-stage-action.v2` envelope with `error_kind: "invalid_task_path"` and a
+`verb` field naming the requested public verb (`pr` maps to `open-pr`).
+Command-level error serialization deliberately propagates
+`JSON::GeneratorError`.
+
 Dependency errors also carry `reason_code`, `offending_ref`, and
 `safe_correction`. `dependency_wait` is retryable after the prerequisite
 reaches its gate; `admission_error` requires repairing the named metadata,
@@ -151,6 +157,30 @@ plan, workflow, enrollment, or repository-identity evidence.
 In JSON mode, the inner Approve and Run are quieted so the envelope is a single parseable document. In text mode, Approve and Run emit their normal prose since that output is intended for humans.
 
 External consumers can validate the current contract through `Hive::Schemas.schema_path("hive-stage-action")`, which resolves to `schemas/hive-stage-action.v2.json`; `schemas/hive-stage-action.v1.json` remains in tree for pinned legacy consumers.
+
+## Examples
+
+- `hive brainstorm TASK --from 1-inbox`
+- `hive develop TASK --from 3-plan`
+- `hive open-pr TASK --from 4-execute`
+- `hive artifacts TASK --from 6-review`
+- `hive finalize TASK --from 7-artifacts`
+
+The same usage section defines `plan`, `review`, and `archive`; all eight verbs
+share this owner and the `hive-stage-action` v2 contract.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive brainstorm` | Options: `--from`, `--project`, `--json`. | Promotes or runs the brainstorm stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive plan` | Options: `--from`, `--project`, `--json`. | Promotes or runs the plan stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive develop` | Options: `--from`, `--project`, `--json`. | Promotes or runs the execute stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive open-pr` | Options: `--from`, `--project`, `--json`. | Promotes or runs the open-PR stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive review` | Options: `--from`, `--project`, `--pr`, `--json`. | Promotes or runs review; `--pr` creates or reuses an ad-hoc review task first. | JSON schema `hive-stage-action.v2`. | Invalid paths, PR ownership, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive artifacts` | Options: `--from`, `--project`, `--json`. | Promotes or runs the artifacts stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive finalize` | Options: `--from`, `--project`, `--json`. | Promotes or runs the finalize stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+| `hive archive` | Options: stage-action flags plus `--reason`, `--evidence`, `--successor`, and `--attestation` for evidence-bound closure. | With a target, promotes/runs or closes the task; without a target, lists terminal history. | Target JSON uses schema `hive-stage-action.v2`; no-target JSON uses the status contract. | Invalid paths, closure evidence, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates on the stage-action path; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
 
 ## Idempotency contract
 

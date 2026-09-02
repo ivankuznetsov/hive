@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-26
+updated: 2026-09-02
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -54,6 +54,22 @@ with the prior outcome to each pending action, and marks the job complete.
 Repeating it for a complete job is a no-op. The command emits
 the final `hive-refactor-patrol-jobs.v2` show projection, so no second archive
 status contract exists.
+
+## Read-only job-query pagination
+
+`--list` and `--show` read the authoritative durable job ledger through its
+immutable query index and never mutate it.
+
+- List pages and per-job show histories default to 100 records; `--limit`
+  accepts integers from 1 through 100.
+- A list cursor freezes the intake-sequence high-water mark and index
+  generation of the issuing snapshot. Jobs recorded later do not change an
+  in-flight page, and a cursor from a rebuilt generation fails closed as a
+  usage error.
+- `--show` truncates history to the same 100-record default and requires
+  explicit `--full` for an unbounded history.
+
+Both modes emit `hive-refactor-patrol-jobs.v2`.
 
 ## Discovery
 
@@ -106,6 +122,22 @@ analysis SHA, routed dispositions, per-feature completion records, and review
 errors. New records contain no publication attempts or actions. `--list` and
 `--show` emit `hive-refactor-patrol-jobs.v2`; `--archive` emits the same
 projection after its guarded transition.
+
+## Serialization and exit codes
+
+All three JSON families are encoded directly. If `JSON.generate` fails, no
+prose or fallback JSON document is substituted; the encoding failure
+propagates. A best-effort daemon result-file write does not change that stdout
+contract.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Discovery, query, show, or an idempotent archive completed. |
+| 1 | An ordinary discovery/job-state invariant failed. |
+| 64 | Query pagination, job identity, mode selection, or another public argument was invalid. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 75 | A generation claim, checkout, or state lock was temporarily stale or busy. |
+| 78 | Project, policy, manifest, repository ownership, or scheduled input was invalid. |
 
 ## Backlinks
 

@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-07-18
+updated: 2026-09-02
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -82,6 +82,28 @@ not prevent local credential removal. Under `--json`, the envelope carries
 `disconnected`, `revoked`, and — when `revoked` is false — a `reason`
 (`no_token`, `unreadable_credential`, or the revoke error) so automation can
 tell the cases apart.
+
+Connect's JSON Lines and disconnect's final JSON document are encoded directly.
+A serialization failure is not replaced with text or a fallback JSON document;
+it propagates.
+
+## Output, schema, serialization, and exit codes
+
+`hive connect screenote --json` streams a schema-less JSON Lines authorize
+event followed by its terminal result; `hive disconnect screenote --json`
+emits one schema-less JSON result. Usage errors use the same Screenote error
+family. Both commands encode JSON directly: a `JSON::GeneratorError` propagates
+and no fallback document is emitted. Success exits `0`; invalid arguments exit
+`64`, configuration failures exit `78`, and connect OAuth/discovery or local
+filesystem errors exit non-zero. A disconnect revocation failure remains a
+warning and does not prevent exit `0` after local credential removal.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive connect` | Options: `--base-url`, `--json`; service must be `screenote`. | Discovers metadata, completes OAuth with PKCE, selects a project, and stores the credential. | JSON is explicitly schema-less JSON Lines. | Usage, configuration, OAuth/discovery, and filesystem failures use the Screenote error family. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `78`, or another non-zero OAuth/filesystem failure. |
+| `hive disconnect` | Options: `--json`; service must be `screenote`. | Attempts revocation and always clears a readable or corrupt local credential; missing credentials are a no-op. | JSON is an explicitly schema-less result. | Usage/configuration failures are typed; revocation failure is a warning after local removal. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `78`, or another non-zero local failure. |
 
 ## Runtime Use
 

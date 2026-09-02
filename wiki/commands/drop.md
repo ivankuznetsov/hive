@@ -3,7 +3,7 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, web/app/models/task.rb, web/app/models/concerns/task_mutations.rb, web/app/controllers/tasks/drops_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-07-22
+updated: 2026-09-02
 tags: [command, task, cleanup, json, tui, web]
 ---
 
@@ -52,6 +52,11 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
 
 The exit-4 `wrong_stage` contract is **slug-only**. For numeric-id (and path) targets, `--from` flows through [[modules/task_resolver]] as a stage *filter*, so a mismatched stage means the id resolves to no task there: drop reports `invalid_task_path` (exit 64), not `wrong_stage` (exit 4). This keeps id targets consistent with their `run`/`approve`/`findings` siblings, which share the same resolver.
+
+Pre-dispatch usage failures use the same `hive-drop.v2` error envelope with
+`error_kind: "invalid_task_path"`. If command-level error-envelope encoding
+raises `JSON::GeneratorError`, drop warns on stderr, emits no substitute
+document, and re-raises the original typed failure.
 
 When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
 
@@ -121,6 +126,11 @@ Success emits `schema = "hive-drop"`, current version 2:
 ```
 
 Errors use `Hive::Schemas::ErrorEnvelope.build` under the same `hive-drop` schema. External consumers should resolve the current file via `Hive::Schemas.schema_path("hive-drop")`, which now points at v2; `Hive::Schemas.schema_path("hive-drop", version: 1)` remains available for pinned v1 validators.
+
+## Serialization fallback
+
+Drop encodes both success and error arms directly as `hive-drop.v2`. A
+`JSON::GeneratorError` is raised; Hive emits no prose or fallback JSON document.
 
 ## TUI Binding
 

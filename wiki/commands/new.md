@@ -178,6 +178,23 @@ an idempotency key retain the existing capture behavior. The workflow creator
 uses this surface only when task creation was explicit in the original request;
 creation-only workflow authoring never invokes `hive new`.
 
+## Serialization fallback
+
+The public `hive new` command remains text-only even when the wrapper lifts a
+`--json` token. It has no command JSON serialization or fallback policy; typed
+programmatic callers receive Ruby exceptions rather than a fallback document.
+
+## Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | The task was created, or an idempotency-key replay returned its existing task. |
+| 1 | A generic project, slug, collision, filesystem, or I/O failure occurred. |
+| 64 | Arguments, workflow selection, base/dependency shape, or draft-PR combination were invalid. |
+| 70 | An internal software boundary failed. |
+| 75 | A task-capture or commit lock was busy. |
+| 78 | Project or managed-workflow configuration was invalid. |
+
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[stages/inbox]]

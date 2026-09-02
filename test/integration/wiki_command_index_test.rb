@@ -104,6 +104,12 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
         # home's RubyGems user directory.
         "GEM_HOME" => Gem.dir,
         "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR),
+        # The read-only assertion snapshots ignored files too. A coverage
+        # instrumented child would write its own resultset into this checkout.
+        "HIVE_COVERAGE" => nil,
+        "HIVE_COVERAGE_ROOT" => nil,
+        "HIVE_COVERAGE_RUN_ID" => nil,
+        "RUBYOPT" => nil,
         "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1",
         "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
         "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "1",

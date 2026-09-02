@@ -380,6 +380,12 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
+Tests that assert a subprocess leaves the repository unchanged must clear
+`HIVE_COVERAGE`, `HIVE_COVERAGE_ROOT`, `HIVE_COVERAGE_RUN_ID`, and `RUBYOPT`
+for that child. Otherwise the coverage bootstrap itself writes an ignored
+resultset file inside the checkout and creates a false repository-mutation
+failure even when the exercised command is read-only.
+
 Hosted CI separates collection from enforcement. Six `coverage:collect`
 matrix legs run a complete, disjoint partition of the default test-file set and
 upload their raw process results plus a `hive-coverage-shard.v1` manifest.

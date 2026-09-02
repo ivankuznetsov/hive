@@ -30,10 +30,18 @@ class RuntimeControlPlaneCodecTest < Minitest::Test
   end
 
   def test_invalid_utf8_is_rejected_before_persistence
+    valid_binary = "Claude stopped · retry the review".b
+    assert_equal "Claude stopped · retry the review",
+                 Hive::RuntimeControlPlane::Codec.normalize_string(valid_binary)
+    assert_equal "café", Hive::RuntimeControlPlane::Codec.normalize_string("cafe\u0301".b)
+
     invalid = "\xFF".b.force_encoding(Encoding::UTF_8)
     assert_raises(ArgumentError) { Hive::RuntimeControlPlane::Codec.normalize_string(invalid) }
     assert_raises(ArgumentError) do
       Hive::RuntimeControlPlane::Codec.normalize_string("\xFF".b)
+    end
+    assert_raises(ArgumentError) do
+      Hive::RuntimeControlPlane::Codec.normalize_string("\xFF".b.force_encoding(Encoding::US_ASCII))
     end
   end
 end

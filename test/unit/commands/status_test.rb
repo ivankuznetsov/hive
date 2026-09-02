@@ -3197,7 +3197,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_includes output,
-                    "SNAPSHOT COMPLETE — 0 active · 0 archived · task graph cached 32s ago"
+                    "SNAPSHOT COMPLETE — 0 active · archive on demand · task graph cached 32s ago"
   end
 
   def test_operational_project_context_fails_closed_when_config_is_unreadable

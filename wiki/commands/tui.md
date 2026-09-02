@@ -3,11 +3,27 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-08-13
+updated: 2026-09-02
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+
+## Usage and options
+
+Run `hive tui` in an interactive TTY. It has no command-specific options;
+`--json` is explicitly rejected because the dashboard is human-only.
+
+## Examples
+
+`hive tui` opens the fleet dashboard; press `?` after launch for the complete
+per-mode keybinding reference.
+
+## Output, schema, and serialization
+
+Successful TUI operation is human-readable terminal output with no JSON schema,
+so success serialization and a serialization fallback are not applicable. The
+schema-less `--json` refusal is emitted only by the wrapper error boundary.
 
 ## Backend
 

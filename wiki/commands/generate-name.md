@@ -61,6 +61,17 @@ invalid configuration uses `78`, and an uncaught agent/Git/software failure
 uses its shared Hive error code. There is no command JSON schema, so a
 serialization fallback is not applicable.
 
+## Examples
+
+`hive generate-name 42 --project demo` resolves a numeric task id; use
+`hive generate-name demo-task --project demo --stage 2-brainstorm` when the
+slug needs explicit project and stage disambiguation.
+
+## Serialization fallback
+
+The command is text-only and has no JSON schema, so JSON serialization and a
+serialization fallback are not applicable.
+
 ## Tests
 
 - `test/integration/generate_name_test.rb` covers successful sidecar update + commit and failure leaving `display_name` unchanged.

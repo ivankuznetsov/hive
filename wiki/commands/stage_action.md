@@ -158,6 +158,17 @@ In JSON mode, the inner Approve and Run are quieted so the envelope is a single 
 
 External consumers can validate the current contract through `Hive::Schemas.schema_path("hive-stage-action")`, which resolves to `schemas/hive-stage-action.v2.json`; `schemas/hive-stage-action.v1.json` remains in tree for pinned legacy consumers.
 
+## Examples
+
+- `hive brainstorm TASK --from 1-inbox`
+- `hive develop TASK --from 3-plan`
+- `hive open-pr TASK --from 4-execute`
+- `hive artifacts TASK --from 6-review`
+- `hive finalize TASK --from 7-artifacts`
+
+The same usage section defines `plan`, `review`, and `archive`; all eight verbs
+share this owner and the `hive-stage-action` v2 contract.
+
 ## Idempotency contract
 
 `--from <stage>` is the retry-safety lever. After `hive plan <slug> --from 2-brainstorm` succeeds, the task is at 3-plan. A second invocation with `--from 2-brainstorm`:

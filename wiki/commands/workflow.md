@@ -32,6 +32,13 @@ hive workflow publish my-flow --version 1.0.0 \
   --expected-release-digest <confirmed-release-digest> --json
 ```
 
+## Usage and examples: decide
+
+`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT]
+[--json]` records one waiting human-stage decision. For example,
+`hive decide demo:task approve --from research --decision-id visit-7 --json`
+accepts only the current visit-specific identifier returned by `hive run`.
+
 ## Honeycomb Lifecycle
 
 `install`, `list`, `update`, and `remove` are the 0.x command-compatible
@@ -283,6 +290,12 @@ pathspecs under the commit lock before removing the generated files.
 Workflow JSON success and error documents are encoded directly. A
 `JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
 it propagates from the owning subcommand.
+
+## Serialization fallback
+
+Workflow and decide success/error documents are encoded directly. If
+`JSON.generate` raises `JSON::GeneratorError`, Hive emits no prose or fallback
+JSON document and lets that serialization failure propagate.
 
 ## Backlinks
 

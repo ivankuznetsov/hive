@@ -72,6 +72,12 @@ success output.
 
 ## Exit codes and serialization
 
+Text mode is human-readable. `--json` success uses the unregistered
+`hive-bench-submit` schema described above; failures remain stderr plus an exit
+code rather than a structured error schema. The success producer calls
+`JSON.generate` directly, and a serialization failure propagates without a
+fallback document.
+
 | Code | Meaning |
 |---:|---|
 | 0 | The corpus entry was committed, pushed, and submitted. |

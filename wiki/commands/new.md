@@ -178,6 +178,12 @@ an idempotency key retain the existing capture behavior. The workflow creator
 uses this surface only when task creation was explicit in the original request;
 creation-only workflow authoring never invokes `hive new`.
 
+## Serialization fallback
+
+The public `hive new` command remains text-only even when the wrapper lifts a
+`--json` token. It has no command JSON serialization or fallback policy; typed
+programmatic callers receive Ruby exceptions rather than a fallback document.
+
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[stages/inbox]]

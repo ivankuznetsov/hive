@@ -127,6 +127,11 @@ Success emits `schema = "hive-drop"`, current version 2:
 
 Errors use `Hive::Schemas::ErrorEnvelope.build` under the same `hive-drop` schema. External consumers should resolve the current file via `Hive::Schemas.schema_path("hive-drop")`, which now points at v2; `Hive::Schemas.schema_path("hive-drop", version: 1)` remains available for pinned v1 validators.
 
+## Serialization fallback
+
+Drop encodes both success and error arms directly as `hive-drop.v2`. A
+`JSON::GeneratorError` is raised; Hive emits no prose or fallback JSON document.
+
 ## TUI Binding
 
 In [[commands/tui]], Shift+X drops the focused right-pane row by dispatching:

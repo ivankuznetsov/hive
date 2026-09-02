@@ -42,6 +42,25 @@ leaking to process stderr. Outside that scoped build the same warnings retain
 their ordinary stderr behavior. A failed scan retains warnings emitted before
 its final exception.
 
+## Usage and examples: act
+
+`hive act ACTION_ID TARGET --observation TOKEN --json` executes one fresh
+routine action issued by operational status. For example, use
+`hive act workflow.retry demo:task --observation TOKEN --json` only with the
+exact `action_id`, target, and opaque token from the current status document; a
+stale or invented action is refused.
+
+## Output exceptions, serialization, and exit codes
+
+Status uses `hive-running-status.v2`, `hive-status-diagnose.v2`, or
+`hive-operational-status.v4` according to the selected mode; act uses
+`hive-act.v2`. Invalid arguments and stale/refused actions emit the selected
+typed error surface. Status suppresses a `JSON::GeneratorError` while encoding
+an error so the original typed error controls the exit, while act propagates
+the generator exception and emits no fallback JSON. Success exits `0`; usage
+errors exit `64`, temporary/stale observations exit `75`, and configuration
+errors exit `78`.
+
 ## Bounded running-task contract
 
 `Hive::RunningStatus` validates at most 256 registered projects, then performs

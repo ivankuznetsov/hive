@@ -135,6 +135,15 @@ exactly one versioned install error envelope, distinguished by
 Pre-dispatch argv failures distinguish `web status` from `web install` and use
 the matching versioned envelope with `error_kind: "invalid_task_path"`.
 
+## Output exceptions, serialization, and exit codes
+
+Foreground `hive web` is human-readable. Machine lifecycle modes emit
+`hive-web-status.v1` or `hive-web-install.v1`, including their matching typed
+error arms. Those documents are encoded directly: a JSON serialization failure
+propagates and no prose or fallback JSON document is emitted. Success exits `0`;
+an unready service or ordinary bootstrap/service failure exits `1`, invalid
+arguments exit `64`, and invalid web configuration exits `78`.
+
 ## Environment compatibility
 
 `Hive::Web::Environment` is the single resolver for the six shared-app

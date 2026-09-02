@@ -84,6 +84,11 @@ replaced with prose or a fallback JSON document; it propagates.
 | 64 | The target was missing/ambiguous or `--log` was combined with `--json`. |
 | 78 | Project, workflow, or global configuration was invalid. |
 
+## Examples
+
+`hive task demo:checkout --json` emits the bounded semantic workspace; use
+`hive task checkout --project demo --log` for the correlated diagnostic tail.
+
 ## Tests
 
 - `test/integration/task_command_test.rb`

@@ -453,6 +453,13 @@ applicable to that automation verb.
 | 75 | The observation was stale or the task/commit lock was busy. |
 | 78 | Review policy, workflow, or project configuration was invalid. |
 
+## Examples
+
+Use `hive plan-review PROJECT:SLUG ACTION --json` with the complete observation
+identity and action-specific options from the current projection. Automation
+uses `hive plan-review-run PROJECT:SLUG` to dispatch or resume the projected
+review state.
+
 ## Tests and proof
 
 - `test/unit/plan_review/` covers policy, identity, immutable storage, parser,

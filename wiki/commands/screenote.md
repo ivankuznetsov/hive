@@ -87,6 +87,17 @@ Connect's JSON Lines and disconnect's final JSON document are encoded directly.
 A serialization failure is not replaced with text or a fallback JSON document;
 it propagates.
 
+## Output, schema, serialization, and exit codes
+
+`hive connect screenote --json` streams a schema-less JSON Lines authorize
+event followed by its terminal result; `hive disconnect screenote --json`
+emits one schema-less JSON result. Usage errors use the same Screenote error
+family. Both commands encode JSON directly: a `JSON::GeneratorError` propagates
+and no fallback document is emitted. Success exits `0`; invalid arguments exit
+`64`, configuration failures exit `78`, and connect OAuth/discovery or local
+filesystem errors exit non-zero. A disconnect revocation failure remains a
+warning and does not prevent exit `0` after local credential removal.
+
 ## Runtime Use
 
 Connected credentials are not placed in YAML config and are not exposed through

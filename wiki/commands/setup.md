@@ -191,6 +191,18 @@ so a cold packaged Rails boot can take roughly ten seconds without producing a
 false `active_not_ready` install failure. This longer window does not make
 `hive web status` block; status retains its single immediate health sample.
 
+## Examples
+
+Use `hive setup --yes --json` for an unattended managed setup, or
+`hive setup --no-bootstrap --json` for a read-only diagnostic pass.
+
+## Output exceptions and exit codes
+
+`hive-setup.v1` records phase failures inside one document; pre-dispatch usage
+errors retain that schema. Success exits `0`, incomplete or failed setup exits
+`1`, invalid arguments or missing non-interactive consent exit `64`, and an
+invalid global/project configuration exits `78`.
+
 ## Backlinks
 
 - [[cli]]

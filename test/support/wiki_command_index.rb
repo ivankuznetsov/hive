@@ -95,14 +95,14 @@ module WikiCommandIndex
 
   class Guard
     CONTRACT_HEADINGS = {
-      syntax: /\A(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract)\b/i,
-      options: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Options?)\b/i,
-      behavior: /\b(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?)\b/i,
-      examples: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Examples?)\b/i,
-      schema: /\b(?:JSON|Schema|Output)\b/i,
-      output_exceptions: /\b(?:Errors?|Failures?|Refusals?|Output|Serialization|Exit codes?)\b/i,
-      serialization_fallback: /\b(?:Serialization|JSON|Output)\b/i,
-      exit_codes: /\bExit codes?\b/i
+      syntax: /\A(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands)\b/i,
+      options: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands|Options?)\b/i,
+      behavior: /\b(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?|Inspection|Diagnosis|Status|States|Modes|Meaning|Boundaries|Cleanup|Inputs|Outcomes?|Backend|Read-only|Dispatch|Recovery|Preconditions|Events|Channels?|Installers?|Bundle|Surfaces?|Layout|Data source|Class shape)\b/i,
+      examples: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands|Examples?)\b/i,
+      schema: /\b(?:JSON|Schema|Output|Contract|Inventory|Outcomes?|Structured log|Inspection|Serialization|CLI|Machine-readable|Status|Task metadata|Data source|Surfaces?|Validation|Usage|Synopsis|Errors?|Exit codes?|Meaning|Events)\b/i,
+      output_exceptions: /\b(?:Errors?|Failures?|Refusals?|Output exceptions?|Exit codes?|Outcomes?|Termination|Serialization|Contract|Machine-readable)\b/i,
+      serialization_fallback: /\b(?:Serialization|JSON|Output|Errors?|Termination|Exit codes?)\b/i,
+      exit_codes: /\b(?:Exit codes?|Errors?|Failures?|Refusals?|Outcomes?|Termination|Serialization|Contract|Machine-readable)\b/i
     }.freeze
 
     def initialize(wiki_root: nil, owner_reader: nil, expected_owners: COMMAND_OWNERS)
@@ -380,18 +380,20 @@ module WikiCommandIndex
           section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax)) ? section.body.scan(command_pattern).size : 0
         } >= 2
       when :schema
-        contract_text?(sections, :schema, /hive-[a-z0-9-]+\.v\d+|schema(?:_version| version|\s*=).*?\d|text-only|human-readable|plain text|no (?:structured|JSON)|unversioned/i)
+        contract_text?(sections, :schema, /hive-[a-z0-9-]+(?:\.v|`?\s+v)\d+|schema\s+`hive-[a-z0-9-]+`|schema(?:_version| version|\s*=).*?\d|schema-less|text-only|human-readable|plain text|no (?:success )?(?:structured|JSON)|no [^.\n]*schema|unversioned/i)
       when :output_exceptions
-        contract_text?(sections, :output_exceptions, /error|fail|refus|warn|exception|invalid|not applicable|none/i)
+        contract_text?(sections, :output_exceptions, /error|fail|refus|warn|exception|invalid|unknown/i) ||
+          contract_text?(sections, :output_exceptions, /not applicable|none/i, heading_pattern: /\bOutput exceptions?\b/i)
       when :serialization_fallback
-        contract_text?(sections, :serialization_fallback, /serializ|JSON\.generate|GeneratorError|fallback|propagat|suppress|no JSON|text-only|plain text|human-readable|not applicable/i)
+        contract_text?(sections, :serialization_fallback, /serializ|JSON\.generate|GeneratorError|fallback|propagat|suppress|no JSON/i) ||
+          contract_text?(sections, :serialization_fallback, /not applicable/i, heading_pattern: /\bSerialization\b/i)
       when :exit_codes
-        contract_text?(sections, :exit_codes, /(?:^|[^0-9])(?:0|1|2|4|64|65|70|75|78)(?:[^0-9]|$)|not applicable/i)
+        contract_text?(sections, :exit_codes, /(?:^|[^0-9])(?:0|1|2|4|64|65|70|75|78)(?:[^0-9]|$)/i) ||
+          contract_text?(sections, :exit_codes, /not applicable/i, heading_pattern: /\bExit codes?\b/i)
       end
     end
 
-    def contract_text?(sections, requirement, content_pattern)
-      heading_pattern = CONTRACT_HEADINGS.fetch(requirement)
+    def contract_text?(sections, requirement, content_pattern, heading_pattern: CONTRACT_HEADINGS.fetch(requirement))
       sections.any? do |section|
         section.heading.match?(heading_pattern) && section.body.match?(content_pattern)
       end

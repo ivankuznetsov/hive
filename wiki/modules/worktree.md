@@ -322,6 +322,17 @@ is emitted.
 | 75 | The task lock was busy or freshness changed concurrently. |
 | 78 | Project/workflow configuration was invalid. |
 
+## Examples
+
+Use `hive worktree status TASK --json` to inspect owned residue. A guarded
+repair is explicit, for example
+`hive worktree repair TASK --strategy commit --json`.
+
+## JSON schema
+
+All machine-readable status and repair results use `hive-worktree.v1`, with
+`schema: "hive-worktree"` and `schema_version: 1` on success and error arms.
+
 ## Tests
 
 - `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head fetching despite a same-named tag, stalled-transport process-group timeout, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.

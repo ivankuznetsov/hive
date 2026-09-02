@@ -98,6 +98,19 @@ Update has no JSON mode or command schema. It prints the selected channel,
 updater, cutover progress, and exact recovery action as human-readable text;
 JSON serialization and a serialization fallback are not applicable.
 
+## Examples
+
+Use `hive update --dry-run` to inspect the detected channel and cutover command;
+`hive update --yes` authorizes the updater followed by the irreversible fleet
+migration.
+
+## Output exceptions and exit codes
+
+The text-only command exits `0` after a successful update/cutover or a dev-mode
+guidance run. Missing consent or invalid arguments exit `64`; invalid channel
+configuration exits `78`; updater, candidate-resolution, or migration failures
+exit non-zero and print the exact forward-recovery command.
+
 ## Tests
 
 - `test/unit/commands/update_test.rb` covers channel selection, dry-run output,

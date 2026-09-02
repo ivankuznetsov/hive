@@ -146,8 +146,9 @@ progress.
 
 ## Serialization and exit codes
 
-JSON output is encoded directly. A `JSON::GeneratorError` is not replaced with
-prose or a fallback JSON document; the encoding failure propagates.
+JSON output is schema-less for this command and is encoded directly. A
+`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
+the encoding failure propagates.
 
 | Code | Meaning |
 |---:|---|

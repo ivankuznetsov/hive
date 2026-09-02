@@ -61,6 +61,7 @@ module Hive
         commit_action = nil
         Hive::Lock.with_commit_lock(context.hive_state_path) do
           killed = kill_recorded_agents(context.folders)
+          refuse_failed_agent_cleanup!(killed)
           with_task_leases(context.folders) do
             revalidate_context!(context)
             cleanup = cleanup_context(context, killed: killed)
@@ -344,33 +345,43 @@ module Hive
 
       def kill_recorded_agents(folders)
         candidates = process_candidates(folders)
-        return { killed: false, pid: nil, killed_pids: [], skipped_reason: "no_pid" } if candidates.empty?
-
-        killed_pids = []
-        skipped_reasons = []
-        candidates.each do |candidate|
-          result =
-            if candidate[:group]
-              Hive::ProcessKill.terminate_process_group(
-                candidate[:pid],
-                recorded_start_time: candidate[:process_start_time]
-              )
-            else
-              Hive::ProcessKill.terminate_process(
-                candidate[:pid],
-                recorded_start_time: candidate[:process_start_time]
-              )
-            end
-          killed_pids << result.pid if result.killed && result.pid
-          skipped_reasons << result.skipped_reason if result.skipped_reason
+        if candidates.empty?
+          return {
+            killed: false, pid: nil, killed_pids: [], skipped_reason: "no_pid",
+            kill_failed: false
+          }
         end
+
+        results = candidates.map do |candidate|
+          if candidate[:group]
+            Hive::ProcessKill.terminate_process_group(
+              candidate[:pid],
+              recorded_start_time: candidate[:process_start_time]
+            )
+          else
+            Hive::ProcessKill.terminate_process(
+              candidate[:pid],
+              recorded_start_time: candidate[:process_start_time]
+            )
+          end
+        end
+        killed_pids = results.filter_map { |result| result.pid if result.killed }
+        skipped_reasons = results.filter_map(&:skipped_reason)
 
         {
           killed: !killed_pids.empty?,
           pid: candidates.first[:pid],
           killed_pids: killed_pids.uniq,
-          skipped_reason: skipped_reasons.compact.first
+          skipped_reason: skipped_reasons.first,
+          kill_failed: results.any? { |result| result.skipped_reason == "kill_failed" }
         }
+      end
+
+      def refuse_failed_agent_cleanup!(cleanup)
+        return unless cleanup.fetch(:kill_failed, false)
+
+        raise Hive::ConcurrentRunError,
+              "recorded agent cleanup returned kill_failed; task state was preserved for retry"
       end
 
       def process_candidates(folders)

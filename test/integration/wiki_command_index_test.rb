@@ -13,10 +13,8 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
   def test_public_help_metadata_and_owner_index_are_one_read_only_contract
     before = repository_snapshot
     stdout, stderr, status = render_public_help
-    after = repository_snapshot
 
     assert status.success?, "bin/hive help failed (#{status.exitstatus}): #{stderr}"
-    assert_equal before, after, "bin/hive help modified the repository"
 
     guard = WikiCommandIndex::Guard.new(wiki_root: WIKI_ROOT)
     index_text = File.read(File.join(WIKI_ROOT, "cli.md"))
@@ -49,6 +47,30 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
     assert_equal "version", metadata.aliases.fetch("-v")
     %w[pr --version -v].each do |alias_name|
       refute_includes first.index_commands, alias_name
+    end
+
+    assert_equal before, repository_snapshot,
+      "public help or the command-index guard modified the repository"
+  end
+
+  def test_repository_snapshot_covers_tracked_untracked_and_ignored_files
+    Dir.mktmpdir("wiki-command-index-repository") do |root|
+      File.write(File.join(root, ".gitignore"), "ignored.txt\n")
+      File.write(File.join(root, "tracked.txt"), "tracked\n")
+      File.write(File.join(root, "untracked.txt"), "untracked\n")
+      File.write(File.join(root, "ignored.txt"), "ignored\n")
+      _stdout, stderr, status = Open3.capture3("git", "init", "--quiet", chdir: root)
+      assert status.success?, stderr
+      _stdout, stderr, status = Open3.capture3(
+        "git", "add", ".gitignore", "tracked.txt", chdir: root
+      )
+      assert status.success?, stderr
+
+      before = repository_snapshot(root)
+      assert_equal %w[.gitignore ignored.txt tracked.txt untracked.txt], before.map(&:first)
+
+      File.write(File.join(root, "ignored.txt"), "changed\n")
+      refute_equal before, repository_snapshot(root)
     end
   end
 
@@ -101,30 +123,34 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
     end
   end
 
-  def repository_snapshot
-    stdout, stderr, status = Open3.capture3(
-      "git", "status", "--porcelain=v1", "--untracked-files=all", chdir: ROOT
-    )
-    raise "git status failed: #{stderr}" unless status.success?
-
-    [ stdout, tracked_files_snapshot ]
+  def repository_snapshot(root = ROOT)
+    repository_paths(root).map do |relative|
+      path = File.join(root, relative)
+      begin
+        stat = File.lstat(path)
+        digest = if stat.symlink?
+          Digest::SHA256.hexdigest(File.readlink(path))
+        elsif stat.file?
+          Digest::SHA256.file(path).hexdigest
+        else
+          stat.ftype
+        end
+        [ relative, stat.mode, stat.size, stat.mtime.to_r, digest ]
+      rescue Errno::ENOENT
+        [ relative, :missing ]
+      end
+    end
   end
 
-  def tracked_files_snapshot
-    stdout, stderr, status = Open3.capture3("git", "ls-files", "-z", chdir: ROOT)
-    raise "git ls-files failed: #{stderr}" unless status.success?
-
-    stdout.split("\0").map do |relative|
-      path = File.join(ROOT, relative)
-      next [ relative, :missing ] unless File.exist?(path) || File.symlink?(path)
-
-      stat = File.lstat(path)
-      digest = if stat.symlink?
-        Digest::SHA256.hexdigest(File.readlink(path))
-      else
-        Digest::SHA256.file(path).hexdigest
-      end
-      [ relative, stat.mode, stat.size, digest ]
-    end
+  def repository_paths(root = ROOT)
+    commands = [
+      [ "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z" ],
+      [ "git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z" ]
+    ]
+    commands.flat_map do |command|
+      stdout, stderr, status = Open3.capture3(*command, chdir: root)
+      raise "#{command.join(' ')} failed: #{stderr}" unless status.success?
+      stdout.split("\0")
+    end.sort
   end
 end

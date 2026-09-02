@@ -97,7 +97,7 @@ module WikiCommandIndex
     CONTRACT_HEADINGS = {
       syntax: /\A(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands)\b/i,
       options: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands|Options?)\b/i,
-      behavior: /\b(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?|Inspection|Diagnosis|Status|States|Modes|Meaning|Boundaries|Cleanup|Inputs|Outcomes?|Backend|Read-only|Dispatch|Recovery|Preconditions|Events|Channels?|Installers?|Bundle|Surfaces?|Layout|Data source|Class shape)\b/i,
+      behavior: /\A(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?|Inspection|Diagnosis|Status|States|Modes|Meaning|Boundaries|Cleanup|Inputs|Outcomes?|Backend|Read-only|Dispatch|Recovery|Preconditions|Events|Channels?|Installers?|Bundle|Surfaces?|Layout|Data source|Class shape|Connect Behavior|Disconnect Behavior|What the daemon dispatches|Runtime control-plane diagnosis|Discovery lifecycle|Applicability and boundary|Consent and lifecycle)\b/i,
       examples: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands|Examples?)\b/i,
       schema: /\b(?:JSON|Schema|Output|Contract|Inventory|Outcomes?|Structured log|Inspection|Serialization|CLI|Machine-readable|Status|Task metadata|Data source|Surfaces?|Validation|Usage|Synopsis|Errors?|Exit codes?|Meaning|Events)\b/i,
       output_exceptions: /\b(?:Errors?|Failures?|Refusals?|Output exceptions?|Exit codes?|Outcomes?|Termination|Serialization|Contract|Machine-readable)\b/i,

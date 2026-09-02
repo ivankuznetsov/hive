@@ -51,7 +51,8 @@ fallback document or generator-error suppression applies.
 | Code | Meaning |
 |---:|---|
 | 0 | Version text or the v1 JSON document emitted. |
-| 70 | An unexpected internal failure prevents version reporting. |
+| 1 | JSON serialization failed before a document could be emitted. |
+| 64 | The `version` invocation was malformed. |
 
 ## Examples
 

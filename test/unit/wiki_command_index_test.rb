@@ -197,7 +197,7 @@ class WikiCommandIndexTest < Minitest::Test
       index_text: index_for([ "alpha", "[[commands/alpha]]" ])
     )
 
-    %i[syntax options examples schema output_exceptions serialization_fallback exit_codes].each do |requirement|
+    %i[syntax options behavior examples schema output_exceptions serialization_fallback exit_codes].each do |requirement|
       assert_owner_contract_diagnostic result, "alpha", "commands/alpha", requirement
     end
   end
@@ -224,6 +224,24 @@ class WikiCommandIndexTest < Minitest::Test
     )
 
     assert_diagnostic result, :unexpected_owner, "review"
+  end
+
+  def test_durable_aggregate_owner_map_is_command_specific
+    expected = {
+      "brainstorm" => "commands/stage_action",
+      "plan" => "commands/stage_action",
+      "develop" => "commands/stage_action",
+      "open-pr" => "commands/stage_action",
+      "review" => "commands/stage_action",
+      "artifacts" => "commands/stage_action",
+      "finalize" => "commands/stage_action",
+      "archive" => "commands/stage_action",
+      "plan-review" => "modules/plan_review",
+      "plan-review-run" => "modules/plan_review",
+      "worktree" => "modules/worktree"
+    }
+
+    assert_equal expected, WikiCommandIndex::COMMAND_OWNERS.slice(*expected.keys)
   end
 
   def test_every_contract_section_is_required_and_explicit_not_applicable_is_valid
@@ -363,6 +381,21 @@ class WikiCommandIndexTest < Minitest::Test
     end
 
     assert_equal expected, actual
+  end
+
+  def test_version_exit_table_matches_the_runtime_boundary
+    version = page("commands/version.md")
+    exit_section = version[/^## Exit codes\n(?<body>.*?)(?=^## |\z)/m, :body]
+    actual = exit_section.lines.filter_map do |line|
+      cells = line.strip.delete_prefix("|").delete_suffix("|").split("|").map(&:strip)
+      cells if cells.size == 2 && cells.first.match?(/\A\d+\z/)
+    end
+
+    assert_equal [
+      [ "0", "Version text or the v1 JSON document emitted." ],
+      [ "1", "JSON serialization failed before a document could be emitted." ],
+      [ "64", "The `version` invocation was malformed." ]
+    ], actual
   end
 
   def test_metrics_and_act_document_their_asymmetric_serialization_policies

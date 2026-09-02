@@ -40,5 +40,8 @@ class RuntimeControlPlaneCodecTest < Minitest::Test
     assert_raises(ArgumentError) do
       Hive::RuntimeControlPlane::Codec.normalize_string("\xFF".b)
     end
+    assert_raises(ArgumentError) do
+      Hive::RuntimeControlPlane::Codec.normalize_string("\xFF".b.force_encoding(Encoding::US_ASCII))
+    end
   end
 end

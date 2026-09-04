@@ -1015,6 +1015,8 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal 1, launcher.launched.size
 
       request = Struct.new(:slug, :project).new(task.slug, "demo")
+      legacy = Struct.new(:task_id, :project, :task_slug, :intended_stage).new(nil, "demo", task.slug, "4-execute")
+      assert_equal first.attempt, dispatcher.send(:find_semantic_owner, [ first.attempt ], legacy)
       resolver = Struct.new(:task) { def resolve = task }.new(task)
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
         assert_equal task, dispatcher.send(:resolve_request_task, request)

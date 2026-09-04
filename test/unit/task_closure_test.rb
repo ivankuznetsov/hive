@@ -631,6 +631,7 @@ class TaskClosureTest < Minitest::Test
       run!("git", "-C", worktree.path, "add", "delivered.txt")
       run!("git", "-C", worktree.path, "commit", "-m", "delivered", "--quiet")
       head = Hive::GitOps.new(worktree.path).head_sha
+      assert_equal head, Hive::TaskClosure.local_pr_head_binding(task, frontmatter: { "head_oid" => "f" * 40 })
       service = service_for(gh: FakeGh.new(head_oid: head))
       input = input_for("acme/app#42")
       preview = service.preview(task: task, project: project, input: input)

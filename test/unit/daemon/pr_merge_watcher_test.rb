@@ -319,6 +319,73 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_binding_and_journal_changes_after_observation_block_archival
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _|
+      task = tasks.first
+      watcher = build_watcher(gh: FakeGh.new(state: "MERGED"))
+      watcher.observe([ row_for(task) ], now: T0)
+      path = File.join(task.folder, "pr.md")
+      generation_status = watcher.method(:generation_status)
+      change_binding = lambda do |*args|
+        generation = generation_status.call(*args)
+        File.write(path, File.read(path).sub("pull/40", "pull/99"))
+        generation
+      end
+      result = with_replaced_singleton_method(watcher, :generation_status, change_binding) do
+        watcher.tick(now: T0).first
+      end
+      assert_equal :blocked, result[:status]
+      assert_includes result[:reason], "binding changed"
+
+      watcher.observe([ row_for(task) ], now: T0 + 1)
+      File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "broken journal\n")
+      result = watcher.tick(now: T0 + 1).first
+      assert_equal :blocked, result[:status]
+      assert_includes result[:reason], "task journal is invalid"
+    end
+  end
+
+  def test_task_archived_between_observation_and_poll_uses_its_closure_receipt
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _|
+      task = tasks.first
+      prepare_test_runtime_project(task.project_root, state_home: Hive::Paths.state_home)
+      watcher = build_watcher(gh: FakeGh.new(state: "MERGED"), task_closure: Hive::TaskClosure)
+      watcher.observe([ row_for(task) ], now: T0)
+      assert_equal :archived, watcher.tick(now: T0).first[:status]
+      assert_equal :already_archived, watcher.tick(now: T0 + 1).first[:status]
+    end
+  end
+
+  def test_terminal_task_without_receipt_cannot_claim_verified_archival
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _|
+      task = tasks.first
+      watcher = build_watcher
+      watcher.observe([ row_for(task) ], now: T0)
+      destination = File.join(task.project_root, ".hive-state", "stages", "9-done", task.slug)
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.mv(task.folder, destination)
+      result = watcher.tick(now: T0).first
+      assert_equal :blocked, result[:status]
+      assert_includes result[:reason], "no valid merge closure receipt"
+    end
+  end
+
+  def test_registered_repository_mismatch_is_fenced
+    with_merge_project(stages: [ "6-review" ]) do |tasks, _|
+      registration = registration_for(tasks.first.project_root).merge("repository_identity" => "github.com/other/repo")
+      watcher = build_watcher(config_lookup: ->(_) { registration })
+      result = watcher.observe([ row_for(tasks.first) ], now: T0).first
+      assert_equal :blocked, result[:status]
+      assert_includes result[:reason], "must exactly match"
+      assert watcher.recovery_blocked?(project: "app", slug: tasks.first.slug)
+    end
+  end
+
+  def test_invalid_optional_remote_timestamp_does_not_fabricate_a_time
+    watcher = build_watcher
+    assert_nil watcher.send(:timestamp_for, "not-a-time")
+  end
+
   def test_invalid_pr_metadata_and_project_identity_keep_recovery_fenced
     with_merge_project(stages: [ "6-review" ]) do |tasks, _|
       watcher = build_watcher(config_lookup: ->(_) { raise Hive::ConfigError, "identity unavailable" })

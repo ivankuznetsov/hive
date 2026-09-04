@@ -86,6 +86,7 @@ class AttemptsCoordinationTest < Minitest::Test
 
   def test_coordination_rejects_invalid_accounting_routing_and_identity_inputs
     with_repository do |repository|
+      assert_raises(Hive::Attempts::RepositoryError) { repository.terminal_attempt_id(request_id: "\n") }
       launching = create(repository, attempt_id: "live", task_slug: "live")
       assert_raises(Hive::Attempts::RepositoryError) { repository.refund_unstarted(launching) }
       assert_raises(Hive::Attempts::RepositoryError) { repository.refund_tempfail(launching) }

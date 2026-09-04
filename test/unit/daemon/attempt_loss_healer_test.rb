@@ -302,6 +302,44 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_recovery_inherits_durable_dirty_capture_references
+    with_task do |task|
+      with_tmp_git_repo do |worktree|
+        File.write(File.join(worktree, "partial.txt"), "partial\n")
+        capture_task = Struct.new(:worktree_path).new(worktree)
+        with_tmp_dir do |root|
+          store = Hive::Attempts::Repository.new(root: root, migrate: true)
+          lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
+          outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+          processor = Hive::Attempts::LostOutcomeProcessor.new(
+            store: store, outcome_store: outcomes,
+            process_identity: Struct.new(:result) { def terminate_orphan_group(**) = result }.new(:absent),
+            task_resolver: ->(_) { capture_task }
+          )
+          processor.define_singleton_method(:task_folder) { task.folder }
+          dispatcher = FakeDispatcher.new(store)
+
+          healer(store, outcomes, processor, dispatcher, FakeLogger.new)
+            .heal_attempt_losses([ lost ], admission_view: admission_view(store), now: RETRY_AT)
+
+          captures = outcomes.fetch(lost.attempt_id).fetch("capture_references")
+          refute_empty captures
+          assert captures.all? { |reference| reference.fetch("path").start_with?("sealed/") }
+          assert_equal captures, dispatcher.calls.first.fetch(:inherited_outputs)
+          assert_equal captures, store.fetch("replacement-1")["inherited_outputs"]
+          assert_equal :expired, store.log_archive.expire(lost.attempt_id, now: RETRY_AT + 1)
+          captures.each { |reference| store.read_output(reference, max_bytes: 1_000_000) }
+          inherited_rows = store.database.read do |db|
+            db[:payload_references].where(
+              attempt_id: "replacement-1", kind: "inherited_output", state: "sealed"
+            ).count
+          end
+          assert_equal captures.size, inherited_rows
+        end
+      end
+    end
+  end
+
   def test_recovery_retargets_moved_task_and_drops_satisfied_source_assertion
     with_task(stage: "2-brainstorm") do |task|
       with_tmp_dir do |root|

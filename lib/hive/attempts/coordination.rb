@@ -79,16 +79,11 @@ module Hive
         record
       end
 
-      def reservation_metadata(attempt_id)
+      def admission_metadata(attempt_id)
         row = database.read do |db|
           db[:attempts].where(attempt_id: identifier(attempt_id)).first
         end
-        return unless row
-
-        admission = admission_from(row)
-        live_reservation(
-          project: row.fetch(:project_name), task_slug: row.fetch(:task_slug), admission: admission
-        )
+        row && admission_from(row)
       end
 
       def record_failure_cohort(attempt_id:, identity:, occurred_at:)
@@ -262,16 +257,6 @@ module Hive
         end
         raise RepositoryError, "daily accounting acceptance is missing" unless row
         row
-      end
-
-      def live_reservation(project:, task_slug:, admission: nil, phase: "active")
-        raise RepositoryError, "live capacity reservation phase is invalid" unless phase == "active"
-        value = {
-          "project" => identifier(project), "task_slug" => identifier(task_slug),
-          "phase" => "active"
-        }
-        value["admission"] = live_admission(admission) if admission
-        value
       end
 
       def live_admission(admission)

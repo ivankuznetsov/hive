@@ -171,7 +171,7 @@ class AttemptsLogArchiveTest < Minitest::Test
       retain_until = store.database.read do |db|
         db[:payload_references].where(attempt_id: terminal.attempt_id).get(:retain_until)
       end
-      assert_equal (NOW + 60).iso8601(6), retain_until
+      assert_nil retain_until
     end
   end
 

@@ -125,6 +125,9 @@ module Hive
       started_at = normalized_time(started_at)
       store.transaction do |db|
         usage = db[:token_usage]
+        lane = patrol_discovery_dataset(
+          usage, project_slug: project_slug, stage: stage, at: started_at
+        )
         existing = usage.where(session_id: session_id).first
         if existing
           validate_patrol_reservation!(
@@ -132,15 +135,10 @@ module Hive
           )
           next {
             reserved: true, existing: true,
-            used: patrol_discovery_dataset(
-              usage, project_slug: project_slug, stage: stage, at: started_at
-            ).count
+            used: lane.count
           }
         end
 
-        lane = patrol_discovery_dataset(
-          usage, project_slug: project_slug, stage: stage, at: started_at
-        )
         used = lane.count
         next { reserved: false, existing: false, used: used } if used >= limit
 

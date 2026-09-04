@@ -67,20 +67,27 @@ Concurrent healers therefore converge on one request and one admission without
 predecessor or successor fields. Request retention cannot reopen recovery
 authority because completion remains on the source attempt.
 
+Dirty worktree captures are sealed into the content-addressed payload store
+before the recovery becomes ready. Admission links those sealed bytes to the
+replacement in the same transaction, so source retention cannot delete output
+that the replacement inherited.
+
 ## Terminal publication
 
 Terminal receipts remain durable until their fixed consumers acknowledge them.
 Acknowledgement fields live on the attempt row and are monotonic; replay is
 safe after a daemon restart. Result delivery itself lives on the associated
 dispatch-request row and is at-least-once across an external send boundary.
+After all acknowledgements, the row remains active until log archival and
+failure-cohort reconciliation finish and the daemon durably marks promotion.
 
 ## Maintenance
 
 Only the daemon schedules periodic attempt maintenance. Its timer is
-process-local. Each run performs bounded, keyset-ordered, idempotent queries for
-pending finalizations and expired payload/log candidates and continues past an
-individual row failure. A restart may repeat safe work; it does not restore a
-claim or cursor from SQLite.
+process-local. Each run performs row-bounded and monotonic-time-bounded,
+keyset-ordered, idempotent queries for pending finalizations and expired
+payload/log candidates and continues past an individual row failure. A restart
+may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 ## Tests
 

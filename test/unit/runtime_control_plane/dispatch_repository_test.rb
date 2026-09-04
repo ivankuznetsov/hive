@@ -142,6 +142,29 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  def test_pending_result_reads_and_bulk_acknowledgement_are_bounded
+    with_repository do |repository|
+      ids = 3.times.map do |index|
+        id = "bounded-result-#{index}"
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: id, now: NOW + index
+        )
+        repository.write_result!(
+          chat_id: 42, project: "hive", slug: "sqlite-cutover",
+          request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW + index
+        )
+        id
+      end
+
+      page = repository.pending_results(now: NOW + 3, limit: 2)
+      assert_equal ids.first(2), page.map(&:request_id)
+      assert_equal 2, repository.acknowledge_results(page.map(&:request_id), now: NOW + 3)
+      assert_equal [ ids.last ], repository.pending_results(now: NOW + 3).map(&:request_id)
+      assert_raises(ArgumentError) { repository.pending_results(limit: 0) }
+    end
+  end
+
   def test_malformed_stored_result_fails_closed_without_dropping_the_request
     with_repository do |repository|
       id = repository.write_request!(

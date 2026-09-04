@@ -996,12 +996,12 @@ class CommandsStatusTest < Minitest::Test
       "position" => { "stage" => "4-execute", "marker" => "none" },
       "blocker_owner" => "operator",
       "reason" => "provider health is unavailable",
-      "routing" => { "selected_route" => nil, "reason" => "health_state_unavailable" }
+      "routing" => { "selected_route" => nil, "reason" => "no_eligible_provider_route" }
     }
 
     line = Hive::Commands::Status.new.send(:operational_row_line, row)
 
-    assert_includes line, "routing health_state_unavailable"
+    assert_includes line, "routing no_eligible_provider_route"
   end
 
   def test_json_payload_unblocks_dependency_at_gate_stage

@@ -135,9 +135,15 @@ class PatrolLaunchBudgetTest < Minitest::Test
       readers << reader
       Hive::RuntimeControlPlane::ProcessGuard.fork do
         reader.close
-        result = acquire(budget(engine: :ordinary, limit: 4), "patrol-review", id: "p-#{index}")
+        child_database = Hive::RuntimeControlPlane::Database.new(path: @database.path).open!
+        result = acquire(
+          budget(engine: :ordinary, limit: 4, database: child_database),
+          "patrol-review", id: "p-#{index}"
+        )
         writer.write(result ? "1" : "0")
         writer.close
+      ensure
+        child_database&.disconnect
       end.tap { writer.close }
     end
     results = readers.map(&:read)
@@ -212,13 +218,14 @@ class PatrolLaunchBudgetTest < Minitest::Test
 
   private
 
-  def budget(engine:, now: NOW, limit: 4, project_id: "project-1", usage_db: @usage)
-    ensure_project(project_id)
+  def budget(engine:, now: NOW, limit: 4, project_id: "project-1", usage_db: @usage,
+             database: @database)
+    ensure_project(project_id, database: database)
     Hive::Patrol::LaunchBudget.new(
       @root,
       cfg: { "patrol" => { "scheduled_discovery_launches_per_engine_per_day" => limit } },
       project_id: project_id, project_name: "demo", engine: engine,
-      usage_db: usage_db, database: @database, clock: -> { now }
+      usage_db: usage_db, database: database, clock: -> { now }
     )
   end
 
@@ -229,9 +236,9 @@ class PatrolLaunchBudgetTest < Minitest::Test
     )
   end
 
-  def ensure_project(project_id)
+  def ensure_project(project_id, database: @database)
     timestamp = Hive::RuntimeControlPlane::Codec.dump_time(NOW)
-    @database.transaction do |db|
+    database.transaction do |db|
       installation = db[:installations].get(:installation_id)
       db[:projects].insert_conflict.insert(
         project_id: project_id, installation_id: installation,

@@ -306,6 +306,7 @@ module Hive
       # collapsed into one summary line so a reconnect can't flood the
       # chat or trip Telegram's per-chat rate limit (ADV-1 / #6).
       DISPATCH_RESULT_SEND_CAP = 10
+      DISPATCH_RESULT_SCAN_CAP = Hive::RuntimeControlPlane::DispatchRepository::PENDING_RESULT_LIMIT
 
       # ADV-1: drain the daemon's dispatch-result channel and relay each
       # notice to the chat that initiated the run. The daemon is the
@@ -323,7 +324,7 @@ module Hive
       # Public + `now:`-injectable so tests can drive one drain
       # deterministically.
       def drain_dispatch_results(now: Time.now)
-        pending = dispatch_repository.pending_results(now: now)
+        pending = dispatch_repository.pending_results(now: now, limit: DISPATCH_RESULT_SCAN_CAP)
 
         # Defense-in-depth (#263): the chat_id round-trips from the persisted
         # request row through the daemon with no re-validation, so re-check
@@ -332,14 +333,12 @@ module Hive
         # or a forged result with an arbitrary chat_id. Mirrors
         # the allowlist filtering on the nudge/reconnect push paths.
         allowed = chat_ids
-        pending = pending.reject do |notice|
-          next false if allowed.include?(notice.chat_id)
-
+        rejected, pending = pending.partition { |notice| !allowed.include?(notice.chat_id) }
+        rejected.each do |notice|
           @logger.event(:dispatch_result_rejected_unauthorized,
                         chat_id: notice.chat_id, result_id: notice.result_id, slug: notice.slug)
-          acknowledge_dispatch_result(notice)
-          true
         end
+        acknowledge_dispatch_results(rejected, now: now)
 
         pending.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
           sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_result_text(notice))
@@ -361,13 +360,21 @@ module Hive
             chat_id: chat_id,
             text: "⚠️ +#{group.size} more #{noun} suppressed (see daemon.log)."
           )
-          group.each { |notice| acknowledge_dispatch_result(notice, now: now) } if sent
+          acknowledge_dispatch_results(group, now: now) if sent
         end
       end
 
       def acknowledge_dispatch_result(notice, now: Time.now)
         dispatch_repository.acknowledge_result(
           notice.request_id, state_home: dispatch_result_state_home, now: now
+        )
+      end
+
+      def acknowledge_dispatch_results(notices, now: Time.now)
+        return if notices.empty?
+
+        dispatch_repository.acknowledge_results(
+          notices.map(&:request_id), state_home: dispatch_result_state_home, now: now
         )
       end
 

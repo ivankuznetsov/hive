@@ -16,7 +16,31 @@ module Hive
           raise RepositoryError, "only final attempt payloads can be sealed"
         end
 
-        specs = terminal_payload_specs(record)
+        seal_payloads(record, terminal_payload_specs(record))
+      end
+
+      def seal_lost_capture_payloads(record, references)
+        unless record.is_a?(Record) && record.state == "lost"
+          raise RepositoryError, "only lost attempt captures can be sealed"
+        end
+
+        prefix = File.join("open", record.attempt_id, "dirty-state") + File::SEPARATOR
+        specs = Array(references).each_with_index.map do |reference, index|
+          source = normalized_output_reference(reference)
+          unless source.fetch("path").start_with?(prefix)
+            raise RepositoryError, "lost recovery capture reference is outside its attempt"
+          end
+          {
+            payload_id: "lost-capture:#{record.attempt_id}:#{index}",
+            kind: "lost_capture", source: source
+          }
+        end
+        seal_payloads(record, specs).values.uniq.freeze
+      rescue InvalidOutputReference => error
+        raise RepositoryError, error.message
+      end
+
+      def seal_payloads(record, specs)
         payload_store.with_reference_custody(specs.map { |spec| spec.fetch(:source) }) do
           prepared = specs.map do |spec|
             spec.merge(reference: prepare_sealed_reference(spec.fetch(:source)))
@@ -33,6 +57,8 @@ module Hive
              Sequel::Error, SystemCallError, IOError => error
         raise RepositoryError, "attempt payload sealing failed: #{error.message}"
       end
+
+      private :seal_payloads
 
       def sealed_payload_reference(reference)
         source = normalized_output_reference(reference)
@@ -85,12 +111,20 @@ module Hive
       end
 
       def finish_publication(attempt_id)
-        entry = publication(attempt_id)
-        return false unless entry
-        raise RepositoryError, "pending finalization is incomplete" unless
-          entry.fetch("consumers").values.all?
+        id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
+        database.transaction do |db|
+          row = db[:attempts].where(attempt_id: id).first
+          next false unless row && row[:terminal_receipt_json]
+          unless PUBLICATION_COLUMNS.values.all? { |column| row.fetch(column) == 1 }
+            raise RepositoryError, "pending finalization is incomplete"
+          end
 
-        true
+          db[:attempts].where(attempt_id: id, publication_promoted: 0)
+            .update(publication_promoted: 1)
+          true
+        end
+      rescue Sequel::Error, RuntimeControlPlane::Error => error
+        raise RepositoryError, "pending finalization could not be promoted: #{error.message}"
       end
 
       private
@@ -208,6 +242,7 @@ module Hive
           "receipt_digest" => row.fetch(:terminal_receipt_digest),
           "task_source_fingerprint" => row.fetch(:terminal_task_source_fingerprint),
           "created_at" => row.fetch(:terminal_publication_created_at),
+          "promoted" => row.fetch(:publication_promoted) == 1,
           "consumers" => consumers.freeze
         }.freeze
       end

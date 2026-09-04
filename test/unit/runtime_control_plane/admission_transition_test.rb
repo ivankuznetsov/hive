@@ -49,6 +49,10 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       assert_equal request_id, rows.fetch(:replacements).first.fetch(:request_id)
       assert_equal 1, rows.fetch(:recovery_requests).size
       assert_equal "admitted", rows.fetch(:recovery_requests).first.fetch(:state)
+      payload = Hive::RuntimeControlPlane::Codec.load_json(
+        rows.fetch(:recovery_requests).first.fetch(:payload_json)
+      )
+      assert_equal "dispatched", payload.dig("recovery", "phase")
       replacement = attempts.fetch(rows.fetch(:replacements).first.fetch(:attempt_id))
       refute_includes replacement.to_h, "predecessor_attempt_id"
     end

@@ -46,6 +46,7 @@ module Hive
               source_fingerprint: source_fingerprint, admission: admission
             )
           )
+          link_sealed_inherited_payloads!(db, record)
           @repository.admission_claim_cohort_in(db, record, failure_cohort_probe)
           @repository.admission_complete_lost_recovery_in(
             db, source_attempt_id: recovery_source_attempt_id,
@@ -62,6 +63,26 @@ module Hive
       end
 
       private
+
+      def link_sealed_inherited_payloads!(db, record)
+        Array(record["inherited_outputs"]).uniq.each_with_index do |reference, index|
+          next unless reference.fetch("path").start_with?("sealed/")
+
+          source = db[:payload_references].where(
+            relative_path: reference.fetch("path"), sha256: reference.fetch("sha256"),
+            bytes: reference.fetch("size"), state: "sealed"
+          ).first
+          unless source
+            raise Attempts::RepositoryError, "sealed inherited attempt payload is unavailable"
+          end
+          db[:payload_references].insert(
+            payload_id: "attempt-inherited:#{record.attempt_id}:#{index}",
+            attempt_id: record.attempt_id, task_id: nil, kind: "inherited_output",
+            relative_path: source.fetch(:relative_path), sha256: source.fetch(:sha256),
+            bytes: source.fetch(:bytes), state: "sealed", created_at: record["accepted_at"]
+          )
+        end
+      end
 
       def validate_decision!(decision)
         return nil unless decision
@@ -144,7 +165,7 @@ module Hive
       def admission_request_payload(record, recovery_source_attempt_id:)
         recovery = unless recovery_source_attempt_id.to_s.empty?
           {
-            "variant" => "attempt_loss", "phase" => "admitted",
+            "variant" => "attempt_loss", "phase" => "dispatched",
             "source_attempt_id" => recovery_source_attempt_id.to_s
           }
         end

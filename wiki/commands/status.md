@@ -22,7 +22,7 @@ terminal history. The former public full-fleet status surface is removed.
 | `hive status` | Bounded human daemon/liveness snapshot. |
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
+| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable stateless routing decision; superseded v1-v3 are removed. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |

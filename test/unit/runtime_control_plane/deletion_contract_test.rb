@@ -71,6 +71,11 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/task_projection/reader.rb
     lib/hive/workflow_package/publish_store.rb
   ].freeze
+  CURRENT_OPERATOR_GUIDES = %w[
+    skills/hive/references/status-and-watch.md
+    openclaw/skills/hive/references/status-and-watch.md
+    wiki/cli.md
+  ].freeze
 
   def test_final_affected_inventory_is_exact_and_at_least_twenty_percent_smaller
     inventory = YAML.safe_load_file(INVENTORY, permitted_classes: [], aliases: false)
@@ -144,6 +149,12 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
 
   def test_unrelated_task_workflow_and_artifact_file_stores_remain
     RETAINED_FILE_STORES.each { |relative| assert_path_exists File.join(ROOT, relative) }
+  end
+
+  def test_current_operator_guides_do_not_advertise_the_retired_circuits_command
+    CURRENT_OPERATOR_GUIDES.each do |relative|
+      refute_includes File.binread(File.join(ROOT, relative)), "hive circuits", relative
+    end
   end
 
   private

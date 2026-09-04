@@ -29,7 +29,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     lost_recovery_cleanup lost_recovery_phase lost_recovery_request_id
     lost_recovery_revision lost_recovery_updated_at outcome ownership_generation
     project_id project_name provider_account_id publication_accounting_acknowledged
-    publication_dispatch_acknowledged publication_journal_acknowledged record_digest
+    publication_dispatch_acknowledged publication_journal_acknowledged publication_promoted record_digest
     record_json refunded request_id retain_until retry_charge source_fingerprint
     started_at state subject_json subject_key subject_kind task_generation task_id
     task_slug terminal_publication_created_at terminal_receipt_digest
@@ -277,7 +277,8 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
             terminal_publication_created_at: timestamp,
             publication_journal_acknowledged: 1,
             publication_accounting_acknowledged: 1,
-            publication_dispatch_acknowledged: 1
+            publication_dispatch_acknowledged: 1,
+            publication_promoted: 1
           )
         )
         connection[:dispatch_requests].insert(

@@ -26,6 +26,7 @@ module Hive
       CLAIM_EXPIRY_SEC = 14_400
       TERMINAL_RECOVERY_RETENTION_SEC = 7 * 24 * 60 * 60
       RESULT_RETENTION_SEC = 3600
+      PENDING_RESULT_LIMIT = 512
       RECOVERY_PROJECTION_LIMIT = 500
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
@@ -216,9 +217,9 @@ module Hive
       def release_claim(request_id, **)
         database.transaction do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: "claimed").update(
-            state: "queued", claim_owner: nil, claim_pid: nil,
-            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-            updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            cleared_claim_columns(state: "queued").merge(
+              updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            )
           ) == 1
         end
       end
@@ -230,9 +231,9 @@ module Hive
           dataset = db[:dispatch_requests].where(request_id: request_id.to_s)
           if row[:result_state]
             dataset.update(
-              state: "completed", claim_owner: nil, claim_pid: nil,
-              claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-              updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+              cleared_claim_columns(state: "completed").merge(
+                updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+              )
             ) == 1
           else
             dataset.delete == 1
@@ -339,9 +340,9 @@ module Hive
       def complete_delivery(request_id, now: @clock.call, **)
         database.transaction do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: DELIVERY_STATES).update(
-            state: "completed", claim_owner: nil, claim_pid: nil,
-            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-            updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+            cleared_claim_columns(state: "completed").merge(
+              updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+            )
           ) == 1
         end
       end
@@ -365,10 +366,8 @@ module Hive
       def prune_terminal_recoveries(now: @clock.call, retention_sec: TERMINAL_RECOVERY_RETENTION_SEC, **)
         cutoff = now.utc - retention_sec
         database.transaction do |db|
-          ids = db[:dispatch_requests].where(state: "completed", result_state: nil)
-            .where { updated_at < cutoff.iso8601(6) }
-            .select_map(:request_id)
-          db[:dispatch_requests].where(request_id: ids).delete
+          db[:dispatch_requests].where(state: "completed", result_state: nil)
+            .where { updated_at < cutoff.iso8601(6) }.delete
         end
       end
 
@@ -463,22 +462,34 @@ module Hive
         end
       end
 
-      def pending_results(now: @clock.call, **)
+      def pending_results(now: @clock.call, limit: PENDING_RESULT_LIMIT, **)
+        limit = Integer(limit)
+        raise ArgumentError, "pending result limit is invalid" unless limit.between?(1, PENDING_RESULT_LIMIT)
+
         database.read do |db|
           db[:dispatch_requests].where(result_state: "pending")
             .where { result_available_at <= now.utc.iso8601(6) }
-            .order(:result_available_at, :request_id).map { |row| result_from(row) }
+            .order(:result_available_at, :request_id).limit(limit).map { |row| result_from(row) }
         end
       end
 
       def acknowledge_result(request_id, now: @clock.call, **)
+        acknowledge_results([ request_id ], now: now) == 1
+      end
+
+      def acknowledge_results(request_ids, now: @clock.call, **)
+        ids = Array(request_ids).map(&:to_s).uniq
+        raise ArgumentError, "dispatch result acknowledgement is too large" if
+          ids.length > PENDING_RESULT_LIMIT
+        return 0 if ids.empty?
+
         database.transaction do |db|
           db[:dispatch_requests].where(
-            request_id: request_id.to_s, result_state: "pending"
+            request_id: ids, result_state: "pending"
           ).update(
             result_state: "delivered", result_delivered_at: now.utc.iso8601(6),
             updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
-          ) == 1
+          )
         end
       end
 
@@ -627,6 +638,13 @@ module Hive
         value.to_s.empty? ? nil : value
       end
 
+      def cleared_claim_columns(state:)
+        {
+          state: state, claim_owner: nil, claim_pid: nil,
+          claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil
+        }
+      end
+
       def payload_for(request_id)
         value = database.read do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s).get(:payload_json)
@@ -669,10 +687,7 @@ module Hive
           recovery["phase"] = changes[:phase] if changes.key?(:phase)
           validate_recovery!(recovery)
           if state
-            row_changes.merge!(
-              state: state, claim_owner: nil, claim_pid: nil,
-              claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil
-            )
+            row_changes.merge!(cleared_claim_columns(state: state))
           end
           true
         end
@@ -697,9 +712,9 @@ module Hive
           dataset = db[:dispatch_requests].where(request_id: ids)
           deleted = dataset.where(result_state: nil).delete
           completed = dataset.exclude(result_state: nil).update(
-            state: "completed", claim_owner: nil, claim_pid: nil,
-            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-            updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            cleared_claim_columns(state: "completed").merge(
+              updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            )
           )
           deleted + completed
         end

@@ -14,7 +14,10 @@ module Hive
         end
         return Decision.legacy(request: request) if request.policy.legacy?
 
-        candidates = ordered_routes(request).map { |route| evaluate(route, request) }
+        failed_route = configured_failed_route(request)
+        candidates = ordered_routes(request, failed_route).map do |route|
+          evaluate(route, request, failed_route)
+        end
         selected = candidates.find(&:eligible?)
         exclusions = candidates.flat_map(&:exclusions)
         considered = candidates.map(&:route)
@@ -33,7 +36,7 @@ module Hive
         in_boundary = candidates.select do |candidate|
           request.policy.pin_allows?(candidate.route) &&
             request.policy.requirements_satisfied?(candidate.route) &&
-            candidate.route.id != configured_failed_route(request)&.id
+            candidate.route.id != failed_route&.id
         end
         if request.policy.pin.nil? && !in_boundary.empty? && in_boundary.all?(&:capacity_only?)
           return Decision.capacity_saturated(
@@ -59,9 +62,8 @@ module Hive
 
       private
 
-      def ordered_routes(request)
+      def ordered_routes(request, failed)
         routes = request.policy.routes
-        failed = configured_failed_route(request)
         return routes unless failed
 
         routes.rotate(routes.index(failed) + 1)
@@ -73,7 +75,7 @@ module Hive
         request.policy.routes.find { |route| route.id == request.failed_route_id }
       end
 
-      def evaluate(route, request)
+      def evaluate(route, request, failed_route)
         unless request.policy.pin_allows?(route)
           return Candidate.new(
             route: route,
@@ -87,7 +89,7 @@ module Hive
           )
         end
 
-        if route.id == configured_failed_route(request)&.id
+        if route.id == failed_route&.id
           return Candidate.new(
             route: route,
             exclusions: [ exclusion(route, "failed_route") ]

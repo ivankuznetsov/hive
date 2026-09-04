@@ -152,7 +152,10 @@ module Hive
             argv: recovery_argv(attempt, task),
             request_id: outcome.fetch("request_id"),
             provider: attempt["provider"],
-            inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
+            inherited_outputs: (
+              attempt["inherited_outputs"] + attempt["current_outputs"] +
+              outcome.fetch("capture_references", [])
+            ).uniq,
             retry_charge: attempt["retry_charge"] + 1,
             interactive: false,
             now: now,

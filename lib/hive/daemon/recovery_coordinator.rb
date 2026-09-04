@@ -528,7 +528,6 @@ module Hive
             policy_digest: decision.policy_digest
           )
           observation = admission_observation(decision)
-          operator_blocked = decision.reason == "health_state_unavailable"
           recovery = {
             "variant" => "admission_failure",
             "phase" => "admitted",
@@ -539,10 +538,9 @@ module Hive
             "dispatch_generation" => generation.task_generation,
             "failure_origin" => decision.reason,
             "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
-            "owner" => operator_blocked ? "operator" : "scheduler",
-            "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
-            "blocked_remediation" => operator_blocked ?
-              "inspect and repair the unavailable provider-health scope" : nil,
+            "owner" => "scheduler",
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil,
             "retry_count" => durable_retry_count_for(
               project: project, slug: slug, expected_stage: task_stage(locked_task)
             ) + 1,
@@ -747,13 +745,11 @@ module Hive
           return receipt_for_request(current, now: now)
         end
 
-        operator_blocked = decision.reason == "health_state_unavailable"
         changes = {
           "admission_observation" => admission_observation(decision),
-          "owner" => operator_blocked ? "operator" : "scheduler",
-          "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
-          "blocked_remediation" => operator_blocked ?
-            "inspect and repair the unavailable provider-health scope" : nil
+          "owner" => "scheduler",
+          "blocked_reason" => nil,
+          "blocked_remediation" => nil
         }
         unless decision.capacity_saturated?
           changes["next_eligible_at"] =
@@ -1267,9 +1263,7 @@ module Hive
       def validate_admission_decision!(decision, expected_status:)
         unless decision.is_a?(Hive::ProviderRouting::Decision) &&
                decision.status == expected_status &&
-               %w[
-                 capacity_saturated health_state_unavailable no_eligible_provider_route
-               ].include?(decision.reason)
+               %w[capacity_saturated no_eligible_provider_route].include?(decision.reason)
           raise ArgumentError, "invalid provider-routing admission decision"
         end
       end

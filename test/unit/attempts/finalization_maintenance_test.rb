@@ -44,6 +44,9 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
 
       refute subject.promote(terminal)
       assert store.fetch(terminal.attempt_id)
+      restarted = Hive::Attempts::Repository.new(root: store.root, migrate: true)
+      assert_equal terminal.attempt_id,
+                   restarted.active_attempts.find { |attempt| attempt.attempt_id == terminal.attempt_id }&.attempt_id
       writer.close
       assert subject.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
@@ -64,7 +67,8 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert_operator early.fetch(:cold_examined), :<=,
                       Hive::Attempts::FinalizationMaintenance::COLD_SWEEP_LIMIT
 
-      expired = subject.sweep_logs(now: NOW + (3 * 86_400) + 4)
+      restarted = maintenance(store)
+      expired = restarted.sweep_logs(now: NOW + (3 * 86_400) + 4)
       assert_equal 1, expired.fetch(:deleted)
       assert_equal :expired, store.log_archive.resolve(terminal.attempt_id).availability
       assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
@@ -248,6 +252,38 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert maintenance(store).sweep_if_due(now: NOW).fetch(:ran)
       assert_equal [ nil, "attempt-1", nil ], seen.map { |cursor, _limit| cursor.fetch("after") }
     end
+  end
+
+  def test_cold_sweep_stops_at_its_time_budget_and_resumes_after_the_last_examined_row
+    record = Struct.new(:attempt_id) do
+      def final? = true
+      def [](key) = key == "ended_at" ? "2026-08-01T00:00:00Z" : nil
+    end
+    pages = []
+    page = Data.define(:attempt_ids, :cursor)
+    archive = Object.new
+    archive.define_singleton_method(:cold_attempt_ids_page) do |cursor:, **|
+      pages << cursor.fetch("after")
+      ids = cursor.fetch("after") == "attempt-1" ? %w[attempt-2 attempt-3] : %w[attempt-1 attempt-2 attempt-3]
+      page.new(attempt_ids: ids, cursor: { "after" => ids.last })
+    end
+    archive.define_singleton_method(:expire) { |*, **| :expired }
+    store = Object.new
+    store.define_singleton_method(:log_archive) { archive }
+    store.define_singleton_method(:publication) { |_| nil }
+    store.define_singleton_method(:fetch) { |id| record.new(id) }
+    clock_values = [ 0.0, 1.0, 6.0, 10.0, 11.0, 12.0 ]
+    subject = Hive::Attempts::FinalizationMaintenance.new(
+      store: store, task_archived: ->(_) { false },
+      monotonic_clock: -> { clock_values.shift }, maintenance_time_budget_sec: 5
+    )
+
+    first = subject.sweep_logs(now: NOW)
+    second = subject.sweep_logs(now: NOW)
+
+    assert_equal 1, first.fetch(:cold_examined)
+    assert_equal 2, second.fetch(:cold_examined)
+    assert_equal [ nil, "attempt-1" ], pages
   end
 
   def test_maintenance_error_is_visible_only_in_the_current_process

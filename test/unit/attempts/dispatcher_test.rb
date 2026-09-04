@@ -565,7 +565,7 @@ class AttemptsDispatcherTest < Minitest::Test
         )
         assert Hive::Attempts::FailureCohortReconciler.new(store: store).reconcile(
           record: terminal,
-          admission: store.reservation_metadata(terminal.attempt_id).fetch("admission")
+          admission: store.admission_metadata(terminal.attempt_id)
         )
         result
       end

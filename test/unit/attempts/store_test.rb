@@ -76,8 +76,12 @@ class AttemptsRepositoryTest < Minitest::Test
       restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
       assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
       assert restarted.publication_complete?(terminal.attempt_id)
+      assert_equal terminal.attempt_id,
+                   restarted.active_attempts.find { |attempt| attempt.attempt_id == terminal.attempt_id }&.attempt_id
       assert restarted.finish_publication(terminal.attempt_id)
+      assert restarted.publication(terminal.attempt_id).fetch("promoted")
       assert_nil restarted.fetch_hot(terminal.attempt_id)
+      refute restarted.active_attempts.any? { |attempt| attempt.attempt_id == terminal.attempt_id }
       assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
     end
   end

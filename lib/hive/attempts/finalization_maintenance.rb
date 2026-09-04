@@ -13,10 +13,10 @@ module Hive
     # the fixed consumer acknowledgements; no one-to-one publication ledger is
     # created or removed.
     class FinalizationMaintenance
-      TERMINAL_CONSUMERS = %w[accounting dispatch journal].freeze
       MAINTENANCE_INTERVAL_SEC = 60 * 60
       LOG_RETENTION_SEC = 3 * 24 * 60 * 60
       COLD_SWEEP_LIMIT = 512
+      MAINTENANCE_TIME_BUDGET_SEC = 5
       MaintenanceStatus = Data.define(:attempt, :classification, :owner_status, :evidence)
 
       def self.runtime(store:, state_home: Hive::Paths.state_home, **options)
@@ -36,12 +36,18 @@ module Hive
       end
 
       def initialize(store:, condition_observer: nil, delivery_pending: nil,
-                     task_archived: nil, logger: nil)
+                     task_archived: nil, logger: nil,
+                     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     maintenance_time_budget_sec: MAINTENANCE_TIME_BUDGET_SEC)
         @store = store
         @condition_observer = condition_observer
         @delivery_pending = delivery_pending
         @task_archived = task_archived
         @logger = logger
+        @monotonic_clock = monotonic_clock
+        @maintenance_time_budget_sec = Float(maintenance_time_budget_sec)
+        raise ArgumentError, "maintenance time budget must be positive" unless @maintenance_time_budget_sec.positive?
+
         @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
         @last_started_at = nil
         @last_completed_at = nil
@@ -92,9 +98,9 @@ module Hive
           raise RepositoryError, "attempt changed after final proof publication"
         end
 
-        reservation = @store.reservation_metadata(current.attempt_id)
+        admission = @store.admission_metadata(current.attempt_id)
         @failure_cohort_reconciler.reconcile(
-          record: current, admission: reservation&.fetch("admission", nil)
+          record: current, admission: admission
         )
         @store.finish_publication(record.attempt_id)
         true
@@ -116,11 +122,18 @@ module Hive
       def sweep_logs(now: Time.now.utc)
         deleted = 0
         errors = 0
+        examined = 0
+        last_examined = nil
+        deadline = @monotonic_clock.call + @maintenance_time_budget_sec
         page = @store.log_archive.cold_attempt_ids_page(
           cursor: { "after" => @cursor_after },
           limit: COLD_SWEEP_LIMIT
         )
         page.attempt_ids.each do |attempt_id|
+          break if @monotonic_clock.call >= deadline
+
+          last_examined = attempt_id
+          examined += 1
           begin
             record = @store.fetch(attempt_id)
             next unless record&.final?
@@ -134,8 +147,9 @@ module Hive
             record_maintenance_error(error, now: now, attempt_id: attempt_id)
           end
         end
-        @cursor_after = page.cursor.fetch("after")
-        { deleted: deleted, cold_examined: page.attempt_ids.size, errors: errors }
+        @cursor_after = last_examined || page.cursor.fetch("after") if
+          last_examined || page.attempt_ids.empty?
+        { deleted: deleted, cold_examined: examined, errors: errors }
       end
 
       def storage_snapshot(hot_count:, invalid_hot_count:)
@@ -232,9 +246,12 @@ module Hive
       def timestamp(value) = value && Record.iso8601(value)
 
       def recovery_pinned?(record)
-        !!@store.publication(record.attempt_id) &&
-          !@store.publication_complete?(record.attempt_id)
-      rescue RepositoryError
+        publication = @store.publication(record.attempt_id)
+        return false unless publication
+        return true unless publication.is_a?(Hash)
+
+        publication.fetch("promoted") != true
+      rescue RepositoryError, KeyError
         true
       end
 

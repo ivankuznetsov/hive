@@ -315,9 +315,7 @@ module Hive
       def active_attempts
         rows = database.read do |db|
           publication_pending = Sequel.lit(
-            "terminal_receipt_json IS NOT NULL AND " \
-            "(publication_journal_acknowledged = 0 OR " \
-            "publication_accounting_acknowledged = 0 OR publication_dispatch_acknowledged = 0)"
+            "terminal_receipt_json IS NOT NULL AND publication_promoted = 0"
           )
           db[:attempts].where(state: %w[launching running])
             .or(publication_pending).order(:attempt_id).all
@@ -331,9 +329,7 @@ module Hive
         id = safe_id(task_id, error: "unsafe task id")
         row = database.read do |db|
           pending = Sequel.lit(
-            "terminal_receipt_json IS NOT NULL AND " \
-            "(publication_journal_acknowledged = 0 OR " \
-            "publication_accounting_acknowledged = 0 OR publication_dispatch_acknowledged = 0)"
+            "terminal_receipt_json IS NOT NULL AND publication_promoted = 0"
           )
           db[:attempts].where(task_id: id).where(state: %w[launching running])
             .or(Sequel.&({ task_id: id }, pending)).order(:attempt_id).first
@@ -549,7 +545,6 @@ module Hive
       end
 
       def row_for(record, task_id:, project_id:, source_fingerprint:, admission:)
-        payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
         admission = live_admission(admission) if admission
         {
           attempt_id: record.attempt_id, request_id: record["request_id"],
@@ -565,26 +560,27 @@ module Hive
           admission_runtime_digest: admission&.fetch("runtime_digest", nil),
           admission_utc_date: admission&.fetch("utc_date", nil),
           source_fingerprint: source_fingerprint.to_s,
-          record_json: payload,
-          record_digest: Digest::SHA256.hexdigest(payload),
           subject_json: RuntimeControlPlane::Codec.dump_json(record.subject),
           project_name: record["project"], task_slug: record["task_slug"],
           accepted_date: Time.iso8601(record["accepted_at"]).utc.to_date.iso8601,
           created_at: record["created_at"], accepted_at: record["accepted_at"],
           started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
           ended_at: record["ended_at"]
-        }
+        }.merge(serialized_record_columns(record))
       end
 
       def mutable_columns(record)
-        payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
         {
           state: record.state, outcome: record.outcome,
           lease_version: record.lease_version,
-          record_json: payload, record_digest: Digest::SHA256.hexdigest(payload),
           started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
           ended_at: record["ended_at"]
-        }
+        }.merge(serialized_record_columns(record))
+      end
+
+      def serialized_record_columns(record)
+        payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
+        { record_json: payload, record_digest: Digest::SHA256.hexdigest(payload) }
       end
 
       def record_from(row)
@@ -611,11 +607,7 @@ module Hive
       end
 
       def publication_pending_row?(row)
-        row[:terminal_receipt_json] &&
-          %i[
-            publication_journal_acknowledged publication_accounting_acknowledged
-            publication_dispatch_acknowledged
-          ].any? { |column| row.fetch(column).zero? }
+        row[:terminal_receipt_json] && row.fetch(:publication_promoted).zero?
       end
 
       def ensure_subject!(db, record, source_fingerprint:)

@@ -22,3 +22,9 @@ until acknowledged; external delivery remains at-least-once across a
 send-before-ack crash. Patrol daily limits are derived from unique token-usage
 session rows, and only the daemon runs attempt maintenance.
 
+**Review hardening:** Final attempts now remain visible until archive and
+failure-cohort promotion is durably marked. Lost-attempt dirty captures are
+sealed and transactionally linked to the independent replacement, so retention
+cannot invalidate inherited output. Attempt maintenance is bounded by both row
+count and monotonic elapsed time. The canonical and OpenClaw Hive guidance now
+describes stateless routing instead of the removed circuits command.

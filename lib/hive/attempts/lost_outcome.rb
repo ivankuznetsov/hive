@@ -67,9 +67,10 @@ module Hive
             "updated_at" => now.utc.iso8601(6)
           )
           validate_transition!(current, replacement, attempt)
-          persist_capture_references(
-            db, attempt, requested.fetch("capture_references", []), now: now
-          ) if requested.key?("capture_references")
+          if requested.key?("capture_references") &&
+             capture_references(db, attempt.attempt_id) != requested.fetch("capture_references")
+            raise RepositoryError, "lost recovery capture references are not sealed"
+          end
           changed = db[:attempts].where(
             attempt_id: attempt.attempt_id,
             lost_recovery_revision: row.fetch(:lost_recovery_revision),
@@ -129,42 +130,17 @@ module Hive
       end
 
       def capture_references(db, attempt_id)
-        db[:payload_references].where(attempt_id: attempt_id, kind: "lost_capture", state: "open")
-          .order(:payload_id).filter_map do |row|
-            path = File.join(@store.root, row.fetch(:relative_path))
-            OutputReference.build(path, root: @store.root)
-          rescue InvalidOutputReference, SystemCallError, IOError
-            nil
-          end.freeze
-      end
-
-      def persist_capture_references(db, attempt, references, now:)
-        Array(references).each_with_index do |reference, index|
-          value = Hive::StringifyKeys.call(reference)
-          OutputReference.validate_shape!(value)
-          relative = value.fetch("path")
-          prefix = File.join("open", attempt.attempt_id, "dirty-state") + File::SEPARATOR
-          unless relative.start_with?(prefix)
-            raise RepositoryError, "lost recovery capture reference is outside its attempt"
-          end
-          payload_id = "lost-capture:#{attempt.attempt_id}:#{index}"
-          existing = db[:payload_references].where(payload_id: payload_id).first
-          if existing
-            unless existing.fetch(:attempt_id) == attempt.attempt_id &&
-                   existing.fetch(:kind) == "lost_capture" &&
-                   existing.fetch(:relative_path) == relative && existing.fetch(:state) == "open"
-              raise RepositoryError, "lost recovery capture identity conflicts"
-            end
-            next
-          end
-          db[:payload_references].insert(
-            payload_id: payload_id, attempt_id: attempt.attempt_id, task_id: nil,
-            kind: "lost_capture", relative_path: relative, state: "open",
-            created_at: now.utc.iso8601(6)
-          )
-        end
+        db[:payload_references].where(attempt_id: attempt_id, kind: "lost_capture", state: "sealed")
+          .order(:payload_id).map do |row|
+            reference = {
+              "path" => row.fetch(:relative_path),
+              "sha256" => row.fetch(:sha256), "size" => row.fetch(:bytes)
+            }
+            OutputReference.validate_shape!(reference)
+            reference.freeze
+          end.uniq.freeze
       rescue InvalidOutputReference => error
-        raise RepositoryError, error.message
+        raise RepositoryError, "lost recovery capture is unreadable: #{error.message}"
       end
 
       def validate!(data)
@@ -242,12 +218,20 @@ module Hive
           )
         end
 
-        task = @task_resolver.call(attempt)
-        capture = capture(task, attempt, now: now)
+        references = outcome.fetch("capture_references")
+        if references.empty?
+          task = @task_resolver.call(attempt)
+          capture = capture(task, attempt, now: now)
+          references = @store.seal_lost_capture_payloads(attempt, capture&.references || [])
+        else
+          references.each do |reference|
+            @store.payload_store.read_sealed(reference.merge("algorithm" => "sha256"))
+          end
+        end
         @outcome_store.update(
           attempt, now: now, phase: "ready", cleanup: cleanup,
           request_id: @outcome_store.recovery_request_id(attempt),
-          capture_references: capture&.references || []
+          capture_references: references
         )
       rescue CompareAndSwapFailed
         @outcome_store.fetch(attempt.attempt_id) || raise

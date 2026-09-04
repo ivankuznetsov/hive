@@ -43,6 +43,11 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert first.fetch("capture_references").all? do |reference|
           Hive::OutputReference.verify(reference, root: root)
         end
+        assert first.fetch("capture_references").all? do |reference|
+          reference.fetch("path").start_with?("sealed/sha256/") &&
+            store.read_output(reference, max_bytes: 1_000_000)
+        end
+        assert_empty Dir.glob(File.join(root, "open", lost.attempt_id, "dirty-state", "*"))
         assert Hive::Markers.current(task.state_file).none?,
                "the attempt ledger owns loss recovery; it must not create a second marker lifecycle"
       end
@@ -177,6 +182,48 @@ class AttemptsLostOutcomeTest < Minitest::Test
       assert_raises(Hive::Attempts::RepositoryError) do
         outcomes.update(lost, status: "ready")
       end
+    end
+  end
+
+  def test_transition_rejects_capture_references_that_have_not_been_sealed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(
+          lost, phase: "ready", cleanup: "absent",
+          request_id: outcomes.recovery_request_id(lost),
+          capture_references: [ { "path" => "open/lost-no-worker/dirty-state/x", "size" => 1,
+                                  "sha256" => "a" * 64 } ]
+        )
+      end
+    end
+  end
+
+  def test_processor_resumes_from_a_capture_sealed_before_the_recovery_transition
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+      directory = store.output_directory(lost.attempt_id, "dirty-state", create: true)
+      path = File.join(directory, "capture")
+      File.binwrite(path, "captured")
+      reference = Hive::OutputReference.build(path, root: root)
+      sealed = store.seal_lost_capture_payloads(lost, [ reference ])
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: outcomes,
+        process_identity: FakeIdentity.new(:absent, []),
+        task_resolver: ->(_) { raise "sealed capture must be reused" }
+      )
+
+      ready = processor.process(lost, now: NOW + 1)
+
+      assert_equal "ready", ready.fetch("phase")
+      assert_equal sealed, ready.fetch("capture_references")
     end
   end
 

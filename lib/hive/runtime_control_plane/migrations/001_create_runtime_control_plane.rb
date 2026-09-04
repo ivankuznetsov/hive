@@ -127,6 +127,7 @@ Sequel.migration do
       Integer :publication_journal_acknowledged, null: false, default: 0
       Integer :publication_accounting_acknowledged, null: false, default: 0
       Integer :publication_dispatch_acknowledged, null: false, default: 0
+      Integer :publication_promoted, null: false, default: 0
       %i[
         failure_cohort_date failure_cohort_identity_digest failure_cohort_outcome
         failure_cohort_occurred_at
@@ -144,7 +145,7 @@ Sequel.migration do
       check Sequel.lit(
         "publication_journal_acknowledged IN (0, 1) AND " \
         "publication_accounting_acknowledged IN (0, 1) AND " \
-        "publication_dispatch_acknowledged IN (0, 1)"
+        "publication_dispatch_acknowledged IN (0, 1) AND publication_promoted IN (0, 1)"
       )
       check Sequel.lit("failure_cohort_counted IN (0, 1)")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
@@ -177,10 +178,14 @@ Sequel.migration do
         "(terminal_receipt_json IS NULL AND terminal_receipt_digest IS NULL AND " \
         "terminal_task_source_fingerprint IS NULL AND terminal_publication_created_at IS NULL AND " \
         "publication_journal_acknowledged = 0 AND " \
-        "publication_accounting_acknowledged = 0 AND publication_dispatch_acknowledged = 0) OR " \
+        "publication_accounting_acknowledged = 0 AND publication_dispatch_acknowledged = 0 AND " \
+        "publication_promoted = 0) OR " \
         "(state IN ('terminal', 'lost') AND terminal_receipt_json IS NOT NULL AND " \
         "length(terminal_receipt_digest) = 64 AND terminal_task_source_fingerprint IS NOT NULL AND " \
-        "terminal_publication_created_at IS NOT NULL)"
+        "terminal_publication_created_at IS NOT NULL AND " \
+        "(publication_promoted = 0 OR " \
+        "(publication_journal_acknowledged = 1 AND publication_accounting_acknowledged = 1 AND " \
+        "publication_dispatch_acknowledged = 1)))"
       )
       check Sequel.lit(
         "(failure_cohort_outcome IS NULL AND failure_cohort_date IS NULL AND " \
@@ -207,9 +212,7 @@ Sequel.migration do
             name: :attempts_lost_recovery_idx
       index [ :terminal_publication_created_at, :attempt_id ],
             where: Sequel.lit(
-              "terminal_receipt_json IS NOT NULL AND " \
-              "(publication_journal_acknowledged = 0 OR " \
-              "publication_accounting_acknowledged = 0 OR publication_dispatch_acknowledged = 0)"
+              "terminal_receipt_json IS NOT NULL AND publication_promoted = 0"
             ),
             name: :attempts_publication_pending_idx
       index [ :failure_cohort_date, :failure_cohort_identity_digest, :failure_cohort_counted ],
@@ -374,7 +377,7 @@ Sequel.migration do
         "(state != 'open' AND sha256 IS NOT NULL AND length(sha256) = 64 " \
         "AND bytes IS NOT NULL AND bytes >= 0)"
       )
-      check Sequel.lit("(state = 'releasable') = (retain_until IS NOT NULL)")
+      check Sequel.lit("state = 'releasable' OR retain_until IS NULL")
       index [ :kind, :relative_path ], name: :payload_references_path_idx
       index [ :task_id ], name: :payload_references_task_idx
       index [ :attempt_id ], name: :payload_references_attempt_idx

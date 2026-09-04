@@ -3,15 +3,15 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-09-01
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
 **TLDR**: Authored task/project documents remain in `.hive-state` and feature
-worktrees. A Sequel/SQLite runtime control plane owns coordination state:
-attempt lifecycle, dispatch requests/outbox, capacity, provider circuits and
-audit, routing decisions, task leases and ids, Patrol discovery allowances,
-and PR merge reconciliation. Evidence-bound
+worktrees. A Sequel/SQLite runtime control plane owns machine-local coordination:
+independent attempt lifecycle and fixed per-attempt facts, request/result
+delivery, live capacity, task leases and ids, token history, payload references,
+and PR merge reconciliation. Provider order remains in current config. Evidence-bound
 delivered/superseded closure remains a task-local authority retained with an
 archived task; it is never fabricated attempt success.
 
@@ -156,6 +156,12 @@ strictly owned canonical worktree when one exists and otherwise uses the
 controller-observed head in current `pr.md` metadata. For tasks created before
 that field existed, only the owned worktree can supply the binding; an
 arbitrary path, missing worktree, or different HEAD remains unverifiable.
+For operator closure, a clean owned worktree is considered delivered when its
+HEAD either equals a verified same-repository merged PR head or is an ancestor
+of that head. This admits review-fix commits added later on the same PR branch,
+including squash merges where the task commits are not ancestors of the
+default branch; unrelated unique work remains blocked. If the verified PR head
+object is unavailable locally, the ancestry check fails closed.
 That channel is not accepted by the public confirmation API and
 cannot take over an operator receipt. `closure.json` is mode 0600 and is
 written/fsynced before the centralized move to `9-done`; a restart resumes the
@@ -241,11 +247,11 @@ integer values mean full 24-hour periods and hide only when
 visible. `never` always remains visible in ordinary views. The dedicated
 archive source bypasses this projection and retains every archived task.
 
-Task ids are allocated from the installation-scoped `task_counters` row
-`namespace=tasks` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
+Task ids are allocated from `installations.next_task_id`
+via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
 The immediate SQLite transaction makes read-plus-increment atomic across
 processes; there is no counter YAML or counter lock file. `peek` returns the
-stored next value (or `1` before the first allocation), and `seed_at_least!`
+stored next value (or infers a floor above numeric task subject IDs), and `seed_at_least!`
 advances without moving backwards. Capture paths use `next_or_nil` so a typed
 runtime-control-plane outage can preserve an already-created task with a nil id
 for explicit migration. `hive migrate` strictly seeds above existing metadata
@@ -338,7 +344,7 @@ without creating an infinite loop.
 
 - **Per-task lease**: installation SQLite `task_leases`, keyed through stable
   `task_subjects.task_id`. Typed holder PID/start identity, holder nonce,
-  generation, lease version, and bounded JSON operation/agent detail provide
+  lease version, and bounded JSON operation/agent detail provide
   liveness plus compare-and-swap fencing. Dead or PID-reused holders are
   reclaimable; an old nonce cannot release or update its replacement. Subject
   lookup is metadata-id-first, validates the registered project/state root,
@@ -351,57 +357,39 @@ without creating an infinite loop.
   closed; a lease-created placeholder is never treated as an admitted source.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
-## Task condition journal and projection
+## Task condition journal
 
-The task-local durability contracts are deliberately separate. Legacy,
-fail-soft operational telemetry remains in `events.jsonl` under
-`Hive::Events`. Versioned condition/generation/evidence/audit records live in
-the strict `task-journal.jsonl` and are appended synchronously through
-`Hive::TaskJournal::Writer` with a separate task-local journal flock, complete
-JSON-line batch, short-write retry, flush, and fsync. A failed append truncates
-and re-syncs to the pre-append byte boundary before reporting failure. Those
-records reuse the durable attempt ID from [[modules/attempts]] and add a
-numeric task input epoch plus exact-HEAD commit generation. Projection replay
-applies the same structural, schema-version, and durable attempt task/stage/
-generation checks as the writer; unknown record shapes fail closed.
-Validation follows predecessor lineage and rejects missing, incompatible, or
-cyclic links. Projection selection uses that causal chain before timestamps,
-so clock regression cannot reverse retry order.
+Legacy, fail-soft operational telemetry remains in `events.jsonl` under
+`Hive::Events`. Versioned condition, generation, evidence, audit, and
+implementation-identity records live in the strict `task-journal.jsonl`.
+`Hive::TaskJournal::Writer` appends complete JSON-line batches under a
+task-local flock, flushes and fsyncs them, and truncates back to the previous
+byte boundary when a write fails. New records are checked against their live
+SQLite attempt before append.
 
-The underlying storage/replay mechanics now enter through
-`require "hive/work_ledger"`. `Hive::WorkLedger` owns only policy-light ordered
-descriptor validation, JSONL locking/complete-write/fsync/rollback,
-idempotency-key conflict detection, byte-bound replay, and duplicate record
-identity rejection. `Hive::TaskJournal` still creates and validates the
-Hive-owned authoritative event schema, and `Hive::TaskProjection` supplies
-attempt enrichment plus condition/projection compatibility policy through the
-replay callback. Consequently `task-journal.jsonl` and
-`task-projection.json` remain internal Hive compatibility formats, not public
-WorkLedger formats. Task paths, store selection, migrations, transitions,
-overlays, Git actions, and status policy remain above the mechanism.
+Historical task state has one authority: the JSONL journal. Readers take a
+shared lock, validate every record and hash-chain link, bind the stream to one
+task/workflow and each attempt to one stage/generation identity, then fold it
+directly in memory through `Hive::TaskProjection`. Routine scheduling reads the
+complete stream; only bounded task-workspace presentation enforces byte and
+event limits. Unchanged routine read results are memoized in a bounded, process-local
+LRU by the journal's path and file identity plus marker and task identity. Every
+lookup still takes the nonblocking shared journal lock before it can reuse a
+fold, and an append or replacement changes the file identity and misses the
+cache. Replay is self-contained and never asks SQLite to reinterpret old
+history. Attempt lineage used by the fold comes from journal provenance. A
+malformed or incomplete journal fails that task closed as
+`task_history_invalid`; Hive does not create a checkpoint, snapshot, or repair
+sidecar. A busy lock reports transient `busy` state without serving a cached
+fold. If the lock sidecar appears during a first append, a reader retries through
+the shared lock instead of consuming an unlocked partial write.
 
-Append and replay receipts contain detached, deeply frozen JSON record
-snapshots. Replay hashes a private copy of its source bytes, and idempotent
-append validates every historical record sharing the requested key before it
-returns an existing receipt.
-
-`<task>/task-projection.json` is an atomic, disposable materialized view bound
-to the journal cursor, last event ID, and SHA-256. It contains projected
-identity, current and superseded conditions, evidence, gate diagnostics,
-compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
-replay from the journal without git/GitHub calls. A binding-matched cached view
-hashes the journal bytes and revalidates each unique current/predecessor attempt
-binding, including mutable state/outcome/lease; changed bindings take the full
-parse/replay path. A missing or empty journal after a durable snapshot or
-attempt-stamped `execute_*` marker fails both read and rebuild without
-replacing the last snapshot; non-execute markers do not claim an execute
-condition-journal handoff. Status replay is
-read-only; the next mutating execute boundary republishes the view. The view
-also carries at most the latest 20 `condition_overrides` projected from forced-
-transition `operator_action` records; the journal keeps all of them. Terminal/
-lost attempt state reconciles current `AgentHealthy` even before the daemon
-lifecycle observation lands.
-See [[modules/conditions]].
+The low-level append/replay mechanics enter through `require
+"hive/work_ledger"`. `Hive::WorkLedger` owns JSONL locking, complete-write
+rollback, byte-bounded replay, and duplicate record identity rejection.
+`Hive::TaskJournal` owns the Hive event schema and `Hive::TaskProjection` owns
+the in-memory fold and marker overlay. Task paths, transitions, Git actions,
+and status policy remain above that mechanism. See [[modules/conditions]].
 
 ### Implementation identity events
 
@@ -439,20 +427,18 @@ journal.
 ## Attempt storage lifecycle
 
 The runtime control plane's `attempts` rows are the bounded authority for live,
-lost-without-a-safe-successor, finalization-pending, and terminal attempts.
+lost, finalization-pending, and terminal attempts. Each row also owns its fixed
+accounting, counted-failure, lost-recovery, and terminal-publication facts.
 Reconciliation and admission use indexed queries rather than scanning a record
-directory. Finalization first observes the terminal attempt into the
-task-authoritative journal and durably acknowledges that receipt. Only then may
-loss/accounting indexes, refunds, provider-health observation, or request
-delivery advance. Promotion removes the live reservation after every required
-consumer acknowledgement while `Repository#fetch(attempt_id)` preserves point
-access to the canonical terminal row.
+directory. Finalization observes the terminal attempt into the task-authoritative
+journal and records monotonic consumer acknowledgements on the same attempt.
+`Repository#fetch(attempt_id)` preserves point access to the canonical row.
 
 Raw frames are sealed into the content-addressed runtime payload store during
-promotion. Maintenance advances a SQL keyset cursor through at most 512 entries
-per hourly pass and expires them when the owning task is archived or three days
-after `ended_at`, whichever is earlier, unless recovery remains pinned. This
-retention does not delete the terminal attempt row or still-referenced payloads.
+promotion. Daemon-only maintenance performs bounded keyset queries and
+idempotently expires eligible bytes while continuing past individual failures.
+The interval is process-local; SQLite stores no maintenance claim or cursor.
+This retention does not delete the terminal attempt row or still-referenced payloads.
 
 The one-way installation cutover is offline and fleet-atomic. A durable
 `ready → intended → active` manifest binds the registered projects,
@@ -469,81 +455,34 @@ start again. There is no general legacy decoder, attempts-v4 migration state
 machine, dual reader/writer, reverse hydration, implicit database creation,
 rollback, or downgrade.
 
-The cutover deliberately retains task journals and their validated projection
-checkpoints while resetting legacy attempt rows. A checkpoint prefix whose
-attempt was accepted before the durable installation activation boundary may
-classify that missing legacy attempt as lost; the prefix must still pass its
-cursor, inode, and anchor checks. The appended suffix is validated against
-SQLite. Ordinary lifecycle reads prefer this validated checkpoint and bounded
-suffix so retained tasks can resume after cutover. Strict full replay remains
-the fallback when no trusted checkpoint exists and remains mandatory for an
-explicit rebuild. Exact-task repair has one cutover-only compatibility route:
-it may use a retained snapshot binding for an unknown pre-activation attempt,
-but only when the journal itself also contains a pre-activation observation for
-that attempt. Hive then replays the complete journal under the task lock and
-publishes only when the ledger and complete projection match. The comparison ignores only recomputed
-marker overlays, an omitted optional null exit status, and the historical
-per-stage implementation-identity summary; its underlying identity events and
-history must still match. Post-activation unknown attempts, changed journals,
-and every other projection mismatch remain strict failures.
+The cutover retains task journals while resetting legacy attempt rows. Current
+Hive validates and folds those journals directly; it neither retains nor
+rebuilds a projection checkpoint. Historical attempt IDs remain journal facts,
+while SQLite starts with only post-cutover live runtime state and the imported
+token-usage history. A pending terminal publication is a transient live fence
+until its journal append is acknowledged, not a second historical read path.
 
 The package manager publishes the candidate normally; Hive never renames
 package-owned launcher entries or retains the previous executable tree.
 `hive runtime` exposes only bounded status and forward resume. The external
 manifest is cutover evidence, not a user-selectable backup or restore source.
-Workflow files, task journals and projections, artifacts, and referenced
+Workflow files, task journals, artifacts, and referenced
 payload files remain under their existing authorities after activation; only
 genuinely retired runtime writer paths receive tombstones.
 
-## Runtime dispatch queue and web snapshots
+## Runtime dispatch requests and web snapshots
 
-The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
-(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Ordinary
-producers include Telegram and hivebox web. Every recoverable-marker surface
-(TUI, Rails, Telegram, recorder, CLI/action, and automatic healer scheduling)
-submits through `Hive::Recovery::API`; `RecoveryCoordinator` is the only
-producer of a recovery transition. The `requestor` field records the actual
-adapter rather than disguising web or TUI requests as bot traffic.
-Pending requests are consumed in `(created_at, request_id)` order. If an older
-request observes global or generic durable-attempt capacity exhaustion, later
-requests stay pending for the next scan even when a short-lived worker frees a
-slot before the current scan ends. Project and daily caps preserve order only
-within that project, so unrelated projects can still use available capacity.
-Each pending request is one JSON file:
-
-```yaml
-schema: hive-dispatch-request
-schema_version: 4
-request_id: <hex16>
-created_at: <UTC-ISO8601>
-project: <registered project name>
-slug: <task slug>
-argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer|web|tui|cli|action|daemon|recorder|operator
-chat_id:
-update_id:
-trigger:
-task_generation:
-predecessor_attempt_id:
-inherited_outputs: []
-task_id:
-expected_stage:
-expected_marker_name:
-expected_marker_id:
-recovery: null
-```
+Ordinary producers such as Telegram and Hive web insert `dispatch_requests`
+rows. `RecoveryCoordinator` is the only producer of a recovery transition. The
+`requestor` records the actual adapter. Pending requests are consumed in
+`(created_at, request_id)` order, with capacity preserving project fairness.
 
 Current producers write `hive-dispatch-request.v5`. Ordinary requests leave
 `recovery` null. Coordinator requests persist canonical task/marker/generation
 identity, owner/remediation, retry count, terminal outcome/time, and the
-`admitted → cleared → dispatched → terminal` phase. Recovery variants cover
-marker-bound failures, markerless provider admission, and markerless controller
-failures bound directly to an unchanged task generation. Runtime consumers
-accept v5 only; `hive migrate` owns the one-off upgrade of older pending queue
-records. Queue and claim sidecars
-remain delivery records: after admission the claim stores the attempt
-ID/generation, follows a loss successor, and completes from its terminal
-receipt.
+`admitted → cleared → dispatched → terminal` phase. Lost-attempt recovery
+uses one deterministic request and admits an independent attempt; the source
+attempt's recovery-complete phase is committed with admission.
 
 `Hive::RuntimeControlPlane::DispatchRepository.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
@@ -552,15 +491,11 @@ Ordinary pending requests expire after `EXPIRY_SEC = 600`. V5 recovery
 requests instead persist `admitted → cleared → dispatched → terminal`, bound
 to canonical task/stage/generation identity and, where applicable, marker or
 routing-policy evidence, plus owner/remediation and terminal outcome/time.
-Nonterminal recovery never expires or generic-prunes,
-and a bounded request-keyed lock shard serializes claim, phase CAS, and
-pruning; request IDs are bounded filesystem-safe identifiers. On dispatch, the daemon
-renames the file to `<id>.json.claimed` and writes
-`<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
-after task admission it also carries `attempt_id` and `task_generation`.
-If the daemon dies after admission but before writing those fields, startup
-recovers them from the attempt record's immutable `request_id` correlation.
-Those claims are at-most-once delivery records, not execution owners.
+Nonterminal recovery never expires or generic-prunes. Row revision and claim
+identity serialize claim, phase CAS, and pruning. The request row also stores
+its pending/delivered result envelope under the same stable request identity.
+Delivery is resumable and at-least-once: a crash after an external send and
+before acknowledgement may repeat the notification. There is no second outbox.
 `RecoveryCoordinator` is the destructive authority for recoverable markers:
 adapters submit observations, while replay re-resolves identity and safety
 under lock before resuming the persisted phase.
@@ -726,8 +661,8 @@ The read-only web Patrol page uses bounded native `FindingQuery` and `JobQuery`
 reads so it remains available without a daemon. Those two sections fail
 independently and confer no mutation authority. Cohort, latency, token,
 and publication-summary projections are not persisted. Patrol discovery
-allowance and provider-lane holds are typed `patrol_allowances` rows; they are
-admission authority rather than a web projection.
+allowance is derived from current-UTC-day `patrol_discovery_launch` reservations
+in token usage history. There is no mutable allowance counter or provider hold.
 
 ## Patrol Fix finding import
 

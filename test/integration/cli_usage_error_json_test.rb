@@ -109,17 +109,6 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_repair_projection_missing_target_uses_its_versioned_error_contract
-    with_tmp_global_config do |home|
-      assert_pre_dispatch_error(
-        home,
-        %w[repair-projection --json],
-        schema: "hive-repair-projection",
-        error_kind: "invalid_arguments"
-      )
-    end
-  end
-
   def test_act_json_usage_errors_preserve_required_action_identity
     cases = [
       [ %w[act --json], "", "" ],
@@ -178,29 +167,13 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert status.success?
       payload = JSON.parse(out)
       assert_equal "hive-status", payload.fetch("schema")
-      assert_equal 7, payload.fetch("schema_version")
+      assert_equal 8, payload.fetch("schema_version")
 
       out, _err, status = run_hive(home, "status", "--full", "--json")
       refute status.success?
       payload = JSON.parse(out)
       assert_equal "hive-running-status", payload.fetch("schema")
       assert_match(/called with arguments \["--full"\]/, payload.fetch("message"))
-    end
-  end
-
-  def test_circuits_pre_dispatch_usage_errors_preserve_the_json_contract
-    with_tmp_global_config do |home|
-      [
-        %w[circuits inspect extra --json],
-        %w[circuits --unknown-option --json]
-      ].each do |argv|
-        assert_pre_dispatch_error(
-          home,
-          argv,
-          schema: "hive-circuits",
-          error_kind: "usage"
-        )
-      end
     end
   end
 

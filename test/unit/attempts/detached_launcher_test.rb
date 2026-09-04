@@ -12,7 +12,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
-        attempt_id: "attempt-detached", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-detached", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
         task_generation: "generation-1", progress_token: "progress", provider: "codex",
         worker_argv: [ "/bin/sh", "-c", "printf detached" ],
@@ -45,7 +45,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
         attempt_id: "attempt-systemd-scope", request_id: "request-scope",
-        predecessor_attempt_id: nil, task_id: "42", project: "demo",
+        task_id: "42", project: "demo",
         task_slug: "task", intended_stage: "4-execute",
         task_generation: "generation-1", progress_token: "progress",
         provider: "codex", worker_argv: [ "/bin/sleep", "1" ],

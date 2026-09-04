@@ -4,7 +4,7 @@ require "hive/attempts/repository"
 require "hive/commands/status"
 require "hive/implementation_identity/resolver"
 require "hive/implementation_identity/store"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 
 class ImplementationIdentityRoutingTest < Minitest::Test
   include HiveTestHelper
@@ -27,8 +27,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
                      selection.native_arguments
       end
 
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempts
+      projection = Hive::TaskProjection::Reader.new(
+        task_folder: task.folder
       ).read
       journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       journal_before = File.binread(journal_path)
@@ -55,8 +55,8 @@ class ImplementationIdentityRoutingTest < Minitest::Test
 
       File.write(File.join(task.folder, "plan.md"), "# accepted replacement plan\n")
       second = capture_execute(task, attempts, claude_cfg, generation: 2, attempt_id: "execute-generation-2")
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempts
+      projection = Hive::TaskProjection::Reader.new(
+        task_folder: task.folder
       ).read
       identity = projection["implementation_identity"]
 
@@ -287,7 +287,7 @@ class ImplementationIdentityRoutingTest < Minitest::Test
 
   def create_attempt(task, attempts, attempt_id:, stage:, generation:, provider:)
     attempts.create_launching(
-      attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}",
       task_id: task.id.to_s, project: "demo", task_slug: task.slug, intended_stage: stage,
       task_generation: "owner-#{generation}", ownership_generation: "owner-#{generation}",
       task_input_epoch: generation, progress_token: "progress-#{attempt_id}", provider: provider,

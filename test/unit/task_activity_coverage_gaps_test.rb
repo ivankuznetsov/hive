@@ -74,13 +74,13 @@ class TaskActivityCoverageGapsTest < Minitest::Test
       end
       workflow = Struct.new(:id).new("custom")
       task = Struct.new(:folder, :workflow, :id, :slug).new(root, workflow, 1, "task")
-      with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { projection }) do
+      with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { projection }) do
         activity = Hive::TaskActivity.for_task(task, attempt_store: store)
         assert_equal "custom", activity.binding.fetch("workflow")
       end
 
       with_replaced_singleton_method(
-        Hive::TaskProjection::Store, :new, ->(**) { raise Hive::Error, "bad projection" }
+        Hive::TaskProjection::Reader, :new, ->(**) { raise Hive::Error, "bad projection" }
       ) do
         assert_nil Hive::TaskActivity.for_task(task, attempt_store: store)
       end

@@ -8,7 +8,7 @@ require "hive/task_action/diagnostic"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
 require "hive/plan_frontmatter"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
@@ -671,7 +671,7 @@ module Hive
     def load_projection(marker)
       folder = task.respond_to?(:folder) && task.folder
       if folder
-        Hive::TaskProjection::Store.new(task_folder: folder).read(marker: marker)
+        Hive::TaskProjection::Reader.new(task_folder: folder, task: task).read(marker: marker)
       else
         Hive::TaskProjection.project(records: [], marker: marker)
       end

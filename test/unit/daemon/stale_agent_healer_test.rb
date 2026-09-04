@@ -224,18 +224,15 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_projection_repair_row_never_enters_error_recovery
+  def test_task_history_invalid_row_never_enters_error_recovery
     with_marker_file do |state_file|
       row = make_row(
         state_file,
         pid_alive: nil,
         marker: "error",
-        marker_attrs: {
-          "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-          "repair_command" => "hive repair-projection s --project p --stage 4-execute"
-        },
+        marker_attrs: { "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON },
         live_task_lock: false,
-        projection_repair: true
+        task_history_invalid: true
       )
 
       heal([ row ])
@@ -511,8 +508,11 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def test_attempt_loss_retry_uses_the_shared_recovery_ladder
     limited_at = NOW - 120
-    attempt = { "retry_charge" => 3, "loss" => {} }
-    outcome = { "last_retry_at" => limited_at.iso8601(6) }
+    attempt = {
+      "retry_charge" => 3,
+      "loss" => { "at" => limited_at.iso8601(6) }
+    }
+    outcome = {}
 
     refute @healer.send(
       :attempt_loss_retry_due?, attempt, outcome, now: NOW - 1
@@ -521,6 +521,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       :attempt_loss_retry_due?, attempt, outcome, now: NOW
     )
     assert_equal [ 3, 3 ], @coordinator.retry_delay_counts
+  end
+
+  def test_attempt_loss_with_an_invalid_retry_time_is_not_due
+    attempt = { "retry_charge" => 1, "loss" => { "at" => "invalid" } }
+    outcome = { "revision" => 2, "updated_at" => "invalid" }
+
+    refute @healer.send(:attempt_loss_retry_due?, attempt, outcome, now: NOW)
   end
 
   def test_cooldown_and_safety_are_decided_only_by_coordinator
@@ -1243,7 +1250,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                marker: "agent_working", marker_attrs: {}, action: "error",
                live_task_lock: nil, workflow: nil, task_lock_pid: nil,
                task_lock_process_start_time: nil, task_lock_id: nil,
-               projection_repair: false)
+               task_history_invalid: false)
     Row.new(
       project: project,
       slug: slug,
@@ -1252,7 +1259,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       workflow: workflow,
       marker: marker,
       marker_attrs: marker_attrs,
-      projection_repair: projection_repair,
+      task_history_invalid: task_history_invalid,
       folder: File.dirname(state_file),
       state_file: state_file,
       state_file_mtime: mtime,

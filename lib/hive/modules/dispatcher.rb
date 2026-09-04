@@ -171,7 +171,6 @@ module Hive
               argv: retry_attempt.argv,
               request_id: "module-retry:#{retry_attempt.subject.fetch('event_id')}:#{hook_id}:#{charge}",
               provider: "module", interactive: false,
-              predecessor_attempt_id: previous_attempt.attempt_id,
               retry_charge: charge, now: @clock.call,
               project_root: File.dirname(@store.hive_state_path)
             )
@@ -253,7 +252,7 @@ module Hive
         active = context.dig(:selection, "active")
         return unless active && context[:configuration] && context[:hook]
 
-        @attempt_store.scan.records.find do |record|
+        @attempt_store.active_attempts.find do |record|
           subject = record.subject
           record.module_hook? && subject["project_id"] == @project_id &&
             subject["module"] == context.fetch(:module_name) &&
@@ -356,7 +355,7 @@ module Hive
       end
 
       def live_for_hook?(context)
-        @attempt_store.scan.records.any? do |record|
+        @attempt_store.active_attempts.any? do |record|
           subject = record.subject
           record.live? && record.module_hook? && subject["project_id"] == @project_id &&
             subject["module"] == context.fetch(:module_name) && subject["hook"] == context.fetch(:hook_id)

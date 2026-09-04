@@ -124,9 +124,7 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
         assert observation.fetch("selected_credential_present")
         refute observation.fetch("ambient_credential_present")
 
-        projection = JSON.parse(
-          File.read(File.join(folder, "task-projection.json"))
-        )
+        projection = Hive::TaskProjection::Reader.new(task_folder: folder).read.to_h
         identity = projection.dig("implementation_identity", "execute")
         assert_equal "opencode", identity.fetch("provider")
         assert_equal "anthropic", identity.fetch("requested_backend")
@@ -217,7 +215,6 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     attempts.create_launching(
       attempt_id: "opencode-execute-attempt",
       request_id: "opencode-execute-request",
-      predecessor_attempt_id: nil,
       task_id: task.id&.to_s,
       project: File.basename(task.project_root),
       task_slug: task.slug,

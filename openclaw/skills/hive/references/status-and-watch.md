@@ -13,7 +13,9 @@
   current; it re-resolves and integrity-checks the current receipt reference
   before printing a bounded tail.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.
-- Use `hive circuits inspect --json` for the shared provider-account/model health, capacity, and routing-decision projection. Add `--provider ACCOUNT` or `--model MODEL` to keep accounts and decisions in the same scope.
+- Read the nullable routing decision in current operational status. Routing is
+  stateless: Hive tries the configured routes in order and rotates away from a
+  failed route without retaining provider-health or circuit state.
 
 Operational status is the public fleet workflow projection. A current daemon observation may add scheduler ownership, capacity, queue, provider-hold, cooldown, and recovery facts. Only a complete, unexpired observation from the live daemon generation is current. Missing, stale, invalid, or mismatched scheduler evidence lowers completeness and must not become a confident blocker claim.
 
@@ -23,24 +25,17 @@ maintenance fault; do not call the pipeline healthy merely because task rows
 are advancing. `unknown` means the bounded health cell has not yet established
 a successful migration or maintenance result.
 
-When a task is `needs_repair`, inspect `evidence.marker_attrs`. A reason of
-`condition_projection_repair_required` means routine status could not verify
-that task's checkpoint and bounded journal suffix. The row is synthetic,
-operator-owned, and non-retryable; it does not mean the project or fleet scan
-failed, and unrelated tasks may continue. Canonical task creation publishes a
-zero-history checkpoint before exposing new work; status never backfills an
-older missing checkpoint. Run the exact
-`evidence.marker_attrs.repair_command` when present:
-
-```bash
-hive repair-projection TASK-SLUG --project PROJECT --stage STAGE
-```
+When a task is `needs_repair`, inspect `task_history_invalid` and
+`evidence.marker_attrs`. A reason of `condition_task_history_invalid` means
+routine status could not fold that task's authoritative `task-journal.jsonl`.
+The row is synthetic, operator-owned, and non-retryable; it does not mean the
+project or fleet scan failed, and unrelated tasks may continue. Preserve the
+task folder and report the task-local journal diagnostic. Hive has no projection
+repair or history backfill command. Recover the JSONL only from verified task
+evidence or a trusted backup, and only with explicit operator approval.
 
 Refresh operational status afterward. Do not use `workflow.retry`, restart the
-daemon, or create migration/watcher machinery. If no repair command is present
-and `projection_reason` is `checkpoint_oversized`,
-`attempt_ids_exhausted`, or `predecessor_fetches_exhausted`, report the named
-`projection_cap` and task-local retained-history compaction requirement.
+daemon, or create migration, checkpoint, projection, or watcher machinery.
 
 ## Report a useful snapshot
 
@@ -96,8 +91,8 @@ substitute for the task's result or the correlated failure log.
 The task view does not probe providers and does not reconcile invoices. Never
 infer live provider health, quota, credential validity, actual subscription or
 API charge, or provider-observed billing from it. Use current operational
-scheduler evidence for task ownership and `hive circuits inspect --json` for
-the dedicated provider-account/model health projection.
+scheduler and routing evidence for task ownership and the route selected for
+that dispatch; Hive has no durable provider-health projection.
 
 ## Watch selected work
 

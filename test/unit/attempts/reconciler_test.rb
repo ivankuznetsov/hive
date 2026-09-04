@@ -280,17 +280,6 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
-  def test_find_by_request_id_recovers_durable_admission_correlation
-    with_store do |store|
-      attempt = create(store, attempt_id: "correlated")
-      service = reconciler(store, :matching)
-
-      assert_equal attempt.attempt_id,
-                   service.find_by_request_id("request-correlated").attempt_id
-      assert_nil service.find_by_request_id("missing-request")
-    end
-  end
-
   def test_condition_observer_receives_each_reconciled_attempt_before_snapshot_return
     with_store do |store|
       create(store)
@@ -358,19 +347,19 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
-  def test_reconciliation_builds_capacity_and_admission_view_from_one_hot_scan
+  def test_reconciliation_builds_capacity_and_admission_view_from_one_hot_attempts
     with_store do |store|
       create(store)
       scans = 0
-      original_scan = store.method(:scan)
-      store.define_singleton_method(:scan) do
+      original_active_attempts = store.method(:active_attempts)
+      store.define_singleton_method(:active_attempts) do
         scans += 1
-        original_scan.call
+        original_active_attempts.call
       end
       snapshot = reconciler(store, :matching).reconcile(now: NOW + 1)
 
       assert_equal 1, scans
-      assert_equal [ "attempt-1" ], snapshot.hot_scan.records.map(&:attempt_id)
+      assert_equal [ "attempt-1" ], snapshot.admission_view.records.map(&:attempt_id)
       assert_equal snapshot.capacity,
                    snapshot.admission_view.capacity(now: NOW + 1)
     end
@@ -423,7 +412,7 @@ class AttemptsReconcilerTest < Minitest::Test
 
   def create(store, attempt_id: "attempt-1", timeout: 30)
     store.create_launching(
-      attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}",
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-#{attempt_id}",
       progress_token: "progress", provider: "codex",

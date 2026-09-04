@@ -11,7 +11,6 @@ require "hive/lock"
 require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
-require "hive/task_projection/store"
 require "hive/task"
 require "hive/task_action"
 require "hive/task_capture"
@@ -267,9 +266,6 @@ module Hive
           idempotency_key: idempotency_key, input_fingerprint: input_fingerprint,
           stable_selection: stable_selection
         )
-        Hive::TaskProjection::Store.new(
-          task_folder: task_dir
-        ).initialize_pristine!(marker: Hive::Markers.current(idea_path))
       rescue Errno::EEXIST
         if created
           FileUtils.rm_rf(task_dir)

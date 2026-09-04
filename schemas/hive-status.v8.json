@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:status:v7",
-  "title": "hive status output (v7)",
+  "$id": "urn:hive:schema:status:v8",
+  "title": "hive status output (v8)",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -13,7 +13,7 @@
       "required": ["schema", "schema_version", "ok", "generated_at", "projects"],
       "properties": {
         "schema": { "const": "hive-status" },
-        "schema_version": { "const": 7 },
+        "schema_version": { "const": 8 },
         "ok": { "const": true },
         "generated_at": { "type": "string", "format": "date-time" },
         "partial": { "type": "boolean" },
@@ -26,7 +26,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-status" },
-        "schema_version": { "const": 7 },
+        "schema_version": { "const": 8 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
@@ -128,7 +128,7 @@
       "required": [
         "stage", "slug", "id", "display_name", "depends_on", "blocked_by",
         "dependency_stage", "blocked", "admission_error", "folder", "state_file",
-        "worktree_path", "pr_url", "marker", "attrs", "projection_repair", "mtime", "observation_mtime", "folder_mtime",
+        "worktree_path", "pr_url", "marker", "attrs", "task_history_invalid", "mtime", "observation_mtime", "folder_mtime",
         "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
         "attempt_id", "task_generation",
         "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
@@ -172,7 +172,7 @@
           ]
         },
         "attrs": { "type": "object", "additionalProperties": true },
-        "projection_repair": { "type": "boolean" },
+        "task_history_invalid": { "type": "boolean" },
         "held": {
           "type": "object",
           "additionalProperties": false,
@@ -202,7 +202,7 @@
         "task_lock_process_start_time": { "type": ["string", "null"] },
         "task_lock_id": { "type": ["string", "null"] },
          "condition_task_generation": {
-          "description": "Monotonic condition input epoch from the canonical task projection.",
+          "description": "Monotonic condition input epoch folded from the task journal.",
           "type": ["integer", "null"],
           "minimum": 0
         },
@@ -212,7 +212,7 @@
           "minimum": 0
         },
         "current_attempt": {
-          "description": "Current durable attempt selected by the condition projection, or null before handoff.",
+          "description": "Current attempt selected from task-journal history, or null before handoff.",
           "type": ["string", "null"]
         },
         "conditions": {

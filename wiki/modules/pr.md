@@ -33,6 +33,22 @@ Accepted shapes are URLs or path-like strings ending in `/pull/<digits>`, with a
 
 `Hive::Pr` is deliberately not a GitHub API client. It does not validate owner/repo names, confirm that a PR exists, distinguish open/closed/merged states, or advance workflow state. It formats values that [[commands/status]] already emitted; network-backed PR operations remain in [[modules/gh]].
 
+## Task merge observation
+
+`Hive::Daemon::PrMergeWatcher` rediscovers active coding tasks from each status
+scan and polls GitHub without a persisted candidate ledger or project cursor.
+Its process-local polling cache is disposable: restart repeats remote reads and
+the idempotent architecture intake, then resumes the task-owned closure receipt.
+Held tasks cannot consume the oldest-polled eligible task's turn.
+
+Current durable `pr.md` is the PR binding authority. Its controller-recorded
+head takes precedence over legacy owned-worktree discovery; changed current
+worktree heads fail revalidation rather than replacing that recorded binding.
+Historical same-generation observation drift is no longer separately stored.
+Repository identity, generation, immutable reachable merge evidence, and the
+locked `TaskClosure` transition still gate archive. Unknown or unreadable
+observations fence error recovery until a successful open/closed-unmerged poll.
+
 ## Tests
 
 - `test/unit/pr_test.rb` covers numeric extraction plus nil returns for missing, issue, non-number, and subpage URLs; `identifier_to_number` acceptance/rejection; and http(s) URL validation including invalid-URI rejection.

@@ -157,7 +157,6 @@ class DaemonAutoRetryTest < Minitest::Test
           Hive::Workflows::Registry.fetch(workflow.to_sym).state_file_for(stage_name)
         )
         Hive::Markers.set(state_file, marker, attrs)
-        seed_task_projection(folder, state_file: state_file)
         observed_at = T0 - Hive::AgentLimit.retry_cooldown_sec - 1
         File.utime(observed_at, observed_at, state_file)
         @current_project = File.basename(project_root)

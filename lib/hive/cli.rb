@@ -1327,35 +1327,6 @@ module Hive
       ).call
     end
 
-    desc "repair-projection TARGET", "Rebuild one task's derived status projection"
-    long_desc <<~DESC
-      Replays the authoritative journal for exactly one registered task and
-      atomically replaces only its derived projection snapshot and checkpoint.
-      The task and journal are locked for the repair, then the new checkpoint
-      is verified through the same bounded reader used by routine status.
-
-      This is an explicit operator repair for a
-      `condition_projection_repair_required` status row. It does not retry the
-      workflow, change markers or stages, scan other tasks, migrate storage, or
-      install a periodic repair watcher.
-
-      Example:
-        hive repair-projection TASK-SLUG --project PROJECT --stage 4-execute
-    DESC
-    option :project, type: :string, desc: "scope lookup to one registered project"
-    option :stage, type: :string,
-                   desc: "scope lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
-    def repair_projection(target)
-      require "hive/commands/repair_projection"
-      Hive::Commands::RepairProjection.new(
-        target,
-        project: options[:project],
-        stage: options[:stage],
-        json: options[:json]
-      ).call
-    end
-    map "repair-projection" => :repair_projection
-
     desc "task TARGET", "Inspect one task through the semantic read-only workspace"
     long_desc <<~DESC
       Resolves one exact task from registered projects and emits the same
@@ -1374,46 +1345,6 @@ module Hive
       require "hive/commands/task"
       Hive::Commands::Task.new(
         target, project: options[:project], json: options[:json], log: options[:log]
-      ).call
-    end
-
-    desc "circuits [ACTION]", "Inspect or administer provider-account/model circuits"
-    long_desc <<~DESC
-      `hive circuits` (or `hive circuits inspect`) renders the sanitized,
-      durable provider-routing projection: account capacity, provider and
-      exact-model circuit state/generation, probe ownership, protected evidence
-      references, and recent deterministic route decisions.
-
-      Administrative actions are `block`, `unblock`, and `reset`. Circuit actions require
-      an exact configured --provider, optional exact --model, a bounded
-      single-line --reason, a fresh --expected-generation, and explicit --yes.
-      SQLite integrity failures are repaired through the runtime-control-plane
-      recovery workflow, not a per-circuit file quarantine. Actor identity
-      comes from the trusted local execution context; it cannot be supplied on
-      the command line.
-
-      These commands mutate provider health only. They never clear a task
-      marker, schedule a retry, change a retry charge, create a successor, or
-      dispatch work. Provider administration is intentionally absent from
-      `hive act`.
-    DESC
-    option :provider, type: :string, desc: "configured provider-account ID"
-    option :model, type: :string, desc: "exact configured model within --provider"
-    option :reason, type: :string, desc: "required bounded reason for a mutation"
-    option :expected_generation, type: :numeric,
-                                 desc: "fresh circuit generation from inspection"
-    option :yes, type: :boolean, default: false,
-                 desc: "approve one generation-fenced administrative mutation"
-    def circuits(action = "list")
-      require "hive/commands/circuits"
-      Hive::Commands::Circuits.new(
-        action,
-        provider: options[:provider],
-        model: options[:model],
-        reason: options[:reason],
-        expected_generation: options[:expected_generation],
-        yes: options[:yes],
-        json: options[:json]
       ).call
     end
 

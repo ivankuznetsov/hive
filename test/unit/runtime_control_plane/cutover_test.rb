@@ -430,10 +430,13 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
 
       %i[
-        attempts dispatch_requests dispatch_outbox provider_circuits provider_audit
-        routing_policies patrol_allowances pr_merge_reconciliations daemon_runtime
+        attempts dispatch_requests daemon_runtime
       ].each { |table| assert_equal 0, database.read { |db| db[table].count }, table }
-      assert_equal 0, database.read { |db| db[:task_counters].count }
+      %i[
+        dispatch_outbox provider_circuits provider_audit routing_policies patrol_allowances
+        pr_merge_reconciliations pr_merge_project_state attempt_failure_cohorts task_counters
+      ].each { |table| refute database.read { |db| db.table_exists?(table) }, table }
+      assert_nil database.read { |db| db[:installations].get(:next_task_id) }
       assert_equal [ "7" ], database.read { |db| db[:task_subjects].select_map(:task_id) }
     ensure
       database&.disconnect
@@ -595,10 +598,10 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
     end
   end
 
-  def test_task_projection_artifacts_and_referenced_payloads_remain_untouched
+  def test_task_history_artifacts_and_referenced_payloads_remain_untouched
     with_home do |state, data, projects|
       File.binwrite(task_path(projects, "task-journal.jsonl"), "{\"event\":\"existing\"}\n")
-      File.binwrite(task_path(projects, "task-projection.json"), "{\"state\":\"existing\"}\n")
+      File.binwrite(task_path(projects, "notes.md"), "operator notes\n")
       artifacts = task_path(projects, "artifacts")
       FileUtils.mkdir_p(artifacts)
       File.binwrite(File.join(artifacts, "review.md"), "evidence\n")
@@ -607,7 +610,7 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       File.binwrite(File.join(payloads, "attempt-1.frames"), "retained log\n")
       retained = [
         task_path(projects, "meta.yml"), task_path(projects, "idea.md"),
-        task_path(projects, "task-journal.jsonl"), task_path(projects, "task-projection.json"),
+        task_path(projects, "task-journal.jsonl"), task_path(projects, "notes.md"),
         File.join(artifacts, "review.md")
       ]
       task_before = retained.to_h { |path| [ path, File.binread(path) ] }

@@ -1,5 +1,5 @@
 name: incident_provider_limit_retry
-description: Proves a trusted provider-account failure opens one circuit and the existing recovery owner retries once on the next configured route.
+description: Proves a trusted provider-account failure makes the existing recovery owner retry once on the next configured route without retained provider state.
 tags: [incident-regression]
 coverage:
   primary: recovery.provider_limit
@@ -100,7 +100,7 @@ steps:
 
       attempts = Hive::Attempts::Repository.open_default(state_home: run_home)
       dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
-      first = attempts.scan.records.select { |record| record["intended_stage"] == "4-execute" }
+      first = attempts.active_attempts.select { |record| record["intended_stage"] == "4-execute" }
       raise "expected exactly one initial execute attempt, got #{first.size}" unless first.size == 1
       first = first.fetch(0)
       route = first["routing"].fetch("route")
@@ -127,13 +127,13 @@ steps:
       HIVE_FAKE_CLAUDE_COMMIT_MESSAGE: "test: implement provider route fixture"
 
   - kind: state_assert
-    description: RecoveryCoordinator clears and redispatches once; the successor excludes A, selects B, and completes normally.
+    description: RecoveryCoordinator clears and redispatches once; the independent retry rotates after A, selects B, and completes normally.
     path: "{task_dir:4-execute}/task.md"
     marker: { current: EXECUTE_COMPLETE }
     timeout: 9
 
   - kind: ruby_block
-    description: Keep the daemon alive until it reaps the successful successor and seals the one recovery receipt. The wait bound is a functional eventually-bound, not a latency budget — speed is tracked by the advisory incident-duration-budget job.
+    description: Keep the daemon alive until it reaps the successful retry and seals the one recovery receipt. The wait bound is a functional eventually-bound, not a latency budget — speed is tracked by the advisory incident-duration-budget job.
     block: |
       require "hive/runtime_control_plane/dispatch_repository"
       dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
@@ -151,12 +151,11 @@ steps:
     id: daemon
 
   - kind: ruby_block
-    description: Prove exact attempt, circuit, request, charge, exclusion, and ownership counts after repeated daemon ticks.
+    description: Prove exact independent-attempt, request, charge, route-rotation, and ownership facts after repeated daemon ticks.
     block: |
       require "hive/attempts/record"
       require "hive/attempts/repository"
       require "hive/runtime_control_plane/dispatch_repository"
-      require "hive/provider_health"
 
       dispatch = Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: run_home)
       recoveries = dispatch.recovery_requests.select do |request|
@@ -173,11 +172,11 @@ steps:
       raise "recovery receipt did not identify both attempts" unless first && second
       raise "attempt routes were not A then B" unless [first, second].map { |record| record["routing"].dig("route", "route_id") } == ["claude-a/claude-e2e-model", "codex-b/codex-e2e-model"]
       raise "retry charges were not exactly zero then one" unless [first["retry_charge"], second["retry_charge"]] == [0, 1]
-      raise "successor lost predecessor ownership" unless second["predecessor_attempt_id"] == first.attempt_id
-      raise "successor changed frozen generation policy" unless second.task_generation == first.task_generation && second["routing"].fetch("policy_digest") == first["routing"].fetch("policy_digest")
+      raise "retry retained an attempt relationship" if second.to_h.key?("predecessor_attempt_id")
+      raise "retry reused the failed attempt generation" if second.task_generation == first.task_generation
+      raise "retry changed the task input epoch" unless second.task_input_epoch == first.task_input_epoch
       raise "attempt outcomes were not failed then succeeded" unless [first.outcome, second.outcome] == %w[failed succeeded]
-      exclusions = second["routing"].dig("decision", "exclusions")
-      raise "successor did not explain the preferred-route exclusion" unless exclusions == [{"route_id" => "claude-a/claude-e2e-model", "reason" => "circuit_open", "detail" => nil}]
+      raise "retry retained routing policy state" unless second["routing"].keys.sort == %w[mode route]
 
       raise "recovery did not preserve the provider-neutral failure" unless recovery.fetch("failure_origin") == "provider_route_failed"
       raise "recovery was not charged exactly once" unless recovery.fetch("retry_count") == 1
@@ -185,16 +184,3 @@ steps:
       raise "pending recovery remained after terminalization" unless dispatch.pending.empty?
       raise "terminal recovery receipt was duplicated or lost" unless recoveries.size == 1
       raise "live execute attempt remained after terminalization" unless [first, second].none?(&:live?)
-
-      health = Hive::ProviderHealth.open(database: attempts.database)
-      scopes = {
-        "claude-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "claude-a"),
-        "claude-model" => Hive::ProviderHealth::Scope.model(account_id: "claude-a", model_id: "claude-e2e-model"),
-        "codex-provider" => Hive::ProviderHealth::Scope.provider_account(account_id: "codex-b"),
-        "codex-model" => Hive::ProviderHealth::Scope.model(account_id: "codex-b", model_id: "codex-e2e-model")
-      }.transform_values { |scope| health.inspect_scope(scope) }
-      claude = scopes.fetch("claude-provider")
-      raise "Claude account circuit changed more than once" unless claude.generation == 1 && claude.circuit.automatic_state == "open"
-      scopes.except("claude-provider").each do |name, inspection|
-        raise "#{name} circuit changed unexpectedly" unless inspection.generation == 0 && inspection.circuit.automatic_state == "closed"
-      end

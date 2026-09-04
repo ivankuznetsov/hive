@@ -302,7 +302,7 @@ module HiveTestHelper
     FileUtils.mkdir_p(root)
     document = Hive::RuntimeControlPlane::CutoverManifest.build(
       phase: "active", installation_id: identity.fetch(:installation_id),
-      lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
+      source_release: "0.7.1",
       target_release: Hive::VERSION, exclusions: [], task_authority: [],
       evidence: { "activation_epoch" => epoch }
     )
@@ -743,19 +743,5 @@ module HiveTestHelper
       $stderr = real_stderr
     end
     [ out_pipe.string, err_pipe.string, status ]
-  end
-
-  # Direct filesystem fixtures model tasks that were created after the
-  # bounded-projection cutover. Historical/no-checkpoint behavior has its own
-  # explicit repair tests; ordinary fixtures should carry the zero-history
-  # checkpoint that canonical task creators now publish.
-  def seed_task_projection(task_folder, state_file: nil)
-    require "hive/markers"
-    require "hive/task_projection/store"
-
-    marker = Hive::Markers.current(state_file) if state_file
-    Hive::TaskProjection::Store.new(
-      task_folder: task_folder
-    ).initialize_pristine!(marker: marker)
   end
 end

@@ -211,12 +211,11 @@ module Hive
                   now: Time.now.utc)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           return receipt(
             "blocked", failure_origin: failure_origin, owner: "operator",
-            reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: value(row, :suggested_command) ||
-              "repair the exact task projection before retrying"
+            reason: Hive::TaskProjection::INVALID_HISTORY_REASON,
+            remediation: value(row, :suggested_command)
           )
         end
         retry_count = durable_retry_count(row)
@@ -422,7 +421,6 @@ module Hive
             trigger: "recovery",
             request_id: canonical_request_id,
             task_generation: generation.task_generation,
-            predecessor_attempt_id: source_receipt&.fetch("attempt_id", nil),
             task_id: locked_task.id,
             expected_stage: value(row, :stage),
             expected_marker_name: current.name.to_s,
@@ -530,7 +528,6 @@ module Hive
             policy_digest: decision.policy_digest
           )
           observation = admission_observation(decision)
-          operator_blocked = decision.reason == "health_state_unavailable"
           recovery = {
             "variant" => "admission_failure",
             "phase" => "admitted",
@@ -541,10 +538,9 @@ module Hive
             "dispatch_generation" => generation.task_generation,
             "failure_origin" => decision.reason,
             "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
-            "owner" => operator_blocked ? "operator" : "scheduler",
-            "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
-            "blocked_remediation" => operator_blocked ?
-              "inspect and repair the unavailable provider-health scope" : nil,
+            "owner" => "scheduler",
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil,
             "retry_count" => durable_retry_count_for(
               project: project, slug: slug, expected_stage: task_stage(locked_task)
             ) + 1,
@@ -560,7 +556,6 @@ module Hive
             chat_id: request.chat_id, update_id: request.update_id,
             trigger: "recovery/admission_failure", request_id: request_id,
             task_generation: generation.task_generation,
-            predecessor_attempt_id: request.predecessor_attempt_id,
             inherited_outputs: request.inherited_outputs || [],
             task_id: locked_task.id, expected_stage: task_stage(locked_task),
             expected_marker_name: nil, expected_marker_id: nil,
@@ -750,13 +745,11 @@ module Hive
           return receipt_for_request(current, now: now)
         end
 
-        operator_blocked = decision.reason == "health_state_unavailable"
         changes = {
           "admission_observation" => admission_observation(decision),
-          "owner" => operator_blocked ? "operator" : "scheduler",
-          "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
-          "blocked_remediation" => operator_blocked ?
-            "inspect and repair the unavailable provider-health scope" : nil
+          "owner" => "scheduler",
+          "blocked_reason" => nil,
+          "blocked_remediation" => nil
         }
         unless decision.capacity_saturated?
           changes["next_eligible_at"] =
@@ -783,13 +776,12 @@ module Hive
         request = rearm_changed_runtime(request, now:)
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           return receipt(
             "blocked", request_id: request.request_id,
             phase: recovery["phase"], failure_origin: recovery["failure_origin"],
-            owner: "operator", reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: value(row, :suggested_command) ||
-              "repair the exact task projection before retrying",
+            owner: "operator", reason: Hive::TaskProjection::INVALID_HISTORY_REASON,
+            remediation: value(row, :suggested_command),
             retry_count: recovery["retry_count"]
           )
         end
@@ -820,17 +812,6 @@ module Hive
               "task_identity_conflict",
               owner: "operator",
               remediation: "refresh status; the canonical task identity or stage changed"
-            )
-          end
-
-          unless source_health_acknowledged?(recovery["source_receipt"])
-            return receipt(
-              "queued", request_id: current_request.request_id,
-              phase: recovery["phase"],
-              failure_origin: recovery["failure_origin"], owner: "hive",
-              reason: "provider_health_pending",
-              remediation: "wait for provider health to acknowledge the terminal receipt",
-              retry_count: recovery["retry_count"]
             )
           end
 
@@ -1217,7 +1198,6 @@ module Hive
           requestor: request.requestor, chat_id: request.chat_id,
           update_id: request.update_id, trigger: request.trigger,
           request_id: retry_request_id, task_generation: request.task_generation,
-          predecessor_attempt_id: request.predecessor_attempt_id,
           inherited_outputs: request.inherited_outputs || [], task_id: request.task_id,
           expected_stage: request.expected_stage,
           expected_marker_name: request.expected_marker_name,
@@ -1267,23 +1247,6 @@ module Hive
         nil
       end
 
-      def source_health_acknowledged?(source_receipt)
-        return true if source_receipt.nil?
-
-        hot = attempts_store.fetch_hot(source_receipt.fetch("attempt_id"))
-        if hot
-          return false unless source_receipt_matches?(hot, source_receipt)
-
-          pending = attempts_store.publication(hot.attempt_id)
-          return pending&.dig("consumers", "provider_health") == true
-        end
-
-        proof = attempts_store.fetch(source_receipt.fetch("attempt_id"))
-        source_receipt_matches?(proof, source_receipt)
-      rescue KeyError, Hive::Attempts::RepositoryError
-        false
-      end
-
       def source_receipt_matches?(record, source_receipt)
         return false unless record&.final?
 
@@ -1300,9 +1263,7 @@ module Hive
       def validate_admission_decision!(decision, expected_status:)
         unless decision.is_a?(Hive::ProviderRouting::Decision) &&
                decision.status == expected_status &&
-               %w[
-                 capacity_saturated health_state_unavailable no_eligible_provider_route
-               ].include?(decision.reason)
+               %w[capacity_saturated no_eligible_provider_route].include?(decision.reason)
           raise ArgumentError, "invalid provider-routing admission decision"
         end
       end
@@ -1383,8 +1344,8 @@ module Hive
         attrs.is_a?(Hash) ? attrs.to_h.transform_keys(&:to_s) : {}
       end
 
-      def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_row?(row)
+      def task_history_invalid_row?(row)
+        Hive::TaskProjection.history_invalid_row?(row)
       end
 
       def observed_marker_generation(row)

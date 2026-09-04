@@ -73,7 +73,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       maintenance.prepare(terminal)
       maintenance.acknowledge(terminal, :journal)
       assert maintenance.publish_after_journal(terminal)
-      maintenance.acknowledge(terminal, :request_delivery)
+      maintenance.acknowledge(terminal, :dispatch)
       assert maintenance.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
 
@@ -95,6 +95,26 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       assert_equal 1, types.count("implementation_identity_fallback")
       assert_equal 1, types.count("implementation_identity_backfilled")
       assert_equal "legacy_backfill", first.source
+    end
+  end
+
+  def test_successful_reconstruction_does_not_re_read_the_appended_journal
+    with_attempt_history do |task, store, current|
+      reads = 0
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
+        reads += 1
+        { "implementation_identity" => {} }
+      end
+      reconstructor = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(task.project_root), attempt_store: store,
+        history_reader: history_reader
+      )
+
+      selection = with_context(current) { reconstructor.reconstruct! }
+
+      assert_equal "legacy_backfill", selection.source
+      assert_equal 1, reads
     end
   end
 
@@ -191,7 +211,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       attempt_store = Struct.new(:unused) { def fetch(*) = nil }.new
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: attempt_store,
-        projection_store: projection
+        history_reader: projection
       )
 
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
@@ -269,7 +289,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end.new({ "implementation_identity" => { "execute" => identity } })
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection
+        history_reader: projection
       )
 
       selection = with_attempt_context(
@@ -302,7 +322,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end.new({ "implementation_identity" => { "execute" => identity } })
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection
+        history_reader: projection
       )
 
       selection = with_attempt_context(
@@ -341,7 +361,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       end
       subject = Hive::ImplementationIdentity::Reconstructor.new(
         task: task, cfg: config(root), attempt_store: Object.new,
-        projection_store: projection, resolver: resolver
+        history_reader: projection, resolver: resolver
       )
 
       selection = with_attempt_context(
@@ -387,7 +407,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       intended_stage: stage, task_generation: "owner-0", ownership_generation: "owner-0",
       task_input_epoch: input_epoch, progress_token: "progress-#{id}",
       provider: provider, starting_revision: nil,
-      request_id: "request-#{id}", predecessor_attempt_id: nil,
+      request_id: "request-#{id}",
       worker_argv: [ "hive", "run", "legacy-task" ],
       claim_capability_digest: Hive::Attempts::Capability.digest(claim_capability),
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: now

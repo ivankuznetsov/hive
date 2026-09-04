@@ -340,7 +340,7 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     end
   end
 
-  def test_for_task_rescue_does_not_repeat_a_failed_projection_read
+  def test_for_task_rescue_does_not_repeat_a_failed_history_read
     with_task do |task|
       calls = []
       generation = Data.define(:task_generation).new(task_generation: "generation-fallback")

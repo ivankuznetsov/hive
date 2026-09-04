@@ -54,15 +54,30 @@ class AttemptsRepositoryTest < Minitest::Test
       assert_equal terminal.to_h, repository.fetch(terminal.attempt_id).to_h
       assert_equal terminal.attempt_id,
                    repository.terminal_attempt_id(request_id: terminal["request_id"])
-      assert repository.publication(terminal.attempt_id).nil?
-      repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: %w[journal])
+      publication = repository.publication(terminal.attempt_id)
+      assert_equal terminal.attempt_id, publication.fetch("attempt_id")
+      assert_equal [ "accounting", "dispatch", "journal" ],
+                   publication.fetch("consumers").keys.sort
+      before_ack = repository.fetch(terminal.attempt_id).to_h
+      repository.prepare_publication(attempt_id: terminal.attempt_id)
       repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
+      refute repository.publication_complete?(terminal.attempt_id)
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "accounting")
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "dispatch")
+      after_ack = repository.fetch(terminal.attempt_id).to_h
+      assert_equal before_ack, after_ack,
+                   "publication acknowledgements must not rewrite the execution record"
 
       restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
       assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
       assert restarted.publication_complete?(terminal.attempt_id)
+      assert_equal terminal.attempt_id,
+                   restarted.active_attempts.find { |attempt| attempt.attempt_id == terminal.attempt_id }&.attempt_id
       assert restarted.finish_publication(terminal.attempt_id)
+      assert restarted.publication(terminal.attempt_id).fetch("promoted")
       assert_nil restarted.fetch_hot(terminal.attempt_id)
+      refute restarted.active_attempts.any? { |attempt| attempt.attempt_id == terminal.attempt_id }
       assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
     end
   end
@@ -135,7 +150,49 @@ class AttemptsRepositoryTest < Minitest::Test
       values = results.map(&:value)
       assert_equal 1, values.count { |value| value.is_a?(Hive::Attempts::Record) }
       assert_equal 5, values.count { |value| value.is_a?(Hive::Attempts::RepositoryError) }
-      assert_equal 1, repository.scan.records.length
+      assert_equal 1, repository.active_attempts.length
+    end
+  end
+
+  def test_live_attempt_for_returns_only_the_exact_task_attempt
+    with_repository do |repository|
+      expected = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      repository.create_launching(
+        **identity(
+          attempt_id: "attempt-2", request_id: "request-2", task_id: "43",
+          task_slug: "other-task", task_generation: "generation-2"
+        ),
+        launch_timeout_sec: 30, now: NOW
+      )
+
+      assert_equal expected.attempt_id,
+                   repository.live_attempt_for(task_id: "42").attempt_id
+      assert_nil repository.live_attempt_for(task_id: "missing")
+    end
+  end
+
+  def test_live_attempt_for_includes_terminal_attempt_pending_publication
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      terminal = terminal_attempt(repository, launching)
+
+      assert terminal.final?
+      assert_equal terminal.attempt_id,
+                   repository.live_attempt_for(task_id: "42").attempt_id
+      assert_nil repository.live_attempt_for(task_id: "unrelated")
+    end
+  end
+
+  def test_live_attempt_for_translates_database_errors
+    with_repository do |repository|
+      repository.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_match(/live attempt query failed/, error.message)
     end
   end
 
@@ -171,15 +228,15 @@ class AttemptsRepositoryTest < Minitest::Test
     with_repository do |repository|
       record = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
       repository.database.transaction do |db|
-        db[:attempts].where(attempt_id: record.attempt_id).update(record_json: "{")
+        db[:attempts].where(attempt_id: record.attempt_id).update(details_json: "{")
       end
 
-      error = assert_raises(Hive::Attempts::RepositoryError) { repository.scan }
-      assert_match(/record digest is invalid/, error.message)
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.active_attempts }
+      assert_match(/unreadable/, error.message)
     end
   end
 
-  def test_source_fingerprint_and_record_digest_are_bound_to_the_row
+  def test_sql_owns_attempt_fields_without_a_shadow_record
     with_repository do |repository|
       record = repository.create_launching(
         **identity, source_fingerprint: "source-v1", launch_timeout_sec: 30, now: NOW
@@ -189,14 +246,49 @@ class AttemptsRepositoryTest < Minitest::Test
       end
 
       assert_equal "source-v1", row.fetch(:source_fingerprint)
-      assert_equal Digest::SHA256.hexdigest(row.fetch(:record_json)), row.fetch(:record_digest)
+      refute row.key?(:record_json)
+      refute row.key?(:record_digest)
+      details = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+      assert_empty details.keys & %w[state task_id project task_slug task_generation lease_version subject receipt]
       assert_equal record.subject, Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json))
-      binding = repository.fetch_projection_binding(record.attempt_id)
-      assert_equal record["task_id"], binding.fetch("task_id")
-      assert_equal record["task_slug"], binding.fetch("task_slug")
-      assert_equal record["intended_stage"], binding.fetch("intended_stage")
-      assert_equal record.task_input_epoch, binding.fetch("task_input_epoch")
-      assert_equal record.ownership_generation, binding.fetch("ownership_generation")
+      assert_equal record.to_h, repository.fetch(record.attempt_id).to_h
+
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: record.attempt_id).update(lease_version: 1)
+      end
+      assert_equal 1, repository.fetch(record.attempt_id).lease_version
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.claim(record, owner: owner, claim_capability: CLAIM_CAPABILITY,
+                         first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      end
+    end
+  end
+
+  def test_tampered_terminal_receipt_fails_closed
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      terminal = repository.terminalize(
+        running, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: checkpoint, output_references: [ output_reference ],
+        log_reference: log_reference, now: NOW + 3
+      )
+      assert_equal terminal.to_h, repository.fetch(terminal.attempt_id).to_h
+
+      tampered_receipt = terminal.to_h.fetch("receipt").merge("exit_status" => 1)
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: terminal.attempt_id).update(
+          terminal_receipt_json: Hive::RuntimeControlPlane::Codec.dump_json(tampered_receipt)
+        )
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(terminal.attempt_id) }
+      assert_match(/terminal receipt digest mismatch/, error.message)
+      assert_raises(Hive::Attempts::RepositoryError) { repository.active_attempts }
     end
   end
 
@@ -209,7 +301,7 @@ class AttemptsRepositoryTest < Minitest::Test
 
       with_env("HIVE_ATTEMPT_STORE_ROOT" => legacy_root) do
         assert_raises(Hive::Attempts::RepositoryError) do
-          Hive::Attempts::Repository.runtime(state_home: state_home)
+          Hive::Attempts::Repository.open_default(state_home: state_home)
         end
       end
 
@@ -218,25 +310,83 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_repository_reuses_an_already_validated_database
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      revalidations = []
+      database.define_singleton_method(:open!) do |revalidate: true|
+        revalidations << revalidate
+        raise "repository forced runtime validation" if revalidate
+
+        self
+      end
+
+      repository = Hive::Attempts::Repository.new(
+        database: database, root: File.join(root, "payloads")
+      )
+
+      assert_same database, repository.database
+      assert_equal [ false ], revalidations
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_repository_revalidates_when_the_database_file_disappears
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "runtime.sqlite3")
+      ).migrate!
+      FileUtils.rm_f(database.path)
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Repository.new(
+          database: database, root: File.join(root, "payloads")
+        )
+      end
+
+      assert_match(/database is missing/, error.message)
+    ensure
+      database&.disconnect
+    end
+  end
+
   def test_lost_transition_releases_capacity_once_in_the_same_transaction
     with_repository do |repository|
       launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
       lost = repository.mark_lost(launching, reason: "stale_generation", now: NOW + 1)
 
-      reservation, request = repository.database.read do |db|
+      row, request = repository.database.read do |db|
         [
-          db[:capacity_reservations].where(attempt_id: lost.attempt_id).first,
+          db[:attempts].where(attempt_id: lost.attempt_id).first,
           db[:dispatch_requests].where(request_id: lost["request_id"]).first
         ]
       end
-      assert_equal "released", reservation.fetch(:state)
-      assert_equal Hive::Attempts::Record.iso8601(NOW + 1), reservation.fetch(:released_at)
+      assert_equal "lost", row.fetch(:state)
       assert_equal "awaiting_delivery", request.fetch(:state)
       assert_equal lost.attempt_id, request.fetch(:claim_attempt_id)
       assert_raises(Hive::Attempts::CompareAndSwapFailed) do
         repository.mark_lost(launching, reason: "stale_generation", now: NOW + 2)
       end
       assert_equal 0, Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW).global_count
+    end
+  end
+
+  def test_recovery_admission_requires_a_ready_matching_source
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      lost = repository.mark_lost(launching, reason: "stale_generation", now: NOW + 1)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.database.transaction do |db|
+          repository.admission_complete_lost_recovery_in(
+            db, source_attempt_id: lost.attempt_id,
+            request_id: "wrong-request", now: NOW + 2
+          )
+        end
+      end
     end
   end
 
@@ -258,16 +408,15 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
-  def test_projection_reader_caches_live_and_terminal_bindings
+  def test_read_session_caches_records_and_terminal_diagnostics
     with_repository do |repository|
       launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      reader = repository.projection_reader
-      first = reader.fetch_projection_binding(launching.attempt_id)
-      assert_same first, reader.fetch_projection_binding(launching.attempt_id)
+      reader = repository.read_session
+      assert_same reader.fetch(launching.attempt_id), reader.fetch(launching.attempt_id)
       assert_nil reader.fetch_terminal_diagnostic_binding(launching.attempt_id)
 
       terminal = terminal_attempt(repository, launching)
-      terminal_reader = repository.projection_reader
+      terminal_reader = repository.read_session
       diagnostic = terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
       assert_equal terminal.receipt, diagnostic.fetch("receipt")
       assert_same diagnostic, terminal_reader.fetch_terminal_diagnostic_binding(terminal.attempt_id)
@@ -317,12 +466,12 @@ class AttemptsRepositoryTest < Minitest::Test
       repository.database.transaction do |db|
         db[:attempts].where(attempt_id: running.attempt_id).update(task_generation: "different")
       end
-      assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(running.attempt_id) }
+      assert_equal "different", repository.fetch(running.attempt_id).task_generation
 
       invalid = "{"
       repository.database.transaction do |db|
         db[:attempts].where(attempt_id: running.attempt_id).update(
-          record_json: invalid, record_digest: Digest::SHA256.hexdigest(invalid)
+          details_json: invalid
         )
       end
       assert_raises(Hive::Attempts::RepositoryError) { repository.fetch(running.attempt_id) }
@@ -337,23 +486,6 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
-  def test_projection_cutover_boundary_accepts_only_pre_activation_history
-    with_repository do |repository|
-      activated_at = "2026-07-16T12:00:00.000000Z"
-      repository.database.transaction do |db|
-        db[:installations].update(activated_at: activated_at)
-      end
-
-      assert repository.pre_activation_projection?("2026-07-16T11:59:59.999999Z")
-      assert repository.projection_reader.pre_activation_projection?(
-        "2026-07-16T11:59:59.999999Z"
-      )
-      refute repository.pre_activation_projection?(activated_at)
-      refute repository.pre_activation_projection?("2026-07-16T12:00:00.000001Z")
-      refute repository.pre_activation_projection?("invalid")
-    end
-  end
-
   private
 
   def with_repository
@@ -364,7 +496,7 @@ class AttemptsRepositoryTest < Minitest::Test
                task_slug: "durable-task", task_generation: "generation-1")
     {
       attempt_id: attempt_id, request_id: request_id,
-      predecessor_attempt_id: nil, task_id: task_id, project: "demo",
+      task_id: task_id, project: "demo",
       task_slug: task_slug, intended_stage: "4-execute",
       task_generation: task_generation, ownership_generation: "owner-1",
       task_input_epoch: 1, progress_token: "progress-1", provider: "codex",

@@ -7,12 +7,10 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 7,
+      "hive-status" => 8,
       "hive-running-status" => 2,
       "hive-operational-status" => 4,
       "hive-runtime-maintenance" => 1,
-      "hive-repair-projection" => 1,
-      "hive-circuits" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,
@@ -122,7 +120,7 @@ module Hive
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
       # Bounded, read-only detail projection shared by authenticated Web HTML
-      # and JSON. It is intentionally independent from fleet-wide status v7.
+      # and JSON. It is intentionally independent from fleet-wide status v8.
       "hive-task-workspace" => 2,
       # Forward-only controller and agent context provenance receipts.
       "hive-context-receipt" => 1

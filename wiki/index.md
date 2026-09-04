@@ -13,10 +13,10 @@ local-first workflow engine for AI agents; software delivery is its flagship
 proof, while built-in content/bench, installable Honeycomb, and owner-authored
 workflows use the same folder-backed execution model.
 
-Page count: 106
-Updated: 2026-08-30
+Page count: 104
+Updated: 2026-09-04
 
-Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on bounded default liveness status, strict bounded task-local projections with explicit [[commands/repair-projection]], the operational workflow contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, and stable-ID semantic E2E profiles; the former public full-fleet status graph is now internal-only pending consumer-specific projection extraction. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
+Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on bounded default liveness status, lock-checked memoized task-journal folds, the operational workflow contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, and stable-ID semantic E2E profiles; the former public full-fleet status graph is now internal-only pending consumer-specific projection extraction. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
 
 Reusable mechanisms remain in this monorepo behind the canonical
 [[component-boundaries]] catalog. The seventeen-row internal graph has thirteen
@@ -53,7 +53,6 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/babysit]] — `wiki/commands/babysit.md`
 - [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
 - [[commands/bot]] — `wiki/commands/bot.md`
-- [[commands/circuits]] — `wiki/commands/circuits.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
 - [[commands/drop]] — `wiki/commands/drop.md`
@@ -71,7 +70,6 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/prune]] — `wiki/commands/prune.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/refactor-patrol]] — `wiki/commands/refactor-patrol.md`
-- [[commands/repair-projection]] — `wiki/commands/repair-projection.md`
 - [[commands/run]] — `wiki/commands/run.md`
 - [[commands/runtime]] — `wiki/commands/runtime.md`
 - [[commands/screenote]] — `wiki/commands/screenote.md`
@@ -121,7 +119,6 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/plan_review]] — `wiki/modules/plan_review.md`
 - [[modules/pr]] — `wiki/modules/pr.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
-- [[modules/provider_health]] — `wiki/modules/provider_health.md`
 - [[modules/provider_routing]] — `wiki/modules/provider_routing.md`
 - [[modules/rebase]] — `wiki/modules/rebase.md`
 - [[modules/reviewers]] — `wiki/modules/reviewers.md`

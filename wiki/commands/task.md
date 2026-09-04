@@ -67,10 +67,10 @@ lifecycle chronology. Strict v1 audit JSON remains at the authenticated Web
 task `.json` route, and raw timeline pages remain authenticated Web resources.
 
 This task view is not a provider probe or billing statement. Do not infer live
-provider health, quota, credential validity, actual invoice spend, or
+provider usability, quota, credential validity, actual invoice spend, or
 provider-observed billing from it. Use `hive status --operational --json` for
-current workflow/scheduler ownership and `hive circuits inspect --json` for
-the dedicated provider-account/model health projection.
+current workflow and scheduler ownership. Provider routing is recomputed from
+current configuration and live attempt capacity; there is no health projection.
 
 ## Tests
 

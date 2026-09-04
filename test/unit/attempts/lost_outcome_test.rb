@@ -36,13 +36,18 @@ class AttemptsLostOutcomeTest < Minitest::Test
         version = store.fetch(lost.attempt_id).lease_version
         second = processor.process(store.fetch(lost.attempt_id), now: NOW + 4)
 
-        assert_equal "ready", first.fetch("status")
+        assert_equal "ready", first.fetch("phase")
         assert_equal first, second
         assert_equal version, store.fetch(lost.attempt_id).lease_version
         assert_equal 1, identity.calls.size
         assert first.fetch("capture_references").all? do |reference|
-          Hive::Attempts::OutputReference.verify(reference, root: root)
+          Hive::OutputReference.verify(reference, root: root)
         end
+        assert first.fetch("capture_references").all? do |reference|
+          reference.fetch("path").start_with?("sealed/sha256/") &&
+            store.read_output(reference, max_bytes: 1_000_000)
+        end
+        assert_empty Dir.glob(File.join(root, "open", lost.attempt_id, "dirty-state", "*"))
         assert Hive::Markers.current(task.state_file).none?,
                "the attempt ledger owns loss recovery; it must not create a second marker lifecycle"
       end
@@ -64,7 +69,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
         pending = processor.process(lost, now: NOW + 3)
         pending_again = processor.process(lost, now: NOW + 3.5)
 
-        assert_equal "pending", pending.fetch("status")
+        assert_equal "pending", pending.fetch("phase")
         assert_equal pending, pending_again,
                      "an unchanged unsafe identity must wait for the shared cleanup cooldown"
         assert_empty pending.fetch("capture_references")
@@ -79,34 +84,24 @@ class AttemptsLostOutcomeTest < Minitest::Test
           lost, now: NOW + Hive::AgentLimit.retry_cooldown_sec + 4
         )
 
-        assert_equal "pending", still_pending.fetch("status")
-        assert_equal "ready", ready.fetch("status")
-        assert_nil ready.fetch("diagnostic")
+        assert_equal "pending", still_pending.fetch("phase")
+        assert_equal "ready", ready.fetch("phase")
         assert_equal 2, identity.calls.size
       end
     end
   end
 
-  def test_transition_rejects_corrupt_or_identity_mismatched_rows
+  def test_transition_rejects_a_stale_attempt_identity
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_without_worker(store)
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-      outcome = outcomes.ensure_for(lost, now: NOW)
-
+      outcomes.ensure_for(lost, now: NOW)
       store.database.transaction do |db|
-        db[:attempt_lost_outcomes].where(attempt_id: lost.attempt_id).update(value_json: "{")
+        db[:attempts].where(attempt_id: lost.attempt_id).update(task_generation: "new-generation")
       end
-      assert_raises(Hive::Attempts::RepositoryError) { outcomes.fetch(lost.attempt_id) }
-      store.database.transaction do |db|
-        db[:attempt_lost_outcomes].where(attempt_id: lost.attempt_id).update(
-          value_json: Hive::RuntimeControlPlane::Codec.dump_json(outcome),
-          idempotency_key: "wrong"
-        )
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        outcomes.update(lost, status: "ready")
-      end
+      assert_equal "new-generation", outcomes.fetch(lost.attempt_id).fetch("task_generation")
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, now: NOW, phase: "ready") }
     end
   end
 
@@ -121,7 +116,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
       )
 
       outcome = processor.process(lost, now: NOW + 1)
-      assert_equal "ready", outcome.fetch("status")
+      assert_equal "ready", outcome.fetch("phase")
       assert_equal "no_worker", outcome.fetch("cleanup")
       assert_empty outcome.fetch("capture_references")
     end
@@ -136,11 +131,11 @@ class AttemptsLostOutcomeTest < Minitest::Test
         store: store, outcome_store: outcomes,
         process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil }
       )
-      store.define_singleton_method(:annotate_lost) do |*_args, **_kwargs|
-        raise Hive::Attempts::CompareAndSwapFailed
-      end
-      pending = processor.process(lost, now: NOW + 1)
-      assert_equal "pending", pending.fetch("status")
+      first = processor.process(lost, now: NOW + 1)
+      second = processor.process(store.fetch(lost.attempt_id), now: NOW + 2)
+      assert_equal "ready", first.fetch("phase")
+      assert_equal first, second
+      assert_equal 1, first.fetch("revision")
     end
   end
 
@@ -175,9 +170,8 @@ class AttemptsLostOutcomeTest < Minitest::Test
       lost = lost_without_worker(store)
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       outcomes.ensure_for(lost, now: NOW)
-      changed = lost.with("loss" => lost["loss"].merge("at" => (NOW + 99).iso8601(6)))
       assert_raises(Hive::Attempts::RepositoryError) do
-        outcomes.update(changed, status: "ready")
+        outcomes.update(lost, phase: "ready", request_id: "not-deterministic")
       end
 
       store.database.define_singleton_method(:transaction) do |**|
@@ -189,6 +183,151 @@ class AttemptsLostOutcomeTest < Minitest::Test
       assert_raises(Hive::Attempts::RepositoryError) do
         outcomes.update(lost, status: "ready")
       end
+    end
+  end
+
+  def test_transition_rejects_capture_references_that_have_not_been_sealed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(
+          lost, phase: "ready", cleanup: "absent",
+          request_id: outcomes.recovery_request_id(lost),
+          capture_references: [ { "path" => "open/lost-no-worker/dirty-state/x", "size" => 1,
+                                  "sha256" => "a" * 64 } ]
+        )
+      end
+    end
+  end
+
+  def test_transition_rejects_invalid_attempt_phase_and_identity
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      launching = store.create_launching(
+        attempt_id: "live", request_id: "live-request", task_id: "42",
+        project: "demo", task_slug: "durable-task", intended_stage: "4-execute",
+        task_generation: "generation-live", progress_token: "progress",
+        provider: "codex", worker_argv: %w[hive run durable-task],
+        claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+        starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+        launch_timeout_sec: 30, now: NOW
+      )
+      lost = store.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW + 31)
+
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.ensure_for(launching) }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(lost, phase: "ready")
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(lost.with("task_generation" => "different"), phase: "pending")
+      end
+    end
+  end
+
+  def test_transition_reads_and_writes_fail_closed_on_storage_errors
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+
+      store.database.define_singleton_method(:read) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.fetch(lost.attempt_id) }
+
+      store.database.define_singleton_method(:transaction) do |**|
+        raise Hive::RuntimeControlPlane::IntegrityError.new("bad", code: :database_corrupt)
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        outcomes.update(lost, phase: "pending")
+      end
+    end
+  end
+
+  def test_transition_rejects_row_identity_and_capture_corruption
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+
+      store.database.transaction do |db|
+        db[:attempts].where(attempt_id: lost.attempt_id).update(
+          task_generation: "different"
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, phase: "ready") }
+
+      store.database.transaction do |db|
+        db[:attempts].where(attempt_id: lost.attempt_id).update(
+          task_generation: lost.task_generation
+        )
+        db[:payload_references].insert(
+          payload_id: "bad-capture", attempt_id: lost.attempt_id, task_id: nil,
+          kind: "lost_capture", relative_path: "../escape", sha256: "a" * 64,
+          bytes: 1, state: "sealed", created_at: NOW.iso8601(6)
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.fetch(lost.attempt_id) }
+    end
+  end
+
+  def test_processor_recovers_a_competing_ready_transition_and_invalid_retry_time
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      ready = { "phase" => "ready", "capture_references" => [] }.freeze
+      transition = Object.new
+      transition.define_singleton_method(:ensure_for) do |_attempt, now:|
+        { "phase" => "pending", "cleanup" => nil, "capture_references" => [],
+          "updated_at" => now.iso8601(6) }
+      end
+      transition.define_singleton_method(:recovery_request_id) { |_attempt| "request" }
+      transition.define_singleton_method(:update) do |*_args, **_kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed
+      end
+      transition.define_singleton_method(:fetch) { |_attempt_id| ready }
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: transition,
+        process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil }
+      )
+
+      assert_equal ready, processor.process(lost, now: NOW + 1)
+      assert processor.send(
+        :cleanup_retry_due?, { "cleanup" => "still_alive", "updated_at" => "invalid" },
+        now: NOW
+      )
+    end
+  end
+
+  def test_processor_resumes_from_a_capture_sealed_before_the_recovery_transition
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      outcomes.ensure_for(lost, now: NOW)
+      directory = store.output_directory(lost.attempt_id, "dirty-state", create: true)
+      path = File.join(directory, "capture")
+      File.binwrite(path, "captured")
+      reference = Hive::OutputReference.build(path, root: root)
+      sealed = store.seal_lost_capture_payloads(lost, [ reference ])
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: outcomes,
+        process_identity: FakeIdentity.new(:absent, []),
+        task_resolver: ->(_) { raise "sealed capture must be reused" }
+      )
+
+      ready = processor.process(lost, now: NOW + 1)
+
+      assert_equal "ready", ready.fetch("phase")
+      assert_equal sealed, ready.fetch("capture_references")
     end
   end
 
@@ -207,7 +346,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
 
   def lost_attempt(store)
     launching = store.create_launching(
-      attempt_id: "lost-1", request_id: "request-1", predecessor_attempt_id: nil,
+      attempt_id: "lost-1", request_id: "request-1",
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-1",
       progress_token: "progress", provider: "codex",
@@ -232,7 +371,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
 
   def lost_without_worker(store)
     launching = store.create_launching(
-      attempt_id: "lost-no-worker", request_id: "request-no-worker", predecessor_attempt_id: nil,
+      attempt_id: "lost-no-worker", request_id: "request-no-worker",
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-no-worker",
       progress_token: "progress", provider: "codex",

@@ -3,7 +3,7 @@ title: Task workspace projection
 type: module
 source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
-updated: 2026-08-25
+updated: 2026-09-01
 tags: [task, web, projection, semantic, result, usage, provenance, attempts, timeline, dependencies, publication]
 ---
 
@@ -331,7 +331,7 @@ panel instead of widening the page at mobile widths or 400% zoom.
 |---|---|
 | Serialized workspace | 2 MiB |
 | Artifacts | 512 KiB each; 2 MiB / 20 files total |
-| Projection/journal | 512 KiB checkpoint; 1 MiB / 2,000-event suffix |
+| Journal | 1 MiB / 2,000 events for workspace presentation |
 | Attempts | 100 task bindings; 32 predecessor fetches; 512 KiB |
 | Timeline | 200 material; 100 noise groups; 512 KiB; 20 raw members |
 | Dependency component | 32 projects; 10,000 rows; 100 nodes; 200 edges; depth 20; 4 MiB; 2 s |
@@ -339,17 +339,11 @@ panel instead of widening the page at mobile widths or 400% zoom.
 | GitHub | 100 checks; 64 KiB text; 256 KiB response; 10 s |
 | Publication cache | 256 KiB entry; 32 MiB/principal; fresh 2 min; stale 24 h |
 
-Every limit diagnostic names the exhausted cap and observed amount. A valid
-task-projection checkpoint stores the projection plus bounded head/tail prefix
-anchors and permits only bounded suffix validation and replay in a Web request;
-it never stores, hashes, or replays the complete prefix on that request path.
-The authoritative `TaskActivity` append boundary refreshes this optimization
-after a durable write; refresh failure never revokes the successful activity,
-but leaves Web mutations safely degraded until a later append or lifecycle
-rebuild repairs the checkpoint. An exactly current checkpoint has an ordinary
-empty suffix. Missing, changed,
-torn, or over-limit checkpoint evidence degrades the workspace instead of
-moving a full journal rebuild into HTTP.
+Every limit diagnostic names the exhausted cap and observed amount. Task
+workspace reads the journal directly and may return bounded partial detail when
+the presentation cap is exceeded. It does not write a projection cache or
+checkpoint. Routine scheduler/status reads separately validate the complete
+journal, so a large but valid history cannot disable task progress.
 
 ## Decision and Web interaction
 

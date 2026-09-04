@@ -78,6 +78,15 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
+  def test_review_stale_maps_to_recovery_without_an_unguarded_command
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(task, marker(:review_stale, "pass" => "2"))
+
+    assert_equal Hive::Schemas::TaskActionKind::RECOVER_REVIEW, action.key
+    assert_equal "Needs recovery", action.label
+    assert_nil action.command
+  end
+
   def test_outcome_evidence_implementation_rework_is_a_guarded_scheduler_action
     task = fake_task(stage_name: "artifacts", stage_index: 7)
     digest = "a" * 64

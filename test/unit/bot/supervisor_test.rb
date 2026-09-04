@@ -331,7 +331,6 @@ class HiveBotSupervisorTest < Minitest::Test
         )
         path = File.join(folder, "brainstorm.md")
         File.write(path, content)
-        seed_task_projection(folder, state_file: path)
         Hive::Config.register_project(name: "hive", path: project)
         yield path, project
       end
@@ -2466,7 +2465,7 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_includes msg[:text], "stuck-task"
       assert_includes msg[:text], "exit 4"
       assert_empty repository.pending_results,
-                   "a relayed notice must be removed so it isn't sent twice"
+                   "a relayed notice must be acknowledged so it isn't sent twice"
     end
   end
 
@@ -2487,13 +2486,13 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_equal "Run completed for hive/done-task.", msg[:text]
       refute_includes msg[:text], "exit 0"
       assert_empty repository.pending_results,
-                   "a relayed notice must be removed so it isn't sent twice"
+                   "a relayed notice must be acknowledged so it isn't sent twice"
     end
   end
 
   # #263: a notice whose chat_id is not in the allowlist (chat removed
-  # while a request was in-flight, or a notice forged in the 0700 dir) is
-  # dropped + removed without relaying — defense-in-depth re-validation.
+  # while a request was in-flight, or a forged database row) is marked
+  # delivered without relaying — defense-in-depth re-validation.
   def test_drain_dispatch_results_drops_notice_for_unauthorized_chat
     Dir.mktmpdir("hive-dispatch-result") do |home|
       repository = install_dispatch_repository(home)
@@ -2508,7 +2507,7 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_empty @telegram.messages,
                    "a notice for a non-allowlisted chat must not be relayed"
       assert_empty repository.pending_results,
-                   "the unauthorized notice must be removed, not left to retry forever"
+                   "the unauthorized notice must be acknowledged, not left to retry forever"
       rejected = @logger.events.find { |e| e[:name] == :dispatch_result_rejected_unauthorized }
       refute_nil rejected, "the drop must be logged for an audit trail"
       assert_equal 999, rejected[:payload][:chat_id]
@@ -2523,7 +2522,7 @@ class HiveBotSupervisorTest < Minitest::Test
         request_id: "rqbad", exit_code: 1, command: "hive review bad-result"
       )
       repository.database.transaction do |db|
-        db[:dispatch_outbox].where(request_id: "rqbad").update(payload_json: "{")
+        db[:dispatch_requests].where(request_id: "rqbad").update(result_json: "{")
       end
 
       assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
@@ -2553,6 +2552,31 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_drain_dispatch_results_retries_after_send_before_acknowledgement_crash
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      repository = install_dispatch_repository(home)
+      write_dispatch_result(
+        repository, chat_id: 42, project: "hive", slug: "retry-after-crash",
+        request_id: "rqcrash", exit_code: 0, command: "hive run retry-after-crash"
+      )
+      with_replaced_singleton_method(
+        repository, :acknowledge_result,
+        ->(*, **) { raise "crash after external send" }
+      ) do
+        assert_raises(RuntimeError) { @supervisor.send(:drain_dispatch_results) }
+      end
+
+      assert_equal 1, @telegram.messages.size
+      assert_equal [ "rqcrash" ], repository.pending_results.map(&:request_id)
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_equal 2, @telegram.messages.size,
+                   "send-before-ack recovery is at-least-once and may duplicate"
+      assert_empty repository.pending_results
+    end
+  end
+
   # #4: a timeout/signal-killed child has a nil exit_code → render as a
   # kill, not "exit ".
   def test_drain_dispatch_results_renders_nil_exit_as_killed
@@ -2569,9 +2593,7 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  # #6: stale notices are dropped WITHOUT relaying (no hour-old spam) and
-  # pruned to bound growth.
-  def test_drain_dispatch_results_drops_stale_without_sending
+  def test_drain_dispatch_results_relays_old_pending_result_instead_of_losing_it
     Dir.mktmpdir("hive-dispatch-result") do |home|
       repository = install_dispatch_repository(home)
       write_dispatch_result(repository,
@@ -2581,9 +2603,10 @@ class HiveBotSupervisorTest < Minitest::Test
 
       @supervisor.send(:drain_dispatch_results)
 
-      assert_empty @telegram.messages, "a stale notice must not be relayed"
+      assert_equal 1, @telegram.messages.size,
+                   "an undelivered result remains delivery work regardless of age"
       assert_empty repository.pending_results,
-                   "a stale notice must be pruned"
+                   "the old result is acknowledged only after the send succeeds"
     end
   end
 
@@ -3502,6 +3525,7 @@ class HiveBotSupervisorTest < Minitest::Test
       request_id: request_id, now: now
     )
     repository.write_result!(**attributes)
+    repository.remove(request_id)
   end
 
   def test_interruptible_sleep_sleeps_until_flag_changes

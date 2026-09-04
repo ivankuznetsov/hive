@@ -224,7 +224,7 @@ refuse a non-Git temporary directory. Each call writes one immutable,
 digest-named `candidate-plan-<sha256>.md`. Its ArtifactFirewall custody is
 passed into the shared agent launcher, so the protected snapshot surrounds only the untrusted
 provider process. Hive's own durable session-start/session-finish writes to
-`task-journal.jsonl` and `task-projection.json` occur outside that interval;
+`task-journal.jsonl` occur outside that interval;
 they cannot be misclassified as planner tampering, while provider writes to
 the same anchors still fail closed and are restored. A launcher that returns
 success without invoking the supplied custody is rejected. Hive then runs a
@@ -384,7 +384,7 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
-A projection-checkpoint rollout briefly included Hive's own
+A retired projection-checkpoint rollout briefly included Hive's own
 `task-projection.checkpoint.json` write in reviewer custody. The current
 reviewer firewall excludes that orchestrator-owned file. Exact historical
 runner diagnostics for this false positive receive one versioned recovery
@@ -406,7 +406,7 @@ manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 
-`hive-status.v7` and `hive-operational-status.v4` contain one required nullable
+`hive-status.v8` and `hive-operational-status.v4` contain one required nullable
 `plan_review` field. Applicable rows include review and observation identity,
 computed/effective level, state/outcome, degradation reason, attempt/current
 attempt, coverage and finding counts, blockers/owner/reason, retry time, one

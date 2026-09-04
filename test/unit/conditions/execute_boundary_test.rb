@@ -109,14 +109,13 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
                        legacy_marker: :execute_waiting, waiting_reason: "no_worktree_changes")
       assert_equal :execute_waiting, first.marker_name
 
-      lost = store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
+      store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
       File.write(File.join(task.worktree_path, "change.txt"), "change\n")
       run!("git", "-C", task.worktree_path, "add", "change.txt")
       run!("git", "-C", task.worktree_path, "commit", "-m", "change", "--quiet")
       attempt_b = store.create_launching(
         **attempt_identity(task, baseline).merge(
-          attempt_id: "attempt-b", request_id: "request-b",
-          predecessor_attempt_id: lost.attempt_id
+          attempt_id: "attempt-b", request_id: "request-b"
         ),
         launch_timeout_sec: 30, now: Time.now.utc
       )
@@ -153,9 +152,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       assert_equal :execute_complete, allowed.marker_name
       assert_equal "research", allowed.marker_attrs.fetch(:mode)
       assert_equal "no_commit_success", allowed.gate.waivers.first.fetch("reason")
-      replayed = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: store
-      ).read
+      replayed = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       replayed_gate = Hive::Conditions::GateEvaluator.new(
         projection: replayed,
         rule: task.workflow.stage_named("execute").condition_policy
@@ -190,7 +187,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
         )
 
         records = Hive::TaskProjection.read_journal(
-          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), attempt_store: store
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
         )
         overrides = records.select { |record| record["event_type"] == "operator_action" }
         assert_equal 1, overrides.size
@@ -198,9 +195,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
         assert_equal "approve", overrides.first.dig("payload", "source_command")
         assert_equal "ChangesPresent",
                      overrides.first.dig("payload", "waived_diagnostics", 0, "condition")
-        projection = Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: store
-        ).read
+        projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
         public_override = projection["condition_overrides"].fetch(0)
         assert_equal "forced_condition_transition", public_override.fetch("reason")
         assert_equal "approve", public_override.fetch("source_command")
@@ -224,7 +219,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     end
   end
 
-  def test_transition_guard_fails_closed_when_post_handoff_journal_is_missing_or_empty
+  def test_transition_guard_fails_closed_when_admitted_attempt_history_is_missing_or_empty
     with_fixture do |task, store, attempt, context, baseline|
       evaluate(task, store, attempt, context, baseline, mode: "conditions",
                legacy_marker: :execute_complete)
@@ -232,16 +227,41 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       journal = File.binread(journal_path)
 
-      with_env("HIVE_HOME" => store.root) do
-        File.delete(journal_path)
-        assert_raises(Hive::TaskProjection::InvalidJournal) do
-          Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
-        end
+      projects = [ { "name" => "demo", "path" => task.project_root } ]
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_env("HIVE_HOME" => store.root) do
+          File.delete(journal_path)
+          assert_raises(Hive::TaskProjection::InvalidJournal) do
+            Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+          end
 
-        File.binwrite(journal_path, journal)
-        File.truncate(journal_path, 0)
-        assert_raises(Hive::TaskProjection::InvalidJournal) do
-          Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+          File.binwrite(journal_path, journal)
+          File.truncate(journal_path, 0)
+          assert_raises(Hive::TaskProjection::InvalidJournal) do
+            Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+          end
+        end
+      end
+    end
+  end
+
+  def test_transition_guard_waits_for_terminal_journal_publication
+    with_fixture(research: true) do |task, store, attempt, context, baseline|
+      outcome = evaluate(
+        task, store, attempt, context, baseline, mode: "conditions",
+        legacy_marker: :execute_complete, research: true, research_evidence: true
+      )
+      assert_equal :execute_complete, outcome.marker_name
+      lost = store.mark_lost(attempt, reason: "wrapper_exited", now: Time.now.utc)
+      store.prepare_publication(attempt_id: lost.attempt_id)
+      projects = [ { "name" => "demo", "path" => task.project_root } ]
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_env("HIVE_HOME" => store.root) do
+          error = assert_raises(Hive::ConcurrentRunError) do
+            Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+          end
+          assert_includes error.message, "journal is still pending"
         end
       end
     end
@@ -270,7 +290,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       end
 
       records = Hive::TaskProjection.read_journal(
-        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), attempt_store: store
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       )
       refute records.any? { |record| record["event_type"] == "operator_action" }
     end
@@ -280,7 +300,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     with_tmp_dir do |dir|
       task = build_task(dir, dir)
       projection = Hive::TaskProjection.project(records: [])
-      projection_store = Struct.new(:journal_path, :attempt_store).new(
+      history_reader = Struct.new(:journal_path, :attempt_store).new(
         File.join(dir, "task-journal.jsonl"), nil
       )
       result = Hive::Conditions::GateResult.new(
@@ -290,15 +310,15 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
 
       error = assert_raises(Hive::TaskProjection::InvalidJournal) do
         Hive::Conditions::TransitionGuard.audit_force!(
-          task: task, projection: projection, projection_store: projection_store,
-          marker: nil, result: result, source: "approve"
+          task: task, projection: projection, history_reader: history_reader,
+          result: result, source: "approve", repository: Object.new
         )
       end
       assert_includes error.message, "cannot identify its durable attempt"
     end
   end
 
-  def test_legacy_boundary_writes_baseline_and_snapshot_before_returning_marker_outcome
+  def test_legacy_boundary_appends_history_before_returning_marker_outcome
     with_tmp_git_repo do |worktree|
       with_tmp_dir do |dir|
         task = build_task(dir, worktree)
@@ -313,7 +333,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
 
         assert_equal "markers", outcome.selection.effective
         assert File.exist?(File.join(dir, "task-journal.jsonl"))
-        assert File.exist?(File.join(dir, "task-projection.json"))
+        refute File.exist?(File.join(dir, "task-projection.json"))
         assert_equal :execute_complete, outcome.marker_name
       end
     end
@@ -393,7 +413,8 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
           )
         end
         refute File.exist?(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME))
-        refute File.exist?(File.join(dir, Hive::TaskProjection::Store::SNAPSHOT_BASENAME))
+        refute File.exist?(File.join(dir, "task-projection.json"))
+        refute File.exist?(File.join(dir, "task-projection.checkpoint.json"))
       end
     end
   end
@@ -471,7 +492,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       ownership_generation: "owner-1", task_input_epoch: 1
     )
     {
-      attempt_id: "attempt-a", request_id: "request-a", predecessor_attempt_id: nil,
+      attempt_id: "attempt-a", request_id: "request-a",
       task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
       task_generation: generation.ownership_generation,
       ownership_generation: generation.ownership_generation,

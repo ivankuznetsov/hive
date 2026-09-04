@@ -302,7 +302,7 @@ class AttemptsSupervisorTest < Minitest::Test
       references = terminal.receipt.fetch("output_references")
       assert_equal 1, references.length
       reference = references.fetch(0)
-      assert Hive::Attempts::OutputReference.verify(reference, root: store.root)
+      assert Hive::OutputReference.verify(reference, root: store.root)
       diagnostic = JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
       assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
       assert_equal attempt.attempt_id, diagnostic.fetch("correlation_id")
@@ -877,7 +877,7 @@ class AttemptsSupervisorTest < Minitest::Test
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "durable-task",
         intended_stage: intended_stage, task_generation: "generation-1",
         progress_token: "progress-1", provider: "codex", worker_argv: worker_argv,
@@ -901,28 +901,13 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def explicit_routing
-    account_scope = {
-      "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil
-    }
-    model_scope = {
-      "kind" => "model", "provider_account_id" => "account-a", "model" => "model-a"
-    }
     {
-      "mode" => "explicit", "policy_digest" => "a" * 64,
-      "decision" => {
-        "decision_id" => "decision-1", "policy_digest" => "a" * 64,
-        "decided_at" => Time.now.utc.iso8601(6), "exclusions" => []
-      },
+      "mode" => "explicit",
       "route" => {
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "launch_binding_id" => "default",
         "model" => "model-a", "effort" => "high"
-      },
-      "circuit_generations" => [
-        { "scope" => account_scope, "journal_epoch" => 0, "observed_generation" => 0 },
-        { "scope" => model_scope, "journal_epoch" => 0, "observed_generation" => 0 }
-      ],
-      "probe_bindings" => []
+      }
     }
   end
 end

@@ -350,18 +350,18 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
-  def test_projection_repair_is_operator_owned_even_when_daemon_is_enabled
+  def test_task_history_invalid_is_operator_owned_even_when_daemon_is_enabled
     repair = task(
       action: "error",
-      slug: "projection-repair",
+      slug: "invalid-history",
       stage: "4-execute",
       marker: "error",
       attrs: {
-        "reason" => Hive::TaskProjection::REPAIR_REQUIRED_REASON,
+        "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON,
         "owner" => "operator",
-        "message" => "bounded task projection needs exact-task repair"
+        "message" => "task journal is invalid"
       },
-      projection_repair: true
+      task_history_invalid: true
     )
 
     projected = project(
@@ -373,6 +373,28 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", projected.fetch("blocker_owner")
     assert_equal "task_repair", projected.dig("reasons", 0, "code")
     assert_nil projected.fetch("action")
+  end
+
+  def test_busy_task_history_is_transient_scheduler_work_not_repair
+    busy = task(
+      action: "error", slug: "busy-history", stage: "4-execute", marker: "error",
+      attrs: {
+        "reason" => "condition_task_history_unavailable",
+        "owner" => "scheduler",
+        "journal_reason" => "journal_lock_busy",
+        "message" => "task journal writer holds the task lock"
+      }
+    )
+
+    projected = project(
+      status_payload(busy),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_provider_or_scheduler", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "task_history_unavailable", projected.dig("reasons", 0, "code")
+    refute_equal "needs_repair", projected.fetch("state")
   end
 
   def test_terminal_outcome_errors_are_retried_like_any_other_error
@@ -544,7 +566,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v7 payload", error.message
+    assert_equal "operational status requires a successful hive-status v8 payload", error.message
   end
 
   def test_rejects_an_older_status_schema
@@ -553,7 +575,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v7 payload", error.message
+    assert_equal "operational status requires a successful hive-status v8 payload", error.message
   end
 
   def test_noncurrent_scheduler_snapshot_propagates_its_freshness
@@ -781,7 +803,7 @@ class OperationalStatusTest < Minitest::Test
   end
 
   def test_scheduler_match_accepts_unicode_marker_attrs_from_binary_task_scan
-    message = "Claude stopped — retry the review"
+    message = "Claude stopped — retry cafe\u0301"
     source_task = task(
       action: "error",
       slug: "unicode-marker",
@@ -794,7 +816,7 @@ class OperationalStatusTest < Minitest::Test
       reason: "global dispatch capacity is exhausted"
     )
     snapshot.dig("tasks", 0)["marker_attrs"] = {
-      "message" => message,
+      "message" => message.unicode_normalize(:nfc),
       "marker_id" => "marker-unicode-marker"
     }
 
@@ -1556,11 +1578,9 @@ class OperationalStatusTest < Minitest::Test
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "model" => "model-a", "effort" => "high",
         "eligible" => true, "exclusions" => [],
-        "capacity" => { "observed" => 1, "max" => 2 }, "circuits" => []
+        "capacity" => { "observed" => 1, "max" => 2 }
       } ],
-      "exclusions" => [],
-      "circuit_generations" => [],
-      "probe_requirements" => []
+      "exclusions" => []
     }
   end
 
@@ -1586,7 +1606,7 @@ class OperationalStatusTest < Minitest::Test
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
            admission_error: nil, closure: nil, plan_review: nil,
-           projection_repair: false)
+           task_history_invalid: false)
     attrs = attrs.dup
     if Hive::Recovery.recoverable_marker?(marker) && !attrs.key?("marker_id")
       attrs["marker_id"] = "marker-#{slug}"
@@ -1608,7 +1628,7 @@ class OperationalStatusTest < Minitest::Test
       "pr_url" => nil,
       "marker" => marker,
       "attrs" => attrs,
-      "projection_repair" => projection_repair,
+      "task_history_invalid" => task_history_invalid,
       "mtime" => "2026-07-20T10:00:00.000000Z",
       "folder_mtime" => "2026-07-20T10:00:00.000000Z",
       "age_seconds" => 2,

@@ -30,9 +30,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       )
 
       assert observer.call(status, now: NOW + 3)
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: store
-      ).read
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       health = projection.current_condition("AgentHealthy")
       assert_equal "unsatisfied", health.fetch("state")
       assert_equal "attempt_terminal_failed", health.fetch("reason")
@@ -43,7 +41,6 @@ class ConditionsAttemptObserverTest < Minitest::Test
                    File.binread(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME))
       assert_equal 1, locator_calls, "delivered terminal attempts must be skipped before task lookup"
 
-      FileUtils.rm(File.join(task.folder, Hive::TaskProjection::Store::CHECKPOINT_BASENAME))
       restarted = Hive::Conditions::AttemptObserver.new(
         store: store, task_locator: ->(_attempt) { task }
       )
@@ -54,7 +51,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
-  def test_post_cutover_attempt_advances_from_the_retained_projection_checkpoint
+  def test_post_cutover_attempt_advances_from_the_self_contained_journal
     with_tmp_dir do |dir|
       task = build_task(dir)
       legacy_store = Hive::Attempts::Repository.new(
@@ -96,9 +93,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       )
       assert_equal :delivered, observer.observe(status, now: activated_at + 4)
 
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: store
-      ).read_routine
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read_routine
       assert_equal "current", projection.state
       assert_equal "attempt-2",
                    projection.projection.current_condition("AgentHealthy").fetch("attempt_id")
@@ -111,13 +106,10 @@ class ConditionsAttemptObserverTest < Minitest::Test
       assert_equal journal, File.binread(
         File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       )
-      strict = assert_raises(Hive::TaskProjection::InvalidJournal) do
-        Hive::TaskProjection.read_journal(
-          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME),
-          attempt_store: store
-        )
-      end
-      assert_includes strict.message, "unknown durable attempt attempt-1"
+      records = Hive::TaskProjection.read_journal(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      )
+      assert_equal %w[attempt-1 attempt-2], records.map { |record| record.fetch("attempt_id") }.uniq
     end
   end
 
@@ -138,9 +130,8 @@ class ConditionsAttemptObserverTest < Minitest::Test
       )
 
       assert_equal :delivered, observer.observe(status, now: NOW + 3)
-      health = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: store
-      ).read.current_condition("AgentHealthy")
+      health = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
+        .current_condition("AgentHealthy")
       assert_equal "pending", health.fetch("state")
       assert_equal "attempt_terminal_retryable", health.fetch("reason")
       assert_equal false, health.dig("payload", "informational_after_terminal")
@@ -182,9 +173,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       )
 
       assert observer.call(status, now: NOW + 1)
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: store
-      ).read
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       health = projection.current_condition("AgentHealthy")
       assert_equal "unsatisfied", health.fetch("state")
       assert_equal "attempt_lost", health.fetch("reason")
@@ -275,45 +264,6 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
-  def test_successor_stays_current_when_its_clock_regresses_and_predecessor_arrives_late
-    with_tmp_dir do |dir|
-      task = build_task(dir)
-      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-      predecessor = create_attempt(store, now: NOW)
-      lost = store.mark_lost(predecessor, reason: "launch_timeout", now: NOW + 1)
-      successor = create_attempt(
-        store, attempt_id: "attempt-2", request_id: "request-2",
-        predecessor_attempt_id: lost.attempt_id, now: NOW - 10
-      )
-      terminal = terminalize(store, successor, outcome: "succeeded", now: NOW - 10)
-      successor_status = Hive::Attempts::ReconciledAttempt.new(
-        attempt: terminal, classification: :terminal,
-        owner_status: :not_applicable, evidence: {}
-      )
-      predecessor_status = Hive::Attempts::ReconciledAttempt.new(
-        attempt: lost, classification: :lost,
-        owner_status: :not_claimed, evidence: {}
-      )
-      observer = Hive::Conditions::AttemptObserver.new(
-        store: store, task_locator: ->(_attempt) { task }
-      )
-
-      assert observer.call(successor_status, now: NOW + 2)
-      assert observer.call(predecessor_status, now: NOW + 3)
-
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: store
-      ).read
-      health = projection.current_condition("AgentHealthy")
-      assert_equal "attempt-2", health.fetch("attempt_id")
-      assert_equal "satisfied", health.fetch("state")
-      superseded = projection["conditions"].fetch("history").find do |fact|
-        fact["condition"] == "AgentHealthy" && fact["attempt_id"] == "attempt-1"
-      end
-      assert_equal "newer_incompatible_attempt", superseded.fetch("superseded_reason")
-    end
-  end
-
   def test_default_locator_skips_bad_candidates_and_finds_matching_task
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -396,11 +346,9 @@ class ConditionsAttemptObserverTest < Minitest::Test
     )
   end
 
-  def create_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                     predecessor_attempt_id: nil, now: NOW)
+  def create_attempt(store, attempt_id: "attempt-1", request_id: "request-1", now: NOW)
     store.create_launching(
       attempt_id: attempt_id, request_id: request_id,
-      predecessor_attempt_id: predecessor_attempt_id,
       task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
       task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
       progress_token: "progress", provider: "codex",

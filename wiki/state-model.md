@@ -247,11 +247,11 @@ integer values mean full 24-hour periods and hide only when
 visible. `never` always remains visible in ordinary views. The dedicated
 archive source bypasses this projection and retains every archived task.
 
-Task ids are allocated from the installation-scoped `task_counters` row
-`namespace=tasks` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
+Task ids are allocated from `installations.next_task_id`
+via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
 The immediate SQLite transaction makes read-plus-increment atomic across
 processes; there is no counter YAML or counter lock file. `peek` returns the
-stored next value (or `1` before the first allocation), and `seed_at_least!`
+stored next value (or infers a floor above numeric task subject IDs), and `seed_at_least!`
 advances without moving backwards. Capture paths use `next_or_nil` so a typed
 runtime-control-plane outage can preserve an already-created task with a nil id
 for explicit migration. `hive migrate` strictly seeds above existing metadata

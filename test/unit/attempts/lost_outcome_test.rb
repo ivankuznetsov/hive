@@ -91,16 +91,17 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_transition_rejects_corrupt_or_identity_mismatched_rows
+  def test_transition_rejects_a_stale_attempt_identity
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       lost = lost_without_worker(store)
       outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
       outcomes.ensure_for(lost, now: NOW)
       store.database.transaction do |db|
-        db[:attempts].where(attempt_id: lost.attempt_id).update(record_digest: "0" * 64)
+        db[:attempts].where(attempt_id: lost.attempt_id).update(task_generation: "new-generation")
       end
-      assert_raises(Hive::Attempts::RepositoryError) { outcomes.fetch(lost.attempt_id) }
+      assert_equal "new-generation", outcomes.fetch(lost.attempt_id).fetch("task_generation")
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, now: NOW, phase: "ready") }
     end
   end
 
@@ -262,7 +263,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
           task_generation: "different"
         )
       end
-      assert_raises(Hive::Attempts::RepositoryError) { outcomes.fetch(lost.attempt_id) }
+      assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, phase: "ready") }
 
       store.database.transaction do |db|
         db[:attempts].where(attempt_id: lost.attempt_id).update(

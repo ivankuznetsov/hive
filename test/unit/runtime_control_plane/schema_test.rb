@@ -5,32 +5,27 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
   include HiveTestHelper
 
   EXPECTED_TABLES = %i[
-    attempt_failure_cohorts
     attempts
     daemon_runtime
     dispatch_requests
     installations
     payload_references
-    pr_merge_project_state
-    pr_merge_reconciliations
     projects
     schema_info
-    task_counters
     task_leases
     task_subjects
     token_usage
   ].freeze
 
   EXPECTED_ATTEMPT_COLUMNS = %i[
-    accepted_at accepted_date admission_runtime_digest admission_stage
-    admission_utc_date admission_workflow attempt_id created_at ended_at
-    failure_cohort_counted failure_cohort_date failure_cohort_identity_digest
-    failure_cohort_occurred_at failure_cohort_outcome heartbeat_at lease_version
+    accepted_at accepted_date admission_runtime_digest
+    admission_workflow attempt_id created_at details_json ended_at
+    heartbeat_at lease_version
     lost_recovery_cleanup lost_recovery_phase lost_recovery_request_id
     lost_recovery_revision lost_recovery_updated_at outcome ownership_generation
     project_id project_name provider_account_id publication_accounting_acknowledged
-    publication_dispatch_acknowledged publication_journal_acknowledged publication_promoted record_digest
-    record_json refunded request_id retain_until retry_charge source_fingerprint
+    publication_dispatch_acknowledged publication_journal_acknowledged publication_promoted
+    refunded request_id retain_until retry_charge source_fingerprint
     started_at state subject_json subject_key subject_kind task_generation task_id
     task_slug terminal_publication_created_at terminal_receipt_digest
     terminal_receipt_json terminal_task_source_fingerprint
@@ -45,7 +40,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
   ].freeze
 
   RETIRED_ATTEMPT_COLUMNS = %i[
-    checkpoint_json owner_identity_json routing_json
+    checkpoint_json owner_identity_json routing_json record_json record_digest
   ].freeze
 
   def test_migration_creates_the_complete_domain_schema
@@ -128,14 +123,11 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
 
       foreign_keys = database.read do |connection|
         {
-          cohort: connection.foreign_key_list(:attempt_failure_cohorts).first,
           attempt: connection.foreign_key_list(:attempts).find do |foreign_key|
             foreign_key.fetch(:columns) == [ :request_id ]
           end
         }
       end
-      assert_equal :set_null,
-                   foreign_keys.dig(:cohort, :on_delete)
       assert_equal :set_null, foreign_keys.dig(:attempt, :on_delete)
 
       database.transaction do |connection|
@@ -236,24 +228,6 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
               request_id: uuid("6"), result_state: "pending", result_json: "{}",
               result_digest: "a" * 64, result_available_at: timestamp,
               result_delivered_at: timestamp, retain_until: timestamp
-            )
-          )
-        end
-      end
-
-      assert_raises(Sequel::CheckConstraintViolation) do
-        database.transaction do |connection|
-          connection[:attempts].insert(
-            attempt_row(ids).merge(
-              attempt_id: uuid("7"), state: "terminal", outcome: "failed",
-              ended_at: timestamp, terminal_receipt_json: "{}",
-              terminal_receipt_digest: "a" * 64,
-              terminal_task_source_fingerprint: "sha256:source",
-              terminal_publication_created_at: timestamp,
-              failure_cohort_date: "2026-08-29",
-              failure_cohort_identity_digest: "b" * 64,
-              failure_cohort_outcome: "failed", failure_cohort_occurred_at: timestamp,
-              failure_cohort_counted: 0
             )
           )
         end
@@ -360,7 +334,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
       subject_kind: "task_stage", subject_key: "4-execute", subject_json: "{}",
       task_generation: "task:v1", ownership_generation: "owner:v1",
       state: "running", lease_version: 0, source_fingerprint: "sha256:source",
-      record_json: "{}", record_digest: "a" * 64, project_name: "hive",
+      details_json: "{}", project_name: "hive",
       task_slug: "sqlite", accepted_date: "2026-08-29", created_at: timestamp,
       accepted_at: timestamp, retry_charge: 0, refunded: 0
     }

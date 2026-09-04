@@ -1830,7 +1830,7 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
-          when "failure_cohort_cooldown" then :attempt_failure_cohort
+          when "patrol_retry_delay" then :attempt_patrol_retry
           when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
@@ -1858,8 +1858,8 @@ module Hive
           [ "hive", "the automatic advance failed without producing task progress" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
-        when :attempt_failure_cohort
-          [ "scheduler", "this typed Patrol failure cohort is durably paced" ]
+        when :attempt_patrol_retry
+          [ "scheduler", "this Patrol task is waiting for its retry delay" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
@@ -3797,7 +3797,7 @@ module Hive
           when :deferred
             case result.reason
             when "transient_retry" then :attempt_transient_retry
-            when "failure_cohort_cooldown" then :attempt_failure_cohort_deferred
+            when "patrol_retry_delay" then :attempt_patrol_retry_deferred
             else :attempt_capacity_deferred
             end
           when :no_route then :attempt_route_unavailable

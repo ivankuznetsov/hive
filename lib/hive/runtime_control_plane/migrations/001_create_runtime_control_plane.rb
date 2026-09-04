@@ -7,7 +7,9 @@ Sequel.migration do
       Integer :activation_epoch, null: false, default: 0
       String :created_at, null: false
       String :activated_at
+      Integer :next_task_id
       check Sequel.lit("activation_epoch >= 0")
+      check Sequel.lit("next_task_id IS NULL OR next_task_id >= 1")
     end
 
     create_table(:projects) do
@@ -110,7 +112,7 @@ Sequel.migration do
       Integer :lease_version, null: false, default: 0
       Integer :retry_charge, null: false, default: 0
       Integer :refunded, null: false, default: 0
-      %i[admission_workflow admission_stage admission_runtime_digest admission_utc_date].each do |column|
+      %i[admission_workflow admission_runtime_digest].each do |column|
         String column
       end
       %i[
@@ -126,14 +128,8 @@ Sequel.migration do
       Integer :publication_accounting_acknowledged, null: false, default: 0
       Integer :publication_dispatch_acknowledged, null: false, default: 0
       Integer :publication_promoted, null: false, default: 0
-      %i[
-        failure_cohort_date failure_cohort_identity_digest failure_cohort_outcome
-        failure_cohort_occurred_at
-      ].each { |column| String column }
-      Integer :failure_cohort_counted, null: false, default: 0
       String :source_fingerprint, null: false
-      String :record_json, text: true, null: false
-      String :record_digest, null: false
+      String :details_json, text: true, null: false
       String :subject_json, text: true, null: false
       %i[project_name task_slug accepted_date].each { |column| String column, null: false }
       %i[created_at accepted_at].each { |column| String column, null: false }
@@ -145,7 +141,6 @@ Sequel.migration do
         "publication_accounting_acknowledged IN (0, 1) AND " \
         "publication_dispatch_acknowledged IN (0, 1) AND publication_promoted IN (0, 1)"
       )
-      check Sequel.lit("failure_cohort_counted IN (0, 1)")
       check Sequel.lit("subject_kind IN ('task_stage', 'module_hook')")
       check Sequel.lit(
         "(subject_kind = 'task_stage' AND task_id IS NOT NULL) OR " \
@@ -155,10 +150,8 @@ Sequel.migration do
       check Sequel.lit("outcome IS NULL OR outcome IN ('succeeded', 'failed', 'cancelled')")
       check Sequel.lit("(state = 'terminal' AND outcome IS NOT NULL) OR (state != 'terminal' AND outcome IS NULL)")
       check Sequel.lit(
-        "(admission_workflow IS NULL AND admission_stage IS NULL AND " \
-        "admission_runtime_digest IS NULL AND admission_utc_date IS NULL) OR " \
-        "(admission_workflow = 'patrol_fix' AND admission_stage IS NOT NULL AND " \
-        "length(admission_runtime_digest) = 64 AND admission_utc_date IS NOT NULL)"
+        "(admission_workflow IS NULL AND admission_runtime_digest IS NULL) OR " \
+        "(admission_workflow = 'patrol_fix' AND length(admission_runtime_digest) = 64)"
       )
       check Sequel.lit(
         "(lost_recovery_phase IS NULL AND lost_recovery_cleanup IS NULL AND " \
@@ -185,17 +178,6 @@ Sequel.migration do
         "(publication_journal_acknowledged = 1 AND publication_accounting_acknowledged = 1 AND " \
         "publication_dispatch_acknowledged = 1)))"
       )
-      check Sequel.lit(
-        "(failure_cohort_outcome IS NULL AND failure_cohort_date IS NULL AND " \
-        "failure_cohort_identity_digest IS NULL AND failure_cohort_occurred_at IS NULL AND " \
-        "failure_cohort_counted = 0) OR " \
-        "(state IN ('terminal', 'lost') AND failure_cohort_outcome = 'failed' AND " \
-        "failure_cohort_date IS NOT NULL AND length(failure_cohort_identity_digest) = 64 AND " \
-        "failure_cohort_occurred_at IS NOT NULL AND failure_cohort_counted = 1) OR " \
-        "(state IN ('terminal', 'lost') AND failure_cohort_outcome = 'succeeded' AND " \
-        "failure_cohort_date IS NOT NULL AND failure_cohort_identity_digest IS NULL AND " \
-        "failure_cohort_occurred_at IS NOT NULL AND failure_cohort_counted = 0)"
-      )
       index [ :request_id ], unique: true, name: :attempts_request_uidx
       index [ :project_id ], name: :attempts_project_idx
       index [ :task_id, :subject_key, :task_generation ], unique: true,
@@ -213,66 +195,6 @@ Sequel.migration do
               "terminal_receipt_json IS NOT NULL AND publication_promoted = 0"
             ),
             name: :attempts_publication_pending_idx
-      index [ :failure_cohort_date, :failure_cohort_identity_digest, :failure_cohort_counted ],
-            where: Sequel.lit("failure_cohort_outcome = 'failed'"),
-            name: :attempts_failure_cohort_idx
-    end
-
-    create_table(:attempt_failure_cohorts) do
-      %i[utc_date identity_digest updated_at].each { |column| String column, null: false }
-      String :identity_json, text: true, null: false
-      Integer :failure_count, null: false, default: 0
-      String :retry_at
-      foreign_key :probe_attempt_id, :attempts, type: String, key: :attempt_id,
-                  on_delete: :set_null, on_update: :cascade
-      String :probe_expires_at
-      primary_key [ :utc_date, :identity_digest ]
-      check Sequel.lit("failure_count >= 0")
-      index [ :probe_attempt_id ], name: :attempt_failure_cohorts_probe_idx
-    end
-
-    create_table(:pr_merge_reconciliations) do
-      String :reconciliation_id, primary_key: true, null: false
-      foreign_key :project_id, :projects, type: String, key: :project_id,
-                  null: false, on_delete: :cascade, on_update: :cascade
-      foreign_key :task_id, :task_subjects, type: String, key: :task_id,
-                  on_delete: :set_null, on_update: :cascade
-      %i[
-        task_generation repository_identity registration_id project_path
-        state_root_path host default_branch
-      ].each { |column| String column, null: false }
-      Integer :pr_number, null: false
-      %i[merge_sha retry_not_before hold_reason completed_at].each { |column| String column }
-      String :state, null: false
-      Integer :retry_failures, null: false, default: 0
-      String :remote_state, null: false, default: "unknown"
-      %i[architecture_state archive_state].each { |column| String column, null: false, default: "pending" }
-      Integer :held, null: false, default: 0
-      Integer :revision, null: false, default: 0
-      String :observation_json, text: true, null: false
-      %i[observed_at updated_at].each { |column| String column, null: false }
-      check Sequel.lit("pr_number > 0")
-      check Sequel.lit("state IN ('pending', 'merged', 'closed', 'failed')")
-      check Sequel.lit("retry_failures >= 0")
-      check Sequel.lit("held IN (0, 1)")
-      check Sequel.lit("revision >= 0")
-      check Sequel.lit("remote_state IN ('unknown', 'open', 'merged', 'closed_unmerged', 'delivered_elsewhere', 'ambiguous')")
-      check Sequel.lit("architecture_state IN ('pending', 'accepted', 'deferred', 'failed', 'blocked', 'not_required')")
-      check Sequel.lit("archive_state IN ('pending', 'blocked', 'archived', 'failed', 'superseded')")
-      index [ :project_id, :repository_identity, :pr_number ],
-            name: :pr_merge_reconciliations_pr_idx
-      index [ :state, :observed_at ], name: :pr_merge_reconciliations_pending_idx
-      index [ :project_id, :archive_state, :retry_not_before, :reconciliation_id ],
-            name: :pr_merge_reconciliations_ready_idx
-      index [ :task_id ], name: :pr_merge_reconciliations_task_idx
-    end
-
-    create_table(:pr_merge_project_state) do
-      foreign_key :project_id, :projects, type: String, key: :project_id,
-                  primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
-      String :cursor
-      String :backlog_json, text: true, null: false
-      String :updated_at, null: false
     end
 
     create_table(:task_leases) do
@@ -285,15 +207,6 @@ Sequel.migration do
       check Sequel.lit("lease_version >= 0")
       check Sequel.lit("holder_pid IS NULL OR holder_pid > 0")
       check Sequel.lit("(holder_id IS NULL AND holder_pid IS NULL) OR (holder_id IS NOT NULL AND holder_pid IS NOT NULL)")
-    end
-
-    create_table(:task_counters) do
-      foreign_key :installation_id, :installations, type: String, key: :installation_id,
-                  null: false, on_delete: :cascade, on_update: :cascade
-      %i[namespace updated_at].each { |column| String column, null: false }
-      Integer :value, null: false
-      primary_key [ :installation_id, :namespace ]
-      check Sequel.lit("value >= 0")
     end
 
     create_table(:token_usage) do

@@ -29,139 +29,58 @@ class AttemptsCoordinationTest < Minitest::Test
     end
   end
 
-  def test_failure_cohort_probe_is_claimed_with_attempt_creation_or_not_at_all
+  def test_patrol_retry_delay_is_per_task_and_survives_restart
     with_repository do |repository|
-      3.times do |index|
-        attempt = create(repository, attempt_id: "failure-#{index}", task_slug: "task-#{index}")
-        lost = repository.mark_lost(attempt, reason: "agent_failed", now: NOW + index)
-        repository.record_failure_cohort(
-          attempt_id: lost.attempt_id, identity: failure_identity,
-          occurred_at: NOW + index
-        )
-      end
-      probe_time = NOW + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 5
-      attributes = {
-        identity: failure_identity, date: NOW.to_date, now: probe_time,
-        explicit_release: false
-      }
-
-      probe = create(
-        repository, attempt_id: "probe-1", task_slug: "probe-1",
-        failure_cohort_probe: attributes
-      )
-      assert_equal "blocked", repository.failure_cohort_admission(
-        identity: failure_identity, date: NOW.to_date, now: probe_time
-      ).fetch("status")
-      assert_raises(Hive::Attempts::RepositoryError) do
-        create(
-          repository, attempt_id: "probe-2", task_slug: "probe-2",
-          failure_cohort_probe: attributes
-        )
-      end
-      assert_nil repository.fetch("probe-2")
-      observed_probe = repository.database.read do |db|
-        db[:attempt_failure_cohorts].get(:probe_attempt_id)
-      end
-      assert_equal probe.attempt_id, observed_probe
+      attempt = create(repository, attempt_id: "failed", task_slug: "task")
+      lost = repository.mark_lost(attempt, reason: "worker_lost", now: NOW + 3)
+      restarted = Hive::Attempts::Repository.new(root: repository.root, database: repository.database)
+      args = { task_generation: lost.task_generation, subject: lost.subject,
+               runtime_digest: "a" * 64, now: NOW + 4 }
+      expected = NOW + 3 + Hive::AgentLimit.retry_cooldown_sec
+      assert_equal expected, restarted.patrol_retry_at(**args)
+      assert_nil restarted.patrol_retry_at(**args.merge(now: expected))
+      assert_nil restarted.patrol_retry_at(**args.merge(runtime_digest: "b" * 64))
+      assert_nil restarted.patrol_retry_at(**args.merge(task_generation: "new-generation"))
+      assert_nil restarted.patrol_retry_at(**args.merge(subject: lost.subject.merge("task_id" => "other")))
+      refute repository.database.read { |db| db.table_exists?(:attempt_failure_cohorts) }
     end
   end
 
-  def test_failure_events_are_idempotent_and_foreign_key_bound
+  def test_latest_success_releases_retry_delay_without_accounting
     with_repository do |repository|
-      attempt = create(repository, attempt_id: "failure", task_slug: "task")
-      lost = repository.mark_lost(attempt, reason: "agent_failed", now: NOW)
-      2.times do
-        repository.record_failure_cohort(
-          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW
-        )
-      end
-
-      row = repository.database.read do |db|
-        db[:attempts].where(attempt_id: lost.attempt_id).first
-      end
-      assert_equal "failed", row.fetch(:failure_cohort_outcome)
-      assert_equal 1, row.fetch(:failure_cohort_counted)
-      refute repository.database.read { |db| db.table_exists?(:attempt_failure_events) }
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort(
-          attempt_id: "missing", identity: failure_identity, occurred_at: NOW
-        )
-      end
+      first = create(repository, attempt_id: "failed", task_slug: "task")
+      terminalize(repository, first, exit_status: 1)
+      args = { task_generation: first.task_generation, subject: first.subject,
+               runtime_digest: "a" * 64, now: NOW + 4 }
+      assert repository.patrol_retry_at(**args)
+      second = create(repository, attempt_id: "success", task_slug: "task")
+      terminalize(repository, second, exit_status: 0)
+      assert_nil repository.patrol_retry_at(**args)
     end
   end
 
-  def test_failure_cohort_probe_failure_and_success_close_the_original_fence
+  def test_cancelled_patrol_attempt_waits_until_retry_deadline
     with_repository do |repository|
-      3.times do |index|
-        attempt = create(repository, attempt_id: "failure-#{index}", task_slug: "task-#{index}")
-        lost = repository.mark_lost(attempt, reason: "agent_failed", now: NOW + index)
-        repository.record_failure_cohort(
-          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW + index
-        )
-      end
-      probe_time = NOW + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 5
-      probe = create(
-        repository, attempt_id: "probe", task_slug: "probe",
-        failure_cohort_probe: {
-          identity: failure_identity, date: NOW.to_date, now: probe_time,
-          explicit_release: false
-        }
-      )
-      lost_probe = repository.mark_lost(probe, reason: "agent_failed", now: probe_time + 1)
-      different = failure_identity.merge("code" => "different_failure")
+      attempt = create(repository, attempt_id: "cancelled", task_slug: "task")
+      terminalize(repository, attempt, exit_status: 130, outcome: "cancelled")
+      args = { task_generation: attempt.task_generation, subject: attempt.subject,
+               runtime_digest: "a" * 64, now: NOW + 4 }
+      deadline = NOW + 3 + Hive::AgentLimit.retry_cooldown_sec
 
-      assert repository.record_failure_cohort(
-        attempt_id: lost_probe.attempt_id, identity: different, occurred_at: probe_time + 1
-      )
-      assert_equal "probe", repository.failure_cohort_admission(
-        identity: failure_identity, date: NOW.to_date,
-        now: probe_time + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 2
-      ).fetch("status")
-
-      successor_probe = create(
-        repository, attempt_id: "success-probe", task_slug: "success-probe",
-        failure_cohort_probe: {
-          identity: failure_identity, date: NOW.to_date,
-          now: probe_time + Hive::Attempts::Coordination::FAILURE_COHORT_COOLDOWN_SEC + 2,
-          explicit_release: false
-        }
-      )
-      successful = terminalize(repository, successor_probe, exit_status: 0)
-      assert repository.record_failure_cohort_success(
-        attempt_id: successful.attempt_id, date: NOW.to_date
-      )
-      refute repository.record_failure_cohort_success(
-        attempt_id: successful.attempt_id, date: NOW.to_date
-      )
+      assert_equal deadline, repository.patrol_retry_at(**args)
+      assert_nil repository.patrol_retry_at(**args.merge(now: deadline))
     end
   end
 
-  def test_expired_probe_is_cleared_by_read_and_claim_paths
+  def test_failure_without_patrol_admission_does_not_delay_patrol
     with_repository do |repository|
-      old_probe = create(repository, attempt_id: "old-probe", task_slug: "old-probe")
-      digest = repository.send(:failure_cohort_digest, failure_identity)
-      expired = (NOW - 1).iso8601(6)
-      repository.database.transaction do |db|
-        db[:attempt_failure_cohorts].insert(
-          utc_date: NOW.to_date.iso8601, identity_digest: digest,
-          identity_json: Hive::RuntimeControlPlane::Codec.dump_json(failure_identity),
-          failure_count: 3, retry_at: (NOW - 2).iso8601(6),
-          probe_attempt_id: old_probe.attempt_id, probe_expires_at: expired,
-          updated_at: (NOW - 3).iso8601(6)
-        )
-      end
+      attempt = create(repository, attempt_id: "ordinary", task_slug: "task", admission: nil)
+      terminalize(repository, attempt, exit_status: 1)
 
-      row = repository.database.read do |db|
-        db[:attempt_failure_cohorts].where(identity_digest: digest).first
-      end
-      assert_nil repository.send(:expire_probe, row, NOW).fetch(:probe_attempt_id)
-      repository.database.transaction do |db|
-        db[:attempt_failure_cohorts].where(identity_digest: digest).update(
-          probe_attempt_id: old_probe.attempt_id, probe_expires_at: expired
-        )
-        refreshed = db[:attempt_failure_cohorts].where(identity_digest: digest).first
-        assert_nil repository.send(:expire_probe, refreshed, NOW, db: db).fetch(:probe_attempt_id)
-      end
+      assert_nil repository.patrol_retry_at(
+        task_generation: attempt.task_generation, subject: attempt.subject,
+        runtime_digest: "a" * 64, now: NOW + 4
+      )
     end
   end
 
@@ -183,58 +102,6 @@ class AttemptsCoordinationTest < Minitest::Test
         repository.send(:live_admission, { "workflow" => "other" })
       end
       assert_raises(Hive::Attempts::RepositoryError) { repository.send(:live_admission, Object.new) }
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.send(:failure_cohort_identity, failure_identity.except("code"))
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.send(:failure_cohort_identity, failure_identity.merge("runtime_digest" => "bad"))
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.send(:failure_cohort_identity, Object.new)
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort_success(attempt_id: "attempt", date: "not-a-date")
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort(
-          attempt_id: "attempt", identity: failure_identity, occurred_at: "not-a-time"
-        )
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort_success(attempt_id: "\n", date: NOW.to_date)
-      end
-
-      live = create(repository, attempt_id: "other-live", task_slug: "other-live")
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort_success(
-          attempt_id: live.attempt_id, date: NOW.to_date
-        )
-      end
-    end
-  end
-
-  def test_failure_fact_conflicts_and_storage_errors_fail_closed
-    with_repository do |repository|
-      attempt = create(repository, attempt_id: "failure", task_slug: "task")
-      lost = repository.mark_lost(attempt, reason: "agent_failed", now: NOW)
-      repository.record_failure_cohort(
-        attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW
-      )
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort(
-          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW + 1
-        )
-      end
-
-      repository.database.define_singleton_method(:transaction) do |**|
-        raise Sequel::DatabaseError, "write failed"
-      end
-      error = assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_failure_cohort(
-          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW
-        )
-      end
-      assert_match(/could not be recorded/, error.message)
     end
   end
 
@@ -247,7 +114,7 @@ class AttemptsCoordinationTest < Minitest::Test
   end
 
   def create(repository, attempt_id:, task_slug:, request_id: "request-1",
-             failure_cohort_probe: nil)
+             admission: { "workflow" => "patrol_fix", "runtime_digest" => "a" * 64 })
     repository.create_launching(
       attempt_id: attempt_id, request_id: request_id.sub("1", attempt_id),
       task_id: task_slug, project: "demo", task_slug: task_slug,
@@ -257,72 +124,19 @@ class AttemptsCoordinationTest < Minitest::Test
       worker_argv: [ "hive", "run", task_slug ],
       claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       starting_revision: nil, retry_charge: 0, inherited_outputs: [],
-      failure_cohort_probe: failure_cohort_probe,
+      admission: admission,
       launch_timeout_sec: 30, now: NOW
     )
   end
 
-  def selected_decision(id)
-    Hive::ProviderRouting::Decision.selected(
-      request: request, route: route, considered: [ route ],
-      decision_id: id, decided_at: NOW
-    )
-  end
-
-  def request
-    @request ||= Hive::ProviderRouting::Request.new(
-      policy: policy, task_generation: "generation-1"
-    )
-  end
-
-  def policy
-    @policy ||= Hive::ProviderRouting::Policy.explicit(
-      stage: "execute", routes: [ route ],
-      requirements: Hive::ProviderRouting::Requirements.empty, pin: nil,
-      account_policy: {
-        "account-a" => {
-          "adapter" => "codex", "launch_binding" => "default",
-          "models" => [ "model-a" ], "max_concurrent" => 1,
-          "cooldown_sec" => Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
-        }
-      }
-    )
-  end
-
-  def route
-    @route ||= Hive::ProviderRouting::Route.new(
-      id: "account-a/model-a", account: "account-a", adapter: "codex",
-      launch_binding: "default", model: "model-a", effort: "high", order: 0,
-      capabilities: {
-        "context" => "large", "quality" => "high", "tools" => %w[shell],
-        "permissions" => %w[read]
-      }
-    )
-  end
-
-  def subject
-    {
-      "kind" => "task_stage", "task_id" => "task",
-      "task_slug" => "task", "intended_stage" => "4-execute"
-    }
-  end
-
-  def failure_identity
-    {
-      "runtime_digest" => "a" * 64, "project" => "demo",
-      "workflow" => "patrol_fix", "stage" => "2-fix",
-      "code" => "agent_exit_nonzero"
-    }
-  end
-
-  def terminalize(repository, launching, exit_status:)
+  def terminalize(repository, launching, exit_status:, outcome: exit_status.zero? ? "succeeded" : "failed")
     claimed = repository.claim(
       launching, owner: { "pid" => Process.pid }, claim_capability: "c" * 64,
       first_heartbeat_timeout_sec: 30, now: NOW + 1
     )
     running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
     repository.terminalize(
-      running, outcome: exit_status.zero? ? "succeeded" : "failed", exit_status: exit_status,
+      running, outcome: outcome, exit_status: exit_status,
       final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
       log_reference: { "path" => "open/log", "size" => 0, "sha256" => "0" * 64 },
       now: NOW + 3

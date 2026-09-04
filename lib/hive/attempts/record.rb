@@ -5,15 +5,15 @@ require "hive/attempts/capability"
 require "hive/output_reference"
 require "hive/billing_evidence"
 require "hive/stringify_keys"
+require "hive/runtime_control_plane/codec"
 
 module Hive
   module Attempts
     class InvalidRecord < Hive::Error; end
     class InvalidReceipt < InvalidRecord; end
 
-    # Immutable in-memory view of the one mutable JSON record for a durable
-    # task-stage attempt. Mutation is constructed by Store while holding the
-    # generation lock; callers can only observe snapshots.
+    # Immutable view of an attempt row. SQL owns lifecycle and identity fields;
+    # JSON holds only the remaining structured execution details.
     class Record
       SCHEMA = "hive-attempt"
       SCHEMA_VERSION = 4
@@ -68,6 +68,43 @@ module Hive
         latest_revision checkpoint log_reference inherited_outputs current_outputs
         receipt loss diagnostics
       ]).uniq.freeze
+
+      ROW_FIELDS = %w[
+        attempt_id request_id task_id task_slug task_generation ownership_generation
+        state outcome lease_version retry_charge created_at accepted_at started_at heartbeat_at ended_at
+      ].to_h { |key| [ key, key.to_sym ] }.merge("project" => :project_name).freeze
+      DETAIL_KEYS = (REQUIRED_KEYS - ROW_FIELDS.keys - %w[schema schema_version subject receipt]).freeze
+
+      def self.from_row(row)
+        details = RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+        validate_exact_keys!(details, DETAIL_KEYS, "attempt details", InvalidRecord)
+        data = details.merge(ROW_FIELDS.transform_values { |column| row.fetch(column) })
+        routing = data["routing"]
+        route = routing["route"] if routing.is_a?(Hash)
+        route["provider_account_id"] = row.fetch(:provider_account_id) if route.is_a?(Hash)
+        if row[:state] == "terminal"
+          receipt_json = row.fetch(:terminal_receipt_json)
+          unless Digest::SHA256.hexdigest(receipt_json) == row.fetch(:terminal_receipt_digest)
+            raise InvalidRecord, "terminal receipt digest mismatch"
+          end
+          receipt = RuntimeControlPlane::Codec.load_json(receipt_json)
+        end
+        new(data.merge(
+          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
+          "subject" => RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json)),
+          "receipt" => receipt
+        ))
+      end
+
+      def to_row
+        details = to_h.slice(*DETAIL_KEYS)
+        details.fetch("routing")["route"]&.delete("provider_account_id")
+        ROW_FIELDS.to_h { |key, column| [ column, self[key] ] }.merge(
+          details_json: RuntimeControlPlane::Codec.dump_json(details),
+          subject_json: RuntimeControlPlane::Codec.dump_json(subject),
+          provider_account_id: self["routing"].dig("route", "provider_account_id")
+        )
+      end
 
       attr_reader :data
 
@@ -358,7 +395,8 @@ module Hive
         case value.fetch("kind")
         when "task_stage"
           expected = %w[intended_stage kind task_id task_slug]
-          unless value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
+          unless @data["task_id"].is_a?(String) && !@data["task_id"].empty? &&
+                 value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
                  value["task_slug"] == @data["task_slug"] && value["intended_stage"] == @data["intended_stage"]
             raise InvalidRecord, "attempt task subject has incompatible identity with legacy fields"
           end

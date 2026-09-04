@@ -149,13 +149,12 @@ module Hive
       end
 
       def create_launching(source_fingerprint: nil, admission: nil, limits: nil,
-                           failure_cohort_probe: nil, route_decision: nil, **attributes)
+                           route_decision: nil, **attributes)
         recovery_source_attempt_id = attributes.delete(:recovery_source_attempt_id)
         source_fingerprint ||= attributes[:progress_token]
         RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
           attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
-          failure_cohort_probe: failure_cohort_probe,
           route_decision: route_decision,
           recovery_source_attempt_id: recovery_source_attempt_id
         )
@@ -284,11 +283,6 @@ module Hive
           source_fingerprint: source_fingerprint, admission: admission
         )
       def admission_validate_capacity_in(db, record, limits) = validate_capacity!(db, record, limits)
-      def admission_claim_cohort_in(db, record, probe)
-        return unless probe
-        return if claim_failure_cohort_probe_in(db, attempt_id: record.attempt_id, **probe)
-        raise RepositoryError, "failure cohort probe claim became stale"
-      end
       def admission_complete_lost_recovery_in(db, source_attempt_id:, request_id:, now:)
         return true if source_attempt_id.to_s.empty?
 
@@ -479,7 +473,7 @@ module Hive
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
-          values = mutable_columns(replacement)
+          values = replacement.to_row.reject { |column, value| row[column] == value }
           if pending_receipt
             receipt_json = RuntimeControlPlane::Codec.dump_json(pending_receipt)
             values.merge!(
@@ -492,8 +486,7 @@ module Hive
           updated = db[:attempts].where(
             attempt_id: current.attempt_id,
             lease_version: current.lease_version,
-            state: current.state,
-            record_digest: row.fetch(:record_digest)
+            state: current.state
           ).update(values)
           raise CompareAndSwapFailed, "attempt lease compare-and-swap lost" unless updated == 1
           if replacement.final?
@@ -533,54 +526,18 @@ module Hive
       def row_for(record, task_id:, project_id:, source_fingerprint:, admission:)
         admission = live_admission(admission) if admission
         {
-          attempt_id: record.attempt_id, request_id: record["request_id"],
           project_id: project_id, task_id: task_id,
           subject_kind: record.subject_kind, subject_key: digest(record.subject),
-          task_generation: record.task_generation,
-          ownership_generation: record.ownership_generation, state: record.state,
-          outcome: record.outcome, lease_version: record.lease_version,
-          provider_account_id: record["routing"].dig("route", "provider_account_id"),
-          retry_charge: record["retry_charge"], refunded: 0,
+          refunded: 0,
           admission_workflow: admission&.fetch("workflow", nil),
-          admission_stage: admission&.fetch("stage", nil),
           admission_runtime_digest: admission&.fetch("runtime_digest", nil),
-          admission_utc_date: admission&.fetch("utc_date", nil),
           source_fingerprint: source_fingerprint.to_s,
-          subject_json: RuntimeControlPlane::Codec.dump_json(record.subject),
-          project_name: record["project"], task_slug: record["task_slug"],
-          accepted_date: Time.iso8601(record["accepted_at"]).utc.to_date.iso8601,
-          created_at: record["created_at"], accepted_at: record["accepted_at"],
-          started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
-          ended_at: record["ended_at"]
-        }.merge(serialized_record_columns(record))
-      end
-
-      def mutable_columns(record)
-        {
-          state: record.state, outcome: record.outcome,
-          lease_version: record.lease_version,
-          started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
-          ended_at: record["ended_at"]
-        }.merge(serialized_record_columns(record))
-      end
-
-      def serialized_record_columns(record)
-        payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
-        { record_json: payload, record_digest: Digest::SHA256.hexdigest(payload) }
+          accepted_date: Time.iso8601(record["accepted_at"]).utc.to_date.iso8601
+        }.merge(record.to_row)
       end
 
       def record_from(row)
-        payload = row.fetch(:record_json)
-        unless Digest::SHA256.hexdigest(payload) == row.fetch(:record_digest)
-          raise RepositoryError, "attempt #{row.fetch(:attempt_id)} record digest is invalid"
-        end
-        record = Record.new(RuntimeControlPlane::Codec.load_json(payload))
-        unless record.attempt_id == row.fetch(:attempt_id) &&
-               record.state == row.fetch(:state) && record.lease_version == row.fetch(:lease_version) &&
-               record.task_generation == row.fetch(:task_generation)
-          raise RepositoryError, "attempt #{row.fetch(:attempt_id)} indexed fields disagree with its record"
-        end
-        record
+        Record.from_row(row)
       rescue InvalidRecord, RuntimeControlPlane::Error => error
         raise RepositoryError, "attempt #{row.fetch(:attempt_id)} is unreadable: #{error.message}"
       end

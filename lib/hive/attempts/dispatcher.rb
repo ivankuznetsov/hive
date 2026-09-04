@@ -6,7 +6,6 @@ require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
 require "hive/runtime_identity"
-require "hive/patrol_fix/attempt_diagnostic"
 require "hive/provider_routing"
 require "hive/task_resolver"
 require "hive/workflows"
@@ -18,7 +17,7 @@ module Hive
     class Dispatcher
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
-      OPERATOR_COHORT_RELEASE_REQUESTORS = %w[action bot cli web].freeze
+      OPERATOR_RETRY_REQUESTORS = %w[action bot cli web].freeze
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
                      id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
                      capability_generator: Capability.method(:generate),
@@ -54,7 +53,7 @@ module Hive
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
                    interactive: false, generation: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
-                   admission_view: nil, routing_policy: nil, cohort_release: false,
+                   admission_view: nil, routing_policy: nil, retry_release: false,
                    replay_semantic_terminal: false)
         @launcher.preflight!
         generation = normalize_generation(
@@ -67,7 +66,7 @@ module Hive
           provider: provider, interactive: interactive,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           recovery_source_attempt_id: nil, now: now, admission_view: admission_view,
-          routing_policy: policy, cohort_release: cohort_release,
+          routing_policy: policy, retry_release: retry_release,
           replay_semantic_terminal: replay_semantic_terminal,
           failed_route_id: nil
         )
@@ -77,7 +76,7 @@ module Hive
       def dispatch_recovery(source_attempt:, task:, project:, argv:, request_id:, provider:,
                             inherited_outputs: nil, retry_charge: nil, interactive: false,
                             now: @clock.call, admission_view: nil, routing_policy: nil,
-                            cohort_release: false)
+                            retry_release: false)
         @launcher.preflight!
         generation = Generation.resolve(
           task: task,
@@ -103,7 +102,7 @@ module Hive
           now: now,
           admission_view: admission_view,
           routing_policy: routing_policy || resolve_routing_policy(task, source_attempt["intended_stage"]),
-          cohort_release: cohort_release,
+          retry_release: retry_release,
           failed_route_id: failed_route_id_for(source_attempt)
         )
       end
@@ -144,7 +143,7 @@ module Hive
           inherited_outputs: request.inherited_outputs,
           retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view,
-          cohort_release: explicit_cohort_release?(request)
+          retry_release: explicit_retry_release?(request)
         ) if recoverable_source_attempt?(source_attempt)
 
         dispatch(
@@ -153,7 +152,7 @@ module Hive
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
-          cohort_release: explicit_cohort_release?(request),
+          retry_release: explicit_retry_release?(request),
           replay_semantic_terminal: replay_semantic_terminal
         )
       end
@@ -162,13 +161,11 @@ module Hive
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 inherited_outputs:, retry_charge:, recovery_source_attempt_id:, now:,
-                subject: nil, admission_view: nil, routing_policy:, cohort_release: false,
+                subject: nil, admission_view: nil, routing_policy:, retry_release: false,
                 replay_semantic_terminal: false, failed_route_id: nil)
         created = nil
         claim_capability = nil
         route_decision = nil
-        cohort_identity = nil
-        cohort_admission = nil
         view = admission_view
         @store.observe_task_source(task: task, generation: generation, observed_at: now) if task
         view ||= AdmissionView.new(store: @store, records: @store.active_attempts)
@@ -237,16 +234,11 @@ module Hive
           return deferred_result("capacity")
         end
 
-        cohort_identity = failure_cohort_identity(
-          view: view, task: task, generation: generation,
-          subject: subject || task_subject(generation)
+        if !retry_release && CommandProgress.patrol_fix?(task) && view.patrol_retry_at(
+          task_generation: generation.task_generation,
+          subject: subject || task_subject(generation), runtime_digest: @runtime_digest, now: now
         )
-        cohort_admission = cohort_identity && view.failure_cohort_admission(
-          identity: cohort_identity, date: now.utc.to_date, now: now,
-          explicit_release: cohort_release
-        )
-        if cohort_admission&.fetch("status") == "blocked"
-          return deferred_result(cohort_admission.fetch("reason"))
+          return deferred_result("patrol_retry_delay")
         end
 
         launching_attributes = {
@@ -260,12 +252,7 @@ module Hive
           inherited_outputs: inherited_outputs,
           subject: subject,
           now: now,
-          admission: patrol_admission_metadata(
-            task: task, generation: generation, now: now
-          ),
-          cohort_identity: cohort_identity,
-          cohort_admission: cohort_admission,
-          cohort_release: cohort_release
+          admission: patrol_admission_metadata(task: task)
         }
 
         if routing_policy.explicit?
@@ -323,9 +310,7 @@ module Hive
 
         resolve_failed_handoff(
           created, interactive: interactive,
-          error: handoff.is_a?(Hash) ? handoff["error"] : nil,
-          cohort_identity: cohort_identity,
-          cohort_date: now.utc.to_date
+          error: handoff.is_a?(Hash) ? handoff["error"] : nil
         )
       rescue CapacityExceeded
         deferred_result("capacity")
@@ -333,9 +318,7 @@ module Hive
         raise unless created
 
         resolve_failed_handoff(
-          created, interactive: interactive, error: "#{e.class}: #{e.message}",
-          cohort_identity: cohort_identity,
-          cohort_date: now.utc.to_date
+          created, interactive: interactive, error: "#{e.class}: #{e.message}"
         )
       end
 
@@ -547,15 +530,11 @@ module Hive
         )
       end
 
-      def resolve_failed_handoff(created, interactive:, error: nil,
-                                 cohort_identity: nil, cohort_date: nil)
+      def resolve_failed_handoff(created, interactive:, error: nil)
         current = @store.fetch_hot(created.attempt_id)
         adopted = result_for_adopted_handoff(current, interactive: interactive)
         return adopted if adopted
         if current&.state == "lost"
-          release_failed_handoff_probe(
-            current, cohort_identity: cohort_identity, cohort_date: cohort_date
-          )
           return deferred_result("launch_handoff_failed", attempt: current)
         end
 
@@ -567,26 +546,11 @@ module Hive
           diagnostics: diagnostics,
           now: @clock.call
         )
-        release_failed_handoff_probe(
-          lost, cohort_identity: cohort_identity, cohort_date: cohort_date
-        )
         deferred_result("launch_handoff_failed", attempt: lost)
       rescue CompareAndSwapFailed
         current = @store.fetch_hot(created.attempt_id)
-        release_failed_handoff_probe(
-          current, cohort_identity: cohort_identity, cohort_date: cohort_date
-        ) if current&.state == "lost"
         result_for_adopted_handoff(current, interactive: interactive) ||
           deferred_result("launch_handoff_failed", attempt: current)
-      end
-
-      def release_failed_handoff_probe(record, cohort_identity:, cohort_date:)
-        return false unless record&.state == "lost" && cohort_identity && cohort_date
-
-        @store.release_failure_cohort_probe(
-          identity: cohort_identity, date: cohort_date,
-          attempt_id: record.attempt_id
-        )
       end
 
       def result_for_adopted_handoff(record, interactive:)
@@ -690,15 +654,8 @@ module Hive
       def persist_launching_attempt(view:, attempt_id:, request_id:, recovery_source_attempt_id:,
                                     task:, generation:, argv:, provider:, routing:,
                                     claim_capability:, retry_charge:, inherited_outputs:,
-                                    subject:, now:, admission:, cohort_identity:,
-                                    cohort_admission:, cohort_release:,
+                                    subject:, now:, admission:,
                                     route_decision: nil)
-        failure_cohort_probe = if cohort_admission&.fetch("status") == "probe"
-          {
-            identity: cohort_identity, date: now.utc.to_date, now: now,
-            explicit_release: cohort_release
-          }
-        end
         @store.create_launching(
           attempt_id: attempt_id,
           request_id: request_id,
@@ -723,56 +680,24 @@ module Hive
           source_fingerprint: generation.progress_token,
           admission: admission,
           limits: @limits,
-          failure_cohort_probe: failure_cohort_probe,
           launch_timeout_sec: @launch_timeout_sec,
           now: now
         )
       end
 
-      def patrol_admission_metadata(task:, generation:, now:)
+      def patrol_admission_metadata(task:)
         return nil unless CommandProgress.patrol_fix?(task)
 
         {
           "workflow" => "patrol_fix",
-          "stage" => generation.intended_stage,
-          "runtime_digest" => @runtime_digest,
-          "utc_date" => now.utc.to_date.iso8601
+          "runtime_digest" => @runtime_digest
         }
       end
 
-      def failure_cohort_identity(view:, task:, generation:, subject:)
-        return nil unless CommandProgress.patrol_fix?(task)
-
-        terminal = view.latest_terminal_attempt(
-          task_generation: generation.task_generation, subject: subject
-        )
-        return nil unless terminal&.state == "terminal" &&
-                          %w[failed cancelled].include?(terminal.outcome)
-
-        bound = Hive::PatrolFix::AttemptDiagnostic.read_bound(
-          store: @store,
-          binding: {
-            "attempt_id" => terminal.attempt_id,
-            "stage" => terminal["intended_stage"],
-            "task_generation" => terminal.task_generation,
-            "receipt" => terminal.receipt
-          }
-        )
-        return nil unless bound
-
-        {
-          "runtime_digest" => @runtime_digest,
-          "project" => generation.project,
-          "workflow" => "patrol_fix",
-          "stage" => generation.intended_stage,
-          "code" => bound.dig("document", "code")
-        }
-      end
-
-      def explicit_cohort_release?(request)
+      def explicit_retry_release?(request)
         request.respond_to?(:recovery) && request.recovery.is_a?(Hash) &&
           request.respond_to?(:requestor) &&
-          OPERATOR_COHORT_RELEASE_REQUESTORS.include?(request.requestor.to_s) &&
+          OPERATOR_RETRY_REQUESTORS.include?(request.requestor.to_s) &&
           request.respond_to?(:trigger) && request.trigger.to_s == "recovery"
       end
 

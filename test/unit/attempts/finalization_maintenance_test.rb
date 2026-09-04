@@ -371,10 +371,9 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       archive = Object.new
       archive.define_singleton_method(:archive) do |_attempt_id|
         changed = terminal.with("diagnostics" => terminal["diagnostics"].merge("changed" => true))
-        payload = Hive::RuntimeControlPlane::Codec.dump_json(changed.to_h)
         store.database.transaction do |db|
           db[:attempts].where(attempt_id: terminal.attempt_id).update(
-            record_json: payload, record_digest: Digest::SHA256.hexdigest(payload)
+            details_json: Hive::RuntimeControlPlane::Codec.dump_json(changed.to_h.slice(*Hive::Attempts::Record::DETAIL_KEYS))
           )
         end
         :archived
@@ -411,23 +410,6 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     pending_store.define_singleton_method(:publication_complete?) { |_| false }
     pending = Hive::Attempts::FinalizationMaintenance.new(store: pending_store)
     assert pending.send(:recovery_pinned?, record)
-  end
-
-  def test_successful_patrol_attempt_closes_its_failure_cohort
-    calls = []
-    store = Object.new
-    store.define_singleton_method(:record_failure_cohort_success) do |**attributes|
-      calls << attributes
-      true
-    end
-    reconciler = Hive::Attempts::FailureCohortReconciler.new(store: store)
-    record = Struct.new(:state, :outcome, :attempt_id) do
-      def [](key) = key == "intended_stage" ? "2-fix" : nil
-    end.new("terminal", "succeeded", "attempt-1")
-    admission = { "workflow" => "patrol_fix", "stage" => "2-fix", "utc_date" => "2026-08-10" }
-
-    assert reconciler.reconcile(record: record, admission: admission)
-    assert_equal [ { attempt_id: "attempt-1", date: "2026-08-10" } ], calls
   end
 
   def test_archived_task_lookup_and_loss_resolution_checks_are_bounded

@@ -388,23 +388,6 @@ class TaskJournalTest < Minitest::Test
 
   private
 
-  def attempt_record(store, attempt_id)
-    store.database.read do |db|
-      Hive::RuntimeControlPlane::Codec.load_json(
-        db[:attempts].where(attempt_id: attempt_id).get(:record_json)
-      )
-    end
-  end
-
-  def rewrite_attempt(store, record)
-    json = Hive::RuntimeControlPlane::Codec.dump_json(record)
-    store.database.transaction do |db|
-      db[:attempts].where(attempt_id: record.fetch("attempt_id")).update(
-        record_json: json, record_digest: Digest::SHA256.hexdigest(json)
-      )
-    end
-  end
-
   def create_successor(store)
     store.create_launching(
       attempt_id: "attempt-2", request_id: "request-2",

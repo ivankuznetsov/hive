@@ -1,5 +1,4 @@
 require "hive/attempts/lost_outcome"
-require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/repository"
 require "hive/attempts/storage_status"
 require "hive/task_projection/reader"
@@ -48,7 +47,6 @@ module Hive
         @maintenance_time_budget_sec = Float(maintenance_time_budget_sec)
         raise ArgumentError, "maintenance time budget must be positive" unless @maintenance_time_budget_sec.positive?
 
-        @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
         @last_started_at = nil
         @last_completed_at = nil
         @last_result = nil
@@ -98,10 +96,6 @@ module Hive
           raise RepositoryError, "attempt changed after final proof publication"
         end
 
-        admission = @store.admission_metadata(current.attempt_id)
-        @failure_cohort_reconciler.reconcile(
-          record: current, admission: admission
-        )
         @store.finish_publication(record.attempt_id)
         true
       end

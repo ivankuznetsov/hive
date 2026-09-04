@@ -101,10 +101,6 @@ module Hive
       public :recovery_request_id
 
       def parse(db, row)
-        record = RuntimeControlPlane::Codec.load_json(row.fetch(:record_json))
-        unless Digest::SHA256.hexdigest(row.fetch(:record_json)) == row.fetch(:record_digest)
-          raise RepositoryError, "lost recovery execution record digest is invalid"
-        end
         data = {
           "schema" => "hive-attempt-lost-recovery", "schema_version" => 1,
           "attempt_id" => row.fetch(:attempt_id),
@@ -117,10 +113,6 @@ module Hive
           "updated_at" => row.fetch(:lost_recovery_updated_at),
           "capture_references" => capture_references(db, row.fetch(:attempt_id))
         }
-        unless record.fetch("attempt_id") == data.fetch("attempt_id") &&
-               record.fetch("task_generation") == data.fetch("task_generation")
-          raise RepositoryError, "lost recovery identity disagrees with its execution record"
-        end
         validate!(data)
         data.freeze
       end

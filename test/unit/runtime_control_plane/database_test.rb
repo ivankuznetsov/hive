@@ -60,10 +60,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       previous = File.umask(0o022)
       database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
       database.transaction do |connection|
-        connection[:task_counters].insert(
-          installation_id: installation_id(database), namespace: "mode-proof", value: 1,
-          updated_at: Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
-        )
+        connection[:installations].update(next_task_id: 1)
       end
 
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
@@ -266,15 +263,12 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     with_database do |database|
       assert_raises(RuntimeError) do
         database.transaction do |connection|
-          connection[:task_counters].insert(
-            installation_id: installation_id(database), namespace: "test", value: 1,
-            updated_at: Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
-          )
+          connection[:installations].update(next_task_id: 1)
           raise "rollback"
         end
       end
 
-      assert_equal 0, database.read { |connection| connection[:task_counters].count }
+      assert_nil database.read { |connection| connection[:installations].get(:next_task_id) }
       database.disconnect
       database.disconnect
       assert database.disconnected?

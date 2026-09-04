@@ -1605,7 +1605,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
       [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
-      [ :deferred, "failure_cohort_cooldown", :attempt_failure_cohort, "scheduler" ],
+      [ :deferred, "patrol_retry_delay", :attempt_patrol_retry, "scheduler" ],
       [ :deferred, "transient_retry", :attempt_transient_retry, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
       [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ]
@@ -7275,7 +7275,7 @@ end
       [ :existing_live, nil ],
       [ :terminal_replay, nil ],
       [ :deferred, "capacity" ],
-      [ :deferred, "failure_cohort_cooldown" ]
+      [ :deferred, "patrol_retry_delay" ]
     ]
     calls = []
     attempt_dispatcher = Object.new
@@ -7305,7 +7305,7 @@ end
     assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
     assert_equal %i[
       attempt_accepted attempt_duplicate attempt_terminal_replay
-      attempt_capacity_deferred attempt_failure_cohort_deferred
+      attempt_capacity_deferred attempt_patrol_retry_deferred
     ],
                  logger.events.map(&:first).grep(/attempt_/)
     dispatched = logger.events.select { |name, _attrs| name == :dispatched }

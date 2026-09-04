@@ -15,7 +15,7 @@ module Hive
       end
 
       def call(attributes:, source_fingerprint:, admission:, limits:,
-               failure_cohort_probe:, route_decision:, recovery_source_attempt_id: nil)
+               route_decision:, recovery_source_attempt_id: nil)
         record = nil
         @database.transaction do |db|
           subject = attributes[:subject] || Attempts::Record.task_stage_subject(
@@ -47,7 +47,6 @@ module Hive
             )
           )
           link_sealed_inherited_payloads!(db, record)
-          @repository.admission_claim_cohort_in(db, record, failure_cohort_probe)
           @repository.admission_complete_lost_recovery_in(
             db, source_attempt_id: recovery_source_attempt_id,
             request_id: record["request_id"], now: Time.iso8601(record["accepted_at"])

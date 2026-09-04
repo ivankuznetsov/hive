@@ -8,7 +8,7 @@ tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
 **TLDR**: Hive admits task-stage work as independent durable attempts. One
-`attempts` row owns the attempt record plus fixed accounting, failure,
+`attempts` row owns the attempt record plus fixed accounting,
 lost-recovery, and terminal-publication facts. Live rows provide capacity.
 Retries use deterministic dispatch-request identity, not an attempt graph.
 
@@ -31,15 +31,24 @@ The attempt row contains:
 - immutable task, request, generation, provider, route, and worker identity;
 - mutable lifecycle state and lease version;
 - admission charge/refund facts;
-- one counted failure fact for runaway-cohort accounting;
 - lost-recovery phase, revision, deterministic recovery request, and completion;
 - terminal receipt digest and monotonic publication acknowledgements.
 
 These are fixed one-to-one facts. Hive does not maintain separate accounting,
 capacity-reservation, lost-outcome, failure-event, publication-obligation, or
 attempt-relationship tables. `payload_references` remains separate because it
-is genuinely one-to-many. `attempt_failure_cohorts` remains separate because it
-aggregates failures across attempts without representing provider usability.
+is genuinely one-to-many. Patrol retry pacing reads the latest final attempt
+for the same task, generation, stage and runtime. A failed, cancelled or lost
+attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
+changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
+live capacity or unresolved-loss recovery. There are no cohort counters or probes.
+
+SQL columns own lifecycle and identity values. `details_json` contains only
+execution details absent from those columns; `subject_json` holds the structured
+subject and `terminal_receipt_json` holds the receipt once. `Record.from_row`
+reconstructs the validated in-memory value. No full `record_json`, record digest,
+or SQL-versus-record synchronization protocol remains. Receipt digests still
+bind publication evidence; they are not a second live-state authority.
 
 ## Admission and capacity
 
@@ -51,7 +60,8 @@ reservation row is required.
 
 Duplicate work for the same task/generation attaches to the existing live
 attempt. Records and lifecycle mutations are fenced by state, lease version,
-record digest, task generation, and ownership generation.
+task generation, and ownership generation. Only changed execution columns are
+written; accounting and publication acknowledgements remain independent.
 
 ## Lost recovery
 
@@ -81,8 +91,8 @@ Terminal receipts remain durable until their fixed consumers acknowledge them.
 Acknowledgement fields live on the attempt row and are monotonic; replay is
 safe after a daemon restart. Result delivery itself lives on the associated
 dispatch-request row and is at-least-once across an external send boundary.
-After all acknowledgements, the row remains active until log archival and
-failure-cohort reconciliation finish and the daemon durably marks promotion.
+After all acknowledgements, the row remains active until log archival finishes
+and the daemon durably marks promotion.
 
 ## Maintenance
 

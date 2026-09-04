@@ -38,6 +38,26 @@ class AttemptsRecordTest < Minitest::Test
     copy = record.to_h
     copy.fetch("routing").fetch("route")["model"] = "different-model"
     assert_equal "gpt-5.6-sol", record["routing"].dig("route", "model")
+
+    row = record.to_row
+    details = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+    refute details.fetch("routing").fetch("route").key?("provider_account_id")
+    assert_equal record.to_h, Hive::Attempts::Record.from_row(row).to_h
+    assert_equal "codex-account-a", record["routing"].dig("route", "provider_account_id")
+  end
+
+  def test_task_stage_requires_a_stable_task_identity
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.launching(**identity.merge(task_id: nil), now: NOW, launch_timeout_sec: 30)
+    end
+  end
+
+  def test_row_details_cannot_shadow_sql_fields
+    record = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
+    row = record.to_row
+    details = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+    row[:details_json] = Hive::RuntimeControlPlane::Codec.dump_json(details.merge("state" => "lost"))
+    assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.from_row(row) }
   end
 
   def test_routing_is_required_and_strict_at_every_nested_boundary

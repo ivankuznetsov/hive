@@ -1,7 +1,6 @@
 require "test_helper"
 require "hive/attempts/context"
 require "hive/attempts/dispatcher"
-require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/lost_outcome"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
@@ -556,7 +555,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_patrol_failure_cohort_survives_restart_and_runtime_change_releases_it
+  def test_patrol_retry_delay_survives_restart_and_operator_retry_is_per_task
     with_tmp_dir do |root|
       database = attempt_database(root, projects: [ "demo" ])
       store = Hive::Attempts::Repository.new(
@@ -580,18 +579,14 @@ class AttemptsDispatcherTest < Minitest::Test
           task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
         end
       end
-      failures = tasks.each_with_index.map do |task, index|
+      tasks.each_with_index.map do |task, index|
         result = dispatch(
           dispatcher, task, request_id: "failure-#{index}", intended_stage: "2-fix",
           now: NOW + (index * 10)
         )
-        terminal = terminalize_attempt(
-          store, launcher, result, outcome: "failed", exit_status: 7,
+        terminalize_attempt(
+          store, launcher, result, outcome: index == 2 ? "cancelled" : "failed", exit_status: 7,
           now: NOW + (index * 10) + 3, diagnostic: true
-        )
-        assert Hive::Attempts::FailureCohortReconciler.new(store: store).reconcile(
-          record: terminal,
-          admission: store.admission_metadata(terminal.attempt_id)
         )
         result
       end
@@ -622,7 +617,14 @@ class AttemptsDispatcherTest < Minitest::Test
         intended_stage: "2-fix", now: NOW + 40
       )
       assert_equal :deferred, blocked.status
-      assert_equal "failure_cohort_cooldown", blocked.reason
+      assert_equal "patrol_retry_delay", blocked.reason
+
+      cancelled = dispatch(
+        restarted, tasks.last, request_id: "cancelled-retry",
+        intended_stage: "2-fix", now: NOW + 40
+      )
+      assert_equal :deferred, cancelled.status
+      assert_equal "patrol_retry_delay", cancelled.reason
 
       restarted.instance_variable_set(:@task_resolver, ->(_request) { tasks[1] })
       restarted.define_singleton_method(:provider_for) { |_task| "codex" }
@@ -637,7 +639,7 @@ class AttemptsDispatcherTest < Minitest::Test
         now: NOW + 40
       )
       assert_equal :deferred, automatic.status
-      assert_equal "failure_cohort_cooldown", automatic.reason
+      assert_equal "patrol_retry_delay", automatic.reason
 
       restarted_store = restarted.instance_variable_get(:@store)
       original_create = restarted_store.method(:create_launching)
@@ -697,23 +699,7 @@ class AttemptsDispatcherTest < Minitest::Test
         ),
         now: NOW + 40
       )
-      assert_equal :deferred, second_release.status
-      assert_equal "failure_cohort_cooldown", second_release.reason
-
-      repaired = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
-        limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
-        clock: -> { NOW + 41 }, id_generator: -> { ids.next },
-        capability_generator: -> { CLAIM_CAPABILITY },
-        runtime_digest: "b" * 64
-      )
-      released = dispatch(
-        repaired, tasks.first, request_id: "repaired-retry",
-        intended_stage: "2-fix", now: NOW + 41
-      )
-      assert_equal :accepted, released.status
-      refute_includes failures.map { |result| result.attempt.attempt_id },
-                      released.attempt.attempt_id
+      assert_equal :accepted, second_release.status
     end
   end
 
@@ -750,27 +736,14 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_already_lost_handoff_defers_and_releases_matching_probe
+  def test_already_lost_handoff_defers
     with_dispatcher do |dispatcher, _launcher, task, store|
       created = dispatch(dispatcher, task, request_id: "lost-handoff").attempt
       lost = store.mark_lost(created, reason: "owner_gone", now: NOW + 1)
-      seed_failure_cohort(store, identity: failure_cohort_identity, date: NOW.to_date)
-      assert store.claim_failure_cohort_probe(
-        identity: failure_cohort_identity, date: NOW.to_date,
-        attempt_id: lost.attempt_id, now: NOW + 4_000
-      )
-      result = dispatcher.send(
-        :resolve_failed_handoff, lost, interactive: false,
-        cohort_identity: failure_cohort_identity,
-        cohort_date: NOW.to_date
-      )
+      result = dispatcher.send(:resolve_failed_handoff, lost, interactive: false)
 
       assert_equal :deferred, result.status
       assert_equal "launch_handoff_failed", result.reason
-      assert store.claim_failure_cohort_probe(
-        identity: failure_cohort_identity, date: NOW.to_date,
-        attempt_id: lost.attempt_id, now: NOW + 4_001, explicit_release: true
-      )
     end
   end
 
@@ -1033,9 +1006,8 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_legacy_locator_semantic_duplicates_and_resolution_helpers
+  def test_semantic_duplicates_and_resolution_helpers
     with_dispatcher do |dispatcher, launcher, task|
-      task.id = nil
       first = dispatch(dispatcher, task, request_id: "request-one")
       duplicate = dispatch(dispatcher, task, request_id: "request-two")
       assert_equal :accepted, first.status
@@ -1398,16 +1370,6 @@ class AttemptsDispatcherTest < Minitest::Test
     )
   end
 
-  def failure_cohort_identity
-    {
-      "runtime_digest" => "a" * 64,
-      "project" => "demo",
-      "workflow" => "patrol_fix",
-      "stage" => "2-fix",
-      "code" => "agent_exit_nonzero"
-    }
-  end
-
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
                       context_provenance: Hive::ContextProvenance,
                       transient_retry_backoff_sec: 60,
@@ -1544,19 +1506,6 @@ class AttemptsDispatcherTest < Minitest::Test
       store.acknowledge_publication(record.attempt_id, consumer: consumer)
     end
     assert store.finish_publication(record.attempt_id)
-  end
-
-  def seed_failure_cohort(store, identity:, date:)
-    normalized = Hive::RuntimeControlPlane::Codec.normalize(identity)
-    encoded = Hive::RuntimeControlPlane::Codec.dump_json(normalized)
-    store.database.transaction do |db|
-      db[:attempt_failure_cohorts].insert(
-        utc_date: date.iso8601, identity_digest: Digest::SHA256.hexdigest(encoded),
-        identity_json: encoded, failure_count: 3,
-        retry_at: Hive::Attempts::Record.iso8601(NOW + 3_600),
-        updated_at: Hive::Attempts::Record.iso8601(NOW)
-      )
-    end
   end
 
   def patrol_fix_decision_receipt(slug)

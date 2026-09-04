@@ -73,8 +73,7 @@ module Hive
 
     class AdmissionView < Data.define(:store, :records)
       extend Forwardable
-      def_delegators :store, :failure_cohort_admission, :claim_failure_cohort_probe,
-                     :release_failure_cohort_probe
+      def_delegators :store, :patrol_retry_at
 
       def capacity(now:) = CapacitySnapshot.build(store: store, now: now)
 

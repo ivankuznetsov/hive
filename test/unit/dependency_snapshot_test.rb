@@ -377,6 +377,28 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_targeted_admission_context_uses_the_captured_workflow_generation_config
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "terminal-base"
+      )
+      write_task_meta(root, "9-done", "terminal-base", id: 1)
+      project_name = File.basename(root)
+      project = { "name" => project_name, "path" => root, "repository_identity" => nil }
+      generation = Hive::Task.capture_workflow_generation(root)
+
+      context = Hive::DependencySnapshot.targeted_admission_context(
+        [ project ],
+        targets: { project_name => [ "dependent-task" ] },
+        workflow_generations: { File.expand_path(root) => generation }
+      )
+
+      assert context.verdict(project: project_name, slug: "dependent-task").clear?
+    end
+  end
+
   def test_active_admission_context_resolves_a_numeric_terminal_reference
     with_tmp_dir do |root|
       dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)

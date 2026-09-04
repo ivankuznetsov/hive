@@ -333,6 +333,35 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_daemon_task_payload_checks_dependencies_when_authoritative
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task-260823-abcd"
+      folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 2, slug: dependent, display_name: nil,
+        depends_on: "prerequisite-task-260823-abcd"
+      )
+      write_status_task(
+        hive_state, "9-done", "prerequisite-task-260823-abcd",
+        state_file: "done.md", marker: "COMPLETE"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}" ]
+      )
+
+      payload = command.daemon_task_payload(
+        [ status_project(project_root, hive_state) ], authoritative_dependencies: true
+      )
+
+      row = payload.dig("projects", 0, "tasks", 0)
+      assert_equal dependent, row.fetch("slug")
+      assert_equal false, row.fetch("blocked")
+    end
+  end
+
   def test_daemon_task_payload_fails_closed_when_dependency_projection_raises
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

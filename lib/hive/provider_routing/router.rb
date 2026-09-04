@@ -104,8 +104,7 @@ module Hive
           exclusions << Decision::Exclusion.new(
             route_id: route.id,
             reason: "provider_concurrency_saturated",
-            scope: { "kind" => "provider_account", "provider_account_id" => route.account, "model" => nil },
-            observation: { "observed" => observed, "max" => maximum }
+            detail: "#{observed}/#{maximum} live attempts"
           )
         end
         Candidate.new(

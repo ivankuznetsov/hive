@@ -1,6 +1,5 @@
 require "test_helper"
 require "hive/attempts/record"
-require "hive/provider_health/evidence"
 
 class AttemptsRecordTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
@@ -31,7 +30,6 @@ class AttemptsRecordTest < Minitest::Test
     assert_equal "codex", record["provider"]
     assert record["routing"].frozen?
     assert record["routing"].fetch("route").frozen?
-    assert record["routing"].fetch("circuit_generations").frozen?
     assert record["routing"].dig("route", "model").frozen?
     assert_raises(FrozenError) do
       record["routing"].fetch("route")["model"].replace("different-model")
@@ -44,7 +42,7 @@ class AttemptsRecordTest < Minitest::Test
 
   def test_routing_is_required_and_strict_at_every_nested_boundary
     valid = Hive::Attempts::Record.launching(
-      **identity.merge(routing: explicit_routing(probe: true)), now: NOW, launch_timeout_sec: 30
+      **identity.merge(routing: explicit_routing), now: NOW, launch_timeout_sec: 30
     ).to_h
 
     missing = Marshal.load(Marshal.dump(valid))
@@ -53,12 +51,8 @@ class AttemptsRecordTest < Minitest::Test
 
     mutations = [
       ->(routing) { routing["credential"] = "secret" },
-      ->(routing) { routing.fetch("decision")["raw_output"] = "secret" },
-      ->(routing) { routing.dig("decision", "exclusions").first["message"] = "secret" },
       ->(routing) { routing.fetch("route")["token"] = "secret" },
-      ->(routing) { routing.fetch("circuit_generations").first["state"] = "open" },
-      ->(routing) { routing.dig("circuit_generations", 0, "scope")["credential"] = "secret" },
-      ->(routing) { routing.fetch("probe_bindings").first["raw"] = "secret" }
+      ->(routing) { routing.fetch("route")["adapter"] = "claude" }
     ]
     mutations.each do |mutation|
       candidate = Marshal.load(Marshal.dump(valid))
@@ -71,71 +65,6 @@ class AttemptsRecordTest < Minitest::Test
     legacy = Marshal.load(Marshal.dump(valid))
     legacy["routing"] = { "mode" => "legacy", "route" => valid.dig("routing", "route") }
     assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(legacy) }
-  end
-
-  def test_explicit_routing_rejects_inconsistent_route_circuit_and_probe_bindings
-    base = Hive::Attempts::Record.launching(
-      **identity.merge(routing: explicit_routing(probe: true)), now: NOW, launch_timeout_sec: 30
-    ).to_h
-    mutations = [
-      ->(routing) { routing.fetch("route")["adapter"] = "claude" },
-      ->(routing) { routing.fetch("decision")["policy_digest"] = "b" * 64 },
-      ->(routing) { routing.fetch("decision")["decision_id"] = "" },
-      ->(routing) { routing.fetch("circuit_generations").pop },
-      ->(routing) { routing.dig("circuit_generations", 1, "scope")["model"] = "other-model" },
-      ->(routing) { routing.fetch("probe_bindings").first["claim_generation"] = 9 },
-      ->(routing) { routing.fetch("probe_bindings").first["attempt_id"] = "other-attempt" },
-      ->(routing) { routing.fetch("probe_bindings").first["ownership_fence"] = "other-owner" }
-    ]
-    mutations.each do |mutation|
-      candidate = Marshal.load(Marshal.dump(base))
-      mutation.call(candidate.fetch("routing"))
-      assert_raises(Hive::Attempts::InvalidRecord) do
-        Hive::Attempts::Record.new(candidate)
-      end
-    end
-  end
-
-  def test_explicit_routing_rejects_every_bounded_vector_and_cross_reference_violation
-    base = Hive::Attempts::Record.launching(
-      **identity.merge(routing: explicit_routing(probe: true)), now: NOW, launch_timeout_sec: 30
-    ).to_h
-    mutations = [
-      ->(routing) { routing.replace("mode" => "future") },
-      ->(routing) { routing.fetch("decision")["exclusions"] = {} },
-      ->(routing) do
-        routing.fetch("decision").fetch("exclusions") <<
-          routing.fetch("decision").fetch("exclusions").first.dup
-      end,
-      ->(routing) do
-        routing.fetch("circuit_generations")[1] =
-          routing.fetch("circuit_generations")[0].dup
-      end,
-      ->(routing) { routing["probe_bindings"] = {} },
-      ->(routing) { routing.fetch("probe_bindings").first["journal_epoch"] = 99 },
-      ->(routing) do
-        routing.fetch("probe_bindings") << routing.fetch("probe_bindings").first.dup
-      end,
-      ->(routing) { routing.fetch("decision").fetch("exclusions").first["detail"] = "" },
-      ->(routing) { routing["policy_digest"] = "invalid" }
-    ]
-    mutations.each do |mutation|
-      candidate = Marshal.load(Marshal.dump(base))
-      mutation.call(candidate.fetch("routing"))
-      assert_raises(Hive::Attempts::InvalidRecord) do
-        Hive::Attempts::Record.new(candidate)
-      end
-    end
-
-    detailed = Marshal.load(Marshal.dump(base))
-    detailed.dig("routing", "decision", "exclusions", 0)["detail"] = "bounded detail"
-    assert_equal "bounded detail",
-                 Hive::Attempts::Record.new(detailed)
-                   .to_h.dig("routing", "decision", "exclusions", 0, "detail")
-
-    candidate = Marshal.load(Marshal.dump(base))
-    candidate["routing"] = nil
-    assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(candidate) }
   end
 
   def test_explicit_route_rejects_partial_or_unknown_billing_evidence
@@ -488,7 +417,6 @@ class AttemptsRecordTest < Minitest::Test
     {
       attempt_id: "attempt-1",
       request_id: "request-1",
-      predecessor_attempt_id: nil,
       task_id: "42",
       project: "demo",
       task_slug: "durable-task",
@@ -505,39 +433,9 @@ class AttemptsRecordTest < Minitest::Test
     }
   end
 
-  def explicit_routing(probe: false)
-    account_scope = {
-      "kind" => "provider_account", "provider_account_id" => "codex-account-a", "model" => nil
-    }
-    model_scope = {
-      "kind" => "model", "provider_account_id" => "codex-account-a", "model" => "gpt-5.6-sol"
-    }
-    bindings = if probe
-                 [
-                   {
-                     "scope" => model_scope,
-                     "journal_epoch" => 2,
-                     "observed_generation" => 7,
-                     "claim_generation" => 8,
-                     "attempt_id" => "attempt-1",
-                     "task_generation" => "generation-1",
-                     "ownership_fence" => "generation-1"
-                   }
-                 ]
-    else
-                 []
-    end
+  def explicit_routing
     {
       "mode" => "explicit",
-      "policy_digest" => "a" * 64,
-      "decision" => {
-        "decision_id" => "decision-1",
-        "policy_digest" => "a" * 64,
-        "decided_at" => NOW.iso8601(6),
-        "exclusions" => [
-          { "route_id" => "route-0", "reason" => "circuit_cooldown", "detail" => nil }
-        ]
-      },
       "route" => {
         "route_id" => "route-1",
         "provider_account_id" => "codex-account-a",
@@ -545,35 +443,28 @@ class AttemptsRecordTest < Minitest::Test
         "launch_binding_id" => "codex-home-a",
         "model" => "gpt-5.6-sol",
         "effort" => "high"
-      },
-      "circuit_generations" => [
-        { "scope" => account_scope, "journal_epoch" => 1, "observed_generation" => 4 },
-        { "scope" => model_scope, "journal_epoch" => 2, "observed_generation" => 7 }
-      ],
-      "probe_bindings" => bindings
+      }
     }
   end
 
   def provider_evidence(routing:)
-    route_data = routing.fetch("route")
-    route = Hive::ProviderHealth::RouteIdentity.new(
-      route_id: route_data.fetch("route_id"),
-      account_id: route_data.fetch("provider_account_id"),
-      adapter: route_data.fetch("adapter"),
-      launch_binding_id: route_data.fetch("launch_binding_id"),
-      model_id: route_data.fetch("model")
-    )
-    Hive::ProviderHealth::Evidence.new(
-      scope: Hive::ProviderHealth::Scope.model(
-        account_id: route.account_id, model_id: route.model_id
+    route = routing.fetch("route")
+    safe_fields = {
+      "failure_class" => "model_capacity",
+      "scope" => {
+        "kind" => "model", "provider_account_id" => route.fetch("provider_account_id"),
+        "model" => route.fetch("model")
+      },
+      "provenance" => "codex_jsonl_transport",
+      "route_id" => route.fetch("route_id"),
+      "reset_hint_seconds" => 30
+    }
+    safe_fields.merge(
+      "fingerprint" => Digest::SHA256.hexdigest(
+        JSON.generate(Hive::Attempts::Record.send(:canonical_value, safe_fields))
       ),
-      failure_class: "model_capacity",
-      provenance: "codex_jsonl_transport",
-      route: route,
-      reset_hint_seconds: 30,
-      source_reference: receipt.fetch("log_reference"),
-      attempt_id: "attempt-1"
-    ).to_h
+      "source_reference" => receipt.fetch("log_reference")
+    )
   end
 
   def receipt(overrides = {})

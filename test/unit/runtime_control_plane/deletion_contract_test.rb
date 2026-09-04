@@ -22,7 +22,17 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/daemon/pr_merge_reconciliation_store.rb
     lib/hive/daemon/queue_directory.rb
     lib/hive/point_storage.rb
+    lib/hive/commands/circuits.rb
+    lib/hive/provider_health.rb
+    lib/hive/provider_health/attempt_observer.rb
+    lib/hive/provider_health/audit.rb
+    lib/hive/provider_health/circuit.rb
+    lib/hive/provider_health/event.rb
+    lib/hive/provider_health/evidence.rb
+    lib/hive/provider_health/repository.rb
     lib/hive/provider_health/store.rb
+    lib/hive/provider_routing/operational_projection.rb
+    lib/hive/provider_routing/policy_repository.rb
     lib/hive/recovery/migration.rb
     lib/hive/runtime_control_plane/diagnostics.rb
     lib/hive/runtime_control_plane/identity.rb
@@ -31,6 +41,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
   RETIRED_SCHEMA_FILES = %w[
     schemas/hive-attempt.v3.json
     schemas/hive-attempt.v4.json
+    schemas/hive-circuits.v1.json
     schemas/hive-pr-merge-reconciliation.v1.json
     schemas/hive-provider-health-event.v1.json
     schemas/hive-provider-health.v1.json
@@ -46,7 +57,9 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     Hive::Daemon::DispatchRequestQueue
     Hive::Daemon::DispatchResultQueue
     Hive::Daemon::PrMergeReconciliationStore
-    Hive::ProviderHealth::Store
+    Hive::ProviderHealth
+    Hive::ProviderRouting::OperationalProjection
+    Hive::ProviderRouting::PolicyRepository
     Hive::ProviderRouting::PolicyStore
   ].freeze
   RETIRED_ENVIRONMENT_PATHS = %w[HIVE_ATTEMPT_STORE_ROOT HIVE_USAGE_DB_PATH].freeze

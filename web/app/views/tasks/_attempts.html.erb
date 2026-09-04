@@ -31,7 +31,6 @@
             <div><dt>Generation</dt><dd><%= attempt["task_generation"] || "Unavailable" %></dd></div>
             <div><dt>Provider</dt><dd><%= attempt.dig("requested_provider", "value").presence || "Unavailable" %></dd></div>
             <div><dt>Outcome</dt><dd><%= attempt["outcome"].to_s.humanize.presence || "Unavailable" %></dd></div>
-            <div><dt>Predecessor</dt><dd><code><%= attempt["predecessor_attempt_id"]&.first(16) || "None recorded" %></code></dd></div>
           </dl>
 
           <% sessions = Array(attempt["sessions"]) %>

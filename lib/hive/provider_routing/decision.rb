@@ -8,14 +8,12 @@ module Hive
       STATUSES = %i[legacy selected capacity_saturated no_route].freeze
       OWNERS = %w[attempt scheduler retry_authority].freeze
 
-      Exclusion = Data.define(:route_id, :reason, :detail, :scope, :observation) do
-        def initialize(route_id:, reason:, detail: nil, scope: nil, observation: nil)
+      Exclusion = Data.define(:route_id, :reason, :detail) do
+        def initialize(route_id:, reason:, detail: nil)
           super(
             route_id: ProviderRouting.frozen_string(route_id),
             reason: ProviderRouting.frozen_string(reason),
-            detail: detail && ProviderRouting.frozen_string(detail),
-            scope: ProviderRouting.deep_freeze(ProviderRouting.deep_copy(scope)),
-            observation: ProviderRouting.deep_freeze(ProviderRouting.deep_copy(observation))
+            detail: detail && ProviderRouting.frozen_string(detail)
           )
           freeze
         end
@@ -24,9 +22,7 @@ module Hive
           {
             "route_id" => route_id,
             "reason" => reason,
-            "detail" => detail,
-            "scope" => scope,
-            "observation" => observation
+            "detail" => detail
           }.freeze
         end
 

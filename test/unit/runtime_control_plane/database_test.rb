@@ -180,7 +180,10 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
 
     with_database do |database, path|
-      raw_sqlite(path) { |raw| raw.execute("DROP TABLE provider_audit") }
+      database.disconnect
+      raw_sqlite(path) do |raw|
+        raw.execute("CREATE TABLE provider_audit (event_id TEXT PRIMARY KEY)")
+      end
       error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }
       assert_equal :partial_schema, error.code
     end

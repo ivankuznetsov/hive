@@ -21,9 +21,12 @@ is an upgrade procedure for this change.
 
 The broad local test command on 2026-09-04 stopped at the separate Agent CLI
 Runtime OpenCode offline smoke because its default route was absent from the
-installed model inventory. This is outside the runtime table refactor; Hive's
-main suite needs separate verification. No coverage-gate or live-provider result is
-claimed by that run.
+installed model inventory. Hive's separate main run completed 13,921 tests with
+one missing-identity usage fixture error and no assertion failures. The fixture
+was corrected to use a registered task ID in the dispatcher's string form;
+its 12-test integration file then passed. The final runtime-focused run passed
+450 tests. The full main suite was not repeated after that fixture-only fix;
+no coverage-gate or live-provider result is claimed.
 
 ## Task-journal growth and compaction
 

@@ -19,3 +19,8 @@ date: 2026-09-04
   deployment was changed. Existing SQLite installations need a separately
   implemented, token-preserving schema cutover; `hive migrate --all` does not
   implement this replacement.
+- Final focused runtime verification: 450 tests passed; changed Ruby files lint
+  clean. The 13,921-test main sweep found one usage fixture without canonical
+  task identity; corrected it and reran its 12-test integration file successfully.
+  The standard rake prerequisite stopped on an unrelated unavailable OpenCode
+  offline-smoke route; no local coverage or live-provider gate is claimed.

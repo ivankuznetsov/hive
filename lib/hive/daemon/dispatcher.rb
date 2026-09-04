@@ -204,9 +204,9 @@ module Hive
         # see the next warning the next time it goes red, but we don't
         # actively re-emit on every tick. Issue #95.
         @legacy_layout_logged = {}
-        # Test-injectable state homes for dispatch requests and the completion
-        # outbox. Production uses `Hive::Paths.state_home`; unit tests inject a
-        # sandbox while sharing one SQL control plane.
+        # Test-injectable state homes for dispatch requests and their results.
+        # Production uses `Hive::Paths.state_home`; unit tests inject a sandbox
+        # while sharing one SQL control plane.
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answer_state`).
@@ -3544,11 +3544,9 @@ module Hive
         timeout + grace + (@poll_interval_sec.to_i * 2) + 600
       end
 
-      # ADV-1 (#6): drop stale dispatch-result notices each tick so a
-      # down/wedged bot can't let the dir grow without bound. The bot
-      # itself also skips+removes stale notices on drain; this is the
-      # daemon-side backstop for when no bot is consuming at all. Never
-      # crashes a tick.
+      # Prune only expired, delivered, completed request rows. Pending results
+      # survive indefinitely until the bot acknowledges a successful send.
+      # Never crashes a tick.
       def prune_dispatch_results(now:)
         dispatch_repository.prune_results(
           state_home: dispatch_result_state_home, now: now
@@ -3577,7 +3575,7 @@ module Hive
         )
       end
 
-      # ADV-1: write a completion-notice file the bot will drain + relay to
+      # ADV-1: write a completion result the bot will drain + relay to
       # the originating Telegram chat. No-op when the completed run did
       # not carry a chat_id (auto-advance runs, or metadata already gone)
       # — there's no one to reply to. Best-effort: a write failure must

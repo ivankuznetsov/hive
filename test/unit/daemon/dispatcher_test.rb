@@ -7512,6 +7512,37 @@ end
     end
   end
 
+  def test_reap_result_survives_crash_before_request_completion
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      repository = Q.repository(state_home)
+      dispatcher, sup, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home, dispatch_repository: repository
+      )
+      write_request_file(state_home, slug: "s1", request_id: "CRASH1")
+      exited = ChildExit.new(
+        pid: 556, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+        command: "hive review s1", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "CRASH1"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      with_replaced_singleton_method(
+        repository, :remove, ->(*, **) { raise "crash before request completion" }
+      ) do
+        assert_raises(RuntimeError) { dispatcher.send(:reap_completed, now: T0 + 1) }
+      end
+
+      restarted = Hive::RuntimeControlPlane::DispatchRepository.new(
+        database: repository.database
+      )
+      assert_equal [ "CRASH1" ], restarted.pending_results.map(&:request_id)
+      assert restarted.remove("CRASH1")
+      assert_equal [ "CRASH1" ], restarted.pending_results.map(&:request_id)
+      assert_equal "completed", restarted.fetch("CRASH1").state
+    end
+  end
+
   def test_reap_promotes_sequence_only_after_success
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
@@ -7581,7 +7612,7 @@ end
       assert_equal 1, Q.pending_results(state_home: state_home).size,
                    "a failed sequence step must still notify the originating chat"
       assert_equal "completed", Q.fetch("SEQF", state_home: state_home).state,
-                   "the failed request stays as the outbox foreign-key anchor"
+                   "the failed request retains its own pending result"
     end
   end
 
@@ -7711,7 +7742,7 @@ end
       end
 
       assert_equal "completed", Q.fetch("SEQRAISE", state_home: state_home).state,
-                   "the failed request stays as the outbox foreign-key anchor"
+                   "the failed request retains its own pending result"
 
       notices = Q.pending_results(state_home: state_home)
       assert_equal 1, notices.size,
@@ -7758,8 +7789,7 @@ end
     assert_equal 790, dispatcher.send(:claim_expiry_sec)
   end
 
-  # #6: the daemon prunes stale dispatch-result notices each tick.
-  def test_prune_dispatch_results_removes_stale
+  def test_prune_dispatch_results_keeps_pending_and_removes_expired_delivered_request
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, = make_dispatcher(rows: [], dispatch_request_state_home: state_home)
       write_request_file(state_home, slug: "old", request_id: "r")
@@ -7768,7 +7798,12 @@ end
         command: "hive review old", state_home: state_home, now: T0 - 7200
       )
       dispatcher.send(:prune_dispatch_results, now: T0)
-      assert_empty Q.pending_results(state_home: state_home)
+      assert_equal [ "r" ], Q.pending_results(state_home: state_home).map(&:request_id)
+
+      assert Q.remove("r", state_home: state_home)
+      assert Q.acknowledge_result("r", state_home: state_home, now: T0)
+      dispatcher.send(:prune_dispatch_results, now: T0)
+      assert_nil Q.fetch("r", state_home: state_home)
     end
   end
 

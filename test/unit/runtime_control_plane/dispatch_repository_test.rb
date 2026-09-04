@@ -15,7 +15,7 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     )
   end
 
-  def test_request_claim_sequence_and_outbox_are_transactional_and_idempotent
+  def test_request_claim_sequence_and_result_are_transactional_and_idempotent
     with_repository do |repository|
       id = repository.write_request!(
         project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
@@ -51,13 +51,116 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
         chat_id: 42, project: "hive", slug: "sqlite-cutover",
         request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
       )
+      assert_equal id, result_id
       assert_equal result_id, repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW + 1
+      )
+      assert_equal [ result_id ], repository.pending_results.map(&:result_id)
+
+      restarted = Hive::RuntimeControlPlane::DispatchRepository.new(
+        database: repository.database, clock: -> { NOW + 2 }
+      )
+      assert_equal [ id ], restarted.pending_results.map(&:request_id)
+      assert restarted.acknowledge_result(id, now: NOW + 2)
+      refute restarted.acknowledge_result(id, now: NOW + 2)
+      assert_empty restarted.pending_results
+    end
+  end
+
+  def test_conflicting_result_replay_fails_closed_and_keeps_the_original
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "result-conflict", now: NOW
+      )
+      repository.write_result!(
         chat_id: 42, project: "hive", slug: "sqlite-cutover",
         request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
       )
-      assert_equal [ result_id ], repository.pending_results.map(&:result_id)
-      assert repository.remove_result(result_id)
-      assert_empty repository.pending_results
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_result!(
+          chat_id: 42, project: "hive", slug: "sqlite-cutover",
+          request_id: id, exit_code: 1, command: "hive run sqlite-cutover", now: NOW + 1
+        )
+      end
+
+      assert_equal :dispatch_result_conflict, error.code
+      assert_equal 0, repository.pending_results.fetch(0).exit_code
+    end
+  end
+
+  def test_pending_result_survives_request_removal_and_only_delivered_expired_rows_prune
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "retained-result", now: NOW
+      )
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
+      )
+
+      assert repository.remove(id)
+      assert_equal "completed", repository.fetch(id).state
+      assert_equal 0, repository.prune_results(now: NOW + 7200)
+      assert_equal [ id ], repository.pending_results(now: NOW + 7200).map(&:request_id)
+
+      assert repository.acknowledge_result(id, now: NOW + 7200)
+      assert_equal 1, repository.prune_results(now: NOW + 7200)
+      assert_nil repository.fetch(id)
+    end
+  end
+
+  def test_concurrent_result_acknowledgement_has_one_winner
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "result-ack", now: NOW
+      )
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
+      )
+      restarted = Hive::RuntimeControlPlane::DispatchRepository.new(database: repository.database)
+      gate = Queue.new
+      workers = [ repository, restarted ].map do |store|
+        Thread.new do
+          gate.pop
+          store.acknowledge_result(id, now: NOW + 1)
+        end
+      end
+      2.times { gate << true }
+
+      assert_equal [ false, true ], workers.map(&:value).sort_by(&:to_s)
+      row = repository.database.read do |db|
+        db[:dispatch_requests].where(request_id: id).first
+      end
+      assert_equal "delivered", row.fetch(:result_state)
+      assert_equal (NOW + 1).iso8601(6), row.fetch(:result_delivered_at)
+    end
+  end
+
+  def test_malformed_stored_result_fails_closed_without_dropping_the_request
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "invalid-result", now: NOW
+      )
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
+      )
+      repository.database.transaction do |db|
+        db[:dispatch_requests].where(request_id: id).update(result_json: "{")
+      end
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.pending_results
+      end
+      assert_equal :dispatch_result_row_invalid, error.code
+      assert_equal id, repository.fetch(id).request_id
     end
   end
 

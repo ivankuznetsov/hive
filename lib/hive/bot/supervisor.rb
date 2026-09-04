@@ -314,52 +314,45 @@ module Hive
       # operator-visible feedback (beyond the marker-driven status alert).
       #
       # Reliability contract:
-      #   - A notice is removed ONLY after the relay is confirmed sent. If
+      #   - A notice is acknowledged ONLY after the relay is confirmed sent. If
       #     Telegram is down, `safe_send_message` returns nil and the
       #     notice stays pending to retry on the next reaper tick (#1) —
       #     never a silent drop.
-      #   - Stale notices (older than EXPIRY_SEC) are removed WITHOUT
-      #     sending: an hour-old completion ping is noise, and retention
-      #     pruning bounds the outbox (#6).
+      #   - Pending notices are never discarded because of age. Delivered
+      #     request rows are retained and pruned by the daemon.
       # Public + `now:`-injectable so tests can drive one drain
       # deterministically.
       def drain_dispatch_results(now: Time.now)
-        notices = dispatch_repository.pending_results(now: now)
-        fresh = notices.reject do |notice|
-          next false unless dispatch_repository.result_expired?(notice, now: now)
-
-          remove_dispatch_result(notice) # stale: drop without relaying
-          true
-        end
+        pending = dispatch_repository.pending_results(now: now)
 
         # Defense-in-depth (#263): the chat_id round-trips from the persisted
         # request row through the daemon with no re-validation, so re-check
-        # the allowlist before relaying — drop+remove a notice for a chat
-        # removed from the allowlist while its request was in flight, or a
-        # forged outbox row with an arbitrary chat_id. Mirrors
+        # the allowlist before relaying — acknowledge without sending a notice
+        # for a chat removed from the allowlist while its request was in flight,
+        # or a forged result with an arbitrary chat_id. Mirrors
         # the allowlist filtering on the nudge/reconnect push paths.
         allowed = chat_ids
-        fresh = fresh.reject do |notice|
+        pending = pending.reject do |notice|
           next false if allowed.include?(notice.chat_id)
 
           @logger.event(:dispatch_result_rejected_unauthorized,
                         chat_id: notice.chat_id, result_id: notice.result_id, slug: notice.slug)
-          remove_dispatch_result(notice)
+          acknowledge_dispatch_result(notice)
           true
         end
 
-        fresh.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
+        pending.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
           sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_result_text(notice))
-          remove_dispatch_result(notice) if sent
+          acknowledge_dispatch_result(notice, now: now) if sent
         end
 
-        relay_dispatch_result_overflow(fresh.drop(DISPATCH_RESULT_SEND_CAP))
+        relay_dispatch_result_overflow(pending.drop(DISPATCH_RESULT_SEND_CAP), now: now)
       end
 
       # Collapse a too-large backlog tail into a single summary message
       # per chat, removing those notices only if the summary actually
       # sent (same no-silent-drop contract as the individual path).
-      def relay_dispatch_result_overflow(overflow)
+      def relay_dispatch_result_overflow(overflow, now: Time.now)
         return if overflow.empty?
 
         overflow.group_by(&:chat_id).each do |chat_id, group|
@@ -368,13 +361,13 @@ module Hive
             chat_id: chat_id,
             text: "⚠️ +#{group.size} more #{noun} suppressed (see daemon.log)."
           )
-          group.each { |notice| remove_dispatch_result(notice) } if sent
+          group.each { |notice| acknowledge_dispatch_result(notice, now: now) } if sent
         end
       end
 
-      def remove_dispatch_result(notice)
-        dispatch_repository.remove_result(
-          notice.result_id, state_home: dispatch_result_state_home
+      def acknowledge_dispatch_result(notice, now: Time.now)
+        dispatch_repository.acknowledge_result(
+          notice.request_id, state_home: dispatch_result_state_home, now: now
         )
       end
 

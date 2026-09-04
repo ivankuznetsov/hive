@@ -23,11 +23,12 @@ class TaskDisplay
     end
     return "Waiting for #{task['blocked_by']}." if task["blocked_by"].present?
 
+    return "An agent is working on this step." if state == "running"
+
     recovery = task.recovery || {}
-    reason = recovery["remediation"].presence || task.dig("diagnostic", "summary").presence
+    reason = recovery["remediation"].presence || (task.dig("diagnostic", "summary").presence unless state == "ready")
     return reason if reason
     return "#{task['unanswered_questions']} questions need an answer." if task["unanswered_questions"].to_i.positive?
-    return "An agent is working on this step." if state == "running"
     return "This step is finished; the task has not been archived yet." if task["action"] == "ready_to_archive"
 
     task["action_label"].presence unless task["action_label"].to_s.casecmp?(label)

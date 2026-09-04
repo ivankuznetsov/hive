@@ -33,6 +33,9 @@
     <% end %>
     <article class="markdown primary-markdown"><%= document.fetch(:html) %></article>
   <% else %>
-    <pre><%= primary.fetch("content") %></pre>
+    <details data-workspace-disclosure-key="primary-file">
+      <summary>View file contents</summary>
+      <pre><%= primary.fetch("content") %></pre>
+    </details>
   <% end %>
 </section>

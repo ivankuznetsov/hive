@@ -1117,7 +1117,8 @@ Dependency panels require an actual relationship; code panels require a real
 worktree or PR. Closure receipt digests, duplicate action/quality fields and
 repeated slugs are omitted from ordinary content. Document outlines and review
 metadata, routes and audit documents are collapsed; review findings and actions
-remain available. Task references and manual
+remain available. Structured primary files are disclosed on demand instead of
+showing raw JSON as the page body. Task references and manual
 closure remain under Advanced. Bounded publication and mutation guards remain
 unchanged.
 

@@ -1,7 +1,7 @@
 require_relative "test_helper"
 
 class AgentCliRuntimeOpenCodeOfflineSmokeTest < Minitest::Test
-  DEFAULT_ROUTE = "opencode/hy3-free"
+  DEFAULT_ROUTE = "opencode/ling-3.0-flash-fin-free"
   DEFAULT_VARIANT = "high"
 
   def test_installed_cli_satisfies_the_offline_preparation_contract_without_a_run

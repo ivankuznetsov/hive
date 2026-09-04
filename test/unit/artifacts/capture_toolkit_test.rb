@@ -156,7 +156,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     assert_equal domain, browser_environment.fetch("AGENT_BROWSER_ALLOWED_DOMAINS")
     assert_match(%r{\Ahttp://127\.0\.0\.1:\d+\z}, browser_environment.fetch("AGENT_BROWSER_PROXY"))
     downloads = browser_environment.fetch("AGENT_BROWSER_DOWNLOAD_PATH")
-    assert_match(%r{\A/tmp/hive-browser-state-}, downloads)
+    assert_match(%r{\A#{Regexp.escape(Dir.tmpdir)}/hive-browser-state-}, downloads)
     refute downloads.start_with?(File.join(root, "work"))
     assert_match(%r{\Ahttp://127\.0\.0\.1:\d+\z}, receipt.dig("web", "app_endpoint"))
     refute_includes JSON.generate(receipt), "playwright"
@@ -262,7 +262,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       assert_equal "cli", receipt.dig("web", "interface")
       assert_equal "browser", receipt.dig("web", "argv_prefix").last
       browser_environment = browser_closes.first.first
-      assert_match(%r{\A/tmp/hive-browser-state-}, browser_environment.fetch("HOME"))
+      assert_match(%r{\A#{Regexp.escape(Dir.tmpdir)}/hive-browser-state-}, browser_environment.fetch("HOME"))
       refute browser_environment.fetch("HOME").start_with?(File.join(root, "work"))
 
       toolkit.close

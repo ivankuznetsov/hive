@@ -7,6 +7,18 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Test performance measurement limits
+
+The checked-in shard timings come from three completed nightly seeds on
+`cce8c398b`, run `33848365560`; that sweep reported missing-history failures and
+one provider-exit race, so the snapshot is a scheduling estimate, not a clean
+performance acceptance result. Both issues are addressed by the test-flow
+change; a future hosted run must establish the new CI wall clock. Timing-guided
+selection is not used to skip tests. The local task-capture profile took 16.7s
+versus a nightly 178s mean, so no timeout reductions were made from that mismatch.
+Focused source-to-test mapping cannot establish every transitive consumer;
+shared infrastructure falls back broadly and the full coverage gate remains.
+
 ## Task-journal growth and compaction
 
 `task-journal.jsonl` is append-only and routine reads must validate and fold its

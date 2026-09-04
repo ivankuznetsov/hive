@@ -114,7 +114,11 @@ end
 
 if ENV["HIVE_COVERAGE"]
   HiveTestCoverage.install_reporter!
-  HiveTestCoverage.load_all_sources! unless ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+  if ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+    HiveTestCoverage.reload_preloaded_entrypoint!
+  else
+    HiveTestCoverage.load_all_sources!
+  end
 end
 
 module HiveTestStdinIsolation

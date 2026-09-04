@@ -2,6 +2,32 @@ require "test_helper"
 require "hive/daemon/status_report"
 
 class StatusTest < ActionDispatch::IntegrationTest
+  test "state filters count the selected project and distinguish ready from running" do
+    sign_in!
+    projects = [
+      { "name" => "demo", "tasks" => [
+        { "slug" => "running", "stage" => "4-execute", "action" => "agent_running" },
+        { "slug" => "ready", "stage" => "4-execute", "action" => "ready_to_develop" },
+        { "slug" => "question", "stage" => "2-brainstorm", "action" => "needs_input" }
+      ] },
+      { "name" => "other", "tasks" => [ { "slug" => "other-running", "stage" => "4-execute", "action" => "agent_running" } ] }
+    ]
+    with_status_snapshot("projects" => projects) do
+      get "/grid", params: { project: "demo", state: "running" }
+      assert_response :success
+      assert_select ".task-state-filter.active", text: /Running\s+1/
+      assert_select ".task-row", count: 1
+      assert_select ".task-row a[href='/tasks/demo/running']"
+      assert_select ".task-state-filter[href*='project=demo']", minimum: 3
+      get "/grid", params: { project: "demo", state: "waiting" }
+      assert_select ".empty-state", text: /No tasks in this state/
+      get "/grid", params: { project: "demo" }
+      assert_select ".task-row a" do |links|
+        assert_equal %w[running question ready], links.map { |link| link["href"].split("/").last }
+      end
+    end
+  end
+
   test "a supervised daemon does not render service repair guidance" do
     sign_in!
     daemon_status = {
@@ -249,7 +275,7 @@ class StatusTest < ActionDispatch::IntegrationTest
         assert_response :success
         assert_select ".status-freshness-warning[data-status-availability=unavailable][role=status]",
                       text: /No current fleet snapshot has loaded.*retry automatically/m
-        assert_select ".status-content-unavailable", text: /next successful refresh/
+        assert_select ".status-content-unavailable", text: /Tasks will appear when live status is available/
         assert_select "#status-board", 0
         assert_select ".empty-state", { text: /No projects yet/, count: 0 },
                       "an unavailable producer must not be presented as a healthy empty fleet"
@@ -341,9 +367,9 @@ class StatusTest < ActionDispatch::IntegrationTest
           "tasks" => [
             {
               "slug" => slug,
-              "stage" => "9-done",
+              "stage" => "7-architecture",
               "workflow" => "coding",
-              "action" => "archived",
+              "action" => "error",
               "action_label" => "Archived",
               "age_seconds" => 10 * 86_400
             }
@@ -357,7 +383,7 @@ class StatusTest < ActionDispatch::IntegrationTest
 
       assert_response :success
       assert_select "#status-archive .project-section[data-project-name='#{project_name}']"
-      assert_select "[data-task-slug='#{slug}']"
+      assert_select "[data-task-slug='#{slug}'] .status-dot-idle[title='Archived']"
       assert_select "a[href='#{task_path(project_name, slug, source: "archive")}']"
       assert_select ".project-nav a.active[aria-current='page']", text: project_name
 

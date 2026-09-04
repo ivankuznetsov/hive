@@ -15,7 +15,7 @@
             <h2><%= band.project.name %></h2>
             <span class="kanban-workflow"><%= band.workflow_id %> workflow</span>
           </div>
-          <span class="muted"><%= pluralize(band.task_count, "active task") %></span>
+          <span class="muted"><%= pluralize(band.task_count, "task") %></span>
         </header>
 
         <% if band.hidden_archived_task_count.positive? %>
@@ -49,18 +49,16 @@
                     <article id="<%= stable_dom_id("kanban-card", band.project.name, task.slug) %>"
                              class="kanban-card" data-task-slug="<%= task.slug %>">
                       <div class="kanban-card-heading">
-                        <%= status_dot(task) %>
+                        <%= status_dot(task, fresh: status_fresh) %>
                         <%= link_to task.title, task_path(band.project.name, task.slug) %>
                       </div>
-                      <p class="task-slug"><%= task.slug %></p>
+                      <% display = TaskDisplay.new(task, fresh: status_fresh) %>
                       <div class="kanban-card-meta">
-                        <span><%= task.status_label %></span>
-                        <span class="faint"><%= relative_age(task["age_seconds"]) %></span>
+                        <span><%= display.label %></span>
+                        <span class="faint"><%= "Updated #{relative_age(task["age_seconds"])}" %></span>
                       </div>
-                      <% if (owner = task.dig("implementation_identity", "stages", "execute")) %>
-                        <p class="kanban-owner faint" title="Implementation owner">
-                          <%= owner["provider"] %>/<%= truncate(owner["model"], length: 22) %>
-                        </p>
+                      <% if display.detail.present? && !%w[running completed paused].include?(display.state) %>
+                        <p class="task-state-detail"><%= truncate(display.detail, length: 180) %></p>
                       <% end %>
                       <%= render "tasks/primary_actions", task:,
                             daemon_enabled: band.daemon_enabled, compact: true,

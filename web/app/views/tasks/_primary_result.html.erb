@@ -4,10 +4,9 @@
          <% if primary %>data-primary-artifact="<%= primary.fetch("reference") %>"<% end %>>
   <div class="workspace-panel-heading">
     <div>
-      <p class="workspace-eyebrow">Primary work product</p>
-      <h2 id="workspace-primary-result-heading"><%= primary&.fetch("name", nil) || "Work product pending" %></h2>
+      <p class="workspace-eyebrow"><%= @task.terminal? || @task_source == "archive" ? "Result" : "Current work" %></p>
+      <h2 id="workspace-primary-result-heading"><%= primary&.fetch("name", nil) || "Work has not started yet" %></h2>
     </div>
-    <span class="workspace-state-label"><%= result.fetch("kind").humanize %></span>
   </div>
 
   <% if result["warning"].present? %>
@@ -15,22 +14,22 @@
   <% end %>
 
   <% if primary.nil? %>
-    <p class="workspace-empty">The workflow has not produced its primary work product yet.</p>
+    <p class="workspace-empty">No document has been produced yet.</p>
   <% elsif primary["binary"] %>
-    <p class="workspace-empty">The primary work product is binary and cannot be rendered here.</p>
+    <p class="workspace-empty">This file cannot be previewed as text.</p>
   <% elsif primary["content"].nil? %>
-    <p class="workspace-empty">The primary work product is unavailable within the bounded workspace read.</p>
+    <p class="workspace-empty">This document could not be loaded.</p>
   <% elsif primary.fetch("name").end_with?(".md") %>
     <% document = render_markdown_document(primary.fetch("content")) %>
     <% if document.fetch(:outline).any? %>
-      <nav class="document-outline" aria-label="Document outline">
-        <p class="document-outline-title">On this page</p>
+      <details class="document-outline" aria-label="Document outline" data-workspace-disclosure-key="document-outline">
+        <summary class="document-outline-title">On this page</summary>
         <ol>
           <% document.fetch(:outline).each do |heading| %>
             <li><a href="#<%= heading.fetch(:id) %>"><%= heading.fetch(:label) %></a></li>
           <% end %>
         </ol>
-      </nav>
+      </details>
     <% end %>
     <article class="markdown primary-markdown"><%= document.fetch(:html) %></article>
   <% else %>

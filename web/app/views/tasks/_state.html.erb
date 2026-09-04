@@ -8,11 +8,6 @@
 <section id="task-state" data-controller="answers">
   <%= render "tasks/workspace_summary", workspace: @semantic_workspace %>
 
-  <div class="task-header">
-    <%= stage_badge(@task["stage"]) %>
-    <span class="task-meta"><%= status_dot(@task) %> <%= @task.status_label %></span>
-  </div>
-
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>
@@ -33,9 +28,6 @@
         recovery: recovery,
         mutations_enabled: @status_fresh && @workspace_action_evidence_current %>
 
-  <%= render "tasks/usage", usage: @semantic_workspace.fetch("usage") %>
-  <%= render "tasks/primary_result", result: @semantic_workspace.fetch("result") %>
-  <%= render "tasks/diagnostic", diagnostic: @semantic_workspace.fetch("diagnostic") %>
 
   <% if questions.any? %>
     <section id="task-questions" class="qa">
@@ -94,7 +86,7 @@
               data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>
-  <% elsif @task["marker"].to_s == "waiting" && !@task.passable? %>
+  <% elsif @task["stage"] == "2-brainstorm" && @task["marker"].to_s == "waiting" && !@task.passable? %>
     <%# Post-answer limbo: everything answered, daemon not done yet. The
         page morph-refreshes on every status push, so the banner hands off
         to the next round's questions, a running dot, or a passable gate

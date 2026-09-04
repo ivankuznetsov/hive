@@ -1097,3 +1097,32 @@ ffmpeg, ffprobe, and Tesseract. The separate Playwright dependency in
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].
+
+## Task views focused on current work
+
+Board and Grid show a plain-language state separately from the current stage.
+`TaskDisplay` translates the existing task projection for display only; it does
+not change scheduling or action eligibility. Ready work is not labelled running,
+a completed intermediate stage is not labelled a completed task, and stale
+active rows do not claim current liveness. Rejected Patrol findings remain
+paused even when the versioned action key is normalized to `needs_input`.
+State links count and filter the selected project and survive ordinary GET and
+Turbo refreshes. Running work and decisions sort before ready, waiting, paused
+and completed tasks; the Running count remains visible at zero.
+
+Task pages lead with step/state and the selected workflow document. Existing
+workflow-declared primary result selection remains authoritative. Missing usage
+is omitted; recorded usage and failure diagnostics are disclosed on demand.
+Dependency panels require an actual relationship; code panels require a real
+worktree or PR. Closure receipt digests, duplicate action/quality fields and
+repeated slugs are omitted from ordinary content. Document outlines and review
+metadata, routes and audit documents are collapsed; review findings and actions
+remain available. Task references and manual
+closure remain under Advanced. Bounded publication and mutation guards remain
+unchanged.
+
+The task log view extracts readable provider messages, results, errors and tool
+names, with category and text filters. It preserves bounded reads, safe escaping,
+receipt-bound failure logs, polling pauses while reading and filter selections
+across frame replacement. Unrecognized envelopes, reasoning and tool input/output
+payloads are not displayed as log messages.

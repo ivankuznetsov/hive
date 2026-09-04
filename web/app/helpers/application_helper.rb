@@ -43,18 +43,11 @@ module ApplicationHelper
 
   # Liveness dot derived from the task row of Status#json_payload: a live
   # agent pulses green, an error marker is red, an actionable gate is amber.
-  def status_dot(task)
-    kind =
-      if task["marker"] == "error" || task["action"].to_s.include?("error")
-        "error"
-      elsif task["claude_pid_alive"]
-        "running"
-      elsif task["action"].present?
-        "waiting"
-      else
-        "idle"
-      end
-    tag.span("", class: "status-dot status-dot-#{kind}", title: task["action_label"].presence || "idle")
+  def status_dot(task, fresh: true, archived: false)
+    display = TaskDisplay.new(task, fresh: fresh, archived: archived)
+    kind = { "running" => "running", "attention" => "error", "waiting" => "waiting",
+             "ready" => "waiting", "completed" => "idle", "unknown" => "idle", "paused" => "idle" }.fetch(display.state)
+    tag.span("", class: "status-dot status-dot-#{kind}", title: display.label)
   end
 
   MARKDOWN_TAGS = %w[

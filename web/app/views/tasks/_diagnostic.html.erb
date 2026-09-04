@@ -1,11 +1,13 @@
 <% if diagnostic.fetch("state") == "current" %>
   <% log = diagnostic.fetch("log") %>
+  <details data-workspace-disclosure-key="troubleshooting" class="task-secondary">
+    <summary>Failure details</summary>
   <section id="workspace-diagnostic" class="workspace-panel workspace-wide workspace-state-current"
            aria-labelledby="workspace-diagnostic-heading">
     <div class="workspace-panel-heading">
       <div>
         <p class="workspace-eyebrow">Diagnosis</p>
-        <h2 id="workspace-diagnostic-heading">Task needs attention</h2>
+        <h2 id="workspace-diagnostic-heading">Troubleshooting</h2>
         <p><%= diagnostic.fetch("summary") %></p>
       </div>
     </div>
@@ -15,7 +17,7 @@
            source: @task_source, reference_sha256: reference_sha256) %>
       <details class="diagnostic-log" data-workspace-disclosure-key="diagnostic-log"
                data-action="toggle->task-workspace#loadDiagnosticLog">
-        <summary>Show correlated log</summary>
+        <summary>Show failure log</summary>
         <%= turbo_frame_tag stable_dom_id(
               "task-log", @project.name, @task.slug, reference_sha256
             ),
@@ -25,11 +27,12 @@
                 poll_wait_for_content_value: true,
                 turbo_permanent: true, diagnostic_log_src: log_url
               } do %>
-          <div class="log-pane"><p class="muted">Open this disclosure to load the correlated log.</p></div>
+          <div class="log-pane"><p class="muted">Loading failure log…</p></div>
         <% end %>
       </details>
     <% else %>
-      <p class="muted">No receipt-correlated log is available for this diagnostic.</p>
+      <p class="muted">No log is available for this failure.</p>
     <% end %>
   </section>
+  </details>
 <% end %>

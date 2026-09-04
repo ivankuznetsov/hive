@@ -77,7 +77,6 @@ module Hive
           slug: task.slug,
           argv: argv,
           requestor: "cli",
-          predecessor_attempt_id: nil,
           inherited_outputs: [], chat_id: nil, update_id: nil, trigger: "recovery",
           task_generation: nil, task_id: task.id, expected_stage: task.stage_name,
           expected_marker_name: nil, expected_marker_id: nil, recovery: nil,

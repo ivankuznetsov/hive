@@ -84,10 +84,10 @@ module Hive
       end
 
       def terminal_attempt(request_id:) = lookup(:terminal_attempt_id, request_id: request_id)
+      def request_attempt(request_id:) = lookup(:attempt_id_for_request, request_id: request_id)
       def latest_terminal_attempt(**args) = lookup(:latest_terminal_attempt_id, **args)
       def successful_attempt(**args) = lookup(:successful_attempt_id, **args)
       def unresolved_loss(**args) = lookup(:unresolved_loss_attempt_id, **args)
-      def successor(**args) = lookup(:successor_attempt_id, **args)
 
       private
 

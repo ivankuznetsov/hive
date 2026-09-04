@@ -23,6 +23,14 @@ module Hive
         row && row.fetch(:attempt_id)
       end
 
+      def attempt_id_for_request(request_id:)
+        row = database.read do |db|
+          db[:attempts].where(request_id: identifier(request_id))
+            .reverse_order(:accepted_at, :lease_version, :attempt_id).first
+        end
+        row && row.fetch(:attempt_id)
+      end
+
       def latest_terminal_attempt_id(task_generation:, subject:)
         terminal_for(task_generation, subject)&.fetch(:attempt_id)
       end
@@ -34,7 +42,12 @@ module Hive
       def unresolved_loss_attempt_id(task_generation:, subject:)
         row = database.read do |db|
           semantic_attempts(db, task_generation, subject).where(state: "lost")
-            .exclude(lost_recovery_phase: "complete")
+            .where(
+              Sequel.|(
+                { lost_recovery_phase: nil },
+                { lost_recovery_phase: %w[pending ready] }
+              )
+            )
             .reverse_order(:ended_at, :lease_version, :attempt_id).first
         end
         row && row.fetch(:attempt_id)

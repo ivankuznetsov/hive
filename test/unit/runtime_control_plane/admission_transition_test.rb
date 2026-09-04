@@ -1,6 +1,6 @@
 require "test_helper"
+require "hive/attempts/lost_outcome"
 require "hive/attempts/repository"
-require "hive/provider_health/repository"
 require "hive/provider_routing"
 require "hive/runtime_control_plane/dispatch_repository"
 
@@ -9,6 +9,50 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 29, 12)
   CLAIM_DIGEST = Hive::Attempts::Capability.digest("c" * 64)
+
+  def test_concurrent_lost_healers_admit_at_most_one_independent_replacement
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      source = attempts.create_launching(
+        attempt_id: "lost-source", request_id: "source-request",
+        task_id: "task-1", project: "demo", task_slug: "task-1",
+        intended_stage: "4-execute", task_generation: "generation-1",
+        ownership_generation: "owner-1", task_input_epoch: 1,
+        progress_token: "source-1", provider: "codex",
+        worker_argv: %w[hive run task-1], claim_capability_digest: CLAIM_DIGEST,
+        starting_revision: "a" * 40, retry_charge: 0,
+        inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+      )
+      lost = attempts.mark_lost(source, reason: "owner_gone", now: NOW + 1)
+      recovery = Hive::Attempts::LostOutcomeTransition.new(store: attempts)
+      request_id = recovery.recovery_request_id(lost)
+      path = attempts.database.path
+      payload_root = attempts.root
+      attempts.database.disconnect
+
+      results = race_lost_healers(
+        path: path, payload_root: payload_root, source_attempt_id: lost.attempt_id
+      )
+
+      attempts.database.open!
+      assert_equal 1, results.count { |status, _| status == :accepted }, results.inspect
+      assert_equal 1, results.count { |status, _| status == :rejected }, results.inspect
+      rows = attempts.database.read do |db|
+        {
+          source: db[:attempts].where(attempt_id: lost.attempt_id).first,
+          replacements: db[:attempts].exclude(attempt_id: lost.attempt_id).all,
+          recovery_requests: db[:dispatch_requests].where(request_id: request_id).all
+        }
+      end
+      assert_equal "complete", rows.fetch(:source).fetch(:lost_recovery_phase)
+      assert_equal request_id, rows.fetch(:source).fetch(:lost_recovery_request_id)
+      assert_equal 1, rows.fetch(:replacements).size
+      assert_equal request_id, rows.fetch(:replacements).first.fetch(:request_id)
+      assert_equal 1, rows.fetch(:recovery_requests).size
+      assert_equal "admitted", rows.fetch(:recovery_requests).first.fetch(:state)
+      replacement = attempts.fetch(rows.fetch(:replacements).first.fetch(:attempt_id))
+      refute_includes replacement.to_h, "predecessor_attempt_id"
+    end
+  end
 
   def test_racing_admissions_atomically_claim_one_request_slot_and_probe
     with_control_plane(task_ids: %w[task-1 task-2]) do |attempts, dispatch, health|
@@ -355,6 +399,70 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
 
   private
 
+  def race_lost_healers(path:, payload_root:, source_attempt_id:)
+    ready_read, ready_write = IO.pipe
+    start_read, start_write = IO.pipe
+    result_pipes = 2.times.map { IO.pipe }
+    pids = 2.times.map do |index|
+      fork do
+        ready_read.close
+        start_write.close
+        result_pipes.each_with_index do |(reader, writer), pipe_index|
+          reader.close
+          writer.close unless pipe_index == index
+        end
+        database = Hive::RuntimeControlPlane::Database.new(path: path).open!
+        repository = Hive::Attempts::Repository.new(root: payload_root, database: database)
+        source = repository.fetch(source_attempt_id)
+        recovery = Hive::Attempts::LostOutcomeTransition.new(store: repository)
+        ready_write.write("r")
+        start_read.read(1)
+        recovery.ensure_for(source, now: NOW + 2)
+        ready = recovery.update(
+          source, phase: "ready", cleanup: "absent",
+          request_id: recovery.recovery_request_id(source), now: NOW + 2
+        )
+        replacement = repository.create_launching(
+          attempt_id: "replacement-#{index + 1}", request_id: ready.fetch("request_id"),
+          recovery_source_attempt_id: source.attempt_id,
+          task_id: source["task_id"], project: source["project"],
+          task_slug: source["task_slug"], intended_stage: source["intended_stage"],
+          task_generation: source.task_generation,
+          ownership_generation: "replacement-owner-#{index + 1}",
+          task_input_epoch: source.task_input_epoch, progress_token: source["progress_token"],
+          provider: source["provider"], routing: source["routing"],
+          worker_argv: source["worker_argv"], claim_capability_digest: CLAIM_DIGEST,
+          starting_revision: source["starting_revision"], retry_charge: 1,
+          inherited_outputs: source["current_outputs"], launch_timeout_sec: 30,
+          now: NOW + 3
+        )
+        Marshal.dump([ :accepted, replacement.attempt_id ], result_pipes.fetch(index).fetch(1))
+      rescue Hive::Attempts::RepositoryError, Hive::RuntimeControlPlane::Error => error
+        Marshal.dump([ :rejected, error.class.name ], result_pipes.fetch(index).fetch(1))
+      ensure
+        database&.disconnect
+        exit! 0
+      end
+    end
+    ready_write.close
+    start_read.close
+    result_pipes.each { |_reader, writer| writer.close }
+    ready_read.read(2)
+    start_write.write("gg")
+    start_write.close
+    pids.each { |pid| Process.wait(pid) }
+    result_pipes.map { |reader, _writer| Marshal.load(reader.read) }
+  ensure
+    ready_read&.close unless ready_read&.closed?
+    ready_write&.close unless ready_write&.closed?
+    start_read&.close unless start_read&.closed?
+    start_write&.close unless start_write&.closed?
+    Array(result_pipes).each do |reader, writer|
+      reader.close unless reader.closed?
+      writer.close unless writer.closed?
+    end
+  end
+
   def with_control_plane(task_ids:)
     with_tmp_dir do |root|
       database = Hive::RuntimeControlPlane::Database.new(
@@ -385,7 +493,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       yield(
         attempts,
         Hive::RuntimeControlPlane::DispatchRepository.new(database: database, clock: -> { NOW }),
-        Hive::ProviderHealth::Repository.new(database: database, clock: -> { NOW })
+        nil
       )
     ensure
       database&.disconnect

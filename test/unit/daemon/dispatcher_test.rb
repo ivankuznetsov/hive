@@ -7203,7 +7203,7 @@ end
     assert_equal 2, failures.size
   end
 
-  def test_legacy_manual_lost_delivery_remains_claimed_for_successor_recovery
+  def test_pending_lost_delivery_remains_claimed_for_recovery
     Dir.mktmpdir("hive-attempt-manual-delivery") do |state_home|
       request_id = Q.write_request!(
         project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
@@ -7218,7 +7218,7 @@ end
       outcomes.define_singleton_method(:fetch) do |_attempt_id|
         {
           "attempt_id" => "lost-1", "task_generation" => "generation-1",
-          "status" => "manual"
+          "phase" => "pending", "request_id" => nil
         }
       end
       dispatcher, _supervisor, _controller, logger = make_dispatcher(
@@ -7230,7 +7230,6 @@ end
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0 + 1)
 
       assert_equal 1, Q.claimed(state_home: state_home).size
-      assert_empty Q.pending_results(state_home: state_home)
       refute logger.events.any? { |name, _attrs| name == :dispatch_request_completed }
     end
   end
@@ -9566,7 +9565,7 @@ end
     assert_equal [ false, nil, false, true ], observed
   end
 
-  def test_lost_successor_rebinds_claim_and_acknowledges_original_attempt
+  def test_completed_lost_recovery_rebinds_claim_by_request_identity
     request = Q::Request.new(
       request_id: "lost-delivery", created_at: T0, project: "p1", slug: "task",
       argv: %w[hive run task], requestor: "daemon"
@@ -9584,19 +9583,27 @@ end
     repository.define_singleton_method(:update_claim) do |request_id, **attributes|
       updates << [ request_id, attributes ]
     end
-    attempt = Struct.new(:attempt_id).new("lost-1")
+    attempt_type = Struct.new(:attempt_id, :task_generation)
+    lost = attempt_type.new("lost-1", "generation-1")
+    replacement = attempt_type.new("replacement-1", "generation-2")
     acknowledgements = []
     reconciler = Object.new
-    reconciler.define_singleton_method(:fetch) { |_attempt_id| attempt }
+    attempt_store = Object.new
+    attempt_store.define_singleton_method(:attempt_id_for_request) do |request_id:|
+      request_id == "recovery-request-1" ? replacement.attempt_id : nil
+    end
+    reconciler.define_singleton_method(:store) { attempt_store }
+    reconciler.define_singleton_method(:fetch) do |attempt_id|
+      attempt_id == lost.attempt_id ? lost : replacement
+    end
     reconciler.define_singleton_method(:acknowledge_finalization) do |seen, consumer|
       acknowledgements << [ seen.attempt_id, consumer ]
     end
     outcomes = Object.new
     outcomes.define_singleton_method(:fetch) do |_attempt_id|
       {
-        "status" => "successor_dispatched",
-        "successor_attempt_id" => "successor-1",
-        "task_generation" => "generation-2"
+        "phase" => "complete", "request_id" => "recovery-request-1",
+        "task_generation" => "generation-1"
       }
     end
     dispatcher, = make_dispatcher(
@@ -9607,7 +9614,7 @@ end
     dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
 
     assert_equal "lost-delivery", updates.fetch(0).fetch(0)
-    assert_equal "successor-1", updates.fetch(0).fetch(1).fetch(:attempt_id)
+    assert_equal "replacement-1", updates.fetch(0).fetch(1).fetch(:attempt_id)
     assert_equal "generation-2", updates.fetch(0).fetch(1).fetch(:task_generation)
     assert_equal [ [ "lost-1", :request_delivery ] ], acknowledgements
   end

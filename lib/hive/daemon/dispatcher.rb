@@ -1829,7 +1829,6 @@ module Hive
           when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
-          when "invalid_predecessor" then :invalid_predecessor
           else :attempt_deferred
           end
         else
@@ -1862,8 +1861,6 @@ module Hive
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
           [ "hive", "durable worker launch handoff failed" ]
-        when :invalid_predecessor
-          [ "hive", "durable successor admission found an invalid predecessor" ]
         when :attempt_deferred
           [ "hive", "durable attempt admission was deferred" ]
         when :global_cap
@@ -3444,17 +3441,24 @@ module Hive
           outcome = @lost_outcome_store.fetch(attempt_id)
           next unless outcome
 
-          case outcome["status"]
-          when "successor_dispatched"
-            successor_id = outcome["successor_attempt_id"].to_s
-            next if successor_id.empty? || successor_id == attempt_id
+          case outcome["phase"]
+          when "complete"
+            request_id = outcome["request_id"].to_s
+            next if request_id.empty? || !@attempt_reconciler&.respond_to?(:store)
+
+            replacement_id = @attempt_reconciler.store.attempt_id_for_request(
+              request_id: request_id
+            ).to_s
+            next if replacement_id.empty? || replacement_id == attempt_id
+            replacement = @attempt_reconciler.fetch(replacement_id)
+            next unless replacement
 
             dispatch_repository.update_claim(
               delivery.request.request_id,
               pid: delivery.claim["pid"],
               process_start_time: delivery.claim["process_start_time"],
-              attempt_id: successor_id,
-              task_generation: outcome["task_generation"],
+              attempt_id: replacement.attempt_id,
+              task_generation: replacement.task_generation,
               state_home: dispatch_request_state_home,
               now: now
             )
@@ -3728,7 +3732,6 @@ module Hive
           update_id: nil,
           trigger: trigger,
           task_generation: nil,
-          predecessor_attempt_id: nil,
           inherited_outputs: [],
           schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION
         )

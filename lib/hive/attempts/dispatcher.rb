@@ -52,7 +52,7 @@ module Hive
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
-                   interactive: false, generation: nil, predecessor_attempt_id: nil,
+                   interactive: false, generation: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
                    admission_view: nil, routing_policy: nil, cohort_release: false,
                    replay_semantic_terminal: false)
@@ -65,63 +65,46 @@ module Hive
         result = admit(
           task: task, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
-          predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          successor_of: nil, now: now, admission_view: admission_view,
+          recovery_source_attempt_id: nil, now: now, admission_view: admission_view,
           routing_policy: policy, cohort_release: cohort_release,
           replay_semantic_terminal: replay_semantic_terminal,
           failed_route_id: nil
         )
-        return result unless superseding_loss?(result)
-
-        # A lost attempt blocks admission until an explicit successor exists,
-        # but nothing mints that successor on its own: the daemon's recovery
-        # request carries no predecessor, and an operator's `hive run` carries
-        # none either. Left alone the task re-blocks every tick, forever. Adopt
-        # the loss as the predecessor so generation and inherited outputs are
-        # preserved. Racing successors
-        # are not a concern — admission is serialized, and a second one is
-        # refused by the `successor_exists` gate inside `admit`.
-        dispatch_successor(
-          predecessor: result.attempt, task: task, project: project, argv: argv,
-          request_id: request_id, provider: provider, interactive: interactive,
-          now: now, admission_view: admission_view, routing_policy: policy,
-          cohort_release: cohort_release
-        )
+        result
       end
 
-      def dispatch_successor(predecessor:, task:, project:, argv:, request_id:, provider:,
-                             inherited_outputs: nil, retry_charge: nil, interactive: false,
-                             now: @clock.call, admission_view: nil, routing_policy: nil,
-                             cohort_release: false)
+      def dispatch_recovery(source_attempt:, task:, project:, argv:, request_id:, provider:,
+                            inherited_outputs: nil, retry_charge: nil, interactive: false,
+                            now: @clock.call, admission_view: nil, routing_policy: nil,
+                            cohort_release: false)
         @launcher.preflight!
         generation = Generation.resolve(
           task: task,
           project: project,
-          intended_stage: predecessor["intended_stage"],
-          # A recovery successor retains the predecessor's logical generation
-          # while fencing its worker to the exact post-recovery-clear task
-          # bytes admitted now.
+          intended_stage: source_attempt["intended_stage"],
+          # Recovery retains the logical generation while fencing the fresh,
+          # independent worker to the exact post-clear task bytes admitted now.
           progress_token: Generation.artifact_token(task),
-          task_generation: predecessor.task_generation,
-          task_input_epoch: predecessor.task_input_epoch
+          task_generation: source_attempt.task_generation,
+          task_input_epoch: source_attempt.task_input_epoch
         )
         inherited = if inherited_outputs.nil? || inherited_outputs.empty?
-          (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
+          (source_attempt["inherited_outputs"] + source_attempt["current_outputs"]).uniq
         else
           inherited_outputs
         end
         admit(
           task: task, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
-          predecessor_attempt_id: predecessor.attempt_id,
           inherited_outputs: inherited,
-          retry_charge: retry_charge.nil? ? predecessor["retry_charge"] : retry_charge,
-          successor_of: predecessor.attempt_id, now: now,
+          retry_charge: retry_charge.nil? ? source_attempt["retry_charge"] : retry_charge,
+          recovery_source_attempt_id: source_attempt.state == "lost" ? source_attempt.attempt_id : nil,
+          now: now,
           admission_view: admission_view,
-          routing_policy: routing_policy || resolve_routing_policy(task, predecessor["intended_stage"]),
+          routing_policy: routing_policy || resolve_routing_policy(task, source_attempt["intended_stage"]),
           cohort_release: cohort_release,
-          failed_route_id: failed_route_id_for(predecessor)
+          failed_route_id: failed_route_id_for(source_attempt)
         )
       end
 
@@ -130,16 +113,15 @@ module Hive
       # caller owns hook enabled/cursor/deduplication serialization; this
       # method owns host-wide attempt capacity and durable process handoff.
       def dispatch_module_hook(generation:, subject:, argv:, request_id:, provider:,
-                               interactive: false, predecessor_attempt_id: nil,
+                               interactive: false,
                                inherited_outputs: [], retry_charge: 0, now: @clock.call,
                                project_root: nil, admission_view: nil, routing_policy: nil)
         @launcher.preflight!
         admit(
           task: nil, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
-          predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          successor_of: nil, subject: subject, now: now,
+          recovery_source_attempt_id: nil, subject: subject, now: now,
           admission_view: admission_view,
           routing_policy: routing_policy || resolve_routing_policy(nil, generation.intended_stage),
           failed_route_id: nil
@@ -155,16 +137,15 @@ module Hive
           progress_token: command_progress_token(request.argv, task),
           task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
         )
-        predecessor_id = request.respond_to?(:predecessor_attempt_id) ? request.predecessor_attempt_id : nil
-        predecessor = predecessor_id && @store.fetch(predecessor_id)
-        return dispatch_successor(
-          predecessor: predecessor, task: task, project: request.project, argv: request.argv,
+        source_attempt = recovery_source_attempt(request)
+        return dispatch_recovery(
+          source_attempt: source_attempt, task: task, project: request.project, argv: request.argv,
           request_id: request.request_id, provider: provider_for(task),
           inherited_outputs: request.inherited_outputs,
           retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view,
           cohort_release: explicit_cohort_release?(request)
-        ) if successor_predecessor?(predecessor)
+        ) if recoverable_source_attempt?(source_attempt)
 
         dispatch(
           task: task, project: request.project, intended_stage: intended_stage,
@@ -180,7 +161,7 @@ module Hive
       private
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
-                predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
+                inherited_outputs:, retry_charge:, recovery_source_attempt_id:, now:,
                 subject: nil, admission_view: nil, routing_policy:, cohort_release: false,
                 replay_semantic_terminal: false, failed_route_id: nil)
         created = nil
@@ -202,7 +183,19 @@ module Hive
         end
 
         exact = records.select { |record| record.task_generation == generation.task_generation }
-        terminal = if successor_of.nil?
+        request_attempt = view.request_attempt(request_id: request_id)
+        if request_attempt&.live?
+          return live_result(request_attempt, interactive: interactive)
+        elsif request_attempt&.state == "terminal"
+          return DispatchResult.new(
+            status: :terminal_replay, attempt: request_attempt,
+            receipt: request_attempt.receipt, attach_descriptor: nil, reason: nil
+          )
+        elsif request_attempt&.state == "lost"
+          return deferred_result("attempt_lost", attempt: request_attempt)
+        end
+
+        terminal = unless recovery_source_attempt_id
           replayable_terminal(
             exact, request_id, task: task, admission_view: view,
             generation: generation, subject: subject,
@@ -229,20 +222,7 @@ module Hive
         lost = unresolved_lost_attempt(
           admission_view: view, generation: generation, subject: subject
         )
-        predecessor = successor_of &&
-                      view.find(successor_of)
-        if successor_of && !successor_predecessor?(predecessor)
-          return deferred_result("invalid_predecessor", attempt: predecessor)
-        end
-        existing_successor = successor_of && view.successor(
-          predecessor_attempt_id: successor_of
-        )
-        if existing_successor
-          return existing_successor.live? ?
-            live_result(existing_successor, interactive: interactive) :
-            deferred_result("successor_exists", attempt: existing_successor)
-        end
-        if successor_of.nil? && lost
+        if recovery_source_attempt_id.nil? && lost
           return deferred_result("attempt_lost", attempt: lost)
         end
 
@@ -272,7 +252,7 @@ module Hive
         launching_attributes = {
           view: view,
           request_id: request_id,
-          predecessor_attempt_id: predecessor_attempt_id,
+          recovery_source_attempt_id: recovery_source_attempt_id,
           task: task,
           generation: generation,
           argv: argv,
@@ -397,7 +377,6 @@ module Hive
           ],
           payload: {
             "provider" => attempt["provider"],
-            "predecessor_attempt_id" => attempt["predecessor_attempt_id"],
             "state" => attempt.state
           }
         )
@@ -484,21 +463,12 @@ module Hive
         Hive::Stages::Brainstorm.artifact_valid?(task.state_file)
       end
 
-      # Only an unresolved loss is adoptable; every other deferral keeps its
-      # meaning (capacity, successor_exists, invalid_predecessor).
-      def superseding_loss?(result)
-        result.status == :deferred &&
-          result.reason == "attempt_lost"
-      end
-
       def coding_brainstorm?(task)
         Hive::Workflows.coding_id?(task.respond_to?(:workflow) ? task.workflow : nil)
       end
 
-      # A lost attempt blocks ordinary admission only until its explicit
-      # successor exists. Once that descendant terminalizes unsuccessfully, a
-      # new error-retry request must not be trapped behind the older resolved
-      # loss forever.
+      # A lost attempt blocks ordinary admission until its independent recovery
+      # admission atomically records the source phase as complete.
       def unresolved_lost_attempt(admission_view:, generation:, subject: nil)
         admission_view.unresolved_loss(
           task_generation: generation.task_generation,
@@ -506,14 +476,14 @@ module Hive
         )
       end
 
-      def successor_predecessor?(record)
+      def recoverable_source_attempt?(record)
         return false unless record
         return true if record.state == "lost"
 
-        provider_failure_predecessor?(record)
+        provider_failure_source?(record)
       end
 
-      def provider_failure_predecessor?(record)
+      def provider_failure_source?(record)
         return false unless record.state == "terminal" && record.outcome == "failed"
         return false unless record.explicit_routing?
 
@@ -521,7 +491,7 @@ module Hive
       end
 
       def failed_route_id_for(record)
-        return unless provider_failure_predecessor?(record)
+        return unless provider_failure_source?(record)
 
         record["routing"].dig("route", "route_id")
       end
@@ -530,6 +500,13 @@ module Hive
         return nil unless request.respond_to?(:recovery) && request.recovery.is_a?(Hash)
 
         request.recovery["retry_count"]
+      end
+
+      def recovery_source_attempt(request)
+        return unless request.respond_to?(:recovery) && request.recovery.is_a?(Hash)
+
+        attempt_id = request.recovery.dig("source_receipt", "attempt_id")
+        attempt_id && @store.fetch(attempt_id)
       end
 
       def task_subject(generation)
@@ -717,7 +694,7 @@ module Hive
         )
       end
 
-      def persist_launching_attempt(view:, attempt_id:, request_id:, predecessor_attempt_id:,
+      def persist_launching_attempt(view:, attempt_id:, request_id:, recovery_source_attempt_id:,
                                     task:, generation:, argv:, provider:, routing:,
                                     claim_capability:, retry_charge:, inherited_outputs:,
                                     subject:, now:, admission:, cohort_identity:,
@@ -732,7 +709,7 @@ module Hive
         @store.create_launching(
           attempt_id: attempt_id,
           request_id: request_id,
-          predecessor_attempt_id: predecessor_attempt_id,
+          recovery_source_attempt_id: recovery_source_attempt_id,
           task_id: generation.task_id&.to_s,
           project: generation.project,
           task_slug: generation.task_slug,

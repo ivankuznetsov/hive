@@ -1,13 +1,26 @@
 <% frame_parts = [project.name, task.slug] %>
 <% frame_parts << reference_sha256 if reference_sha256.present? %>
-<%= turbo_frame_tag stable_dom_id("task-log", *frame_parts),
+<% log_id = stable_dom_id("task-log", *frame_parts) %>
+<%= turbo_frame_tag log_id,
       data: { controller: "poll", poll_interval_value: 3000 } do %>
-  <div class="log-pane">
+  <div class="log-pane" data-controller="task-log">
     <% if log %>
-      <%# data-tail-follow: the poll controller pins this pane to its bottom
-          (tail -f) and pauses reloads while it is scrolled up for reading. %>
-      <pre data-tail-follow><% log["tail"].each_line do |line| %><span class="<%= log_line_class(line) %>"><%= line %></span><% end %></pre>
-      <p class="faint"><%= File.basename(log["path"]) %></p>
+      <% entries = task_log_entries(log["tail"]) %>
+      <div class="task-log-filters">
+        <label for="<%= log_id %>-filter">Show</label>
+        <select id="<%= log_id %>-filter" data-task-log-target="filter" data-action="change->task-log#filter">
+          <option value="all">All activity</option>
+          <option value="messages">Agent messages</option>
+          <option value="tools">Tools</option>
+          <option value="errors">Errors</option>
+        </select>
+        <label class="task-log-search" for="<%= log_id %>-search">Find in log</label>
+        <input id="<%= log_id %>-search" type="search" placeholder="Search messages…" data-task-log-target="search" data-action="input->task-log#filter">
+      </div>
+      <%# Keep the bounded poller's tail-follow/reading pause behavior. %>
+      <pre class="task-log-entries" data-tail-follow><% entries.each do |entry| %><span class="task-log-entry <%= "log-error" if entry[:kind] == "errors" %>" data-task-log-target="entry" data-kind="<%= entry[:kind] %>"><span class="task-log-label"><%= entry[:time] %> <%= entry[:label] %></span><span class="task-log-message"><%= entry[:text] %></span></span><% end %></pre>
+      <p class="muted" data-task-log-target="empty" <%= "hidden" if entries.any? %>>No messages match this view.</p>
+      <p class="faint">Recent output. Scroll up or search to pause updates.</p>
     <% else %>
       <p class="muted">No log yet for this task.</p>
     <% end %>

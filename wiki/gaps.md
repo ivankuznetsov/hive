@@ -1463,3 +1463,10 @@ Automatic recovery requires successful process and open-file probes (`ps` and
 nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
+
+## Hive Web readable logs depend on persisted messages (2026-09-04)
+
+Durable logs deliberately omit some structured provider messages for secret
+safety. The readable log view cannot recover message text that was never
+persisted; it hides omission markers instead of presenting them as errors.
+Plain output and safely available supported message records remain readable.

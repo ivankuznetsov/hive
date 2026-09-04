@@ -146,7 +146,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".task-closure", text: /already delivered/
     assert_select ".task-closure a[href='https://github.com/acme/app/pull/42']",
                   text: /42/
-    assert_select ".task-closure code", text: "d" * 64
+    assert_select ".task-closure code", count: 0
   end
 
   test "an archive link resolves a task omitted from the ordinary snapshot" do
@@ -278,6 +278,9 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".plan-review", text: /mandatory.*awaiting decision/m
     assert_select ".plan-review", text: /2 complete.*1 failed/m
     assert_select ".plan-review", text: /grok-build.*grok-4.6/m
+    assert_select "details[data-workspace-disclosure-key='review-details']:not([open]) .plan-review-summary"
+    assert_select "details[data-workspace-disclosure-key='review-routes']:not([open]) table"
+    assert_select "details[data-workspace-disclosure-key='review-audit']:not([open]) .plan-review-artifact"
     assert_select ".plan-review-findings > li", 2
     assert_select "form[action=?] input[name=expected_artifact_digest][value=?]",
                   "/tasks/#{@project}/#{@slug}/plan-review", "e" * 64, minimum: 4
@@ -633,6 +636,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "a[href='https://developers.openai.com/api/docs/models/gpt-5.6-sol']", 1
     refute_includes response.body, "private-session-id"
     refute_includes response.body, "private-attempt-id"
+    %w[Canonical\ action Action\ availability State\ quality].each { |label| refute_includes response.body, label }
+    assert_select "#workspace-dependencies", 0
     refute_includes response.body, "provider_reported_cost"
   end
 
@@ -1494,24 +1499,24 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
-    assert_select "#workspace-summary-heading",
-                  text: semantic.dig("headline", "label")
-    assert_select "#workspace-usage", 1
+    assert_select "#workspace-summary-heading", text: "Ready"
+    assert_select "#workspace-summary", text: /Current step.*Inbox/m
+    assert_select "#workspace-usage", 0
     assert_select "#workspace-primary-result[data-primary-artifact=?]",
                   semantic.dig("result", "primary", "reference")
     %w[attempts provenance timeline artifacts].each do |panel|
       assert_select "#workspace-#{panel}", 0, "#{panel} must stay on v1/audit routes"
     end
-    assert_select "turbo-frame[id^='task-diff-'][data-turbo-permanent]", 1
-    assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
+    assert_select "turbo-frame[id^='task-diff-']", 0
+    assert_select "turbo-frame[id^='task-publication-']", 0
     assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent]", count: 0
     assert_select "turbo-frame[id^='task-publication-'][src]", count: 0
     assert_select "turbo-frame[id^='task-timeline-inspection-']", 0
     assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
     assert_operator response.body.index('id="workspace-summary"'), :<,
-                    response.body.index('id="workspace-usage"')
-    assert_operator response.body.index('id="workspace-usage"'), :<,
                     response.body.index('id="workspace-primary-result"')
+    %w[Canonical\ action Action\ availability State\ quality].each { |label| refute_includes response.body, label }
+    assert_select "#workspace-dependencies", 0
     refute_includes response.body, "provider_reported_cost"
     refute_includes response.body, "agent_start"
     refute_includes response.body, "agent_end"
@@ -1525,7 +1530,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     get task_path(@project, @slug)
 
     assert_response :success
-    assert_select "#workspace-publication.workspace-state-unavailable", text: /Unavailable/i
+    assert_select "#workspace-publication", 0, "no publication panel without a worktree or PR"
     assert_select "#workspace-primary-result[data-primary-artifact='idea.md']", 1
     assert_select ".advanced form", minimum: 1
   ensure

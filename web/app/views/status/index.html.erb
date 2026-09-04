@@ -73,15 +73,31 @@
 <div class="status-view-toolbar">
   <div>
     <h1><%= @status_view.titleize %></h1>
-    <p class="muted">The same live Hive tasks, arranged for scanning or flow.</p>
+    <p class="muted">What is running, what needs you, and what is ready to continue.</p>
   </div>
   <%= render "status/view_switch", status_view: @status_view %>
 </div>
 
+<% unless @status_page_snapshot.unavailable? %>
+  <nav class="task-state-filters" aria-label="Task state">
+    <% { nil => "All tasks" }.merge(TaskDisplay::STATES).each do |state, label| %>
+      <% count = state ? @task_counts.fetch(state, 0) : @task_counts.values.sum %>
+      <% next if count.zero? && state && state != "running" && state != @task_state %>
+      <%= link_to url_for(request.query_parameters.merge("state" => state)),
+            class: class_names("task-state-filter", "active": state == @task_state),
+            aria: { current: ("page" if state == @task_state) } do %>
+        <%= label %> <strong><%= count %></strong>
+      <% end %>
+    <% end %>
+  </nav>
+<% end %>
+
 <% if @status_page_snapshot.unavailable? %>
   <div class="empty-state status-content-unavailable">
-    <p>Fleet state will appear after the next successful refresh.</p>
+    <p>Tasks will appear when live status is available.</p>
   </div>
+<% elsif @task_state && @visible_projects.empty? %>
+  <div class="empty-state"><p>No tasks in this state.</p></div>
 <% elsif @status_view == "board" %>
   <%= render "status/board", board: @board, status_fresh: @status_fresh %>
 <% else %>

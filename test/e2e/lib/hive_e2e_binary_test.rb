@@ -209,7 +209,8 @@ class E2EBinaryTest < Minitest::Test
         hive_e2e, "run", "--filter", "incident-regression"
       )
 
-      assert status.success?, "#{err}\n#{out}"
+      reports = Dir[File.join(runs_dir, "*", "report.json")].map { |path| File.read(path) }
+      assert status.success?, ([ err, out ] + reports).join("\n")
       assert_match(/selected 6, executed 3, pending 3, passed 3, failed 0/, out)
     end
   end

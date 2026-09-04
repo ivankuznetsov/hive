@@ -63,6 +63,29 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_request_identity_replays_a_live_attempt_across_task_generations
+    with_dispatcher do |dispatcher, launcher, task|
+      first = dispatch(dispatcher, task, request_id: "shared-request")
+      other = task_fixture(task_state_root(task), id: 43, slug: "other-task")
+
+      replay = dispatch(dispatcher, other, request_id: "shared-request")
+
+      assert_equal :existing_live, replay.status
+      assert_equal first.attempt.attempt_id, replay.attempt.attempt_id
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_terminal_provider_failure_is_a_recoverable_source
+    with_dispatcher do |dispatcher, _launcher, _task|
+      record = Struct.new(:state, :outcome, :receipt) do
+        def explicit_routing? = true
+      end.new("terminal", "failed", { "provider_evidence" => {} })
+
+      assert dispatcher.send(:recoverable_source_attempt?, record)
+    end
+  end
+
   def test_claim_window_starts_after_prelaunch_context_capture
     wall_time = NOW
     context_provenance = Object.new
@@ -445,6 +468,9 @@ class AttemptsDispatcherTest < Minitest::Test
       )
       failed = terminalize_attempt(
         store, launcher, repair, outcome: "failed", exit_status: 1, now: NOW + 6
+      )
+      assert_equal failed, dispatcher.send(
+        :replayable_terminal, [ failed ], "request-two", task: task
       )
 
       replay = dispatch(

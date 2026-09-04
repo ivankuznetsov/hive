@@ -203,6 +203,38 @@ class AttemptsCoordinationTest < Minitest::Test
       assert_raises(Hive::Attempts::RepositoryError) do
         repository.record_failure_cohort_success(attempt_id: "\n", date: NOW.to_date)
       end
+
+      live = create(repository, attempt_id: "other-live", task_slug: "other-live")
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_failure_cohort_success(
+          attempt_id: live.attempt_id, date: NOW.to_date
+        )
+      end
+    end
+  end
+
+  def test_failure_fact_conflicts_and_storage_errors_fail_closed
+    with_repository do |repository|
+      attempt = create(repository, attempt_id: "failure", task_slug: "task")
+      lost = repository.mark_lost(attempt, reason: "agent_failed", now: NOW)
+      repository.record_failure_cohort(
+        attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW
+      )
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_failure_cohort(
+          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW + 1
+        )
+      end
+
+      repository.database.define_singleton_method(:transaction) do |**|
+        raise Sequel::DatabaseError, "write failed"
+      end
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.record_failure_cohort(
+          attempt_id: lost.attempt_id, identity: failure_identity, occurred_at: NOW
+        )
+      end
+      assert_match(/could not be recorded/, error.message)
     end
   end
 

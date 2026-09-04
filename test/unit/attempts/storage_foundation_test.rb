@@ -95,6 +95,43 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  def test_lost_capture_and_publication_boundaries_fail_closed
+    with_repository do |repository|
+      launching = launching_attempt(repository)
+      lost = repository.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.seal_lost_capture_payloads(launching, [])
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.seal_lost_capture_payloads(
+          lost, [ { "path" => "open/other/dirty-state/file", "size" => 0,
+                    "sha256" => "0" * 64 } ]
+        )
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.seal_lost_capture_payloads(lost, [ { "path" => "bad" } ])
+      end
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.acknowledge_publication("missing", consumer: "journal")
+      end
+    end
+  end
+
+  def test_publication_promotion_translates_storage_errors
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      repository.database.define_singleton_method(:transaction) do |**|
+        raise Sequel::DatabaseError, "write failed"
+      end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.finish_publication(terminal.attempt_id)
+      end
+      assert_match(/could not be promoted/, error.message)
+    end
+  end
+
   def test_sealed_payload_identity_conflict_is_rejected
     with_repository do |repository|
       terminal = terminal_attempt(repository)
@@ -156,17 +193,7 @@ class AttemptsStorageFoundationTest < Minitest::Test
   end
 
   def terminal_attempt(repository)
-    launching = repository.create_launching(
-      attempt_id: "attempt-1", request_id: "request-1",
-      task_id: "42", project: "demo", task_slug: "task",
-      intended_stage: "4-execute", task_generation: "generation-1",
-      ownership_generation: "owner-1", task_input_epoch: 1,
-      progress_token: "progress-1", provider: "codex",
-      worker_argv: [ "hive", "run", "task" ],
-      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 30, now: NOW
-    )
+    launching = launching_attempt(repository)
     claimed = repository.claim(
       launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
       first_heartbeat_timeout_sec: 30, now: NOW + 1
@@ -177,6 +204,20 @@ class AttemptsStorageFoundationTest < Minitest::Test
       final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
       log_reference: { "path" => "open/attempt-1.frames", "size" => 0, "sha256" => "0" * 64 },
       now: NOW + 3
+    )
+  end
+
+  def launching_attempt(repository)
+    repository.create_launching(
+      attempt_id: "attempt-1", request_id: "request-1",
+      task_id: "42", project: "demo", task_slug: "task",
+      intended_stage: "4-execute", task_generation: "generation-1",
+      ownership_generation: "owner-1", task_input_epoch: 1,
+      progress_token: "progress-1", provider: "codex",
+      worker_argv: [ "hive", "run", "task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: NOW
     )
   end
 

@@ -523,6 +523,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_equal [ 3, 3 ], @coordinator.retry_delay_counts
   end
 
+  def test_attempt_loss_with_an_invalid_retry_time_is_not_due
+    attempt = { "retry_charge" => 1, "loss" => { "at" => "invalid" } }
+    outcome = { "revision" => 2, "updated_at" => "invalid" }
+
+    refute @healer.send(:attempt_loss_retry_due?, attempt, outcome, now: NOW)
+  end
+
   def test_cooldown_and_safety_are_decided_only_by_coordinator
     with_error_marker do |row, state_file|
       @coordinator.assessment_result = {

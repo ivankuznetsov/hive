@@ -4,6 +4,18 @@ require "hive/runtime_control_plane/dispatch_repository"
 class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
   include HiveTestHelper
 
+  class ZeroUpdateDataset
+    def initialize(dataset) = @dataset = dataset
+    def where(*args, **kwargs) = self.class.new(@dataset.where(*args, **kwargs))
+    def first = @dataset.first
+    def update(*) = 0
+  end
+
+  class ZeroUpdateDatabase
+    def initialize(database) = @database = database
+    def [](table) = table == :dispatch_requests ? ZeroUpdateDataset.new(@database[table]) : @database[table]
+  end
+
   NOW = Time.utc(2026, 8, 29, 12)
 
   def test_only_the_evidence_rework_subcommand_is_dispatchable
@@ -88,6 +100,37 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
 
       assert_equal :dispatch_result_conflict, error.code
       assert_equal 0, repository.pending_results.fetch(0).exit_code
+    end
+  end
+
+  def test_result_write_requires_the_request_and_detects_revision_loss
+    with_repository do |repository|
+      missing = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_result!(
+          chat_id: nil, project: "hive", slug: "sqlite-cutover",
+          request_id: "missing", exit_code: 0, command: "hive run sqlite-cutover",
+          now: NOW
+        )
+      end
+      assert_equal :dispatch_result_request_missing, missing.code
+
+      repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "raced", now: NOW
+      )
+      database = repository.database
+      original = database.method(:transaction)
+      database.define_singleton_method(:transaction) do |**kwargs, &block|
+        original.call(**kwargs) { |db| block.call(ZeroUpdateDatabase.new(db)) }
+      end
+      raced = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_result!(
+          chat_id: nil, project: "hive", slug: "sqlite-cutover",
+          request_id: "raced", exit_code: 0, command: "hive run sqlite-cutover",
+          now: NOW
+        )
+      end
+      assert_equal :dispatch_update_conflict, raced.code
     end
   end
 

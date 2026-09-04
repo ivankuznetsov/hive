@@ -191,6 +191,17 @@ class PatrolLaunchBudgetTest < Minitest::Test
     assert_equal "usage_store_unavailable", subject.resource_exhaustion.fetch(:reason)
   end
 
+  def test_discovery_reservation_fails_closed_when_token_history_write_fails
+    usage = Object.new
+    usage.define_singleton_method(:reserve_patrol_discovery!) do |**|
+      raise IOError, "write failed"
+    end
+    subject = budget(engine: :ordinary, usage_db: usage)
+
+    refute acquire(subject, "patrol-review", id: "failed-reservation")
+    assert_equal "usage_store_unavailable", subject.resource_exhaustion.fetch(:reason)
+  end
+
   def test_unknown_exhaustion_message_and_failed_telemetry_are_nonfatal
     subject = budget(engine: :ordinary)
     assert_match(/blocked \(unknown\)/, subject.exhaustion_message)

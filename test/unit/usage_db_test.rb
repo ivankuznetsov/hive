@@ -398,7 +398,56 @@ class UsageDbTest < Minitest::Test
       assert_equal 1, Hive::UsageDb.patrol_discovery_count(
         project_slug: "alpha", stage: "refactor-patrol-review", at: now
       )
+      assert_equal 1, Hive::UsageDb.patrol_discovery_count(
+        project_slug: "alpha", stage: "patrol-review", at: now.iso8601
+      )
     end
+  end
+
+  def test_patrol_reservations_fail_closed_on_identity_and_storage_errors
+    with_usage_db do
+      Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "same-session", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2
+      )
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::UsageDb.reserve_patrol_discovery!(
+          session_id: "same-session", agent: "codex", project_slug: "other",
+          stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2
+        )
+      end
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.reserve_patrol_discovery!(
+          session_id: "", agent: "codex", project_slug: "alpha",
+          stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2
+        )
+      end
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.patrol_discovery_count(
+          project_slug: "", stage: "patrol-review", at: Time.utc(2026, 8, 20, 12)
+        )
+      end
+    end
+
+    broken = Object.new
+    broken.define_singleton_method(:transaction) { |**| raise IOError, "write failed" }
+    error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+      Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "session", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2,
+        database: broken
+      )
+    end
+    assert_equal :usage_persistence_failed, error.code
+
+    broken.define_singleton_method(:read) { |**| raise IOError, "read failed" }
+    error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+      Hive::UsageDb.patrol_discovery_count(
+        project_slug: "alpha", stage: "patrol-review",
+        at: Time.utc(2026, 8, 20, 12), database: broken
+      )
+    end
+    assert_equal :usage_read_failed, error.code
   end
 
   def test_session_merge_preserves_the_first_authoritative_billing_evidence

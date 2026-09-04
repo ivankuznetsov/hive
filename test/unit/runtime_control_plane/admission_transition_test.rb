@@ -406,6 +406,38 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_admission_rejects_unselectable_routes_and_missing_sealed_inheritance
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, health|
+      policy = explicit_policy(max_concurrent: 1)
+      saturated = Hive::ProviderRouting::Router.new.call(
+        request: Hive::ProviderRouting::Request.new(
+          policy: policy, task_generation: "generation-1",
+          capacity: { "account-a" => { "observed" => 1, "max" => 1 } }
+        ),
+        decision_id: "saturated", decided_at: NOW
+      )
+      assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(attempts, health, policy, saturated, suffix: 1)
+      end
+
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-1", expected_stage: "4-execute", now: NOW
+      )
+      selected = decision(policy, health, "generation-1")
+      missing = {
+        "path" => "sealed/sha256/aa/#{'a' * 64}", "sha256" => "a" * 64, "size" => 1
+      }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(
+          attempts, health, policy, selected, suffix: 1,
+          inherited_outputs: [ missing ]
+        )
+      end
+    end
+  end
+
   private
 
   def race_lost_healers(path:, payload_root:, source_attempt_id:)
@@ -558,7 +590,8 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
-  def create_routed_attempt(attempts, _health, _policy, route_decision, suffix:)
+  def create_routed_attempt(attempts, _health, _policy, route_decision, suffix:,
+                            inherited_outputs: [])
     attempts.create_launching(
       attempt_id: "attempt-#{suffix}", request_id: "request-#{suffix}",
       task_id: "task-#{suffix}", project: "demo",
@@ -567,7 +600,8 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       task_input_epoch: 1, progress_token: "source-#{suffix}", provider: "codex",
       worker_argv: [ "hive", "run", "task-#{suffix}" ],
       claim_capability_digest: CLAIM_DIGEST, starting_revision: "a" * 40,
-      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW,
+      retry_charge: 0, inherited_outputs: inherited_outputs,
+      launch_timeout_sec: 30, now: NOW,
       limits: { max_global: 10, max_per_project: 10, max_daily: 10 },
       route_decision: route_decision
     )

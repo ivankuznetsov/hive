@@ -447,20 +447,6 @@ module Hive
         end
       end
 
-      def annotate_lost(observed, output_references:, diagnostics:, now:)
-        mutate(observed, allowed_states: [ "lost" ]) do |data|
-          outputs = (data.fetch("current_outputs") + Hive::StringifyKeys.call(output_references)).uniq
-          outputs.each { |reference| OutputReference.validate_shape!(reference) }
-          data.merge(
-            "lease_version" => data.fetch("lease_version") + 1,
-            "current_outputs" => outputs,
-            "diagnostics" => data.fetch("diagnostics").merge(
-              Hive::StringifyKeys.call(diagnostics).merge("loss_processed_at" => Record.iso8601(now))
-            )
-          )
-        end
-      end
-
       private
 
       def validate_capacity!(db, record, limits)

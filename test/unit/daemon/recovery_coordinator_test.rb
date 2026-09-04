@@ -1883,6 +1883,115 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_provider_marker_binds_to_its_exact_terminal_receipt
+    marker_attrs = {
+      "reason" => "provider_route_failed", "attempt_id" => "attempt-1",
+      "task_generation" => "generation-1", "ownership_generation" => "owner-1",
+      "provider_account_id" => "account-a", "route_id" => "account-a/model-a"
+    }
+    marker = Struct.new(:attrs).new(marker_attrs)
+    task = FakeTask.new(
+      id: 817, slug: "demo-task", folder: "/project/task", state_file: "/project/task.md",
+      stage_index: 4, stage_name: "execute"
+    )
+    values = {
+      "project" => "hive", "task_slug" => task.slug, "task_id" => task.id.to_s,
+      "intended_stage" => "4-execute",
+      "routing" => {
+        "mode" => "explicit",
+        "route" => {
+          "provider_account_id" => "account-a", "route_id" => "account-a/model-a"
+        }
+      }
+    }
+    terminal = Object.new
+    terminal.define_singleton_method(:state) { "terminal" }
+    terminal.define_singleton_method(:explicit_routing?) { true }
+    terminal.define_singleton_method(:task_generation) { "generation-1" }
+    terminal.define_singleton_method(:ownership_generation) { "owner-1" }
+    terminal.define_singleton_method(:attempt_id) { "attempt-1" }
+    terminal.define_singleton_method(:final?) { true }
+    terminal.define_singleton_method(:[]) { |key| values[key] }
+    terminal.define_singleton_method(:receipt) do
+      {
+        "outcome" => "failed", "provider_evidence" => {},
+        "receipt_version" => 1, "terminal_lease_version" => 3
+      }
+    end
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_attempt_id| terminal }
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: Dir.tmpdir, attempt_store: store, dispatch_repository: Object.new
+    )
+
+    identity = coordinator.send(
+      :source_receipt_for, marker: marker, task: task, project: "hive"
+    )
+    assert_equal(
+      { "attempt_id" => "attempt-1", "receipt_version" => 1,
+        "terminal_lease_version" => 3 },
+      identity
+    )
+    row = Struct.new(:project, :stage).new("hive", "4-execute")
+    assert_equal 32, coordinator.send(
+      :deterministic_request_id, row, task, "marker-generation", "dispatch-generation",
+      source_receipt: identity
+    ).length
+
+    store.define_singleton_method(:fetch) do |_attempt_id|
+      raise Hive::Attempts::RepositoryError, "unavailable"
+    end
+    assert_nil coordinator.send(
+      :source_receipt_for, marker: marker, task: task, project: "hive"
+    )
+  end
+
+  def test_provider_recovery_derives_its_request_from_the_terminal_receipt
+    attrs = {
+      "reason" => "provider_route_failed", "marker_id" => "provider-marker",
+      "attempt_id" => "attempt-1", "task_generation" => "generation-1",
+      "ownership_generation" => "owner-1", "provider_account_id" => "account-a",
+      "route_id" => "account-a/model-a"
+    }
+    terminal = nil
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_attempt_id| terminal }
+    with_fixture(marker_attrs: attrs, attempt_store: store) do |coordinator, row, state_home|
+      values = {
+        "project" => "hive", "task_slug" => row.slug, "task_id" => "817",
+        "intended_stage" => "4-execute",
+        "routing" => {
+          "mode" => "explicit", "route" => {
+            "provider_account_id" => "account-a", "route_id" => "account-a/model-a"
+          }
+        }
+      }
+      terminal = Object.new
+      terminal.define_singleton_method(:state) { "terminal" }
+      terminal.define_singleton_method(:explicit_routing?) { true }
+      terminal.define_singleton_method(:task_generation) { "generation-1" }
+      terminal.define_singleton_method(:ownership_generation) { "owner-1" }
+      terminal.define_singleton_method(:attempt_id) { "attempt-1" }
+      terminal.define_singleton_method(:final?) { true }
+      terminal.define_singleton_method(:[]) { |key| values[key] }
+      terminal.define_singleton_method(:receipt) do
+        {
+          "outcome" => "failed", "provider_evidence" => {},
+          "receipt_version" => 1, "terminal_lease_version" => 3
+        }
+      end
+
+      result = coordinator.request(
+        row: row, requestor: "healer", request_id: "ignored", now: NOW
+      )
+
+      assert_equal "queued", result.status
+      request = Q.pending(state_home: state_home).fetch(0)
+      assert_equal "attempt-1", request.recovery.dig("source_receipt", "attempt_id")
+      refute_equal "ignored", request.request_id
+    end
+  end
+
   def test_markerless_admission_rechecks_task_marker_id_and_generation_under_lock
     changing_resolver = lambda do |task, _dir|
       calls = 0
@@ -2242,7 +2351,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def with_fixture(marker_attrs: nil, marker_name: "ERROR", mtime: NOW - 3600,
                    safety: nil, task_resolver_builder: nil, task_id: 817,
-                   generation_resolver: nil)
+                   generation_resolver: nil, attempt_store: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       project_root = File.join(dir, "project")
       folder = File.join(
@@ -2279,6 +2388,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       coordinator = Hive::Daemon::RecoveryCoordinator.new(
         state_home: dir,
         dispatch_repository: Q.repository(dir),
+        attempt_store: attempt_store,
         task_resolver: task_resolver,
         safety: safety || ->(_row) { [ true, "safe" ] },
         generation_resolver: generation_resolver || lambda do |resolved_task, project:, intended_stage:, state_file_content:|

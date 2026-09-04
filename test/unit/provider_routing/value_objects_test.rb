@@ -96,6 +96,7 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
     assert_empty policy.routes
     assert_nil policy.digest
     assert_nil policy.decision_id
+    assert_equal "hive-provider-routing-policy/v1", policy.to_h.fetch("schema")
   end
 
   def test_request_decision_and_canonical_values_reject_invalid_inputs

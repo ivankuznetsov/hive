@@ -480,6 +480,22 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     assert_equal [ lost ], refunded
   end
 
+  def test_maintenance_error_recording_survives_a_broken_logger
+    with_repository do |store|
+      logger = Object.new
+      logger.define_singleton_method(:event) { |*| raise IOError, "logger failed" }
+      subject = maintenance(store, logger: logger)
+
+      assert_nil subject.send(
+        :record_maintenance_error, IOError.new("sweep failed"),
+        now: NOW, attempt_id: "attempt-1"
+      )
+      assert_equal "IOError",
+                   subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+                     .fetch("last_error").fetch("class")
+    end
+  end
+
   private
 
   def with_repository

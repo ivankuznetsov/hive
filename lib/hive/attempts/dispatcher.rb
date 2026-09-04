@@ -410,18 +410,11 @@ module Hive
           ].compact
         end
         terminals = ordered_records(terminals)
-        same_request = terminals.select { |record| record["request_id"] == request_id }
         if brainstorm_artifact_missing?(task, terminals)
-          # A failed receipt remains idempotent for its request even before
-          # the legacy success is considered.
-          same_request_failure = same_request.reverse.find { |record| record.outcome != "succeeded" }
+          same_request_failure = terminals.reverse.find do |record|
+            record["request_id"] == request_id && record.outcome != "succeeded"
+          end
           return same_request_failure if same_request_failure
-        end
-
-        unless same_request.empty?
-          newest = same_request.last
-          return newest unless newest.outcome == "succeeded"
-          return newest if required_artifact_valid?(task, newest)
         end
 
         if replay_semantic_terminal && semantic_terminal&.outcome != "succeeded"

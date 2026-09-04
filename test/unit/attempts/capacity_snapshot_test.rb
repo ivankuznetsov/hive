@@ -77,6 +77,20 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
+  def test_legacy_attempts_count_against_the_only_default_account_for_their_adapter
+    account = Struct.new(:max_concurrent, :launch_binding, :adapter).new(2, "default", "codex")
+    record = Struct.new(:attempt_id, :provider, :routing) do
+      def [](key) = public_send(key)
+    end.new("attempt-1", "codex", { "mode" => "legacy" })
+
+    capacity = Hive::Attempts::CapacitySnapshot.provider_account_capacity(
+      accounts: { "codex-default" => account }, records: [ record ],
+      reserved_attempt_ids: [ record.attempt_id ]
+    )
+
+    assert_equal({ "observed" => 1, "max" => 2 }, capacity.fetch("codex-default"))
+  end
+
   private
 
   def with_repository

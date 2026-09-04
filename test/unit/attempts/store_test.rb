@@ -337,6 +337,22 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_recovery_admission_requires_a_ready_matching_source
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      lost = repository.mark_lost(launching, reason: "stale_generation", now: NOW + 1)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        repository.database.transaction do |db|
+          repository.admission_complete_lost_recovery_in(
+            db, source_attempt_id: lost.attempt_id,
+            request_id: "wrong-request", now: NOW + 2
+          )
+        end
+      end
+    end
+  end
+
   def test_existing_dispatch_request_must_match_the_attempt_identity
     with_repository do |repository|
       first = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)

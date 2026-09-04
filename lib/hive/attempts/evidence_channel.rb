@@ -100,8 +100,6 @@ module Hive
           "provenance" => provenance.freeze,
           "reset_hint_seconds" => hint
         }.freeze
-      rescue KeyError => error
-        raise RepositoryError, "attempt provider evidence rejected: #{error.class.name.split('::').last}"
       end
 
       def materialize(signal, record:, source_reference:)
@@ -174,8 +172,6 @@ module Hive
         case value
         when Hash
           value.keys.sort.to_h { |key| [ key, canonical_value(value.fetch(key)) ] }
-        when Array
-          value.map { |child| canonical_value(child) }
         else
           value
         end
@@ -186,8 +182,6 @@ module Hive
         case value
         when Hash
           value.to_h { |key, child| [ key.to_s.dup, deep_copy(child) ] }
-        when Array
-          value.map { |child| deep_copy(child) }
         when String
           value.dup
         else
@@ -200,8 +194,6 @@ module Hive
         case value
         when Hash
           value.each { |key, child| key.freeze; deep_freeze(child) }
-        when Array
-          value.each { |child| deep_freeze(child) }
         when String
           value.freeze
         end

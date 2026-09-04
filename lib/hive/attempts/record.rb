@@ -529,15 +529,6 @@ module Hive
           true
         end
 
-        def validate_optional_detail!(value, label, error_class)
-          return true if value.nil?
-          unless value.is_a?(String) && !value.empty? && value.bytesize <= MAX_DETAIL_BYTES &&
-                 value.valid_encoding? && !value.match?(/[\u0000-\u001f\u007f]/)
-            raise error_class, "#{label} is invalid"
-          end
-          true
-        end
-
         def validate_nonnegative_integer!(value, label, error_class)
           unless value.is_a?(Integer) && value >= 0
             raise error_class, "#{label} must be a non-negative integer"
@@ -550,10 +541,6 @@ module Hive
             raise error_class, "#{label} must be lowercase SHA-256"
           end
           true
-        end
-
-        def scope_identity(scope)
-          [ scope["kind"], scope["provider_account_id"], scope["model"] ]
         end
 
         def canonical_value(value)

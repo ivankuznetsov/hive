@@ -65,6 +65,17 @@ class AttemptsRecordTest < Minitest::Test
     legacy = Marshal.load(Marshal.dump(valid))
     legacy["routing"] = { "mode" => "legacy", "route" => valid.dig("routing", "route") }
     assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(legacy) }
+
+    [ nil, { "mode" => "future" } ].each do |routing|
+      assert_raises(Hive::Attempts::InvalidRecord) do
+        Hive::Attempts::Record.new(valid.merge("routing" => routing))
+      end
+    end
+    invalid_identifier = Marshal.load(Marshal.dump(valid))
+    invalid_identifier.dig("routing", "route")["route_id"] = ""
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(invalid_identifier)
+    end
   end
 
   def test_explicit_route_rejects_partial_or_unknown_billing_evidence
@@ -201,6 +212,7 @@ class AttemptsRecordTest < Minitest::Test
 
     invalid_evidence = [
       evidence.merge("message" => "raw secret"),
+      evidence.merge("fingerprint" => "bad"),
       evidence.merge("fingerprint" => "f" * 64),
       evidence.merge("route_id" => "another-route"),
       evidence.merge("provenance" => "stdout"),

@@ -82,11 +82,7 @@ module Hive
             lost_recovery_revision: row.fetch(:lost_recovery_revision) + 1,
             lost_recovery_updated_at: replacement.fetch("updated_at")
           )
-          unless changed == 1
-            fresh = db[:attempts].where(attempt_id: attempt.attempt_id).first
-            return parse(db, fresh) if fresh && equivalent_or_later?(parse(db, fresh), replacement)
-            raise RepositoryError, "lost recovery changed concurrently"
-          end
+          raise CompareAndSwapFailed, "lost recovery changed concurrently" unless changed == 1
           parse(db, db[:attempts].where(attempt_id: attempt.attempt_id).first)
         end
       rescue Sequel::Error, RuntimeControlPlane::Error => error
@@ -178,11 +174,6 @@ module Hive
           raise RepositoryError, "lost recovery request identity is invalid"
         end
         true
-      end
-
-      def equivalent_or_later?(fresh, requested)
-        PHASES.index(fresh.fetch("phase")) >= PHASES.index(requested.fetch("phase")) &&
-          fresh["cleanup"] == requested["cleanup"] && fresh["request_id"] == requested["request_id"]
       end
 
       def stringify(hash)

@@ -274,14 +274,7 @@ module Hive
       end
 
       def admission_from(row)
-        columns = %i[
-          admission_workflow admission_stage admission_runtime_digest admission_utc_date
-        ]
-        values = columns.map { |column| row[column] }
-        return nil if values.all?(&:nil?)
-        unless values.none?(&:nil?)
-          raise RepositoryError, "live capacity admission metadata is invalid"
-        end
+        return nil unless row[:admission_workflow]
 
         live_admission(
           "workflow" => row.fetch(:admission_workflow),
@@ -384,10 +377,6 @@ module Hive
           "status" => "blocked", "reason" => "failure_cohort_cooldown",
           "retry_at" => retry_at
         }.freeze
-      end
-
-      def semantic_key(generation, subject_json)
-        Digest::SHA256.hexdigest([ generation, subject_json ].join("\0"))
       end
 
       def date_value(value)

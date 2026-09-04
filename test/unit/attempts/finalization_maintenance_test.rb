@@ -293,30 +293,23 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
-  def test_runtime_wires_provider_health_and_dispatch_delivery_to_the_shared_database
+  def test_runtime_wires_dispatch_delivery_without_provider_health
     with_repository do |store|
       subject = Hive::Attempts::FinalizationMaintenance.runtime(store: store)
-      observer = subject.instance_variable_get(:@provider_health_observer_factory).call
       delivery = subject.instance_variable_get(:@delivery_pending)
 
-      assert_instance_of Hive::ProviderHealth::AttemptObserver, observer
+      refute subject.instance_variable_defined?(:@provider_health_observer_factory)
       refute delivery.call(Struct.new(:attempt_id).new("missing"))
     end
   end
 
-  def test_provider_health_and_delivery_fail_closed_on_collaborator_errors
-    record = Struct.new(:attempt_id) do
-      def explicit_routing? = true
-    end.new("attempt")
-    observer = Object.new
-    observer.define_singleton_method(:observe) { |_| raise Hive::ProviderHealth::Error, "bad" }
-    store = Object.new
+  def test_delivery_fails_closed_on_collaborator_errors
+    record = Struct.new(:attempt_id).new("attempt")
     subject = Hive::Attempts::FinalizationMaintenance.new(
-      store: store, provider_health_observer_factory: -> { observer },
+      store: Object.new,
       delivery_pending: ->(_) { raise Hive::Error, "bad" }
     )
 
-    refute subject.acknowledge_provider_health(record)
     assert subject.send(:delivery_pending?, record)
   end
 

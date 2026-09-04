@@ -13,8 +13,6 @@ module Hive
     # fingerprint. Transport environment is scrubbed immediately afterwards.
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
-      EMPTY_ROUTING_VALUES = [].freeze
-
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
                   :progress_token, :predecessor_attempt_id
@@ -205,10 +203,7 @@ module Hive
       end
 
       def explicit_routing? = routing["mode"] == "explicit"
-      def routing_decision = explicit_routing? ? routing.fetch("decision") : nil
       def admitted_route = explicit_routing? ? routing.fetch("route") : nil
-      def circuit_generations = explicit_routing? ? routing.fetch("circuit_generations") : EMPTY_ROUTING_VALUES
-      def probe_bindings = explicit_routing? ? routing.fetch("probe_bindings") : EMPTY_ROUTING_VALUES
       def provider_account_id = admitted_route&.fetch("provider_account_id", nil)
       def adapter = admitted_route&.fetch("adapter", nil)
       def launch_binding_id = admitted_route&.fetch("launch_binding_id", nil)

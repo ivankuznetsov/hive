@@ -821,17 +821,6 @@ module Hive
             )
           end
 
-          unless source_health_acknowledged?(recovery["source_receipt"])
-            return receipt(
-              "queued", request_id: current_request.request_id,
-              phase: recovery["phase"],
-              failure_origin: recovery["failure_origin"], owner: "hive",
-              reason: "provider_health_pending",
-              remediation: "wait for provider health to acknowledge the terminal receipt",
-              retry_count: recovery["retry_count"]
-            )
-          end
-
           marker = Hive::Markers.current(locked_task.state_file)
           safety_marker = recovery_safety_marker(current_request, marker)
           locked_safe, locked_safety_reason = @safety.call(
@@ -1263,23 +1252,6 @@ module Hive
         source_receipt_matches?(record, identity) ? identity.freeze : nil
       rescue Hive::Attempts::RepositoryError
         nil
-      end
-
-      def source_health_acknowledged?(source_receipt)
-        return true if source_receipt.nil?
-
-        hot = attempts_store.fetch_hot(source_receipt.fetch("attempt_id"))
-        if hot
-          return false unless source_receipt_matches?(hot, source_receipt)
-
-          pending = attempts_store.publication(hot.attempt_id)
-          return pending&.dig("consumers", "provider_health") == true
-        end
-
-        proof = attempts_store.fetch(source_receipt.fetch("attempt_id"))
-        source_receipt_matches?(proof, source_receipt)
-      rescue KeyError, Hive::Attempts::RepositoryError
-        false
       end
 
       def source_receipt_matches?(record, source_receipt)

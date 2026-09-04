@@ -23,18 +23,10 @@ module Hive
       def self.runtime(store:, state_home: Hive::Paths.state_home, **options)
         require "hive/conditions/attempt_observer"
         require "hive/runtime_control_plane/dispatch_repository"
-        require "hive/provider_health/attempt_observer"
-        require "hive/provider_health/repository"
         observer = Hive::Conditions::AttemptObserver.new(store: store)
         new(
           store: store,
           condition_observer: observer,
-          provider_health_observer_factory: lambda do
-            health_store = Hive::ProviderHealth::Repository.new(
-              database: store.database
-            )
-            Hive::ProviderHealth::AttemptObserver.new(store: health_store)
-          end,
           delivery_pending: lambda do |record|
             Hive::RuntimeControlPlane::DispatchRepository.new(
               database: store.database
@@ -45,14 +37,12 @@ module Hive
       end
 
       def initialize(store:, condition_observer: nil, delivery_pending: nil,
-                     task_archived: nil, logger: nil,
-                     provider_health_observer_factory: nil)
+                     task_archived: nil, logger: nil)
         @store = store
         @condition_observer = condition_observer
         @delivery_pending = delivery_pending
         @task_archived = task_archived
         @logger = logger
-        @provider_health_observer_factory = provider_health_observer_factory
         @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
       end
 
@@ -61,7 +51,6 @@ module Hive
         return false if record.state == "lost" && !resolved_loss?(record)
 
         consumers = record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
-        consumers = consumers + [ "provider_health" ] if record.explicit_routing?
         @store.prepare_publication(
           attempt_id: record.attempt_id,
           consumers: consumers
@@ -76,23 +65,6 @@ module Hive
         true
       end
 
-      def acknowledge_provider_health(record)
-        return true unless record.explicit_routing?
-        return false unless @provider_health_observer_factory
-
-        @provider_health_observer ||= @provider_health_observer_factory.call
-        result = @provider_health_observer.observe(record)
-        return false unless %i[acknowledged not_applicable].include?(result)
-
-        entry = @store.publication(record.attempt_id)
-        if entry&.fetch("consumers", {})&.key?("provider_health")
-          @store.acknowledge_publication(record.attempt_id, consumer: "provider_health")
-        end
-        true
-      rescue Hive::ProviderHealth::Error, Hive::ManagedDirectory::UnsafeError
-        false
-      end
-
       # Advances only consumers that are downstream of the task-authoritative
       # terminal receipt. Every operation is idempotent so daemon
       # reconciliation can retry this boundary without another agent dispatch.
@@ -103,7 +75,6 @@ module Hive
         acknowledge(record, :loss) if record.state == "lost"
         publish_indexes(record)
         acknowledge(record, :accounting)
-        acknowledge_provider_health(record)
       end
 
       def promote(record)

@@ -2,7 +2,6 @@ require "date"
 require "digest"
 require "time"
 require "hive/attempts/record"
-require "hive/provider_routing/decision"
 require "hive/runtime_control_plane"
 
 module Hive
@@ -11,7 +10,6 @@ module Hive
     # Historical lookup is now an indexed query over attempts, not a second
     # set of transactional rows rather than repairable point-addressed files.
     module Coordination
-      MAX_ROUTING_PROJECTIONS = 4_096
       MAX_FAILURE_COHORTS = 512
       FAILURE_COHORT_THRESHOLD = 3
       FAILURE_COHORT_COOLDOWN_SEC = 60 * 60
@@ -183,61 +181,6 @@ module Hive
           ).update(probe_attempt_id: nil, probe_expires_at: nil)
         end
         updated == 1
-      end
-
-      def record_routing_decision(decision:, task_generation:, subject:, project:, attempt_id: nil)
-        unless decision.is_a?(Hive::ProviderRouting::Decision) && !decision.legacy?
-          raise RepositoryError, "routing decision requires an explicit typed decision"
-        end
-        generation = identifier(task_generation)
-        unless decision.request.task_generation == generation
-          raise RepositoryError, "routing decision task generation does not match its key"
-        end
-        subject_json = RuntimeControlPlane::Codec.dump_json(subject)
-        decision_json = RuntimeControlPlane::Codec.dump_json(decision.to_h)
-        key = semantic_key(generation, subject_json)
-        row = {
-          decision_key: key, task_generation: generation, subject_json: subject_json,
-          project_name: identifier(project), attempt_id: attempt_id && identifier(attempt_id),
-          decision_id: decision.decision_id, decision_json: decision_json,
-          decided_at: decision.decided_at, updated_at: decision.decided_at
-        }
-        database.transaction do |db|
-          db[:attempt_routing_decisions].insert_conflict(
-            target: :decision_key, update: row.except(:decision_key)
-          ).insert(row)
-        end
-        decision.to_h
-      rescue ArgumentError, Sequel::Error, RuntimeControlPlane::Error => error
-        raise RepositoryError, "routing decision is invalid: #{error.message}"
-      end
-
-      def routing_decision(task_generation:, subject:)
-        generation = identifier(task_generation)
-        subject_json = RuntimeControlPlane::Codec.dump_json(subject)
-        row = database.read do |db|
-          db[:attempt_routing_decisions].where(
-            decision_key: semantic_key(generation, subject_json)
-          ).first
-        end
-        row && RuntimeControlPlane::Codec.load_json(row.fetch(:decision_json))
-      end
-
-      def routing_decisions(limit: MAX_ROUTING_PROJECTIONS)
-        unless limit.is_a?(Integer) && limit.positive? && limit <= MAX_ROUTING_PROJECTIONS
-          raise RepositoryError, "routing decision projection limit is invalid"
-        end
-        rows = database.read do |db|
-          db[:attempt_routing_decisions].reverse_order(:decided_at, :decision_id).limit(limit).all
-        end
-        rows.map do |row|
-          {
-            "task_generation" => row.fetch(:task_generation),
-            "subject" => RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json)),
-            "project" => row.fetch(:project_name), "attempt_id" => row[:attempt_id],
-            "decision" => RuntimeControlPlane::Codec.load_json(row.fetch(:decision_json))
-          }.freeze
-        end.freeze
       end
 
       private

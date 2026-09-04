@@ -14,18 +14,11 @@ module Hive
       def self.build(store:, now: Time.now)
         date = now.utc.to_date
         reservations, daily_counts = store.database.read do |db|
-          live = db[:capacity_reservations].where(
-            Sequel[:capacity_reservations][:state] => "reserved"
-          )
-            .join(:attempts, attempt_id: :attempt_id)
-            .limit(MAX_RESERVATIONS + 1).select_map([
-              Sequel[:capacity_reservations][:attempt_id],
-              Sequel[:attempts][:project_name], Sequel[:attempts][:task_slug]
-            ])
-          daily = db[:attempts].where(accepted_date: date.iso8601)
-            .join(:attempt_accounting, attempt_id: :attempt_id)
-            .where(Sequel[:attempt_accounting][:refunded] => 0)
-            .group_and_count(Sequel[:attempts][:project_name]).all
+          live = db[:attempts].where(state: %w[launching running])
+            .limit(MAX_RESERVATIONS + 1)
+            .select_map([ :attempt_id, :project_name, :task_slug ])
+          daily = db[:attempts].where(accepted_date: date.iso8601, refunded: 0)
+            .group_and_count(:project_name).all
           [ live, daily ]
         end
         raise RepositoryError, "live capacity exceeds its bounded set" if reservations.size > MAX_RESERVATIONS
@@ -81,7 +74,7 @@ module Hive
     class AdmissionView < Data.define(:store, :records)
       extend Forwardable
       def_delegators :store, :failure_cohort_admission, :claim_failure_cohort_probe,
-                     :release_failure_cohort_probe, :record_routing_decision, :routing_decision
+                     :release_failure_cohort_probe
 
       def capacity(now:) = CapacitySnapshot.build(store: store, now: now)
 

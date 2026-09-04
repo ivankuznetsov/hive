@@ -39,23 +39,14 @@ module Hive
         ownership_generation task_input_epoch outcome exit_status started_at ended_at
         final_checkpoint output_references log_reference provider_evidence
       ].freeze
-      EXPLICIT_ROUTING_KEYS = %w[
-        mode policy_digest decision route circuit_generations probe_bindings
-      ].freeze
-      DECISION_KEYS = %w[decision_id policy_digest decided_at exclusions].freeze
-      EXCLUSION_KEYS = %w[route_id reason detail].freeze
+      EXPLICIT_ROUTING_KEYS = %w[mode route].freeze
       ROUTE_KEYS = %w[
         route_id provider_account_id adapter launch_binding_id model effort
       ].freeze
       ROUTE_BILLING_KEYS = %w[billing_route billing_evidence_source].freeze
       BILLING_ROUTES = Hive::BillingEvidence::ROUTES
       BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
-      CIRCUIT_GENERATION_KEYS = %w[scope journal_epoch observed_generation].freeze
       SCOPE_KEYS = %w[kind provider_account_id model].freeze
-      PROBE_BINDING_KEYS = %w[
-        scope journal_epoch observed_generation claim_generation attempt_id
-        task_generation ownership_fence
-      ].freeze
       PROVIDER_EVIDENCE_KEYS = %w[
         failure_class scope provenance route_id reset_hint_seconds fingerprint
         source_reference
@@ -417,50 +408,9 @@ module Hive
           validate_exact_keys!(
             routing, EXPLICIT_ROUTING_KEYS, "explicit attempt routing", InvalidRecord
           )
-          policy_digest = routing["policy_digest"]
-          validate_sha256!(policy_digest, "routing policy digest", InvalidRecord)
-          validate_decision!(routing["decision"], policy_digest: policy_digest)
           route = validate_route!(routing["route"])
           unless route["adapter"] == provider
             raise InvalidRecord, "explicit routing adapter must match the attempt provider"
-          end
-
-          circuits = validate_circuit_generations!(
-            routing["circuit_generations"], route: route
-          )
-          validate_probe_bindings!(
-            routing["probe_bindings"],
-            circuits: circuits,
-            attempt_id: attempt_id,
-            task_generation: task_generation,
-            ownership_generation: ownership_generation
-          )
-        end
-
-        def validate_decision!(decision, policy_digest:)
-          validate_exact_keys!(decision, DECISION_KEYS, "routing decision", InvalidRecord)
-          validate_identifier!(decision["decision_id"], "routing decision", InvalidRecord)
-          validate_sha256!(decision["policy_digest"], "routing decision policy digest", InvalidRecord)
-          unless decision["policy_digest"] == policy_digest
-            raise InvalidRecord, "routing decision policy digest mismatch"
-          end
-          parse_time(decision["decided_at"], label: "routing decision time", error_class: InvalidRecord)
-
-          exclusions = decision["exclusions"]
-          unless exclusions.is_a?(Array) && exclusions.length <= 1_024
-            raise InvalidRecord, "routing decision exclusions must be a bounded array"
-          end
-          route_ids = exclusions.map do |exclusion|
-            validate_exact_keys!(
-              exclusion, EXCLUSION_KEYS, "routing decision exclusion", InvalidRecord
-            )
-            validate_identifier!(exclusion["route_id"], "excluded route", InvalidRecord)
-            validate_identifier!(exclusion["reason"], "routing exclusion reason", InvalidRecord)
-            validate_optional_detail!(exclusion["detail"], "routing exclusion detail", InvalidRecord)
-            exclusion["route_id"]
-          end
-          if route_ids.uniq.length != route_ids.length
-            raise InvalidRecord, "routing decision cannot repeat an excluded route"
           end
         end
 
@@ -490,77 +440,6 @@ module Hive
             end
           end
           route
-        end
-
-        def validate_circuit_generations!(generations, route:)
-          unless generations.is_a?(Array) && generations.length == 2
-            raise InvalidRecord, "explicit routing requires both enclosing circuit generations"
-          end
-          scopes = generations.map do |entry|
-            validate_exact_keys!(
-              entry, CIRCUIT_GENERATION_KEYS, "routing circuit generation", InvalidRecord
-            )
-            scope = validate_scope!(entry["scope"], "routing circuit scope", InvalidRecord)
-            validate_nonnegative_integer!(
-              entry["journal_epoch"], "routing circuit journal epoch", InvalidRecord
-            )
-            validate_nonnegative_integer!(
-              entry["observed_generation"], "routing circuit observed generation", InvalidRecord
-            )
-            scope
-          end
-          if scopes.uniq.length != scopes.length
-            raise InvalidRecord, "routing circuit generation vector cannot repeat a scope"
-          end
-
-          expected = [
-            [ "provider_account", route["provider_account_id"], nil ],
-            [ "model", route["provider_account_id"], route["model"] ]
-          ]
-          actual = scopes.map { |scope| scope_identity(scope) }
-          unless expected.all? { |scope| actual.include?(scope) }
-            raise InvalidRecord, "routing circuit scopes must enclose the selected route"
-          end
-          generations
-        end
-
-        def validate_probe_bindings!(bindings, circuits:, attempt_id:, task_generation:,
-                                     ownership_generation:)
-          unless bindings.is_a?(Array) && bindings.length <= 2
-            raise InvalidRecord, "routing probe bindings must be a bounded array"
-          end
-          scopes = bindings.map do |binding|
-            validate_exact_keys!(
-              binding, PROBE_BINDING_KEYS, "routing probe binding", InvalidRecord
-            )
-            scope = validate_scope!(binding["scope"], "routing probe scope", InvalidRecord)
-            validate_nonnegative_integer!(
-              binding["journal_epoch"], "routing probe journal epoch", InvalidRecord
-            )
-            validate_nonnegative_integer!(
-              binding["observed_generation"], "routing probe observed generation", InvalidRecord
-            )
-            validate_nonnegative_integer!(
-              binding["claim_generation"], "routing probe claim generation", InvalidRecord
-            )
-            unless binding["claim_generation"] == binding["observed_generation"] + 1
-              raise InvalidRecord, "routing probe claim generation must follow its observation"
-            end
-            unless binding["attempt_id"] == attempt_id &&
-                   binding["task_generation"] == task_generation &&
-                   binding["ownership_fence"] == ownership_generation
-              raise InvalidRecord, "routing probe binding does not match attempt ownership"
-            end
-            circuit = circuits.find { |entry| entry["scope"] == scope }
-            unless circuit && circuit["journal_epoch"] == binding["journal_epoch"] &&
-                   circuit["observed_generation"] == binding["observed_generation"]
-              raise InvalidRecord, "routing probe binding does not match its circuit observation"
-            end
-            scope
-          end
-          if scopes.uniq.length != scopes.length
-            raise InvalidRecord, "routing probe bindings cannot repeat a scope"
-          end
         end
 
         def validate_provider_evidence!(evidence, routing:, protected_references:)

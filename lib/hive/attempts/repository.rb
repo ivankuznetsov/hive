@@ -103,11 +103,6 @@ module Hive
         log_archive.read(attempt_id, after_sequence: after_sequence)
       end
 
-      def routing_policies
-        require "hive/provider_routing/policy_repository"
-        @routing_policies ||= Hive::ProviderRouting::PolicyRepository.new(store: self)
-      end
-
       def output_directory(attempt_id, *segments, create: false)
         components = [ attempt_id, *segments ].map { |segment| safe_id(segment) }
         path = outputs_root
@@ -154,19 +149,13 @@ module Hive
       end
 
       def create_launching(source_fingerprint: nil, admission: nil, limits: nil,
-                           failure_cohort_probe: nil, routing_policy: nil,
-                           route_decision: nil, health_repository: nil, **attributes)
+                           failure_cohort_probe: nil, route_decision: nil, **attributes)
         source_fingerprint ||= attributes[:progress_token]
-        routing_policy ||= Hive::ProviderRouting::Policy.legacy(
-          stage: attributes.fetch(:intended_stage)
-        )
-        RuntimeControlPlane::AdmissionTransition.new(
-          repository: self, health_repository: health_repository
-        ).call(
+        RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
           attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
           failure_cohort_probe: failure_cohort_probe,
-          routing_policy: routing_policy, route_decision: route_decision
+          route_decision: route_decision
         )
       rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt could not be created")
@@ -306,8 +295,13 @@ module Hive
 
       def active_attempts
         rows = database.read do |db|
-          pending = db[:terminal_pending_publications].select(:attempt_id)
-          db[:attempts].where(state: %w[launching running]).or(attempt_id: pending).order(:attempt_id).all
+          publication_pending = Sequel.lit(
+            "terminal_receipt_json IS NOT NULL AND " \
+            "(publication_journal_acknowledged = 0 OR " \
+            "publication_accounting_acknowledged = 0 OR publication_dispatch_acknowledged = 0)"
+          )
+          db[:attempts].where(state: %w[launching running])
+            .or(publication_pending).order(:attempt_id).all
         end
         rows.map { |row| record_from(row) }.freeze
       rescue Sequel::Error, RuntimeControlPlane::Error => error
@@ -317,10 +311,9 @@ module Hive
       def live_attempt_for(task_id:)
         id = safe_id(task_id, error: "unsafe task id")
         row = database.read do |db|
-          pending = db[:terminal_pending_publications].select(:attempt_id)
           db[:attempts]
             .where(task_id: id)
-            .where(Sequel.|({ state: %w[launching running] }, { attempt_id: pending }))
+            .where(state: %w[launching running])
             .order(:attempt_id)
             .first
         end
@@ -455,15 +448,11 @@ module Hive
 
       def validate_capacity!(db, record, limits)
         limits = limits.to_h
-        reserved = db[:capacity_reservations].where(
-          Sequel[:capacity_reservations][:state] => "reserved"
-        )
-        attempts = reserved.join(:attempts, attempt_id: :attempt_id)
-        units = Sequel[:capacity_reservations][:units]
-        at_limit = reserved.sum(units).to_i >= Integer(limits.fetch(:max_global)) ||
-          attempts.where(project_name: record["project"]).sum(units).to_i >=
+        live = db[:attempts].where(state: %w[launching running])
+        at_limit = live.count >= Integer(limits.fetch(:max_global)) ||
+          live.where(project_name: record["project"]).count >=
             Integer(limits.fetch(:max_per_project)) ||
-          attempts.where(
+          live.where(
             project_name: record["project"], task_slug: record["task_slug"]
           ).any? ||
           accepted_count(db, record) >= Integer(limits.fetch(:max_daily))
@@ -475,9 +464,8 @@ module Hive
       def accepted_count(db, record)
         date = Time.iso8601(record["accepted_at"]).utc.to_date.iso8601
         db[:attempts].where(
-          project_name: record["project"], accepted_date: date
-        ).join(:attempt_accounting, attempt_id: :attempt_id)
-          .where(Sequel[:attempt_accounting][:refunded] => 0).count
+          project_name: record["project"], accepted_date: date, refunded: 0
+        ).count
       end
 
       def mutate(observed, allowed_states:, pending_receipt: nil)
@@ -488,34 +476,24 @@ module Hive
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
+          values = mutable_columns(replacement)
+          if pending_receipt
+            receipt_json = RuntimeControlPlane::Codec.dump_json(pending_receipt)
+            values.merge!(
+              terminal_receipt_json: receipt_json,
+              terminal_receipt_digest: Digest::SHA256.hexdigest(receipt_json),
+              terminal_task_source_fingerprint: row.fetch(:source_fingerprint),
+              terminal_publication_created_at: replacement["ended_at"]
+            )
+          end
           updated = db[:attempts].where(
             attempt_id: current.attempt_id,
             lease_version: current.lease_version,
             state: current.state,
             record_digest: row.fetch(:record_digest)
-          ).update(mutable_columns(replacement))
+          ).update(values)
           raise CompareAndSwapFailed, "attempt lease compare-and-swap lost" unless updated == 1
-          if pending_receipt
-            receipt_json = RuntimeControlPlane::Codec.dump_json(pending_receipt)
-            digest = Digest::SHA256.hexdigest(receipt_json)
-            db[:terminal_pending_publications].insert_conflict(
-              target: :attempt_id,
-              update: {
-                task_source_fingerprint: row.fetch(:source_fingerprint),
-                receipt_json: receipt_json, expected_receipt_digest: digest,
-                created_at: replacement["ended_at"]
-              }
-            ).insert(
-              attempt_id: current.attempt_id,
-              task_source_fingerprint: row.fetch(:source_fingerprint),
-              receipt_json: receipt_json, expected_receipt_digest: digest,
-              created_at: replacement["ended_at"]
-            )
-          end
           if replacement.final?
-            db[:capacity_reservations].where(
-              attempt_id: replacement.attempt_id, state: "reserved"
-            ).update(state: "released", released_at: replacement["ended_at"])
             db[:dispatch_requests].where(
               request_id: replacement["request_id"],
               claim_attempt_id: replacement.attempt_id,
@@ -558,15 +536,14 @@ module Hive
           task_generation: record.task_generation,
           ownership_generation: record.ownership_generation, state: record.state,
           outcome: record.outcome, lease_version: record.lease_version,
-          owner_identity_json: json(record.wrapper),
-          routing_json: RuntimeControlPlane::Codec.dump_json(record["routing"]),
+          provider_account_id: record["routing"].dig("route", "provider_account_id"),
+          retry_charge: record["retry_charge"], refunded: 0,
           source_fingerprint: source_fingerprint.to_s,
-          checkpoint_json: json(record.checkpoint), record_json: payload,
+          record_json: payload,
           record_digest: Digest::SHA256.hexdigest(payload),
           subject_json: RuntimeControlPlane::Codec.dump_json(record.subject),
           project_name: record["project"], task_slug: record["task_slug"],
           accepted_date: Time.iso8601(record["accepted_at"]).utc.to_date.iso8601,
-          terminal_receipt_digest: digest(record.receipt),
           created_at: record["created_at"], accepted_at: record["accepted_at"],
           started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
           ended_at: record["ended_at"]
@@ -578,10 +555,7 @@ module Hive
         {
           state: record.state, outcome: record.outcome,
           lease_version: record.lease_version,
-          owner_identity_json: json(record.wrapper),
-          checkpoint_json: json(record.checkpoint),
           record_json: payload, record_digest: Digest::SHA256.hexdigest(payload),
-          terminal_receipt_digest: digest(record.receipt),
           started_at: record["started_at"], heartbeat_at: record["heartbeat_at"],
           ended_at: record["ended_at"]
         }

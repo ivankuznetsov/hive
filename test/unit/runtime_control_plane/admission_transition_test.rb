@@ -117,6 +117,36 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_recovery_admission_requires_the_requests_current_generation
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, _health|
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-current", expected_stage: "4-execute",
+        recovery: {
+          "variant" => "marker", "phase" => "cleared",
+          "expected_marker_attrs" => { "task_generation" => "generation-failed" }
+        },
+        now: NOW
+      )
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        attempts.create_launching(
+          attempt_id: "attempt-1", request_id: "request-1",
+          task_id: "task-1", project: "demo", task_slug: "task-1",
+          intended_stage: "4-execute", task_generation: "generation-failed",
+          ownership_generation: "generation-failed", task_input_epoch: 1,
+          progress_token: "source-1", provider: "codex",
+          worker_argv: %w[hive run task-1], claim_capability_digest: CLAIM_DIGEST,
+          starting_revision: "a" * 40, retry_charge: 1,
+          inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+        )
+      end
+      assert_equal "queued", dispatch.fetch("request-1").state
+      assert_equal 0, attempts.database.read { |db| db[:attempts].count }
+    end
+  end
+
   def test_task_source_observation_replaces_lease_placeholder_before_admission
     with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, health|
       state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }

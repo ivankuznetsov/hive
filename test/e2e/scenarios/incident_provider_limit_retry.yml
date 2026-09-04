@@ -173,7 +173,8 @@ steps:
       raise "attempt routes were not A then B" unless [first, second].map { |record| record["routing"].dig("route", "route_id") } == ["claude-a/claude-e2e-model", "codex-b/codex-e2e-model"]
       raise "retry charges were not exactly zero then one" unless [first["retry_charge"], second["retry_charge"]] == [0, 1]
       raise "retry retained an attempt relationship" if second.to_h.key?("predecessor_attempt_id")
-      raise "retry changed task generation" unless second.task_generation == first.task_generation
+      raise "retry reused the failed attempt generation" if second.task_generation == first.task_generation
+      raise "retry changed the task input epoch" unless second.task_input_epoch == first.task_input_epoch
       raise "attempt outcomes were not failed then succeeded" unless [first.outcome, second.outcome] == %w[failed succeeded]
       raise "retry retained routing policy state" unless second["routing"].keys.sort == %w[mode route]
 

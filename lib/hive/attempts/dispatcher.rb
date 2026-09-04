@@ -83,10 +83,10 @@ module Hive
           task: task,
           project: project,
           intended_stage: source_attempt["intended_stage"],
-          # Recovery retains the logical generation while fencing the fresh,
-          # independent worker to the exact post-clear task bytes admitted now.
+          # The replacement is an independent attempt bound to the exact
+          # post-clear task bytes. The numeric input epoch remains stable when
+          # clearing a retryable marker does not change task inputs.
           progress_token: Generation.artifact_token(task),
-          task_generation: source_attempt.task_generation,
           task_input_epoch: source_attempt.task_input_epoch
         )
         inherited = if inherited_outputs.nil? || inherited_outputs.empty?

@@ -63,6 +63,9 @@ A proven-lost attempt advances through a monotonic recovery phase. Recovery
 creates or finds one deterministic dispatch request. When that request admits a
 replacement, the new attempt is an ordinary independent attempt and the source
 attempt becomes irreversibly recovery-complete in the same transaction.
+The replacement derives a fresh ownership generation from the exact post-clear
+task bytes while retaining the task's numeric input epoch; admission must match
+that generation to the recovery request before launching the worker.
 Concurrent healers therefore converge on one request and one admission without
 predecessor or successor fields. Request retention cannot reopen recovery
 authority because completion remains on the source attempt.

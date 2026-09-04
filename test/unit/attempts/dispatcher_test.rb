@@ -863,6 +863,7 @@ class AttemptsDispatcherTest < Minitest::Test
         lost, phase: "ready", cleanup: "absent",
         request_id: recovery.recovery_request_id(lost), now: NOW + 2
       )
+      File.write(task.state_file, "#{task.slug}\n")
 
       replacement = dispatcher.dispatch_recovery(
         source_attempt: lost, task: task, project: "demo",
@@ -874,8 +875,10 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "pending", pending.fetch("phase")
       assert_equal :accepted, replacement.status
       refute_equal lost.attempt_id, replacement.attempt.attempt_id
-      assert_equal lost.task_generation, replacement.attempt.task_generation
+      refute_equal lost.task_generation, replacement.attempt.task_generation
       assert_equal lost.task_input_epoch, replacement.attempt.task_input_epoch
+      assert_equal Hive::Attempts::Generation.artifact_token(task),
+                   replacement.attempt["progress_token"]
       refute_includes replacement.attempt.to_h, "predecessor_attempt_id"
       assert_equal ready.fetch("request_id"), replacement.attempt["request_id"]
       assert_equal [ capture ], replacement.attempt["inherited_outputs"]

@@ -276,8 +276,11 @@ module Hive
           )
           reconcile_lost_attempt_deliveries(now: now)
           if @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
-            result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
-            refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
+            begin
+              @attempt_reconciler.sweep_finalization_maintenance(now: now)
+            ensure
+              refresh_attempt_storage_snapshot
+            end
           end
         rescue StandardError => e
           @logger.event(:fatal,

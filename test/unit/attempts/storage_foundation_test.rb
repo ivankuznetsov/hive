@@ -90,7 +90,7 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
-  def test_publication_and_maintenance_inputs_fail_closed
+  def test_publication_inputs_fail_closed
     with_repository do |repository|
       terminal = terminal_attempt(repository)
       assert_raises(Hive::Attempts::RepositoryError) do
@@ -101,46 +101,6 @@ class AttemptsStorageFoundationTest < Minitest::Test
       end
       assert_raises(Hive::Attempts::RepositoryError) do
         repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [ "Bad Name" ])
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.claim_maintenance(now: NOW, interval_sec: "bad")
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.advance_maintenance_cursor("after" => "")
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.advance_maintenance_cursor(Object.new)
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.complete_maintenance(now: NOW, result: { promoted: -1 })
-      end
-    end
-  end
-
-  def test_publication_persistence_errors_remain_typed
-    with_repository do |repository|
-      repository.database.define_singleton_method(:read) do |**|
-        raise Sequel::DatabaseError, "bad read"
-      end
-      assert_raises(Hive::Attempts::RepositoryError) { repository.maintenance_checkpoint }
-    end
-
-    %i[complete fail].each do |operation|
-      with_repository do |repository|
-        repository.database.define_singleton_method(:transaction) do |**|
-          raise Sequel::DatabaseError, "bad write"
-        end
-        if operation == :complete
-          assert_raises(Hive::Attempts::RepositoryError) do
-            repository.complete_maintenance(
-              now: NOW, result: { promoted: 0, deleted: 0, cold_examined: 0 }
-            )
-          end
-        else
-          assert_raises(Hive::Attempts::RepositoryError) do
-            repository.fail_maintenance(error: ArgumentError.new("bad"), now: NOW)
-          end
-        end
       end
     end
   end

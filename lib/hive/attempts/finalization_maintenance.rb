@@ -43,6 +43,11 @@ module Hive
         @task_archived = task_archived
         @logger = logger
         @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
+        @last_started_at = nil
+        @last_completed_at = nil
+        @last_result = nil
+        @last_error = nil
+        @cursor_after = nil
       end
 
       def prepare(record)
@@ -104,55 +109,50 @@ module Hive
         promote(record)
       end
 
-      def run_if_due(now: Time.now.utc)
-        maintain(now) do
-          @store.active_attempts.count { |record| finalize(record, now: now) }
-        end
-      end
-
       def sweep_if_due(now: Time.now.utc)
         maintain(now) { 0 }
       end
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
-        checkpoint = @store.maintenance_checkpoint
+        errors = 0
         page = @store.log_archive.cold_attempt_ids_page(
-          cursor: { "after" => checkpoint && checkpoint.fetch(:cursor_after) },
+          cursor: { "after" => @cursor_after },
           limit: COLD_SWEEP_LIMIT
         )
         page.attempt_ids.each do |attempt_id|
-          record = @store.fetch(attempt_id)
-          next unless record&.final?
-          next if recovery_pinned?(record)
-          next unless retention_expired?(record, now: now) ||
-                      task_archived?(record)
+          begin
+            record = @store.fetch(attempt_id)
+            next unless record&.final?
+            next if recovery_pinned?(record)
+            next unless retention_expired?(record, now: now) ||
+                        task_archived?(record)
 
-          deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
+            deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
+          rescue StandardError => error
+            errors += 1
+            record_maintenance_error(error, now: now, attempt_id: attempt_id)
+          end
         end
-        @store.advance_maintenance_cursor(page.cursor)
-        { deleted: deleted, cold_examined: page.attempt_ids.size }
+        @cursor_after = page.cursor.fetch("after")
+        { deleted: deleted, cold_examined: page.attempt_ids.size, errors: errors }
       end
 
       def storage_snapshot(hot_count:, invalid_hot_count:)
         diagnosis = @store.database.diagnostics
-        checkpoint = @store.maintenance_checkpoint
         database_error = !diagnosis.ok? && {
           "operation" => "status", "class" => diagnosis.error&.class&.name || "IntegrityError"
         }
-        maintenance_error = checkpoint&.fetch(:error_class) && {
-          "operation" => "maintenance", "class" => checkpoint.fetch(:error_class),
-          "observed_at" => checkpoint.fetch(:error_observed_at)
-        }
+        maintenance_error = @last_error
         error = maintenance_error || database_error
         status = StorageStatus.unknown
-        status["status"] = error ? "degraded" : (checkpoint&.fetch(:last_started_at) ? "healthy" : "unknown")
+        status["status"] = error ? "degraded" : (@last_started_at ? "healthy" : "unknown")
         status["layout"]["migration"] = diagnosis.ok? ? "complete" : "failed"
         status["hot"] = { "records" => hot_count, "invalid" => invalid_hot_count }
         status["maintenance"].merge!(
-          "last_started_at" => checkpoint&.fetch(:last_started_at),
-          "last_completed_at" => checkpoint&.fetch(:last_completed_at),
-          "last_result" => maintenance_result(checkpoint)
+          "last_started_at" => timestamp(@last_started_at),
+          "last_completed_at" => timestamp(@last_completed_at),
+          "last_result" => @last_result
         )
         status["last_error"] = error
         status["degraded_reason"] = maintenance_error ? "maintenance_failed" :
@@ -168,12 +168,19 @@ module Hive
       private
 
       def maintain(now)
-        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
+        now = normalize_time(now)
+        empty = { ran: false, promoted: 0, deleted: 0, cold_examined: 0, errors: 0 }
+        return empty unless maintenance_due?(now)
+
+        @last_started_at = now
+        @last_error = nil
         result = sweep_logs(now: now).merge(ran: true, promoted: yield)
-        @store.complete_maintenance(now: now, result: result)
+        @last_completed_at = now
+        @last_result = result.slice(:promoted, :deleted, :cold_examined, :errors)
+          .transform_keys(&:to_s)
         result
       rescue StandardError => error
-        @store.fail_maintenance(error: error, now: now)
+        record_maintenance_error(error, now: now)
         raise
       end
 
@@ -200,17 +207,29 @@ module Hive
         true
       end
 
-      def claim_due(now)
-        @store.claim_maintenance(now: now, interval_sec: MAINTENANCE_INTERVAL_SEC)
+      def maintenance_due?(now)
+        !@last_started_at || now >= @last_started_at + MAINTENANCE_INTERVAL_SEC
       end
 
-      def maintenance_result(checkpoint)
-        return nil unless checkpoint&.fetch(:last_completed_at)
-
-        %i[promoted deleted cold_examined].to_h do |key|
-          [ key.to_s, checkpoint.fetch(key) ]
-        end
+      def record_maintenance_error(error, now:, attempt_id: nil)
+        @last_error = {
+          "operation" => "maintenance", "class" => error.class.name,
+          "observed_at" => timestamp(normalize_time(now))
+        }
+        @last_error["attempt_id"] = attempt_id.to_s if attempt_id
+        @logger&.event(
+          :attempt_maintenance_failed,
+          error_class: error.class.name, attempt_id: attempt_id
+        )
+      rescue StandardError
+        nil
       end
+
+      def normalize_time(value)
+        value.respond_to?(:utc) ? value.utc : Time.iso8601(value.to_s).utc
+      end
+
+      def timestamp(value) = value && Record.iso8601(value)
 
       def recovery_pinned?(record)
         !!@store.publication(record.attempt_id) &&

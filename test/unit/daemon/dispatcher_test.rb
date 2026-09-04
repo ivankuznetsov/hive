@@ -1782,6 +1782,40 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil failure
   end
 
+  def test_maintenance_failure_is_published_in_the_current_operational_snapshot
+    capacity = Hive::Attempts::CapacitySnapshot.new(
+      global_count: 0, per_project: {}, per_task: {}, daily_counts: {},
+      reserved_attempt_ids: []
+    )
+    reconciliation = Hive::Attempts::ReconciliationSnapshot.new(
+      capacity: capacity, attempts: [], lost_attempts: [],
+      newly_lost_attempts: [], terminal_attempts: [], admission_view: nil
+    )
+    failed = false
+    reconciler = Object.new
+    reconciler.define_singleton_method(:reconcile) { |now:| reconciliation }
+    reconciler.define_singleton_method(:sweep_finalization_maintenance) do |now:|
+      failed = true
+      raise Hive::Attempts::RepositoryError, "cleanup failed"
+    end
+    reconciler.define_singleton_method(:operational_storage_status) do |_snapshot|
+      if failed
+        { "status" => "degraded", "degraded_reason" => "maintenance_failed" }
+      else
+        { "status" => "healthy" }
+      end
+    end
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_reconciler: reconciler, operational_snapshot: snapshot
+    )
+
+    dispatcher.tick(now: T0)
+
+    updates = snapshot.calls.select { |name, _| name == :update_attempt_storage }
+    assert_equal "maintenance_failed", updates.last.last.fetch("degraded_reason")
+  end
+
   def test_legacy_layout_row_publishes_operator_disposition_without_dispatch
     snapshot = FakeOperationalSnapshot.new
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)

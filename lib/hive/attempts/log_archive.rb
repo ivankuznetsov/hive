@@ -79,10 +79,6 @@ module Hive
           @store.payload_store.with_reference_custody(references) do
             references.each { |reference| remove_unreferenced(reference) }
           end
-          @store.database.transaction do |db|
-            db[:payload_references].where(attempt_id: id, state: "releasable")
-              .update(retain_until: nil)
-          end
           :expired
         end
       rescue Sequel::Error, RuntimeControlPlane::Error,

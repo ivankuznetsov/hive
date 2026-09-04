@@ -60,6 +60,13 @@ class TaskDisplayTest < ActiveSupport::TestCase
     end
   end
 
+  test "running and ready work do not present a prior failure as the current explanation" do
+    state = display("action" => "agent_running", "diagnostic" => { "summary" => "provider_limit (provider)" })
+    assert_equal "An agent is working on this step.", state.detail
+    ready = display("diagnostic" => { "summary" => "provider_limit (provider)" })
+    assert_equal "Ready to develop", ready.detail
+  end
+
   test "unknown actions are not silently reported as ready" do
     assert_equal "Status unavailable", display("action" => "future_action", "action_label" => nil).label
   end

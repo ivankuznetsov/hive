@@ -796,7 +796,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       request_id: "recovery-1", created_at: T0, project: "p1", slug: "s1",
       argv: %w[hive run s1 --stage 4-execute --project p1 --json],
       requestor: "web", chat_id: nil, update_id: nil, trigger: "recovery",
-      task_generation: "c" * 64, predecessor_attempt_id: nil,
+      task_generation: "c" * 64,
       inherited_outputs: [], task_id: 1, expected_stage: "4-execute",
       expected_marker_name: "error", expected_marker_id: "m1",
       recovery: recovery, schema_version: 4
@@ -1608,8 +1608,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :deferred, "failure_cohort_cooldown", :attempt_failure_cohort, "scheduler" ],
       [ :deferred, "transient_retry", :attempt_transient_retry, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
-      [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
-      [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
+      [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ]
     ]
     results = admissions.map do |status, reason, _outcome, _owner|
       Hive::Attempts::DispatchResult.new(
@@ -6141,7 +6140,7 @@ end
       )
       launching = store.create_launching(
         source_fingerprint: "test",
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "p1", task_slug: "demo-task",
         intended_stage: "4-execute", task_generation: "generation-1",
         progress_token: "progress", provider: "codex",
@@ -6214,7 +6213,7 @@ end
       )
       launching = store.create_launching(
         source_fingerprint: "test",
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "p1", task_slug: "demo-task",
         intended_stage: "4-execute", task_generation: "generation-1",
         progress_token: "progress", provider: "codex",
@@ -6255,7 +6254,7 @@ end
       pending = store.publication(terminal.attempt_id)
       assert_equal true, pending.dig("consumers", "accounting")
       assert_equal true, pending.dig("consumers", "journal")
-      assert_equal false, pending.dig("consumers", "request_delivery")
+      assert_equal false, pending.dig("consumers", "dispatch")
     end
   end
 
@@ -6301,9 +6300,9 @@ end
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
 
       assert_equal [
-        [ :acknowledge, "terminal-1", :request_delivery ],
+        [ :acknowledge, "terminal-1", :dispatch ],
         [ :promote, "terminal-1" ],
-        [ :acknowledge, "lost-1", :request_delivery ],
+        [ :acknowledge, "lost-1", :dispatch ],
         [ :promote, "lost-1" ]
       ], calls
     end
@@ -9685,7 +9684,7 @@ end
     assert_equal "lost-delivery", updates.fetch(0).fetch(0)
     assert_equal "replacement-1", updates.fetch(0).fetch(1).fetch(:attempt_id)
     assert_equal "generation-2", updates.fetch(0).fetch(1).fetch(:task_generation)
-    assert_equal [ [ "lost-1", :request_delivery ] ], acknowledgements
+    assert_equal [ [ "lost-1", :dispatch ] ], acknowledgements
   end
 
   def test_shutdown_snapshot_failure_is_advisory

@@ -1578,11 +1578,9 @@ class OperationalStatusTest < Minitest::Test
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "model" => "model-a", "effort" => "high",
         "eligible" => true, "exclusions" => [],
-        "capacity" => { "observed" => 1, "max" => 2 }, "circuits" => []
+        "capacity" => { "observed" => 1, "max" => 2 }
       } ],
-      "exclusions" => [],
-      "circuit_generations" => [],
-      "probe_requirements" => []
+      "exclusions" => []
     }
   end
 

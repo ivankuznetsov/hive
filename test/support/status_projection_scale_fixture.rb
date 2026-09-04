@@ -160,7 +160,6 @@ module HiveStatusProjectionScaleFixture
   def attempt_record(attempt_id:, slug:, id:, stage:)
     {
       "attempt_id" => attempt_id,
-      "predecessor_attempt_id" => nil,
       "task_slug" => slug,
       "task_id" => id.to_s,
       "intended_stage" => stage,

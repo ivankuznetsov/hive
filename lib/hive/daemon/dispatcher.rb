@@ -3349,7 +3349,7 @@ module Hive
               )
             end
             dispatch_repository.complete_delivery(request.request_id, now: now)
-            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            acknowledge_attempt_finalization(attempt_id, :dispatch)
             next
           end
 
@@ -3413,12 +3413,12 @@ module Hive
             exit_code: receipt["exit_status"],
             outcome: receipt["outcome"]
           )
-          acknowledge_attempt_finalization(attempt, :request_delivery)
+          acknowledge_attempt_finalization(attempt, :dispatch)
         end
 
         terminal_attempts.each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
-            acknowledge_attempt_finalization(attempt, :request_delivery)
+            acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
         terminal_attempts.each do |attempt|
@@ -3465,13 +3465,13 @@ module Hive
               state_home: dispatch_request_state_home,
               now: now
             )
-            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            acknowledge_attempt_finalization(attempt_id, :dispatch)
           end
         end
 
         Array(@attempt_snapshot&.lost_attempts).each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
-            acknowledge_attempt_finalization(attempt, :request_delivery)
+            acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
         Array(@attempt_snapshot&.lost_attempts).each do |attempt|

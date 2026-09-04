@@ -155,6 +155,11 @@ module Hive
                  %w[sealed releasable].include?(existing.fetch(:state))
             raise RepositoryError, "sealed attempt payload identity conflicts"
           end
+          if existing.fetch(:state) == "releasable"
+            db[:payload_references].where(payload_id: row.fetch(:payload_id)).update(
+              state: "sealed", retain_until: nil
+            )
+          end
           return
         end
         db[:payload_references].insert(row)
@@ -176,7 +181,7 @@ module Hive
       end
 
       def sealed_payloads(db)
-        db[:payload_references].where(state: %w[sealed releasable])
+        db[:payload_references].where(state: "sealed")
       end
 
       def payload_reference(row)

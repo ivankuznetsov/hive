@@ -45,7 +45,7 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
       snapshot = Hive::Attempts::CapacitySnapshot.build(store: repository, now: NOW)
       assert_equal 1, snapshot.daily_count("demo", NOW.to_date)
       refunds = repository.database.read do |db|
-        db[:attempt_accounting].where(attempt_id: [ charged.attempt_id, lost.attempt_id ])
+        db[:attempts].where(attempt_id: [ charged.attempt_id, lost.attempt_id ])
           .select_map([ :attempt_id, :refunded ]).to_h
       end
       assert_equal 0, refunds.fetch(charged.attempt_id)
@@ -88,7 +88,7 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
   def create(repository, attempt_id:, task_slug:)
     repository.create_launching(
       attempt_id: attempt_id, request_id: "request-#{attempt_id}",
-      predecessor_attempt_id: nil, task_id: task_slug, project: "demo",
+      task_id: task_slug, project: "demo",
       task_slug: task_slug, intended_stage: "4-execute",
       task_generation: "generation-#{attempt_id}", ownership_generation: "owner-1",
       task_input_epoch: 1, progress_token: "progress-1", provider: "codex",

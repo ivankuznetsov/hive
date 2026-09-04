@@ -132,7 +132,7 @@ class StagesBaseUsageTest < Minitest::Test
       )
       store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1",
-        predecessor_attempt_id: nil, task_id: task.id,
+        task_id: task.id,
         project: registered_project, task_slug: task.slug,
         intended_stage: "2-brainstorm", task_generation: "owner-3",
         ownership_generation: "owner-3", task_input_epoch: 3,

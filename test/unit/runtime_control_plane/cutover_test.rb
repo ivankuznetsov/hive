@@ -430,9 +430,11 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       database = Hive::RuntimeControlPlane::Database.new(path: result.database_path).open!
 
       %i[
-        attempts dispatch_requests dispatch_outbox provider_circuits provider_audit
-        routing_policies patrol_allowances pr_merge_reconciliations daemon_runtime
+        attempts dispatch_requests pr_merge_reconciliations daemon_runtime
       ].each { |table| assert_equal 0, database.read { |db| db[table].count }, table }
+      %i[
+        dispatch_outbox provider_circuits provider_audit routing_policies patrol_allowances
+      ].each { |table| refute database.read { |db| db.table_exists?(table) }, table }
       assert_equal 0, database.read { |db| db[:task_counters].count }
       assert_equal [ "7" ], database.read { |db| db[:task_subjects].select_map(:task_id) }
     ensure

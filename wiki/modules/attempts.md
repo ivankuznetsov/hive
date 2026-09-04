@@ -18,6 +18,7 @@ Retries use deterministic dispatch-request identity, not an attempt graph.
 and module-hook paths use the same dispatcher. A successful admission starts a
 detached supervisor; callers may attach or observe but do not own the worker's
 lifetime.
+The API does not own or reap child processes after handoff.
 
 SQLite owns machine-local coordination only. Task Markdown and task journals
 remain workflow authority. Large logs and outputs live in the content-addressed
@@ -53,6 +54,10 @@ attempt. Records and lifecycle mutations are fenced by state, lease version,
 record digest, task generation, and ownership generation.
 
 ## Lost recovery
+
+A lost attempt never
+projects a recovery marker; its row remains the recovery authority.
+Recovery stays direct without adding an event bus.
 
 A proven-lost attempt advances through a monotonic recovery phase. Recovery
 creates or finds one deterministic dispatch request. When that request admits a

@@ -171,7 +171,7 @@ class AttemptsLogArchiveTest < Minitest::Test
       retain_until = store.database.read do |db|
         db[:payload_references].where(attempt_id: terminal.attempt_id).get(:retain_until)
       end
-      assert_nil retain_until
+      assert_equal (NOW + 60).iso8601(6), retain_until
     end
   end
 
@@ -320,7 +320,7 @@ class AttemptsLogArchiveTest < Minitest::Test
 
   def running_attempt(store, attempt_id: "attempt-1", request_id: "request-1")
     launching = store.create_launching(
-      attempt_id: attempt_id, request_id: request_id, predecessor_attempt_id: nil,
+      attempt_id: attempt_id, request_id: request_id,
       task_id: "42", project: "demo", task_slug: "task-#{attempt_id}",
       intended_stage: "4-execute", task_generation: "generation-#{attempt_id}",
       ownership_generation: "owner-#{attempt_id}", task_input_epoch: 1,

@@ -28,26 +28,6 @@ class ProviderRoutingRecoveryTest < Minitest::Test
     end
   end
 
-  class RetryAdmissionView
-    def initialize(store)
-      @view = Hive::Attempts::AdmissionView.new(
-        store: store, records: store.active_attempts
-      )
-    end
-
-    def successor(**) = nil
-
-    def method_missing(name, *args, **kwargs, &block)
-      return super unless @view.respond_to?(name)
-
-      @view.public_send(name, *args, **kwargs, &block)
-    end
-
-    def respond_to_missing?(name, include_private = false)
-      @view.respond_to?(name, include_private) || super
-    end
-  end
-
   def setup
     @root = Dir.mktmpdir("provider-routing-recovery")
     @project_root = File.join(@root, "demo")
@@ -133,16 +113,15 @@ class ProviderRoutingRecoveryTest < Minitest::Test
     )
   end
 
-  def retry_after(predecessor, routed_task, request_id:, policy:)
-    @dispatcher.dispatch_successor(
-      predecessor: predecessor,
+  def retry_after(source_attempt, routed_task, request_id:, policy:)
+    @dispatcher.dispatch_recovery(
+      source_attempt: source_attempt,
       task: routed_task,
       project: "demo",
       argv: [ "hive", "run", routed_task.slug ],
       request_id: request_id,
       provider: "codex",
       routing_policy: policy,
-      admission_view: RetryAdmissionView.new(@store),
       now: NOW + 4
     )
   end

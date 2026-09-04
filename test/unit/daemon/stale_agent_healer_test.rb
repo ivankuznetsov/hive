@@ -508,8 +508,11 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def test_attempt_loss_retry_uses_the_shared_recovery_ladder
     limited_at = NOW - 120
-    attempt = { "retry_charge" => 3, "loss" => {} }
-    outcome = { "last_retry_at" => limited_at.iso8601(6) }
+    attempt = {
+      "retry_charge" => 3,
+      "loss" => { "at" => limited_at.iso8601(6) }
+    }
+    outcome = {}
 
     refute @healer.send(
       :attempt_loss_retry_due?, attempt, outcome, now: NOW - 1

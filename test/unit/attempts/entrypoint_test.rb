@@ -15,9 +15,6 @@ class AttemptsEntrypointTest < Minitest::Test
     )
     dispatcher = Object.new
     dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
-    dispatcher.define_singleton_method(:dispatch_successor) do |**_kwargs|
-      flunk "capacity deferral must not be superseded"
-    end
     error = assert_raises(Hive::ConcurrentRunError) do
       Hive::Attempts::Entrypoint.new(
         store: Object.new, dispatcher: dispatcher

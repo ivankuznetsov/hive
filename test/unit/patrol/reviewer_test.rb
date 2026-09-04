@@ -830,7 +830,7 @@ class HivePatrolReviewerTest < Minitest::Test
         agent_singleton.define_method(:new) { |*| fake_agent }
         usage_singleton.define_method(:record!) do |**args|
           record_calls += 1
-          raise "db locked" if record_calls == 2
+          raise "db locked" if record_calls == 1
 
           usage_record.call(**args)
         end

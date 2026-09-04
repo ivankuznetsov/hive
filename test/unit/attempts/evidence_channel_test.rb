@@ -131,4 +131,29 @@ class AttemptsEvidenceChannelTest < Minitest::Test
     )
     assert_equal "model_capacity", evidence.fetch("failure_class")
   end
+
+  def test_scope_route_and_materialization_identity_errors_are_typed
+    invalid_scope = SIGNAL.merge(
+      "scope" => {
+        "kind" => "future", "provider_account_id" => "account-a", "model" => "model-a"
+      }
+    )
+    assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::EvidenceChannel.validate_signal(invalid_scope, route: ROUTE)
+    end
+    assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::EvidenceChannel.validate_signal(
+        SIGNAL, route: ROUTE.merge("route_id" => "")
+      )
+    end
+
+    record = Object.new
+    record.define_singleton_method(:[]) { |_key| {} }
+    assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::EvidenceChannel.materialize(
+        SIGNAL, record: record,
+        source_reference: { "path" => "log", "size" => 1, "sha256" => "a" * 64 }
+      )
+    end
+  end
 end

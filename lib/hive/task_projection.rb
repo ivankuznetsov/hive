@@ -59,9 +59,7 @@ module Hive
       }
     end
 
-    INTERNAL_FACT_KEYS = %w[
-      journal_index attempt_accepted_at predecessor_attempt_id
-    ].freeze
+    INTERNAL_FACT_KEYS = %w[journal_index attempt_accepted_at].freeze
 
     attr_reader :data
 
@@ -259,8 +257,7 @@ module Hive
           "event_id" => record.fetch("event_id"),
           "task" => Hive::StringifyKeys.call(record["task"]),
           "journal_index" => index,
-          "attempt_accepted_at" => record.dig("provenance", "attempt_accepted_at"),
-          "predecessor_attempt_id" => record.dig("provenance", "predecessor_attempt_id")
+          "attempt_accepted_at" => record.dig("provenance", "attempt_accepted_at")
         }
         fact
       end
@@ -349,28 +346,8 @@ module Hive
 
     def compare_attempt_precedence(left, right)
       return left.fetch("journal_index") <=> right.fetch("journal_index") if left["attempt_id"] == right["attempt_id"]
-      return 1 if attempt_descends_from?(left["attempt_id"], right["attempt_id"])
-      return -1 if attempt_descends_from?(right["attempt_id"], left["attempt_id"])
-
       [ left["attempt_accepted_at"].to_s, left.fetch("journal_index") ] <=>
         [ right["attempt_accepted_at"].to_s, right.fetch("journal_index") ]
-    end
-
-    def attempt_descends_from?(candidate_id, ancestor_id)
-      @attempt_predecessors ||= authoritative_records.each_with_object({}) do |record, predecessors|
-        predecessor = record.dig("provenance", "predecessor_attempt_id")
-        predecessors[record.fetch("attempt_id")] ||= predecessor unless predecessor.to_s.empty?
-      end
-      seen = {}
-      current = candidate_id
-      loop do
-        predecessor = @attempt_predecessors[current]
-        return false if predecessor.to_s.empty? || seen[predecessor]
-        return true if predecessor == ancestor_id
-
-        seen[predecessor] = true
-        current = predecessor
-      end
     end
 
     def public_fact(fact)

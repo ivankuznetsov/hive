@@ -1,5 +1,4 @@
 require "test_helper"
-require "digest"
 require "sqlite3"
 require "hive/usage_db"
 
@@ -21,43 +20,10 @@ class UsageDbTest < Minitest::Test
       path = File.join(dir, "runtime-control-plane.sqlite3")
       @usage_database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
       Hive::UsageDb.database = @usage_database
-      seed_usage_attempts
       yield
     ensure
       @usage_database&.disconnect
       @usage_database = nil
-    end
-  end
-
-  def seed_usage_attempts
-    now = Time.utc(2026, 5, 24, 10).iso8601(6)
-    @usage_database.transaction do |db|
-      installation_id = db[:installations].get(:installation_id)
-      db[:projects].insert(
-        project_id: "usage-project", installation_id: installation_id,
-        registration_id: "alpha", name: "alpha", observed_path: "/tmp/alpha",
-        state_root_path: "/tmp/alpha/.hive-state", active: 1,
-        registered_at: now, last_observed_at: now
-      )
-      db[:task_subjects].insert(
-        task_id: "usage-task", project_id: "usage-project", workflow_id: "coding",
-        task_slug: "task-a", observed_path: "/tmp/alpha/.hive-state/stages/4-execute/task-a",
-        source_fingerprint: "f" * 64, generation: 4,
-        created_at: now, last_observed_at: now
-      )
-      { "attempt-1" => 3, "attempt-2" => 3, "attempt-direct" => 4, "attempt" => 1 }.each do |id, generation|
-        document = Hive::RuntimeControlPlane::Codec.dump_json("attempt_id" => id)
-        db[:attempts].insert(
-          attempt_id: id, project_id: "usage-project", task_id: "usage-task",
-          subject_kind: "task_stage",
-          subject_key: "4-execute", task_generation: generation.to_s,
-          ownership_generation: "owner-#{id}", state: "terminal", outcome: "succeeded",
-          lease_version: 1, routing_json: "{}", source_fingerprint: "f" * 64,
-          record_json: document, record_digest: Digest::SHA256.hexdigest(document),
-          subject_json: "{}", project_name: "alpha", task_slug: "task-a",
-          accepted_date: "2026-05-24", created_at: now, accepted_at: now, ended_at: now
-        )
-      end
     end
   end
 
@@ -369,6 +335,119 @@ class UsageDbTest < Minitest::Test
       assert_equal({ input: 12, output: 4, cached: 2 }, exact.fetch(:totals))
       assert_equal "session-1", exact.fetch(:sessions).first.fetch(:session_id)
     end
+  end
+
+  def test_patrol_discovery_reservation_is_atomic_idempotent_and_daily
+    with_usage_db do
+      now = Time.utc(2026, 8, 20, 12)
+      2.times do |index|
+        result = Hive::UsageDb.reserve_patrol_discovery!(
+          session_id: "ordinary-#{index}", agent: "codex", project_slug: "alpha",
+          stage: "patrol-review", started_at: now, limit: 2
+        )
+        assert result.fetch(:reserved)
+        assert_equal index + 1, result.fetch(:used)
+      end
+
+      repeat = Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "ordinary-0", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: now, limit: 2
+      )
+      assert repeat.fetch(:reserved)
+      assert repeat.fetch(:existing)
+
+      refused = Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "ordinary-2", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: now, limit: 2
+      )
+      refute refused.fetch(:reserved)
+      assert_equal 2, refused.fetch(:used)
+
+      tomorrow = Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "ordinary-next-day", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: now + 86_400, limit: 2
+      )
+      assert tomorrow.fetch(:reserved)
+      assert_equal 1, tomorrow.fetch(:used)
+      assert_equal 3, @usage_database.read { |db| db[:token_usage].count }
+    end
+  end
+
+  def test_patrol_discovery_count_is_scoped_by_project_engine_source_and_utc_day
+    with_usage_db do
+      now = Time.utc(2026, 8, 20, 12)
+      [
+        [ "ordinary", "alpha", "patrol-review", now ],
+        [ "architecture", "alpha", "refactor-patrol-review", now ],
+        [ "other-project", "beta", "patrol-review", now ],
+        [ "yesterday", "alpha", "patrol-review", now - 86_400 ]
+      ].each do |session_id, project, stage, started_at|
+        Hive::UsageDb.reserve_patrol_discovery!(
+          session_id: session_id, agent: "codex", project_slug: project,
+          stage: stage, started_at: started_at, limit: 4
+        )
+      end
+      record(
+        project_slug: "alpha", stage: "patrol-review", started_at: now,
+        session_id: "not-a-reservation"
+      )
+
+      assert_equal 1, Hive::UsageDb.patrol_discovery_count(
+        project_slug: "alpha", stage: "patrol-review", at: now
+      )
+      assert_equal 1, Hive::UsageDb.patrol_discovery_count(
+        project_slug: "alpha", stage: "refactor-patrol-review", at: now
+      )
+      assert_equal 1, Hive::UsageDb.patrol_discovery_count(
+        project_slug: "alpha", stage: "patrol-review", at: now.iso8601
+      )
+    end
+  end
+
+  def test_patrol_reservations_fail_closed_on_identity_and_storage_errors
+    with_usage_db do
+      Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "same-session", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2
+      )
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::UsageDb.reserve_patrol_discovery!(
+          session_id: "same-session", agent: "codex", project_slug: "other",
+          stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2
+        )
+      end
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.reserve_patrol_discovery!(
+          session_id: "", agent: "codex", project_slug: "alpha",
+          stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2
+        )
+      end
+      assert_raises(ArgumentError) do
+        Hive::UsageDb.patrol_discovery_count(
+          project_slug: "", stage: "patrol-review", at: Time.utc(2026, 8, 20, 12)
+        )
+      end
+    end
+
+    broken = Object.new
+    broken.define_singleton_method(:transaction) { |**| raise IOError, "write failed" }
+    error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+      Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "session", agent: "codex", project_slug: "alpha",
+        stage: "patrol-review", started_at: Time.utc(2026, 8, 20, 12), limit: 2,
+        database: broken
+      )
+    end
+    assert_equal :usage_persistence_failed, error.code
+
+    broken.define_singleton_method(:read) { |**| raise IOError, "read failed" }
+    error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+      Hive::UsageDb.patrol_discovery_count(
+        project_slug: "alpha", stage: "patrol-review",
+        at: Time.utc(2026, 8, 20, 12), database: broken
+      )
+    end
+    assert_equal :usage_read_failed, error.code
   end
 
   def test_session_merge_preserves_the_first_authoritative_billing_evidence

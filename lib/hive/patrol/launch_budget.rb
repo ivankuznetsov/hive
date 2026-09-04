@@ -7,8 +7,6 @@ require "hive/usage_db"
 module Hive
   module Patrol
     class LaunchBudget
-      class AllowanceError < Hive::Error; end
-
       ENGINES = %i[ordinary architecture].freeze
       DISCOVERY_STAGES = {
         "patrol-review" => :ordinary,
@@ -17,7 +15,6 @@ module Hive
       DAILY_EXHAUSTION_REASONS = %w[daily_agent_spawn_limit].freeze
       DEFAULT_MAX_AGENT_SPAWNS_PER_DAY = 4
       MAX_RESERVATION_ID_BYTES = 256
-      MAX_RESERVATIONS_PER_LANE = 10_000
 
       attr_reader :last_exhaustion
 
@@ -62,13 +59,13 @@ module Hive
         engine = @charge_discovery ? stage_engine(stage) : nil
         @active_telemetry_source = engine ? "patrol_discovery_launch" : "patrol_non_discovery_launch"
         if engine && !reserve_discovery!(
-          engine: engine, started_at: started_at,
+          engine: engine, profile: profile, started_at: started_at,
           reservation_id: reservation_id || @id_generator.call
         )
           return false
         end
 
-        reserve_telemetry!(profile: profile, stage: stage, started_at: started_at)
+        reserve_telemetry!(profile: profile, stage: stage, started_at: started_at) unless engine
         true
       end
 
@@ -79,81 +76,29 @@ module Hive
       def allowance_snapshot(engine: @engine || :ordinary)
         engine = normalize_engine(engine)
         project_id!
-        date = date_for(now)
-        lane, hold = @database.read do |db|
-          [ allowance_dataset(db, engine, date).first || { used: 0 }, hold_dataset(db, engine).first ]
-        end
-        used = lane.fetch(:used)
-        status = "available"
+        current = now
+        used = @usage_db.patrol_discovery_count(
+          project_slug: @project_slug, stage: discovery_stage(engine),
+          at: current, database: @database
+        )
         remaining = [ @limit - used, 0 ].max
-        retry_at = nil
-        if retry_active?(hold)
-          retry_at = hold.fetch(:retry_not_before)
-          @last_exhaustion = exhaustion(
-            "provider_lane_backoff", used, engine: engine, retry_at: retry_at
-          )
-          status = "provider_backoff"
-          remaining = 0
-        elsif remaining.zero?
+        if remaining.zero?
           @last_exhaustion = exhaustion("daily_agent_spawn_limit", used, engine: engine)
-          status = "exhausted"
         else
           @last_exhaustion = nil
         end
         {
-          engine: engine.to_s, utc_date: date, limit: @limit,
-          used: used, remaining: remaining, status: status, retry_at: retry_at
+          engine: engine.to_s, utc_date: date_for(current), limit: @limit,
+          used: used, remaining: remaining,
+          status: remaining.zero? ? "exhausted" : "available", retry_at: nil
         }
       rescue StandardError => error
         @ledger_error = error
-        @last_exhaustion = exhaustion("allowance_store_unavailable", 1, engine: engine)
+        @last_exhaustion = exhaustion("usage_store_unavailable", 1, engine: engine)
         {
           engine: engine.to_s, utc_date: date_for(now), limit: @limit,
           used: nil, remaining: 0, status: "unavailable", retry_at: nil
         }
-      end
-
-      def park!(engine: @engine || :ordinary, retry_at:, reason:)
-        engine = normalize_engine(engine)
-        project_id!
-        instant = normalize_time(retry_at)
-        normalized_reason = reason.to_s.strip
-        raise ArgumentError, "provider retry reason is invalid" if
-          normalized_reason.empty? || normalized_reason.bytesize > 128
-
-        timestamp = Hive::RuntimeControlPlane::Codec.dump_time(now)
-        @database.transaction do |db|
-          dataset = hold_dataset(db, engine)
-          current = dataset.first
-          current_retry = current && normalize_time(current.fetch(:retry_not_before))
-          next if current_retry && current_retry >= instant
-
-          dataset.insert_conflict(
-            target: %i[project_id kind window_key],
-            update: {
-              retry_not_before: timestamp_for(instant), hold_reason: normalized_reason,
-              revision: Sequel[:revision] + 1, updated_at: timestamp
-            }
-          ).insert(
-            project_id: @project_id, kind: "#{engine}:hold", window_key: "provider",
-            used: 0, limit_value: 0, revision: 0, retry_not_before: timestamp_for(instant),
-            hold_reason: normalized_reason, updated_at: timestamp
-          )
-        end
-        true
-      rescue StandardError => error
-        @ledger_error = error
-        false
-      end
-
-      def clear_park!(engine: @engine || :ordinary)
-        engine = normalize_engine(engine)
-        project_id!
-        @database.transaction { |db| hold_dataset(db, engine).delete }
-        true
-      rescue StandardError => error
-        @ledger_error = error
-        false
       end
 
       def exhaustion_message
@@ -201,55 +146,29 @@ module Hive
 
       private
 
-      def reserve_discovery!(engine:, started_at:, reservation_id:)
-        date = date_for(started_at)
+      def reserve_discovery!(engine:, profile:, started_at:, reservation_id:)
         id = reservation_id.to_s
         raise ArgumentError, "discovery reservation id is invalid" if
           id.empty? || id.bytesize > MAX_RESERVATION_ID_BYTES
         project_id!
-
-        @database.transaction do |db|
-          dataset = allowance_dataset(db, engine, date)
-          row = dataset.first
-          unless row
-            dataset.insert(
-              project_id: @project_id, kind: engine.to_s, window_key: date,
-              used: 0, limit_value: @limit, revision: 0,
-              reservation_ids_json: "[]", updated_at: timestamp_for(normalize_time(started_at))
-            )
-            row = dataset.first
-          end
-          hold = hold_dataset(db, engine).first
-          if retry_active?(hold, at: started_at)
-            @last_exhaustion = exhaustion(
-              "provider_lane_backoff", row.fetch(:used), engine: engine,
-              retry_at: hold.fetch(:retry_not_before)
-            )
-            next false
-          end
-          ids = decode_ids(row.fetch(:reservation_ids_json))
-          next true if ids.include?(id)
-          if row.fetch(:used) >= @limit
-            @last_exhaustion = exhaustion("daily_agent_spawn_limit", row.fetch(:used), engine: engine)
-            next false
-          end
-          raise AllowanceError, "discovery reservations exceed the safety bound" if
-            ids.length >= MAX_RESERVATIONS_PER_LANE
-
-          ids << id
-          dataset.update(
-            used: row.fetch(:used) + 1,
-            limit_value: [ @limit, row.fetch(:used) + 1 ].max,
-            reservation_ids_json: Hive::RuntimeControlPlane::Codec.dump_json(ids),
-            revision: row.fetch(:revision) + 1,
-            updated_at: timestamp_for(normalize_time(started_at))
+        result = @usage_db.reserve_patrol_discovery!(
+          session_id: id, agent: profile_name(profile, discovery_stage(engine)),
+          project_slug: @project_slug, stage: discovery_stage(engine),
+          started_at: started_at, limit: @limit, database: @database
+        )
+        unless result.fetch(:reserved)
+          @last_exhaustion = exhaustion(
+            "daily_agent_spawn_limit", result.fetch(:used), engine: engine
           )
-          @last_exhaustion = nil
-          true
+          return false
         end
+
+        @active_telemetry = { attempt_id: nil, session_id: id }
+        @last_exhaustion = nil
+        true
       rescue StandardError => error
         @ledger_error = error
-        @last_exhaustion = exhaustion("allowance_store_unavailable", 1, engine: engine)
+        @last_exhaustion = exhaustion("usage_store_unavailable", 1, engine: engine)
         false
       end
 
@@ -272,23 +191,6 @@ module Hive
         false
       end
 
-      def hold_dataset(db, engine)
-        allowance_dataset(db, "#{engine}:hold", "provider")
-      end
-
-      def allowance_dataset(db, kind, window)
-        db[:patrol_allowances].where(project_id: @project_id, kind: kind.to_s, window_key: window)
-      end
-
-      def decode_ids(value)
-        ids = Hive::RuntimeControlPlane::Codec.load_json(value)
-        valid = ids.is_a?(Array) && ids.size <= MAX_RESERVATIONS_PER_LANE &&
-          ids.all? { |id| id.is_a?(String) && !id.empty? && id.bytesize <= MAX_RESERVATION_ID_BYTES } &&
-          ids.uniq.size == ids.size
-        raise "discovery reservation ids are invalid" unless valid
-        ids
-      end
-
       def project_id!
         return @project_id if @project_id
 
@@ -307,10 +209,6 @@ module Hive
         )
       end
 
-      def retry_active?(hold, at: now)
-        hold && normalize_time(hold.fetch(:retry_not_before)) > normalize_time(at)
-      end
-
       def exhaustion(reason, observed, engine:, retry_at: nil)
         {
           reason: reason, limit: @limit, observed: observed,
@@ -319,7 +217,7 @@ module Hive
       end
 
       def telemetry_identity
-        id = "patrol-launch-#{SecureRandom.uuid}"
+        id = "patrol-launch-#{@id_generator.call}"
         # A standalone Patrol launch is a telemetry session, not an Attempts
         # lifecycle row. Keep it unattributed so the control-plane foreign key
         # cannot manufacture an attempt identity that does not exist.
@@ -344,6 +242,10 @@ module Hive
         inferred
       end
 
+      def discovery_stage(engine)
+        DISCOVERY_STAGES.key(engine) || raise(ArgumentError, "unknown Patrol engine #{engine.inspect}")
+      end
+
       def normalize_engine(value)
         engine = value.to_sym
         raise ArgumentError, "unknown patrol discovery engine #{value.inspect}" unless ENGINES.include?(engine)
@@ -353,7 +255,6 @@ module Hive
       def now = normalize_time(@clock.call)
       def date_for(value) = normalize_time(value).strftime("%Y-%m-%d")
       def normalize_time(value) = value.respond_to?(:utc) ? value.utc : Time.parse(value.to_s).utc
-      def timestamp_for(value) = Hive::RuntimeControlPlane::Codec.dump_time(normalize_time(value))
       def integer(value) = [ Integer(value || 0), 0 ].max
       def present_or(value, fallback) = value.to_s.strip.empty? ? fallback.to_s : value.to_s.strip
     end

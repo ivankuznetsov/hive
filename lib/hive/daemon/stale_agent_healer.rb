@@ -92,6 +92,7 @@ module Hive
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      project_daemon_enabled: ->(_project) { true },
                      recovery_coordinator: nil,
+                     attempt_task_resolver: nil,
                      admission_open: -> { true })
         @controller = controller
         @logger = logger
@@ -102,12 +103,13 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @project_daemon_enabled = project_daemon_enabled
         @recovery_coordinator = recovery_coordinator
+        @attempt_task_resolver = attempt_task_resolver || method(:resolve_attempt_task)
         @admission_open = admission_open
       end
 
       # Lease-backed loss is processed independently of legacy marker rows.
-      # The durable retry charge and predecessor link survive daemon restart,
-      # while the outcome sidecar makes repeated ticks idempotent.
+      # The source attempt's recovery phase and deterministic request identity
+      # make repeated ticks idempotent without relating the replacement record.
       def heal_attempt_losses(attempts, now: Time.now.utc, admission_view: nil)
         return unless admission_open?
         return unless @attempt_store && @attempt_dispatcher &&
@@ -125,90 +127,52 @@ module Hive
         attempts = Array(attempts)
         return if attempts.empty?
 
-        successors = {}
-
         attempts.each do |attempt|
           break unless admission_open?
           next unless @project_daemon_enabled.call(attempt["project"])
 
           outcome = @lost_outcome_processor.process(attempt, now: now)
-          next unless outcome["status"] == "ready"
+          next unless outcome["phase"] == "ready"
 
-          successor_id = @attempt_store.successor_attempt_id(
-            predecessor_attempt_id: attempt.attempt_id
-          )
-          existing = if successor_id
-            admission_view.find(successor_id)
-          else
-            successors[attempt.attempt_id]
-          end
-          if existing
-            @lost_outcome_store.update(
-              attempt, now: now, status: "successor_dispatched",
-              successor_attempt_id: existing.attempt_id,
-              diagnostic: nil
-            )
-            next
-          end
-
-          task = task_for_attempt(attempt, outcome)
-          unless task
-            diagnostic = "task could not be located for successor yet; retrying"
-            next if outcome["diagnostic"] == diagnostic
-
-            @lost_outcome_store.update(
-              attempt, now: now, status: "ready",
-              diagnostic: diagnostic
-            )
-            next
-          end
+          task = task_for_attempt(attempt)
+          next unless task
 
           next unless attempt_loss_retry_due?(attempt, outcome, now: now)
 
           outcome = @lost_outcome_store.update(
-            attempt,
-            now: now,
-            status: "ready",
-            last_retry_at: now.utc.iso8601(6),
-            diagnostic: nil
+            attempt, now: now, phase: "ready", cleanup: outcome["cleanup"],
+            request_id: outcome.fetch("request_id")
           )
           break unless admission_open?
 
-          result = @attempt_dispatcher.dispatch_successor(
-            predecessor: attempt,
+          result = @attempt_dispatcher.dispatch_recovery(
+            source_attempt: attempt,
             task: task,
             project: attempt["project"],
-            argv: successor_argv(attempt, task),
-            request_id: "attempt-loss-#{outcome.fetch('idempotency_key')[0, 24]}",
+            argv: recovery_argv(attempt, task),
+            request_id: outcome.fetch("request_id"),
             provider: attempt["provider"],
-            inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
+            inherited_outputs: (
+              attempt["inherited_outputs"] + attempt["current_outputs"] +
+              outcome.fetch("capture_references", [])
+            ).uniq,
             retry_charge: attempt["retry_charge"] + 1,
             interactive: false,
             now: now,
             admission_view: admission_view
           )
-          if result.status == :deferred
-            @lost_outcome_store.update(
-              attempt,
-              now: now,
-              status: "ready",
-              diagnostic: "successor dispatch deferred#{": #{result.reason}" if result.reason}; retrying after cooldown"
-            )
-            next
-          end
+          next if result.status == :deferred
 
-          @lost_outcome_store.update(
-            attempt, now: now, status: "successor_dispatched",
-            successor_attempt_id: result.attempt&.attempt_id,
-            diagnostic: nil
-          )
-          successors[attempt.attempt_id] = result.attempt if result.attempt
+          completed = @lost_outcome_store.fetch(attempt.attempt_id)
+          next unless completed&.fetch("phase", nil) == "complete"
+
           @logger.event(
             :marker_healed,
             project: attempt["project"], slug: attempt["task_slug"],
             stage: attempt["intended_stage"], reason: "attempt_lost",
             attempt_id: attempt.attempt_id,
-            successor_attempt_id: result.attempt&.attempt_id,
+            recovery_request_id: completed.fetch("request_id"),
+            replacement_attempt_id: result.attempt&.attempt_id,
             attempts: attempt["retry_charge"] + 1
           )
         rescue StandardError => e
@@ -373,8 +337,11 @@ module Hive
       end
 
       def attempt_loss_retry_due?(attempt, outcome, now:)
-        limited_at = parse_retry_time(outcome["last_retry_at"]) ||
-                     parse_retry_time(attempt["loss"].to_h["at"])
+        limited_at = if outcome.fetch("revision", 0) > 1
+          parse_retry_time(outcome["updated_at"])
+        else
+          parse_retry_time(attempt["loss"].to_h["at"])
+        end
         return false unless limited_at
 
         retry_count = attempt["retry_charge"].to_i
@@ -395,17 +362,18 @@ module Hive
         projects.nil? || projects.include?(row.project)
       end
 
-      def task_for_attempt(attempt, outcome)
-        folder = outcome["task_folder"]
-        return Hive::Task.new(folder) if folder && File.directory?(folder)
-
-        target = attempt["task_id"].to_s.empty? ? attempt["task_slug"] : attempt["task_id"]
-        Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
+      def task_for_attempt(attempt)
+        @attempt_task_resolver.call(attempt)
       rescue Hive::Error, SystemCallError
         nil
       end
 
-      def successor_argv(attempt, task)
+      def resolve_attempt_task(attempt)
+        target = attempt["task_id"].to_s.empty? ? attempt["task_slug"] : attempt["task_id"]
+        Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
+      end
+
+      def recovery_argv(attempt, task)
         argv = Array(attempt["worker_argv"]).dup
         return argv unless argv.first == "hive" && argv.length >= 3
 

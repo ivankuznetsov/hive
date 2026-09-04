@@ -1,9 +1,6 @@
 require_relative "../test_helper"
 require "hive/attempts/dispatcher"
-require "hive/attempts/finalization_maintenance"
-require "hive/daemon/recovery_coordinator"
-require "hive/provider_health/attempt_observer"
-require "hive/provider_health/repository"
+require "hive/attempts/evidence_channel"
 require "hive/provider_routing"
 
 class ProviderRoutingRecoveryTest < Minitest::Test
@@ -11,14 +8,9 @@ class ProviderRoutingRecoveryTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
   CAPABILITY = "c" * 64
-  Task = Data.define(
-    :id, :slug, :folder, :state_file, :stage_index, :stage_name,
-    :project_root, :workflow
-  )
-  Row = Data.define(
-    :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
-    :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
-    :task_generation, :suggested_command
+  FakeTask = Struct.new(
+    :id, :slug, :folder, :state_file, :stage_index, :stage_name, :project_root,
+    :worktree_path, :workflow, keyword_init: true
   )
 
   class Launcher
@@ -36,210 +28,202 @@ class ProviderRoutingRecoveryTest < Minitest::Test
     end
   end
 
-  def test_failed_a_health_acknowledges_before_one_recovery_successor_selects_b
-    with_tmp_dir do |root|
-      task = build_task(root)
-      database = Hive::RuntimeControlPlane::Database.new(
-        path: Hive::Paths.runtime_control_plane_path(root)
-      ).migrate!
-      attempts = Hive::Attempts::Repository.new(
-        root: File.join(root, "attempts"), database: database
-      )
-      register_runtime_project(
-        database: attempts.database, name: "demo", path: task.project_root,
-        state_root_path: File.join(task.project_root, ".hive-state")
-      )
-      prepare_test_task_lease_repository(task.folder, state_home: root)
-      dispatch = Hive::RuntimeControlPlane::DispatchRepository.new(
-        database: attempts.database, clock: -> { NOW }
-      )
-      health = health_store(attempts)
-      launcher = Launcher.new
-      ids = %w[attempt-a attempt-b].each
-      dispatcher = Hive::Attempts::Dispatcher.new(
-        store: attempts, launcher: launcher,
-        limits: { max_global: 3, max_per_project: 3, max_daily: 50 },
-        clock: -> { NOW }, id_generator: -> { ids.next },
-        decision_id_generator: -> { SecureRandom.uuid },
-        capability_generator: -> { CAPABILITY }, health_store: health,
-        task_resolver: ->(_request) { task },
-        routing_policy_resolver: ->(_task, _stage) { policy }
-      )
-      dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
-      first = dispatcher.dispatch(
-        task: task, project: "demo", intended_stage: "4-execute",
-        argv: %w[hive run routed-task], request_id: "initial-request",
-        provider: "codex", routing_policy: policy, now: NOW
-      )
-      terminal = terminalize_provider_failure(attempts, launcher, first)
-      maintenance = Hive::Attempts::FinalizationMaintenance.new(
-        store: attempts,
-        provider_health_observer_factory: lambda do
-          Hive::ProviderHealth::AttemptObserver.new(store: health)
-        end
-      )
-      assert maintenance.prepare(terminal)
-      assert maintenance.acknowledge_provider_health(terminal)
-      assert_equal "open", health.inspect_scope(provider_scope("account-a")).circuit.automatic_state
+  def setup
+    @root = Dir.mktmpdir("provider-routing-recovery")
+    @project_root = File.join(@root, "demo")
+    @state_root = File.join(@project_root, ".hive-state")
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(@root)
+    ).migrate!
+    register_runtime_project(
+      database: database, name: "demo", path: @project_root,
+      state_root_path: @state_root
+    )
+    @store = Hive::Attempts::Repository.new(
+      root: File.join(@root, "attempts"), database: database
+    )
+    @launcher = Launcher.new
+    @ids = (1..20).map { |number| "attempt-#{number}" }.each
+    @dispatcher = Hive::Attempts::Dispatcher.new(
+      store: @store,
+      launcher: @launcher,
+      limits: { max_global: 20, max_per_project: 20, max_daily: 50 },
+      clock: -> { NOW },
+      id_generator: -> { @ids.next },
+      decision_id_generator: -> { SecureRandom.uuid },
+      capability_generator: -> { CAPABILITY }
+    )
+  end
 
-      marker = provider_failure_marker(task, terminal)
-      row = recovery_row(task, marker)
-      coordinator = Hive::Daemon::RecoveryCoordinator.new(
-        state_home: root, dispatch_repository: dispatch,
-        task_resolver: ->(**_attributes) { task },
-        safety: ->(_observation) { [ true, "safe" ] }, attempt_store: attempts
-      )
-      queued = coordinator.request(
-        row: row, requestor: "healer", request_id: "caller-id", now: NOW
-      )
-      recovery = dispatch.fetch(queued.request_id)
+  def teardown
+    @store.database.disconnect
+    FileUtils.remove_entry(@root)
+  end
 
-      assert_equal "queued", queued.status, queued.to_h.inspect
-      assert_equal 1, queued.retry_count
-      assert_equal terminal.attempt_id, recovery.predecessor_attempt_id
-      assert_equal terminal.attempt_id,
-                   recovery.recovery.dig("source_receipt", "attempt_id")
-      resumed = coordinator.resume(request: recovery, row: row, now: NOW)
-      assert_equal "cleared", resumed.phase
-      assert Hive::Markers.current(task.state_file).none?
+  def test_provider_failure_rotates_after_failed_route_and_wraps_once
+    routed_task = task("rotate", 1)
+    first = dispatch(routed_task, request_id: "initial", policy: policy)
+    failed_a = terminalize_provider_failure(first)
+    second = retry_after(failed_a, routed_task, request_id: "retry-b", policy: policy)
+    failed_b = terminalize_provider_failure(second)
+    third = retry_after(failed_b, routed_task, request_id: "retry-a", policy: policy)
 
-      successor = dispatcher.dispatch_request(recovery, now: NOW + 1)
+    assert_equal "account-a/model-a", first.decision.route.id
+    assert_equal "account-b/model-b", second.decision.route.id
+    assert_equal "account-a/model-a", third.decision.route.id
+  end
 
-      assert_equal :accepted, successor.status
-      assert_equal "account-b/model-b", successor.decision.route.id
-      assert_equal terminal.attempt_id, successor.attempt["predecessor_attempt_id"]
-      assert_equal terminal.task_generation, successor.attempt.task_generation
-      assert_equal terminal.task_input_epoch, successor.attempt.task_input_epoch
-      assert_equal policy.digest, successor.attempt["routing"].fetch("policy_digest")
-      assert_equal 1, successor.attempt["retry_charge"]
-      assert_equal 2, attempts.active_attempts.size
-      assert_empty dispatch.pending
-      assert_equal "admitted", dispatch.fetch(recovery.request_id).state
-      assert_equal 1, recovery.recovery.fetch("retry_count")
-    end
+  def test_prior_provider_failure_does_not_change_unrelated_new_work
+    routed_task = task("failed", 2)
+    failed = terminalize_provider_failure(
+      dispatch(routed_task, request_id: "failed-request", policy: policy)
+    )
+    unrelated = dispatch(task("unrelated", 3), request_id: "unrelated-request", policy: policy)
+
+    assert_equal "account-a/model-a", failed["routing"].dig("route", "route_id")
+    assert_equal "account-a/model-a", unrelated.decision.route.id
+  end
+
+  def test_retry_uses_current_configuration_when_failed_route_was_removed
+    routed_task = task("removed", 4)
+    failed = terminalize_provider_failure(
+      dispatch(routed_task, request_id: "before-change", policy: policy)
+    )
+    current = policy(routes: [ route("account-b", "model-b", "claude", "binding-b", 0) ])
+
+    retried = retry_after(failed, routed_task, request_id: "after-change", policy: current)
+
+    assert_equal :accepted, retried.status
+    assert_equal "account-b/model-b", retried.decision.route.id
+    assert_equal %w[mode route], retried.attempt["routing"].keys.sort
   end
 
   private
 
-  def build_task(root)
-    project_root = File.join(root, "demo")
-    folder = File.join(project_root, ".hive-state", "stages", "4-execute", "routed-task")
-    FileUtils.mkdir_p(folder)
-    state_file = File.join(folder, "task.md")
-    File.write(state_file, "# Routed task\n")
-    File.write(
-      File.join(folder, Hive::TaskMeta::FILENAME),
-      { "id" => 42, "slug" => "routed-task", "workflow" => "coding" }.to_yaml
-    )
-    Task.new(
-      id: 42, slug: "routed-task", folder: folder, state_file: state_file,
-      stage_index: 4, stage_name: "execute", project_root: project_root,
-      workflow: nil
+  def dispatch(routed_task, request_id:, policy:)
+    @dispatcher.dispatch(
+      task: routed_task,
+      project: "demo",
+      intended_stage: "4-execute",
+      argv: [ "hive", "run", routed_task.slug ],
+      request_id: request_id,
+      provider: "codex",
+      routing_policy: policy,
+      now: NOW
     )
   end
 
-  def health_store(attempts)
-    Hive::ProviderHealth::Repository.new(
-      database: attempts.database, clock: -> { NOW }
+  def retry_after(source_attempt, routed_task, request_id:, policy:)
+    @dispatcher.dispatch_recovery(
+      source_attempt: source_attempt,
+      task: routed_task,
+      project: "demo",
+      argv: [ "hive", "run", routed_task.slug ],
+      request_id: request_id,
+      provider: "codex",
+      routing_policy: policy,
+      now: NOW + 4
     )
   end
 
-  def terminalize_provider_failure(store, launcher, result)
-    capability = launcher.launched.find do |record, _token|
+  def terminalize_provider_failure(result)
+    capability = @launcher.launched.find do |record, _token|
       record.attempt_id == result.attempt.attempt_id
     end.fetch(1)
-    claimed = store.claim(
-      result.attempt, owner: { "pid" => Process.pid },
-      claim_capability: capability, first_heartbeat_timeout_sec: 30,
+    claimed = @store.claim(
+      result.attempt,
+      owner: { "pid" => Process.pid },
+      claim_capability: capability,
+      first_heartbeat_timeout_sec: 30,
       now: NOW + 1
     )
-    running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+    running = @store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
     reference = {
-      "path" => "logs/attempt-a.frames", "size" => 0,
+      "path" => "logs/#{running.attempt_id}.frames",
+      "size" => 0,
       "sha256" => Digest::SHA256.hexdigest("")
     }
-    route = Hive::ProviderHealth::RouteIdentity.new(
-      route_id: "account-a/model-a", account_id: "account-a", adapter: "codex",
-      launch_binding_id: "binding-a", model_id: "model-a"
+    route = running["routing"].fetch("route")
+    signal = {
+      "failure_class" => "account_quota",
+      "scope" => {
+        "kind" => "provider_account",
+        "provider_account_id" => route.fetch("provider_account_id"),
+        "model" => nil
+      },
+      "provenance" => "provider_diagnostic",
+      "reset_hint_seconds" => nil
+    }
+    evidence = Hive::Attempts::EvidenceChannel.materialize(
+      signal, record: running, source_reference: reference
     )
-    evidence = Hive::ProviderHealth::Evidence.new(
-      scope: provider_scope("account-a"), failure_class: "account_quota",
-      provenance: "codex_jsonl_transport", route: route,
-      reset_hint_seconds: 3_600, source_reference: reference,
-      attempt_id: result.attempt.attempt_id
-    )
-    store.terminalize(
-      running, outcome: "failed", exit_status: 70,
-      final_checkpoint: running.checkpoint, output_references: [],
-      log_reference: reference, provider_evidence: evidence.to_h,
+    @store.terminalize(
+      running,
+      outcome: "failed",
+      exit_status: 70,
+      final_checkpoint: running.checkpoint,
+      output_references: [],
+      log_reference: reference,
+      provider_evidence: evidence,
       now: NOW + 3
     )
   end
 
-  def provider_failure_marker(task, terminal)
-    route = terminal["routing"].fetch("route")
-    Hive::Markers.set(
-      task.state_file, :error,
-      reason: "provider_route_failed", marker_id: "provider-marker",
-      attempt_id: terminal.attempt_id,
-      task_generation: terminal.task_generation,
-      ownership_generation: terminal.ownership_generation,
-      task_input_epoch: terminal.task_input_epoch,
-      provider_account_id: route.fetch("provider_account_id"),
-      route_id: route.fetch("route_id")
-    )
-    File.utime(NOW - Hive::AgentLimit.retry_cooldown_sec,
-               NOW - Hive::AgentLimit.retry_cooldown_sec, task.state_file)
-    Hive::Markers.current(task.state_file)
-  end
-
-  def recovery_row(task, marker)
-    Row.new(
-      project: "demo", slug: task.slug, folder: task.folder,
-      state_file: task.state_file, stage: "4-execute", workflow: "coding",
-      marker: marker.name.to_s, marker_attrs: marker.attrs,
-      state_file_mtime: NOW - Hive::AgentLimit.retry_cooldown_sec,
-      live_task_lock: false, attempt_id: marker.attrs["attempt_id"],
-      task_generation: marker.attrs["task_generation"],
-      suggested_command: "hive run routed-task --stage 4-execute --project demo --json"
+  def task(slug, id)
+    folder = File.join(@state_root, "stages", "4-execute", slug)
+    FileUtils.mkdir_p(folder)
+    state_file = File.join(folder, "task.md")
+    File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
+    FakeTask.new(
+      id: id,
+      slug: slug,
+      folder: folder,
+      state_file: state_file,
+      stage_index: 4,
+      stage_name: "execute"
     )
   end
 
-  def policy
-    @policy ||= Hive::ProviderRouting::Policy.explicit(
+  def policy(routes: nil)
+    routes ||= [
+      route("account-a", "model-a", "codex", "binding-a", 0),
+      route("account-b", "model-b", "claude", "binding-b", 1)
+    ]
+    accounts = routes.to_h do |candidate|
+      [
+        candidate.account,
+        {
+          "adapter" => candidate.adapter,
+          "launch_binding" => candidate.launch_binding,
+          "models" => [ candidate.model ],
+          "max_concurrent" => 1
+        }
+      ]
+    end
+    Hive::ProviderRouting::Policy.explicit(
       stage: "execute",
-      routes: [
-        route("account-a", "model-a", "codex", "binding-a", 0),
-        route("account-b", "model-b", "claude", "binding-b", 1)
-      ],
-      requirements: Hive::ProviderRouting::Requirements.empty, pin: nil,
-      account_policy: {
-        "account-a" => account("codex", "binding-a", "model-a"),
-        "account-b" => account("claude", "binding-b", "model-b")
-      }
+      routes: routes,
+      requirements: Hive::ProviderRouting::Requirements.empty,
+      pin: nil,
+      account_policy: accounts
     )
   end
 
   def route(account_id, model, adapter, binding, order)
     Hive::ProviderRouting::Route.new(
-      id: "#{account_id}/#{model}", account: account_id, adapter: adapter,
-      launch_binding: binding, model: model, effort: "high", order: order,
+      id: "#{account_id}/#{model}",
+      account: account_id,
+      adapter: adapter,
+      launch_binding: binding,
+      model: model,
+      effort: "high",
+      order: order,
       capabilities: {
-        "context" => "large", "quality" => "high",
-        "tools" => %w[shell], "permissions" => %w[read]
+        "context" => "large",
+        "quality" => "high",
+        "tools" => %w[shell],
+        "permissions" => %w[read]
       }
     )
-  end
-
-  def account(adapter, binding, model)
-    {
-      "adapter" => adapter, "launch_binding" => binding,
-      "models" => [ model ], "max_concurrent" => 1,
-      "cooldown_sec" => Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
-    }
-  end
-
-  def provider_scope(account_id)
-    Hive::ProviderHealth::Scope.provider_account(account_id: account_id)
   end
 end

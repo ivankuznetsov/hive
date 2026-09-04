@@ -204,9 +204,9 @@ module Hive
         # see the next warning the next time it goes red, but we don't
         # actively re-emit on every tick. Issue #95.
         @legacy_layout_logged = {}
-        # Test-injectable state homes for dispatch requests and the completion
-        # outbox. Production uses `Hive::Paths.state_home`; unit tests inject a
-        # sandbox while sharing one SQL control plane.
+        # Test-injectable state homes for dispatch requests and their results.
+        # Production uses `Hive::Paths.state_home`; unit tests inject a sandbox
+        # while sharing one SQL control plane.
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answer_state`).
@@ -276,8 +276,13 @@ module Hive
           )
           reconcile_lost_attempt_deliveries(now: now)
           if @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
-            result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
-            refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
+            begin
+              result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
+              refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
+            rescue StandardError
+              refresh_attempt_storage_snapshot
+              raise
+            end
           end
         rescue StandardError => e
           @logger.event(:fatal,
@@ -1825,11 +1830,10 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
-          when "failure_cohort_cooldown" then :attempt_failure_cohort
+          when "patrol_retry_delay" then :attempt_patrol_retry
           when "transient_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
-          when "invalid_predecessor" then :invalid_predecessor
           else :attempt_deferred
           end
         else
@@ -1854,16 +1858,14 @@ module Hive
           [ "hive", "the automatic advance failed without producing task progress" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
-        when :attempt_failure_cohort
-          [ "scheduler", "this typed Patrol failure cohort is durably paced" ]
+        when :attempt_patrol_retry
+          [ "scheduler", "this Patrol task is waiting for its retry delay" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
           [ "hive", "durable worker launch handoff failed" ]
-        when :invalid_predecessor
-          [ "hive", "durable successor admission found an invalid predecessor" ]
         when :attempt_deferred
           [ "hive", "durable attempt admission was deferred" ]
         when :global_cap
@@ -3349,7 +3351,7 @@ module Hive
               )
             end
             dispatch_repository.complete_delivery(request.request_id, now: now)
-            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            acknowledge_attempt_finalization(attempt_id, :dispatch)
             next
           end
 
@@ -3413,12 +3415,12 @@ module Hive
             exit_code: receipt["exit_status"],
             outcome: receipt["outcome"]
           )
-          acknowledge_attempt_finalization(attempt, :request_delivery)
+          acknowledge_attempt_finalization(attempt, :dispatch)
         end
 
         terminal_attempts.each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
-            acknowledge_attempt_finalization(attempt, :request_delivery)
+            acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
         terminal_attempts.each do |attempt|
@@ -3444,27 +3446,34 @@ module Hive
           outcome = @lost_outcome_store.fetch(attempt_id)
           next unless outcome
 
-          case outcome["status"]
-          when "successor_dispatched"
-            successor_id = outcome["successor_attempt_id"].to_s
-            next if successor_id.empty? || successor_id == attempt_id
+          case outcome["phase"]
+          when "complete"
+            request_id = outcome["request_id"].to_s
+            next if request_id.empty? || !@attempt_reconciler&.respond_to?(:store)
+
+            replacement_id = @attempt_reconciler.store.attempt_id_for_request(
+              request_id: request_id
+            ).to_s
+            next if replacement_id.empty? || replacement_id == attempt_id
+            replacement = @attempt_reconciler.fetch(replacement_id)
+            next unless replacement
 
             dispatch_repository.update_claim(
               delivery.request.request_id,
               pid: delivery.claim["pid"],
               process_start_time: delivery.claim["process_start_time"],
-              attempt_id: successor_id,
-              task_generation: outcome["task_generation"],
+              attempt_id: replacement.attempt_id,
+              task_generation: replacement.task_generation,
               state_home: dispatch_request_state_home,
               now: now
             )
-            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            acknowledge_attempt_finalization(attempt_id, :dispatch)
           end
         end
 
         Array(@attempt_snapshot&.lost_attempts).each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
-            acknowledge_attempt_finalization(attempt, :request_delivery)
+            acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
         Array(@attempt_snapshot&.lost_attempts).each do |attempt|
@@ -3540,11 +3549,9 @@ module Hive
         timeout + grace + (@poll_interval_sec.to_i * 2) + 600
       end
 
-      # ADV-1 (#6): drop stale dispatch-result notices each tick so a
-      # down/wedged bot can't let the dir grow without bound. The bot
-      # itself also skips+removes stale notices on drain; this is the
-      # daemon-side backstop for when no bot is consuming at all. Never
-      # crashes a tick.
+      # Prune only expired, delivered, completed request rows. Pending results
+      # survive indefinitely until the bot acknowledges a successful send.
+      # Never crashes a tick.
       def prune_dispatch_results(now:)
         dispatch_repository.prune_results(
           state_home: dispatch_result_state_home, now: now
@@ -3573,7 +3580,7 @@ module Hive
         )
       end
 
-      # ADV-1: write a completion-notice file the bot will drain + relay to
+      # ADV-1: write a completion result the bot will drain + relay to
       # the originating Telegram chat. No-op when the completed run did
       # not carry a chat_id (auto-advance runs, or metadata already gone)
       # — there's no one to reply to. Best-effort: a write failure must
@@ -3728,7 +3735,6 @@ module Hive
           update_id: nil,
           trigger: trigger,
           task_generation: nil,
-          predecessor_attempt_id: nil,
           inherited_outputs: [],
           schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION
         )
@@ -3791,7 +3797,7 @@ module Hive
           when :deferred
             case result.reason
             when "transient_retry" then :attempt_transient_retry
-            when "failure_cohort_cooldown" then :attempt_failure_cohort_deferred
+            when "patrol_retry_delay" then :attempt_patrol_retry_deferred
             else :attempt_capacity_deferred
             end
           when :no_route then :attempt_route_unavailable

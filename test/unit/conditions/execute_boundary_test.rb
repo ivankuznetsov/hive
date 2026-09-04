@@ -109,14 +109,13 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
                        legacy_marker: :execute_waiting, waiting_reason: "no_worktree_changes")
       assert_equal :execute_waiting, first.marker_name
 
-      lost = store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
+      store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
       File.write(File.join(task.worktree_path, "change.txt"), "change\n")
       run!("git", "-C", task.worktree_path, "add", "change.txt")
       run!("git", "-C", task.worktree_path, "commit", "-m", "change", "--quiet")
       attempt_b = store.create_launching(
         **attempt_identity(task, baseline).merge(
-          attempt_id: "attempt-b", request_id: "request-b",
-          predecessor_attempt_id: lost.attempt_id
+          attempt_id: "attempt-b", request_id: "request-b"
         ),
         launch_timeout_sec: 30, now: Time.now.utc
       )
@@ -254,7 +253,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       )
       assert_equal :execute_complete, outcome.marker_name
       lost = store.mark_lost(attempt, reason: "wrapper_exited", now: Time.now.utc)
-      store.prepare_publication(attempt_id: lost.attempt_id, consumers: %w[journal])
+      store.prepare_publication(attempt_id: lost.attempt_id)
       projects = [ { "name" => "demo", "path" => task.project_root } ]
 
       with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
@@ -493,7 +492,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       ownership_generation: "owner-1", task_input_epoch: 1
     )
     {
-      attempt_id: "attempt-a", request_id: "request-a", predecessor_attempt_id: nil,
+      attempt_id: "attempt-a", request_id: "request-a",
       task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
       task_generation: generation.ownership_generation,
       ownership_generation: generation.ownership_generation,

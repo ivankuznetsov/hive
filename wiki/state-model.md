@@ -344,7 +344,7 @@ without creating an infinite loop.
 
 - **Per-task lease**: installation SQLite `task_leases`, keyed through stable
   `task_subjects.task_id`. Typed holder PID/start identity, holder nonce,
-  generation, lease version, and bounded JSON operation/agent detail provide
+  lease version, and bounded JSON operation/agent detail provide
   liveness plus compare-and-swap fencing. Dead or PID-reused holders are
   reclaimable; an old nonce cannot release or update its replacement. Subject
   lookup is metadata-id-first, validates the registered project/state root,

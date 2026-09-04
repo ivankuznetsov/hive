@@ -4,7 +4,6 @@ Sequel.migration do
 
     create_table(:installations) do
       String :installation_id, primary_key: true, null: false
-      String :lineage_id, null: false, unique: true
       Integer :activation_epoch, null: false, default: 0
       String :created_at, null: false
       String :activated_at
@@ -16,7 +15,6 @@ Sequel.migration do
       foreign_key :installation_id, :installations, type: String, key: :installation_id,
                   null: false, on_delete: :cascade, on_update: :cascade
       %i[registration_id name observed_path state_root_path].each { |column| String column, null: false }
-      String :repository_identity_json
       Integer :active, null: false, default: 1
       String :registered_at, null: false
       String :last_observed_at
@@ -280,19 +278,13 @@ Sequel.migration do
     create_table(:task_leases) do
       foreign_key :task_id, :task_subjects, type: String, key: :task_id,
                   primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
-      %i[
-        holder_kind holder_id holder_process_identity acquired_at expires_at released_at
-      ].each { |column| String column }
+      %i[holder_id holder_process_identity].each { |column| String column }
       Integer :holder_pid
       String :payload_json, text: true, null: false, default: "{}"
-      Integer :generation, null: false
       Integer :lease_version, null: false
-      String :source_fingerprint, null: false
-      check Sequel.lit("generation >= 0")
       check Sequel.lit("lease_version >= 0")
       check Sequel.lit("holder_pid IS NULL OR holder_pid > 0")
       check Sequel.lit("(holder_id IS NULL AND holder_pid IS NULL) OR (holder_id IS NOT NULL AND holder_pid IS NOT NULL)")
-      index [ :expires_at ], name: :task_leases_expiry_idx
     end
 
     create_table(:task_counters) do
@@ -346,17 +338,8 @@ Sequel.migration do
 
     create_table(:daemon_runtime) do
       foreign_key :installation_id, :installations, type: String, key: :installation_id,
-                  null: false, on_delete: :cascade, on_update: :cascade
-      %i[daemon_kind state observed_at].each { |column| String column, null: false }
-      Integer :generation, null: false
-      Integer :owner_pid
-      String :owner_process_identity
+                  primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
       String :observation_json, text: true, null: false, default: "{}"
-      String :expires_at
-      primary_key [ :installation_id, :daemon_kind ]
-      check Sequel.lit("generation >= 0")
-      check Sequel.lit("owner_pid IS NULL OR owner_pid > 0")
-      check Sequel.lit("state IN ('starting', 'running', 'stopped', 'unavailable')")
     end
 
     create_table(:payload_references) do

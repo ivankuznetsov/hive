@@ -166,20 +166,12 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
         end
       end
 
-      installation = database.read { |connection| connection[:installations].get(:installation_id) }
-      database.transaction do |connection|
-        %w[starting running stopped unavailable].each_with_index do |state, index|
-          connection[:daemon_runtime].insert(
-            installation_id: installation, daemon_kind: "daemon-#{index}", state: state,
-            observed_at: timestamp, generation: 0
-          )
-        end
-        assert_raises(Sequel::CheckConstraintViolation) do
-          connection[:daemon_runtime].insert(
-            installation_id: installation, daemon_kind: "retired", state: "stopping",
-            observed_at: timestamp, generation: 0
-          )
-        end
+      database.read do |connection|
+        assert_equal %i[installation_id observation_json], connection[:daemon_runtime].columns
+        refute_includes connection[:installations].columns, :lineage_id
+        refute_includes connection[:projects].columns, :repository_identity_json
+        assert_equal %i[task_id holder_id holder_process_identity holder_pid payload_json lease_version],
+                     connection[:task_leases].columns
       end
 
       database.transaction do |connection|

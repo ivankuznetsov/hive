@@ -114,7 +114,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
 
     with_database do |database, path|
       database.disconnect
-      raw_sqlite(path) { |raw| raw.execute("CREATE INDEX unexpected_runtime_idx ON daemon_runtime(daemon_kind)") }
+      raw_sqlite(path) { |raw| raw.execute("CREATE INDEX unexpected_runtime_idx ON daemon_runtime(observation_json)") }
 
       error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }
       assert_equal :partial_schema, error.code

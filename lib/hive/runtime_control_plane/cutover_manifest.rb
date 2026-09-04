@@ -20,12 +20,12 @@ module Hive
 
       attr_reader :path
 
-      def self.build(phase:, installation_id:, lineage_id:, source_release:, target_release:,
+      def self.build(phase:, installation_id:, source_release:, target_release:,
                      exclusions:, task_authority:, evidence: {}, created_at: Time.now.utc)
         validate!({
           "schema" => SCHEMA, "schema_version" => VERSION, "phase" => phase.to_s,
           "created_at" => Codec.dump_time(created_at), "installation_id" => installation_id,
-          "lineage_id" => lineage_id, "source_release" => source_release,
+          "source_release" => source_release,
           "target_release" => target_release, "exclusions" => exclusions,
           "task_authority" => task_authority, "evidence" => evidence
         }, Error)
@@ -34,12 +34,12 @@ module Hive
       def self.validate!(value, error_class = IntegrityError)
         document = Codec.normalize(value)
         valid = document.keys.sort == %w[
-          created_at evidence exclusions installation_id lineage_id phase schema
+          created_at evidence exclusions installation_id phase schema
           schema_version source_release target_release task_authority
         ] && document["schema"] == SCHEMA && document["schema_version"] == VERSION &&
           PHASES.include?(document["phase"]) && document["evidence"].is_a?(Hash) &&
           %w[exclusions task_authority].all? { |key| document[key].is_a?(Array) } &&
-          %w[installation_id lineage_id source_release target_release].all? do |key|
+          %w[installation_id source_release target_release].all? do |key|
             document[key].is_a?(String) && document[key].bytesize.between?(1, 512)
           end
         Codec.load_time(document.fetch("created_at"))

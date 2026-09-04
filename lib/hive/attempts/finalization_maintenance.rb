@@ -9,12 +9,11 @@ require "time"
 
 module Hive
   module Attempts
-    # Two-phase publication of final attempt authority. The final row and
-    # bounded consumer ledger are durable before acknowledgements can publish
-    # content-addressed payloads and remove the attempt from the hot view.
+    # Two-phase publication of final attempt authority. The final row carries
+    # the fixed consumer acknowledgements; no one-to-one publication ledger is
+    # created or removed.
     class FinalizationMaintenance
-      TERMINAL_CONSUMERS = %w[accounting journal request_delivery].freeze
-      LOST_CONSUMERS = (TERMINAL_CONSUMERS + [ "loss" ]).freeze
+      TERMINAL_CONSUMERS = %w[accounting dispatch journal].freeze
       MAINTENANCE_INTERVAL_SEC = 60 * 60
       LOG_RETENTION_SEC = 3 * 24 * 60 * 60
       COLD_SWEEP_LIMIT = 512
@@ -50,11 +49,7 @@ module Hive
         return false unless record.is_a?(Record) && record.final?
         return false if record.state == "lost" && !resolved_loss?(record)
 
-        consumers = record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
-        @store.prepare_publication(
-          attempt_id: record.attempt_id,
-          consumers: consumers
-        )
+        @store.prepare_publication(attempt_id: record.attempt_id)
         true
       end
 
@@ -72,7 +67,6 @@ module Hive
         entry = @store.publication(record.attempt_id)
         return false unless entry&.dig("consumers", "journal") == true
 
-        acknowledge(record, :loss) if record.state == "lost"
         publish_indexes(record)
         acknowledge(record, :accounting)
       end
@@ -88,17 +82,15 @@ module Hive
         log_result = @store.log_archive.archive(record.attempt_id)
         return false if log_result == :busy
 
-        current = @store.fetch_hot(record.attempt_id)
-        return true unless current
-        unless current.final? && current.to_h == proof.to_h
-          raise RepositoryError, "hot attempt changed after final proof publication"
+        current = @store.fetch(record.attempt_id)
+        unless current&.final? && current.to_h == proof.to_h
+          raise RepositoryError, "attempt changed after final proof publication"
         end
 
         reservation = @store.reservation_metadata(current.attempt_id)
         @failure_cohort_reconciler.reconcile(
           record: current, admission: reservation&.fetch("admission", nil)
         )
-        @store.release_live(attempt_id: record.attempt_id)
         @store.finish_publication(record.attempt_id)
         true
       end
@@ -108,7 +100,7 @@ module Hive
         return false unless acknowledge_journal(record, now: now)
         return false unless publish_after_journal(record)
 
-        acknowledge(record, :request_delivery) unless delivery_pending?(record)
+        acknowledge(record, :dispatch) unless delivery_pending?(record)
         promote(record)
       end
 
@@ -221,10 +213,8 @@ module Hive
       end
 
       def recovery_pinned?(record)
-        hot = @store.fetch_hot(record.attempt_id)
-        return false unless hot
-
-        !@store.publication_complete?(record.attempt_id)
+        !!@store.publication(record.attempt_id) &&
+          !@store.publication_complete?(record.attempt_id)
       rescue RepositoryError
         true
       end
@@ -288,29 +278,11 @@ module Hive
       end
 
       def resolved_loss?(record)
-        !resolved_loss_successor(record).nil?
+        outcome = LostOutcomeTransition.new(store: @store).fetch(record.attempt_id)
+        LostOutcomeTransition::FINAL_PHASES.include?(outcome&.fetch("phase", nil)) &&
+          LostOutcomeTransition::SAFE_CLEANUPS.include?(outcome["cleanup"])
       rescue RepositoryError
         false
-      end
-
-      def resolved_loss_successor(record)
-        outcome = LostOutcomeTransition.new(store: @store).fetch(record.attempt_id)
-        return nil unless LostOutcomeTransition::FINAL_STATUSES.include?(outcome&.fetch("status", nil))
-        return nil unless LostOutcomeTransition::SAFE_CLEANUPS.include?(outcome["cleanup"])
-
-        successor_id = outcome["successor_attempt_id"].to_s
-        return nil if successor_id.empty? || successor_id == record.attempt_id
-        indexed_id = @store.successor_attempt_id(
-          predecessor_attempt_id: record.attempt_id
-        )
-        return nil unless indexed_id == successor_id
-
-        successor = @store.fetch(successor_id)
-        return nil unless successor && successor["predecessor_attempt_id"] == record.attempt_id
-        return nil unless successor.task_generation == record.task_generation
-        return nil unless successor.subject == record.subject
-
-        successor
       end
     end
   end

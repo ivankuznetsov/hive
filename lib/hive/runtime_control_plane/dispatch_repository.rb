@@ -34,13 +34,13 @@ module Hive
       Request = Data.define(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
         :chat_id, :update_id, :trigger, :task_generation,
-        :predecessor_attempt_id, :inherited_outputs, :task_id,
+        :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
         :recovery, :schema_version, :state, :revision
       ) do
         def initialize(request_id:, created_at:, project:, slug:, argv:, requestor:,
                        chat_id: nil, update_id: nil, trigger: "", task_generation: nil,
-                       predecessor_attempt_id: nil, inherited_outputs: [], task_id: nil,
+                       inherited_outputs: [], task_id: nil,
                        expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
                        recovery: nil, schema_version: DispatchRepository::SCHEMA_VERSION,
                        state: "queued", revision: 0)
@@ -48,7 +48,6 @@ module Hive
             request_id: request_id, created_at: created_at, project: project, slug: slug,
             argv: argv, requestor: requestor, chat_id: chat_id, update_id: update_id,
             trigger: trigger, task_generation: task_generation,
-            predecessor_attempt_id: predecessor_attempt_id,
             inherited_outputs: inherited_outputs, task_id: task_id,
             expected_stage: expected_stage, expected_marker_name: expected_marker_name,
             expected_marker_id: expected_marker_id, recovery: recovery,
@@ -89,14 +88,14 @@ module Hive
 
       def write_request!(project:, slug:, argv:, requestor: "bot", chat_id: nil,
                          update_id: nil, trigger: nil, request_id: generate_request_id,
-                         task_generation: nil, predecessor_attempt_id: nil,
+                         task_generation: nil,
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
                          expected_marker_id: nil, recovery: nil, now: @clock.call, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
-          task_generation: task_generation, predecessor_attempt_id: predecessor_attempt_id,
+          task_generation: task_generation,
           inherited_outputs: inherited_outputs, task_id: task_id, expected_stage: expected_stage,
           expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
           recovery: recovery, now: now
@@ -468,7 +467,7 @@ module Hive
 
       def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,
                           update_id: nil, trigger: nil, task_generation: nil,
-                          predecessor_attempt_id: nil, inherited_outputs: [], task_id: nil,
+                          inherited_outputs: [], task_id: nil,
                           expected_stage: nil, expected_marker_name: nil,
                           expected_marker_id: nil, recovery: nil, remaining_argvs: [])
         validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
@@ -478,7 +477,6 @@ module Hive
           "project" => project.to_s, "slug" => slug.to_s, "argv" => Array(argv),
           "requestor" => requestor.to_s, "chat_id" => chat_id, "update_id" => update_id,
           "trigger" => trigger.to_s, "task_generation" => task_generation,
-          "predecessor_attempt_id" => predecessor_attempt_id,
           "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
           "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
           "expected_marker_id" => expected_marker_id, "recovery" => recovery,
@@ -513,7 +511,7 @@ module Hive
         existing = Codec.load_json(row.fetch(:payload_json))
         %w[
           request_id project slug argv requestor chat_id update_id trigger task_generation
-          predecessor_attempt_id inherited_outputs task_id expected_stage
+          inherited_outputs task_id expected_stage
           expected_marker_name expected_marker_id recovery
           remaining_argvs
         ].all? { |key| existing[key] == payload[key] }
@@ -536,7 +534,6 @@ module Hive
           chat_id: payload["chat_id"], update_id: payload["update_id"],
           trigger: payload.fetch("trigger"),
           task_generation: blank_to_nil(row[:task_generation]),
-          predecessor_attempt_id: payload["predecessor_attempt_id"],
           inherited_outputs: payload.fetch("inherited_outputs"), task_id: payload["task_id"],
           expected_stage: payload["expected_stage"],
           expected_marker_name: payload["expected_marker_name"],

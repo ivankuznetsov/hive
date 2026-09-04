@@ -7,47 +7,25 @@ class AttemptsCoordinationTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 10, 12)
 
-  def test_routing_decision_round_trips_through_a_bounded_typed_query
+  def test_replacement_attempt_is_independent_after_the_source_is_lost
     with_tmp_dir do |root|
       repository = Hive::Attempts::Repository.new(root: root, migrate: true)
-      attempt = create(repository, attempt_id: "attempt-1", task_slug: "task")
-      decision = selected_decision("decision-1")
-
-      recorded = repository.record_routing_decision(
-        decision: decision, task_generation: "generation-1", subject: subject,
-        project: "demo", attempt_id: attempt.attempt_id
-      )
-      restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
-
-      assert_equal decision.to_h, recorded
-      assert_equal decision.to_h,
-                   restarted.routing_decision(task_generation: "generation-1", subject: subject)
-      assert_equal attempt.attempt_id, restarted.routing_decisions.fetch(0).fetch("attempt_id")
-      assert_raises(Hive::Attempts::RepositoryError) { restarted.routing_decisions(limit: 0) }
-    end
-  end
-
-  def test_successor_identity_uses_one_relationship_row_not_a_duplicate_attempt_column
-    with_tmp_dir do |root|
-      repository = Hive::Attempts::Repository.new(root: root, migrate: true)
-      predecessor = create(repository, attempt_id: "predecessor", task_slug: "task")
-      repository.mark_lost(predecessor, reason: "worker_lost", now: NOW + 1)
-      successor = create(
-        repository, attempt_id: "successor", task_slug: "task",
-        request_id: "request-successor", predecessor_attempt_id: predecessor.attempt_id
+      source = create(repository, attempt_id: "source", task_slug: "task")
+      repository.mark_lost(source, reason: "worker_lost", now: NOW + 1)
+      replacement = create(
+        repository, attempt_id: "replacement", task_slug: "task",
+        request_id: "request-replacement"
       )
 
       schema = repository.database.read { |db| db.schema(:attempts).map(&:first) }
       refute_includes schema, :predecessor_attempt_id
-      assert_equal successor.attempt_id,
-                   repository.successor_attempt_id(predecessor_attempt_id: predecessor.attempt_id)
-      assert_equal 1, repository.database.read { |db| db[:attempt_relationships].count }
-      assert_raises(Hive::Attempts::RepositoryError) do
-        create(
-          repository, attempt_id: "competing", task_slug: "task",
-          request_id: "request-competing", predecessor_attempt_id: predecessor.attempt_id
-        )
+      refute_includes replacement.to_h, "predecessor_attempt_id"
+      refute repository.respond_to?(:successor_attempt_id)
+      refute repository.database.read { |db| db.table_exists?(:attempt_relationships) }
+      repository.database.transaction do |db|
+        db[:attempts].where(attempt_id: source.attempt_id).delete
       end
+      assert_equal replacement.to_h, repository.fetch(replacement.attempt_id).to_h
     end
   end
 
@@ -98,7 +76,12 @@ class AttemptsCoordinationTest < Minitest::Test
         )
       end
 
-      assert_equal 1, repository.database.read { |db| db[:attempt_failure_events].count }
+      row = repository.database.read do |db|
+        db[:attempts].where(attempt_id: lost.attempt_id).first
+      end
+      assert_equal "failed", row.fetch(:failure_cohort_outcome)
+      assert_equal 1, row.fetch(:failure_cohort_counted)
+      refute repository.database.read { |db| db.table_exists?(:attempt_failure_events) }
       assert_raises(Hive::Attempts::RepositoryError) do
         repository.record_failure_cohort(
           attempt_id: "missing", identity: failure_identity, occurred_at: NOW
@@ -143,11 +126,12 @@ class AttemptsCoordinationTest < Minitest::Test
           explicit_release: false
         }
       )
+      successful = terminalize(repository, successor_probe, exit_status: 0)
       assert repository.record_failure_cohort_success(
-        attempt_id: successor_probe.attempt_id, date: NOW.to_date
+        attempt_id: successful.attempt_id, date: NOW.to_date
       )
       refute repository.record_failure_cohort_success(
-        attempt_id: successor_probe.attempt_id, date: NOW.to_date
+        attempt_id: successful.attempt_id, date: NOW.to_date
       )
     end
   end
@@ -190,28 +174,9 @@ class AttemptsCoordinationTest < Minitest::Test
 
       terminal = terminalize(repository, launching, exit_status: 0)
       assert_raises(Hive::Attempts::RepositoryError) { repository.refund_tempfail(terminal) }
-      repository.database.transaction do |db|
-        db[:attempt_accounting].where(attempt_id: terminal.attempt_id).delete
-      end
-      assert_raises(Hive::Attempts::RepositoryError) { repository.send(:mark_refunded, terminal) }
-
+      missing_acceptance = terminal.with("accepted_at" => (NOW - 1).iso8601(6))
       assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_routing_decision(
-          decision: Object.new, task_generation: "generation-1",
-          subject: subject, project: "demo"
-        )
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_routing_decision(
-          decision: selected_decision("wrong-generation"), task_generation: "other",
-          subject: subject, project: "demo"
-        )
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.record_routing_decision(
-          decision: selected_decision("bad-subject"), task_generation: "generation-1",
-          subject: Object.new, project: "demo"
-        )
+        repository.send(:mark_refunded, missing_acceptance)
       end
 
       assert_raises(Hive::Attempts::RepositoryError) do
@@ -250,10 +215,9 @@ class AttemptsCoordinationTest < Minitest::Test
   end
 
   def create(repository, attempt_id:, task_slug:, request_id: "request-1",
-             predecessor_attempt_id: nil, failure_cohort_probe: nil)
+             failure_cohort_probe: nil)
     repository.create_launching(
       attempt_id: attempt_id, request_id: request_id.sub("1", attempt_id),
-      predecessor_attempt_id: predecessor_attempt_id,
       task_id: task_slug, project: "demo", task_slug: task_slug,
       intended_stage: "4-execute", task_generation: "generation-#{task_slug}",
       ownership_generation: "owner-1", task_input_epoch: 1,

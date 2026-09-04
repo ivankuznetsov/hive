@@ -96,51 +96,23 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
-  def test_missing_and_cyclic_attempt_lineage_fail_closed
+  def test_attempt_validation_does_not_require_another_attempt
     with_writer do |writer, _dir|
       store = writer.attempt_store
-      first = attempt_record(store, "attempt-1")
-      rewrite_attempt(store, first.merge("predecessor_attempt_id" => "missing"))
-
-      error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
-        writer.append(event("condition_observed"))
-      end
-      assert_includes error.message, "missing predecessor"
-
       create_successor(store)
-      rewrite_attempt(store, first.merge("predecessor_attempt_id" => "attempt-2"))
+      store.database.transaction do |db|
+        db[:attempts].where(attempt_id: "attempt-1").delete
+      end
       fresh_writer = Hive::TaskJournal::Writer.new(
         task_folder: writer.task_folder, attempt_store: store, clock: -> { NOW }
       )
-      error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
-        fresh_writer.append(event(
-          "condition_observed", attempt_id: "attempt-2", ownership_generation: "ownership-2"
-        ))
-      end
-      assert_includes error.message, "lineage cycle"
-    end
-  end
-
-  def test_attempt_lineage_rejects_an_incompatible_predecessor_identity
-    with_writer do |writer, _dir|
-      store = writer.attempt_store
-      first = attempt_record(store, "attempt-1")
-      create_successor(store)
-      incompatible = first.merge(
-        "task_slug" => "other-task",
-        "subject" => first.fetch("subject").merge("task_slug" => "other-task")
-      )
-      rewrite_attempt(store, incompatible)
-
-      fresh_writer = Hive::TaskJournal::Writer.new(
-        task_folder: writer.task_folder, attempt_store: store, clock: -> { NOW }
-      )
-      error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
-        fresh_writer.append(event(
-          "condition_observed", attempt_id: "attempt-2", ownership_generation: "ownership-2"
-        ))
-      end
-      assert_includes error.message, "incompatible identity"
+      result = fresh_writer.append(event(
+        "condition_observed", attempt_id: "attempt-2", ownership_generation: "ownership-2"
+      ))
+      assert_equal 1, result.records.length
+      assert_equal "attempt-2", result.records.first.fetch("attempt_id")
+      refute_includes result.records.first.fetch("provenance").keys,
+                      "predecessor_attempt_id"
     end
   end
 
@@ -435,7 +407,7 @@ class TaskJournalTest < Minitest::Test
 
   def create_successor(store)
     store.create_launching(
-      attempt_id: "attempt-2", request_id: "request-2", predecessor_attempt_id: "attempt-1",
+      attempt_id: "attempt-2", request_id: "request-2",
       task_id: "42", project: "demo", task_slug: "durable-task", intended_stage: "4-execute",
       task_generation: "ownership-2", ownership_generation: "ownership-2", task_input_epoch: 3,
       progress_token: "progress", provider: "codex", starting_revision: nil,
@@ -449,7 +421,7 @@ class TaskJournalTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = store.create_launching(
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "durable-task", intended_stage: "4-execute",
         task_generation: "ownership-1", ownership_generation: "ownership-1", task_input_epoch: 3,
         progress_token: "progress", provider: "codex", starting_revision: nil,

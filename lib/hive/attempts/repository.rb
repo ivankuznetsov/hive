@@ -150,12 +150,14 @@ module Hive
 
       def create_launching(source_fingerprint: nil, admission: nil, limits: nil,
                            failure_cohort_probe: nil, route_decision: nil, **attributes)
+        recovery_source_attempt_id = attributes.delete(:recovery_source_attempt_id)
         source_fingerprint ||= attributes[:progress_token]
         RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
           attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
           failure_cohort_probe: failure_cohort_probe,
-          route_decision: route_decision
+          route_decision: route_decision,
+          recovery_source_attempt_id: recovery_source_attempt_id
         )
       rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt could not be created")
@@ -251,9 +253,7 @@ module Hive
         row = read_row(attempt_id)
         return nil unless row
         return record_from(row) if %w[launching running].include?(row.fetch(:state))
-        return nil unless database.read do |db|
-          db[:terminal_pending_publications].where(attempt_id: row[:attempt_id]).any?
-        end
+        return nil unless publication_pending_row?(row)
 
         record_from(row)
       end
@@ -278,19 +278,38 @@ module Hive
       rescue ArgumentError, TypeError
         raise StaleTaskSource, "attempt task source generation is invalid"
       end
-      def admission_row(record, task_id:, project_id:, source_fingerprint:) =
+      def admission_row(record, task_id:, project_id:, source_fingerprint:, admission:) =
         row_for(
           record, task_id: task_id, project_id: project_id,
-          source_fingerprint: source_fingerprint
+          source_fingerprint: source_fingerprint, admission: admission
         )
       def admission_validate_capacity_in(db, record, limits) = validate_capacity!(db, record, limits)
-      def admission_reservation(record, admission) = live_reservation(
-        project: record["project"], task_slug: record["task_slug"], admission: admission
-      )
       def admission_claim_cohort_in(db, record, probe)
         return unless probe
         return if claim_failure_cohort_probe_in(db, attempt_id: record.attempt_id, **probe)
         raise RepositoryError, "failure cohort probe claim became stale"
+      end
+      def admission_complete_lost_recovery_in(db, source_attempt_id:, request_id:, now:)
+        return true if source_attempt_id.to_s.empty?
+
+        source_id = safe_id(source_attempt_id, error: "lost recovery source attempt id is invalid")
+        row = db[:attempts].where(attempt_id: source_id, state: "lost").first
+        unless row && row.fetch(:lost_recovery_phase) == "ready" &&
+               row.fetch(:lost_recovery_request_id) == request_id
+          raise RepositoryError, "lost recovery source is not ready for this request"
+        end
+        changed = db[:attempts].where(
+          attempt_id: source_id, state: "lost", lost_recovery_phase: "ready",
+          lost_recovery_request_id: request_id,
+          lost_recovery_revision: row.fetch(:lost_recovery_revision)
+        ).update(
+          lost_recovery_phase: "complete",
+          lost_recovery_revision: row.fetch(:lost_recovery_revision) + 1,
+          lost_recovery_updated_at: Record.iso8601(now)
+        )
+        raise CompareAndSwapFailed, "lost recovery completion raced" unless changed == 1
+
+        true
       end
 
       def active_attempts
@@ -311,11 +330,13 @@ module Hive
       def live_attempt_for(task_id:)
         id = safe_id(task_id, error: "unsafe task id")
         row = database.read do |db|
-          db[:attempts]
-            .where(task_id: id)
-            .where(state: %w[launching running])
-            .order(:attempt_id)
-            .first
+          pending = Sequel.lit(
+            "terminal_receipt_json IS NOT NULL AND " \
+            "(publication_journal_acknowledged = 0 OR " \
+            "publication_accounting_acknowledged = 0 OR publication_dispatch_acknowledged = 0)"
+          )
+          db[:attempts].where(task_id: id).where(state: %w[launching running])
+            .or(Sequel.&({ task_id: id }, pending)).order(:attempt_id).first
         end
         row && record_from(row)
       rescue Sequel::Error, RuntimeControlPlane::Error => error
@@ -527,8 +548,9 @@ module Hive
         raise RepositoryError, "attempt immutable identity changed: #{changed.join(', ')}" unless changed.empty?
       end
 
-      def row_for(record, task_id:, project_id:, source_fingerprint:)
+      def row_for(record, task_id:, project_id:, source_fingerprint:, admission:)
         payload = RuntimeControlPlane::Codec.dump_json(record.to_h)
+        admission = live_admission(admission) if admission
         {
           attempt_id: record.attempt_id, request_id: record["request_id"],
           project_id: project_id, task_id: task_id,
@@ -538,6 +560,10 @@ module Hive
           outcome: record.outcome, lease_version: record.lease_version,
           provider_account_id: record["routing"].dig("route", "provider_account_id"),
           retry_charge: record["retry_charge"], refunded: 0,
+          admission_workflow: admission&.fetch("workflow", nil),
+          admission_stage: admission&.fetch("stage", nil),
+          admission_runtime_digest: admission&.fetch("runtime_digest", nil),
+          admission_utc_date: admission&.fetch("utc_date", nil),
           source_fingerprint: source_fingerprint.to_s,
           record_json: payload,
           record_digest: Digest::SHA256.hexdigest(payload),
@@ -582,6 +608,14 @@ module Hive
         database.read { |db| db[:attempts].where(attempt_id: id).first }
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt lookup failed")
+      end
+
+      def publication_pending_row?(row)
+        row[:terminal_receipt_json] &&
+          %i[
+            publication_journal_acknowledged publication_accounting_acknowledged
+            publication_dispatch_acknowledged
+          ].any? { |column| row.fetch(column).zero? }
       end
 
       def ensure_subject!(db, record, source_fingerprint:)

@@ -15,7 +15,7 @@ module Hive
       end
 
       def call(attributes:, source_fingerprint:, admission:, limits:,
-               failure_cohort_probe:, route_decision:)
+               failure_cohort_probe:, route_decision:, recovery_source_attempt_id: nil)
         record = nil
         @database.transaction do |db|
           subject = attributes[:subject] || Attempts::Record.task_stage_subject(
@@ -35,17 +35,22 @@ module Hive
           )
           claim_request!(
             db, record, task_id, project_id,
-            source_fingerprint: source_fingerprint
+            source_fingerprint: source_fingerprint,
+            recovery_source_attempt_id: recovery_source_attempt_id
           )
           @repository.admission_validate_capacity_in(db, record, limits) if limits
           validate_provider_capacity_in(db, decision) if decision
           db[:attempts].insert(
             @repository.admission_row(
               record, task_id: task_id, project_id: project_id,
-              source_fingerprint: source_fingerprint
+              source_fingerprint: source_fingerprint, admission: admission
             )
           )
           @repository.admission_claim_cohort_in(db, record, failure_cohort_probe)
+          @repository.admission_complete_lost_recovery_in(
+            db, source_attempt_id: recovery_source_attempt_id,
+            request_id: record["request_id"], now: Time.iso8601(record["accepted_at"])
+          )
           db[:dispatch_requests].where(request_id: record["request_id"]).update(
             state: "admitted", claim_attempt_id: record.attempt_id,
             updated_at: record["accepted_at"], revision: Sequel[:revision] + 1
@@ -83,7 +88,8 @@ module Hive
         }
       end
 
-      def claim_request!(db, record, task_id, project_id, source_fingerprint:)
+      def claim_request!(db, record, task_id, project_id, source_fingerprint:,
+                         recovery_source_attempt_id:)
         request_id = record["request_id"]
         return unless request_id
         row = db[:dispatch_requests].where(request_id: request_id).first
@@ -97,7 +103,9 @@ module Hive
             idempotency_key: request_id, claim_owner: "admission",
             claim_attempt_id: record.attempt_id,
             claimed_at: record["accepted_at"], source_fingerprint: source_fingerprint.to_s,
-            payload_json: Codec.dump_json(admission_request_payload(record)),
+            payload_json: Codec.dump_json(
+              admission_request_payload(record, recovery_source_attempt_id: recovery_source_attempt_id)
+            ),
             created_at: record["accepted_at"], updated_at: record["accepted_at"],
             revision: 0
           )
@@ -133,7 +141,13 @@ module Hive
         raise Attempts::CompareAndSwapFailed, "dispatch request claim raced" unless changed == 1
       end
 
-      def admission_request_payload(record)
+      def admission_request_payload(record, recovery_source_attempt_id:)
+        recovery = unless recovery_source_attempt_id.to_s.empty?
+          {
+            "variant" => "attempt_loss", "phase" => "admitted",
+            "source_attempt_id" => recovery_source_attempt_id.to_s
+          }
+        end
         {
           "schema" => DispatchRepository::SCHEMA,
           "schema_version" => DispatchRepository::SCHEMA_VERSION,
@@ -142,11 +156,10 @@ module Hive
           "argv" => record["worker_argv"], "requestor" => "daemon",
           "chat_id" => nil, "update_id" => nil, "trigger" => "attempt-admission",
           "task_generation" => record.task_generation,
-          "predecessor_attempt_id" => record["predecessor_attempt_id"],
           "inherited_outputs" => record["inherited_outputs"],
           "task_id" => record["task_id"], "expected_stage" => record["intended_stage"],
           "expected_marker_name" => nil, "expected_marker_id" => nil,
-          "recovery" => nil, "remaining_argvs" => []
+          "recovery" => recovery, "remaining_argvs" => []
         }
       end
 

@@ -5,7 +5,11 @@ require "time"
 module Hive
   module Attempts
     module Publication
-      MAX_CONSUMERS = 32
+      PUBLICATION_COLUMNS = {
+        "journal" => :publication_journal_acknowledged,
+        "accounting" => :publication_accounting_acknowledged,
+        "dispatch" => :publication_dispatch_acknowledged
+      }.freeze
 
       def seal_terminal_payloads(record)
         unless record.is_a?(Record) && record.final?
@@ -47,27 +51,12 @@ module Hive
         raise RepositoryError, "sealed attempt payload is unreadable: #{error.message}"
       end
 
-      def prepare_publication(attempt_id:, consumers:)
+      def prepare_publication(attempt_id:)
         id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
-        names = Array(consumers).map { |value| consumer_name(value) }.uniq.sort
-        if names.empty? || names.length > MAX_CONSUMERS
-          raise RepositoryError, "pending finalization consumers are invalid"
-        end
-        database.transaction do |db|
-          pending = db[:terminal_pending_publications].where(attempt_id: id)
-          raise RepositoryError, "final attempt is not pending publication" unless pending.any?
-          obligations = db[:terminal_publication_obligations].where(attempt_id: id)
-          existing = obligations.order(:consumer).select_map(:consumer)
-          if existing.any? && existing != names
-            raise RepositoryError, "pending finalization conflicts with existing obligations"
-          end
-          names.each do |name|
-            obligations.insert_conflict.insert(
-              attempt_id: id, consumer: name, acknowledged: 0
-            )
-          end
-          publication_in(db, id)
-        end
+        entry = database.read { |db| publication_in(db, id) }
+        raise RepositoryError, "final attempt is not pending publication" unless entry
+
+        entry
       end
 
       def publication(attempt_id)
@@ -78,11 +67,13 @@ module Hive
       def acknowledge_publication(attempt_id, consumer:)
         id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
         name = consumer_name(consumer)
+        column = PUBLICATION_COLUMNS.fetch(name)
         database.transaction do |db|
-          changed = db[:terminal_publication_obligations].where(
-            attempt_id: id, consumer: name
-          ).update(acknowledged: 1)
-          raise RepositoryError, "pending finalization consumer is unknown" unless changed == 1
+          row = db[:attempts].where(attempt_id: id).first
+          unless row && row[:terminal_receipt_json]
+            raise RepositoryError, "final attempt is not pending publication"
+          end
+          db[:attempts].where(attempt_id: id, column => 0).update(column => 1)
 
           publication_in(db, id)
         end
@@ -94,15 +85,12 @@ module Hive
       end
 
       def finish_publication(attempt_id)
-        id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
-        database.transaction do |db|
-          obligations = db[:terminal_publication_obligations].where(attempt_id: id)
-          return false unless obligations.any?
-          if obligations.where(acknowledged: 0).any?
-            raise RepositoryError, "pending finalization is incomplete"
-          end
-          db[:terminal_pending_publications].where(attempt_id: id).delete == 1
-        end
+        entry = publication(attempt_id)
+        return false unless entry
+        raise RepositoryError, "pending finalization is incomplete" unless
+          entry.fetch("consumers").values.all?
+
+        true
       end
 
       def claim_maintenance(now:, interval_sec:)
@@ -240,7 +228,7 @@ module Hive
         if existing
           identity = row.slice(:attempt_id, :kind, :relative_path, :sha256, :bytes)
           unless identity.all? { |key, value| existing.fetch(key) == value } &&
-                 %w[sealed pinned].include?(existing.fetch(:state))
+                 %w[sealed releasable].include?(existing.fetch(:state))
             raise RepositoryError, "sealed attempt payload identity conflicts"
           end
           return
@@ -264,7 +252,7 @@ module Hive
       end
 
       def sealed_payloads(db)
-        db[:payload_references].where(state: %w[sealed pinned])
+        db[:payload_references].where(state: %w[sealed releasable])
       end
 
       def payload_reference(row)
@@ -279,19 +267,25 @@ module Hive
       end
 
       def publication_in(db, attempt_id)
-        consumers = db[:terminal_publication_obligations].where(attempt_id: attempt_id)
-          .order(:consumer).to_h { |row| [ row.fetch(:consumer), row.fetch(:acknowledged) == 1 ] }
-        return nil if consumers.empty?
+        row = db[:attempts].where(attempt_id: attempt_id).first
+        return nil unless row && row[:terminal_receipt_json]
+
+        consumers = PUBLICATION_COLUMNS.to_h do |name, column|
+          [ name, row.fetch(column) == 1 ]
+        end
 
         {
           "attempt_id" => attempt_id,
+          "receipt_digest" => row.fetch(:terminal_receipt_digest),
+          "task_source_fingerprint" => row.fetch(:terminal_task_source_fingerprint),
+          "created_at" => row.fetch(:terminal_publication_created_at),
           "consumers" => consumers.freeze
         }.freeze
       end
 
       def consumer_name(value)
         name = value.to_s
-        return name if /\A[a-z][a-z0-9_-]{0,63}\z/.match?(name)
+        return name if PUBLICATION_COLUMNS.key?(name)
         raise RepositoryError, "pending finalization consumer is invalid"
       end
     end

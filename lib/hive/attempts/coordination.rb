@@ -34,19 +34,8 @@ module Hive
       def unresolved_loss_attempt_id(task_generation:, subject:)
         row = database.read do |db|
           semantic_attempts(db, task_generation, subject).where(state: "lost")
+            .exclude(lost_recovery_phase: "complete")
             .reverse_order(:ended_at, :lease_version, :attempt_id).first
-        end
-        return nil unless row
-        return nil if successor_attempt_id(predecessor_attempt_id: row.fetch(:attempt_id))
-
-        row.fetch(:attempt_id)
-      end
-
-      def successor_attempt_id(predecessor_attempt_id:)
-        row = database.read do |db|
-          db[:attempt_relationships].where(
-            related_attempt_id: identifier(predecessor_attempt_id), kind: "successor"
-          ).first
         end
         row && row.fetch(:attempt_id)
       end
@@ -67,29 +56,26 @@ module Hive
       end
 
       def mark_refunded(record)
-        row = acceptance_for!(record)
-        billing = RuntimeControlPlane::Codec.load_json(row.fetch(:billing_json))
-        update_accounting(
-          record.attempt_id,
-          refunded: 1, billing_json: RuntimeControlPlane::Codec.dump_json(billing.merge("refunded" => true))
-        )
+        acceptance_for!(record)
+        database.transaction do |db|
+          db[:attempts].where(
+            attempt_id: record.attempt_id, accepted_at: record["accepted_at"],
+            project_name: record["project"], refunded: 0
+          ).update(refunded: 1)
+        end
         record
       end
 
       def reservation_metadata(attempt_id)
         row = database.read do |db|
-          db[:attempt_accounting].where(attempt_id: identifier(attempt_id)).first
+          db[:attempts].where(attempt_id: identifier(attempt_id)).first
         end
-        row && RuntimeControlPlane::Codec.load_json(row.fetch(:reservation_json))
-      end
+        return unless row
 
-      def release_live(attempt_id:)
-        id = identifier(attempt_id)
-        database.transaction do |db|
-          db[:capacity_reservations].where(attempt_id: id, state: "reserved")
-                                    .update(state: "released", released_at: Record.iso8601(Time.now.utc))
-        end
-        true
+        admission = admission_from(row)
+        live_reservation(
+          project: row.fetch(:project_name), task_slug: row.fetch(:task_slug), admission: admission
+        )
       end
 
       def record_failure_cohort(attempt_id:, identity:, occurred_at:)
@@ -99,8 +85,21 @@ module Hive
         date = occurred.utc.to_date.iso8601
         digest = failure_cohort_digest(normalized)
         database.transaction do |db|
-          events = db[:attempt_failure_events]
-          next if events.where(utc_date: date, attempt_id: attempt).any?
+          attempt_row = db[:attempts].where(attempt_id: attempt).first
+          unless attempt_row && %w[terminal lost].include?(attempt_row.fetch(:state))
+            raise RepositoryError, "failure cohort attempt is not final"
+          end
+          existing = failure_fact(attempt_row)
+          expected = {
+            outcome: "failed", date: date, identity_digest: digest,
+            occurred_at: Record.iso8601(occurred), counted: 1
+          }
+          if existing
+            unless existing == expected
+              raise RepositoryError, "failure cohort attempt fact conflicts"
+            end
+            next
+          end
 
           # A probe that returns a different code still closes its original
           # probe fence before the new cohort is counted.
@@ -115,10 +114,16 @@ module Hive
             db, row, occurred, clear_probe: row[:probe_attempt_id] == attempt,
             increment: true
           )
-          events.insert(
-            utc_date: date, attempt_id: attempt, identity_digest: digest,
-            outcome: "failed", occurred_at: Record.iso8601(occurred)
+          changed = db[:attempts].where(
+            attempt_id: attempt, failure_cohort_outcome: nil,
+            failure_cohort_counted: 0
+          ).update(
+            failure_cohort_date: date, failure_cohort_identity_digest: digest,
+            failure_cohort_outcome: "failed",
+            failure_cohort_occurred_at: Record.iso8601(occurred),
+            failure_cohort_counted: 1
           )
+          raise RepositoryError, "failure cohort attempt fact changed concurrently" unless changed == 1
         end
         true
       rescue Sequel::Error => error
@@ -130,6 +135,11 @@ module Hive
         utc_date = date_value(date).iso8601
         found = false
         database.transaction do |db|
+          attempt_row = db[:attempts].where(attempt_id: attempt).first
+          unless attempt_row && attempt_row.fetch(:state) == "terminal" &&
+                 attempt_row.fetch(:outcome) == "succeeded"
+            raise RepositoryError, "failure cohort success requires a successful terminal attempt"
+          end
           rows = db[:attempt_failure_cohorts].where(
             utc_date: utc_date, probe_attempt_id: attempt
           ).all
@@ -140,10 +150,16 @@ module Hive
             ).delete
           end
           if found
-            db[:attempt_failure_events].insert_conflict.insert(
-              utc_date: utc_date, attempt_id: attempt, outcome: "succeeded",
-              occurred_at: Record.iso8601(Time.now.utc)
+            occurred_at = attempt_row.fetch(:ended_at)
+            changed = db[:attempts].where(
+              attempt_id: attempt, failure_cohort_outcome: nil,
+              failure_cohort_counted: 0
+            ).update(
+              failure_cohort_date: utc_date, failure_cohort_identity_digest: nil,
+              failure_cohort_outcome: "succeeded", failure_cohort_occurred_at: occurred_at,
+              failure_cohort_counted: 0
             )
+            raise RepositoryError, "failure cohort attempt fact changed concurrently" unless changed == 1
           end
         end
         found
@@ -225,25 +241,14 @@ module Hive
       end
 
       def acceptance_for!(record)
-        row, accepted = database.read do |db|
-          [
-            db[:attempt_accounting].where(attempt_id: record.attempt_id).first,
-            db[:attempts].where(
-              attempt_id: record.attempt_id, accepted_at: record["accepted_at"],
-              project_name: record["project"]
-            ).any?
-          ]
+        row = database.read do |db|
+          db[:attempts].where(
+            attempt_id: record.attempt_id, accepted_at: record["accepted_at"],
+            project_name: record["project"], retry_charge: record["retry_charge"]
+          ).first
         end
-        unless row && accepted
-          raise RepositoryError, "daily accounting acceptance is missing"
-        end
+        raise RepositoryError, "daily accounting acceptance is missing" unless row
         row
-      end
-
-      def update_accounting(attempt_id, values)
-        database.transaction do |db|
-          db[:attempt_accounting].where(attempt_id: attempt_id).update(values)
-        end
       end
 
       def live_reservation(project:, task_slug:, admission: nil, phase: "active")
@@ -268,6 +273,36 @@ module Hive
         value
       rescue ArgumentError, KeyError, TypeError, RuntimeControlPlane::Error
         raise RepositoryError, "live capacity admission metadata is invalid"
+      end
+
+      def admission_from(row)
+        columns = %i[
+          admission_workflow admission_stage admission_runtime_digest admission_utc_date
+        ]
+        values = columns.map { |column| row[column] }
+        return nil if values.all?(&:nil?)
+        unless values.none?(&:nil?)
+          raise RepositoryError, "live capacity admission metadata is invalid"
+        end
+
+        live_admission(
+          "workflow" => row.fetch(:admission_workflow),
+          "stage" => row.fetch(:admission_stage),
+          "runtime_digest" => row.fetch(:admission_runtime_digest),
+          "utc_date" => row.fetch(:admission_utc_date)
+        )
+      end
+
+      def failure_fact(row)
+        return nil unless row[:failure_cohort_outcome]
+
+        {
+          outcome: row.fetch(:failure_cohort_outcome),
+          date: row.fetch(:failure_cohort_date),
+          identity_digest: row[:failure_cohort_identity_digest],
+          occurred_at: row.fetch(:failure_cohort_occurred_at),
+          counted: row.fetch(:failure_cohort_counted)
+        }
       end
 
       def failure_cohort_identity(identity)

@@ -15,7 +15,7 @@ module Hive
       ENV_PREFIX = "HIVE_ATTEMPT_"
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token, :predecessor_attempt_id
+                  :progress_token
 
       class << self
         def current
@@ -76,7 +76,6 @@ module Hive
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"],
             progress_token: record["progress_token"],
-            predecessor_attempt_id: record["predecessor_attempt_id"],
             routing: record["routing"],
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
@@ -184,7 +183,7 @@ module Hive
                      project: nil, task_slug: nil, intended_stage: nil,
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
-                     progress_token: nil, predecessor_attempt_id: nil)
+                     progress_token: nil)
         @attempt_id = attempt_id.to_s
         @task_generation = Integer(task_generation)
         @ownership_generation = ownership_generation&.to_s
@@ -192,7 +191,6 @@ module Hive
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
         @progress_token = progress_token&.to_s
-        @predecessor_attempt_id = predecessor_attempt_id&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
         @evidence_writer = evidence_writer
         @diagnostic_writer = diagnostic_writer
@@ -251,12 +249,8 @@ module Hive
         end
         current = Generation.resolve(**generation_options)
         ownership_matches = current.ownership_generation == ownership_generation
-        successor_progress_matches = !predecessor_attempt_id.to_s.empty? &&
-                                     !progress_token.to_s.empty? &&
-                                     current.respond_to?(:progress_token) &&
-                                     current.progress_token == progress_token
         epoch_matches = current.task_input_epoch == task_generation
-        unless (ownership_matches || successor_progress_matches) && epoch_matches
+        unless ownership_matches && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
         end

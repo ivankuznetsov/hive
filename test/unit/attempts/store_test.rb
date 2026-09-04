@@ -54,9 +54,24 @@ class AttemptsRepositoryTest < Minitest::Test
       assert_equal terminal.to_h, repository.fetch(terminal.attempt_id).to_h
       assert_equal terminal.attempt_id,
                    repository.terminal_attempt_id(request_id: terminal["request_id"])
-      assert repository.publication(terminal.attempt_id).nil?
-      repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: %w[journal])
+      publication = repository.publication(terminal.attempt_id)
+      assert_equal terminal.attempt_id, publication.fetch("attempt_id")
+      assert_equal [ "accounting", "dispatch", "journal" ],
+                   publication.fetch("consumers").keys.sort
+      before_ack = repository.database.read do |db|
+        db[:attempts].where(attempt_id: terminal.attempt_id).get(:record_json)
+      end
+      repository.prepare_publication(attempt_id: terminal.attempt_id)
       repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
+      refute repository.publication_complete?(terminal.attempt_id)
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "accounting")
+      repository.acknowledge_publication(terminal.attempt_id, consumer: "dispatch")
+      after_ack = repository.database.read do |db|
+        db[:attempts].where(attempt_id: terminal.attempt_id).get(:record_json)
+      end
+      assert_equal before_ack, after_ack,
+                   "publication acknowledgements must not rewrite the execution record"
 
       restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
       assert_equal terminal.to_h, restarted.fetch(terminal.attempt_id).to_h
@@ -302,14 +317,13 @@ class AttemptsRepositoryTest < Minitest::Test
       launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
       lost = repository.mark_lost(launching, reason: "stale_generation", now: NOW + 1)
 
-      reservation, request = repository.database.read do |db|
+      row, request = repository.database.read do |db|
         [
-          db[:capacity_reservations].where(attempt_id: lost.attempt_id).first,
+          db[:attempts].where(attempt_id: lost.attempt_id).first,
           db[:dispatch_requests].where(request_id: lost["request_id"]).first
         ]
       end
-      assert_equal "released", reservation.fetch(:state)
-      assert_equal Hive::Attempts::Record.iso8601(NOW + 1), reservation.fetch(:released_at)
+      assert_equal "lost", row.fetch(:state)
       assert_equal "awaiting_delivery", request.fetch(:state)
       assert_equal lost.attempt_id, request.fetch(:claim_attempt_id)
       assert_raises(Hive::Attempts::CompareAndSwapFailed) do
@@ -425,7 +439,7 @@ class AttemptsRepositoryTest < Minitest::Test
                task_slug: "durable-task", task_generation: "generation-1")
     {
       attempt_id: attempt_id, request_id: request_id,
-      predecessor_attempt_id: nil, task_id: task_id, project: "demo",
+      task_id: task_id, project: "demo",
       task_slug: task_slug, intended_stage: "4-execute",
       task_generation: task_generation, ownership_generation: "owner-1",
       task_input_epoch: 1, progress_token: "progress-1", provider: "codex",

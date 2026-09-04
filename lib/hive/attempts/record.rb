@@ -56,7 +56,7 @@ module Hive
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
       IMMUTABLE_KEYS = %w[
-        schema schema_version attempt_id request_id predecessor_attempt_id
+        schema schema_version attempt_id request_id
         task_id project task_slug intended_stage task_generation progress_token
         ownership_generation task_input_epoch
         provider routing worker_argv claim_capability_digest starting_revision retry_charge
@@ -71,7 +71,7 @@ module Hive
 
       attr_reader :data
 
-      def self.launching(attempt_id:, request_id:, predecessor_attempt_id:, task_id:, project:,
+      def self.launching(attempt_id:, request_id:, task_id:, project:,
                          task_slug:, intended_stage:, task_generation:, progress_token:, provider:,
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
@@ -86,7 +86,6 @@ module Hive
           "schema_version" => SCHEMA_VERSION,
           "attempt_id" => attempt_id,
           "request_id" => request_id,
-          "predecessor_attempt_id" => predecessor_attempt_id,
           "task_id" => task_id,
           "project" => project,
           "task_slug" => task_slug,

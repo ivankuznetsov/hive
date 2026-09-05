@@ -5,6 +5,82 @@ require "hive/task_closure"
 require_relative "../stages/patrol_fix/fix_test"
 
 class PatrolFixStageTransitionTest < Minitest::Test
+  def test_rejected_task_moves_directly_to_archive_and_keeps_rejected_status
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, manifest|
+      Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
+        PatrolFixStageFixture.decision_receipt(manifest, "reject")
+      )
+      assert_raises(Hive::PatrolFix::StageTransition::InvalidTransition) do
+        Hive::PatrolFix::StageTransition.new(task).begin!("2-fix")
+      end
+      approve_without_enrollment(task)
+      destination = File.join(task.hive_state_path, "stages", "6-done", task.slug)
+      refute File.exist?(task.folder)
+      assert File.directory?(destination)
+      action = Hive::TaskAction.for(Hive::Task.new(destination), Hive::Markers.current(File.join(destination, "state.md")))
+      assert_equal "archived", action.key
+      assert_equal "Rejected", action.label
+      assert_equal "rejected", action.patrol_fix.dig("outcome", "kind")
+    end
+  end
+
+  def test_failed_escalation_handoff_does_not_archive_and_retries_without_an_agent
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, manifest|
+      Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
+        PatrolFixStageFixture.decision_receipt(manifest, "escalate")
+      )
+      require "hive/patrol_fix/successor_materializer"
+      failing = Object.new
+      failing.define_singleton_method(:call) { |_| raise Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor, "handoff failed" }
+      original = Hive::PatrolFix::SuccessorMaterializer.method(:new)
+      Hive::PatrolFix::SuccessorMaterializer.define_singleton_method(:new) { |*| failing }
+      begin
+        assert_raises(Hive::PatrolFix::SuccessorMaterializer::InvalidSuccessor) do
+          Hive::Commands::Approve.new(task.folder, quiet: true).call
+        end
+      ensure
+        Hive::PatrolFix::SuccessorMaterializer.define_singleton_method(:new, original)
+      end
+      assert File.directory?(task.folder)
+      destination = File.join(task.hive_state_path, "stages", "6-done", task.slug)
+      refute File.exist?(destination)
+
+      approve_without_enrollment(task)
+      refute File.exist?(task.folder)
+      action = Hive::TaskAction.for(Hive::Task.new(destination), Hive::Markers.current(File.join(destination, "state.md")))
+      assert_equal "archived", action.key
+      assert_equal "Escalated", action.label
+      successor = action.patrol_fix.fetch("successor")
+      assert_equal 1, Dir.glob(File.join(task.hive_state_path, "stages", "*", successor.fetch("slug"))).length
+    end
+  end
+
+  def approve_without_enrollment(task)
+    original = Hive::DependencySnapshot.method(:enforce_admission!)
+    Hive::DependencySnapshot.define_singleton_method(:enforce_admission!) { |*| true }
+    Hive::Commands::Approve.new(task.folder, quiet: true).call
+  ensure
+    Hive::DependencySnapshot.define_singleton_method(:enforce_admission!, original)
+  end
+
+  def test_crash_after_handoff_before_archive_intent_reuses_the_successor
+    PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, manifest|
+      Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
+        PatrolFixStageFixture.decision_receipt(manifest, "escalate")
+      )
+      transition = Hive::PatrolFix::StageTransition.new(task)
+      transition.define_singleton_method(:append) { |_| raise "crash before intent" }
+      assert_raises(RuntimeError) { transition.begin!("6-done") }
+      successor = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read.dig("relations", "successor")
+      assert File.directory?(task.folder)
+      approve_without_enrollment(task)
+      refute File.exist?(task.folder)
+      destination = File.join(task.hive_state_path, "stages", "6-done", task.slug)
+      assert Hive::PatrolFix::Projection.new(task_folder: destination, stage: "6-done").to_h.fetch("archived")
+      assert_equal 1, Dir.glob(File.join(task.hive_state_path, "stages", "*", successor.fetch("slug"))).length
+    end
+  end
+
   def test_evidence_closure_authorizes_only_the_workflow_terminal_move
     PatrolFixStageFixture.with_task(stage: "1-inbox") do |task, _root, _manifest|
       File.write(File.join(task.folder, "closure.json"), "{}")
@@ -65,13 +141,7 @@ class PatrolFixStageTransitionTest < Minitest::Test
       Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(
         PatrolFixStageFixture.decision_receipt(manifest, "fix")
       )
-      original = Hive::DependencySnapshot.method(:enforce_admission!)
-      Hive::DependencySnapshot.define_singleton_method(:enforce_admission!) { |*| true }
-      begin
-        Hive::Commands::Approve.new(task.folder, quiet: true).call
-      ensure
-        Hive::DependencySnapshot.define_singleton_method(:enforce_admission!, original)
-      end
+      approve_without_enrollment(task)
 
       destination = File.join(task.hive_state_path, "stages", "2-fix", task.slug)
       assert File.directory?(destination)

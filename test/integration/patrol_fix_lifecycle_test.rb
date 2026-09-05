@@ -77,7 +77,7 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
     end
   end
 
-  def test_both_sources_converge_rework_and_publish_while_escalation_stays_parked
+  def test_both_sources_converge_rework_publish_and_archive_handed_off_escalation
     with_tmp_global_config do
       with_tmp_git_repo do |project|
         capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
@@ -178,6 +178,15 @@ class PatrolFixLifecycleIntegrationTest < Minitest::Test
         assert_equal 1, Dir.glob(File.join(hive_state, "stages", "*", successor_slug)).size
         assert_equal "1-inbox", File.basename(File.dirname(escalation_task.folder))
         refute File.exist?(File.join(escalation_task.folder, "pr.md"))
+        original_folder = escalation_task.folder
+        capture_io { Hive::Commands::Approve.new(original_folder, quiet: true).call }
+        refute File.exist?(original_folder)
+        archived_folder = File.join(hive_state, "stages", "6-done", escalation_task.slug)
+        archived = Hive::PatrolFix::Projection.new(task_folder: archived_folder, stage: "6-done").to_h
+        assert archived.fetch("archived")
+        assert_equal "escalated", archived.dig("outcome", "kind")
+        assert_equal successor_slug, archived.dig("successor", "slug")
+        assert_equal 1, Dir.glob(File.join(hive_state, "stages", "*", successor_slug)).size
       end
     end
   end

@@ -225,7 +225,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert_equal "healthy", snapshot.fetch("status")
       assert_equal({
         "promoted" => 0, "deleted" => 0, "cold_examined" => 0,
-        "errors" => 0
+        "errors" => 0, "usage_compacted" => 0
       }, snapshot.dig("maintenance", "last_result"))
     end
   end
@@ -332,7 +332,9 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       store: store, task_archived: ->(_) { false }
     )
 
-    result = subject.sweep_if_due(now: NOW)
+    result = with_replaced_singleton_method(Hive::UsageDb, :compact!, ->(**) { 0 }) do
+      subject.sweep_if_due(now: NOW)
+    end
     assert_equal 1, result.fetch(:deleted)
     assert_equal 1, result.fetch(:errors)
     snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
@@ -347,6 +349,61 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
 
       refute subject.instance_variable_defined?(:@provider_health_observer_factory)
       refute delivery.call(Struct.new(:attempt_id).new("missing"))
+    end
+  end
+
+  def test_hourly_maintenance_compacts_only_acknowledged_usage_and_rejects_replay
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      previous = Hive::UsageDb.instance_variable_get(:@database)
+      Hive::UsageDb.database = store.database
+      attributes = {
+        session_id: "usage-session", attempt_id: terminal.attempt_id,
+        task_generation: terminal.task_input_epoch,
+        agent: "codex", model: "sol", project_slug: "project", task_slug: "task",
+        stage: "4-execute", started_at: NOW, ended_at: NOW + 1,
+        input: 100, output: 25, cached: 0
+      }
+      Hive::UsageDb.record!(**attributes)
+      later = NOW + 10 * 86_400
+      assert_equal 0, Hive::UsageDb.compact!(now: later)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
+      result = subject.sweep_if_due(now: later)
+      assert_equal 1, result[:usage_compacted]
+      exact = Hive::UsageDb.exact_attempt(attempt_id: terminal.attempt_id)
+      assert exact[:detail_expired]
+      assert_empty exact[:sessions]
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::UsageDb.record!(**attributes)
+      end
+      assert_equal 125, Hive::UsageDb.aggregate(scope: {})[:total][:all].values_at(:input, :output).sum
+    ensure
+      Hive::UsageDb.database = previous
+    end
+  end
+
+  def test_a_delayed_first_receipt_is_still_accepted_for_unsettled_accounting
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      previous = Hive::UsageDb.instance_variable_get(:@database)
+      Hive::UsageDb.database = store.database
+      common = {
+        agent: "codex", model: "sol", project_slug: "project", task_slug: "task",
+        stage: "4-execute", started_at: NOW, ended_at: NOW + 1,
+        input: 100, output: 25, cached: 0
+      }
+      Hive::UsageDb.record!(**common, session_id: "standalone")
+      Hive::UsageDb.compact!(now: NOW + 10 * 86_400)
+      assert Hive::UsageDb.record!(**common, session_id: "delayed",
+        attempt_id: terminal.attempt_id, task_generation: terminal.task_input_epoch)
+      assert_equal 0, Hive::UsageDb.compact!(now: NOW + 10 * 86_400)
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::UsageDb.record!(**common, session_id: "wrong-generation",
+          attempt_id: terminal.attempt_id, task_generation: 999)
+      end
+    ensure
+      Hive::UsageDb.database = previous
     end
   end
 

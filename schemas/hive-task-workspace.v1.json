@@ -317,7 +317,8 @@
       "properties": {
         "record_kind": { "const": "usage" },
         "attempt_id": { "$ref": "#/$defs/StringOrNull" },
-        "state": { "$ref": "#/$defs/State" },
+        "state": { "anyOf": [{ "$ref": "#/$defs/State" }, { "const": "expired" }] },
+        "detail_expired": { "type": "boolean" },
         "sessions": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/UsageSession" } },
         "totals": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/TokenTotals" }] },
         "unattributed_count": { "$ref": "#/$defs/IntegerOrNull" },

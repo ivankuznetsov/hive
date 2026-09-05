@@ -101,6 +101,9 @@ process-local. Each run performs row-bounded and monotonic-time-bounded,
 keyset-ordered, idempotent queries for pending finalizations and expired
 payload/log candidates and continues past an individual row failure. A restart
 may repeat safe work; it does not restore a claim or cursor from SQLite.
+The same hourly pass compacts up to 500 settled usage rows older than seven
+days into daily task/stage/model totals. Its result reports `usage_compacted`;
+open or unacknowledged accounting remains detailed. See [[token-usage]].
 
 ## Tests
 

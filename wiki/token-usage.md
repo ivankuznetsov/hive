@@ -101,31 +101,67 @@ declares the route. `Hive::BillingEvidence.for_profile` reads only the declared
 profile contract and never re-derives admission from the adapter name. Harness
 identity is never used as the billing provider.
 
+## Detail retention and daily totals
+
+Usage has two disjoint tiers in the same SQLite database: `token_usage` holds
+recent per-session detail; `token_usage_daily` holds older daily totals. There
+is no always-updated duplicate totals table. Hourly daemon maintenance compacts
+at most 500 rows whose start and end precede UTC midnight seven days ago.
+Open sessions, malformed timestamps, and attempt-bound rows without an
+accounting acknowledgement remain detailed. Missing attempt ownership is not
+assumed settled. Standalone completed sessions need no invented attempt row.
+
+Each summary groups UTC start day, project/task slug, stage, harness, actual
+provider/model (and best-effort model), billing evidence, and token inclusion
+semantics. It retains session/metered-session counts, separate input/output/
+cache/reasoning sums, provider-reported cost, and availability flags. A known
+subtotal remains usable when another session has unknown counts; it is never
+labelled a complete total. Summary keys use `Hive::CanonicalJSON.digest`.
+
+One immediate transaction upserts summaries and deletes exactly the selected
+raw rows. Retrying after a crash cannot duplicate the transfer. The latest
+summary day closes new historical session writes through that day, without a
+per-session tombstone or compaction ledger. Existing detailed sessions may
+still receive their final cumulative update. A delayed first receipt from an
+unacknowledged attempt is accepted when its input epoch matches; otherwise a
+new historical write raises `usage_detail_expired`. This also applies to old
+Patrol reservation inserts. Historical imports therefore require an explicit
+offline reconciliation, not ordinary `record!` replay.
+
+Compaction is not activated by reads and never edits task journals. It adds
+one table to the unreleased base schema; an existing activated database needs
+an explicit offline schema cutover before deploying this build. Ordinary
+runtime startup does not silently upgrade it.
+
 ## Semantic task usage
 
-`Hive::TaskWorkspace::Usage` starts from the bounded durable attempt/session
-inventory, then performs exact `UsageDb.exact_attempt` reads. It includes failed
-attempts and retries, deduplicates by durable session ID, rejects rows not bound
-to that inventory, and reports unattributed legacy rows separately.
-The v1 resource and v2 semantic projections share one request-local reader:
-each attempt is read at most once, no attempt returns more than 100 sessions,
-and the complete task read has one two-second monotonic deadline. Exhaustion,
-truncation, and store failures lower coverage and never become zero usage.
+`Hive::TaskWorkspace::Usage` reads `UsageDb.task_usage` by project/task slug,
+aggregating raw and daily rows directly. Failed attempts, retries and legacy
+task-attributed telemetry all contribute; no bounded journal inventory can
+truncate accounting. Attempts supply optional outcome labels for recent detail
+only. Task totals and recent detail share one read transaction. The request-local
+reader caches task and exact-attempt reads, bounds detail to 100 sessions, and
+checks its shared two-second budget. Detail truncation does not truncate totals;
+store/deadline failures never become zero usage.
 The task coverage vocabulary is:
 
-- `complete` — every bounded session is terminal, metered, attributable, and
-  priceable;
-- `partial` — the visible values are an observed subtotal because sessions,
-  token categories, modifiers, or the attempt window are missing;
-- `pending` — at least one exact session is still live;
-- `unavailable` — no durable session inventory or trustworthy usage is
-  available.
+- `complete` — recorded sessions are closed and input/output counts are known;
+- `partial` — one or more recorded input/output counts are unknown;
+- `pending` — at least one recorded session is still open;
+- `unavailable` — no recorded usage or trustworthy read is available.
 
 The summary publishes known input-plus-output tokens, harness sets, evidenced
 actual providers/models, combined billing route, and API-equivalent coverage.
 Details group sessions by stage/outcome and retain cache/reasoning categories,
 billing evidence, rate basis, and missing dimensions. Raw attempt/session IDs
 are not headings, and the v2 projection removes provider-reported cost.
+`model_totals` retains stage/provider/model totals independently of those detail
+groups. Web explicitly labels compacted sessions. Old per-attempt resource
+detail can be `expired` rather than a missing measurement. Token completeness
+is independent of pricing coverage: API-equivalent estimates cover retained
+detail only, and expired/truncated detail is labelled unpriced rather than
+repriced from aggregate counts or silently estimated as zero. No estimate
+history was stored before this change; provider-reported cost is preserved.
 
 ## API-equivalent price catalog
 
@@ -173,7 +209,7 @@ attempt. See [[modules/task_workspace]].
 
 - `today`: UTC day boundary.
 - `7d`: rolling `now - 7 days`.
-- `30d`: rolling `now - 30 days`.
+- `30d`: from UTC midnight 30 days ago (daily precision, including the whole boundary day).
 - `all`: no time filter.
 
 The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is normally paired with `project_slug` by the TUI so same-named tasks in different projects stay distinguishable.
@@ -182,20 +218,11 @@ The aggregate also returns `:patrol` buckets by summing rows whose `stage` start
 
 `Hive::UsageDb.patrol_activity` remains the current-UTC-day telemetry source for
 input/output/cached totals, aggregate Patrol launches, engine attribution, and
-unmetered counts. Admission instead uses the bounded owner-private Patrol
-allowance rows in the same control plane. Their independent ordinary and Architecture
-lanes are keyed by stable project ID and UTC date and follow the selected mode's
-16/8/4/2 ceiling. An atomic pre-spawn reservation survives controller loss.
-Daily exhaustion resets at the next UTC date; provider retry holds are durable
-per lane and may cross midnight. Fix/review/publish/remediation and post-merge
-work do not consume scheduled discovery allowance.
-
-On the first day after this ledger is introduced, exact legacy discovery rows
-seed their corresponding engine lane while known fix/non-discovery rows are
-excluded. Ambiguous attribution parks only that lane until the next UTC day.
-After seeding, UsageDb failures affect telemetry but cannot create or remove
-capacity. Existing wall-clock, turn, process-custody, feature, fix, and PR caps
-remain independent controls.
+unmetered counts. Admission uses the current-day usage rows themselves:
+`reserve_patrol_discovery!` atomically counts and inserts a session reservation
+with source `patrol_discovery_launch`. Completion updates that same session.
+Compaction never touches the current day or unfinished reservations, so it
+cannot reopen today's capacity. There is no separate Patrol allowance table.
 
 ## TUI Surfaces
 

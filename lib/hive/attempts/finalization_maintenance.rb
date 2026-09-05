@@ -2,6 +2,7 @@ require "hive/attempts/lost_outcome"
 require "hive/attempts/repository"
 require "hive/attempts/storage_status"
 require "hive/task_projection/reader"
+require "hive/usage_db"
 require "json"
 require "psych"
 require "time"
@@ -183,8 +184,9 @@ module Hive
         @last_started_at = now
         @last_error = nil
         result = sweep_logs(now: now).merge(ran: true, promoted: yield)
+        result[:usage_compacted] = Hive::UsageDb.compact!(now: now, database: @store.database)
         @last_completed_at = now
-        @last_result = result.slice(:promoted, :deleted, :cold_examined, :errors)
+        @last_result = result.slice(:promoted, :deleted, :cold_examined, :errors, :usage_compacted)
           .transform_keys(&:to_s)
         result
       rescue StandardError => error

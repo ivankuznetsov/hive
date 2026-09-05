@@ -261,6 +261,7 @@ module Hive
 
       def semantic_usage(attempts)
         value = Usage.new(
+          project_slug: @project, task_slug: task_value("slug"),
           attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
         ).call
         value = deep_stringify(value)

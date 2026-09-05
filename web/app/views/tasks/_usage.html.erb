@@ -37,6 +37,20 @@
     <div><dt>Sessions covered</dt><dd><%= usage["metered_sessions_count"] || 0 %> of <%= usage["sessions_count"] || 0 %></dd></div>
   </dl>
 
+  <% if Array(usage["model_totals"]).any? %>
+    <dl class="usage-model-totals workspace-facts">
+      <% usage["model_totals"].each do |total| %>
+        <div>
+          <dt><%= [total["stage"], total["provider"], total["model"]].compact_blank.join(" · ") %></dt>
+          <dd><%= number_with_delimiter(total.dig("tokens", "input_output")) %> input + output tokens<%= " (known subtotal)" unless total.dig("tokens", "complete") %></dd>
+        </div>
+      <% end %>
+    </dl>
+  <% end %>
+  <% if usage["compacted_sessions_count"].to_i.positive? %>
+    <p class="muted"><%= number_with_delimiter(usage["compacted_sessions_count"]) %> older sessions retained as daily totals. Per-run detail expires after seven days once accounting is settled.</p>
+  <% end %>
+
   <details class="usage-details" data-workspace-disclosure-key="usage-details">
     <summary>Show details</summary>
     <% if Array(usage["groups"]).empty? %>

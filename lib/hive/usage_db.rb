@@ -95,6 +95,7 @@ module Hive
           validate_session_identity!(existing, attributes)
           usage.where(id: existing.fetch(:id)).update(merge_session(existing, attributes))
         else
+          reject_expired_detail!(db, attributes)
           usage.insert(attributes)
         end
       end
@@ -142,6 +143,7 @@ module Hive
         used = lane.count
         next { reserved: false, existing: false, used: used } if used >= limit
 
+        reject_expired_detail!(db, started_at: started_at.iso8601)
         usage.insert(
           id: SecureRandom.uuid, session_id: session_id, agent: agent.to_s,
           project_slug: project_slug, task_slug: stage, stage: "#{stage}-unmetered",
@@ -208,6 +210,7 @@ module Hive
                                   .limit(legacy_limit + 1).all
         {
           available: true,
+          detail_expired: rows.empty? && expired_attempt_detail?(db, attempt_id),
           sessions: sessions,
           totals: sum_usage(sessions),
           unattributed: legacy_rows.first(legacy_limit).map { |row| exact_row(row) },
@@ -229,7 +232,7 @@ module Hive
       database.read do |db|
         result = zero_aggregate
         bucket_starts(now).each do |bucket, since|
-          rows = scoped_usage(db[:token_usage], scope || {}, since)
+          rows = scoped_usage(reporting_rows(db), scope || {}, since)
                  .select_group(:agent).select_append(*aggregate_columns).all
           rows.each do |row|
             values = (result[:agents][row[:agent].to_s.to_sym] ||= zero_buckets).fetch(bucket)
@@ -241,7 +244,7 @@ module Hive
             propagate_unavailable!(result[:total][bucket], values)
           end
 
-          patrol = patrol_dataset(scoped_usage(db[:token_usage], scope || {}, since))
+          patrol = patrol_dataset(scoped_usage(reporting_rows(db), scope || {}, since))
                    .select(*(aggregate_columns + [ Sequel.function(:count, :id).as(:count) ])).first || {}
           apply_aggregate!(result[:patrol][bucket], patrol) if integer(patrol[:count]).positive?
         end
@@ -427,7 +430,7 @@ module Hive
       {
         today: today.iso8601,
         "7d": (utc_now - (7 * 86_400)).iso8601,
-        "30d": (utc_now - (30 * 86_400)).iso8601,
+        "30d": (today - (30 * 86_400)).iso8601,
         all: nil
       }
     end
@@ -531,3 +534,5 @@ module Hive
     def blank?(value) = value.nil? || value.to_s.empty?
   end
 end
+
+require "hive/usage_db/compaction"

@@ -1,100 +1,173 @@
 require "test_helper"
 require "bigdecimal"
-require "net/http"
 require "hive/task_workspace/usage"
 
 class TaskWorkspaceUsageTest < Minitest::Test
-  def test_failed_attempt_and_successful_retry_are_counted_once_per_durable_session
-    pricing = ->(row) do
-      {
-        coverage: "complete", subtotal_usd: BigDecimal("0.125"),
-        observed_subtotal_usd: nil, missing_dimensions: [],
-        provider: row[:actual_backend], canonical_model: row[:actual_model],
-        rate_basis: { source_url: "https://developers.openai.com/api/docs/models/gpt-5.6-sol" }
-      }
-    end
-    duplicate = usage_row("session-failed", input: 100, output: 25)
-    reader = lambda do |attempt_id:, **|
-      sessions = attempt_id == "attempt-failed" ? [ duplicate, duplicate ] :
-        [ usage_row("session-retry", input: 200, output: 50) ]
-      { available: true, sessions: sessions, unattributed_count: 3 }
-    end
+  NOW = Time.utc(2026, 9, 5, 12)
 
-    envelope = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts_panel, usage_reader: reader, pricing: pricing
-    ).call
-
-    assert_equal "complete", envelope.fetch("coverage")
-    assert_equal 2, envelope.fetch("sessions_count")
-    assert_equal 375, envelope.dig("tokens", "input_output")
-    assert_equal 3, envelope.fetch("unattributed_legacy_count")
-    assert_equal BigDecimal("0.250"), envelope.dig("api_equivalent", "subtotal_usd")
-    assert_nil envelope.dig("api_equivalent", "observed_subtotal_usd")
-    assert_equal %w[failed succeeded], envelope.fetch("sessions").map { |row| row.fetch("outcome") }
-    assert_equal %w[failed succeeded], envelope.fetch("groups").map { |row| row.fetch("outcome") }
+  def setup
+    @previous = Hive::UsageDb.instance_variable_get(:@database)
+    @directory = Dir.mktmpdir("hive-task-usage")
+    @database = Hive::RuntimeControlPlane::Database.new(
+      path: File.join(@directory, "runtime.sqlite3")
+    ).migrate!
+    Hive::UsageDb.database = @database
   end
 
-  def test_unmetered_live_and_truncated_inventories_cannot_look_complete
-    attempts = attempts_panel
-    attempts["truncated"] = true
-    attempts["records"].last["sessions"] << session_binding(
-      "session-live", outcome: nil, live: true
+  def teardown
+    @database.disconnect
+    Hive::UsageDb.database = @previous
+    FileUtils.remove_entry(@directory)
+  end
+
+  def test_task_totals_survive_compaction_without_an_attempt_inventory
+    record("a")
+    record("b", input: 200)
+    record("other", project_slug: "other", input: 999)
+    before = usage.call
+    assert_equal 350, before.dig("tokens", "input_output")
+    assert_equal "complete", before["coverage"]
+    assert_equal 2, before["sessions_count"]
+
+    Hive::UsageDb.compact!(now: NOW)
+    after = usage(attempts_panel: { "truncated" => true, "records" => [] }).call
+    assert_equal before["tokens"], after["tokens"]
+    assert_equal "complete", after["coverage"]
+    assert_equal 2, after["compacted_sessions_count"]
+    assert_empty after["sessions"]
+    assert_equal 350, after.dig("model_totals", 0, "tokens", "input_output")
+    assert_nil after.dig("api_equivalent", "subtotal_usd")
+    assert_nil after.dig("api_equivalent", "observed_subtotal_usd")
+    assert_includes after.dig("api_equivalent", "missing_dimensions"), "session_detail"
+  end
+
+  def test_recent_detail_is_bounded_but_totals_are_not
+    record("a")
+    record("b")
+    result = usage(limits: Hive::TaskWorkspace::Limits.new(usage_sessions_per_attempt: 1)).call
+    assert_equal 1, result["sessions"].length
+    assert result["details_truncated"]
+    assert_equal 250, result.dig("tokens", "input_output")
+    assert_equal "complete", result["coverage"]
+    assert_equal 2, result["sessions_count"]
+  end
+
+  def test_unknown_metrics_stay_partial_and_live_sessions_stay_pending
+    record("unknown", input: nil)
+    result = usage.call
+    assert_equal "partial", result["coverage"]
+    assert_equal 25, result.dig("tokens", "input_output")
+    refute result.dig("tokens", "complete")
+    assert_includes result.dig("tokens", "unavailable"), "input"
+    Hive::UsageDb.compact!(now: NOW)
+    assert_equal result["tokens"], usage.call["tokens"]
+    record("live", started_at: NOW, ended_at: nil)
+    assert_equal "pending", usage.call["coverage"]
+  end
+
+  def test_mixed_models_and_billing_routes_remain_distinct
+    record("a", billing_route: "subscription")
+    record("b", actual_model: "luna", billing_route: "api")
+    Hive::UsageDb.compact!(now: NOW)
+    result = usage.call
+    assert_equal "mixed", result["billing_route"]
+    assert_equal %w[luna sol], result["actual_models"]
+    assert_equal [ "openai" ], result["actual_providers"]
+    assert_equal [ 125, 125 ], result["model_totals"].map { |row| row.dig("tokens", "input_output") }
+  end
+
+  def test_rollup_keeps_known_subtotals_and_metered_session_counts
+    record("known")
+    record("unknown", input: nil)
+    before = usage.call
+    assert_equal 1, before["metered_sessions_count"]
+    assert_equal 1, before["unmetered_sessions_count"]
+    Hive::UsageDb.compact!(now: NOW)
+    after = usage.call
+    assert_equal before["tokens"], after["tokens"]
+    assert_equal 1, after["metered_sessions_count"]
+    assert_equal 1, after["unmetered_sessions_count"]
+  end
+
+  def test_missing_failed_and_expired_budget_reads_never_become_zero_totals
+    assert_nil usage.call["tokens"]
+    reader = Object.new
+    reader.define_singleton_method(:task_usage) { |**| { available: false, reason: "store_missing" } }
+    assert_equal "unavailable", usage(usage_reader: reader).call["coverage"]
+    reader.define_singleton_method(:task_usage) { |**| raise IOError, "read failed" }
+    assert_nil usage(usage_reader: reader).call["tokens"]
+
+    clock = 0
+    bounded = Hive::TaskWorkspace::BoundedUsageReader.new(
+      reader: Hive::UsageDb, limits: Hive::TaskWorkspace::Limits.new,
+      monotonic_clock: -> { clock }
     )
-    reader = lambda do |attempt_id:, **|
-      rows = attempt_id == "attempt-failed" ? [] :
-        [ usage_row("session-retry", input: 200, output: 50) ]
-      { available: true, sessions: rows, unattributed_count: 0 }
-    end
-
-    envelope = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts, usage_reader: reader, pricing: unavailable_pricing
-    ).call
-
-    assert_equal "pending", envelope.fetch("coverage")
-    assert envelope.fetch("observed_subtotal")
-    assert_equal 1, envelope.fetch("unmetered_sessions_count")
-    assert_equal 1, envelope.fetch("live_sessions_count")
-    assert_includes envelope.fetch("diagnostics").map { |row| row.fetch("reason") },
-                    "attempt_inventory_truncated"
+    clock = 100
+    assert_equal "unavailable", usage(usage_reader: bounded).call["coverage"]
   end
 
-  def test_usage_rows_without_a_durable_session_binding_are_excluded_and_reported
-    reader = lambda do |attempt_id:, **|
-      sessions = attempt_id == "attempt-failed" ?
-        [ usage_row("session-failed"), usage_row("orphan-session") ] :
-        [ usage_row("session-retry") ]
-      { available: true, sessions: sessions, unattributed_count: 0 }
+  def test_task_reader_is_cached_and_scoped_independently_of_attempt_reads
+    calls = 0
+    reader = Object.new
+    reader.define_singleton_method(:task_usage) do |**|
+      calls += 1
+      { available: true, sessions: [], groups: [], compacted_sessions_count: 0 }
     end
-    envelope = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts_panel, usage_reader: reader, pricing: unavailable_pricing
-    ).call
-
-    assert_equal "partial", envelope.fetch("coverage")
-    assert_equal 1, envelope.fetch("excluded_attributed_sessions_count")
-    assert_equal 2, envelope.fetch("sessions_count")
+    bounded = Hive::TaskWorkspace::BoundedUsageReader.new(
+      reader: reader, limits: Hive::TaskWorkspace::Limits.new
+    )
+    2.times { usage(usage_reader: bounded).call }
+    assert_equal 1, calls
+    bounded.task_usage(project_slug: "other", task_slug: "task")
+    assert_equal 2, calls
   end
 
-  def test_unavailable_and_failed_usage_reads_degrade_without_zero_filling
-    unavailable = ->(**) { { available: false, reason: "store_missing" } }
-    missing = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts_panel, usage_reader: unavailable,
-      pricing: unavailable_pricing
-    ).call
+  def test_per_session_pricing_remains_separate_from_provider_reported_cost
+    record("a", provider_reported_cost: 99)
+    pricing = ->(_) do
+      { coverage: "complete", subtotal_usd: BigDecimal("0.125"),
+        missing_dimensions: [], rate_basis: nil }
+    end
+    result = usage(pricing: pricing).call
+    assert_equal BigDecimal("0.125"), result.dig("api_equivalent", "subtotal_usd")
+    assert_equal 99, result.dig("sessions", 0, "provider_reported_cost")
 
-    assert_equal "partial", missing.fetch("coverage")
-    assert_nil missing.dig("sessions", 0, "input")
-    assert_includes missing.fetch("diagnostics").map { |row| row.fetch("reason") },
-                    "usage_store_unavailable"
+    pricing = Object.new
+    pricing.define_singleton_method(:estimate) { |_| raise ArgumentError, "bad pricing" }
+    result = usage(pricing: pricing).call
+    assert_nil result.dig("api_equivalent", "subtotal_usd")
+    assert_equal [ "pricing" ], result.dig("api_equivalent", "missing_dimensions")
+    assert_equal 125, result.dig("tokens", "input_output")
+  end
 
-    failing = ->(**) { raise IOError, "read failed" }
-    failed = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts_panel, usage_reader: failing,
-      pricing: unavailable_pricing
-    ).call
+  def test_task_reader_bounds_an_over_returning_adapter
+    reader = Object.new
+    reader.define_singleton_method(:task_usage) do |**|
+      { available: true, sessions: [ { id: "a" }, { id: "b" } ], groups: [] }
+    end
+    bounded = Hive::TaskWorkspace::BoundedUsageReader.new(
+      reader: reader, limits: Hive::TaskWorkspace::Limits.new(usage_sessions_per_attempt: 1)
+    )
+    result = bounded.task_usage(project_slug: "demo", task_slug: "task")
+    assert_equal [ { id: "a" } ], result[:sessions]
+    assert result[:truncated]
+  end
 
-    assert_equal "partial", failed.fetch("coverage")
-    assert_includes failed.fetch("diagnostics").map { |row| row.fetch("reason") },
-                    "usage_read_failed"
+  def test_recent_session_keeps_optional_pricing_dimensions_from_its_receipt
+    record("a", attempt_id: "attempt-a")
+    dimensions = { "service_tier" => "priority" }
+    received = nil
+    pricing = lambda do |input|
+      received = input[:pricing_dimensions]
+      { coverage: "unavailable", missing_dimensions: [] }
+    end
+    result = usage(pricing: pricing, attempts_panel: {
+      "records" => [ { "attempt_id" => "attempt-a", "sessions" => [
+        { "session_id" => "a", "usage" => { "pricing_dimensions" => dimensions } }
+      ] } ]
+    }).call
+    assert_equal dimensions, received
+    assert_equal 125, result.dig("tokens", "input_output")
   end
 
   def test_bounded_reader_caps_rows_caches_attempts_and_fails_closed_at_deadline
@@ -130,170 +203,24 @@ class TaskWorkspaceUsageTest < Minitest::Test
     assert_equal 1, calls
   end
 
-  def test_mixed_routes_keep_harness_provider_and_reported_cost_separate_from_observed_price
-    sessions = [
-      session_binding("session-subscription", outcome: "succeeded"),
-      session_binding("session-api", outcome: "succeeded"),
-      session_binding("session-unpriced", outcome: "failed")
-    ]
-    panel = {
-      "state" => "current", "truncated" => false, "diagnostics" => [],
-      "records" => [
-        attempt("attempt-mixed", "failed", "unused").merge("sessions" => sessions)
-      ]
-    }
-    reader = lambda do |**|
-      dimensions = {
-        "service_tier" => "standard", "context_tokens" => 1_000,
-        "server_tool_usage" => "none"
-      }
-      common = {
-        input: 100, output: 100, cache_read: 0, cache_write: 0, reasoning: 0,
-        input_includes_cache_read: false, input_includes_cache_write: false,
-        output_includes_reasoning: true, pricing_dimensions: dimensions,
-        started_at: "2026-08-16T12:00:00Z"
-      }
-      {
-        available: true, unattributed_count: 0,
-        sessions: [
-          common.merge(
-            session_id: "session-subscription", harness: "codex",
-            actual_backend: "openai", actual_model: "gpt-5.6-sol",
-            billing_route: "subscription",
-            billing_evidence_source: "agent_profile_contract"
-          ),
-          common.merge(
-            session_id: "session-api", harness: "opencode",
-            actual_backend: "openai", actual_model: "gpt-5.6-sol",
-            billing_route: "api", billing_evidence_source: "provider_account_config",
-            provider_reported_cost: BigDecimal("0.0001")
-          ),
-          common.merge(
-            session_id: "session-unpriced", harness: "pi",
-            actual_backend: "partner", actual_model: "partner-model",
-            billing_route: "unknown", billing_evidence_source: "unavailable"
-          )
-        ]
-      }
-    end
-
-    envelope = without_http do
-      Hive::TaskWorkspace::Usage.new(
-        attempts_panel: panel, usage_reader: reader
-      ).call
-    end
-
-    assert_equal "partial", envelope.fetch("coverage")
-    assert_equal "mixed", envelope.fetch("billing_route")
-    assert_equal %w[codex opencode pi], envelope.fetch("harnesses")
-    assert_equal [ "openai", "partner" ], envelope.fetch("actual_providers")
-    assert_nil envelope.dig("api_equivalent", "subtotal_usd")
-    assert_equal BigDecimal("0.007"), envelope.dig("api_equivalent", "observed_subtotal_usd")
-    opencode = envelope.fetch("sessions").find { |row| row["harness"] == "opencode" }
-    assert_equal "openai", opencode.fetch("actual_provider")
-    assert_equal "api", opencode.fetch("billing_route")
-    assert_equal BigDecimal("0.0001"), opencode.fetch("provider_reported_cost")
-    assert_match(%r{developers\.openai\.com},
-                 opencode.dig("api_equivalent", "rate_basis", :source_url))
-  end
-
-  def test_truncation_conflicts_and_fallback_callers_degrade_coverage
-    attempts = attempts_panel
-    attempts.fetch("records").last.fetch("sessions") <<
-      session_binding("session-failed", outcome: "succeeded")
-    reader = lambda do |**|
-      {
-        available: true, sessions: [], unattributed_count: 0,
-        truncated: true, unattributed_truncated: true
-      }
-    end
-    usage = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts, usage_reader: reader, pricing: unavailable_pricing
-    )
-    envelope = usage.call
-    reasons = envelope.fetch("diagnostics").map { |row| row.fetch("reason") }
-    assert_includes reasons, "session_bound_to_multiple_attempts"
-    assert_includes reasons, "usage_sessions_truncated"
-    assert_includes reasons, "unattributed_usage_truncated"
-
-    usage.instance_variable_set(
-      :@usage_reader,
-      ->(**) { { available: true, sessions: [], unattributed_count: 0 } }
-    )
-    response = usage.send(:exact_usage, attempts.fetch("records").first)
-    assert response.fetch(:available)
-  end
-
-  def test_pricing_and_invalid_token_values_fail_closed
-    pricing = Object.new
-    pricing.define_singleton_method(:estimate) { |*| raise ArgumentError, "bad pricing" }
-    reader = lambda do |attempt_id:, **|
-      id = attempt_id == "attempt-failed" ? "session-failed" : "session-retry"
-      { available: true, sessions: [ usage_row(id, input: "bad") ], unattributed_count: 0 }
-    end
-
-    envelope = Hive::TaskWorkspace::Usage.new(
-      attempts_panel: attempts_panel, usage_reader: reader, pricing: pricing
-    ).call
-
-    assert_equal "partial", envelope.fetch("coverage")
-    assert_nil envelope.dig("sessions", 0, "input")
-    assert_equal "unavailable", envelope.dig("sessions", 0, "api_equivalent", "coverage")
-    assert_equal [ "pricing" ],
-                 envelope.dig("sessions", 0, "api_equivalent", "missing_dimensions")
-  end
 
   private
 
-  def without_http
-    original = Net::HTTP.method(:start)
-    Net::HTTP.define_singleton_method(:start) { |*| raise "network forbidden" }
-    yield
-  ensure
-    Net::HTTP.define_singleton_method(:start, original)
+  def usage(**options)
+    Hive::TaskWorkspace::Usage.new(project_slug: "hive", task_slug: "task", **options)
   end
 
-  def attempts_panel
-    {
-      "state" => "current", "truncated" => false, "diagnostics" => [],
-      "records" => [
-        attempt("attempt-failed", "failed", "session-failed"),
-        attempt("attempt-retry", "succeeded", "session-retry")
-      ]
-    }
+  def usage_row(id)
+    { session_id: id, input: 100, output: 25 }
   end
 
-  def attempt(id, outcome, session_id)
-    {
-      "attempt_id" => id, "task_generation" => 7,
-      "project_slug" => "project", "task_slug" => "task",
-      "stage" => "4-execute", "outcome" => outcome,
-      "sessions" => [ session_binding(session_id, outcome: outcome) ]
-    }
-  end
-
-  def session_binding(id, outcome:, live: false)
-    {
-      "session_id" => id, "outcome" => outcome, "live" => live,
-      "provider" => "codex", "actual_model" => { "value" => "gpt-5.6-sol" }
-    }
-  end
-
-  def usage_row(id, input: 10, output: 5)
-    {
-      session_id: id, harness: "codex", actual_backend: "openai",
-      actual_model: "gpt-5.6-sol", billing_route: "subscription",
-      billing_evidence_source: "agent_profile_contract",
-      input: input, output: output, cache_read: 0, cache_write: 0, reasoning: 0,
-      provider_reported_cost: BigDecimal("0.01"), started_at: "2026-08-16T12:00:00Z"
-    }
-  end
-
-  def unavailable_pricing
-    ->(_) do
-      { coverage: "unavailable", subtotal_usd: nil, observed_subtotal_usd: nil,
-        missing_dimensions: [ "model" ], provider: nil, canonical_model: nil,
-        rate_basis: nil }
-    end
+  def record(id, **overrides)
+    started_at = NOW - 10 * 86_400
+    Hive::UsageDb.record!(**{
+      session_id: id, agent: "codex", model: "sol", actual_provider: "openai",
+      actual_model: "sol", project_slug: "hive", task_slug: "task", stage: "4-execute",
+      started_at: started_at, ended_at: started_at + 60,
+      input: 100, output: 25, cached: 0
+    }.merge(overrides))
   end
 end

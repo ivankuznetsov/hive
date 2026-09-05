@@ -586,6 +586,11 @@ class TasksTest < ActionDispatch::IntegrationTest
           "harnesses" => [ "opencode" ], "actual_providers" => [ "openai" ],
           "actual_models" => [ "gpt-5.6-sol" ], "billing_routes" => [ "api" ],
           "billing_route" => "api",
+          "compacted_sessions_count" => 12,
+          "model_totals" => [
+            { "stage" => "4-execute", "provider" => "openai", "model" => "gpt-5.6-sol",
+              "tokens" => { "input_output" => 1500, "complete" => true } }
+          ],
           "api_equivalent" => {
             "coverage" => "partial", "subtotal_usd" => nil,
             "observed_subtotal_usd" => "0.0123", "priced_sessions_count" => 1,
@@ -629,6 +634,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "#workspace-usage", text: /\$0\.0123 observed.*Partial coverage/m
     assert_select "#workspace-usage", text: /opencode.*openai.*gpt-5\.6-sol.*API/m
     assert_select "details[data-workspace-disclosure-key='usage-details']", 1
+    assert_select ".usage-model-totals", text: /gpt-5\.6-sol.*1,500/m
+    assert_select "#workspace-usage", text: /12 older sessions.*daily totals/m
     assert_select ".usage-group", text: /Execute.*Succeeded.*Cache read \/ write.*200 \/ 0/m
     assert_select "a[href='https://developers.openai.com/api/docs/models/gpt-5.6-sol']", 1
     refute_includes response.body, "private-session-id"

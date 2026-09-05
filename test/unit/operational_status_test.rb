@@ -535,7 +535,8 @@ class OperationalStatusTest < Minitest::Test
       "maintenance" => {
         "last_started_at" => "2026-07-20T09:00:00.000000Z",
         "last_completed_at" => nil,
-        "last_result" => nil
+        "last_result" => { "promoted" => 0, "deleted" => 0, "cold_examined" => 0,
+                           "errors" => 0, "usage_compacted" => 500 }
       },
       "last_error" => {
         "operation" => "maintenance", "class" => "Hive::Attempts::RepositoryError",
@@ -551,6 +552,8 @@ class OperationalStatusTest < Minitest::Test
     )
 
     assert_equal snapshot.fetch("attempt_storage"), result.fetch("attempt_storage")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+    assert_empty schema.validate(result).to_a
     assert_equal "degraded", result.dig("daemon", "status")
     warnings = result.fetch("issues").select do |issue|
       issue.fetch("code") == "attempt_storage_degraded"

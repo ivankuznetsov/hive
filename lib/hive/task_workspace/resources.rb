@@ -125,7 +125,8 @@ module Hive
           truncated = response[:truncated] == true || response[:unattributed_truncated] == true
           return {
             "record_kind" => "usage", "attempt_id" => attempt["attempt_id"],
-            "state" => truncated ? "partial" : "missing",
+            "state" => response[:detail_expired] ? "expired" : (truncated ? "partial" : "missing"),
+            "detail_expired" => response[:detail_expired] == true,
             "sessions" => [], "totals" => nil,
             "unattributed_count" => response[:unattributed_count],
             "unattributed_truncated" => response[:unattributed_truncated] == true,

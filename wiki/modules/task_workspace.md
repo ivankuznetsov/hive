@@ -71,19 +71,22 @@ booleans decide whether worktree, diff, publication, media, dependency, and
 supporting-artifact evidence is meaningful; actual safe evidence can make a
 section applicable even when a legacy declaration omitted the capability.
 
-`usage` aggregates every session in the bounded durable attempt inventory once
-by exact session ID, including failed attempts and retries. It separates
+`usage` aggregates recorded task usage directly from recent session rows plus
+historical daily totals, including failed attempts and retries. A bounded
+attempt/journal inventory does not limit those totals. It separates
 harness, evidenced actual provider/model, and `api`, `subscription`, `mixed`,
 or `unknown` billing route. `complete`, `partial`, `pending`, and `unavailable`
 remain distinct. API-equivalent USD is a local rate-card estimate with coverage
 and missing dimensions, never an invoice or a claim that subscription use cost
 zero. Provider-reported cost is deliberately absent from v2.
 
-One request-wide `BoundedUsageReader` shares exact-attempt results between the
-v1 and v2 projections. It caps each attempt at 100 usage sessions and applies a
-single two-second deadline; row/deadline exhaustion makes coverage partial or
-unavailable and never invents zero. `UsageDb.exact_attempt` applies the same
-row bound to SQLite and bounds its unattributed-legacy sample/count.
+One request-wide `BoundedUsageReader` caches exact-attempt and task-summary
+reads. It caps detail at 100 sessions and checks a shared two-second deadline;
+detail truncation does not truncate task totals. `UsageDb.exact_attempt` applies
+the same row bound to SQLite and bounds its unattributed-legacy sample/count.
+Expired per-attempt detail is labelled explicitly, while v2 `model_totals`
+continues to show stage/provider/model history. Token and API-equivalent-price
+coverage are independent; expired detail is not repriced from merged counts.
 
 `diagnostic` is `not_applicable` for normal tasks. A genuine red/recovery state
 can carry one bounded summary and the current attempt receipt's safe

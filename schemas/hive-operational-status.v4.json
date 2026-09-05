@@ -245,7 +245,9 @@
               "properties": {
                 "promoted": { "type": "integer", "minimum": 0 },
                 "deleted": { "type": "integer", "minimum": 0 },
-                "cold_examined": { "type": "integer", "minimum": 0 }
+                "cold_examined": { "type": "integer", "minimum": 0 },
+                "errors": { "type": "integer", "minimum": 0 },
+                "usage_compacted": { "type": "integer", "minimum": 0 }
               }
             }
           }

@@ -49,6 +49,20 @@ module Hive
 
       alias call exact_attempt
 
+      def task_usage(project_slug:, task_slug:)
+        key = [ :task, project_slug.to_s, task_slug.to_s ]
+        return unwrap(@cache[key]) if @cache.key?(key)
+        return unavailable("deadline_exhausted") if deadline_exhausted?
+
+        @cache[key] = bound(@reader.task_usage(
+          project_slug: project_slug, task_slug: task_slug, session_limit: @limit,
+          deadline: @deadline, monotonic_clock: @clock
+        ))
+      rescue StandardError => error
+        @cache[key] = Failure.new(error: error)
+        raise
+      end
+
       private
 
       def accepts_keyword?(callable, name)

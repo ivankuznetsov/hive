@@ -249,6 +249,28 @@ Sequel.migration do
             name: :token_usage_session_uidx
     end
 
+    create_table(:token_usage_daily) do
+      String :id, primary_key: true, null: false
+      String :day, null: false
+      %i[agent model actual_backend actual_model project_slug task_slug stage
+         billing_route billing_evidence_source].each { |column| String column }
+      %i[input_includes_cache_read input_includes_cache_write output_includes_reasoning].each do |column|
+        Integer column
+      end
+      Integer :sessions_count, null: false
+      Integer :metered_sessions_count, null: false
+      %i[input output cached cache_read cache_write reasoning].each do |metric|
+        Integer metric, null: false, default: 0
+        Integer :"#{metric}_available", null: false, default: 0
+        check Sequel.lit("#{metric} >= 0 AND #{metric}_available IN (0, 1)")
+      end
+      Float :cost, null: false, default: 0
+      Integer :cost_available, null: false, default: 0
+      check Sequel.lit("sessions_count > 0 AND metered_sessions_count BETWEEN 0 AND sessions_count AND cost_available IN (0, 1)")
+      index :day
+      index [ :project_slug, :task_slug, :day ]
+    end
+
     create_table(:daemon_runtime) do
       foreign_key :installation_id, :installations, type: String, key: :installation_id,
                   primary_key: true, null: false, on_delete: :cascade, on_update: :cascade

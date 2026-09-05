@@ -150,6 +150,11 @@
         "input": { "type": "integer", "minimum": 0 },
         "output": { "type": "integer", "minimum": 0 },
         "input_output": { "type": "integer", "minimum": 0 },
+        "cached": { "type": "integer", "minimum": 0 },
+        "cache_read": { "type": "integer", "minimum": 0 },
+        "cache_write": { "type": "integer", "minimum": 0 },
+        "reasoning": { "type": "integer", "minimum": 0 },
+        "unavailable": { "type": "array", "items": { "enum": ["input", "output", "cached", "cache_read", "cache_write", "reasoning"] } },
         "complete": { "type": "boolean" }
       }
     },
@@ -173,6 +178,8 @@
         "coverage": { "type": "string", "enum": ["complete", "partial", "pending", "unavailable"] },
         "observed_subtotal": { "type": "boolean" },
         "details_truncated": { "type": "boolean" },
+        "compacted_sessions_count": { "type": "integer", "minimum": 0 },
+        "model_totals": { "$ref": "#/$defs/SafeArray" },
         "sessions_count": { "type": "integer", "minimum": 0 },
         "metered_sessions_count": { "type": "integer", "minimum": 0 },
         "unmetered_sessions_count": { "type": "integer", "minimum": 0 },

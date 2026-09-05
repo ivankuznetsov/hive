@@ -15,6 +15,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     task_leases
     task_subjects
     token_usage
+    token_usage_daily
   ].freeze
 
   EXPECTED_ATTEMPT_COLUMNS = %i[

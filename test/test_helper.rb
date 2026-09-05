@@ -306,7 +306,7 @@ module HiveTestHelper
     FileUtils.mkdir_p(root)
     document = Hive::RuntimeControlPlane::CutoverManifest.build(
       phase: "active", installation_id: identity.fetch(:installation_id),
-      lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
+      source_release: "0.7.1",
       target_release: Hive::VERSION, exclusions: [], task_authority: [],
       evidence: { "activation_epoch" => epoch }
     )

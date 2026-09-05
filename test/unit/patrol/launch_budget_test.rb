@@ -12,10 +12,13 @@ class PatrolLaunchBudgetTest < Minitest::Test
     @database = Hive::RuntimeControlPlane::Database.new(
       path: File.join(@root, "runtime.sqlite3")
     ).migrate!
-    @usage = usage_store
+    @previous_usage_database = Hive::UsageDb.instance_variable_get(:@database)
+    Hive::UsageDb.database = @database
+    @usage = Hive::UsageDb
   end
 
   def teardown
+    Hive::UsageDb.database = @previous_usage_database
     @database&.disconnect
   end
 
@@ -48,32 +51,24 @@ class PatrolLaunchBudgetTest < Minitest::Test
     )
 
     assert_equal 0, budget(engine: :ordinary, now: NOW, limit: 1).remaining_launches
-    rows = @database.read { |db| db[:patrol_allowances].where(kind: "ordinary").count }
+    rows = @database.read do |db|
+      db[:token_usage].where(source: "patrol_discovery_launch").count
+    end
     assert_equal 2, rows
   end
 
-  def test_provider_hold_survives_restart_and_midnight_but_is_lane_scoped
-    before_midnight = Time.utc(2026, 8, 20, 23, 50)
-    retry_at = before_midnight + 1800
-    subject = budget(engine: :ordinary, now: before_midnight)
-    assert subject.park!(retry_at: retry_at, reason: "token_limit")
-
-    after_midnight = before_midnight + 900
-    restarted = budget(engine: :ordinary, now: after_midnight)
-    assert_equal "provider_backoff", restarted.allowance_snapshot.fetch(:status)
-    assert_equal 4, budget(engine: :architecture, now: after_midnight).remaining_launches
-    assert_equal 4, budget(engine: :ordinary, now: retry_at).remaining_launches
-  end
-
-  def test_missing_lane_starts_empty_without_consulting_usage_history
-    usage = usage_store
-    usage.define_singleton_method(:patrol_discovery_seed) do |**|
-      raise "runtime allowance must not reconstruct legacy state"
+  def test_allowance_is_derived_from_existing_token_history
+    3.times do |index|
+      Hive::UsageDb.reserve_patrol_discovery!(
+        session_id: "history-#{index}", agent: "codex", project_slug: "demo",
+        stage: "patrol-review", started_at: NOW, limit: 4, database: @database
+      )
     end
-    subject = budget(engine: :ordinary, usage_db: usage)
 
-    assert_equal "available", subject.allowance_snapshot.fetch(:status)
-    assert_equal 4, subject.remaining_launches
+    snapshot = budget(engine: :ordinary).allowance_snapshot
+    assert_equal "available", snapshot.fetch(:status)
+    assert_equal 3, snapshot.fetch(:used)
+    assert_equal 1, snapshot.fetch(:remaining)
   end
 
   def test_capacity_reads_do_not_create_an_empty_lane
@@ -101,31 +96,25 @@ class PatrolLaunchBudgetTest < Minitest::Test
     )
 
     assert acquire(subject, "patrol-review", id: "stable-id")
-    row = @database.read { |db| db[:patrol_allowances].where(kind: "ordinary").first }
-    assert_equal "stable-project", row.fetch(:project_id)
+    row = @database.read do |db|
+      db[:token_usage].where(session_id: "stable-id").first
+    end
+    assert_equal "telemetry-name", row.fetch(:project_slug)
   end
 
-  def test_reservation_safety_bound_fails_closed_without_mutating_the_lane
-    ensure_project("project-1")
-    ids = Array.new(Hive::Patrol::LaunchBudget::MAX_RESERVATIONS_PER_LANE) do |index|
-      "r#{index}"
-    end
-    timestamp = Hive::RuntimeControlPlane::Codec.dump_time(NOW)
-    @database.transaction do |db|
-      db[:patrol_allowances].insert(
-        project_id: "project-1", kind: "ordinary", window_key: "2026-08-20",
-        used: ids.length, limit_value: ids.length + 1, revision: 0,
-        reservation_ids_json: Hive::RuntimeControlPlane::Codec.dump_json(ids),
-        updated_at: timestamp
-      )
-    end
-    subject = budget(engine: :ordinary, limit: ids.length + 1)
+  def test_usage_updates_the_reservation_row_instead_of_inserting_a_second_row
+    subject = budget(engine: :ordinary)
+    assert acquire(subject, "patrol-review", id: "stable-id")
+    assert subject.record!(
+      result: { status: :ok, usage: { input: 7, output: 3, cached: 1 } },
+      profile: Profile.new(:codex), stage: "patrol-review", started_at: NOW
+    )
 
-    refute acquire(subject, "patrol-review", id: "overflow")
-    row = @database.read { |db| db[:patrol_allowances].where(kind: "ordinary").first }
-    assert_equal ids.length, row.fetch(:used)
-    assert_equal 0, row.fetch(:revision)
-    assert_equal "allowance_store_unavailable", subject.resource_exhaustion.fetch(:reason)
+    rows = @database.read { |db| db[:token_usage].where(session_id: "stable-id").all }
+    assert_equal 1, rows.length
+    assert_equal 7, rows.first.fetch(:input)
+    assert_equal "patrol-review", rows.first.fetch(:stage)
+    assert rows.first.fetch(:ended_at)
   end
 
   def test_non_discovery_stages_record_telemetry_without_charging_allowance
@@ -136,7 +125,7 @@ class PatrolLaunchBudgetTest < Minitest::Test
       stage: "patrol-fix", started_at: NOW
     )
     assert_equal 2, subject.remaining_launches
-    assert_equal 2, @usage.recorded.length
+    assert_equal 1, @database.read { |db| db[:token_usage].count }
   end
 
   def test_multiprocess_contention_never_exceeds_limit
@@ -146,9 +135,15 @@ class PatrolLaunchBudgetTest < Minitest::Test
       readers << reader
       Hive::RuntimeControlPlane::ProcessGuard.fork do
         reader.close
-        result = acquire(budget(engine: :ordinary, limit: 4), "patrol-review", id: "p-#{index}")
+        child_database = Hive::RuntimeControlPlane::Database.new(path: @database.path).open!
+        result = acquire(
+          budget(engine: :ordinary, limit: 4, database: child_database),
+          "patrol-review", id: "p-#{index}"
+        )
         writer.write(result ? "1" : "0")
         writer.close
+      ensure
+        child_database&.disconnect
       end.tap { writer.close }
     end
     results = readers.map(&:read)
@@ -182,7 +177,7 @@ class PatrolLaunchBudgetTest < Minitest::Test
     assert_equal 0, subject.remaining_launches
   end
 
-  def test_allowance_and_hold_fail_closed_when_sql_is_unavailable
+  def test_allowance_fails_closed_when_token_history_is_unavailable
     broken = Object.new
     broken.define_singleton_method(:read) { raise IOError, "read failed" }
     broken.define_singleton_method(:transaction) { raise IOError, "write failed" }
@@ -193,18 +188,18 @@ class PatrolLaunchBudgetTest < Minitest::Test
     )
 
     assert_equal "unavailable", subject.allowance_snapshot.fetch(:status)
-    refute subject.park!(retry_at: NOW + 60, reason: "provider")
-    refute subject.clear_park!
-    assert_equal "allowance_store_unavailable", subject.resource_exhaustion.fetch(:reason)
+    assert_equal "usage_store_unavailable", subject.resource_exhaustion.fetch(:reason)
   end
 
-  def test_active_hold_blocks_reservation_and_reports_a_bounded_message
-    subject = budget(engine: :ordinary)
-    assert subject.park!(retry_at: NOW + 60, reason: "provider")
+  def test_discovery_reservation_fails_closed_when_token_history_write_fails
+    usage = Object.new
+    usage.define_singleton_method(:reserve_patrol_discovery!) do |**|
+      raise IOError, "write failed"
+    end
+    subject = budget(engine: :ordinary, usage_db: usage)
 
-    refute acquire(subject, "patrol-review", id: "held")
-    assert_match(/provider_lane_backoff/, subject.exhaustion_message)
-    assert_equal "provider_lane_backoff", subject.resource_exhaustion.fetch(:reason)
+    refute acquire(subject, "patrol-review", id: "failed-reservation")
+    assert_equal "usage_store_unavailable", subject.resource_exhaustion.fetch(:reason)
   end
 
   def test_unknown_exhaustion_message_and_failed_telemetry_are_nonfatal
@@ -229,18 +224,19 @@ class PatrolLaunchBudgetTest < Minitest::Test
 
     snapshot = subject.allowance_snapshot
     assert_equal "unavailable", snapshot.fetch(:status)
-    assert_equal "allowance_store_unavailable", subject.resource_exhaustion.fetch(:reason)
+    assert_equal "usage_store_unavailable", subject.resource_exhaustion.fetch(:reason)
   end
 
   private
 
-  def budget(engine:, now: NOW, limit: 4, project_id: "project-1", usage_db: @usage)
-    ensure_project(project_id)
+  def budget(engine:, now: NOW, limit: 4, project_id: "project-1", usage_db: @usage,
+             database: @database)
+    ensure_project(project_id, database: database)
     Hive::Patrol::LaunchBudget.new(
       @root,
       cfg: { "patrol" => { "scheduled_discovery_launches_per_engine_per_day" => limit } },
       project_id: project_id, project_name: "demo", engine: engine,
-      usage_db: usage_db, database: @database, clock: -> { now }
+      usage_db: usage_db, database: database, clock: -> { now }
     )
   end
 
@@ -251,9 +247,9 @@ class PatrolLaunchBudgetTest < Minitest::Test
     )
   end
 
-  def ensure_project(project_id)
+  def ensure_project(project_id, database: @database)
     timestamp = Hive::RuntimeControlPlane::Codec.dump_time(NOW)
-    @database.transaction do |db|
+    database.transaction do |db|
       installation = db[:installations].get(:installation_id)
       db[:projects].insert_conflict.insert(
         project_id: project_id, installation_id: installation,
@@ -263,14 +259,5 @@ class PatrolLaunchBudgetTest < Minitest::Test
         active: 1, registered_at: timestamp, last_observed_at: timestamp
       )
     end
-  end
-
-  def usage_store
-    store = Struct.new(:recorded).new([])
-    store.define_singleton_method(:record!) do |**attributes|
-      recorded << attributes
-      true
-    end
-    store
   end
 end

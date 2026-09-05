@@ -1348,46 +1348,6 @@ module Hive
       ).call
     end
 
-    desc "circuits [ACTION]", "Inspect or administer provider-account/model circuits"
-    long_desc <<~DESC
-      `hive circuits` (or `hive circuits inspect`) renders the sanitized,
-      durable provider-routing projection: account capacity, provider and
-      exact-model circuit state/generation, probe ownership, protected evidence
-      references, and recent deterministic route decisions.
-
-      Administrative actions are `block`, `unblock`, and `reset`. Circuit actions require
-      an exact configured --provider, optional exact --model, a bounded
-      single-line --reason, a fresh --expected-generation, and explicit --yes.
-      SQLite integrity failures are repaired through the runtime-control-plane
-      recovery workflow, not a per-circuit file quarantine. Actor identity
-      comes from the trusted local execution context; it cannot be supplied on
-      the command line.
-
-      These commands mutate provider health only. They never clear a task
-      marker, schedule a retry, change a retry charge, create a successor, or
-      dispatch work. Provider administration is intentionally absent from
-      `hive act`.
-    DESC
-    option :provider, type: :string, desc: "configured provider-account ID"
-    option :model, type: :string, desc: "exact configured model within --provider"
-    option :reason, type: :string, desc: "required bounded reason for a mutation"
-    option :expected_generation, type: :numeric,
-                                 desc: "fresh circuit generation from inspection"
-    option :yes, type: :boolean, default: false,
-                 desc: "approve one generation-fenced administrative mutation"
-    def circuits(action = "list")
-      require "hive/commands/circuits"
-      Hive::Commands::Circuits.new(
-        action,
-        provider: options[:provider],
-        model: options[:model],
-        reason: options[:reason],
-        expected_generation: options[:expected_generation],
-        yes: options[:yes],
-        json: options[:json]
-      ).call
-    end
-
     desc "watch [TARGET...]", "Observe bounded semantic task transitions"
     long_desc <<~DESC
       Watches one or more tasks without mutating workflow state. TARGET may be

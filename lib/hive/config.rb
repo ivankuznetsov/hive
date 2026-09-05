@@ -1758,8 +1758,6 @@ module Hive
               registration_id: entry["registration_id"] || "legacy:#{project_id}",
               name: entry.fetch("name"), observed_path: File.expand_path(entry.fetch("path")),
               state_root_path: project_hive_state_path(entry),
-              repository_identity_json: entry["repository_identity"] &&
-                Hive::RuntimeControlPlane::Codec.dump_json(entry.fetch("repository_identity")),
               active: 1, registered_at: entry.fetch("registered_at", timestamp),
               last_observed_at: timestamp
             }

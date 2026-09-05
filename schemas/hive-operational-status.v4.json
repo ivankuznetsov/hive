@@ -452,34 +452,9 @@
     "RoutingExclusionReason": {
       "type": "string",
       "enum": [
-        "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
-        "provider_concurrency_saturated", "health_state_unavailable"
+        "hard_pin_mismatch", "requirements_incompatible", "failed_route",
+        "provider_concurrency_saturated", "provider_capacity_unavailable"
       ]
-    },
-    "RoutingScope": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "provider_account_id", "model"],
-      "properties": {
-        "kind": { "type": "string", "enum": ["provider_account", "model"] },
-        "provider_account_id": { "$ref": "#/$defs/RoutingIdentifier" },
-        "model": { "type": ["string", "null"] }
-      }
-    },
-    "RoutingProbe": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["scope", "journal_epoch", "observed_generation", "claim_generation", "attempt_id", "task_generation", "ownership_fence"],
-      "properties": {
-        "scope": { "$ref": "#/$defs/RoutingScope" },
-        "journal_epoch": { "type": "integer", "minimum": 0 },
-        "observed_generation": { "type": "integer", "minimum": 0 },
-        "claim_generation": { "type": "integer", "minimum": 1 },
-        "attempt_id": { "$ref": "#/$defs/RoutingIdentifier" },
-        "task_generation": { "$ref": "#/$defs/RoutingIdentifier" },
-        "ownership_fence": { "$ref": "#/$defs/RoutingIdentifier" }
-      }
     },
     "RoutingPin": {
       "type": "object",
@@ -501,47 +476,20 @@
         "permissions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
       }
     },
-    "RoutingObservation": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "generation": { "type": "integer", "minimum": 0 },
-        "journal_epoch": { "type": "integer", "minimum": 0 },
-        "observed": { "type": "integer", "minimum": 0 },
-        "max": { "type": "integer", "minimum": 1 }
-      }
-    },
     "RoutingExclusion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["route_id", "reason", "detail", "scope", "observation"],
+      "required": ["route_id", "reason", "detail"],
       "properties": {
         "route_id": { "$ref": "#/$defs/RoutingIdentifier" },
         "reason": { "$ref": "#/$defs/RoutingExclusionReason" },
-        "detail": { "type": ["string", "null"] },
-        "scope": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingScope" }] },
-        "observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingObservation" }] }
-      }
-    },
-    "RoutingCircuitObservation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["scope", "status", "generation", "journal_epoch", "state", "manual_block", "eligible_at", "probe_owner"],
-      "properties": {
-        "scope": { "$ref": "#/$defs/RoutingScope" },
-        "status": { "type": "string", "enum": ["available", "unavailable"] },
-        "generation": { "type": "integer", "minimum": 0 },
-        "journal_epoch": { "type": "integer", "minimum": 0 },
-        "state": { "type": "string", "enum": ["closed", "open", "half_open", "manual_block", "probe_owned", "health_state_unavailable"] },
-        "manual_block": { "type": ["boolean", "null"] },
-        "eligible_at": { "type": ["string", "null"], "format": "date-time" },
-        "probe_owner": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingProbe" }] }
+        "detail": { "type": ["string", "null"] }
       }
     },
     "RoutingCandidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["route_id", "provider_account_id", "adapter", "model", "effort", "eligible", "exclusions", "capacity", "circuits"],
+      "required": ["route_id", "provider_account_id", "adapter", "model", "effort", "eligible", "exclusions", "capacity"],
       "properties": {
         "route_id": { "$ref": "#/$defs/RoutingIdentifier" },
         "provider_account_id": { "$ref": "#/$defs/RoutingIdentifier" },
@@ -555,18 +503,7 @@
             { "type": "null" },
             { "type": "object", "additionalProperties": false, "required": ["observed", "max"], "properties": { "observed": { "type": "integer", "minimum": 0 }, "max": { "type": "integer", "minimum": 1 } } }
           ]
-        },
-        "circuits": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitObservation" } }
-      }
-    },
-    "RoutingCircuitGeneration": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["scope", "journal_epoch", "observed_generation"],
-      "properties": {
-        "scope": { "$ref": "#/$defs/RoutingScope" },
-        "journal_epoch": { "type": "integer", "minimum": 0 },
-        "observed_generation": { "type": "integer", "minimum": 0 }
+        }
       }
     },
     "RoutingDecision": {
@@ -575,7 +512,7 @@
       "required": [
         "decision_id", "decided_at", "task_generation", "policy_digest",
         "status", "reason", "next_action_owner", "policy", "selected_route",
-        "candidates", "exclusions", "circuit_generations", "probe_requirements"
+        "candidates", "exclusions"
       ],
       "properties": {
         "decision_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -588,9 +525,7 @@
         "policy": { "type": "object", "additionalProperties": false, "required": ["stage", "pin", "requirements"], "properties": { "stage": { "type": "string" }, "pin": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingPin" }] }, "requirements": { "$ref": "#/$defs/RoutingRequirements" } } },
         "selected_route": { "type": ["string", "null"] },
         "candidates": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RoutingCandidate" } },
-        "exclusions": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/RoutingExclusion" } },
-        "circuit_generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitGeneration" } },
-        "probe_requirements": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitGeneration" } }
+        "exclusions": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/RoutingExclusion" } }
       }
     },
     "HumanOutcome": {

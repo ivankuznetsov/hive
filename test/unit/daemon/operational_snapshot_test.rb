@@ -326,7 +326,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         status_payload: payload, now: T0 + 1
       )
       database_for(path).transaction do |db|
-        dataset = db[:daemon_runtime].where(daemon_kind: "operational")
+        dataset = db[:daemon_runtime]
         document = Hive::RuntimeControlPlane::Codec.load_json(dataset.get(:observation_json))
         document.fetch("status_projection")["tick_sequence"] += 1
         dataset.update(observation_json: Hive::RuntimeControlPlane::Codec.dump_json(document))
@@ -411,9 +411,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       database.transaction do |db|
         installation_id = db[:installations].get(:installation_id)
         db[:daemon_runtime].insert(
-          installation_id: installation_id, daemon_kind: "operational",
-          generation: 1, state: "running", observation_json: "{",
-          observed_at: T0.iso8601(6)
+          installation_id: installation_id, observation_json: "{"
         )
       end
       assert_raises(Hive::RuntimeControlPlane::IntegrityError) { repository.snapshot }

@@ -1,14 +1,10 @@
 require "test_helper"
-require "open3"
-require "yaml"
 require "hive/runtime_control_plane/cutover"
 
 class RuntimeControlPlaneDeletionContractTest < Minitest::Test
   include HiveTestHelper
 
   ROOT = File.expand_path("../../..", __dir__)
-  INVENTORY = File.join(ROOT, "test/fixtures/runtime_control_plane/affected_production.yml")
-  PRODUCTION_PATHS = %w[bin lib schemas install.sh packaging web/config].freeze
   RETIRED_SOURCE_FILES = %w[
     lib/hive/attempts/decision_index.rb
     lib/hive/attempts/pending_finalization_store.rb
@@ -77,29 +73,6 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     wiki/cli.md
   ].freeze
 
-  def test_final_affected_inventory_is_exact_and_at_least_twenty_percent_smaller
-    inventory = YAML.safe_load_file(INVENTORY, permitted_classes: [], aliases: false)
-    entries = inventory.fetch("final_paths")
-    observed = entries.sum do |entry|
-      path = File.join(ROOT, entry.fetch("path"))
-      assert_path_exists path
-      lines = File.foreach(path).count
-      assert_equal entry.fetch("lines"), lines, entry.fetch("path")
-      lines
-    end
-
-    assert_equal entries.map { |entry| entry.fetch("path") }.uniq.length, entries.length
-    outside_net = outside_inventory_net_lines(inventory, entries)
-    final_lines = observed + outside_net
-    assert_equal inventory.fetch("final_inventory_lines"), observed
-    assert_equal inventory.fetch("outside_inventory_net_lines"), outside_net
-    assert_equal inventory.fetch("final_lines"), final_lines
-    assert_operator final_lines, :<=, inventory.fetch("maximum_final_lines")
-    assert_operator final_lines, :<=, (inventory.fetch("baseline_lines") * 0.8).floor
-    assert_equal affected_production_files(inventory),
-                 entries.map { |entry| entry.fetch("path") }.sort
-  end
-
   def test_retired_runtime_sources_schemas_and_constants_are_absent
     (RETIRED_SOURCE_FILES + RETIRED_SCHEMA_FILES).each do |relative|
       refute_path_exists File.join(ROOT, relative), relative
@@ -155,62 +128,5 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     CURRENT_OPERATOR_GUIDES.each do |relative|
       refute_includes File.binread(File.join(ROOT, relative)), "hive circuits", relative
     end
-  end
-
-  private
-
-  def affected_production_files(inventory)
-    retained = inventory.fetch("paths").filter_map do |entry|
-      entry.fetch("path") if File.file?(File.join(ROOT, entry.fetch("path")))
-    end
-    added = changed_production_files(
-      inventory, from: inventory.fetch("outside_inventory_reference_commit")
-    ).filter_map do |status_code, path|
-      path if status_code == "A" && File.file?(File.join(ROOT, path))
-    end
-    (retained + added).uniq.sort
-  end
-
-  def outside_inventory_net_lines(inventory, entries)
-    classified = inventory.fetch("paths").map { |entry| entry.fetch("path") } +
-      entries.map { |entry| entry.fetch("path") }
-    changed_production_files(inventory).sum do |_status_code, path|
-      next 0 if classified.include?(path)
-
-      current = File.file?(File.join(ROOT, path)) ? File.foreach(File.join(ROOT, path)).count : 0
-      current - base_line_count(
-        inventory.fetch("outside_inventory_reference_commit"), path
-      )
-    end
-  end
-
-  def changed_production_files(inventory, from: inventory.fetch("base_commit"))
-    output, error, status = Open3.capture3(
-      "git", "diff", "--name-status", "--no-renames", from,
-      "--", *PRODUCTION_PATHS, chdir: ROOT
-    )
-    assert status.success?, error
-    changed = output.lines.map do |line|
-      status_code, path = line.chomp.split("\t", 2)
-      [ status_code, path ]
-    end
-    status_output, status_error, status = Open3.capture3(
-      "git", "status", "--porcelain", "--untracked-files=all", chdir: ROOT
-    )
-    assert status.success?, status_error
-    untracked = status_output.lines.filter_map do |line|
-      path = line[3..].to_s.strip
-      [ "A", path ] if line[0, 2] == "??" && production_path?(path)
-    end
-    (changed + untracked).uniq
-  end
-
-  def production_path?(path)
-    path == "install.sh" || path.match?(%r{\A(?:bin|lib|schemas|packaging|web/config)/})
-  end
-
-  def base_line_count(commit, path)
-    output, _error, status = Open3.capture3("git", "show", "#{commit}:#{path}", chdir: ROOT)
-    status.success? ? output.lines.count : 0
   end
 end

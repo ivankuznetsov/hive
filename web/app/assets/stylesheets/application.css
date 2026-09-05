@@ -378,9 +378,7 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .kanban-workflow { color: var(--ink-faint); font-size: 0.82rem; overflow-wrap: anywhere; }
 .kanban-band-warning { margin: 0 0 12px; }
 .kanban-columns {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(270px, 1fr);
+  display: flex;
   gap: 12px;
   max-width: 100%;
   overflow-x: auto;
@@ -389,6 +387,8 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   overscroll-behavior-inline: contain;
 }
 .kanban-column {
+  flex: 0 0 270px;
+  min-width: 270px;
   display: flex;
   flex-direction: column;
   min-height: 170px;
@@ -1411,7 +1411,7 @@ pre {
   .task-row { grid-template-columns: 1fr; gap: 8px; }
   .status-view-toolbar { align-items: start; }
   .kanban-band-header { align-items: start; }
-  .kanban-columns { grid-auto-columns: minmax(78vw, 290px); }
+  .kanban-column { flex-basis: min(78vw, 290px); min-width: min(78vw, 290px); }
   .task-meta { flex-wrap: wrap; white-space: normal; }
   .workflow-row { grid-template-columns: 1fr; }
   .workflow-actions { justify-content: flex-start; }

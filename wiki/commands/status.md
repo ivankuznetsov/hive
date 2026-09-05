@@ -658,3 +658,12 @@ task/commit locks and committed before the clock can hide a row.
 
 - [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]]
 - [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]] · [[modules/plan_review]]
+
+## Historical terminal recovery
+
+The operational projection retains terminal recovery receipts for diagnostics,
+but `attempt_terminal_replay` does not override the current task state, blocker
+owner, or reason. For example, a Patrol fix now parked in review keeps its
+`Escalated (parked)` reason instead of becoming idle with reason `terminal`
+because an earlier recovery succeeded. Active recovery dispositions still
+participate in scheduling classification.

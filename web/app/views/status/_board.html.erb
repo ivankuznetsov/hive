@@ -35,13 +35,25 @@
           <% band.columns.each do |column| %>
             <% column_id = stable_dom_id("kanban-column", band.project.name, band.workflow_id, column.stage) %>
             <% heading_id = "#{column_id}-heading" %>
-            <section id="<%= column_id %>" class="kanban-column" data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>">
+            <section id="<%= column_id %>" class="kanban-column <%= "is-folded" if column.folded_by_default? %>"
+                     data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>"
+                     data-controller="kanban-column" data-action="turbo:morph-element->kanban-column#restore"
+                     data-kanban-column-default-folded-value="<%= column.folded_by_default? %>"
+                     data-kanban-column-label-value="<%= column.label %>">
               <header class="kanban-column-header">
-                <h3 id="<%= heading_id %>"><%= column.label %></h3>
-                <span class="kanban-count" aria-label="<%= pluralize(column.tasks.size, "task") %>"><%= column.tasks.size %></span>
+                <h3 id="<%= heading_id %>">
+                  <button type="button" class="kanban-column-toggle" data-kanban-column-target="toggle"
+                          data-action="kanban-column#toggle" aria-controls="<%= column_id %>-cards"
+                          aria-expanded="<%= !column.folded_by_default? %>"
+                          aria-label="<%= column.folded_by_default? ? "Expand" : "Fold" %> <%= column.label %> column">
+                    <span class="kanban-column-label"><%= column.label %></span>
+                    <span class="kanban-count" aria-label="<%= pluralize(column.tasks.size, "task") %>"><%= column.tasks.size %></span>
+                    <span class="kanban-fold-icon" aria-hidden="true">‹</span>
+                  </button>
+                </h3>
               </header>
 
-              <div class="kanban-cards">
+              <div id="<%= column_id %>-cards" class="kanban-cards" data-kanban-column-target="cards" <%= "hidden" if column.folded_by_default? %>>
                 <% if column.tasks.empty? %>
                   <p class="kanban-empty">No tasks</p>
                 <% else %>

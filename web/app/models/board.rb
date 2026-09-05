@@ -3,7 +3,9 @@ require "hive/stage_label"
 class Board
   DEFAULT_WORKFLOW = Hive::Config::DEFAULTS.fetch("default_workflow")
 
-  Column = Data.define(:stage, :label, :tasks)
+  Column = Data.define(:stage, :label, :tasks, :terminal) do
+    def folded_by_default? = tasks.empty? || terminal
+  end
 
   Band = Data.define(
     :project, :workflow_id, :columns, :daemon_enabled, :error,
@@ -68,12 +70,13 @@ class Board
     configured_dirs = configured_stages.map(&:dir)
 
     columns = configured_stages.map do |stage|
-      Column.new(stage: stage.dir, label: Hive::StageLabel.format(stage.name), tasks: tasks_by_stage.fetch(stage.dir, []))
+      Column.new(stage: stage.dir, label: Hive::StageLabel.format(stage.name), tasks: tasks_by_stage.fetch(stage.dir, []),
+                 terminal: stage == configured_stages.last)
     end
     (tasks_by_stage.keys - configured_dirs).sort_by { |stage| stage_sort_key(stage) }.each do |stage|
-      columns << Column.new(stage:, label: Hive::StageLabel.format(stage), tasks: tasks_by_stage.fetch(stage))
+      columns << Column.new(stage:, label: Hive::StageLabel.format(stage), tasks: tasks_by_stage.fetch(stage), terminal: false)
     end
-    columns.presence || [ Column.new(stage: "unavailable", label: "Workflow unavailable", tasks:) ]
+    columns.presence || [ Column.new(stage: "unavailable", label: "Workflow unavailable", tasks:, terminal: false) ]
   end
 
   def workflows_for(project, workflow_ids)

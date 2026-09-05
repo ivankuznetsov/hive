@@ -162,8 +162,16 @@ class KanbanBoardTest < ApplicationSystemTestCase
                     "navigation and page content should share the full-width shell"
     assert_operator metrics.fetch("statusMainWidth"), :>, 3_400,
                     "the project rail must leave the rest of a large screen to task content"
-    assert_operator metrics.fetch("columnWidth"), :>, 310,
-                    "kanban columns should grow after their comfortable minimum instead of staying capped"
+    assert_in_delta 270, metrics.fetch("columnWidth"), 1,
+                    "open columns must keep a fixed width on large screens"
+    within(".kanban-band[data-project-name='#{project}']") do
+      click_button "Expand Plan column"
+      widths = all(".kanban-column:not(.is-folded)").map { |column| column.evaluate_script("this.getBoundingClientRect().width") }
+      assert_equal 2, widths.size
+      widths.each { |width| assert_in_delta 270, width, 1 }
+      click_button "Fold Plan column"
+      assert_in_delta 270, find(".kanban-column:not(.is-folded)").evaluate_script("this.getBoundingClientRect().width"), 1
+    end
   end
 
   test "project filter survives a view switch" do

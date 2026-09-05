@@ -68,6 +68,43 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert_selector "#status-board .kanban-card", text: slug
   end
 
+  test "columns fold empty and done stages by default and retain operator choices" do
+    project = create_hive_project!("kanban-fold-app")
+    create_task!(project, "Active card")
+    done = create_task!(project, "Completed card")
+    FileUtils.mv(stage_dir(project, "1-inbox").join(done), stage_dir(project, "9-done").join(done))
+    stage_dir(project, "9-done").join(done, "task.md").write("<!-- COMPLETE -->\n")
+    sign_in!
+
+    band = ".kanban-band[data-project-name='#{project}']"
+    assert_selector "#{band} [data-stage='1-inbox']:not(.is-folded) .kanban-card", text: "Active card"
+    assert_selector "#{band} [data-stage='3-plan'].is-folded"
+    assert_selector "#{band} [data-stage='9-done'].is-folded"
+    assert_no_selector "#{band} [data-stage='9-done'] .kanban-card"
+    within("#{band} [data-stage='9-done']") do
+      assert_selector "button[aria-expanded='false']"
+      find_button("Expand Done column").send_keys(:enter)
+      assert_selector "button[aria-expanded='true'][aria-label='Fold Done column']"
+    end
+    assert_selector "#{band} [data-stage='9-done'] .kanban-card", text: "Completed card"
+    find("#{band} [data-stage='1-inbox'] button.kanban-column-toggle").click
+    assert_no_selector "#{band} [data-stage='1-inbox'] .kanban-card"
+
+    # A pushed update must update counts and keep the operator's fold choices.
+    create_task!(project, "New incoming card")
+    assert_selector "#{band} [data-stage='1-inbox'] .kanban-count", text: "2", wait: 10
+    assert_selector "#{band} [data-stage='1-inbox'].is-folded"
+    assert_selector "#{band} [data-stage='9-done']:not(.is-folded)"
+    visit board_path(project: project)
+    assert_selector "#{band} [data-stage='1-inbox'].is-folded"
+    assert_selector "#{band} [data-stage='9-done']:not(.is-folded) .kanban-card"
+
+    # An untouched empty column opens when a live task arrives.
+    new_slug = create_task!(project, "New brainstorm card")
+    FileUtils.mv(stage_dir(project, "1-inbox").join(new_slug), stage_dir(project, "2-brainstorm").join(new_slug))
+    assert_selector "#{band} [data-stage='2-brainstorm']:not(.is-folded) .kanban-card", text: "New brainstorm card", wait: 10
+  end
+
   test "board remains contained at a mobile viewport" do
     project = create_hive_project!("kanban-#{"unbroken" * 8}")
     create_task!(project, "A deliberately long kanban task title that must stay inside the mobile viewport")
@@ -181,6 +218,9 @@ class KanbanBoardTest < ApplicationSystemTestCase
     disable_daemon!(focused_project)
     sign_in!
 
+    within(".kanban-band[data-project-name='#{focused_project}']") do
+      all(".kanban-column.is-folded .kanban-column-toggle").each(&:click)
+    end
     focused_card = find(".kanban-card[data-task-slug='#{focused_slug}']")
     focused_card.find_button("Run brainstorm")
     expected_action = evaluate_script(<<~JS)

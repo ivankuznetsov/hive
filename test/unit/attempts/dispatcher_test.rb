@@ -1,7 +1,7 @@
 require "test_helper"
 require "hive/attempts/context"
 require "hive/attempts/dispatcher"
-require "hive/attempts/failure_cohort_reconciler"
+require "hive/attempts/lost_outcome"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
 require "hive/workflows/patrol_fix"
@@ -17,7 +17,7 @@ class AttemptsDispatcherTest < Minitest::Test
   )
   FakeRequest = Struct.new(
     :slug, :project, :argv, :request_id, :task_generation,
-    :predecessor_attempt_id, :inherited_outputs, :recovery,
+    :inherited_outputs, :recovery,
     :requestor, :trigger,
     keyword_init: true
   )
@@ -59,6 +59,29 @@ class AttemptsDispatcherTest < Minitest::Test
       capability = launcher.launched.first.last
       assert Hive::Attempts::Capability.matches?(first.attempt["claim_capability_digest"], capability)
       refute_includes first.attempt.to_h.values, capability
+    end
+  end
+
+  def test_request_identity_replays_a_live_attempt_across_task_generations
+    with_dispatcher do |dispatcher, launcher, task|
+      first = dispatch(dispatcher, task, request_id: "shared-request")
+      other = task_fixture(task_state_root(task), id: 43, slug: "other-task")
+
+      replay = dispatch(dispatcher, other, request_id: "shared-request")
+
+      assert_equal :existing_live, replay.status
+      assert_equal first.attempt.attempt_id, replay.attempt.attempt_id
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_terminal_provider_failure_is_a_recoverable_source
+    with_dispatcher do |dispatcher, _launcher, _task|
+      record = Struct.new(:state, :outcome, :receipt) do
+        def explicit_routing? = true
+      end.new("terminal", "failed", { "provider_evidence" => {} })
+
+      assert dispatcher.send(:recoverable_source_attempt?, record)
     end
   end
 
@@ -445,6 +468,9 @@ class AttemptsDispatcherTest < Minitest::Test
       failed = terminalize_attempt(
         store, launcher, repair, outcome: "failed", exit_status: 1, now: NOW + 6
       )
+      assert_equal failed, dispatcher.send(
+        :replayable_terminal, [ failed ], "request-two", task: task
+      )
 
       replay = dispatch(
         dispatcher, task, request_id: "request-three",
@@ -483,17 +509,18 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_failed_successor_allows_retry_after_resolved_lost_ancestor
+  def test_failed_recovery_allows_a_later_independent_retry
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
-      successor = dispatcher.dispatch_successor(
-        predecessor: lost, task: task, project: "demo",
-        argv: [ "hive", "run", task.slug ], request_id: "request-two",
+      recovery = ready_loss(store, lost, now: NOW + 2)
+      replacement = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: recovery.fetch("request_id"),
         provider: "codex", retry_charge: 1, now: NOW + 2
       )
       terminalize_attempt(
-        store, launcher, successor, outcome: "failed", exit_status: 1, now: NOW + 5
+        store, launcher, replacement, outcome: "failed", exit_status: 1, now: NOW + 5
       )
 
       retry_result = dispatch(dispatcher, task, request_id: "request-three", now: NOW + 6)
@@ -528,7 +555,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_patrol_failure_cohort_survives_restart_and_runtime_change_releases_it
+  def test_patrol_retry_delay_survives_restart_and_operator_retry_is_per_task
     with_tmp_dir do |root|
       database = attempt_database(root, projects: [ "demo" ])
       store = Hive::Attempts::Repository.new(
@@ -552,18 +579,14 @@ class AttemptsDispatcherTest < Minitest::Test
           task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
         end
       end
-      failures = tasks.each_with_index.map do |task, index|
+      tasks.each_with_index.map do |task, index|
         result = dispatch(
           dispatcher, task, request_id: "failure-#{index}", intended_stage: "2-fix",
           now: NOW + (index * 10)
         )
-        terminal = terminalize_attempt(
-          store, launcher, result, outcome: "failed", exit_status: 7,
+        terminalize_attempt(
+          store, launcher, result, outcome: index == 2 ? "cancelled" : "failed", exit_status: 7,
           now: NOW + (index * 10) + 3, diagnostic: true
-        )
-        assert Hive::Attempts::FailureCohortReconciler.new(store: store).reconcile(
-          record: terminal,
-          admission: store.reservation_metadata(terminal.attempt_id).fetch("admission")
         )
         result
       end
@@ -594,7 +617,14 @@ class AttemptsDispatcherTest < Minitest::Test
         intended_stage: "2-fix", now: NOW + 40
       )
       assert_equal :deferred, blocked.status
-      assert_equal "failure_cohort_cooldown", blocked.reason
+      assert_equal "patrol_retry_delay", blocked.reason
+
+      cancelled = dispatch(
+        restarted, tasks.last, request_id: "cancelled-retry",
+        intended_stage: "2-fix", now: NOW + 40
+      )
+      assert_equal :deferred, cancelled.status
+      assert_equal "patrol_retry_delay", cancelled.reason
 
       restarted.instance_variable_set(:@task_resolver, ->(_request) { tasks[1] })
       restarted.define_singleton_method(:provider_for) { |_task| "codex" }
@@ -609,7 +639,7 @@ class AttemptsDispatcherTest < Minitest::Test
         now: NOW + 40
       )
       assert_equal :deferred, automatic.status
-      assert_equal "failure_cohort_cooldown", automatic.reason
+      assert_equal "patrol_retry_delay", automatic.reason
 
       restarted_store = restarted.instance_variable_get(:@store)
       original_create = restarted_store.method(:create_launching)
@@ -669,23 +699,7 @@ class AttemptsDispatcherTest < Minitest::Test
         ),
         now: NOW + 40
       )
-      assert_equal :deferred, second_release.status
-      assert_equal "failure_cohort_cooldown", second_release.reason
-
-      repaired = Hive::Attempts::Dispatcher.new(
-        store: Hive::Attempts::Repository.new(root: store.root, database: database), launcher: launcher,
-        limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
-        clock: -> { NOW + 41 }, id_generator: -> { ids.next },
-        capability_generator: -> { CLAIM_CAPABILITY },
-        runtime_digest: "b" * 64
-      )
-      released = dispatch(
-        repaired, tasks.first, request_id: "repaired-retry",
-        intended_stage: "2-fix", now: NOW + 41
-      )
-      assert_equal :accepted, released.status
-      refute_includes failures.map { |result| result.attempt.attempt_id },
-                      released.attempt.attempt_id
+      assert_equal :accepted, second_release.status
     end
   end
 
@@ -722,27 +736,14 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_already_lost_handoff_defers_and_releases_matching_probe
+  def test_already_lost_handoff_defers
     with_dispatcher do |dispatcher, _launcher, task, store|
       created = dispatch(dispatcher, task, request_id: "lost-handoff").attempt
       lost = store.mark_lost(created, reason: "owner_gone", now: NOW + 1)
-      seed_failure_cohort(store, identity: failure_cohort_identity, date: NOW.to_date)
-      assert store.claim_failure_cohort_probe(
-        identity: failure_cohort_identity, date: NOW.to_date,
-        attempt_id: lost.attempt_id, now: NOW + 4_000
-      )
-      result = dispatcher.send(
-        :resolve_failed_handoff, lost, interactive: false,
-        cohort_identity: failure_cohort_identity,
-        cohort_date: NOW.to_date
-      )
+      result = dispatcher.send(:resolve_failed_handoff, lost, interactive: false)
 
       assert_equal :deferred, result.status
       assert_equal "launch_handoff_failed", result.reason
-      assert store.claim_failure_cohort_probe(
-        identity: failure_cohort_identity, date: NOW.to_date,
-        attempt_id: lost.attempt_id, now: NOW + 4_001, explicit_release: true
-      )
     end
   end
 
@@ -846,7 +847,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_successor_inherits_generation_predecessor_outputs_and_retry_charge
+  def test_recovery_admits_an_independent_attempt_and_completes_the_source
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
@@ -855,51 +856,63 @@ class AttemptsDispatcherTest < Minitest::Test
         "current_outputs" => [ capture ],
         "retry_charge" => 2
       )
-      # Persist the fixture through the store's guarded checkpoint equivalent
-      # is impossible after loss, so pass the durable predecessor plus explicit
-      # inherited outputs/retry charge as the healer will in U6.
-      successor = dispatcher.dispatch_successor(
-        predecessor: lost, task: task, project: "demo", argv: [ "hive", "run", task.slug ],
-        request_id: "request-two", provider: "codex", inherited_outputs: [ capture ],
+      recovery = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      pending = recovery.ensure_for(lost, now: NOW + 1)
+      ready = recovery.update(
+        lost, phase: "ready", cleanup: "absent",
+        request_id: recovery.recovery_request_id(lost), now: NOW + 2
+      )
+      File.write(task.state_file, "#{task.slug}\n")
+
+      replacement = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: ready.fetch("request_id"),
+        provider: "codex", inherited_outputs: [ capture ],
         retry_charge: 2, now: NOW + 2
       )
 
-      assert_equal :accepted, successor.status
-      refute_equal lost.attempt_id, successor.attempt.attempt_id
-      assert_equal lost.task_generation, successor.attempt.task_generation
-      assert_equal lost.task_input_epoch, successor.attempt.task_input_epoch
-      assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
-      assert_equal [ capture ], successor.attempt["inherited_outputs"]
-      assert_equal 2, successor.attempt["retry_charge"]
+      assert_equal "pending", pending.fetch("phase")
+      assert_equal :accepted, replacement.status
+      refute_equal lost.attempt_id, replacement.attempt.attempt_id
+      refute_equal lost.task_generation, replacement.attempt.task_generation
+      assert_equal lost.task_input_epoch, replacement.attempt.task_input_epoch
+      assert_equal Hive::Attempts::Generation.artifact_token(task),
+                   replacement.attempt["progress_token"]
+      refute_includes replacement.attempt.to_h, "predecessor_attempt_id"
+      assert_equal ready.fetch("request_id"), replacement.attempt["request_id"]
+      assert_equal [ capture ], replacement.attempt["inherited_outputs"]
+      assert_equal 2, replacement.attempt["retry_charge"]
+      assert_equal "complete", recovery.fetch(lost.attempt_id).fetch("phase")
       assert_equal 2, launcher.launched.size
     end
   end
 
-  def test_existing_successor_prevents_a_second_successor_for_the_same_loss
+  def test_completed_recovery_request_prevents_a_second_replacement_for_the_same_loss
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
-      successor = dispatcher.dispatch_successor(
-        predecessor: lost, task: task, project: "demo",
-        argv: [ "hive", "run", task.slug ], request_id: "request-two",
+      recovery = ready_loss(store, lost, now: NOW + 2)
+      replacement = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: recovery.fetch("request_id"),
         provider: "codex", now: NOW + 2
       )
-      store.mark_lost(successor.attempt, reason: "handoff_failed", now: NOW + 3)
+      store.mark_lost(replacement.attempt, reason: "handoff_failed", now: NOW + 3)
 
-      duplicate = dispatcher.dispatch_successor(
-        predecessor: lost, task: task, project: "demo",
-        argv: [ "hive", "run", task.slug ], request_id: "request-three",
+      duplicate = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: recovery.fetch("request_id"),
         provider: "codex", now: NOW + 4
       )
 
       assert_equal :deferred, duplicate.status
-      assert_equal "successor_exists", duplicate.reason
-      assert_equal successor.attempt.attempt_id, duplicate.attempt.attempt_id
+      assert_equal "attempt_lost", duplicate.reason
+      assert_equal replacement.attempt.attempt_id, duplicate.attempt.attempt_id
       assert_equal 2, launcher.launched.size
     end
   end
 
-  def test_empty_successor_outputs_fall_back_to_all_predecessor_outputs
+  def test_empty_recovery_outputs_fall_back_to_all_source_outputs
     with_dispatcher do |dispatcher, _launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       inherited = { "path" => "outputs/inherited.json", "size" => 2, "sha256" => "1" * 64 }
@@ -907,41 +920,49 @@ class AttemptsDispatcherTest < Minitest::Test
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1).with(
         "inherited_outputs" => [ inherited ], "current_outputs" => [ current ]
       )
+      recovery = ready_loss(store, lost, now: NOW + 2)
 
-      successor = dispatcher.dispatch_successor(
-        predecessor: lost, task: task, project: "demo", argv: [ "hive", "run", task.slug ],
-        request_id: "request-two", provider: "codex", inherited_outputs: [], now: NOW + 2
+      replacement = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: task, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: recovery.fetch("request_id"), provider: "codex",
+        inherited_outputs: [], now: NOW + 2
       )
 
-      assert_equal [ inherited, current ], successor.attempt["inherited_outputs"]
+      assert_equal [ inherited, current ], replacement.attempt["inherited_outputs"]
     end
   end
 
-  def test_successor_chain_is_not_blocked_by_an_older_lost_ancestor
+  def test_each_loss_has_its_own_independent_recovery_admission
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       first_lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
-      second = dispatcher.dispatch_successor(
-        predecessor: first_lost, task: task, project: "demo",
-        argv: [ "hive", "run", task.slug ], request_id: "request-two",
+      first_recovery = ready_loss(store, first_lost, now: NOW + 2)
+      second = dispatcher.dispatch_recovery(
+        source_attempt: first_lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: first_recovery.fetch("request_id"),
         provider: "codex", retry_charge: 1, now: NOW + 2
       )
       second_lost = store.mark_lost(second.attempt, reason: "owner_gone", now: NOW + 3)
+      second_recovery = ready_loss(store, second_lost, now: NOW + 4)
 
-      third = dispatcher.dispatch_successor(
-        predecessor: second_lost, task: task, project: "demo",
-        argv: [ "hive", "run", task.slug ], request_id: "request-three",
+      third = dispatcher.dispatch_recovery(
+        source_attempt: second_lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: second_recovery.fetch("request_id"),
         provider: "codex", retry_charge: 2, now: NOW + 4
       )
 
       assert_equal :accepted, third.status
       assert_equal "attempt-three", third.attempt.attempt_id
-      assert_equal second.attempt.attempt_id, third.attempt["predecessor_attempt_id"]
+      refute_includes third.attempt.to_h, "predecessor_attempt_id"
+      assert_equal "complete", Hive::Attempts::LostOutcomeTransition.new(store: store)
+        .fetch(first_lost.attempt_id).fetch("phase")
+      assert_equal "complete", Hive::Attempts::LostOutcomeTransition.new(store: store)
+        .fetch(second_lost.attempt_id).fetch("phase")
       assert_equal 3, launcher.launched.size
     end
   end
 
-  def test_dispatch_request_routes_normal_and_lost_predecessor_deliveries
+  def test_dispatch_request_routes_normal_and_lost_recovery_deliveries
     with_dispatcher do |dispatcher, launcher, task, store|
       dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
       dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
@@ -951,64 +972,42 @@ class AttemptsDispatcherTest < Minitest::Test
       )
       first = dispatcher.dispatch_request(request, now: NOW)
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
-      successor_request = request.dup
-      successor_request.request_id = "request-two"
-      successor_request.task_generation = lost.task_generation
-      successor_request.predecessor_attempt_id = lost.attempt_id
-      successor_request.recovery = { "retry_count" => 3 }
+      recovery = ready_loss(store, lost, now: NOW + 2)
+      recovery_request = request.dup
+      recovery_request.request_id = recovery.fetch("request_id")
+      recovery_request.task_generation = lost.task_generation
+      recovery_request.recovery = {
+        "variant" => "attempt_loss", "retry_count" => 3,
+        "source_receipt" => { "attempt_id" => lost.attempt_id }
+      }
 
-      successor = dispatcher.dispatch_request(successor_request, interactive: true, now: NOW + 2)
+      replacement = dispatcher.dispatch_request(recovery_request, interactive: true, now: NOW + 2)
 
-      assert_equal :accepted, successor.status
-      assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
-      assert_equal 3, successor.attempt["retry_charge"]
+      assert_equal :accepted, replacement.status
+      refute_includes replacement.attempt.to_h, "predecessor_attempt_id"
+      assert_equal recovery.fetch("request_id"), replacement.attempt["request_id"]
+      assert_equal 3, replacement.attempt["retry_charge"]
       assert_equal 2, launcher.launched.size
     end
   end
 
-  def test_lost_generation_and_invalid_successor_are_deferred
+  def test_lost_generation_defers_ordinary_admission_until_recovery
     with_dispatcher do |dispatcher, _launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
       lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+      assert_equal lost.attempt_id, store.unresolved_loss_attempt_id(
+        task_generation: lost.task_generation, subject: lost.subject
+      )
 
-      # An ordinary dispatch adopts the loss rather than deferring behind it:
-      # nothing else mints the successor, so deferring parks the task forever.
       ordinary = dispatch(dispatcher, task, request_id: "request-two")
-      assert_equal :accepted, ordinary.status
-      assert_equal lost.attempt_id, ordinary.attempt["predecessor_attempt_id"]
-    end
-
-    with_dispatcher do |dispatcher, _launcher, task|
-      with_tmp_dir do |other_root|
-        other_store = Hive::Attempts::Repository.new(root: other_root, migrate: true)
-        generation = Hive::Attempts::Generation.resolve(
-          task: task, project: "demo", intended_stage: "4-execute"
-        )
-        external = other_store.create_launching(
-          attempt_id: "external", request_id: "external", predecessor_attempt_id: nil,
-          task_id: task.id.to_s, project: "demo", task_slug: task.slug,
-          intended_stage: "4-execute",
-          task_generation: generation.task_generation,
-          progress_token: generation.progress_token,
-          provider: "codex", worker_argv: [ "hive", "run", task.slug ],
-          claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-          starting_revision: nil, retry_charge: 0,
-          inherited_outputs: [], launch_timeout_sec: 30, now: NOW
-        )
-        external = other_store.mark_lost(external, reason: "owner_gone", now: NOW + 1)
-        result = dispatcher.dispatch_successor(
-          predecessor: external, task: task, project: "demo",
-          argv: [ "hive", "run", task.slug ], request_id: "successor",
-          provider: "codex", now: NOW + 2
-        )
-        assert_equal "invalid_predecessor", result.reason
-      end
+      assert_equal :deferred, ordinary.status
+      assert_equal "attempt_lost", ordinary.reason
+      assert_equal lost.attempt_id, ordinary.attempt.attempt_id
     end
   end
 
-  def test_legacy_locator_semantic_duplicates_and_resolution_helpers
+  def test_semantic_duplicates_and_resolution_helpers
     with_dispatcher do |dispatcher, launcher, task|
-      task.id = nil
       first = dispatch(dispatcher, task, request_id: "request-one")
       duplicate = dispatch(dispatcher, task, request_id: "request-two")
       assert_equal :accepted, first.status
@@ -1016,6 +1015,8 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal 1, launcher.launched.size
 
       request = Struct.new(:slug, :project).new(task.slug, "demo")
+      legacy = Struct.new(:task_id, :project, :task_slug, :intended_stage).new(nil, "demo", task.slug, "4-execute")
+      assert_equal first.attempt, dispatcher.send(:find_semantic_owner, [ first.attempt ], legacy)
       resolver = Struct.new(:task) { def resolve = task }.new(task)
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
         assert_equal task, dispatcher.send(:resolve_request_task, request)
@@ -1178,7 +1179,7 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_shared_admission_view_revalidates_terminal_replay_and_loss_successor_semantics
+  def test_shared_admission_view_revalidates_terminal_replay_and_loss_recovery_semantics
     with_dispatcher do |dispatcher, launcher, task, store|
       admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
       first = dispatch(
@@ -1198,9 +1199,10 @@ class AttemptsDispatcherTest < Minitest::Test
       blocked = dispatch(
         dispatcher, task, request_id: "request-three", admission_view: admission_view
       )
-      successor = dispatcher.dispatch_successor(
-        predecessor: lost, task: task, project: "demo",
-        argv: [ "hive", "run", task.slug ], request_id: "request-four",
+      recovery = ready_loss(store, lost, now: NOW + 5)
+      replacement = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: recovery.fetch("request_id"),
         provider: "codex", retry_charge: 1, now: NOW + 5,
         admission_view: admission_view
       )
@@ -1208,13 +1210,12 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :terminal_replay, replay.status
       assert_equal failed.receipt, replay.receipt
       assert_equal :accepted, retry_result.status
-      # The ordinary dispatch adopts the loss, so it becomes the successor...
-      assert_equal :accepted, blocked.status
-      assert_equal lost.attempt_id, blocked.attempt["predecessor_attempt_id"]
-      # ...and an explicit second successor for the same loss spawns nothing
-      # new, which is what keeps adoption from racing anything.
-      assert_equal :existing_live, successor.status
-      assert_equal blocked.attempt.attempt_id, successor.attempt.attempt_id
+      assert_equal :deferred, blocked.status
+      assert_equal "attempt_lost", blocked.reason
+      assert_equal lost.attempt_id, blocked.attempt.attempt_id
+      assert_equal :accepted, replacement.status
+      refute_includes replacement.attempt.to_h, "predecessor_attempt_id"
+      assert_equal recovery.fetch("request_id"), replacement.attempt["request_id"]
     end
   end
 
@@ -1342,8 +1343,8 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
-  def test_routing_collaborator_defaults_and_health_attempt_projection_fail_closed
-    with_dispatcher do |dispatcher, _launcher, task, store|
+  def test_routing_collaborator_defaults
+    with_dispatcher do |dispatcher, _launcher, task, _store|
       assert_match(
         /\A[0-9a-f-]{36}\z/,
         dispatcher.instance_variable_get(:@decision_id_generator).call
@@ -1357,28 +1358,18 @@ class AttemptsDispatcherTest < Minitest::Test
         :@routing_policy_resolver,
         ->(_task, stage) { Hive::ProviderRouting::Policy.legacy(stage: stage) }
       )
-
-      opened = Object.new
-      dispatcher.instance_variable_set(:@health_store, nil)
-      with_replaced_singleton_method(
-        Hive::ProviderHealth, :open,
-        -> { opened }
-      ) do
-        assert_same opened, dispatcher.send(:provider_health_store)
-      end
     end
   end
 
   private
 
-  def failure_cohort_identity
-    {
-      "runtime_digest" => "a" * 64,
-      "project" => "demo",
-      "workflow" => "patrol_fix",
-      "stage" => "2-fix",
-      "code" => "agent_exit_nonzero"
-    }
+  def ready_loss(store, lost, now:)
+    transition = Hive::Attempts::LostOutcomeTransition.new(store: store)
+    transition.ensure_for(lost, now: now)
+    transition.update(
+      lost, phase: "ready", cleanup: "absent",
+      request_id: transition.recovery_request_id(lost), now: now
+    )
   end
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 },
@@ -1512,22 +1503,11 @@ class AttemptsDispatcherTest < Minitest::Test
   end
 
   def finish_publication(store, record)
-    store.prepare_publication(attempt_id: record.attempt_id, consumers: [ "journal" ])
-    store.acknowledge_publication(record.attempt_id, consumer: "journal")
-    assert store.finish_publication(record.attempt_id)
-  end
-
-  def seed_failure_cohort(store, identity:, date:)
-    normalized = Hive::RuntimeControlPlane::Codec.normalize(identity)
-    encoded = Hive::RuntimeControlPlane::Codec.dump_json(normalized)
-    store.database.transaction do |db|
-      db[:attempt_failure_cohorts].insert(
-        utc_date: date.iso8601, identity_digest: Digest::SHA256.hexdigest(encoded),
-        identity_json: encoded, failure_count: 3,
-        retry_at: Hive::Attempts::Record.iso8601(NOW + 3_600),
-        updated_at: Hive::Attempts::Record.iso8601(NOW)
-      )
+    store.prepare_publication(attempt_id: record.attempt_id)
+    %w[journal accounting dispatch].each do |consumer|
+      store.acknowledge_publication(record.attempt_id, consumer: consumer)
     end
+    assert store.finish_publication(record.attempt_id)
   end
 
   def patrol_fix_decision_receipt(slug)

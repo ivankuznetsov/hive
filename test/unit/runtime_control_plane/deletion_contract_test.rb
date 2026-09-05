@@ -22,7 +22,17 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/daemon/pr_merge_reconciliation_store.rb
     lib/hive/daemon/queue_directory.rb
     lib/hive/point_storage.rb
+    lib/hive/commands/circuits.rb
+    lib/hive/provider_health.rb
+    lib/hive/provider_health/attempt_observer.rb
+    lib/hive/provider_health/audit.rb
+    lib/hive/provider_health/circuit.rb
+    lib/hive/provider_health/event.rb
+    lib/hive/provider_health/evidence.rb
+    lib/hive/provider_health/repository.rb
     lib/hive/provider_health/store.rb
+    lib/hive/provider_routing/operational_projection.rb
+    lib/hive/provider_routing/policy_repository.rb
     lib/hive/recovery/migration.rb
     lib/hive/runtime_control_plane/diagnostics.rb
     lib/hive/runtime_control_plane/identity.rb
@@ -31,6 +41,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
   RETIRED_SCHEMA_FILES = %w[
     schemas/hive-attempt.v3.json
     schemas/hive-attempt.v4.json
+    schemas/hive-circuits.v1.json
     schemas/hive-pr-merge-reconciliation.v1.json
     schemas/hive-provider-health-event.v1.json
     schemas/hive-provider-health.v1.json
@@ -46,7 +57,9 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     Hive::Daemon::DispatchRequestQueue
     Hive::Daemon::DispatchResultQueue
     Hive::Daemon::PrMergeReconciliationStore
-    Hive::ProviderHealth::Store
+    Hive::ProviderHealth
+    Hive::ProviderRouting::OperationalProjection
+    Hive::ProviderRouting::PolicyRepository
     Hive::ProviderRouting::PolicyStore
   ].freeze
   RETIRED_ENVIRONMENT_PATHS = %w[HIVE_ATTEMPT_STORE_ROOT HIVE_USAGE_DB_PATH].freeze
@@ -57,6 +70,11 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/task_journal.rb
     lib/hive/task_projection/reader.rb
     lib/hive/workflow_package/publish_store.rb
+  ].freeze
+  CURRENT_OPERATOR_GUIDES = %w[
+    skills/hive/references/status-and-watch.md
+    openclaw/skills/hive/references/status-and-watch.md
+    wiki/cli.md
   ].freeze
 
   def test_final_affected_inventory_is_exact_and_at_least_twenty_percent_smaller
@@ -131,6 +149,12 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
 
   def test_unrelated_task_workflow_and_artifact_file_stores_remain
     RETAINED_FILE_STORES.each { |relative| assert_path_exists File.join(ROOT, relative) }
+  end
+
+  def test_current_operator_guides_do_not_advertise_the_retired_circuits_command
+    CURRENT_OPERATOR_GUIDES.each do |relative|
+      refute_includes File.binread(File.join(ROOT, relative)), "hive circuits", relative
+    end
   end
 
   private

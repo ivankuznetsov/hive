@@ -9,7 +9,7 @@ require "hive/atomic_file"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_SCHEMA_SHA256 = "34e12e7c8303f7b6f21c00cd0019fe96aaf80bc4679db90034b2a0b931ae1355".freeze
+    EXPECTED_SCHEMA_SHA256 = "24f43b9a0ac27f015b9a4321b9ff3ac2034cd109f354a30abf50f181a8748935".freeze
 
     class Database
       MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze
@@ -250,7 +250,7 @@ module Hive
       def ensure_installation_identity!
         return unless @connection[:installations].empty?
         identity = @uuid_generator.call
-        @connection[:installations].insert(installation_id: identity, lineage_id: identity,
+        @connection[:installations].insert(installation_id: identity,
                                            activation_epoch: 0,
                                            created_at: Codec.dump_time(@clock.call))
       end

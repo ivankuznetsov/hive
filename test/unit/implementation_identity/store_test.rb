@@ -369,8 +369,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
         first_attempt, reason: "retry_superseded", now: Time.now.utc
       )
       retry_attempt = create_attempt(
-        attempt_store, task, attempt_id: "open-pr-retry", intended_stage: "5-open-pr",
-        predecessor_attempt_id: first_attempt.attempt_id
+        attempt_store, task, attempt_id: "open-pr-retry", intended_stage: "5-open-pr"
       )
       drifted_cfg = execute_config(
         "claude", "claude-fable-5",
@@ -641,7 +640,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       File.write(File.join(folder, "plan.md"), "# plan\n")
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       attempt = attempt_store.create_launching(
-        attempt_id: attempt_id, request_id: "request", predecessor_attempt_id: nil,
+        attempt_id: attempt_id, request_id: "request",
         task_id: "42", project: "demo", task_slug: task.slug, intended_stage: intended_stage,
         task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
         progress_token: "progress", provider: "codex", starting_revision: nil,
@@ -655,7 +654,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
 
   def seed_execute_identity(task, attempt_store, cfg)
     execute_attempt = attempt_store.create_launching(
-      attempt_id: "seed-execute", request_id: "seed", predecessor_attempt_id: nil,
+      attempt_id: "seed-execute", request_id: "seed",
       task_id: "42", project: "demo", task_slug: task.slug, intended_stage: "4-execute",
       task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
       progress_token: "seed-progress", provider: "codex", starting_revision: nil,
@@ -673,11 +672,10 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
-  def create_attempt(attempt_store, task, attempt_id:, intended_stage:, generation: 1,
-                     predecessor_attempt_id: nil)
+  def create_attempt(attempt_store, task, attempt_id:, intended_stage:, generation: 1)
     attempt_store.create_launching(
       attempt_id: attempt_id, request_id: "request-#{attempt_id}",
-      predecessor_attempt_id: predecessor_attempt_id, task_id: task.id.to_s, project: "demo",
+      task_id: task.id.to_s, project: "demo",
       task_slug: task.slug, intended_stage: intended_stage,
       task_generation: "owner-#{generation}", ownership_generation: "owner-#{generation}",
       task_input_epoch: generation, progress_token: "progress-#{attempt_id}",

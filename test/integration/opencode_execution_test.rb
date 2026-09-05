@@ -215,7 +215,6 @@ class OpenCodeExecutionIntegrationTest < Minitest::Test
     attempts.create_launching(
       attempt_id: "opencode-execute-attempt",
       request_id: "opencode-execute-request",
-      predecessor_attempt_id: nil,
       task_id: task.id&.to_s,
       project: File.basename(task.project_root),
       task_slug: task.slug,

@@ -2580,7 +2580,10 @@ class AgentTest < Minitest::Test
           expected_output: output
         ).run!
 
-        assert_equal 0, result[:exit_code]
+        # The reader may terminate the process as soon as Pi reports the
+        # output limit, before the fixture reaches its natural zero exit.
+        assert_includes [ 0, -Signal.list.fetch("TERM") ], result[:exit_code]
+        refute result[:timed_out]
         assert_equal :error, result[:status]
         assert_equal "model_output_limit", result[:error_reason]
         assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)

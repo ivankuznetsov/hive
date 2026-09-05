@@ -194,6 +194,37 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_complete_normalizes_valid_utf8_marker_bytes_before_sql_publication
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader, cache_reader = build(path)
+      message = "Claude stopped · retry the review".b
+      payload = {
+        "schema" => "hive-status", "schema_version" => 8, "ok" => true,
+        "generated_at" => T0.iso8601(6),
+        "projects" => [ { "name" => "demo", "tasks" => [ {
+          "slug" => "ship-it", "attrs" => { "message" => message }
+        } ] } ]
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        rows: [ row(marker_attrs: { "message" => message }) ],
+        controller: {}, queue: {}, recoveries: {}, status_payload: payload,
+        now: T0 + 1
+      )
+
+      snapshot = reader.read(now: T0 + 2)
+      cache = cache_reader.read(snapshot: snapshot, now: T0 + 2)
+      assert_equal Encoding::UTF_8,
+                   snapshot.dig("tasks", 0, "marker_attrs", "message").encoding
+      assert_equal Encoding::UTF_8,
+                   cache.dig("payload", "projects", 0, "tasks", 0, "attrs", "message").encoding
+      assert_equal message.force_encoding(Encoding::UTF_8),
+                   cache.dig("payload", "projects", 0, "tasks", 0, "attrs", "message")
+    end
+  end
+
   def test_failed_later_tick_preserves_the_last_completed_scheduler_snapshot
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
@@ -295,7 +326,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         status_payload: payload, now: T0 + 1
       )
       database_for(path).transaction do |db|
-        dataset = db[:daemon_runtime].where(daemon_kind: "operational")
+        dataset = db[:daemon_runtime]
         document = Hive::RuntimeControlPlane::Codec.load_json(dataset.get(:observation_json))
         document.fetch("status_projection")["tick_sequence"] += 1
         dataset.update(observation_json: Hive::RuntimeControlPlane::Codec.dump_json(document))
@@ -380,9 +411,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       database.transaction do |db|
         installation_id = db[:installations].get(:installation_id)
         db[:daemon_runtime].insert(
-          installation_id: installation_id, daemon_kind: "operational",
-          generation: 1, state: "running", observation_json: "{",
-          observed_at: T0.iso8601(6)
+          installation_id: installation_id, observation_json: "{"
         )
       end
       assert_raises(Hive::RuntimeControlPlane::IntegrityError) { repository.snapshot }

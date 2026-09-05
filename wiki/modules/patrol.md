@@ -108,20 +108,13 @@ first authoritative mutation; read-only queries do not create state.
 ## Scheduling and capacity
 
 Patrol is opt-in and coding-workflow-only. Ordinary and Architecture scheduled
-discovery have separate per-project, per-engine daily launch allowances.
-`UsageDb` is telemetry, not admission authority. Provider resource exhaustion
-parks only the affected lane.
-
-Allowance reservations and provider holds are typed `patrol_allowances` rows
-keyed by stable registered `project_id`, engine/kind, and window. The project id
-is injected by discovery callers or resolved from `projects.observed_path` /
-`state_root_path`; basename is never an identity fallback. An immediate Sequel
-transaction makes reservation-id idempotency, used-count increment, and lane
-limit enforcement atomic across daemon processes. Reservation ids, legacy
-seed counts, and seed arrays are bounded to 10,000 entries. Legacy UsageDb
-seeding happens before the SQL transaction; an unavailable or ambiguous seed
-fails closed without a compatibility file. Telemetry reservation/finalization
-also stays outside SQL transactions.
+discovery have separate per-project, per-engine daily launch allowances. Each
+allowance is derived from unique `patrol_discovery_launch` reservations in
+`token_usage` for the current UTC date. One immediate transaction recognizes an
+existing session reservation before counting and inserting a new zero-token
+row, so retries are idempotent and concurrent daemon processes cannot
+oversubscribe the limit. The next UTC date resets naturally. Provider failures
+do not create lane holds or other durable usability state.
 
 The Patrol arbiter alternates ready ordinary and architecture candidates under
 `daemon.max_concurrent_patrol_scans`. Candidate discovery is read-only;
@@ -275,7 +268,9 @@ authentication, or PR creation has occurred at this point. Status exposes the
 operator-only, receipt-bound `patrol_fix.rework_publication` action, including
 on daemon-enrolled projects. The action advances a new generation to Inbox,
 Fix, or Review according to the earliest authority that can change the blocked
-bytes. The Fix-stage authorization consumes the same current receipt rows as
+bytes. Its controller lock and task lease are identity-backed runtime-control-plane
+leases, so the executor re-reads and releases the exact moved task identity rather
+than relying on a task-folder lock file. The Fix-stage authorization consumes the same current receipt rows as
 ordinary execution and returns the structured rework context expected by the
 stage runner. Generic `workflow.retry` cannot release this park.
 

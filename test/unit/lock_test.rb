@@ -470,11 +470,8 @@ class LockTest < Minitest::Test
     @database.transaction do |db|
       db[:task_leases].insert(
         task_id: identity.fetch(:task_id), lease_version: 1,
-        holder_kind: nil, holder_id: nil, holder_pid: nil,
-        holder_process_identity: nil, payload_json: "{}",
-        generation: identity.fetch(:generation),
-        source_fingerprint: identity.fetch(:source_fingerprint),
-        acquired_at: nil, expires_at: nil, released_at: timestamp
+        holder_id: nil, holder_pid: nil,
+        holder_process_identity: nil, payload_json: "{}"
       )
     end
     data = {

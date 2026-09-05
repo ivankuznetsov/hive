@@ -13,8 +13,7 @@ documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
-agent-first `hive status --operational --json`, explicit `hive circuits`
-inspection/administration, bounded `hive watch`, closed `hive act`, native
+agent-first `hive status --operational --json`, bounded `hive watch`, closed `hive act`, native
 semantic `hive task` detail, the
 `hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
@@ -37,7 +36,6 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
-- `lib/hive/commands/circuits.rb`
 - `lib/hive/operational_status.rb`
 - `lib/hive/operational_action.rb`
 - `skills/hive/`
@@ -75,7 +73,6 @@ its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
 authorized actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
-[[commands/circuits]] as the generation-fenced provider-health surface,
 [[commands/task]] as the bounded read-only semantic result/usage/diagnostic
 surface for one exact task,
 `--json` envelopes where the command page says they exist.

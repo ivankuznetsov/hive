@@ -255,9 +255,14 @@ Honeycomb projections.
   through the existing task controllers. The application shell and primary
   navigation use the full viewport width with fluid edge gutters; the project
   rail grows to a bounded desktop width while the status content receives all
-  remaining space. Kanban tracks grow beyond their comfortable minimum when a
-  large screen has room, and each band scrolls horizontally inside the page
-  when it does not. `Grid` retains the compact per-project task rows and gains
+  remaining space. Open Kanban columns keep a fixed 270px desktop width; unused space
+  stays empty instead of stretching cards when neighboring columns fold.
+  Mobile columns use `min(78vw, 290px)`, and each band scrolls horizontally
+  inside the page when it does not fit. Each column heading is a keyboard-accessible fold toggle.
+  Empty columns and the workflow's final Done column start folded, with the
+  count and vertical stage label still visible. Explicit choices persist in
+  browser local storage per project/workflow/stage across reloads and live
+  morphs. An untouched empty column opens when a task arrives. `Grid` retains the compact per-project task rows and gains
   the same fluid content area. Both ordinary views consume status's
   workflow-aware archive projection:
   expired archived rows are absent, and a positive project count renders

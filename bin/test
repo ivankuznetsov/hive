@@ -2,10 +2,26 @@
 # Focused test runner for agent sandboxes and developer shells alike.
 #
 #   bin/test test/unit/foo_test.rb [more files...] [-- seed options]
+#   bin/test --changed [--base REF] [--list] [-- minitest options]
+#   bin/test --all                 # bounded local parallel suite
 #
 # Prefers the project bundle; falls back to plain ruby when bundler is
 # absent or the bundle is not installed (common in minimal agent sandboxes).
 set -euo pipefail
+
+if [[ "${1:-}" == "--all" ]]; then
+  shift
+  if [[ $# -gt 0 ]]; then
+    echo "bin/test --all: use HIVE_TEST_WORKERS and TESTOPTS for suite options" >&2
+    exit 1
+  fi
+  exec bundle exec rake test:parallel
+fi
+
+if [[ "${1:-}" == "--changed" ]]; then
+  shift
+  exec bundle exec ruby script/test_changed.rb "$@"
+fi
 
 # Ruby executes only the first file argument; the rest become ARGV and are not
 # loaded. Use one tiny loader so every leading test file is required while the

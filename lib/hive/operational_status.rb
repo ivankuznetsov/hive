@@ -587,7 +587,7 @@ module Hive
     end
 
     def material_scheduler_disposition?(disposition)
-      !%w[not_evaluated skip project_disabled].include?(disposition["decision"])
+      !%w[not_evaluated skip project_disabled attempt_terminal_replay].include?(disposition["decision"])
     end
 
     def classify_scheduler_disposition(disposition)
@@ -602,8 +602,6 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
-      when "attempt_terminal_replay"
-        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "semantic_terminal_error"
@@ -678,8 +676,8 @@ module Hive
       return malformed_routing_payload(row, project_name) unless routing_value_safe?(raw)
 
       keys = %w[
-        candidates circuit_generations decided_at decision_id exclusions next_action_owner
-        policy policy_digest probe_requirements reason selected_route status task_generation
+        candidates decided_at decision_id exclusions next_action_owner policy policy_digest
+        reason selected_route status task_generation
       ]
       return malformed_routing_payload(row, project_name) unless raw.keys.sort == keys.sort
       core = %w[
@@ -700,9 +698,7 @@ module Hive
         "policy" => raw["policy"],
         "selected_route" => raw["selected_route"],
         "candidates" => Array(raw["candidates"]),
-        "exclusions" => Array(raw["exclusions"]),
-        "circuit_generations" => Array(raw["circuit_generations"]),
-        "probe_requirements" => Array(raw["probe_requirements"])
+        "exclusions" => Array(raw["exclusions"])
       }
     rescue KeyError
       malformed_routing_payload(row, project_name)

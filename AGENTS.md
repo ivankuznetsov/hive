@@ -33,10 +33,16 @@ Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and
 
 ## Local Test Feedback Loop
 
-- During implementation, run the smallest focused test files that cover the
-  changed behavior. Do not run the full suite or coverage after every commit.
-- Use `bundle exec rake test` as the broad local checkpoint when the change
-  warrants it, normally once before handoff rather than once per commit.
+- During implementation, inspect `bin/test --changed --list`, then use
+  `bin/test --changed` or the smallest explicit files via `bin/test`. Selection
+  falls back visibly for shared/unmapped changes; inspect that before running.
+  Do not run the full suite or coverage after every commit.
+- Use `bin/test --all` (`bundle exec rake test:parallel`) as the broad local
+  checkpoint when warranted, normally once before handoff. It uses two isolated
+  workers and coordinates simultaneous agent runs. `HIVE_TEST_WORKERS=4` opts
+  into four; `bundle exec rake test` remains the serial debugging fallback.
+- Use `bundle exec rake coverage:changed` only for focused changed-lib coverage;
+  test-only, component, and Rails changes use the general changed-test selector.
 - `bundle exec rake coverage` is the exhaustive CI coverage gate. Agents should
   run it locally only when changing coverage machinery or when explicitly
   requested.

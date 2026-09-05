@@ -825,7 +825,7 @@ class OperationalStatusTest < Minitest::Test
   end
 
   def test_scheduler_match_accepts_unicode_marker_attrs_from_binary_task_scan
-    message = "Claude stopped — retry the review"
+    message = "Claude stopped — retry cafe\u0301"
     source_task = task(
       action: "error",
       slug: "unicode-marker",
@@ -838,7 +838,7 @@ class OperationalStatusTest < Minitest::Test
       reason: "global dispatch capacity is exhausted"
     )
     snapshot.dig("tasks", 0)["marker_attrs"] = {
-      "message" => message,
+      "message" => message.unicode_normalize(:nfc),
       "marker_id" => "marker-unicode-marker"
     }
 
@@ -989,6 +989,30 @@ class OperationalStatusTest < Minitest::Test
       assert_equal phase, projected.dig("recovery", "phase"), status
       assert_equal "degraded", projected.dig("recovery", "escalation_tier"), status
       assert_equal 2, projected.dig("recovery", "identical_failure_count"), status
+    end
+  end
+
+  def test_terminal_recovery_history_preserves_current_workflow_state_and_reason
+    rows = [ "Escalated (parked)", "Rejected (parked)" ].map.with_index do |label, index|
+      task(action: "needs_input", slug: "writero-parked-#{index}", stage: "4-review", marker: "none").merge(
+        "workflow" => "patrol-fix", "action_label" => label, "suggested_command" => nil
+      )
+    end
+    rows << task(action: "needs_input", slug: "question", stage: "2-brainstorm",
+                 marker: "waiting", unanswered_questions: 2)
+    rows.each do |row|
+      expected = project(status_payload(row)).fetch("tasks").first
+      snapshot = scheduler_snapshot_for(row, decision: "attempt_terminal_replay", reason: "terminal")
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => "terminal", "phase" => "terminal", "request_id" => "old-request",
+        "attempt_id" => "old-attempt", "terminal_outcome" => "succeeded"
+      }
+      actual = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } },
+                       scheduler_snapshot: snapshot).fetch("tasks").first
+      %w[state blocker_owner reason].each { |key| assert_equal expected[key], actual[key], "#{row['slug']}: #{key}" }
+      assert_equal expected.fetch("reasons").first.fetch("code"), actual.fetch("reasons").first.fetch("code")
+      assert_equal "terminal", actual.dig("recovery", "status")
+      assert_equal "succeeded", actual.dig("recovery", "terminal_outcome")
     end
   end
 
@@ -1600,11 +1624,9 @@ class OperationalStatusTest < Minitest::Test
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "model" => "model-a", "effort" => "high",
         "eligible" => true, "exclusions" => [],
-        "capacity" => { "observed" => 1, "max" => 2 }, "circuits" => []
+        "capacity" => { "observed" => 1, "max" => 2 }
       } ],
-      "exclusions" => [],
-      "circuit_generations" => [],
-      "probe_requirements" => []
+      "exclusions" => []
     }
   end
 

@@ -433,17 +433,18 @@ module Hive
 
     def patrol_fix_action
       return ACTIONS.fetch(:error) if patrol_fix["state"] == "invalid"
-      return ACTIONS.fetch(:done) if patrol_fix["archived"] == true
-
-      case patrol_fix.dig("outcome", "kind")
-      when "rejected" then ACTIONS.fetch(:patrol_fix_rejected)
-      when "blocked" then ACTIONS.fetch(:patrol_fix_blocked)
-      when "escalated" then ACTIONS.fetch(:patrol_fix_escalated)
-      when "publication_blocked" then ACTIONS.fetch(:patrol_fix_publication_blocked)
-      else
-        return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
-        ACTIONS.fetch(:generic_ready_to_run)
+      outcome = patrol_fix.dig("outcome", "kind")
+      if patrol_fix["archived"] == true
+        return ACTIONS.fetch(:done).merge(label: outcome.capitalize) if
+          Hive::PatrolFix::Projection::TERMINAL_OUTCOMES.include?(outcome)
+        return ACTIONS.fetch(:done)
       end
+      return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
+
+      return ACTIONS.fetch(:patrol_fix_publication_blocked) if outcome == "publication_blocked"
+      return ACTIONS.fetch(:patrol_fix_blocked) if outcome == "blocked"
+
+      ACTIONS.fetch(:generic_ready_to_run)
     end
 
     def universal_action

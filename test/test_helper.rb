@@ -114,7 +114,11 @@ end
 
 if ENV["HIVE_COVERAGE"]
   HiveTestCoverage.install_reporter!
-  HiveTestCoverage.load_all_sources! unless ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+  if ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+    HiveTestCoverage.reload_preloaded_entrypoint!
+  else
+    HiveTestCoverage.load_all_sources!
+  end
 end
 
 module HiveTestStdinIsolation
@@ -302,7 +306,7 @@ module HiveTestHelper
     FileUtils.mkdir_p(root)
     document = Hive::RuntimeControlPlane::CutoverManifest.build(
       phase: "active", installation_id: identity.fetch(:installation_id),
-      lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
+      source_release: "0.7.1",
       target_release: Hive::VERSION, exclusions: [], task_authority: [],
       evidence: { "activation_epoch" => epoch }
     )

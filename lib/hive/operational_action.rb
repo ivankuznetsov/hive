@@ -360,7 +360,7 @@ module Hive
         )
         Hive::PatrolFix::StageTransition.with_lock(task) do
           Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
-            lock = Hive::Lock.read_task_lock(File.join(task.folder, ".lock"))
+            lock = Hive::Lock.read_task_lock(task.folder)
             unless lock && lock["lock_id"]
               raise Hive::PatrolFix::Transition::InvalidTransition,
                     "publication rework task lock ownership could not be verified"

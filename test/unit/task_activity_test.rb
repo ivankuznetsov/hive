@@ -400,7 +400,7 @@ class TaskActivityTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
       launching = store.create_launching(
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "durable-task",
         intended_stage: "4-execute", task_generation: "ownership-1",
         ownership_generation: "ownership-1", task_input_epoch: 3,
@@ -445,7 +445,7 @@ class TaskActivityTest < Minitest::Test
   def create_retry_attempt(writer)
     writer.attempt_store.create_launching(
       attempt_id: "attempt-2", request_id: "request-2",
-      predecessor_attempt_id: "attempt-1", task_id: "42", project: "demo",
+      task_id: "42", project: "demo",
       task_slug: "durable-task", intended_stage: "4-execute",
       task_generation: "ownership-2", ownership_generation: "ownership-2",
       task_input_epoch: 3, progress_token: "progress-2", provider: "codex",

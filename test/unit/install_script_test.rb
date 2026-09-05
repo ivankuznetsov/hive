@@ -3,6 +3,7 @@ require "base64"
 require "digest"
 require "json"
 require "open3"
+require "shellwords"
 
 class InstallScriptTest < Minitest::Test
   INSTALL_SCRIPT = File.expand_path("../../install.sh", __dir__)
@@ -724,10 +725,12 @@ class InstallScriptTest < Minitest::Test
       fi
       exit 0
     SH
-    write_executable(File.join(fake_bin, "ruby"), <<~RUBY)
-      #!#{RbConfig.ruby}
-      exec(#{RbConfig.ruby.dump}, *ARGV)
-    RUBY
+    # Dispatch directly to the test interpreter without booting a second Ruby
+    # just to exec it. The installer still executes every real Ruby probe.
+    write_executable(File.join(fake_bin, "ruby"), <<~SH)
+      #!/bin/sh
+      exec #{Shellwords.escape(RbConfig.ruby)} "$@"
+    SH
     write_executable(File.join(fake_bin, "gem"), <<~'SH')
       #!/bin/bash
       [[ "$HIVE_INSTALL_TEST_FAILURE" == "gem_failure" ]] && exit 42

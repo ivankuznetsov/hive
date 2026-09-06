@@ -14,10 +14,68 @@ const drafts = new Map()
 const suggestionStates = new Map()
 const suggestionDrafts = new Map()
 let pendingFocus = null
-const MAX_SAVED_STATES = 100
+let sessionHydrated = false
+const MAX_SAVED_STATES = 24
+const MAX_KEY_CHARACTERS = 4096
+const MAX_DRAFT_CHARACTERS = 65_536
+const SESSION_STORAGE_KEY = "hive:brainstorm-answer-presentation:v1"
+
+function boundedEntries(entries, valueIsValid) {
+  if (!Array.isArray(entries)) return []
+
+  return entries.slice(-MAX_SAVED_STATES).filter((entry) => {
+    return Array.isArray(entry) && entry.length === 2 &&
+      typeof entry[0] === "string" && entry[0].length <= MAX_KEY_CHARACTERS &&
+      valueIsValid(entry[1])
+  })
+}
+
+function hydrateSession() {
+  if (sessionHydrated) return
+  sessionHydrated = true
+
+  try {
+    const stored = JSON.parse(window.sessionStorage.getItem(SESSION_STORAGE_KEY) || "null")
+    if (!stored || stored.version !== 1) return
+
+    boundedEntries(stored.drafts, (value) => {
+      return typeof value === "string" && value.length <= MAX_DRAFT_CHARACTERS
+    }).forEach(([key, value]) => drafts.set(key, value))
+    boundedEntries(stored.suggestionDrafts, (value) => {
+      return typeof value === "string" && value.length <= MAX_DRAFT_CHARACTERS
+    }).forEach(([key, value]) => suggestionDrafts.set(key, value))
+    boundedEntries(stored.suggestionStates, (value) => {
+      return value && typeof value === "object" &&
+        typeof value.approved === "boolean" && typeof value.declined === "boolean"
+    }).forEach(([key, value]) => {
+      suggestionStates.set(key, { approved: value.approved, declined: value.declined })
+    })
+  } catch (_error) {
+    try {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY)
+    } catch (_removeError) {
+      // Storage can be wholly unavailable in privacy modes.
+    }
+  }
+}
+
+function persistSession() {
+  try {
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      drafts: Array.from(drafts).slice(-MAX_SAVED_STATES),
+      suggestionStates: Array.from(suggestionStates).slice(-MAX_SAVED_STATES),
+      suggestionDrafts: Array.from(suggestionDrafts).slice(-MAX_SAVED_STATES)
+    }))
+  } catch (_error) {
+    // Presentation persistence is advisory. Quota/privacy-mode failures must
+    // never block manual answering or turn a browser action into authority.
+  }
+}
 
 export default class extends Controller {
   connect() {
+    hydrateSession()
     this.snapshot = this.snapshot.bind(this)
     this.restore = this.restore.bind(this)
     this.trackFocus = this.trackFocus.bind(this)
@@ -147,15 +205,23 @@ export default class extends Controller {
 
   remember(field) {
     const key = this.fieldKey(field)
-    if (!key) return
+    if (!key || key.length > MAX_KEY_CHARACTERS) return
     if (!field.value) {
       drafts.delete(key)
+      persistSession()
+      return
+    }
+
+    if (field.value.length > MAX_DRAFT_CHARACTERS) {
+      drafts.delete(key)
+      persistSession()
       return
     }
 
     drafts.delete(key)
     drafts.set(key, field.value)
-    if (drafts.size > 100) drafts.delete(drafts.keys().next().value)
+    if (drafts.size > MAX_SAVED_STATES) drafts.delete(drafts.keys().next().value)
+    persistSession()
   }
 
   fieldKey(field) {
@@ -183,13 +249,14 @@ export default class extends Controller {
 
   rememberSuggestion(card, state) {
     const key = card.dataset.suggestionKey
-    if (!key) return
+    if (!key || key.length > MAX_KEY_CHARACTERS) return
 
     suggestionStates.delete(key)
     suggestionStates.set(key, state)
     if (suggestionStates.size > MAX_SAVED_STATES) {
       suggestionStates.delete(suggestionStates.keys().next().value)
     }
+    persistSession()
   }
 
   suggestionDraftKey(card, field) {
@@ -197,11 +264,14 @@ export default class extends Controller {
   }
 
   rememberSuggestionDraft(key, value) {
+    if (!key || key.length > MAX_KEY_CHARACTERS || value.length > MAX_DRAFT_CHARACTERS) return
+
     suggestionDrafts.delete(key)
     suggestionDrafts.set(key, value)
     if (suggestionDrafts.size > MAX_SAVED_STATES) {
       suggestionDrafts.delete(suggestionDrafts.keys().next().value)
     }
+    persistSession()
   }
 
   renderSuggestion(card, state) {

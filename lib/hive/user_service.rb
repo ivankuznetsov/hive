@@ -105,7 +105,15 @@ module Hive
 
       @transaction.with_lock do |transaction|
         if (recovery = reconcile_pending(transaction))
-          return recovery
+          return recovery unless recovery.success?
+          return recovery if recovery.operation == :apply &&
+                             recovered_apply_satisfies?(transaction, plan)
+
+          plan = self.plan(
+            autostart: plan.autostart,
+            force: plan.force,
+            restart_if_running: plan.restart_if_running
+          )
         end
         current = inspect_status(manager: plan.manager_observed)
         return stale_result(:apply, current) unless current.observation_key == plan.expected_observation
@@ -383,6 +391,7 @@ module Hive
       return stale_result(:apply, inspect_status(manager: plan.manager_observed)) if current.content_state != :absent && !prior_content
 
       legacy_match = plan.action == :noop && receipt.nil?
+      filesystem_only_receipt = receipt && receipt.fetch("mode") != "managed"
       takeover_pending = @legacy_takeover&.pending?
       manager_intent = if plan.autostart && current.manager_available?
         if takeover_pending && !current.running?
@@ -390,7 +399,8 @@ module Hive
         else
           restart_required = plan.action == :replace || legacy_match ||
             (current.running? &&
-             (plan.restart_if_running || !manager_definition_current?(current)))
+             (plan.restart_if_running || !manager_definition_current?(current) ||
+              filesystem_only_receipt))
           restart_required ? :restart : :enable
         end
       end
@@ -815,6 +825,23 @@ module Hive
             diagnostics: diagnostics + status.diagnostics
           )
         end
+        if inspect_manager && @definition.platform == :linux &&
+           document.fetch("prior_running") && document["restore_from_main_pid"].nil?
+          current_identity = status.process_identity
+          if status.running? && !current_identity
+            return pending_result(
+              operation: :apply,
+              document: document,
+              status: status,
+              diagnostics: diagnostics + [ :rollback_manager_unverified ]
+            )
+          end
+          document = transaction.journal.record_restore_process(
+            document,
+            main_pid: current_identity&.fetch(:main_pid) || 0,
+            process_start: current_identity&.fetch(:process_start)
+          )
+        end
         manager = @manager.restore(
           prior_enabled: document.fetch("prior_enabled"),
           prior_running: document.fetch("prior_running")
@@ -1055,6 +1082,17 @@ module Hive
       end
     end
 
+    def recovered_apply_satisfies?(transaction, plan)
+      status = inspect_status(manager: plan.manager_observed)
+      receipt = transaction.receipt.read
+      receipt_satisfies?(
+        receipt,
+        desired_digest: Digest::SHA256.hexdigest(@definition.content),
+        plan: plan,
+        status: status
+      ) && !(plan.restart_if_running && status.running?)
+    end
+
     def desired_endpoint?(status)
       return false unless status.content_state == :matching &&
                           status.manager_available? &&
@@ -1114,6 +1152,17 @@ module Hive
       { main_pid: pid.to_i, process_start: started }
     end
 
+    def restoring_process_verified?(current, document)
+      pid = document["restore_from_main_pid"]
+      return false if pid.nil?
+      return true if pid.zero?
+
+      current != {
+        main_pid: pid,
+        process_start: document.fetch("restore_from_process_start")
+      }
+    end
+
     def activation_effect(status, document, trusted_action: false)
       return :incomplete unless desired_endpoint?(status)
       return :complete if document.fetch("manager_intent") == "enable"
@@ -1151,8 +1200,14 @@ module Hive
                           status.running? == document.fetch("prior_running")
 
       if document.fetch("prior_digest")
-        manager_definition_current?(status) &&
-          (!status.running? || @definition.platform != :linux || !status.process_identity.nil?)
+        return false unless manager_definition_current?(status)
+        return true unless status.running? && @definition.platform == :linux
+
+        current = status.process_identity
+        return false unless current
+        return true if current == recorded_process_identity(document)
+
+        restoring_process_verified?(current, document)
       else
         manager_removed?(status)
       end
@@ -1167,18 +1222,21 @@ module Hive
     end
 
     def lifecycle_effect(status, document, trusted_action: false)
+      return :incomplete unless status.manager_available?
+
       operation = document.fetch("manager_intent")
       case operation
-      when "start"
-        status.running? ? :complete : :incomplete
-      when "stop"
-        status.running? ? :incomplete : :complete
+      when "start", "stop"
+        lifecycle_endpoint?(status, document) ? :complete : :incomplete
       when "restart", "takeover"
         return :incomplete unless status.running?
+        return :complete if !document.fetch("prior_running") && @definition.platform != :linux
         return trusted_action ? :complete : :incomplete unless @definition.platform == :linux
 
         prior = recorded_process_identity(document)
         current = status.process_identity
+        return :incomplete unless current
+        return :complete unless document.fetch("prior_running")
         return :complete if prior && current && current != prior
         return :complete if trusted_action && current && current.fetch(:process_start) == "injected"
         return :incomplete if prior && current == prior
@@ -1190,9 +1248,12 @@ module Hive
     end
 
     def lifecycle_endpoint?(status, document)
+      return false unless status.manager_available?
+
       operation = document.fetch("manager_intent")
       return !status.running? if operation == "stop"
       return false unless status.running?
+      return false if @definition.platform == :linux && status.process_identity.nil?
 
       %w[start restart takeover].include?(operation)
     end

@@ -105,7 +105,10 @@ complete endpoint is freshly observed:
 4. Record and verify the manager reload separately, then resume the recorded
    enable, restart, or takeover intent. A command's exit status is evidence,
    not truth: fresh load state, fragment path, reload need, enablement, active
-   state, main PID, and process-start observations decide the result.
+   state, main PID, and process-start observations decide the result. Rollback
+   records the process observed before restoring a running prior service;
+   replay accepts only the original process or a fresh identity produced after
+   that observation, never an arbitrary still-running desired process.
 5. Persist verification and commit, write one compact applied receipt, then
    remove the pending journal.
 
@@ -131,6 +134,9 @@ Explicit `start`, `stop`, `restart`, and `takeover` calls use their own durable
 phases under the same target lock. Replay first observes whether the recorded
 effect already completed; in particular, restart/takeover compares the prior
 and current process identities before deciding whether another action is safe.
+A stopped-to-running restart completes from a fresh Linux process identity.
+Every lifecycle verification boundary requires an available manager, so a
+failed stop followed by an indeterminate observation retains its journal.
 
 ## Verified endpoint modes
 
@@ -144,7 +150,10 @@ and current process identities before deciding whether another action is safe.
 
 `remove` and `purge` acquire the same lock and finish pending install recovery
 first. Verified stop/disable, unlink, and reload remove the journal and receipt.
-Ambiguous removal retains both. A repeated verified removal remains idempotent.
+Ambiguous removal retains both. `hive uninstall`, including
+`--force-purge-state`, stops before later destructive cleanup when removal is
+busy or retains unverified recovery evidence. A repeated verified removal
+remains idempotent.
 
 ## Manager availability
 

@@ -56,6 +56,9 @@ snapshot comparison through fencing, installs the fully validated candidate
 database idempotently, publishes `active`, and then replays only services that
 were running at cutover start. Once fencing begins, evidence and tombstones
 remain in place so another process cannot silently revive a legacy writer.
+Service stop/start effects run through each daemon, bot, or web installer's
+`UserService` lifecycle owner, so cutover contends on the same canonical-target
+lock and fails closed instead of racing install, removal, or recovery.
 
 The live database directory is private (`0700`), and the main database, WAL,
 and SHM files must be owned single-link regular files with no group/world mode
@@ -80,7 +83,8 @@ and genuinely fresh setup. It never creates or migrates the database.
   import, disposable runtime reset, custom state roots, and crash-forward
   convergence across fencing, database, intent, and service boundaries.
 - `test/unit/runtime_control_plane/maintenance_test.rb` covers idempotent
-  service quiescence and restart intent without launcher mutation.
+  service quiescence, restart intent, and target-lock contention through the
+  shared UserService owner without launcher mutation.
 
 ## Backlinks
 

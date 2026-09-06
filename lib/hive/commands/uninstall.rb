@@ -8,6 +8,11 @@ require "hive/paths"
 module Hive
   module Commands
     class Uninstall
+      FAIL_CLOSED_SERVICE_DIAGNOSTICS = %i[
+        operation_busy recovery_pending invalid_recovery_state
+        manager_probe_indeterminate
+      ].freeze
+
       def initialize(purge: false, force_purge_state: false, input: $stdin, output: $stdout, runner: nil,
                      host_os: RbConfig::CONFIG["host_os"])
         @purge = purge
@@ -92,6 +97,14 @@ module Hive
         return unless path
 
         result = installer.remove!(inspect_absent_manager: false)
+        retained = result.diagnostics & FAIL_CLOSED_SERVICE_DIAGNOSTICS
+        unless retained.empty?
+          @output.puts "hive: could not safely remove #{path}; preserving UserService " \
+                       "coordination evidence and stopping uninstall (#{retained.join(', ')})"
+          raise Hive::Error,
+                "hive uninstall: service removal is busy or unverified; repair the service " \
+                "manager and retry without deleting UserService recovery evidence"
+        end
         if result.diagnostics.include?(:unsafe_unit_path)
           @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
         elsif result.diagnostics.include?(:manager_disable_failed)

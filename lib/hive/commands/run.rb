@@ -19,6 +19,7 @@ require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
 require "hive/terminal_outcome"
+require "hive/brainstorm_suggestions/transition_cleanup"
 
 module Hive
   module Commands
@@ -130,6 +131,7 @@ module Hive
 
       def run_task(task)
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
+          cleanup_departed_brainstorm_advisory!(task)
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)
           @observation_guard&.call(task)
@@ -178,6 +180,14 @@ module Hive
           terminal_snapshot&.close
         end
       end
+
+      def cleanup_departed_brainstorm_advisory!(task)
+        return if task.stage_name.to_s == "brainstorm"
+        return unless File.directory?(task.folder)
+
+        Hive::BrainstormSuggestions::TransitionCleanup.call_under_lock(task.folder)
+      end
+      private :cleanup_departed_brainstorm_advisory!
 
       def task_after_patrol_fix_move(task, result)
         return task unless task.workflow.controller?

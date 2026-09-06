@@ -85,4 +85,25 @@ class TaskWorkspaceArtifactsTest < Minitest::Test
       assert_equal "source_changed", panel.dig("diagnostics", 0, "reason")
     end
   end
+
+  def test_brainstorm_supporting_artifact_never_exposes_advisory_envelopes
+    with_tmp_dir do |root|
+      envelope = Hive::BrainstormSuggestions::Envelope.render(
+        binding: "a" * 64, text: "Private repository-aware candidate"
+      )
+      File.write(
+        File.join(root, "brainstorm.md"),
+        "### Q1. Which path?\n### A1.\n#{envelope}\n<!-- WAITING -->\n"
+      )
+
+      record = Hive::TaskWorkspace::Artifacts.new(
+        task_root: root, references: [ "brainstorm.md" ]
+      ).call.fetch("records").first
+
+      assert_equal "brainstorm.md", record.fetch("name")
+      refute_includes record.fetch("content"), "hive-suggestion:v1"
+      refute_includes record.fetch("content"), "Private repository-aware candidate"
+      assert_nil Hive::BrainstormParser.parse_text(record.fetch("content")).first.answer
+    end
+  end
 end

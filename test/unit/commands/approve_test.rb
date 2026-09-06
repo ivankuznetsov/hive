@@ -894,6 +894,9 @@ class HiveCommandsApproveTest < Minitest::Test
     calls = []
     fake_ops = Object.new
     fake_ops.define_singleton_method(:run_git!) { |*args| calls << args }
+    fake_ops.define_singleton_method(:stage_advisory_free_task!) do |task_path|
+      calls << [ :stage_advisory_free_task, task_path ]
+    end
     original_git_ops = Hive::GitOps.singleton_class.instance_method(:new)
     original_capture3 = Open3.singleton_class.instance_method(:capture3)
     ok = successful_status
@@ -904,8 +907,9 @@ class HiveCommandsApproveTest < Minitest::Test
 
     cmd.send(:record_hive_commit, approve_task, "3-plan", "approve 2-brainstorm -> 3-plan")
 
-    assert_equal 1, calls.size
+    assert_equal 2, calls.size
     assert_equal [ "-C", "/tmp/state", "add", "-A", "stages/3-plan/slug-260522-abcd" ], calls.first
+    assert_equal [ :stage_advisory_free_task, "stages/3-plan/slug-260522-abcd" ], calls.last
   ensure
     Hive::GitOps.singleton_class.define_method(:new, original_git_ops) if original_git_ops
     Open3.singleton_class.define_method(:capture3, original_capture3) if original_capture3

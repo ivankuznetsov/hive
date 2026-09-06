@@ -3,6 +3,7 @@ require "fileutils"
 require "hive/stages"
 require "hive/git_ref"
 require "hive/lock"
+require "hive/brainstorm_suggestions/envelope"
 
 module Hive
   class GitOps
@@ -171,6 +172,9 @@ module Hive
 
       # Per-project commit lock (Hive::Lock.with_commit_lock).
       .commit-lock
+
+      # Owner-private advisory runtime state is never history.
+      stages/*/*/brainstorm-suggestions.json
     GITIGNORE
 
     def ensure_hive_state_worktree_attached
@@ -267,6 +271,7 @@ module Hive
           run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
         end
         after_stage&.call
+        stage_advisory_free_task!(task_path)
         _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
         if status.success? && !allow_empty
           :nothing_to_commit
@@ -278,6 +283,54 @@ module Hive
           :committed
         end
       end
+    end
+
+    # Keep task-local advisory runtime out of hive/state without changing the
+    # live editor buffer. The index receives an envelope-free brainstorm blob;
+    # the worktree retains the current projection until its normal lifecycle
+    # cleanup or editor reconciliation.
+    def stage_advisory_free_task!(task_path)
+      relative = task_path.to_s
+      sidecar = File.join(relative, Hive::BrainstormSuggestions::STORE_FILENAME)
+      run_git!(
+        "-C", hive_state_path, "rm", "--cached", "-f", "--ignore-unmatch", "--", sidecar
+      )
+
+      brainstorm_relative = File.join(relative, "brainstorm.md")
+      brainstorm_path = File.join(hive_state_path, brainstorm_relative)
+      return true unless File.exist?(brainstorm_path) || File.symlink?(brainstorm_path)
+
+      status = File.lstat(brainstorm_path)
+      unless status.file? && !status.symlink? &&
+             status.size <= Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES
+        raise Hive::GitError, "brainstorm advisory commit source is unsafe"
+      end
+      bytes = File.binread(
+        brainstorm_path, Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES + 1
+      )
+      stripped = Hive::BrainstormSuggestions::Envelope.strip(bytes).text
+      return true if stripped == bytes
+
+      oid = write_hive_blob(stripped)
+      mode = (status.mode & 0o111).zero? ? "100644" : "100755"
+      run_git!(
+        "-C", hive_state_path, "update-index", "--add", "--cacheinfo",
+        mode, oid, brainstorm_relative
+      )
+      true
+    end
+
+    def write_hive_blob(bytes)
+      out, err, status = Open3.capture3(
+        "git", "-C", hive_state_path, "hash-object", "-w", "--stdin", stdin_data: bytes
+      )
+      oid = out.strip
+      unless status.success? && oid.match?(/\A[0-9a-f]{40,64}\z/i)
+        detail = err.strip.empty? ? out : err
+        raise Hive::GitError, "git hash-object failed in #{hive_state_path}: #{detail}"
+      end
+
+      oid
     end
 
     def delete_branch!(name)

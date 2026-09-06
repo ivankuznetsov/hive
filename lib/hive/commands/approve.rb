@@ -626,6 +626,7 @@ module Hive
         if source_has_tracked_files?(task.hive_state_path, source_slug_rel)
           ops.run_git!("-C", task.hive_state_path, "add", "-A", source_slug_rel)
         end
+        ops.stage_advisory_free_task!(dest_slug_rel)
 
         _, _, status = Open3.capture3("git", "-C", task.hive_state_path, "diff", "--cached", "--quiet")
         ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?

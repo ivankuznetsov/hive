@@ -1,4 +1,5 @@
 require "hive/task_workspace"
+require "hive/brainstorm_suggestions/envelope"
 
 module Hive
   module TaskWorkspace
@@ -118,10 +119,14 @@ module Hive
             "details" => { "observed_bytes" => result.bytes }
           }
         end
+        content = result.binary ? nil : result.content
+        if content && File.basename(reference) == "brainstorm.md"
+          content = Hive::BrainstormSuggestions::Envelope.strip(content).text
+        end
         {
           "name" => result.evidence_ref,
           "reference" => result.evidence_ref,
-          "content" => result.binary ? nil : result.content,
+          "content" => content,
           "bytes" => result.bytes,
           "truncated" => result.truncated,
           "invalid_encoding" => result.invalid_encoding,

@@ -49,6 +49,53 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_later_stage_run_removes_advisory_state_before_admission
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "3-plan", "some-slug")
+      FileUtils.mkdir_p(folder)
+      brainstorm = File.join(folder, "brainstorm.md")
+      envelope = Hive::BrainstormSuggestions::Envelope.render(
+        binding: "b" * 64, text: "Advisory candidate"
+      )
+      File.write(
+        brainstorm,
+        "## Round 1\n### Q1. Choose?\n### A1.\n#{envelope}<!-- WAITING -->\n"
+      )
+      File.write(
+        File.join(folder, Hive::BrainstormSuggestions::STORE_FILENAME),
+        "{\"candidate\":\"Advisory candidate\"}\n"
+      )
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      prepare_test_task_lease_repository(folder)
+      current = task(
+        folder: folder, state_file: File.join(folder, "plan.md"),
+        hive_state_path: File.join(dir, ".hive-state"), stage_name: "plan", stage_index: 3
+      )
+      run = command(quiet: true)
+      run.define_singleton_method(:resolve_task) { current }
+      observed = {}
+      admission = lambda do |_task|
+        body = File.read(brainstorm)
+        observed[:sidecar_removed] = !File.exist?(
+          File.join(folder, Hive::BrainstormSuggestions::STORE_FILENAME)
+        )
+        observed[:envelope_removed] = !body.include?("hive-suggestion:v1")
+        observed[:candidate_removed] = !body.include?("Advisory candidate")
+        raise Hive::Error, "stop after admission proof"
+      end
+
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, admission) do
+        error = assert_raises(Hive::Error) { run.call }
+        assert_equal "stop after admission proof", error.message
+      end
+
+      assert_equal({
+        sidecar_removed: true, envelope_removed: true, candidate_removed: true
+      }, observed)
+      assert_nil Hive::BrainstormParser.parse(brainstorm).first.answer
+    end
+  end
+
   def task(folder: "/tmp/hive-task", stage_name: "brainstorm", stage_index: 2,
            state_file: nil, hive_state_path: nil, workflow: Hive::Workflows::Registry.default)
     TaskDouble.new(

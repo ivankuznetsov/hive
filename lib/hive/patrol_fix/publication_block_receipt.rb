@@ -2,7 +2,7 @@ require "digest"
 require "time"
 require "hive/patrol_fix"
 require "hive/patrol_fix/receipt_store"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module PatrolFix
@@ -33,7 +33,7 @@ module Hive
           "validation_receipt_id" => validation_receipt_id,
           "head_revision" => head_revision,
           "diff_digest" => diff_digest,
-          "secret_policy_version" => Hive::SecretPatterns::POLICY_VERSION
+          "secret_policy_version" => Hive::SecretScanner::POLICY_VERSION
         }
         validate_payload!(payload)
         receipt_id = "publication-block-#{Digest::SHA256.hexdigest(PatrolFix.canonical_json(
@@ -72,7 +72,7 @@ module Hive
                receipt_ids_valid &&
                payload["head_revision"].to_s.match?(REVISION) &&
                payload["diff_digest"].to_s.match?(DIGEST) &&
-               payload["secret_policy_version"] == Hive::SecretPatterns::POLICY_VERSION
+               payload["secret_policy_version"] == Hive::SecretScanner::POLICY_VERSION
           raise InvalidBlock, "publication block payload is invalid"
         end
 

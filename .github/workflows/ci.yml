@@ -44,6 +44,8 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Bundle pinned Betterleaks
+        run: ruby packaging/betterleaks.rb
       - name: Collect coverage shard
         env:
           HIVE_COVERAGE_RUN_ID: shard-${{ matrix.shard }}
@@ -144,6 +146,8 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Bundle pinned Betterleaks
+        run: ruby packaging/betterleaks.rb
       - name: Run merge gate
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
@@ -239,6 +243,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes tmux
+      - name: Bundle pinned Betterleaks
+        run: ruby packaging/betterleaks.rb
       - name: Run harness library tests
         run: bundle exec rake e2e:lib_test
       - name: Run real-subprocess scenarios
@@ -312,6 +318,9 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
           working-directory: web
+      - name: Bundle pinned Betterleaks
+        working-directory: .
+        run: ruby packaging/betterleaks.rb
       - name: Cache Playwright browsers
         if: ${{ matrix.suite != 'integration' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -452,6 +461,8 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Bundle pinned Betterleaks
+        run: ruby packaging/betterleaks.rb
       - name: workflow creator native publication happy path
         run: >-
           bundle exec ruby -Itest test/unit/packaging/workflow_creator_evidence_test.rb

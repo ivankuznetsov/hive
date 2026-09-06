@@ -856,7 +856,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         purge_history: true
       )
       File.open(row.state_file, "a") do |file|
-        file.write("\napi_key=abcdefghijklmnopqrstuvwxyz123456\n")
+        file.write("\nghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       end
 
       resumed = coordinator.resume(request: request, row: row)

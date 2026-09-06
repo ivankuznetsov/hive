@@ -130,7 +130,7 @@ class PlanReviewPlanSignalsTest < Minitest::Test
   end
 
   def test_literal_credential_pattern_requires_mandatory_review
-    token = "sk-#{'A' * 24}"
+    token = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_plan(<<~PLAN) do |path, task_folder|
       # Update a local fixture
 
@@ -362,7 +362,7 @@ class PlanReviewPlanSignalsTest < Minitest::Test
       - `lib/hive/parser.rb`
 
       ## Notes
-      Replace the placeholder with aws_secret_access_key = AKIAIOSFODNN7EXAMPLE
+      Replace the placeholder with aws_secret_access_key = ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}
     PLAN
     with_plan(body) do |path, task_folder|
       result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)

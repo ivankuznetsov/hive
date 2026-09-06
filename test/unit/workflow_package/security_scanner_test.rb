@@ -43,15 +43,19 @@ class WorkflowPackageSecurityScannerTest < Minitest::Test
   end
 
   def test_secret_diagnostic_has_location_but_no_snippet
-    secret = "sk-ant-#{'x' * 30}"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     diagnostic = Hive::WorkflowPackage::SecurityScanner.scan_text(
       "prefix\n#{secret}\n", path: "instructions/work.md", permissions: {}
     ).first
 
-    assert_equal "security.anthropic_api_key", diagnostic.rule_id
+    assert_equal "security.github-pat", diagnostic.rule_id
     assert_equal 2, diagnostic.line
     refute_includes diagnostic.to_s, secret
     refute_includes diagnostic.to_h.values.compact.join, secret
+    findings = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      "token=#{secret}\n", path: "instructions/work.md", permissions: {}
+    )
+    assert_equal [ "security.github-pat" ], findings.map(&:rule_id)
   end
 
   # MatchData#begin is a character offset; the diagnostic location must stay

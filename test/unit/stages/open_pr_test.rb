@@ -17,6 +17,7 @@ class HiveStagesOpenPrTest < Minitest::Test
 
   class FakeController
     attr_reader :request, :phases
+    attr_accessor :creation_base_oid
 
     def initialize(publication)
       @publication = publication
@@ -107,16 +108,18 @@ class HiveStagesOpenPrTest < Minitest::Test
       assert_equal "open-pr-task", controller.request.branch
       assert_equal "master", controller.request.base_branch
       assert_equal "Add the feature", controller.request.title
-      assert_equal Digest::SHA256.hexdigest(controller.request.diff),
+      diff = Hive::AgentGitGate.read(_repo, :diff, base_oid: base_oid, head_oid: controller.request.head_oid).stdout
+      assert_equal Digest::SHA256.hexdigest(diff),
                    controller.request.diff_digest
-      assert_includes controller.request.diff, "feature.rb"
+      assert_includes diff, "feature.rb"
       assert_equal :complete, Hive::Markers.current(task.state_file).name
       assert_includes File.read(task.state_file), "publication_id: #{controller.request.publication_id}"
     end
   end
 
   def test_run_recovers_controller_owned_merged_publication
-    with_task do |task, _repo, _base_oid|
+    with_task do |task, repo, _base_oid|
+      run!("git", "-C", repo, "branch", "-f", "master", "HEAD")
       result = Hive::Stages::OpenPr.run!(
         task, cfg,
         git_gateway: FakeGitGateway.new,
@@ -135,6 +138,42 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_publication_excludes_upstream_changes_since_task_creation
+    with_task do |task, repo, original_base|
+      run!("git", "-C", repo, "checkout", "master", "--quiet")
+      File.write(File.join(repo, "upstream.txt"), "upstream changes\n" * 300_000)
+      run!("git", "-C", repo, "add", "upstream.txt")
+      run!("git", "-C", repo, "commit", "-m", "Advance upstream", "--quiet")
+      run!("git", "-C", repo, "checkout", task.slug, "--quiet")
+      run!("git", "-C", repo, "rebase", "master", "--quiet")
+      controller = FakeController.new(publication)
+
+      result = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+
+      assert_equal :complete, result.fetch(:status)
+      assert_equal original_base, controller.request.creation_base_oid
+      diff = Hive::AgentGitGate.read(repo, :diff, base_oid: controller.request.scan_base_oid, head_oid: controller.request.head_oid).stdout
+      refute_includes diff, "upstream.txt"
+      assert_includes diff, "feature.rb"
+    end
+  end
+
+  def test_publication_accepts_a_legitimate_patch_larger_than_four_megabytes
+    with_task do |task, repo, _base|
+      File.write(File.join(repo, "large.txt"), "ordinary content\n" * 300_000)
+      run!("git", "-C", repo, "add", "large.txt")
+      run!("git", "-C", repo, "commit", "-m", "Large change", "--quiet")
+      controller = FakeController.new(publication)
+
+      result = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+
+      assert_equal :complete, result.fetch(:status)
+      diff = Hive::AgentGitGate.read(repo, :diff, base_oid: controller.request.scan_base_oid, head_oid: controller.request.head_oid).stdout
+      assert_operator diff.bytesize, :>, 4 * 1024 * 1024
+      assert_equal Digest::SHA256.hexdigest(diff), controller.request.diff_digest
+    end
+  end
+
   def test_closed_publication_is_not_recreated
     with_task do |task, _repo, _base_oid|
       result = Hive::Stages::OpenPr.run!(
@@ -145,6 +184,27 @@ class HiveStagesOpenPrTest < Minitest::Test
 
       assert_equal({ commit: "open_pr_closed", status: :error }, result)
       assert_equal "open_pr_closed", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+    end
+  end
+
+  def test_legacy_pointer_without_a_creation_base_uses_the_verified_pr_base
+    with_task do |task, _repo, base_oid|
+      path = File.join(task.folder, "worktree.yml")
+      pointer = YAML.safe_load(File.read(path))
+      pointer.delete("base_oid")
+      File.write(path, pointer.to_yaml)
+      controller = FakeController.new(publication)
+
+      result = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+
+      assert_equal :complete, result.fetch(:status)
+      assert_equal base_oid, controller.request.creation_base_oid
+      refute YAML.safe_load(File.read(path)).key?("base_oid")
+
+      controller.creation_base_oid = base_oid
+      replay = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+      assert_equal :complete, replay.fetch(:status)
+      assert_equal base_oid, controller.request.creation_base_oid
     end
   end
 

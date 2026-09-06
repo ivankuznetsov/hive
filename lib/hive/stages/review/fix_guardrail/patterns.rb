@@ -1,4 +1,4 @@
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Stages
@@ -22,7 +22,7 @@ module Hive
           # Each pattern descriptor:
           #   :detector    — which scan engine owns this pattern:
           #                    :regex           — spec[:regex] matched against the target text
-          #                    :secret_patterns — dispatched to Hive::SecretPatterns.scan;
+          #                    :secret_patterns — dispatched to Hive::SecretScanner.scan;
           #                                       no spec[:regex] participates in matching
           #   :regex       — Regexp matched against either added lines (code) or file paths (file_path)
           #   :severity    — :high | :medium | :nit (used to group findings in fix-guardrail-NN.md)
@@ -46,7 +46,7 @@ module Hive
             secrets_pattern_match: {
               # Explicit non-regex strategy: scan dispatches on this
               # detector key and hands each added line to
-              # Hive::SecretPatterns.scan instead of spec[:regex].
+              # Hive::SecretScanner.scan instead of spec[:regex].
               detector: :secret_patterns,
               regex: nil,
               severity: :high,

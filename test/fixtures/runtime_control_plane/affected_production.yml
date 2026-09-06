@@ -6,10 +6,16 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 8354
-outside_inventory_net_lines: -7462
-final_lines: 892
+final_inventory_lines: 8530
+outside_inventory_net_lines: -7798
+final_lines: 732
 final_paths:
+- path: lib/hive/betterleaks.rb
+  lines: 26
+- path: lib/hive/secret_scanner.rb
+  lines: 114
+- path: packaging/betterleaks.rb
+  lines: 36
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 96
 - path: lib/hive/attempts/coordination.rb

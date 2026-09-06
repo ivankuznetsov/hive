@@ -124,10 +124,10 @@ module Hive
           fields = {
             "title" => request.title,
             "body" => request.published_body,
-            "diff" => request.diff
+            "diff" => snapshot.fetch("diff")
           }
           blocked_fields = fields.filter_map do |field, bytes|
-            field if Hive::SecretPatterns.match?(bytes)
+            field if Hive::SecretScanner.match?(bytes)
           end
           Hive::PatrolFix::PublicationBlockReceipt.build(
             task: { "slug" => task.slug, "generation" => authority.fetch("generation") },
@@ -162,7 +162,7 @@ module Hive
         private_class_method :publication_rework_stage
 
         def secret_in?(values)
-          values.compact.any? { |value| Hive::SecretPatterns.match?(value.to_s) }
+          values.compact.any? { |value| Hive::SecretScanner.match?(value.to_s) }
         end
         private_class_method :secret_in?
 

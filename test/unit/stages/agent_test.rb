@@ -1627,6 +1627,41 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_managed_failure_classifies_limit_envelopes_like_the_generic_agent_stage
+    with_tmp_dir do |project|
+      task = task_for(project, "fix", descriptor: worktree_workflow)
+      profile = Struct.new(:name).new("codex")
+
+      # The generic stage (Hive::Stages::Agent) classifies an error_message
+      # quota envelope as limits_reached even without limit_text; the worktree
+      # stage must route through the same classifier and stamp the same
+      # provider/retry_after quota metadata.
+      result = Hive::Stages::AgentWorktree.send(
+        :managed_failure_result, task, result: {
+          status: :error,
+          error_message: "limits reached for claude: You've hit your session limit"
+        }, profile: profile
+      )
+      marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+      assert_equal "limits_reached", result.fetch(:commit)
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_equal "codex", marker.attrs.fetch("provider")
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+
+      # Non-limit failures keep the typed fallback reason and must not gain
+      # quota metadata.
+      result = Hive::Stages::AgentWorktree.send(
+        :managed_failure_result, task, result: { status: :error, error_message: "profile unavailable" },
+                                    profile: profile
+      )
+      marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+      assert_equal "managed_agent_failed", result.fetch(:commit)
+      assert_equal "managed_agent_failed", marker.attrs.fetch("reason")
+      refute marker.attrs.key?("provider")
+      refute marker.attrs.key?("retry_after")
+    end
+  end
+
   def test_agent_worktree_private_failures_are_typed_and_bounded
     failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
     with_replaced_singleton_method(Open3, :capture3, ->(*) { [ "stdout detail", "", failed ] }) do

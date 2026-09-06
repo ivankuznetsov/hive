@@ -199,6 +199,48 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "stale_runner", projected.dig("reasons", 0, "code")
   end
 
+  def test_dead_runner_marker_stays_repair_after_the_action_projects_error
+    %w[agent_working review_working].each do |marker|
+      row = task(action: "error", slug: marker, marker: marker).merge(
+        "claude_pid" => 99_999,
+        "claude_pid_alive" => false
+      )
+
+      projected = project(status_payload(row)).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state"), marker
+      assert_equal "stale", projected.dig("liveness", "status"), marker
+      assert_equal "stale_runner", projected.dig("reasons", 0, "code"), marker
+    end
+  end
+
+  def test_patrol_fix_receipt_progress_outweighs_a_dead_predecessor_lock
+    row = task(
+      action: "ready_to_advance", slug: "receipt-ready",
+      stage: "2-fix", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "claude_pid" => 99_999,
+      "claude_pid_alive" => false,
+      "attempt_id" => "completed-attempt",
+      "task_generation" => "generation-1"
+    )
+
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "idle", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "not_running", projected.dig("liveness", "status")
+    assert_nil projected.dig("liveness", "pid")
+    assert_nil projected.dig("liveness", "attempt_id")
+    assert_nil projected.dig("liveness", "task_generation")
+    assert_equal "ready_for_dispatch", projected.dig("reasons", 0, "code")
+    assert_nil projected.fetch("action"), "the enrolled daemon owns the next transition"
+  end
+
   def test_invalid_task_is_unknown_while_admission_error_needs_repair
     invalid = task(
       action: "error", slug: "invalid", marker: "error",

@@ -181,6 +181,16 @@ Confirmation-free operational actions repeat this routine read under the task
 lock. If history changes or becomes invalid between status and `hive act`, the
 observation token is rejected without mutation.
 
+Dead process metadata is stale liveness only while the task's current action
+or marker still claims that a runner owns the step. A markerless controller
+task whose durable receipts already project `ready_to_run` or
+`ready_to_advance` reports `not_running` and keeps that workflow state even if
+an earlier attempt left a dead PID in `.lock`. For daemon-enrolled projects the
+next transition remains scheduler-owned, and ordinary task-lock acquisition
+reclaims the stale file without an operator repair step. A genuinely current
+`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
+continues to report `needs_repair`.
+
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
 `dependency_wait` as its primary reason; it cannot fall through to `idle`.

@@ -55,8 +55,7 @@ module Hive
 
         diff = Hive::AgentGitGate.read(
           owner.fetch("worktree"), :diff,
-          base_oid: fix.dig("payload", "base_revision"), head_oid: head,
-          max_stdout_bytes: Hive::PatrolFix::WorktreeReceipt::MAX_DIFF_BYTES
+          base_oid: fix.dig("payload", "base_revision"), head_oid: head
         )
         unless diff.success? && !diff.overflow
           message = phase.to_sym == :review ?

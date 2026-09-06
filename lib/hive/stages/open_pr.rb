@@ -38,13 +38,16 @@ module Hive
         return authoring if authoring.is_a?(Hash)
 
         git_gateway ||= default_git_gateway(cfg)
-        request = publication_request(
-          task, cfg, pointer, authoring, git_gateway: git_gateway
-        )
         controller ||= Hive::GithubPublication::Controller.new(
           state_path: File.join(task.folder, PUBLICATION_STATE_FILE),
           git_gateway: git_gateway,
           github_gateway: github_gateway || Hive::GithubPublication::GithubGateway.new(cfg: cfg)
+        )
+        if !pointer["base_oid"] && (recorded_base = controller.creation_base_oid)
+          pointer = pointer.merge("base_oid" => recorded_base)
+        end
+        request = publication_request(
+          task, cfg, pointer, authoring, git_gateway: git_gateway
         )
         revalidate = lambda do |_phase|
           current_authoring = read_authoring(authoring_path(task))
@@ -194,23 +197,22 @@ module Hive
         path = pointer.fetch("path")
         branch = pointer.fetch("branch", task.slug)
         base_branch = publication_base_branch(task, cfg, pointer)
-        base_oid = pointer.fetch("base_oid").to_s.downcase
+        base_oid = pointer["base_oid"]&.to_s&.downcase
         head_oid = git_read!(path, :head_oid).stdout.strip.downcase
         current_branch = git_read!(path, :current_branch).stdout.strip
         raise Hive::StageError, "publication worktree branch changed" unless current_branch == branch
         raise Hive::StageError, "publication worktree is dirty" unless git_read!(path, :status).stdout.empty?
-        unless git_read!(path, :ancestor, base_oid: base_oid, head_oid: head_oid, allow_false: true).success?
+        if base_oid && !git_read!(path, :ancestor, base_oid: base_oid, head_oid: head_oid, allow_false: true).success?
           raise Hive::StageError, "publication head is not descended from its recorded base"
         end
-        count = Integer(
-          git_read!(path, :commit_count, base_oid: base_oid, head_oid: head_oid).stdout.strip,
-          10
-        )
-        raise Hive::StageError, "publication has no commits beyond its recorded base" unless count.positive?
-        diff = git_read!(
-          path, :diff, base_oid: base_oid, head_oid: head_oid,
-          max_stdout_bytes: Hive::GithubPublication::MAX_DIFF_BYTES
-        ).stdout
+        scan_base = Hive::AgentGitGate.change_base(path, branch: base_branch, head_oid: head_oid)
+        # Older task pointers predate creation-base provenance. Bind their
+        # first publication to the verified Git base without inventing history
+        # or rewriting the pointer. Existing recorded provenance stays fixed.
+        base_oid ||= scan_base
+        # An empty current range may mean the owned PR was already merged.
+        # Let the publication controller reconcile it before attempting creation.
+        diff_digest = Hive::AgentGitGate.diff_digest(path, base_oid: scan_base, head_oid: head_oid)
         repository = git_gateway.repository_identity(worktree_path: path)
         Hive::GithubPublication::Request.new(
           worktree_path: path,
@@ -218,12 +220,12 @@ module Hive
           repository: repository.fetch("repository"),
           base_branch: base_branch,
           creation_base_oid: base_oid,
+          scan_base_oid: scan_base,
           branch: branch,
           head_oid: head_oid,
-          diff_digest: Digest::SHA256.hexdigest(diff),
+          diff_digest: diff_digest,
           title: authoring.title,
           body: authoring.body,
-          diff: diff,
           draft: true
         )
       rescue KeyError, ArgumentError, TypeError => e

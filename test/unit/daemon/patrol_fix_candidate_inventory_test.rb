@@ -136,7 +136,7 @@ class HiveDaemonPatrolFixCandidateInventoryTest < Minitest::Test
       hive_state = File.join(dir, ".hive-state")
       write_manifest(
         hive_state, slug: "repair-secret", path: "lib/secret.rb",
-        evidence: "token ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        evidence: "token ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       )
 
       error = assert_raises(Hive::Daemon::PatrolFixCandidateInventory::InvalidInventory) do

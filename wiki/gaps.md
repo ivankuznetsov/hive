@@ -7,6 +7,19 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Betterleaks distribution and recovery verification
+
+Betterleaks 1.8.1 binaries are checksum-pinned for Linux/macOS x64/arm64.
+Real scanner regression tests run on Linux x64; execution on the other three
+targets and packaged installation remain release/CI verification obligations.
+Publication range and size fixes have candidate-code checks, but live task
+advancement must be verified after an authorized dogfood deployment. Scanning
+Git objects does not fetch LFS payloads or decrypt encrypted artifacts.
+Ordinary publication hashes stream, but outcome-evidence materialization and
+Patrol snapshots still buffer a complete diff. Betterleaks staged-blob checks
+start a process per current blob (and matching prior blobs only when needed);
+large multi-file commits need throughput measurement before adding batching.
+
 ## Test performance measurement limits
 
 The checked-in shard timings come from three completed nightly seeds on

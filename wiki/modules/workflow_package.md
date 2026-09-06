@@ -219,7 +219,11 @@ The canonical builder emits only `packages/NAME/VERSION/` with generated
 instructions, and declared assets. The manifest owns normalized permissions,
 the complete registry-relative hash map, and `release_sha256`; the final
 manifest byte hash is `package_digest`. The current consumer validator and
-pinned Honeycomb lint contract run before remote access. The installed gem
+pinned Honeycomb lint contract run before remote access. Both import scanning
+and authoring lint delegate credential detection to bundled Betterleaks;
+authoring lint emits the stable `secret.detected` rule without maintaining a
+second credential regex catalog or entropy classifier. Permission, network,
+and personal-data lint remain separate checks. The installed gem
 ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
 contract data, so packaged Hive does not depend on the source checkout's test
 tree. Bounded safe-file reads treat a zero-byte regular file as empty bytes;

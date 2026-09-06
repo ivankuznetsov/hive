@@ -2,7 +2,7 @@ require "set"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/identity"
 require "hive/artifacts/outcome_evidence/proof"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Artifacts
@@ -184,7 +184,7 @@ module Hive
         private_class_method :meaningful!
 
         def secret_free!(text, label)
-          hits = Hive::SecretPatterns.scan(text)
+          hits = Hive::SecretScanner.scan(text)
           return text if hits.empty?
 
           names = hits.map { |hit| hit.fetch(:name) }.uniq.join(", ")

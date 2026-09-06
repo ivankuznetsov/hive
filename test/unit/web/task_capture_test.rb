@@ -1515,7 +1515,7 @@ class WebTaskCaptureTest < Minitest::Test
       error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
         capture.send(
           :reject_manifest_secrets!,
-          { "diagnostic" => "ghp_abcdefghijklmnopqrstuvwxyz1234567890" }
+          { "diagnostic" => "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}" }
         )
       end
       assert_match(/secret-shaped content/, error.message)
@@ -1533,7 +1533,7 @@ class WebTaskCaptureTest < Minitest::Test
           :run_command!,
           [
             RbConfig.ruby, "-e",
-            "STDERR.write('ghp_abcdefghijklmnopqrstuvwxyz1234567890'); exit 4"
+            "STDERR.write('ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}'); exit 4"
           ]
         )
       end
@@ -1552,7 +1552,7 @@ class WebTaskCaptureTest < Minitest::Test
       capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
       log = Object.new
       log.define_singleton_method(:flush) { raise IOError, "closed" }
-      error = RuntimeError.new("bootstrap ghp_abcdefghijklmnopqrstuvwxyz1234567890")
+      error = RuntimeError.new("bootstrap ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}")
 
       diagnostic = capture.send(
         :capture_server_diagnostic, error, log, "/missing/log"

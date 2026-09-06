@@ -217,7 +217,7 @@ class OutcomeEvidenceContractTest < Minitest::Test
   end
 
   def test_rejects_secret_shaped_semantic_claims_exclusions_and_verdicts
-    secret = "api_key=abcdefghijklmnopqrstuvwxyz0123456789"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     input = {
       implementation: { "changed_paths" => %w[app/checkout.rb] },
       claims: [

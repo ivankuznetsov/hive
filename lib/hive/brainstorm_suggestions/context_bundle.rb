@@ -10,6 +10,7 @@ require "hive/brainstorm_suggestions/binding"
 require "hive/brainstorm_suggestions/process_capture"
 require "hive/brainstorm_suggestions/safety"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module BrainstormSuggestions
@@ -449,10 +450,12 @@ module Hive
       end
 
       def safe_evidence?(value)
-        !Hive::SecretPatterns.match?(value) &&
+        !Hive::SecretScanner.match?(value) &&
           !value.match?(Hive::BrainstormSuggestions::Safety::CONTROL_RE) &&
           !value.match?(Hive::BrainstormSuggestions::Safety::BARE_CR_RE) &&
           !value.match?(Hive::BrainstormSuggestions::Safety::PROMPT_CONTROL_RE)
+      rescue Hive::SecretScanner::Unavailable
+        raise CaptureError.new("secret_scanner_unavailable")
       end
 
       def xml_attribute(value)

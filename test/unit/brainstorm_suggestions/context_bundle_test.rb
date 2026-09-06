@@ -52,7 +52,10 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
       git(root, "add", "staged.rb")
       File.delete(File.join(root, "deleted.txt"))
       File.write(File.join(root, "untracked.rb"), "UNTRACKED = true\n")
-      File.write(File.join(root, "secret-adapter.yml"), "API_KEY=abcdefghijklmnopqrstuvwxyz123456\n")
+      File.write(
+        File.join(root, "secret-adapter.yml"),
+        "TOKEN=#{["ghp", "a" * 36].join("_")}\n"
+      )
       git(root, "add", "secret-adapter.yml")
 
       with_task(root) do |task|
@@ -68,7 +71,7 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
         refute_includes paths, "deleted.txt"
         refute_includes paths, "untracked.rb"
         refute_includes paths, "secret-adapter.yml"
-        refute_includes context, "abcdefghijklmnopqrstuvwxyz123456"
+        refute_includes context, "#{["ghp", "a" * 36].join("_")}"
         assert_equal [ "Keep the public API." ], bundle.settled_answers.map { |row| row.fetch("answer") }
         assert_equal "Which adapter should we use?", bundle.question.fetch("text")
         assert bundle.diagnostics.fetch("head")
@@ -355,6 +358,26 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
           )
         end
         assert_equal "unsafe_question", error.code
+      end
+    end
+  end
+
+  def test_capture_fails_closed_when_the_supported_secret_detector_is_unavailable
+    with_repository do |root|
+      with_task(root) do |task|
+        unavailable = lambda do |*|
+          raise Hive::SecretScanner::Unavailable, "scanner unavailable"
+        end
+
+        with_replaced_singleton_method(Hive::SecretScanner, :match?, unavailable) do
+          error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+            Hive::BrainstormSuggestions::ContextBundle.capture(
+              project_root: root, task_root: task, question_ordinal: 2
+            )
+          end
+          assert_equal "secret_scanner_unavailable", error.code
+          refute_includes error.message, "scanner unavailable"
+        end
       end
     end
   end

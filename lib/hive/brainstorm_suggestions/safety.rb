@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module BrainstormSuggestions
@@ -38,7 +38,9 @@ module Hive
           !value.match?(UNSAFE_MARKUP_RE) &&
           value.lines.none? { |line| line.match?(UNSAFE_STRUCTURE_RE) } &&
           !value.match?(PROMPT_CONTROL_RE) &&
-          !Hive::SecretPatterns.match?(value)
+          !Hive::SecretScanner.match?(value)
+      rescue Hive::SecretScanner::Unavailable
+        false
       end
     end
   end

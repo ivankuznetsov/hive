@@ -159,7 +159,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { cfg },
-        git: FakeGit.new
+        git: FakeGit.new,
+        database: runtime_database(entry)
       )
       candidate = sched.candidates(now: T0).fetch(0)
       cfg = enabled_cfg("patrol" => { "enabled" => false })
@@ -181,7 +182,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { registrations },
         config_loader: ->(_path) { enabled_cfg },
-        git: FakeGit.new
+        git: FakeGit.new,
+        database: runtime_database(original)
       )
       candidate = sched.candidates(now: T0).fetch(0)
       registrations = [ replacement ]
@@ -548,7 +550,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       entry = project_entry(dir)
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] }, config_loader: ->(*) { enabled_cfg },
-        state_store_factory: ->(*) { raise "store unavailable" }
+        state_store_factory: ->(*) { raise "store unavailable" },
+        database: runtime_database(entry)
       )
       sched.instance_variable_get(:@events) << { status: :blocked }
       assert_equal [ { status: :blocked } ], sched.drain_events

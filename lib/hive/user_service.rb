@@ -30,12 +30,14 @@ module Hive
                    status_reader: nil, launchd_running_via_list: false,
                    writer: nil, clock: -> { Time.now.utc },
                    event_handler: nil, home: nil,
-                   lock_wait: Transaction::LOCK_WAIT_SEC, legacy_takeover: nil)
+                   lock_wait: Transaction::LOCK_WAIT_SEC, legacy_takeover: nil,
+                   removal_takeover: nil)
       @definition = definition
       @writer = writer
       @clock = clock
       @event_handler = event_handler
       @legacy_takeover = legacy_takeover
+      @removal_takeover = removal_takeover
       @manager = Manager.new(
         definition: definition,
         runner: runner,
@@ -244,6 +246,7 @@ module Hive
         manager_availability: manager_inspection.availability,
         enabled: manager_inspection.enabled,
         running: manager_inspection.running,
+        active_state: manager_inspection.active_state,
         load_state: manager_inspection.respond_to?(:load_state) ? manager_inspection.load_state : nil,
         fragment_path: manager_inspection.respond_to?(:fragment_path) ? manager_inspection.fragment_path : nil,
         need_daemon_reload: manager_inspection.respond_to?(:need_daemon_reload) ? manager_inspection.need_daemon_reload : nil,
@@ -276,11 +279,6 @@ module Hive
           diagnostics: current.diagnostics + [ :manager_probe_indeterminate ]
         )
       end
-      if current.content_state == :absent &&
-         (!current.manager_available? || (!current.enabled? && !current.running? && manager_removed?(current)))
-        transaction.clear_after_verified_removal
-        return result(:absent, operation: :remove, final_status: current)
-      end
       if %i[unsafe unreadable].include?(current.content_state)
         return result(
           :unsafe_path,
@@ -288,6 +286,33 @@ module Hive
           final_status: current,
           diagnostics: current.diagnostics + [ :unsafe_unit_path ]
         )
+      end
+
+      if @removal_takeover
+        begin
+          stopped = @removal_takeover.stop!
+        rescue StandardError => error
+          return result(
+            :failed,
+            operation: :remove,
+            final_status: safe_inspect(manager: plan.manager_observed),
+            diagnostics: [ :foreground_stop_failed ],
+            error: error
+          )
+        end
+        unless stopped
+          return result(
+            :failed,
+            operation: :remove,
+            final_status: safe_inspect(manager: plan.manager_observed),
+            diagnostics: [ :foreground_stop_failed ]
+          )
+        end
+      end
+      if current.content_state == :absent &&
+         (!current.manager_available? || (!current.enabled? && current.stopped? && manager_removed?(current)))
+        transaction.clear_after_verified_removal
+        return result(:absent, operation: :remove, final_status: current)
       end
 
       prior_content = if current.content_state == :absent
@@ -479,6 +504,18 @@ module Hive
       end
       return rollback_apply(document, transaction, diagnostics: [ :recovery_resumed ]) if document.fetch("direction") == "rollback"
 
+      if document.fetch("autostart") && document.fetch("manager_intent")
+        manager_status = inspect_status(manager: true)
+        unless manager_status.manager_available?
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: manager_status,
+            diagnostics: manager_status.diagnostics + [ :manager_action_unavailable ]
+          )
+        end
+      end
+
       file = inspect_file
       desired_matches = file.dig(:identity, :digest) == document.fetch("desired_digest")
       prior_matches = recorded_prior_file?(file, document)
@@ -579,7 +616,20 @@ module Hive
           return rollback_apply(document, transaction, diagnostics: diagnostics)
         end
         diagnostics << :manager_effect_verified unless reload.ok
-        document = transaction.journal.advance(document, phase: :manager_reloaded)
+        activation_process = activation_process_observation(status)
+        if activation_boundary_required?(document) && !activation_process
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_effect_ambiguous ]
+          )
+        end
+        document = transaction.journal.advance(
+          document,
+          phase: :manager_reloaded,
+          activation_process: activation_process
+        )
         transition_event(:after_manager_reloaded)
         status = inspect_status(manager: true)
       elsif !manager_definition_current?(status)
@@ -597,6 +647,37 @@ module Hive
             diagnostics: diagnostics
           )
         end
+        if activation_boundary_required?(document)
+          activation_process = activation_process_observation(status)
+          unless activation_process
+            return pending_result(
+              operation: :apply,
+              document: document,
+              status: status,
+              diagnostics: diagnostics + [ :manager_effect_ambiguous ]
+            )
+          end
+          document = transaction.journal.record_activation_process(
+            document,
+            **activation_process
+          )
+        end
+      end
+
+      if activation_boundary_required?(document) && !activation_boundary_recorded?(document)
+        activation_process = activation_process_observation(status)
+        unless activation_process
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: status,
+            diagnostics: diagnostics + [ :manager_effect_ambiguous ]
+          )
+        end
+        document = transaction.journal.record_activation_process(
+          document,
+          **activation_process
+        )
       end
 
       if intent == "takeover" && !apply_phase_at_least?(document, :takeover_completed)
@@ -785,6 +866,21 @@ module Hive
     end
 
     def rollback_apply(document, transaction, diagnostics:)
+      before_file_restore = document.fetch("direction") == "forward" ||
+        document.fetch("phase") == "rollback_selected"
+      if before_file_restore &&
+         document.fetch("autostart") && document.fetch("manager_intent")
+        manager_status = inspect_status(manager: true)
+        unless manager_status.manager_available?
+          return pending_result(
+            operation: :apply,
+            document: document,
+            status: manager_status,
+            diagnostics: diagnostics + manager_status.diagnostics + [ :manager_action_unavailable ]
+          )
+        end
+      end
+
       document = transaction.journal.advance(
         document, phase: :rollback_selected, direction: :rollback
       ) unless document.fetch("direction") == "rollback"
@@ -1129,7 +1225,7 @@ module Hive
     end
 
     def manager_disabled?(status)
-      status.manager_available? && !status.enabled? && !status.running?
+      status.manager_available? && !status.enabled? && status.stopped?
     end
 
     def removal_manager_endpoint?(status, document)
@@ -1166,16 +1262,46 @@ module Hive
     def activation_effect(status, document, trusted_action: false)
       return :incomplete unless desired_endpoint?(status)
       return :complete if document.fetch("manager_intent") == "enable"
-      return :complete unless document.fetch("prior_running")
       return trusted_action ? :complete : :incomplete unless @definition.platform == :linux
 
-      prior = recorded_process_identity(document)
+      return :ambiguous unless activation_boundary_recorded?(document)
+
+      prior = activation_boundary_identity(document)
       current = status.process_identity
+      return :complete if prior.nil? && current
       return :complete if prior && current && current != prior
       return :complete if trusted_action && current && current.fetch(:process_start) == "injected"
       return :incomplete if prior && current == prior
 
       :ambiguous
+    end
+
+    def activation_boundary_required?(document)
+      @definition.platform == :linux && document.fetch("manager_intent") == "restart"
+    end
+
+    def activation_boundary_recorded?(document)
+      !document["activation_from_main_pid"].nil?
+    end
+
+    def activation_boundary_identity(document)
+      pid = document["activation_from_main_pid"]
+      return nil if pid.to_i.zero?
+
+      {
+        main_pid: pid,
+        process_start: document.fetch("activation_from_process_start")
+      }
+    end
+
+    def activation_process_observation(status)
+      return { main_pid: 0, process_start: nil } unless status.process_live?
+      return nil unless status.process_start && !status.process_start.empty?
+
+      {
+        main_pid: status.main_pid,
+        process_start: status.process_start
+      }
     end
 
     def apply_endpoint_for_mode?(status, document, mode)
@@ -1196,8 +1322,8 @@ module Hive
     def prior_manager_endpoint?(status, document)
       return true unless document.fetch("autostart") && document.fetch("manager_intent")
       return false unless status.manager_available? &&
-                          status.enabled? == document.fetch("prior_enabled") &&
-                          status.running? == document.fetch("prior_running")
+                          status.enabled? == document.fetch("prior_enabled")
+      return false if document.fetch("prior_running") ? !status.running? : !status.stopped?
 
       if document.fetch("prior_digest")
         return false unless manager_definition_current?(status)
@@ -1251,7 +1377,7 @@ module Hive
       return false unless status.manager_available?
 
       operation = document.fetch("manager_intent")
-      return !status.running? if operation == "stop"
+      return status.stopped? if operation == "stop"
       return false unless status.running?
       return false if @definition.platform == :linux && status.process_identity.nil?
 
@@ -1276,7 +1402,7 @@ module Hive
             diagnostics: before.diagnostics + [ :manager_action_unavailable ]
           )
         end
-        if (operation == :start && before.running?) || (operation == :stop && !before.running?)
+        if (operation == :start && before.running?) || (operation == :stop && before.stopped?)
           return result(:unchanged, operation: operation, final_status: before)
         end
         unless before.file_identity

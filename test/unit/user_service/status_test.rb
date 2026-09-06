@@ -32,4 +32,39 @@ class UserServiceStatusTest < Minitest::Test
 
     assert_match(/unknown manager availability/, error.message)
   end
+
+  def test_deactivating_linux_process_is_not_conclusively_stopped
+    status = Hive::UserService::Status.new(
+      platform: :linux,
+      unit_path: "/tmp/hive-test.service",
+      content_state: :matching,
+      file_identity: { digest: "a" * 64 },
+      manager_available: true,
+      enabled: false,
+      running: false,
+      active_state: "deactivating",
+      main_pid: 123,
+      process_start: "draining"
+    )
+
+    refute status.running?
+    refute status.stopped?
+    assert status.process_live?
+  end
+
+  def test_transitional_manager_state_is_not_stopped_after_main_pid_clears
+    status = Hive::UserService::Status.new(
+      platform: :linux,
+      unit_path: "/tmp/hive-test.service",
+      content_state: :matching,
+      file_identity: { digest: "a" * 64 },
+      manager_available: true,
+      enabled: false,
+      running: false,
+      active_state: "deactivating",
+      main_pid: 0
+    )
+
+    refute status.stopped?
+  end
 end

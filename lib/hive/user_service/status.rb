@@ -6,15 +6,16 @@ module Hive
     class Status
       CONTENT_STATES = %i[absent matching drifted unsafe unreadable].freeze
       MANAGER_AVAILABILITIES = %i[available conclusively_absent indeterminate].freeze
+      TRANSITIONAL_ACTIVE_STATES = %w[activating deactivating reloading].freeze
 
       attr_reader :platform, :unit_path, :content_state, :file_identity,
                   :manager_available, :manager_availability, :enabled, :running,
-                  :load_state, :fragment_path, :need_daemon_reload, :main_pid,
+                  :active_state, :load_state, :fragment_path, :need_daemon_reload, :main_pid,
                   :process_start, :manager_evidence_source, :diagnostics
 
       def initialize(platform:, unit_path:, content_state:, file_identity:,
                      manager_available: nil, manager_availability: nil,
-                     enabled:, running:, load_state: nil, fragment_path: nil,
+                     enabled:, running:, active_state: nil, load_state: nil, fragment_path: nil,
                      need_daemon_reload: nil, main_pid: nil, process_start: nil,
                      manager_evidence_source: :observed,
                      diagnostics: [])
@@ -39,6 +40,7 @@ module Hive
         @manager_available = @manager_availability == :available
         @enabled = !!enabled
         @running = !!running
+        @active_state = active_state&.to_s
         @load_state = load_state&.to_s
         @fragment_path = fragment_path&.then { |path| File.expand_path(path.to_s) }
         @need_daemon_reload = if need_daemon_reload.nil?
@@ -59,6 +61,7 @@ module Hive
             manager_availability: @manager_availability,
             enabled: @enabled,
             running: @running,
+            active_state: @active_state,
             load_state: @load_state,
             fragment_path: @fragment_path,
             need_daemon_reload: @need_daemon_reload,
@@ -85,6 +88,14 @@ module Hive
 
       def running?
         running
+      end
+
+      def process_live?
+        main_pid.positive?
+      end
+
+      def stopped?
+        !running? && !process_live? && !TRANSITIONAL_ACTIVE_STATES.include?(active_state)
       end
 
       def loaded_definition_current?

@@ -512,6 +512,8 @@ class UninstallCommandTest < Minitest::Test
 
   def test_stop_foreground_babysitter_reuses_safe_stop_lifecycle
     with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".babysitter.pid"), "pending\n")
       captured = nil
       stopper = Object.new
       stopper.define_singleton_method(:call) { true }
@@ -558,7 +560,8 @@ class UninstallCommandTest < Minitest::Test
 
       assert_includes error.message, "no services or data were removed"
       assert File.exist?(unit)
-      assert_empty calls
+      refute calls.any? { |argv| %w[disable stop restart].include?(argv[2]) }
+      refute_includes calls, %w[systemctl --user daemon-reload]
     end
   end
 

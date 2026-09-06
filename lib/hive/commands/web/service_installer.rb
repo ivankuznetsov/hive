@@ -45,17 +45,23 @@ module Hive
 
         def start!
           super
-        rescue Hive::Error
-          raise Hive::Error, "hive web: could not start managed service"
+        rescue Hive::Error => error
+          raise_web_lifecycle_error(error, :start)
         end
 
         def stop!
           super
-        rescue Hive::Error
-          raise Hive::Error, "hive web: could not stop managed service"
+        rescue Hive::Error => error
+          raise_web_lifecycle_error(error, :stop)
         end
 
         private
+
+        def raise_web_lifecycle_error(error, operation)
+          base = "hive web: could not #{operation} managed web service"
+          detail = error.message.delete_prefix(base)
+          raise Hive::Error, "hive web: could not #{operation} managed service#{detail}"
+        end
 
         def render_systemd
           rendered = render_systemd_from(

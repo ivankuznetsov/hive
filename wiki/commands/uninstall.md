@@ -22,14 +22,19 @@ hive uninstall --force-purge-state
 ## Cleanup sequence
 
 1. Read registered projects from global config. Config errors become warnings and skip per-project cleanup.
-2. Stop a foreground daemon using the XDG state-home `.daemon.pid` when present, and a foreground bot using `.bot.pid` (a YAML payload; a corrupt/legacy pid file degrades to a no-op rather than aborting uninstall).
-3. Deregister platform service units for the daemon, opt-in bot, and Hive Web using each installer's own service name and target path:
+2. Deregister platform service units for the babysitter, daemon, opt-in bot,
+   and Hive Web using each installer's own service name and target path. The
+   daemon, bot, and babysitter foreground-process stop runs inside that unit's
+   canonical UserService ownership scope, after lock acquisition; a competing
+   uninstall that loses contention performs no signal or PID-file mutation.
+   The daemon uses the XDG state-home `.daemon.pid`; the bot uses `.bot.pid`
+   (a YAML payload whose corrupt/legacy forms remain a no-op).
    - macOS: unload and remove the matching `local.hive-*.plist` files.
    - Linux: disable/stop the matching user services, remove their `~/.config/systemd/user/*.service` units, then daemon-reload.
    - Hive Web identity lookup uses an explicit inert installer config, so a malformed global `web:` section cannot abort identity-only deregistration or prevent later cleanup.
    - Each thin installer delegates no-follow inspection, exact-state revalidation, manager disable, unlink, and Linux daemon-reload to `Hive::UserService`. A busy removal, indeterminate manager observation, or retained recovery state stops uninstall before later config, cache, data, symlink, project, or forced-state cleanup can erase coordination evidence.
-4. Remove XDG config/cache and versioned data payload directories, unless `HIVE_HOME` collapses config/data/state/cache onto one path.
-5. Remove user symlinks `hive` and `hv` under
+3. Remove XDG config/cache and versioned data payload directories, unless `HIVE_HOME` collapses config/data/state/cache onto one path.
+4. Remove user symlinks `hive` and `hv` under
    `${XDG_BIN_HOME:-~/.local/bin}` only when each exact target is a
    current-user regular wrapper under the active XDG data home or the prefix
    recorded by `install-prefix`, and its data home has a stable current-user
@@ -38,7 +43,7 @@ hive uninstall --force-purge-state
    Removal first renames the candidate to a unique same-directory quarantine,
    revalidates the moved entry, and deletes only that exact managed link. A
    concurrent replacement is restored or retained with an explicit warning.
-6. Preserve or remove state according to `--purge` / `--force-purge-state`.
+5. Preserve or remove state according to `--purge` / `--force-purge-state`.
 
 Service unit removal refuses to unlink symlinks, so a pre-planted launchd/systemd path cannot trick uninstall into deleting an arbitrary user-writable target.
 

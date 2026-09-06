@@ -80,6 +80,7 @@ class WorkflowsBenchTest < Minitest::Test
 
     assert_path_exists File.join(runtime, "harness", "hive_run.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "judge_slate.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "controller_git.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_runtime.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "pi_bench_launcher.sh")
@@ -195,11 +196,54 @@ class WorkflowsBenchTest < Minitest::Test
     assert_equal "high", config.dig("models", "plan", "effort")
   end
 
+  def test_pi_launcher_always_loads_the_packaged_tool_stream_extension
+    launcher = File.join(
+      Hive::Workflows::Bench::RUNTIME_DIR,
+      "harness", "lib", "pi_bench_launcher.sh"
+    )
+    Dir.mktmpdir("hive-bench-pi-launcher") do |root|
+      argv_path = File.join(root, "argv")
+      real_pi = File.join(root, "pi")
+      extension = File.join(root, "pi-tool-stream.ts")
+      File.write(extension, "// fixture\n")
+      File.write(real_pi, <<~SH)
+        #!/bin/sh
+        printf '%s\n' "$@" >#{argv_path}
+      SH
+      FileUtils.chmod(0o755, real_pi)
+
+      _out, err, status = Open3.capture3(
+        {
+          "HB_PI_REAL_BIN" => real_pi,
+          "HB_PI_TOOL_STREAM" => extension
+        },
+        "bash", launcher, "--model", "openrouter/z-ai/glm-5.3-flash:high"
+      )
+
+      assert status.success?, err
+      assert_equal [
+        "--extension", extension,
+        "--model", "openrouter/z-ai/glm-5.3-flash:high"
+      ], File.readlines(argv_path, chomp: true)
+    end
+  end
+
+  def test_pi_tool_stream_extension_covers_the_current_disclosed_route
+    extension = File.read(File.join(
+                            Hive::Workflows::Bench::RUNTIME_DIR,
+                            "harness", "lib", "pi_tool_stream.ts"
+                          ))
+
+    assert_includes extension, '"z-ai/glm-5.3-flash"'
+    assert_includes extension, "tool_stream: true"
+  end
+
   def test_packaged_runtime_seals_hive_source_from_pi_and_opencode
     runtime = Hive::Workflows::Bench::RUNTIME_DIR
     dockerfile = File.read(File.join(runtime, "Dockerfile.runner"))
     driver = File.read(File.join(runtime, "harness", "lib", "hive_driver.rb"))
     stages = File.read(File.join(runtime, "harness", "lib", "hive_stages.sh"))
+    controller_git = File.read(File.join(runtime, "harness", "lib", "controller_git.sh"))
     pi_launcher = File.read(File.join(runtime, "harness", "lib", "pi_bench_launcher.sh"))
     opencode_launcher = File.read(File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh"))
 
@@ -210,6 +254,10 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes driver, 'runner image #{image} is not the sealed Hive build'
     assert_includes driver, '"--user", "0:0"'
     assert_includes stages, "HB_ERROR hive_runtime_visible_to_candidate"
+    assert_includes stages, "CONTROLLER_BIN=/opt/hb/controller-bin"
+    assert_includes controller_git, "--reuid=1000"
+    assert_includes controller_git, 'args[position]="$HB_CONTROLLER_ORIGIN"'
+    assert_includes stages, 'cat >"$CONTROLLER_BIN/gh"'
     [ pi_launcher, opencode_launcher ].each do |launcher|
       assert_includes launcher, "--bounding-set=-all --inh-caps=-all --ambient-caps=-all"
       assert_includes launcher, "GEM_HOME=/usr/local/bundle"
@@ -246,6 +294,70 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes args, "GEM_HOME=/opt/hb/control-bundle"
     assert_includes args, "HB_SEALED_AGENT_RUNTIME=1"
     refute args.any? { |arg| arg.include?("/host/hive") || arg.include?("/host/gems") }
+  end
+
+  def test_sealed_controller_git_ignores_candidate_hooks_and_push_redirects
+    wrapper = File.join(
+      Hive::Workflows::Bench::RUNTIME_DIR,
+      "harness", "lib", "controller_git.sh"
+    )
+    Dir.mktmpdir("hive-bench-controller-git") do |root|
+      origin = File.join(root, "origin.git")
+      redirected = File.join(root, "redirected.git")
+      work = File.join(root, "work")
+      controller_bin = File.join(root, "controller-bin")
+      controller_id = File.join(controller_bin, "id")
+      FileUtils.mkdir_p(controller_bin)
+      # Host runner UIDs vary; the sealed runtime always invokes Git as uid 1000.
+      File.write(controller_id, "#!/bin/sh\nprintf '1000\\n'\n")
+      FileUtils.chmod(0o755, controller_id)
+      controller_env = {
+        "HB_CONTROLLER_ORIGIN" => origin,
+        "PATH" => "#{controller_bin}:#{ENV.fetch("PATH")}"
+      }
+      run_git = lambda do |*argv|
+        out, err, status = Open3.capture3("/usr/bin/git", *argv)
+        assert status.success?, "git #{argv.join(' ')} failed: #{out}#{err}"
+      end
+      run_git.call("init", "-q", "--bare", origin)
+      run_git.call("init", "-q", "--bare", redirected)
+      run_git.call("init", "-q", "-b", "main", work)
+      run_git.call("-C", work, "config", "user.email", "bench@example.test")
+      run_git.call("-C", work, "config", "user.name", "Bench")
+      File.write(File.join(work, "README.md"), "candidate\n")
+      run_git.call("-C", work, "add", "README.md")
+      run_git.call("-C", work, "commit", "-q", "-m", "candidate")
+      run_git.call("-C", work, "remote", "add", "origin", origin)
+      run_git.call("-C", work, "config", "remote.origin.pushurl", redirected)
+
+      hook_marker = File.join(root, "pre-push-ran")
+      hook = File.join(work, ".git", "hooks", "pre-push")
+      File.write(hook, "#!/bin/sh\ntouch #{hook_marker}\n")
+      FileUtils.chmod(0o755, hook)
+
+      resolved, err, status = Open3.capture3(
+        controller_env,
+        "bash", wrapper, "-C", work, "remote", "get-url", "--push", "--all", "origin"
+      )
+      assert status.success?, err
+      assert_equal origin, resolved.strip
+
+      _out, err, status = Open3.capture3(
+        controller_env,
+        "bash", wrapper, "-C", work, "push", "-q", "origin", "main"
+      )
+
+      assert status.success?, err
+      _out, _err, origin_status = Open3.capture3(
+        "/usr/bin/git", "--git-dir", origin, "rev-parse", "main"
+      )
+      _out, _err, redirected_status = Open3.capture3(
+        "/usr/bin/git", "--git-dir", redirected, "rev-parse", "main"
+      )
+      assert origin_status.success?, "controller origin did not receive main"
+      refute redirected_status.success?, "candidate pushurl received main"
+      refute_path_exists hook_marker
+    end
   end
 
   def test_generate_exports_campaign_sealed_runtime_requirement

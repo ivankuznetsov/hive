@@ -17,6 +17,7 @@ require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
+require "hive/brainstorm_suggestions/envelope"
 
 module Hive
   module Config
@@ -105,7 +106,16 @@ module Hive
       "brainstorm" => {
         "agent" => "claude",
         "skill" => "/ce-brainstorm",
-        "runtime" => "headless"
+        "runtime" => "headless",
+        "suggestions" => {
+          "enabled" => false,
+          "agent" => "claude",
+          "capture_timeout_sec" => 5,
+          "timeout_sec" => 120,
+          "coalesce_window_sec" => 5,
+          "min_retry_interval_sec" => 300,
+          "max_automatic_attempts" => 3
+        }
       },
       "plan" => {
         "agent" => "claude",
@@ -695,6 +705,7 @@ module Hive
     # check each role's value resolves to a registered AgentProfile.
     ROLE_AGENT_PATHS = [
       %w[brainstorm agent],
+      %w[brainstorm suggestions agent],
       %w[plan agent],
       %w[execute agent],
       %w[open_pr agent],
@@ -2057,6 +2068,7 @@ module Hive
       validate_permissions!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
+      validate_brainstorm_suggestions!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_attempt_timers!(cfg, source_path)
       validate_conditions!(cfg, source_path)
@@ -2456,6 +2468,12 @@ module Hive
       add_model_routing_call(
         calls, cfg, "brainstorm", cfg.dig("brainstorm", "agent"),
         current: model_routing_current(cfg["brainstorm"])
+      )
+      suggestions = cfg.dig("brainstorm", "suggestions")
+      add_model_routing_call(
+        calls, cfg, "brainstorm_suggestion", suggestions&.fetch("agent", "claude"),
+        enabled: suggestions&.fetch("enabled", false) == true,
+        current: model_routing_current(suggestions)
       )
       add_model_routing_call(
         calls, cfg, "plan", cfg.dig("plan", "agent"),
@@ -3309,6 +3327,73 @@ module Hive
             "brainstorm.runtime in #{describe_source(source_path)} must be one of " \
             "#{BRAINSTORM_RUNTIMES.inspect}; got #{runtime.inspect} (#{runtime.class})"
     end
+
+    BRAINSTORM_SUGGESTION_KEYS = %w[
+      enabled agent model effort capture_timeout_sec timeout_sec
+      coalesce_window_sec min_retry_interval_sec max_automatic_attempts
+    ].freeze
+    BRAINSTORM_SUGGESTION_NUMERIC_BOUNDS = {
+      "capture_timeout_sec" => 1,
+      "timeout_sec" => 1,
+      "coalesce_window_sec" => 0,
+      "min_retry_interval_sec" => 1,
+      "max_automatic_attempts" => 1
+    }.freeze
+
+    def validate_brainstorm_suggestions!(cfg, source_path)
+      suggestions = cfg.dig("brainstorm", "suggestions")
+      unless suggestions.is_a?(Hash)
+        raise ConfigError,
+              "brainstorm.suggestions in #{describe_source(source_path)} must be a Hash"
+      end
+
+      unknown = suggestions.keys.map(&:to_s) - BRAINSTORM_SUGGESTION_KEYS
+      unless unknown.empty?
+        raise ConfigError,
+              "brainstorm.suggestions in #{describe_source(source_path)} has unknown keys: #{unknown.inspect}"
+      end
+      unless suggestions["enabled"] == true || suggestions["enabled"] == false
+        raise ConfigError,
+              "brainstorm.suggestions.enabled in #{describe_source(source_path)} must be a boolean"
+      end
+      BRAINSTORM_SUGGESTION_NUMERIC_BOUNDS.each do |key, minimum|
+        value = suggestions[key]
+        next if value.is_a?(Integer) && value >= minimum
+
+        raise ConfigError,
+              "brainstorm.suggestions.#{key} in #{describe_source(source_path)} must be an integer " \
+              ">= #{minimum}; got #{value.inspect}"
+      end
+      validate_brainstorm_suggestion_disable!(cfg, source_path) unless suggestions["enabled"]
+    end
+
+    def validate_brainstorm_suggestion_disable!(cfg, source_path)
+      root = cfg["hive_state_path"]
+      return if root.to_s.empty?
+
+      root = File.expand_path(root, cfg["project_root"].to_s) unless Pathname.new(root).absolute?
+      stages = File.join(root, "stages")
+      return unless File.directory?(stages)
+
+      unsafe = Dir.glob(File.join(stages, "*", "*", "brainstorm-suggestions.json")).any?
+      unless unsafe
+        unsafe = Dir.glob(File.join(stages, "*", "*", "brainstorm.md")).any? do |path|
+          next true if File.symlink?(path) || !File.file?(path)
+
+          bytes = File.binread(path, Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES + 1)
+          bytes.bytesize > Hive::BrainstormSuggestions::Envelope::MAX_SCAN_BYTES ||
+            bytes.lines.any? { |line| line.match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE) }
+        rescue SystemCallError, IOError
+          true
+        end
+      end
+      return unless unsafe
+
+      raise ConfigError,
+            "brainstorm.suggestions.enabled cannot be false while advisory artifacts remain in " \
+            "#{describe_source(source_path)}; run `hive brainstorm-suggestion cleanup --json` first"
+    end
+    private_class_method :validate_brainstorm_suggestion_disable!
 
     # Shared check used by both validate_reviewers! and
     # validate_role_agent_names!: ensure `agent_name` resolves via

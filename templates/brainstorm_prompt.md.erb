@@ -34,6 +34,13 @@ Behavior:
    then end with `<!-- COMPLETE -->`. Otherwise append `## Round N+1` with
    follow-up questions and end with `<!-- WAITING -->`.
 
+   A region delimited by exact `hive-suggestion:v1` HTML comments is
+   controller-owned advisory text. The complete region is never a filled answer.
+   Ignore its body when deciding whether a question was answered; it
+   must not cause `## Requirements` and must not cause `<!-- COMPLETE -->`.
+   Preserve an untouched region byte-for-byte while its answer slot remains
+   unanswered.
+
 3. Use the `<%= skill_invocation %>` skill for the interview
    structure when available.
 

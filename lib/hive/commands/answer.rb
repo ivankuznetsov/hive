@@ -7,6 +7,7 @@ require "stringio"
 require "hive/attempts/generation"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/brainstorm_parser"
+require "hive/brainstorm_suggestions/projection"
 require "hive/config"
 require "hive/lock"
 require "hive/task_meta"
@@ -83,6 +84,18 @@ module Hive
         generation = task_generation(task, project)
         content = read_brainstorm!(task)
         questions = Hive::BrainstormParser.parse_text(content)
+        suggestion_config = Hive::Config.load(task.project_root).dig("brainstorm", "suggestions")
+        suggestions = if suggestion_config&.fetch("enabled", false)
+          Hive::BrainstormSuggestions::Projection.call(
+            task_root: task.folder,
+            project_root: task.project_root,
+            questions: questions,
+            task_generation: generation,
+            enabled: true
+          )
+        else
+          {}
+        end
 
         # A second identity observation catches a stage move or task replacement
         # during the lock-free, strictly read-only inventory path. A concurrent
@@ -99,6 +112,7 @@ module Hive
           slot_payload(
             question,
             ordinal: index + 1,
+            suggestion: suggestions[index + 1],
             binding: encode_binding(binding_payload(
               task: task, project: project, generation: generation,
               question: question, ordinal: index + 1
@@ -576,7 +590,7 @@ module Hive
         }
       end
 
-      def slot_payload(question, ordinal:, binding: nil)
+      def slot_payload(question, ordinal:, binding: nil, suggestion: nil)
         {
           "ordinal" => ordinal,
           "round" => question.round,
@@ -585,7 +599,8 @@ module Hive
           "answered" => question.answered?,
           "answer" => question.answer,
           "fingerprint" => question_fingerprint(question),
-          "binding" => binding
+          "binding" => binding,
+          "suggestion" => suggestion
         }
       end
 

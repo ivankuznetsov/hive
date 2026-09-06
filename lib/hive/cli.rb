@@ -1211,6 +1211,31 @@ module Hive
       ).call
     end
 
+    desc "brainstorm-suggestion ACTION [TARGET]",
+         "Clean, retry, restore, or dismiss advisory brainstorm state"
+    long_desc <<~DESC, wrap: false
+      Acquires each exact task lock, removes `hive-suggestion:v1` envelopes and
+      brainstorm-suggestions.json sidecars, then verifies parser-visible answers
+      are unchanged. With no TARGET, scans every registered project's task stages.
+
+      A non-clean receipt reports safe_to_disable=false. Do not disable or revert
+      repository-aware suggestions until a cleanup receipt is safe.
+    DESC
+    option :project, type: :string, desc: "scope cleanup to one registered project"
+    option :question, type: :numeric, desc: "task-local question ordinal for candidate actions"
+    option :binding, type: :string, desc: "current input or suggestion binding"
+    def brainstorm_suggestion(action = nil, target = nil)
+      require "hive/commands/brainstorm_suggestion"
+      Hive::Commands::BrainstormSuggestion.new(
+        action,
+        target: target,
+        project: options[:project],
+        question: options[:question],
+        binding: options[:binding],
+        json: options[:json]
+      ).call
+    end
+
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks.
     long_desc <<~DESC, wrap: false

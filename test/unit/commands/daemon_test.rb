@@ -182,6 +182,31 @@ class HiveCommandsDaemonTest < Minitest::Test
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 
+  def test_non_dry_run_wires_the_brainstorm_suggestion_scheduler
+    command = daemon("start", dry_run: false)
+    dispatcher = FakeDispatcher.new([])
+    scheduler = Object.new
+    captured = nil
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_global_start_config(daemon_config) do
+        with_replaced_singleton_method(
+          Hive::Daemon::BrainstormSuggestionScheduler, :new,
+          ->(logger:) { logger; scheduler }
+        ) do
+          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+            captured = kwargs
+            dispatcher
+          }) do
+            command.call
+          end
+        end
+      end
+    end
+
+    assert_same scheduler, captured.fetch(:brainstorm_suggestion_scheduler)
+  end
+
   def test_start_holds_activation_lock_until_runtime_readiness_is_published
     activation_lock = FakeActivationLock.new
     command = daemon(

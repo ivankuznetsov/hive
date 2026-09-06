@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/brainstorm_suggestions/envelope"
 require "hive/daemon/auto_retry_safety"
 
 class HiveDaemonAutoRetrySafetyTest < Minitest::Test
@@ -153,6 +154,28 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
       MD
 
       ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "2-brainstorm"))
+
+      assert_equal true, ok
+      assert_includes reason, "no brainstorm answers"
+    end
+  end
+
+  def test_brainstorm_suggestion_envelope_is_not_mutable_answer_state
+    with_tmp_dir do |dir|
+      envelope = Hive::BrainstormSuggestions::Envelope.render(
+        binding: "a" * 64, text: "Advisory candidate"
+      )
+      File.write(File.join(dir, "brainstorm.md"), <<~MD)
+        ## Round 1
+        ### Q1. What?
+        ### A1.
+        #{envelope}
+        <!-- WAITING -->
+      MD
+
+      ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
+        row(folder: dir, stage: "2-brainstorm")
+      )
 
       assert_equal true, ok
       assert_includes reason, "no brainstorm answers"

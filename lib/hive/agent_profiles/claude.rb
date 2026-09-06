@@ -12,6 +12,7 @@ module Hive
       policy_capabilities: %i[
         tools directories commands domains settings_isolation mcp_isolation
         environment_isolation
+        brainstorm_suggestion_data_only
       ],
       skill_verifier: Hive::AgentSupport.skill_verifier(:claude),
       default_model_resolver: Hive::AgentSupport.model_resolver(:claude),

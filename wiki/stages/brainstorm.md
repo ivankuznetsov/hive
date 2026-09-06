@@ -1,13 +1,13 @@
 ---
 title: 2-brainstorm stage
 type: stage
-source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
+source: lib/hive/stages/brainstorm.rb, lib/hive/brainstorm_suggestions/, lib/hive/daemon/brainstorm_suggestion_scheduler.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/{brainstorm,brainstorm_suggestion}_prompt.md.erb
 created: 2026-04-25
-updated: 2026-07-25
-tags: [stage, brainstorm, qa, tmux]
+updated: 2026-08-31
+tags: [stage, brainstorm, qa, tmux, suggestions, advisory, sandbox]
 ---
 
-**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Process exit and attempt receipts are not completion evidence by themselves: WAITING must contain a numbered Round, COMPLETE must contain non-empty Requirements, and a failed spawn cannot reuse an unchanged stale artifact. When the resolved `brainstorm.agent` is Claude, launch shape comes from project-global `claude.mode`: `tmux` runs Claude inside a managed attachable tmux session via `Hive::ClaudeLauncher`, while `headless` uses the normal non-interactive profile path. Legacy `brainstorm.runtime` is still read only when `claude.mode` is absent, and `hive doctor` advises migrating it.
+**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Only after those questions are published, the daemon may generate one repository-aware advisory suggestion for each unanswered slot; suggestions never count as answers or block manual input. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Process exit and attempt receipts are not completion evidence by themselves: WAITING must contain a numbered Round, COMPLETE must contain non-empty Requirements, and a failed spawn cannot reuse an unchanged stale artifact. When the resolved `brainstorm.agent` is Claude, launch shape comes from project-global `claude.mode`: `tmux` runs Claude inside a managed attachable tmux session via `Hive::ClaudeLauncher`, while `headless` uses the normal non-interactive profile path. Legacy `brainstorm.runtime` is still read only when `claude.mode` is absent, and `hive doctor` advises migrating it.
 
 ## Setup
 
@@ -36,6 +36,124 @@ tags: [stage, brainstorm, qa, tmux]
   artifact admits one repair attempt for that task generation, regardless of
   which request ID observes it. Once that repair terminalizes, its newest
   receipt is replayed instead of admitting an unbounded repair loop.
+
+## Repository-aware answer suggestions
+
+The ordinary brainstorm producer publishes a complete `WAITING` round first.
+`Hive::Daemon::BrainstormSuggestionScheduler` then inventories every active
+coding task at `2-brainstorm`, creates missing records for every unanswered
+physical slot, and runs the advisory pass asynchronously. This reconciliation
+also covers rounds created before the feature existed and a crash between
+question publication and sidecar seeding. Generation never owns the answer
+lock long enough to block an operator from typing or submitting an answer.
+
+### Canonical state and freshness
+
+`brainstorm-suggestions.json` at the active task root is the owner-private
+canonical store. It contains only bounded lifecycle metadata and validated
+candidate fields; raw repository context and rejected provider output are
+never persisted. Missing records project as `loading`. The closed states are
+`loading`, `fresh`, `stale`, `no_safe_suggestion`, `unavailable`, and `failed`.
+Only a current, non-dismissed `fresh` record may expose `text`, `rationale`, or
+provenance. Every other state projects null text and a bounded safe reason.
+
+The `input_binding` covers the task incarnation/generation, brainstorm
+generation, physical question identity and text, the exact selected manifest
+(path, mode, content digest, source class, recipe name/version), and preceding
+durably parsed operator answers. Repository-global `HEAD` is recorded only as
+diagnostic metadata and is deliberately absent from freshness. A
+`suggestion_binding` adds immutable attempt/candidate identity. Any binding
+change hides the old candidate synchronously.
+
+Capture runs outside the task lock. The scheduler briefly reacquires the exact
+task lock to re-resolve stage/question/answer identity and compare-and-swap the
+request or result, then re-observes the selected manifest after publication.
+A late result cannot recreate a moved folder, overwrite a newer attempt, or
+survive an operator answer.
+
+### Eligible evidence and admission
+
+The current `tracked-relevance` recipe (version 2) admits:
+
+- the task request;
+- bounded text files already in Git's index, read from the working tree so
+  tracked staged/unstaged changes and deletions overlay committed blobs;
+- bounded tracked `wiki/` files and relevant Markdown from a validated
+  `.llm-wiki/config.json` `main_wiki_path`; and
+- only durably parsed answers from preceding physical slots.
+
+Untracked and ignored files are never enumerated. Relevant committed files are
+selected deterministically, while tracked overlay paths are prioritized within
+the same file/byte bounds. Conflicts, submodules, symlinks, special files,
+descriptor races, oversized/binary/non-UTF-8 content, and secret-bearing
+repository/wiki entries fail closed or are excluded. Task and settled-answer
+text is redacted before use. External main-wiki reads are normalized to valid
+UTF-8 before safety screening, and capture-cache hits return independent
+mutable strings so selection cannot mutate or freeze another reader's value.
+Every excerpt is labelled as untrusted data.
+
+The configured provider is launchable only when its profile proves the
+`brainstorm_suggestion_data_only` capability. The shipped implementation
+currently admits Claude only. Hive constructs a controller-owned Bubblewrap
+runtime with no live project/task mount, an immutable `/bundle`, empty
+settings/MCP configuration, disabled shell/network tools and slash commands,
+and one schema-constrained stdout result channel. The sandbox retains network
+transport only for the controller-owned Claude CLI to reach its provider API;
+the model receives no network tool. Unsupported profiles,
+missing Bubblewrap, missing binaries, or unavailable isolation become
+`unavailable` and are not launched. Runtime roots and directories are `0700`;
+bundle/auth files are `0400`; every success, failure, timeout, TERM/KILL, and
+spawn-error path removes the runtime. Daemon startup sweeps inactive
+owner-matching runtime roots.
+
+Admission accepts at most 1,000 UTF-8 characters and 12 lines of safe plain
+text plus a short rationale. Fences, structural Markdown/HTML, controls,
+prompt-control phrases, and secret patterns are rejected. Provider source
+claims must be a nonempty subset of manifest classes, but Hive replaces them
+with the controller-derived set actually present in the admitted manifest.
+Weak, conflicting, sensitive, malformed, or unsafe output exposes no
+actionable text.
+
+### Regeneration and authority
+
+The default `brainstorm.suggestions` block keeps generation disabled until an
+operator explicitly sets `enabled: true`. Once enabled, it uses one configured
+worker, allows three automatic attempts per input epoch, uses a five-second task-wide
+coalescing window, waits at least 300 seconds between automatic retries, and
+caps capture/provider work at 5/120 seconds. Backoff is jittered. There is one
+active request per question/input binding and only one launch per task window;
+an exhausted slot cannot consume that window. A new selected-input epoch resets
+the budget, while unrelated commits and Hive marker commits do not.
+
+`hive answer --json`, TUI, and Web consume the same sidecar projection. TUI
+uses an exact `hive-suggestion:v1` comment envelope under the answer heading;
+the parser, completeness check, first-pass prompt, and writer strip that whole
+region before deciding whether a slot is answered. Web Approve/Undo and
+Decline/Restore are browser-only presentation state. Retry/Restore/dismissal,
+projection, persistence, and generation cannot write an answer, completion
+marker, attempt, dispatch, or stage transition. Only the operator's saved TUI
+adoption or Web **Send answers** submission reaches the existing answer
+writer. Telegram and Guided/YOLO answer behavior is unchanged.
+
+### Ownership cleanup and downgrade
+
+Persisting an answer, removing a question, or leaving `2-brainstorm` cancels
+matching workers and removes actionable sidecar/envelope state under the task
+lock. Later stages, supporting artifacts, state commits, and archives must not
+retain candidate text.
+
+Before disabling, reverting, or downgrading this feature, run:
+
+```bash
+hive brainstorm-suggestion cleanup --json
+```
+
+With no target the command visits registered task stages under each exact task
+lock, strips every reserved envelope, removes every sidecar, verifies parsed
+operator answers are byte-for-byte unchanged, and emits an idempotent bounded
+receipt. Proceed only when `safe_to_disable` is true. Configuration validation
+refuses `brainstorm.suggestions.enabled: false` while any advisory artifact
+remains, making this cleanup a mandatory compatibility fence for older parsers.
 
 ## Agent behaviour (per `templates/brainstorm_prompt.md.erb`)
 

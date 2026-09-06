@@ -21,6 +21,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/plan_review/transition_guard"
 require "hive/task_activity"
+require "hive/brainstorm_suggestions/transition_cleanup"
 
 module Hive
   module Commands
@@ -399,6 +400,10 @@ module Hive
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
+              end
+              brainstorm_stage = task.workflow.stage_named("brainstorm")
+              if task.stage_name == brainstorm_stage&.name && dest_stage != brainstorm_stage.dir
+                Hive::BrainstormSuggestions::TransitionCleanup.call_under_lock(task.folder)
               end
               new_folder = move_task!(task, dest_stage)
             end

@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+{
+  IFS= read -r repository_path
+  IFS= read -r task_path
+  IFS= read -r alternate_path
+  IFS= read -r network_port
+} < /bundle/probes.txt
+
+repository=false
+task=false
+shell_tool=true
+network=false
+escape=false
+alternate=false
+
+test ! -r "$repository_path" || repository=true
+test ! -r "$task_path" || task=true
+test ! -r "/bundle/../../..${repository_path}" || escape=true
+if printf '%s\n' "$@" | grep -qx -- '--tools'; then
+  previous=
+  for argument in "$@"; do
+    if test "$previous" = '--tools' && test -z "$argument"; then shell_tool=false; fi
+    previous=$argument
+  done
+fi
+if (printf 'probe\n' > "$alternate_path") 2>/dev/null; then alternate=true; fi
+/usr/bin/curl --silent --max-time 1 "http://127.0.0.1:${network_port}/" >/dev/null 2>&1 && network=true || true
+
+printf '{"structured_output":{"disposition":"suggestion","text":"repository=%s task=%s shell=%s network=%s escape=%s alternate=%s","rationale":"The live sandbox probe completed.","provenance":["repository"]}}\n' \
+  "$repository" "$task" "$shell_tool" "$network" "$escape" "$alternate"

@@ -33,7 +33,10 @@ class HiveCommandsAnswerTest < Minitest::Test
         hive_state = File.join(project, ".hive-state")
         folder = File.join(hive_state, "stages", "2-brainstorm", SLUG)
         FileUtils.mkdir_p(folder)
-        File.write(File.join(hive_state, "config.yml"), {}.to_yaml)
+        File.write(
+          File.join(hive_state, "config.yml"),
+          { "brainstorm" => { "suggestions" => { "enabled" => true } } }.to_yaml
+        )
         Hive::TaskMeta.write(
           folder,
           id: Digest::SHA256.hexdigest(File.expand_path(folder))[0, 12].to_i(16),
@@ -87,8 +90,25 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal 3, payload.fetch("unanswered_count")
       assert_equal false, payload.fetch("complete")
       assert payload.fetch("slots").all? { |slot| slot.fetch("binding").match?(/\A[A-Za-z0-9_-]+\z/) }
+      assert_equal %w[loading loading loading],
+                   payload.fetch("slots").map { |slot| slot.dig("suggestion", "state") }
+      assert payload.fetch("slots").all? { |slot| slot.dig("suggestion", "text").nil? }
       assert_equal before, File.binread(path)
       refute Hive::Lock.task_lock_held?(folder), "read-only inventory must not publish a task lease"
+      assert_schema(payload)
+    end
+  end
+
+  def test_inventory_omits_suggestions_when_the_feature_is_disabled
+    with_project do |project, _folder, _path|
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        { "brainstorm" => { "suggestions" => { "enabled" => false } } }.to_yaml
+      )
+
+      payload = inventory
+
+      assert payload.fetch("slots").all? { |slot| slot["suggestion"].nil? }
       assert_schema(payload)
     end
   end

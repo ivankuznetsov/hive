@@ -32,6 +32,26 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
+  def test_brainstorm_suggestion_action_flash_bounds_every_failure_state
+    row = make_task_row(slug: "suggestion-task")
+
+    assert_equal "no suggestion available to retry for suggestion-task",
+                 @model.send(
+                   :brainstorm_suggestion_action_flash, "retry", row,
+                   { "status" => "not_found" }
+                 )
+    assert_equal "suggestion retry deferred — task is busy",
+                 @model.send(
+                   :brainstorm_suggestion_action_flash, "retry", row,
+                   { "status" => "lock_busy" }
+                 )
+    assert_equal "suggestion retry unavailable for suggestion-task",
+                 @model.send(
+                   :brainstorm_suggestion_action_flash, "retry", row,
+                   { "status" => "unavailable" }
+                 )
+  end
+
   def key_message(key_type, runes: [])
     Bubbletea::KeyMessage.new(key_type: key_type, runes: runes)
   end
@@ -3746,6 +3766,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # ---- OpenInputEditor → foreground editor takeover ----
 
+  def test_brainstorm_suggestion_restore_and_retry_only_update_advisory_state
+    row = make_task_row
+    calls = []
+    restore = ->(root) { calls << [ :restore, root ]; { "status" => "updated" } }
+    retry_action = ->(root) { calls << [ :retry, root ]; { "status" => "updated" } }
+
+    with_replaced_singleton_method(Hive::Tui::BrainstormSuggestions, :restore!, restore) do
+      with_replaced_singleton_method(Hive::Tui::BrainstormSuggestions, :retry!, retry_action) do
+        restored, restore_cmd = @model.update(
+          Hive::Tui::Messages::RestoreBrainstormSuggestion.new(row: row)
+        )
+        restore_flash = restored.hive_model.flash
+        retried, retry_cmd = @model.update(
+          Hive::Tui::Messages::RetryBrainstormSuggestion.new(row: row)
+        )
+
+        assert_nil restore_cmd
+        assert_nil retry_cmd
+        assert_match(/restore queued/, restore_flash)
+        assert_match(/retry queued/, retried.hive_model.flash)
+      end
+    end
+    assert_equal [ [ :restore, row.folder ], [ :retry, row.folder ] ], calls
+    assert_empty @messages, "advisory controls must not dispatch workflow messages"
+  end
+
   def test_open_input_editor_returns_sequence_command_and_dispatches_result
     row = make_task_row(state_file: "/tmp/hive/some-slug/brainstorm.md")
     seen_editor_invocation = nil
@@ -4840,6 +4886,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert File.directory?(target), "manual archive target must exist"
       assert_match(/archived manual-task/, @model.hive_model.flash)
       assert_match(/shipped/, @model.hive_model.flash)
+    end
+  end
+
+  def test_agent_steer_exited_cleans_suggestion_state_before_archiving
+    config = { "brainstorm" => { "suggestions" => { "enabled" => true } } }
+    with_manual_task_context(config: config) do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      brainstorm = File.join(folder, "brainstorm.md")
+      File.write(
+        brainstorm,
+        "### Q1. Scope?\n\n### A1.\n" \
+        "#{Hive::BrainstormSuggestions::Envelope.render(binding: 'b' * 64, text: 'Candidate')}" \
+        "\n<!-- WAITING -->\n"
+      )
+      sidecar = File.join(folder, Hive::BrainstormSuggestions::Store::FILENAME)
+      File.write(sidecar, "private suggestion state")
+      File.chmod(0o600, sidecar)
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug, folder: folder, exit_code: 0, worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      target = File.join(hive_state, "stages", "archived-manual", row.slug)
+      assert File.directory?(target), @model.hive_model.flash.to_s
+      refute_includes File.read(File.join(target, "brainstorm.md")), "hive-suggestion:v1"
+      refute File.exist?(File.join(target, Hive::BrainstormSuggestions::Store::FILENAME))
     end
   end
 

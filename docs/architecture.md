@@ -191,6 +191,14 @@ hive_state_path: .hive-state
 
 brainstorm:
   agent: claude
+  suggestions:
+    enabled: true
+    agent: claude
+    capture_timeout_sec: 5
+    timeout_sec: 120
+    coalesce_window_sec: 5
+    min_retry_interval_sec: 300
+    max_automatic_attempts: 3
 plan:
   agent: claude
 execute:
@@ -327,8 +335,9 @@ models:
     model: gpt-5.6-sol
 ```
 
-`execute_implementation` inherits `execute.effort`; `review_fix` inherits
-`review.effort`. The project keys are `brainstorm`, `plan`, `plan_review`,
+`brainstorm_suggestion` inherits `brainstorm`; `execute_implementation`
+inherits `execute.effort`; `review_fix` inherits
+`review.effort`. The project keys are `brainstorm`, `brainstorm_suggestion`, `plan`, `plan_review`,
 `plan_review_adversarial`, `plan_review_verification`, `execute`,
 `execute_implementation`, `rebase`, `diagnose`, `babysitter`, `review`,
 `review_ci`, `review_reviewers`, `review_triage`, `review_fix`,
@@ -341,7 +350,7 @@ generation-scoped implementation identity. Retrying that generation does not
 re-read edited routing config; a new generation may capture new values. Hive
 also routes the direct and shared-session reviewer adapters, triage,
 browser-test, rebase, diagnosis, babysitter, ordinary patrol, Architecture
-Patrol, brainstorm, plan, artifacts, and finalize at their trusted launch
+Patrol, brainstorm, repository-aware brainstorm suggestions, plan, artifacts, and finalize at their trusted launch
 seams. Shared Claude sessions are grouped by both effective permission scope
 and routed model/effort so one process cannot leak its identity into another
 reviewer.

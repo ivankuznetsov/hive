@@ -138,7 +138,7 @@ class TuiHelpTest < Minitest::Test
       open_contextual open_task_folder open_idea_preview implementation_identity open_in_agent
       filter project_scope help quit token_stats archive_pane
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
-      drop_task
+      drop_task restore_suggestion retry_suggestion
     ]
     Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|
       action = entry[:action]
@@ -152,6 +152,18 @@ class TuiHelpTest < Minitest::Test
         flunk "BINDINGS references unknown action: #{action.inspect} (key=#{entry[:key]})"
       end
     end
+  end
+
+
+  def test_brainstorm_suggestion_recovery_bindings_are_advisory
+    grid = Hive::Tui::Help::BINDINGS.select { |entry| entry[:mode] == :grid }
+    restore = grid.find { |entry| entry[:key] == "u" }
+    retry_entry = grid.find { |entry| entry[:key] == "R" }
+
+    assert_equal :restore_suggestion, restore.fetch(:action)
+    assert_match(/dismissed/i, restore.fetch(:description))
+    assert_equal :retry_suggestion, retry_entry.fetch(:action)
+    assert_match(/without writing an answer/i, retry_entry.fetch(:description))
   end
 
   def test_binding_for_i_exists_in_grid_mode

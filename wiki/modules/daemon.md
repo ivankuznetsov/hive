@@ -4,7 +4,7 @@ type: module
 source: lib/hive/daemon/
 created: 2026-05-06
 updated: 2026-08-30
-tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage]
+tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, brainstorm, suggestions]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
@@ -101,6 +101,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::ActivationLock` | `lib/hive/daemon/activation_lock.rb` | Stable, owner-bound, never-unlinked profile flock held by daemon startup through generation-bound runtime readiness. Unsafe paths, replacement inodes, and bounded contention fail closed. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared read-only `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, suppresses update-state orphan cleanup, bounds `installed_binary --version` probes to 10s, treats a stable service symlink and its current deployment target as the same binary by filesystem identity, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest, patrol discovery, and the hidden single-launch Patrol Fix semantic-decision child. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. Ancillary exits reaped during graceful shutdown are returned to the dispatcher and use the same scheduler-completion path as ordinary tick reaps; Patrol Fix additionally binds each completion to its exact durable AdmissionStore reservation and lease. |
+| `Hive::Daemon::BrainstormSuggestionScheduler` | `lib/hive/daemon/brainstorm_suggestion_scheduler.rb` | Reconciles every unanswered physical slot in active coding `2-brainstorm` waiting rounds, including missing pre-feature/crash-window records. It captures selected evidence outside task locks, performs short locked identity/CAS checks, launches cancellation-bound data-only workers, re-observes freshness after publication, and owns task-wide coalescing, per-epoch retry bounds, restart recovery, terminal cleanup, and runtime-bundle sweeping. It cannot dispatch a workflow or persist an answer. |
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and advances the projection: a terminal `succeeded` receipt is satisfied, ordinary failed/cancelled/lost outcomes fail closed, and exit `75 (TEMPFAIL)` remains a scheduler-owned pending retry rather than an agent-health failure. A valid checkpoint supplies the restart idempotency and generation facts, so retained pre-cutover history is not strictly replayed; absent or invalid checkpoints retain the fail-closed full-replay path. Confirmed deliveries are memoized in-process before task lookup. A deleted task folder is `not_applicable`, not perpetually pending. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Durable TEMPFAIL admission holds emit the closed `attempt_transient_retry` event and a scheduler-owned operational disposition. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises), with source-parity coverage for both inline and multiline literal event calls so supervised Patrol Fix semantic completion cannot terminate the daemon through enum drift. Size-rotated. |
@@ -812,6 +813,53 @@ This is surface-agnostic: it holds whether answers arrive incrementally
 via the bot or all at once via a direct edit. The bot's own "all
 answered → enqueue a dispatch request" path then just races the row-scan
 to the same gate; the per-slug in-flight gate dedups.
+
+## Brainstorm suggestion scheduler
+
+`Dispatcher#startup!` asks the suggestion scheduler to sweep inactive
+controller-owned bundle roots before the first provider launch. Each daemon
+tick calls it after task observation; partial observations reconcile the exact
+rows they contain without treating omitted fleet rows as departed, while a
+complete observation also cancels work for tasks no longer active.
+
+For one eligible task, reconciliation follows this order:
+
+1. Parse `brainstorm.md`, derive stable task/question/brainstorm identities,
+   and inventory every unanswered physical slot. Under the exact task lock,
+   seed missing records, mark changed records stale with null actionable
+   fields, and prune answered/removed slots.
+2. Capture each selected repository/wiki bundle outside the task lock with the
+   configured deadline. A simultaneous operator answer therefore wins without
+   waiting for Git/context work.
+3. Reacquire the task lock, re-resolve the same unanswered slot and generation,
+   enforce request due/attempt/coalescing policy, and compare-and-swap one
+   loading attempt. An exhausted slot is terminalized before the task launch
+   window is reserved, so it cannot starve a later question.
+4. Run the profile-gated worker with a cancellation token. On completion,
+   recheck task/stage/question/attempt/input identity under the lock before
+   accepting the validated result, then observe the selected manifest again.
+   Drift discards/hides the candidate and schedules bounded regeneration.
+
+The scheduler maintains one active job for each task/question and one
+task-wide next-launch timestamp. Pending slots are interleaved across tasks,
+and both task and question starting points rotate between ticks so a task with
+many not-yet-due slots cannot monopolize the bounded worker pool. The current
+input binding is also its input
+epoch: a new selected manifest or settled-answer generation resets the
+automatic attempt budget; same-epoch failures use minimum-delay plus bounded
+exponential jitter. Restarted `loading` records are reconciled rather than
+trusted as live processes. Missing isolation or routing is recorded as
+`unavailable`; timeout, provider exit, malformed structured output, and spawn
+failure are `failed`; safe suppression is `no_safe_suggestion`.
+Inventory conversion and per-row reconciliation are both failure-isolated: a
+malformed observation is logged through the scheduler's closed event enum and
+returns no launches instead of escaping the daemon tick.
+
+Answer persistence and stage transitions invoke the same task-locked cleanup
+boundary: matching jobs are cancelled, sidecar/envelope text is removed, and a
+late result cannot recreate the old folder. This auxiliary lifecycle never
+updates dispatch baselines, answer completeness, stage attempts, workflow
+requests, or task action. See [[stages/brainstorm]] and [[commands/answer]].
 
 ## Persisted dispatch baselines (restart survival)
 

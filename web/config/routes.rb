@@ -76,6 +76,8 @@ Rails.application.routes.draw do
     post "closure" => "tasks/closures#create", as: :task_closure
     post "intervene" => "tasks/interventions#create", as: :task_intervene
     post "answers" => "tasks/answers#create", as: :task_answers
+    post "brainstorm-suggestion/retry" => "tasks/brainstorm_suggestions#create",
+         as: :task_brainstorm_suggestion_retry
     post "plan-review" => "tasks/plan_review_actions#create", as: :task_plan_review_action
   end
 

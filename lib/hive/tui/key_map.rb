@@ -1,5 +1,6 @@
 require "shellwords"
 require "hive/markers"
+require "hive/stages"
 require "hive/task_action"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
@@ -133,10 +134,19 @@ module Hive
           return Messages::OpenImplementationIdentityDetail.new(row: row)
         end
         return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
+        if pane_focus == :right && brainstorm_suggestion_row?(row)
+          return Messages::RestoreBrainstormSuggestion.new(row: row) if key == "u"
+          return Messages::RetryBrainstormSuggestion.new(row: row) if key == "R"
+        end
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 
         Messages::NOOP
+      end
+
+      def brainstorm_suggestion_row?(row)
+        row.stage.to_s == Hive::Stages::SHORT_TO_FULL.fetch("brainstorm") &&
+          row.action_key.to_s == "needs_input"
       end
 
       # Keys that work even when the cursor sits on an empty grid; row

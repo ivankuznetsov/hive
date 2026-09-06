@@ -7,11 +7,9 @@ class ModelRoutingSurfaceTest < Minitest::Test
   include HiveTestHelper
 
   Task = Struct.new(:folder, :state_file, :log_dir, :stage_name, keyword_init: true)
-  INHERITANCE_ONLY_KEYS = %w[plan_review execute review patrol].freeze
+  INHERITANCE_ONLY_KEYS = %w[brainstorm plan_review execute review patrol].freeze
   ROUTE_LAUNCH_SOURCES = {
-    "brainstorm" => %w[
-      lib/hive/stages/brainstorm.rb
-    ],
+    "brainstorm_suggestion" => %w[lib/hive/daemon/brainstorm_suggestion_scheduler.rb],
     "plan" => %w[lib/hive/stages/plan.rb],
     "plan_review_adversarial" => %w[lib/hive/plan_review/route_resolver.rb],
     "plan_review_verification" => %w[lib/hive/plan_review/route_resolver.rb],

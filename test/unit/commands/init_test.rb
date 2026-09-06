@@ -107,6 +107,7 @@ class HiveCommandsInitTest < Minitest::Test
 
   def test_project_config_renders_adhoc_auto_fix_choice
     disabled = render_fresh_config(:coding)
+    assert_equal false, YAML.safe_load(disabled).dig("brainstorm", "suggestions", "enabled")
     assert_match(/github_publish:\n    enabled: true\n    max_attempts: 2/, disabled)
     assert_match(/adhoc:\n    reviewers: null\n    fix: false/, disabled)
 

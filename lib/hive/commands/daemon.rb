@@ -17,6 +17,7 @@ require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/answer_digest_scheduler"
+require "hive/daemon/brainstorm_suggestion_scheduler"
 require "hive/daemon/logger"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
@@ -268,6 +269,9 @@ module Hive
           ),
           logger: logger
         )
+        brainstorm_suggestion_scheduler = unless @dry_run
+          Hive::Daemon::BrainstormSuggestionScheduler.new(logger: logger)
+        end
 
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
@@ -315,6 +319,7 @@ module Hive
           patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
           patrol_arbiter: patrol_arbiter,
           answer_digest_scheduler: answer_digest_scheduler,
+          brainstorm_suggestion_scheduler: brainstorm_suggestion_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new,
           attempt_dispatcher: attempts_api,

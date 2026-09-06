@@ -784,6 +784,21 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
+  def test_answer_cleanup_does_not_undo_an_authoritative_write_when_sidecar_cleanup_fails
+    store = Object.new
+    store.define_singleton_method(:delete_question!) do |**|
+      raise Hive::BrainstormSuggestions::UnsafePath, "unsafe sidecar"
+    end
+
+    with_replaced_singleton_method(
+      Hive::BrainstormSuggestions::Store, :new, ->(*) { store }
+    ) do
+      assert_nil Hive::Bot::BrainstormAnswerWriter.send(
+        :cleanup_suggestion_record, "/tmp/task/brainstorm.md", 1
+      )
+    end
+  end
+
   def with_short_deadline(&block)
     with_deadline(0.1, &block)
   end

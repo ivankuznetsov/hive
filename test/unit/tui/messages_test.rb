@@ -63,6 +63,17 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_brainstorm_suggestion_actions_carry_only_the_row
+    row = Object.new
+    restore = Hive::Tui::Messages::RestoreBrainstormSuggestion.new(row: row)
+    retry_message = Hive::Tui::Messages::RetryBrainstormSuggestion.new(row: row)
+
+    assert_same row, restore.row
+    assert_same row, retry_message.row
+    assert restore.frozen?
+    assert retry_message.frozen?
+  end
+
   def test_open_idea_preview_carries_row
     row = Object.new
     msg = Hive::Tui::Messages::OpenIdeaPreview.new(row: row)

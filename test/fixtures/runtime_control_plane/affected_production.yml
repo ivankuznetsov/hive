@@ -6,9 +6,9 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 9053
-outside_inventory_net_lines: -7983
-final_lines: 1070
+final_inventory_lines: 9081
+outside_inventory_net_lines: -7980
+final_lines: 1101
 final_paths:
 - path: lib/hive/agent_git_gate/isolation.rb
   lines: 291
@@ -53,13 +53,13 @@ final_paths:
 - path: lib/hive/runtime_control_plane/cutover_manifest.rb
   lines: 114
 - path: lib/hive/runtime_control_plane/database.rb
-  lines: 366
+  lines: 395
 - path: lib/hive/runtime_control_plane/dispatch_repository.rb
   lines: 773
 - path: lib/hive/runtime_control_plane/maintenance.rb
   lines: 113
 - path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
-  lines: 283
+  lines: 282
 - path: lib/hive/runtime_control_plane/operational_repository.rb
   lines: 63
 - path: lib/hive/runtime_control_plane/payload_store.rb

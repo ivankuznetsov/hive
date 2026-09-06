@@ -97,8 +97,7 @@ Sequel.migration do
 
     create_table(:attempts) do
       String :attempt_id, primary_key: true, null: false
-      foreign_key :request_id, :dispatch_requests, type: String, key: :request_id,
-                  on_delete: :set_null, on_update: :cascade
+      String :request_id # Immutable provenance, not ownership by the disposable queue row.
       foreign_key :project_id, :projects, type: String, key: :project_id,
                   null: false, on_delete: :cascade, on_update: :cascade
       foreign_key :task_id, :task_subjects, type: String, key: :task_id,

@@ -1412,3 +1412,11 @@ prevents lower-priority leapfrogging, but a rare project-only race can leave an
 unrelated slot unused for the full-scan interval plus scan time. Keep this gap
 open until durable admission emits a typed capacity scope that the row
 scheduler can preserve directly.
+## Attempt request-provenance upgrade awaits deployment (2026-09-06)
+
+The exact-schema upgrade removing the dispatch-request foreign key is tested
+against a reconstructed copy of the preceding schema, including row preservation
+and transaction rollback. It has not been applied to dogfood. Stop all writers
+and take an external SQLite backup before the explicit upgrade described in
+[[modules/attempts]]. Request IDs already cleared by the old foreign key are not
+recovered by this change; retained IDs and future attempts are preserved.

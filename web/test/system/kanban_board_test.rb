@@ -3,7 +3,7 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
-  test "operator follows an ordinary hidden summary into the complete archive and task detail" do
+  test "operator opens the complete archive and task detail on demand" do
     project = create_hive_project!("kanban-archive-app")
     slug = create_task!(project, "Keep the complete archive reachable")
     source = stage_dir(project, "1-inbox").join(slug)
@@ -18,8 +18,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
     sign_in!
 
     assert_no_selector ".kanban-card[data-task-slug='#{slug}']"
-    find(".archive-summary a", text: "… and 1 older archived task (hive archive to view)").click
-    assert_current_path archive_path(project:)
+    find(".status-archive-link", text: "Archive").click
+    assert_current_path archive_path
     assert_selector "#status-archive [data-task-slug='#{slug}']"
 
     find("[data-task-slug='#{slug}'] a", text: "Keep the complete archive reachable").click

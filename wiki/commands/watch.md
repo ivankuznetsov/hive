@@ -3,13 +3,15 @@ title: hive watch
 type: command
 source: lib/hive/commands/watch.rb, lib/hive/operational_status.rb, lib/hive/commands/status.rb
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-08-28
 tags: [command, watch, agents, status, jsonl, observability]
 ---
 
 **TLDR**: `hive watch` is a bounded, read-only semantic observer for agents.
-It resolves selected tasks once from one complete status graph, emits an
-initial event and only meaningful transitions, then emits a final event on the
+It resolves explicit tasks from one exact-target status projection with
+authoritative dependency admission (or uses
+the active project projection for `--project` selection), emits an initial
+event and only meaningful transitions, then emits a final event on the
 requested terminal condition, timeout, event cap, interruption, or source
 failure. It replaces shell polling loops; machine mode is JSON Lines.
 
@@ -25,9 +27,10 @@ hive watch PROJECT:SLUG --json-lines --interval 15 --timeout 1800 --max-events 1
 
 Targets are either exact `PROJECT:SLUG` identities or bare slugs. A bare slug
 must resolve uniquely, with `--project` available to disambiguate. With no
-positional targets, `--project` selects that project's active tasks. Selection
-is resolved exactly once from a full `hive-status` graph and is capped at 100
-tasks. The watch pins the selected task id when one is available, so a later
+positional targets, `--project` selects that project's active tasks. Explicit
+targets are exact-loaded across registered projects before selection, including
+retention-hidden archive rows, while project-wide selection stays active-only.
+Selection is capped at 100 tasks. The watch pins the selected task id when one is available, so a later
 task that reuses the same `PROJECT:SLUG` cannot replace it in the stream; the
 original task must either remain present, appear in the verified archive, or
 be reported missing. An initially id-less task is provisionally pinned by its
@@ -38,7 +41,12 @@ multiple physical rows for the selected identity, including an id-less
 active/archive collision, selection refuses the collision and reports the
 distinct row type, stage, and folder alternatives instead of silently
 collapsing them. If an id-less task's physical identity cannot be established,
-selection fails closed before starting the stream.
+selection fails closed before starting the stream. After selection, each poll
+uses the exact bounded task projection for those pinned identities. That
+projection recursively exact-loads only their dependency closure, so a valid
+completed prerequisite keeps its authoritative admission meaning and completion
+remains verifiable without rebuilding the fleet or loading unrelated archive
+rows.
 
 Defaults are `--interval 15`, `--timeout 1800`, `--max-events 100`, and
 `--until settled`. Interval/timeout must be positive finite numbers and the
@@ -98,7 +106,8 @@ fresh `hive status --operational --json` snapshot and use `hive act`.
   collisions and their repair evidence, project selection, bounds, transition
   deduplication, settled/completion termination, archive verification,
   disappearance/source failure budgets, source/identity deadlines,
-  timeout/event caps, signals, EPIPE, JSON Lines, and read-only behavior.
+  timeout/event caps, signals, EPIPE, JSON Lines, exact initial archive lookup,
+  authoritative missing-target decisions, and read-only behavior.
 - `test/e2e/scenarios/watch_semantic_transitions.yml` pins the subprocess
   scenario contract.
 

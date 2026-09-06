@@ -126,6 +126,19 @@ module Hive
       "hive-context-receipt" => 1
     }.freeze
 
+    # The internal v7 envelope survives temporarily while consumers are split,
+    # so every success document names the projection semantics it carries.
+    # Keeping this compatibility marker in the daemon's code-fingerprint file
+    # also forces an already-running daemon to re-exec before it observes the
+    # active-only cutover from a freshly installed CLI.
+    module StatusProjectionKind
+      ORDINARY = "ordinary".freeze
+      ACTIVE = "active".freeze
+      ARCHIVE = "archive".freeze
+      PARTIAL = "partial".freeze
+      ALL = [ ORDINARY, ACTIVE, ARCHIVE, PARTIAL ].freeze
+    end
+
     # Closed enum of Diagnostic.generated_by values accepted by the
     # published status schemas. This is deliberately narrower than
     # AgentProfiles.registered_names because custom profiles are a

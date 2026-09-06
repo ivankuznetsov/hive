@@ -321,7 +321,7 @@ module Hive
         completeness = %w[complete partial unknown].include?(payload["completeness"]) ?
           payload.fetch("completeness") : "unknown"
         heading = "SNAPSHOT #{completeness.upcase} — " \
-                  "#{summary.fetch('active')} active · #{summary.fetch('archived')} archived"
+                  "#{summary.fetch('active')} active · archive on demand"
         task_graph = payload.dig("source", "task_graph") || {}
         if task_graph["provenance"] == "daemon_cache"
           heading += " · task graph cached #{task_graph.fetch('age_seconds').round}s ago"
@@ -586,10 +586,15 @@ module Hive
       # without walking every task directory or rebuilding the fleet-wide
       # dependency graph. Rows with dependencies fail closed until the next
       # authoritative full scan.
-      def daemon_task_payload(projects, now: Time.now.utc)
+      def daemon_task_payload(projects, authoritative_dependencies: false, now: Time.now.utc)
         targets = daemon_task_targets(projects)
         selected = projects.select { |project| targets.key?(project.fetch("name")) }
         workflow_generations = capture_workflow_generations(selected)
+        admission_context = if authoritative_dependencies
+          Hive::DependencySnapshot.targeted_admission_context(
+            projects, targets: targets, workflow_generations: workflow_generations
+          )
+        end
         owns_attempt_store = acquire_status_attempt_store
         {
           "schema" => "hive-status",
@@ -601,7 +606,7 @@ module Hive
             project_payload_or_degraded(
               project,
               project_count: projects.size,
-              admission_context: nil,
+              admission_context: admission_context,
               now: now.utc,
               workflow_generation: workflow_generation_for(project, workflow_generations),
               task_slugs: targets.fetch(project.fetch("name"))
@@ -717,7 +722,7 @@ module Hive
               rows,
               project, project_count, config: config, with_diagnostic: true
             )
-            rows = if incremental
+            rows = if incremental && admission_context.nil?
               annotate_incremental_dependencies(
                 rows, project, config: config, workflow_generation: workflow_generation
               )

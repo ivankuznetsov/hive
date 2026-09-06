@@ -317,6 +317,27 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "a", scoped.projects.first.name
   end
 
+  def test_scope_matches_archive_project_by_path_after_registry_reordering
+    active = sample_payload([
+      { "name" => "b", "path" => "/b", "hive_state_path" => "/b/.hive-state", "tasks" => [] },
+      { "name" => "a", "path" => "/a", "hive_state_path" => "/a/.hive-state", "tasks" => [] }
+    ])
+    archived_a = sample_task(slug: "archived-a")
+    archived_b = sample_task(slug: "archived-b")
+    archive = sample_payload([
+      { "name" => "a", "path" => "/a", "hive_state_path" => "/a/.hive-state",
+        "tasks" => [ archived_a ] },
+      { "name" => "b", "path" => "/b", "hive_state_path" => "/b/.hive-state",
+        "tasks" => [ archived_b ] }
+    ])
+    snapshot = Hive::Tui::Snapshot.from_payload(active, archive_payload: archive)
+
+    scoped = snapshot.scope_to_project_index(1)
+
+    assert_equal [ "b" ], scoped.projects.map(&:name)
+    assert_equal [ "archived-b" ], scoped.archive_rows.map(&:slug)
+  end
+
   def test_scope_to_project_index_out_of_range_returns_empty_projects
     payload = sample_payload([
                                { "name" => "a", "path" => "/a", "hive_state_path" => "/a/.hive-state", "tasks" => [] }
@@ -527,7 +548,7 @@ class TuiSnapshotTest < Minitest::Test
                  "unknown labels keep their JSON order against each other"
   end
 
-  def test_snapshot_uses_producer_rows_and_hidden_count_without_reclassifying_mtime
+  def test_snapshot_uses_producer_rows_without_reclassifying_mtime
     now = Time.utc(2026, 6, 4, 12, 0, 0)
     old_archived = sample_task(slug: "old-archived", stage: "9-done", marker: "complete")
     old_archived["action"] = "archived"
@@ -554,18 +575,15 @@ class TuiSnapshotTest < Minitest::Test
                                                                      old_archived,
                                                                      recent_archived,
                                                                      old_execute
-                                                                   ],
-                                                                   "hidden_archived_task_count" => 2
+                                                                   ]
                                                                  }
                                                                ]))
 
-    visible = snapshot.visible_projection(scope: 0, filter: nil, now: now)
+    visible = snapshot.visible_projection(scope: 0, filter: nil)
 
     assert_equal snapshot.rows, visible.rows
     assert_includes visible.rows.map(&:slug), "old-archived",
                     "Snapshot must not re-evaluate producer rows from task mtime"
-    assert_equal 2, snapshot.hidden_archived_task_count
-    refute_includes Hive::Tui::Snapshot::Row.members, :hidden_archived_task_count
   end
 
   def test_snapshot_keeps_dedicated_archive_rows_separate_from_ordinary_rows
@@ -582,8 +600,7 @@ class TuiSnapshotTest < Minitest::Test
         "name" => "alpha",
         "path" => "/tmp/alpha",
         "hive_state_path" => "/tmp/alpha/.hive-state",
-        "tasks" => [ recent_archived, active ],
-        "hidden_archived_task_count" => 1
+        "tasks" => [ recent_archived, active ]
       }
     ])
     archive = sample_payload([
@@ -600,18 +617,5 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "recent-archived", "active" ].sort, snapshot.rows.map(&:slug).sort
     assert_equal [ "old-archived", "recent-archived" ].sort,
                  snapshot.archive_rows.map(&:slug).sort
-    assert_equal 1, snapshot.hidden_archived_task_count
-  end
-
-  def test_hidden_archived_count_respects_project_scope
-    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
-      { "name" => "alpha", "tasks" => [], "hidden_archived_task_count" => 1 },
-      { "name" => "beta", "tasks" => [], "hidden_archived_task_count" => 2 }
-    ]))
-
-    assert_equal 3, snapshot.hidden_archived_task_count
-    assert_equal 1, snapshot.hidden_archived_task_count(scope: 1)
-    assert_equal 2, snapshot.hidden_archived_task_count(scope: 2)
-    assert_equal 0, snapshot.hidden_archived_task_count(scope: 99)
   end
 end

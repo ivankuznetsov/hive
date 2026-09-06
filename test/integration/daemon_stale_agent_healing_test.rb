@@ -93,8 +93,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
           action: task["action"],
           suggested_command: task["suggested_command"],
           claude_pid_alive: task["claude_pid_alive"],
-          live_task_lock: task["live_task_lock"],
-          diagnostic: task["diagnostic"]
+          live_task_lock: task["live_task_lock"]
         )
       end
     end

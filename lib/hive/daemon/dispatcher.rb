@@ -411,50 +411,6 @@ module Hive
         # normal workflow capacity instead.
         run_patrol_fix_admission_scheduler_tick(now: now)
 
-        # 3c. Project-level patrol scans are not task rows, so they do
-        # not go through Policy. They still pass through the same
-        # daemon.enabled, legacy-layout, dry-run, and concurrency gates
-        # before any subprocess is spawned.
-        patrol_candidates = if @patrol_arbiter
-          begin
-            @patrol_arbiter.candidates(now: now)
-          rescue Hive::Daemon::PatrolArbiter::StateError => e
-            @logger.event(
-              :architecture_patrol_blocked,
-              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
-            )
-            []
-          end
-        else
-          @patrol_scheduler&.tick(now: now)
-        end
-        patrol_events = @patrol_scheduler&.drain_events
-        Array(patrol_events).each do |event|
-          @logger.event(
-            :patrol_recovery_blocked,
-            **event.reject { |key, _value| key == :status }
-          )
-        end
-        architecture_events = @refactor_patrol_scheduler&.drain_events
-        Array(architecture_events).each do |event|
-          @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
-        end
-        Array(patrol_candidates).each do |patrol_dispatch|
-          unless admission_open?
-            unless @patrol_arbiter
-              close_patrol_admission(
-                project: patrol_dispatch[:project],
-                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
-                reserved: patrol_dispatch,
-                now: now
-              )
-            end
-            next
-          end
-
-          dispatch_patrol_with_gates(patrol_dispatch, now: now)
-        end
-
         # 4. Per-row dispatch, later pipeline stages first for fresh rows
         # (see dispatch_priority_order), with aging so old earlier-stage
         # work cannot starve behind a continuous later-stage stream.
@@ -493,6 +449,44 @@ module Hive
           status_payload: result.status_payload,
           now: now
         )
+
+        # Patrol discovery can block on project-level Git/config inspection.
+        # Publish the completed task scheduler snapshot first, then use the
+        # separate patrol concurrency budget for any discovered work.
+        patrol_candidates = if @patrol_arbiter
+          begin
+            @patrol_arbiter.candidates(now: now)
+          rescue Hive::Daemon::PatrolArbiter::StateError => e
+            @logger.event(
+              :architecture_patrol_blocked,
+              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
+            )
+            []
+          end
+        else
+          @patrol_scheduler&.tick(now: now)
+        end
+        Array(@patrol_scheduler&.drain_events).each do |event|
+          @logger.event(:patrol_recovery_blocked, **event.reject { |key, _value| key == :status })
+        end
+        Array(@refactor_patrol_scheduler&.drain_events).each do |event|
+          @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
+        end
+        Array(patrol_candidates).each do |patrol_dispatch|
+          unless admission_open?
+            unless @patrol_arbiter
+              close_patrol_admission(
+                project: patrol_dispatch[:project],
+                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
+                reserved: patrol_dispatch,
+                now: now
+              )
+            end
+            next
+          end
+
+          dispatch_patrol_with_gates(patrol_dispatch, now: now)
+        end
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)

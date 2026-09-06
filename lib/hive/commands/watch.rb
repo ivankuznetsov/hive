@@ -9,10 +9,11 @@ require "hive/terminal_text"
 module Hive
   module Commands
     # A bounded, read-only status observer for agents. Selection is resolved
-    # once from a full task graph; subsequent polls emit only meaningful state
-    # changes and never interpret a missing row as successful completion.
+    # once from an exact-target graph (or the active project graph for
+    # --project); subsequent polls emit only meaningful
+    # state changes and never interpret a missing row as successful completion.
     class Watch
-      SourceSnapshot = Data.define(:operational, :full_graph)
+      SourceSnapshot = Data.define(:operational, :status_payload)
       Selection = Data.define(:project, :slug, :id, :physical_identity) do
         def target = "#{project}:#{slug}"
       end
@@ -43,16 +44,80 @@ module Hive
         end
       end
 
-      # Collects the compatibility graph once and derives the operational view
+      # Collects the active graph once and derives the operational view
       # from that exact object, preventing a watch poll from joining two scans
       # taken at different moments.
       class DefaultSource
+        def initialize
+          @task_references = nil
+          @requested_targets = nil
+          @requested_project = nil
+          @authoritative_targets = {}.freeze
+        end
+
+        def prepare(targets:, project:)
+          @requested_targets = Array(targets).map(&:to_s).freeze
+          @requested_project = project&.to_s
+        end
+
+        def select(selections)
+          @task_references = Array(selections).map(&:target).uniq.freeze
+          @authoritative_targets = @task_references.to_h { |target| [ target, true ] }.freeze
+        end
+
+        def authoritative_target?(target)
+          @authoritative_targets.key?(target.to_s)
+        end
+
         def fetch
           projects = Hive::Config.registered_projects
-          status = Hive::Commands::Status.new(json: true)
-          full_graph = status.json_payload(projects)
-          operational = status.operational_payload(projects, status_payload: full_graph)
-          SourceSnapshot.new(operational: operational, full_graph: full_graph)
+          prepare_task_references(projects) unless @task_references
+          status = Hive::Commands::Status.new(
+            json: true, **(@task_references ? { daemon_tasks: @task_references } : {})
+          )
+          status_payload = if @task_references
+            status.daemon_task_payload(projects, authoritative_dependencies: true)
+          else
+            status.active_payload(projects)
+          end
+          operational = status.operational_payload(projects, status_payload: status_payload)
+          SourceSnapshot.new(operational: operational, status_payload: status_payload)
+        end
+
+        private
+
+        def prepare_task_references(projects)
+          return unless @requested_targets&.any?
+
+          project_names = Array(projects).map { |entry| entry.fetch("name").to_s }
+          references = []
+          authoritative = {}
+          @requested_targets.each do |target|
+            if target.include?(":")
+              project, slug = target.split(":", 2)
+              next if project.empty? || slug.empty?
+              next unless Hive::Stages.task_slug?(slug)
+              next if @requested_project && project != @requested_project
+              next unless project_names.include?(project)
+
+              references << target
+              authoritative[target] = true
+            elsif @requested_project
+              next unless Hive::Stages.task_slug?(target)
+              next unless project_names.include?(@requested_project)
+
+              qualified = "#{@requested_project}:#{target}"
+              references << qualified
+              authoritative[qualified] = true
+            else
+              next unless Hive::Stages.task_slug?(target)
+
+              project_names.each { |name| references << "#{name}:#{target}" }
+              authoritative[target] = true
+            end
+          end
+          @task_references = references.uniq.freeze unless references.empty?
+          @authoritative_targets = authoritative.freeze
         end
       end
 
@@ -89,9 +154,11 @@ module Hive
 
       def run
         validate_options!
+        @source.prepare(targets: @targets, project: @project) if @source.respond_to?(:prepare)
         started_at = @clock.monotonic
         snapshot = initial_snapshot!(started_at)
         current, current_fingerprint = initial_projection!(snapshot, started_at)
+        @source.select(@selection) if @source.respond_to?(:select)
         missing_counts = Hash.new(0)
         non_final_events = 0
 
@@ -249,10 +316,10 @@ module Hive
       def fetch_snapshot!(started_at)
         snapshot = within_deadline(started_at) { @source.fetch }
         unless snapshot.is_a?(SourceSnapshot) && snapshot.operational.is_a?(Hash) &&
-               snapshot.full_graph.is_a?(Hash)
+               snapshot.status_payload.is_a?(Hash)
           raise TypeError, "watch source returned an invalid snapshot"
         end
-        unless snapshot.operational["ok"] == true && snapshot.full_graph["ok"] == true
+        unless snapshot.operational["ok"] == true && snapshot.status_payload["ok"] == true
           raise TypeError, "watch source returned an unsuccessful status payload"
         end
 
@@ -329,7 +396,7 @@ module Hive
 
       def missing_target!(target, snapshot)
         task_graph_status = snapshot.operational.dig("source", "task_graph", "status")
-        if task_graph_status != "complete"
+        if task_graph_status != "complete" && !target_projection_authoritative?(target, snapshot)
           raise StatusUnavailableError,
                 "cannot resolve #{target.inspect} from an incomplete task graph (#{task_graph_status || 'unknown'})"
         end
@@ -337,9 +404,20 @@ module Hive
         raise UsageError, "no task matches #{target.inspect}"
       end
 
+      def target_projection_authoritative?(target, snapshot)
+        return false unless @source.respond_to?(:authoritative_target?)
+        return false unless @source.authoritative_target?(target)
+
+        project_name = target.to_s.split(":", 2).first if target.to_s.include?(":")
+        projects = Array(snapshot.status_payload["projects"])
+        relevant = project_name ?
+          projects.select { |project| project["name"].to_s == project_name } : projects
+        relevant.none? { |project| project["error"] }
+      end
+
       def candidate_index(snapshot)
         full = Hash.new { |hash, key| hash[key] = [] }
-        Array(snapshot.full_graph["projects"]).each do |project|
+        Array(snapshot.status_payload["projects"]).each do |project|
           Array(project["tasks"]).each do |row|
             project_name = (row["project"] || project["name"]).to_s
             slug = row["slug"].to_s
@@ -381,7 +459,7 @@ module Hive
       end
 
       def known_project?(snapshot, project_name, candidates)
-        Array(snapshot.full_graph["projects"]).any? { |project| project["name"] == project_name } ||
+        Array(snapshot.status_payload["projects"]).any? { |project| project["name"] == project_name } ||
           candidates.values.flatten.any? { |entry| entry.fetch(:project) == project_name }
       end
 
@@ -395,7 +473,7 @@ module Hive
           active[key] << row if selected.key?(key)
         end
         archived = Hash.new { |hash, key| hash[key] = [] }
-        Array(snapshot.full_graph["projects"]).each do |project|
+        Array(snapshot.status_payload["projects"]).each do |project|
           Array(project["tasks"]).each do |row|
             next unless row["action"] == "archived"
 

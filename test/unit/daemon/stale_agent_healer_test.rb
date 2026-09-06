@@ -1269,8 +1269,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       live_task_lock: live_task_lock,
       task_lock_pid: task_lock_pid,
       task_lock_process_start_time: task_lock_process_start_time,
-      task_lock_id: task_lock_id,
-      diagnostic: nil
+      task_lock_id: task_lock_id
     )
   end
 

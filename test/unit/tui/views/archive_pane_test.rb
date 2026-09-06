@@ -124,6 +124,30 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
     refute_includes out, "active-task"
   end
 
+  def test_renders_isolated_project_error_with_last_known_archive_rows
+    archive = [
+      {
+        "name" => "de\e[2Jmo",
+        "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state",
+        "error" => "project_load_failed\nretry",
+        "tasks" => [
+          task(slug: "last-known", stage: "9-done", project: "demo", archived: true)
+        ]
+      }
+    ]
+    snap = snapshot([], archive_projects: archive)
+
+    out = Hive::Tui::Views::ArchivePane.render(model(snap), width: 100)
+
+    assert_includes out, "demo: archive unavailable"
+    assert_includes out, "project_load_failed?retry"
+    assert_includes out, "showing last known rows"
+    assert_includes out, "last-known"
+    refute_includes out, "\e[2J"
+    refute_includes out, "project_load_failed\nretry"
+  end
+
   # Wide (CJK) characters occupy two terminal cells. Padding with String's
   # column-naive `ljust` pads to a CHARACTER count, so a wide project name
   # overruns PROJECT_WIDTH and pushes the age column right relative to

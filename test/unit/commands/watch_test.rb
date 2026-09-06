@@ -503,15 +503,15 @@ class CommandsWatchTest < Minitest::Test
     assert_equal "interrupted", final.fetch("reason")
   end
 
-  def test_default_source_projects_one_collected_compatibility_graph
+  def test_default_source_projects_one_collected_active_graph
     projects = [ "/tmp/demo" ]
-    full_graph = { "ok" => true, "projects" => [] }
+    active_payload = { "ok" => true, "projects" => [] }
     operational = { "ok" => true, "tasks" => [] }
     calls = []
     status = Object.new
-    status.define_singleton_method(:json_payload) do |received|
-      calls << [ :json_payload, received ]
-      full_graph
+    status.define_singleton_method(:active_payload) do |received|
+      calls << [ :active_payload, received ]
+      active_payload
     end
     status.define_singleton_method(:operational_payload) do |received, status_payload:|
       calls << [ :operational_payload, received, status_payload ]
@@ -525,16 +525,148 @@ class CommandsWatchTest < Minitest::Test
       }) do
         result = Hive::Commands::Watch::DefaultSource.new.fetch
 
-        assert_same full_graph, result.full_graph
+        assert_same active_payload, result.status_payload
         assert_same operational, result.operational
       end
     end
 
     assert_equal [
       [ :status_new, true ],
-      [ :json_payload, projects ],
-      [ :operational_payload, projects, full_graph ]
+      [ :active_payload, projects ],
+      [ :operational_payload, projects, active_payload ]
     ], calls
+  end
+
+  def test_default_source_switches_to_exact_task_payload_after_selection
+    projects = [ "/tmp/demo" ]
+    exact_graph = { "ok" => true, "partial" => true, "projects" => [] }
+    operational = { "ok" => true, "tasks" => [] }
+    calls = []
+    status = Object.new
+    status.define_singleton_method(:daemon_task_payload) do |received, authoritative_dependencies:|
+      calls << [ :daemon_task_payload, received, authoritative_dependencies ]
+      exact_graph
+    end
+    status.define_singleton_method(:operational_payload) do |received, status_payload:|
+      calls << [ :operational_payload, received, status_payload ]
+      operational
+    end
+    source = Hive::Commands::Watch::DefaultSource.new
+    source.select([
+      Hive::Commands::Watch::Selection.new(
+        project: "demo", slug: "task-260828-abcd", id: 7,
+        physical_identity: nil
+      )
+    ])
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(**options) {
+        calls << [ :status_new, options ]
+        status
+      }) do
+        result = source.fetch
+
+        assert_same exact_graph, result.status_payload
+        assert_same operational, result.operational
+      end
+    end
+
+    assert_equal [
+      [ :status_new, { json: true, daemon_tasks: [ "demo:task-260828-abcd" ] } ],
+      [ :daemon_task_payload, projects, true ],
+      [ :operational_payload, projects, exact_graph ]
+    ], calls
+  end
+
+  def test_default_source_normalizes_qualified_and_project_scoped_targets
+    projects = [ { "name" => "alpha" }, { "name" => "beta" } ]
+    slug = "watch-task-260828-abcd"
+    cases = [
+      [ [ "alpha:#{slug}" ], nil, [ "alpha:#{slug}" ], "alpha:#{slug}" ],
+      [ [ slug ], "beta", [ "beta:#{slug}" ], "beta:#{slug}" ],
+      [ [ slug ], nil, [ "alpha:#{slug}", "beta:#{slug}" ], slug ]
+    ]
+
+    cases.each do |targets, project, expected_references, authoritative_target|
+      source = Hive::Commands::Watch::DefaultSource.new
+      source.prepare(targets: targets, project: project)
+      source.send(:prepare_task_references, projects)
+
+      assert_equal expected_references,
+                   source.instance_variable_get(:@task_references)
+      assert source.authoritative_target?(authoritative_target)
+    end
+  end
+
+  def test_default_source_uses_an_exact_initial_projection_for_an_archived_target
+    projects = [ { "name" => "demo", "path" => "/tmp/demo" } ]
+    archived_snapshot = snapshot(nil, archived: [ legacy_task(id: 7, action: "archived") ])
+    archived_snapshot.operational.dig("source", "task_graph")["status"] = "partial"
+    calls = []
+    status = Object.new
+    status.define_singleton_method(:daemon_task_payload) do |received, authoritative_dependencies:|
+      calls << [ :daemon_task_payload, received, authoritative_dependencies ]
+      archived_snapshot.status_payload
+    end
+    status.define_singleton_method(:operational_payload) do |received, status_payload:|
+      calls << [ :operational_payload, received, status_payload ]
+      archived_snapshot.operational
+    end
+    output = StringIO.new
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(**options) {
+        calls << [ :status_new, options ]
+        status
+      }) do
+        build_watch(
+          source: Hive::Commands::Watch::DefaultSource.new,
+          targets: [ "demo:task" ], until_condition: "completion", output: output
+        ).call
+      end
+    end
+
+    assert_equal %w[initial final], json_events(output).map { |event| event.fetch("event") }
+    assert_equal true, json_events(output).first.dig("targets", 0, "archived")
+    assert_equal [
+      [ :status_new, { json: true, daemon_tasks: [ "demo:task" ] } ],
+      [ :daemon_task_payload, projects, true ],
+      [ :operational_payload, projects, archived_snapshot.status_payload ]
+    ], calls
+  end
+
+  def test_exact_initial_projection_can_authoritatively_reject_a_missing_target
+    projects = [ { "name" => "demo", "path" => "/tmp/demo" } ]
+    missing = snapshot
+    missing.operational.dig("source", "task_graph")["status"] = "partial"
+    status = Object.new
+    authoritative_values = []
+    status.define_singleton_method(:daemon_task_payload) do |_projects, authoritative_dependencies:|
+      authoritative_values << authoritative_dependencies
+      missing.status_payload
+    end
+    received_payloads = []
+    status.define_singleton_method(:operational_payload) do |_projects, status_payload:|
+      received_payloads << status_payload
+      missing.operational
+    end
+
+    error = with_replaced_singleton_method(
+      Hive::Config, :registered_projects, -> { projects }
+    ) do
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(**_options) { status }) do
+        assert_raises(Hive::Commands::Watch::UsageError) do
+          build_watch(
+            source: Hive::Commands::Watch::DefaultSource.new,
+            targets: [ "demo:missing" ], output: StringIO.new
+          ).call
+        end
+      end
+    end
+
+    assert_match(/no task matches "demo:missing"/, error.message)
+    assert_equal [ true ], authoritative_values
+    assert_equal [ missing.status_payload ], received_payloads
   end
 
   def test_rejects_each_invalid_bounded_watch_option
@@ -564,7 +696,7 @@ class CommandsWatchTest < Minitest::Test
       [ FakeSource.new(IOError.new("offline")), /initial status source unavailable: IOError: offline/ ],
       [ FakeSource.new(Object.new), /watch source returned an invalid snapshot/ ],
       [ FakeSource.new(Hive::Commands::Watch::SourceSnapshot.new(
-        operational: { "ok" => false }, full_graph: { "ok" => true }
+        operational: { "ok" => false }, status_payload: { "ok" => true }
       )), /watch source returned an unsuccessful status payload/ ]
     ]
 
@@ -654,7 +786,7 @@ class CommandsWatchTest < Minitest::Test
     enriched = task
     enriched["patrol_fix"] = { "future_section" => [ Object.new ] }
     source_snapshot = snapshot(enriched)
-    source_snapshot.full_graph.fetch("projects").first["patrol_fix"] = {
+    source_snapshot.status_payload.fetch("projects").first["patrol_fix"] = {
       "project" => "demo", "future_section" => "unknown"
     }
 
@@ -783,7 +915,7 @@ class CommandsWatchTest < Minitest::Test
         "source" => { "task_graph" => { "status" => "complete" } },
         "tasks" => active
       },
-      full_graph: {
+      status_payload: {
         "schema" => "hive-status",
         "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
         "ok" => true,

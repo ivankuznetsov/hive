@@ -150,6 +150,37 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_codex_runtime_resolution_follows_wrapper_doctor_provenance
+    policy = Hive::AgentSupport.for(:codex)::ArtifactPolicy
+    runtime = Hive::AgentSupport.for(:codex)::Runtime
+    status = Object.new.tap { |value| value.define_singleton_method(:success?) { true } }
+
+    Dir.mktmpdir("hive-codex-wrapper") do |root|
+      package = File.join(root, "package")
+      native = File.join(package, "bin", "codex")
+      FileUtils.mkdir_p(File.dirname(native))
+      File.binwrite(native, "ELF fixture")
+      FileUtils.chmod(0o755, native)
+      report = JSON.generate(
+        "checks" => {
+          "runtime.provenance" => { "details" => { "current executable" => native } }
+        }
+      )
+      runtime.instance_variable_set(:@executables, {})
+
+      roots = with_replaced_singleton_method(
+        Hive::WorkflowPackage::RuntimePolicy::ProviderHost, :capture3_bounded,
+        ->(*, **) { [ report, "", status ] }
+      ) do
+        policy.runtime_roots(fake_profile("codex-wrapper"))
+      end
+
+      assert_equal [ File.join(package, "bin") ], roots
+    ensure
+      runtime.instance_variable_set(:@executables, {})
+    end
+  end
+
   def test_native_browser_command_reports_failure_timeout_and_missing_binary
     toolkit = Toolkit.new
     assert_nil toolkit.send(:run_browser_command, {}, [ RbConfig.ruby, "-e", "exit" ])

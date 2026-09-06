@@ -158,6 +158,12 @@ Escalations land in `reviews/escalations-<NN>.md` — every line that triage lef
 
 The escalations digest is mirrored to the PR with the same publisher path and duplicate-header guard.
 
+Comment publication validates the live open PR against the owned task branch,
+repository, URL, and number. It does not require the PR head to equal the old
+`pr.md` head: review fixes legitimately advance that commit. Exact-head guards
+remain on code publication and CI settlement. This avoids a separate metadata
+repair loop for ordinary PR comments.
+
 ## Branching after triage
 
 - `accepted.empty? && escalations.zero?` with `reviews/errors-NN.md` present — at least one reviewer failed while surviving reviewers found nothing; write `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=NN` so the task is recoverable/retryable rather than a user-input gate.

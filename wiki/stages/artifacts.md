@@ -3,18 +3,24 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-30
+updated: 2026-09-06
 tags: [stage, artifacts, evidence, review]
 ---
 
-**TLDR**: `7-artifacts` now completes only after Hive publishes a strict,
-identity-bound outcome-evidence package. A fresh read-only inference agent maps
+**TLDR**: `7-artifacts` attempts automatic outcome evidence on a best-effort
+basis. Capture, provider, capability, or evidence-validation failures complete
+the stage with `evidence_status=unavailable`, preserving the original reason
+and diagnostic instead of parking otherwise reviewed implementation work.
+This does not publish accepted evidence: packages still require strict,
+identity-bound validation. Source-integrity failures and findings requiring
+implementation rework still block. A fresh read-only inference agent maps
 the task, plan, and exact committed diff into user-meaningful claims; a separate
 producer makes the required proof; and a third fresh read-only reviewer accepts,
 targets evidence for recapture, returns repository defects for implementation
 rework, or blocks every claim and supported exclusion. Legacy
 Hivebox screenshots and recordings remain visible diagnostics but never establish
-completion authority.
+accepted-evidence authority. A best-effort completion is idempotent on resume;
+the existing notes, captures, and rejected packages remain available.
 
 Codex capture resolves its filesystem runtime root through the shared managed
 executable provenance probe, not by scanning PATH for native-looking binaries.
@@ -86,9 +92,8 @@ capture or an approval request.
    controller executes admitted browser/terminal operations, records exact
    file receipts, and exclusively publishes basename-only PNG/WebM media into
    the evidence root.
-   Missing capabilities publish a durable blocker before the producer starts.
-   A paced daemon retry rechecks that blocker against the same immutable
-   requirement; it does not replay a stale capability verdict.
+   Missing capabilities retain a durable blocked package before the producer
+   starts; the stage wrapper reports evidence unavailable and continues.
 6. Launch a distinct **producer** context with one writable root under the active
    evidence attempt. Source and controller metadata remain read-only. Every proof
    names one retained original, one bounded reviewer representation, and the
@@ -132,7 +137,9 @@ capture or an approval request.
    environment, or decision that repository work cannot solve. Invalid
    exclusions, missing capability, exhausted recaptures, or exhausted
    implementation reworks publish an operator-visible blocked pointer and
-   semantic `ERROR`.
+   semantic `ERROR` inside the collector. The stage wrapper converts capture
+   and evidence-only failures to best-effort completion; implementation rework
+   and exhausted implementation reworks remain blocking.
 
 The default is one initial attempt plus at most two targeted recaptures. Project
 configuration may reduce recaptures to zero or one, but cannot exceed two.
@@ -219,11 +226,10 @@ revalidates that selected file's exact size and digest before streaming it.
 Write admission and publication remain responsible for complete media decoding,
 OCR, retained-proof validation, and independent review.
 
-Reviewer and recapture-exhaustion blockers suppress ordinary daemon retry.
-Capability blockers preserve the same audit package but are re-probed on a
-paced ordinary retry, so restored controller tools do not require an operator
-acknowledgement. The task page, status diagnostic, and run output still expose
-an exact command containing the blocked generation and recovery digest:
+Blocked packages retain their audit history even when best-effort collection
+lets the workflow continue. Legacy tasks already parked on a semantic blocker
+can still expose a guarded recovery command containing the blocked generation
+and recovery digest:
 
 ```sh
 hive evidence recover PROJECT:SLUG \
@@ -263,25 +269,20 @@ and reviewer capability. Legacy media follows in a visibly labelled
 
 - A valid accepted pointer is projected as `COMPLETE` and surfaces
   `ready_to_finalize`.
+- A capture/evidence failure is also `COMPLETE`, but explicitly carries
+  `reason=evidence_best_effort evidence_status=unavailable`, the original
+  `warning_reason`, and diagnostic attributes. It surfaces `ready_to_finalize`
+  without claiming an accepted package, and is idempotent on resume.
 - An implementation-rework pointer is a semantic `ERROR` that surfaces the
   exact digest-bound `hive evidence rework` command. The daemon dispatches it
   automatically without provider-route admission, returning the task to
   `4-execute`; it is not handled by the same-stage stale-error healer.
-- Capability, review, and recapture-exhaustion blockers are durable `ERROR`
-  rows with the exact `hive evidence recover` command. Paced automated recovery
-  re-probes capability blockers in the same generation. It does not clear an
-  independent review block or exhausted recapture decision.
-- Integrity, role-launch, source-drift, or malformed-output failures use
-  `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
-  they remain ordinary recoverable stage errors.
-- A role process that returns a typed provider failure keeps that envelope at
-  the controller boundary. Quota and credit failures publish
-  `ERROR reason=limits_reached provider=<profile> retry_after=<iso8601>` and
-  return `commit=limits_reached`, so daemon recovery observes the normal
-  provider cooldown instead of immediately replaying an expensive inference,
-  producer, or reviewer prompt. Other typed provider failures retain
-  `reason=provider_error`, the provider, status code when supplied, and a
-  bounded message rather than being mislabeled as invalid evidence.
+- Source identity/custody failures retain
+  `ERROR reason=outcome_evidence_integrity_invalid`; exhausted implementation
+  reworks retain their semantic blocker. Neither becomes unavailable evidence.
+- Typed provider failures retain the provider, status code, message, and retry
+  time in the warning. They no longer park a reviewed task merely because an
+  optional capture role exhausted its provider allowance.
 
 ## Backlinks
 

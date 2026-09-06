@@ -7,6 +7,16 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Automatic outcome capture remains unreliable (2026-09-06)
+
+Dogfood producers can still fail to obtain controller screenshot receipts or
+start the target application. The artifact stage now treats these as best-effort
+warnings, not task-completion blockers, without labelling missing or rejected
+proof accepted. Rebuilding capture and the Screenote integration is deferred;
+this change makes workflow progress independent of that larger project, not
+the evidence pipeline reliable. Real implementation rework and source-integrity
+failures retain their blocking behavior.
+
 ## Betterleaks distribution and recovery verification
 
 Betterleaks 1.8.1 binaries are checksum-pinned for Linux/macOS x64/arm64.

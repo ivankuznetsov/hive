@@ -4,9 +4,73 @@ require "hive/config"
 require "hive/markers"
 require "hive/stages/artifacts"
 require "hive/task"
+require "hive/task_action"
 
 class StagesArtifactsTest < Minitest::Test
   include HiveTestHelper
+
+  def test_best_effort_capture_failure_completes_without_claiming_accepted_evidence
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      task = make_artifacts_task(dir)
+      File.write(task.state_file, "Existing evidence notes\n")
+      calls = 0
+      collector = lambda do |*_|
+        calls += 1
+        raise Hive::Artifacts::OutcomeEvidence::StoreError, "screenshot has no matching controller capture receipt"
+      end
+      with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, collector) do
+        result = Hive::Stages::Artifacts.run!(task, {})
+        assert_equal :complete, result.fetch(:status)
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal "unavailable", marker.attrs.fetch("evidence_status")
+        assert_equal "outcome_evidence_invalid", marker.attrs.fetch("warning_reason")
+        assert_includes marker.attrs.fetch("diagnostic"), "capture receipt"
+        assert_includes File.read(task.state_file), "Existing evidence notes"
+        assert_equal "ready_to_finalize", Hive::TaskAction.for(task, marker).key
+        assert_equal :complete, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+        assert_equal 1, calls
+      end
+    end
+  end
+
+  def test_best_effort_does_not_hide_source_integrity_failures_or_implementation_rework
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      task = make_artifacts_task(dir)
+      [ Hive::Stages::Artifacts::IntegrityError,
+        Hive::Artifacts::OutcomeEvidence::ResolutionError ].each do |error_class|
+        with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, ->(*_) { raise error_class, "source changed" }) do
+          assert_equal :error, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+          assert_equal "outcome_evidence_integrity_invalid", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+      end
+      %w[outcome_evidence_implementation_rework outcome_evidence_reworks_exhausted].each do |reason|
+        rework = lambda do |*_|
+          Hive::Markers.set(task.state_file, :error, reason: reason)
+          { status: :error, commit: "rework" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, rework) do
+          assert_equal :error, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+        end
+      end
+    end
+  end
+
+  def test_best_effort_continues_after_capture_quota_or_a_blocked_capture
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      %w[limits_reached outcome_evidence_capability_blocked outcome_evidence_recaptures_exhausted].each do |reason|
+        task = make_artifacts_task(dir)
+        File.write(task.state_file, "")
+        failed = lambda do |*_|
+          Hive::Markers.set(task.state_file, :error, reason: reason)
+          { status: :error, commit: "error" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, failed) do
+          assert_equal :complete, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+          assert_equal reason, Hive::Markers.current(task.state_file).attrs.fetch("warning_reason")
+        end
+      end
+    end
+  end
 
   def test_markerless_artifacts_stage_spawns_agent_and_returns_complete_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
@@ -1329,7 +1393,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_run_touches_state_and_translates_controller_errors_to_a_durable_marker
+  def test_collection_touches_state_and_translates_controller_errors_to_a_durable_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       FileUtils.rm_f(task.state_file)
@@ -1337,7 +1401,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, nil)
+        Hive::Stages::Artifacts.collect!(task, nil)
       end
       assert_equal({ commit: "done", status: :complete }, result)
       assert File.exist?(task.state_file)
@@ -1348,7 +1412,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, {})
+        Hive::Stages::Artifacts.collect!(task, {})
       end
       assert_equal({ commit: "error", status: :error }, result)
       marker = Hive::Markers.current(task.state_file)
@@ -1357,7 +1421,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_run_preserves_role_provider_limits_as_a_cooldown_marker
+  def test_collection_preserves_role_provider_limits_as_a_cooldown_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       retry_at = "2026-08-21T10:15:00Z"
@@ -1379,7 +1443,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, {})
+        Hive::Stages::Artifacts.collect!(task, {})
       end
 
       assert_equal({ commit: "limits_reached", status: :error }, result)
@@ -1392,7 +1456,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_run_preserves_non_limit_role_provider_errors
+  def test_collection_preserves_non_limit_role_provider_errors
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       failure = Hive::Stages::Artifacts::RoleAgentError.new(
@@ -1410,7 +1474,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, {})
+        Hive::Stages::Artifacts.collect!(task, {})
       end
 
       assert_equal({ commit: "error", status: :error }, result)

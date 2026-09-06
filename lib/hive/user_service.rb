@@ -1056,9 +1056,13 @@ module Hive
     end
 
     def desired_endpoint?(status)
-      status.content_state == :matching && status.manager_available? &&
-        status.enabled? && status.running? && manager_definition_current?(status) &&
-        (@definition.platform != :linux || !status.process_identity.nil?)
+      return false unless status.content_state == :matching &&
+                          status.manager_available? &&
+                          status.enabled? &&
+                          manager_definition_current?(status)
+
+      @definition.platform == :macos ||
+        (status.running? && !status.process_identity.nil?)
     end
 
     def desired_file?(status, document)

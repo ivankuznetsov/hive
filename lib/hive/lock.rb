@@ -1,7 +1,6 @@
 require "fileutils"
 require "time"
 require "hive/git_index_lock"
-require "hive/runtime_control_plane/task_lease_repository"
 
 module Hive
   module Lock
@@ -220,6 +219,7 @@ module Hive
     end
 
     def task_lease_repository
+      require "hive/runtime_control_plane/task_lease_repository"
       @task_lease_repository ||= RuntimeControlPlane::TaskLeaseRepository.new(
         process_start_time: method(:process_start_time),
         process_alive: method(:process_identity_alive?)

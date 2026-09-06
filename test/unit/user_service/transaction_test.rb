@@ -233,10 +233,10 @@ class UserServiceTransactionTest < Minitest::Test
             transaction.with_lock { flunk "kernel-locked target must not be entered" }
           end
           expected = case state
-                     when :live then /target is busy/
-                     when :stale then /remains kernel-locked/
-                     else /cannot be proven/
-                     end
+          when :live then /target is busy/
+          when :stale then /remains kernel-locked/
+          else /cannot be proven/
+          end
           assert_match expected, error.message
         end
       end

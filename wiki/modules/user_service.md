@@ -121,10 +121,11 @@ provable, the journal is retained and unrelated mutation fails closed. Public
 success is never based only on desired bytes being present.
 
 An enabled install of a matching legacy unit with no receipt performs one
-conservative recorded restart, verifies the loaded/running state, and writes a
-receipt. Later applies are true no-ops. Operator backups remain beside the unit
-as `<path>.bak-<UTC timestamp>` with an exclusive disambiguator when two
-changes share a timestamp; replay-private prior content stays in the journal.
+conservative recorded restart, verifies the platform's managed endpoint, and
+writes a receipt. Later applies are true no-ops. Operator backups remain beside
+the unit as `<path>.bak-<UTC timestamp>` with an exclusive disambiguator when
+two changes share a timestamp; replay-private prior content stays in the
+journal.
 
 Explicit `start`, `stop`, `restart`, and `takeover` calls use their own durable
 phases under the same target lock. Replay first observes whether the recorded
@@ -135,7 +136,7 @@ and current process identities before deciding whether another action is safe.
 
 | Mode | Completion condition |
 |------|----------------------|
-| Managed | Desired file plus an available manager reporting the unit enabled and running, the canonical target loaded with no pending daemon reload, and a live main-process identity |
+| Managed | Desired file plus an available manager reporting the unit enabled. Linux also requires the canonical target loaded with no pending daemon reload and a running process with live identity; launchd completion is the loaded job registration because command adapters separately own process health and readiness. |
 | Intentional no-autostart | Desired file plus a `no_autostart` receipt; no manager command |
 | Unsupported autostart | Desired file plus an `unsupported_autostart` receipt after a conclusive manager-absence probe |
 | Restored prior | Prior file and prior manager projection freshly verified after durable rollback selection |

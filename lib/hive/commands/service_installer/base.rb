@@ -26,7 +26,7 @@ module Hive
 
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
                        systemctl_available: nil, launchctl_available: nil, status_reader: nil,
-                       environment: ENV, legacy_takeover: nil)
+                       environment: ENV, legacy_takeover: nil, removal_takeover: nil)
           @host_os = host_os
           # Anchor on the real user home for launchd/systemd paths —
           # HIVE_HOME is a config/test override that does not apply
@@ -42,6 +42,7 @@ module Hive
           @launchctl_available = launchctl_available
           @runtime_environment = environment
           @legacy_takeover = legacy_takeover
+          @removal_takeover = removal_takeover
           @messages = []
         end
 
@@ -222,7 +223,8 @@ module Hive
             launchd_running_via_list: @runner_injected && !@status_reader,
             event_handler: method(:handle_user_service_event),
             home: @home,
-            legacy_takeover: @legacy_takeover
+            legacy_takeover: @legacy_takeover,
+            removal_takeover: @removal_takeover
           )
         end
 
@@ -235,12 +237,15 @@ module Hive
         end
 
         def perform_lifecycle!(operation)
+          @messages.clear
           result = user_service.public_send(operation)
           record_user_service_messages(result) unless result.kind == :unsupported
           return true if result.success? && result.kind != :unsupported
 
+          detail = @messages.first(3).join(" ")
+          suffix = detail.empty? ? "" : ": #{detail}"
           raise Hive::Error,
-                "hive #{cli_label}: could not #{operation} managed #{service_noun}"
+                "hive #{cli_label}: could not #{operation} managed #{service_noun}#{suffix}"
         end
 
         def handle_user_service_event(event, _definition)

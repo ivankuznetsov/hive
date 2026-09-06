@@ -85,6 +85,10 @@ start/stop/restart and bundle refresh, babysitter detached-process takeover,
 migration cutover restarts, install/upgrade, uninstall/purge, and ordinary
 lifecycle actions. The babysitter's ownership-aware 600-second stop occurs
 inside the install transition before the manager starts its replacement.
+Uninstall's daemon, bot, and babysitter foreground-process stops are explicit
+removal collaborators invoked only after the canonical target lock is held, so
+a losing remover cannot signal a supervised process or consume its PID
+evidence before returning contention.
 
 ## Durable apply and replay
 
@@ -102,10 +106,14 @@ complete endpoint is freshly observed:
    descriptor-relative compare-and-swap. An operator file created, replaced,
    or edited after inspection is preserved and leaves recovery evidence rather
    than being overwritten or unlinked.
-4. Record and verify the manager reload separately, then resume the recorded
-   enable, restart, or takeover intent. A command's exit status is evidence,
-   not truth: fresh load state, fragment path, reload need, enablement, active
-   state, main PID, and process-start observations decide the result. Rollback
+4. Record and verify the manager reload separately, atomically persist the
+   process identity observed after that reload, then resume the recorded
+   enable, restart, or takeover intent. Replay accepts restart completion only
+   from a process created beyond this loaded-definition boundary; a process
+   that systemd automatically restarted from its old cached definition before
+   reload is not sufficient. A command's exit status is evidence, not truth:
+   fresh load state, fragment path, reload need, enablement, active state, main
+   PID, and process-start observations decide the result. Rollback
    records the process observed before restoring a running prior service;
    replay accepts only the original process or a fresh identity produced after
    that observation, never an arbitrary still-running desired process.
@@ -117,6 +125,12 @@ recorded desired operation cannot safely complete, UserService durably selects
 rollback before restoring anything. A fresh process stays in that rollback
 direction until prior file and manager state are freshly verified. Merely
 seeing prior bytes is not enough to clear the journal.
+
+When a pending apply recorded a manager intent, replay probes that manager
+before creating a backup, publishing desired bytes, selecting rollback, or
+restoring the prior file. An absent or indeterminate manager leaves the file,
+journal, and existing backup evidence byte-for-byte unchanged for a later
+retry.
 
 A manager action that mutates and then reports failure can still finalize when
 the desired projection is proven. If neither the prior nor desired endpoint is
@@ -137,6 +151,9 @@ and current process identities before deciding whether another action is safe.
 A stopped-to-running restart completes from a fresh Linux process identity.
 Every lifecycle verification boundary requires an available manager, so a
 failed stop followed by an indeterminate observation retains its journal.
+Linux `ActiveState=deactivating` with a positive `MainPID` is transitional, not
+stopped: stop and removal keep waiting through the manager's bounded action or
+retain pending intent until no live main process remains.
 
 ## Verified endpoint modes
 

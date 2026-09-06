@@ -129,6 +129,28 @@ class UserServiceManagerTest < Minitest::Test
     refute stale.loaded_definition?("/tmp/hive-test.service")
   end
 
+  def test_systemd_inspection_preserves_deactivating_state_and_live_main_pid
+    manager = build_manager(
+      :linux,
+      status_reader: lambda do |_argv|
+        [
+          systemd_status(
+            active_state: "deactivating",
+            main_pid: "123",
+            process_start: "draining"
+          ),
+          true
+        ]
+      end
+    )
+
+    inspection = manager.inspect
+
+    refute inspection.running
+    assert_equal :deactivating, inspection.active_state
+    assert_equal 123, inspection.main_pid
+  end
+
   def test_systemd_inspection_propagates_query_failures_as_indeterminate
     manager = build_manager(
       :linux,

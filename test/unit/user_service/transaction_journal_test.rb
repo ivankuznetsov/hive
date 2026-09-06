@@ -52,6 +52,22 @@ class UserServiceTransactionJournalTest < Minitest::Test
     refute journal.activation_recorded?(prepared.merge("direction" => "rollback"))
   end
 
+  def test_manager_reload_transition_persists_the_activation_process_boundary
+    journal = fake_journal(writer: ->(*) { nil })
+    document = prepared_document(journal)
+    document = journal.advance(document, phase: :backup_stored)
+    document = journal.advance(document, phase: :unit_published)
+
+    reloaded = journal.advance(
+      document,
+      phase: :manager_reloaded,
+      activation_process: { main_pid: 42, process_start: "after-reload" }
+    )
+
+    assert_equal 42, reloaded.fetch("activation_from_main_pid")
+    assert_equal "after-reload", reloaded.fetch("activation_from_process_start")
+  end
+
   def test_prior_content_translates_a_non_string_payload
     encoded = Object.new
     encoded.define_singleton_method(:match?) { |_pattern| true }

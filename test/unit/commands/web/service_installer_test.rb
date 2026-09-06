@@ -198,6 +198,24 @@ class WebServiceInstallerTest < Minitest::Test
     assert_equal "hive web: could not stop managed service", stop_error.message
   end
 
+  def test_web_lifecycle_failure_preserves_recovery_guidance
+    installer = Hive::Commands::Web::ServiceInstaller.new(host_os: "linux")
+    pending = Object.new
+    pending.define_singleton_method(:start) do
+      Hive::UserService::Result.new(
+        :failed,
+        operation: :start,
+        diagnostics: %i[invalid_recovery_state recovery_pending]
+      )
+    end
+    installer.define_singleton_method(:user_service) { pending }
+
+    error = assert_raises(Hive::Error) { installer.start! }
+
+    assert_includes error.message, "retained unverified recovery evidence"
+    assert_includes error.message, "retry without deleting it"
+  end
+
   def test_restart_on_macos_unloads_then_loads_plist
     with_tmp_dir do |home|
       commands = []
@@ -248,7 +266,8 @@ class WebServiceInstallerTest < Minitest::Test
 
       error = assert_raises(Hive::Error) { installer.restart! }
 
-      assert_equal "hive web: could not restart managed web service", error.message
+      assert_includes error.message, "hive web: could not restart managed web service"
+      assert_includes error.message, "transition is pending"
       assert_equal [
         %w[systemctl --user daemon-reload],
         %w[systemctl --user restart hive-web]
@@ -273,7 +292,8 @@ class WebServiceInstallerTest < Minitest::Test
 
       error = assert_raises(Hive::Error) { installer.restart! }
 
-      assert_equal "hive web: could not restart managed web service", error.message
+      assert_includes error.message, "hive web: could not restart managed web service"
+      assert_includes error.message, "transition is pending"
       assert_equal [
         [ "launchctl", "unload", "#{home}/Library/LaunchAgents/local.hive-web.plist" ],
         [ "launchctl", "load", "#{home}/Library/LaunchAgents/local.hive-web.plist" ]

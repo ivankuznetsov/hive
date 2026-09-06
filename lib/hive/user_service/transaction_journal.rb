@@ -60,7 +60,10 @@ module Hive
         manager_intent result_kind autostart prior_main_pid prior_process_start
         created_at updated_at
       ].freeze
-      OPTIONAL_KEYS = %w[restore_from_main_pid restore_from_process_start].freeze
+      OPTIONAL_KEYS = %w[
+        restore_from_main_pid restore_from_process_start
+        activation_from_main_pid activation_from_process_start
+      ].freeze
       DIGEST_PATTERN = /\A[0-9a-f]{64}\z/
       APPLY_RESULT_KINDS = %w[written upgraded unchanged].freeze
       APPLY_MANAGER_INTENTS = %w[enable restart takeover].freeze
@@ -120,12 +123,14 @@ module Hive
           "prior_process_start" => prior_process_start,
           "restore_from_main_pid" => nil,
           "restore_from_process_start" => nil,
+          "activation_from_main_pid" => nil,
+          "activation_from_process_start" => nil,
           "created_at" => timestamp,
           "updated_at" => timestamp
         })
       end
 
-      def advance(document, phase:, direction: document.fetch("direction"))
+      def advance(document, phase:, direction: document.fetch("direction"), activation_process: nil)
         validate_document!(document)
         operation = document.fetch("operation")
         current_direction = document.fetch("direction")
@@ -146,6 +151,15 @@ module Hive
           "direction" => direction,
           "updated_at" => @clock.call.utc.iso8601(6)
         )
+        if activation_process
+          unless operation == "apply" && direction == "forward" && phase == "manager_reloaded"
+            raise Invalid, "activation process can only be recorded at manager reload"
+          end
+          updated = updated.merge(
+            "activation_from_main_pid" => activation_process.fetch(:main_pid),
+            "activation_from_process_start" => activation_process[:process_start]
+          )
+        end
         write(updated, expected_document: document)
       end
 
@@ -167,6 +181,22 @@ module Hive
         updated = document.merge(
           "restore_from_main_pid" => main_pid,
           "restore_from_process_start" => process_start,
+          "updated_at" => @clock.call.utc.iso8601(6)
+        )
+        write(updated, expected_document: document)
+      end
+
+      def record_activation_process(document, main_pid:, process_start:)
+        validate_document!(document)
+        unless document.fetch("operation") == "apply" &&
+               document.fetch("direction") == "forward" &&
+               document.fetch("phase") == "manager_reloaded"
+          raise Invalid, "transition journal cannot record activation process in this state"
+        end
+
+        updated = document.merge(
+          "activation_from_main_pid" => main_pid,
+          "activation_from_process_start" => process_start,
           "updated_at" => @clock.call.utc.iso8601(6)
         )
         write(updated, expected_document: document)
@@ -243,6 +273,7 @@ module Hive
         validate_prior_state!(data)
         validate_process_identity!(data)
         validate_restore_process_identity!(data)
+        validate_activation_process_identity!(data)
         validate_timestamps!(data)
         validate_operation!(data)
         data
@@ -309,6 +340,32 @@ module Hive
 
         unless restore_process_recordable?(data)
           raise Invalid, "transition journal restore-from process identity is invalid in this state"
+        end
+      end
+
+      def validate_activation_process_identity!(data)
+        pid = data["activation_from_main_pid"]
+        process_start = data["activation_from_process_start"]
+        unless pid.nil? || (pid.is_a?(Integer) && pid >= 0)
+          raise Invalid, "transition journal activation-from main pid is invalid"
+        end
+        unless process_start.nil? || (process_start.is_a?(String) && !process_start.empty?)
+          raise Invalid, "transition journal activation-from process start is invalid"
+        end
+        if (pid.nil? && process_start) || (pid == 0 && process_start) ||
+           (pid&.positive? && process_start.nil?)
+          raise Invalid, "transition journal activation-from process identity is incoherent"
+        end
+        return if pid.nil?
+
+        forward_phases = %w[manager_reloaded takeover_completed activated verified committed]
+        valid_phase = if data.fetch("direction") == "forward"
+          forward_phases.include?(data.fetch("phase"))
+        else
+          APPLY_ROLLBACK_PHASES.include?(data.fetch("phase"))
+        end
+        unless data.fetch("operation") == "apply" && valid_phase
+          raise Invalid, "transition journal activation-from process identity is invalid in this state"
         end
       end
 

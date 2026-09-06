@@ -19,6 +19,7 @@ module Hive
         :availability,
         :enabled,
         :running,
+        :active_state,
         :load_state,
         :fragment_path,
         :need_daemon_reload,
@@ -27,7 +28,8 @@ module Hive
         :evidence_source,
         :diagnostics
       ) do
-        def initialize(availability:, enabled:, running:, load_state: nil, fragment_path: nil,
+        def initialize(availability:, enabled:, running:, active_state: nil,
+                       load_state: nil, fragment_path: nil,
                        need_daemon_reload: nil, main_pid: nil, process_start: nil,
                        evidence_source: :observed, diagnostics: [])
           availability = availability.to_sym
@@ -47,6 +49,7 @@ module Hive
             availability: availability,
             enabled: !!enabled,
             running: !!running,
+            active_state: active_state&.to_s&.tr("-", "_")&.to_sym,
             load_state: load_state,
             fragment_path: fragment_path,
             need_daemon_reload: need_daemon_reload.nil? ? nil : !!need_daemon_reload,
@@ -248,6 +251,7 @@ module Hive
           availability: :available,
           enabled: SYSTEMD_ENABLED_STATES.include?(properties.fetch("UnitFileState")),
           running: properties.fetch("ActiveState") == "active",
+          active_state: properties.fetch("ActiveState"),
           load_state: properties.fetch("LoadState"),
           fragment_path: properties.fetch("FragmentPath"),
           need_daemon_reload: parse_systemd_boolean(properties.fetch("NeedDaemonReload")),
@@ -275,6 +279,7 @@ module Hive
           availability: :available,
           enabled: enabled.ok,
           running: running.ok,
+          active_state: running.ok ? :active : :inactive,
           load_state: loaded ? :loaded : :not_found,
           fragment_path: loaded ? @definition.target_path : nil,
           need_daemon_reload: false,
@@ -310,6 +315,7 @@ module Hive
           availability: :available,
           enabled: enabled.ok,
           running: running.ok,
+          active_state: running.ok ? :active : :inactive,
           diagnostics: []
         )
       end
@@ -438,6 +444,7 @@ module Hive
           availability: :indeterminate,
           enabled: false,
           running: false,
+          active_state: nil,
           diagnostics: diagnostics
         )
       end
@@ -447,6 +454,7 @@ module Hive
           availability: :conclusively_absent,
           enabled: false,
           running: false,
+          active_state: :inactive,
           diagnostics: []
         )
       end

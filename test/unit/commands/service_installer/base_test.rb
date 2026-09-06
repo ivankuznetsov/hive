@@ -512,6 +512,26 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  def test_lifecycle_failure_raises_the_actionable_user_service_diagnostic
+    with_tmp_dir do |dir|
+      installer = build(dir)
+      busy = Object.new
+      busy.define_singleton_method(:start) do
+        Hive::UserService::Result.new(
+          :failed,
+          operation: :start,
+          diagnostics: [ :operation_busy ]
+        )
+      end
+      installer.define_singleton_method(:user_service) { busy }
+
+      error = assert_raises(Hive::Error) { installer.start! }
+
+      assert_includes error.message, "another test service operation owns"
+      assert_includes error.message, "Retry shortly"
+    end
+  end
+
   def test_launchd_label_matches_service_name
     installer = TestInstaller.new(host_os: "darwin")
     assert_equal "local.hive-test", installer.launchd_label

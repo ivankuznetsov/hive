@@ -22,7 +22,7 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
         brainstorm = File.join(folder, "brainstorm.md")
         baseline = authority_snapshot(folder)
         launch = nil
-        executor = lambda do |observed|
+        transport = lambda do |observed, _cancellation|
           launch = observed
           Hive::BrainstormSuggestions::Runner::Execution.new(
             stdout: JSON.generate("structured_output" => {
@@ -35,12 +35,14 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
             timed_out: false
           )
         end
-        scheduler = scheduler_for(project, executor)
+        scheduler = scheduler_for(project, transport)
 
         scheduler.tick(rows: [ waiting_row(project, folder) ], now: fixture_time)
 
         assert_equal baseline, authority_snapshot(folder)
-        refute launch.argv.any? { |argument| argument.include?(project) || argument.include?(folder) }
+        refute launch.prompt.include?(project)
+        refute launch.prompt.include?(folder)
+        assert_equal %i[model effort prompt schema], launch.class.members
         inventory = Hive::Commands::Answer.inventory(
           File.basename(folder), project: File.basename(project)
         )
@@ -84,7 +86,7 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
         folder = task_at_brainstorm(project)
         brainstorm = File.join(folder, "brainstorm.md")
         baseline = authority_snapshot(folder)
-        executor = lambda do |_launch|
+        transport = lambda do |_request, _cancellation|
           Hive::BrainstormSuggestions::Runner::Execution.new(
             stdout: JSON.generate("structured_output" => {
               "disposition" => "suggestion",
@@ -96,7 +98,7 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
             timed_out: false
           )
         end
-        scheduler = scheduler_for(project, executor)
+        scheduler = scheduler_for(project, transport)
         scheduler.tick(rows: [ waiting_row(project, folder) ], now: fixture_time)
 
         initial = Hive::Commands::Answer.inventory(
@@ -152,13 +154,12 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
     folder
   end
 
-  def scheduler_for(project, executor)
+  def scheduler_for(project, transport)
     cfg = Hive::Config.load(project)
     runner = Hive::BrainstormSuggestions::Runner.new(
       profile: Hive::AgentProfiles.lookup(:claude),
-      executor: executor,
-      bwrap_path: "/bin/true",
-      executable_resolver: ->(*) { "/bin/true" }
+      model: "claude-sonnet-test",
+      transport: transport
     )
     Hive::Daemon::BrainstormSuggestionScheduler.new(
       runner_factory: ->(_config, _project_root) { runner },

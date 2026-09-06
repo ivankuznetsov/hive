@@ -3,34 +3,41 @@
 require "erb"
 require "fileutils"
 require "json"
+require "net/http"
+require "openssl"
 require "tmpdir"
 require "time"
-require "hive/brainstorm_suggestions/process_capture"
+require "timeout"
+require "uri"
 require "hive/brainstorm_suggestions/validator"
 require "hive/stages/base"
 
 module Hive
   module BrainstormSuggestions
-    # Launches a suggestion worker only through a profile that can prove a
-    # tool-less, settings-isolated route inside a Bubblewrap filesystem view.
+    # Sends a bounded, controller-built data message to a provider API. The
+    # model has no process, filesystem, shell, tool, or arbitrary-network
+    # surface: HTTPS is controller-owned transport to one fixed endpoint and
+    # the only result channel is the response body validated below.
     class Runner
       MAX_OUTPUT_BYTES = 512 * 1024
       DEFAULT_TIMEOUT_SEC = 120
-      KILL_GRACE_SEC = 1
+      MAX_RESPONSE_TOKENS = 1_024
       REQUIRED_CAPABILITY = :brainstorm_suggestion_data_only
       RUNTIME_PREFIX = "hive-brainstorm-suggestion-"
       OWNER_FILE = ".owner.json"
       SWEEP_GRACE_SEC = 300
+      MODEL_RE = /\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
 
-      Execution = Struct.new(:stdout, :exit_code, :timed_out, :too_large, keyword_init: true)
-      Launch = Struct.new(
-        :argv, :environment, :stdin, :runtime_root, :bundle_root,
-        keyword_init: true
-      )
+      Execution = Data.define(:stdout, :exit_code, :timed_out, :too_large) do
+        def initialize(stdout:, exit_code:, timed_out: false, too_large: false)
+          super
+        end
+      end
+      Request = Data.define(:model, :effort, :prompt, :schema)
 
-      # Thread-safe cooperative cancellation. The scheduler uses one token per
-      # bound request; the process loop observes it and terminates the complete
-      # provider process group before returning.
+      # Thread-safe cooperative cancellation. The scheduler binds this token
+      # to the exact question/input/attempt CAS. The HTTP transport watches it
+      # and closes an active request as soon as ownership changes.
       class Cancellation
         def initialize(&guard)
           @mutex = Mutex.new
@@ -58,6 +65,141 @@ module Hive
         end
       end
 
+      # Controller-owned Anthropic Messages transport. Authentication is used
+      # only to construct the outbound header; it is never copied into a
+      # bundle, child environment, request value, result, log, or sidecar.
+      class AnthropicTransport
+        ENDPOINT = "https://api.anthropic.com/v1/messages"
+        API_VERSION = "2023-06-01"
+        WATCH_INTERVAL_SEC = 0.05
+
+        class Error < StandardError; end
+        class InvalidResponse < Error; end
+        class OutputTooLarge < Error; end
+
+        def initialize(api_key:, timeout_sec:, http_factory: nil)
+          @api_key = api_key.to_s
+          @timeout_sec = Float(timeout_sec)
+          @http_factory = http_factory || method(:build_http)
+        end
+
+        def available?
+          !@api_key.empty?
+        end
+
+        def call(request, cancellation = nil)
+          return cancelled_execution if cancellation&.cancelled?
+
+          uri = URI(ENDPOINT)
+          http = @http_factory.call(uri)
+          configure_timeouts(http)
+          message = Net::HTTP::Post.new(uri.request_uri)
+          message["content-type"] = "application/json"
+          message["anthropic-version"] = API_VERSION
+          message["x-api-key"] = @api_key
+          message.body = JSON.generate(request_payload(request))
+          completed = false
+          watcher = cancellation_watcher(http, cancellation) { completed }
+          response = nil
+          body = +"".b
+          http.start do |connection|
+            connection.request(message) do |incoming|
+              response = incoming
+              incoming.read_body do |chunk|
+                body << chunk
+                raise OutputTooLarge if body.bytesize > MAX_OUTPUT_BYTES
+              end
+            end
+          end
+          completed = true
+          return cancelled_execution if cancellation&.cancelled?
+          return Execution.new(stdout: "", exit_code: response.code.to_i) unless response.is_a?(Net::HTTPSuccess)
+
+          Execution.new(stdout: extract_text(body), exit_code: 0)
+        rescue OutputTooLarge
+          Execution.new(
+            stdout: body.to_s.byteslice(0, MAX_OUTPUT_BYTES), exit_code: nil, too_large: true
+          )
+        rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout, Timeout::Error
+          Execution.new(stdout: "", exit_code: nil, timed_out: true)
+        rescue InvalidResponse
+          raise
+        rescue IOError, EOFError, SocketError, SystemCallError, OpenSSL::SSL::SSLError => error
+          raise Error, error.class.name
+        ensure
+          completed = true
+          close_http(http)
+          watcher&.join(WATCH_INTERVAL_SEC * 4)
+          watcher&.kill if watcher&.alive?
+          watcher&.join
+        end
+
+        private
+
+        def request_payload(request)
+          output_config = {
+            "format" => { "type" => "json_schema", "schema" => request.schema }
+          }
+          output_config["effort"] = request.effort if request.effort
+          {
+            "model" => request.model,
+            "max_tokens" => MAX_RESPONSE_TOKENS,
+            "messages" => [ { "role" => "user", "content" => request.prompt } ],
+            "output_config" => output_config
+          }
+        end
+
+        def extract_text(body)
+          payload = JSON.parse(body.force_encoding(Encoding::UTF_8).scrub)
+          blocks = payload.fetch("content")
+          raise InvalidResponse, "content must be an array" unless blocks.is_a?(Array)
+
+          text = blocks.filter_map do |block|
+            block["text"] if block.is_a?(Hash) && block["type"] == "text" && block["text"].is_a?(String)
+          end
+          raise InvalidResponse, "expected exactly one structured text block" unless text.length == 1
+
+          text.first
+        rescue JSON::ParserError, KeyError => error
+          raise InvalidResponse, error.class.name
+        end
+
+        def cancellation_watcher(http, cancellation)
+          return unless cancellation
+
+          Thread.new do
+            loop do
+              break if yield
+              if cancellation.cancelled?
+                close_http(http)
+                break
+              end
+              sleep WATCH_INTERVAL_SEC
+            end
+          end
+        end
+
+        def configure_timeouts(http)
+          http.open_timeout = @timeout_sec
+          http.read_timeout = @timeout_sec
+          http.write_timeout = @timeout_sec if http.respond_to?(:write_timeout=)
+        end
+
+        def build_http(uri)
+          Net::HTTP.new(uri.host, uri.port, nil).tap { |http| http.use_ssl = true }
+        end
+
+        def close_http(http)
+          http.finish if http&.started?
+        rescue IOError, SystemCallError
+          nil
+        end
+
+        def cancelled_execution
+          Execution.new(stdout: "", exit_code: nil, timed_out: true)
+        end
+      end
+
       OUTPUT_SCHEMA = {
         "type" => "object",
         "additionalProperties" => false,
@@ -74,11 +216,11 @@ module Hive
       }.freeze
 
       def self.profile_supported?(profile)
-        profile.respond_to?(:policy_capabilities) &&
-          profile.policy_capabilities.include?(REQUIRED_CAPABILITY) &&
-          profile.respond_to?(:tool_scope_flags) &&
-          profile.tool_scope_flags.key?(:allowed) &&
-          profile.tool_scope_flags.key?(:disallowed)
+        profile.respond_to?(:name) && profile.name.to_sym == :claude &&
+          profile.respond_to?(:policy_capabilities) &&
+          profile.policy_capabilities.include?(REQUIRED_CAPABILITY)
+      rescue NoMethodError
+        false
       end
 
       def self.sweep_inactive!(runtime_parent = Dir.tmpdir, now: Time.now)
@@ -100,7 +242,6 @@ module Hive
         end
       end
 
-
       def self.runtime_live?(path)
         owner = JSON.parse(File.read(File.join(path, OWNER_FILE), 4 * 1024))
         pid = Integer(owner.fetch("pid"))
@@ -113,21 +254,18 @@ module Hive
       end
       private_class_method :runtime_live?
 
-      def initialize(profile:, model_arguments: [], timeout_sec: DEFAULT_TIMEOUT_SEC,
-                     executor: nil, bwrap_path: "/usr/bin/bwrap",
-                     executable_resolver: nil, runtime_parent: Dir.tmpdir)
+      def initialize(profile:, model:, effort: nil, timeout_sec: DEFAULT_TIMEOUT_SEC,
+                     transport: nil, api_key: ENV["ANTHROPIC_API_KEY"], runtime_parent: Dir.tmpdir)
         @profile = profile
-        @model_arguments = Array(model_arguments).map(&:to_s).freeze
+        @model = normalize_model(model)
+        @effort = normalize_effort(effort)
         @timeout_sec = Float(timeout_sec)
-        @executor = executor || method(:execute)
-        @bwrap_path = bwrap_path
-        @executable_resolver = executable_resolver || method(:resolve_executable)
+        @transport = transport || AnthropicTransport.new(api_key: api_key, timeout_sec: @timeout_sec)
         @runtime_parent = runtime_parent
       end
 
       def call(bundle:, cancellation: nil)
-        executable = available_executable
-        return unavailable_result unless executable
+        return unavailable_result unless available?
         return failed_result("cancelled") if cancellation&.cancelled?
 
         runtime_root = Dir.mktmpdir(RUNTIME_PREFIX, @runtime_parent)
@@ -137,135 +275,38 @@ module Hive
           JSON.generate("pid" => Process.pid, "created_at" => Time.now.utc.iso8601),
           mode: "w", perm: 0o400
         )
-        bundle_root = bundle.materialize(runtime_root)
-        auth_root = prepare_auth(runtime_root)
-        launch = build_launch(
-          runtime_root: runtime_root,
-          bundle_root: bundle_root,
-          auth_root: auth_root,
-          executable: executable,
-          bundle: bundle
-        )
-        execution = invoke_executor(launch, cancellation)
+        bundle.materialize(runtime_root)
+        request = Request.new(
+          model: @model, effort: @effort, prompt: render_prompt(bundle).freeze,
+          schema: OUTPUT_SCHEMA
+        ).freeze
+        execution = invoke_transport(request, cancellation)
         return failed_result("cancelled") if cancellation&.cancelled?
         return failed_result("timeout") if execution.timed_out
         return failed_result("output_too_large") if execution.too_large
         return failed_result("provider_exit") unless execution.exit_code == 0
 
         Validator.call(extract_structured_output(execution.stdout), manifest: bundle.manifest)
-      rescue Validator::InvalidOutput, JSON::ParserError
+      rescue AnthropicTransport::InvalidResponse, Validator::InvalidOutput, JSON::ParserError
         failed_result("malformed_result")
-      rescue SystemCallError, IOError, ArgumentError
-        failed_result("spawn_error")
+      rescue AnthropicTransport::Error, SystemCallError, IOError, ArgumentError
+        cancellation&.cancelled? ? failed_result("cancelled") : failed_result("transport_error")
       ensure
         FileUtils.remove_entry_secure(runtime_root) if runtime_root && File.exist?(runtime_root)
       end
 
-      private
-
-      public
-
       def available?
-        !available_executable.nil?
+        self.class.profile_supported?(@profile) && !@model.nil? &&
+          @transport.respond_to?(:call) &&
+          (!@transport.respond_to?(:available?) || @transport.available?)
+      rescue StandardError
+        false
       end
 
       private
 
-      def invoke_executor(launch, cancellation)
-        if @executor.respond_to?(:parameters) && @executor.parameters.length >= 2
-          @executor.call(launch, cancellation)
-        else
-          @executor.call(launch)
-        end
-      end
-
-      def available_executable
-        return unless self.class.profile_supported?(@profile)
-        return unless File.file?(@bwrap_path) && File.executable?(@bwrap_path)
-
-        executable = @executable_resolver.call(@profile)
-        executable if executable && File.file?(executable) && File.executable?(executable)
-      rescue SystemCallError, IOError
-        nil
-      end
-
-      def prepare_auth(runtime_root)
-        auth_root = File.join(runtime_root, "auth")
-        Dir.mkdir(auth_root, 0o700)
-        source_root = @profile.configuration_directory(environment: ENV)
-        source = File.join(source_root, ".credentials.json")
-        return auth_root unless File.file?(source) && !File.symlink?(source)
-
-        flags = File::RDONLY
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        bytes = File.open(source, flags, &:read)
-        target = File.join(auth_root, ".credentials.json")
-        File.open(target, File::WRONLY | File::CREAT | File::EXCL, 0o400) { |file| file.write(bytes) }
-        File.chmod(0o400, target)
-        auth_root
-      rescue SystemCallError, IOError, ArgumentError
-        auth_root
-      end
-
-      def build_launch(runtime_root:, bundle_root:, auth_root:, executable:, bundle:)
-        argv = [ @bwrap_path, "--die-with-parent", "--new-session",
-                 "--unshare-pid", "--unshare-ipc", "--unshare-uts",
-                 "--unshare-cgroup-try" ]
-        argv.concat([ "--ro-bind", "/usr", "/usr" ])
-        append_compatibility_mounts(argv)
-        argv.concat([ "--ro-bind", "/etc", "/etc" ])
-        if File.directory?("/run/systemd/resolve")
-          argv.concat([ "--dir", "/run", "--dir", "/run/systemd",
-                        "--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve" ])
-        end
-        argv.concat([
-          "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-          "--dir", "/agent", "--dir", "/home", "--dir", "/home/hive-worker",
-          "--dir", "/bundle", "--dir", "/auth",
-          "--ro-bind", executable, "/agent/worker",
-          "--ro-bind", bundle_root, "/bundle",
-          "--ro-bind", auth_root, "/auth",
-          "--setenv", "HOME", "/home/hive-worker",
-          "--setenv", "CLAUDE_CONFIG_DIR", "/auth",
-          "--setenv", "TMPDIR", "/tmp",
-          "--chdir", "/bundle",
-          "/agent/worker", "-p",
-          "--safe-mode", "--disable-slash-commands",
-          "--setting-sources", "", "--settings", "{}",
-          "--strict-mcp-config", "--mcp-config", "{}",
-          "--tools", "", "--allowedTools", "",
-          "--permission-mode", "dontAsk", "--no-session-persistence",
-          "--output-format", "json", "--json-schema", JSON.generate(OUTPUT_SCHEMA),
-          *@model_arguments
-        ])
-        Launch.new(
-          argv: argv.freeze,
-          environment: sanitized_environment.freeze,
-          stdin: render_prompt(bundle).freeze,
-          runtime_root: runtime_root,
-          bundle_root: bundle_root
-        )
-      end
-
-      def append_compatibility_mounts(argv)
-        %w[/bin /lib /lib64 /sbin].each do |path|
-          next unless File.exist?(path) || File.symlink?(path)
-
-          if File.symlink?(path)
-            argv.concat([ "--symlink", File.readlink(path), path ])
-          else
-            argv.concat([ "--ro-bind", path, path ])
-          end
-        end
-      end
-
-      def sanitized_environment
-        keys = %w[LANG LC_ALL LC_CTYPE TZ HTTPS_PROXY HTTP_PROXY NO_PROXY SSL_CERT_FILE]
-        keys.concat(@profile.credential_environment_keys) if @profile.respond_to?(:credential_environment_keys)
-        keys.filter_map do |key|
-          value = ENV[key]
-          [ key, value ] unless value.to_s.empty?
-        end.to_h
+      def invoke_transport(request, cancellation)
+        @transport.call(request, cancellation)
       end
 
       def render_prompt(bundle)
@@ -286,143 +327,23 @@ module Hive
         outer
       end
 
-      def execute(launch, cancellation = nil)
-        output_r, output_w = IO.pipe
-        input_r, input_w = IO.pipe
-        pid = Process.spawn(
-          launch.environment, *launch.argv,
-          unsetenv_others: true, pgroup: true,
-          in: input_r, out: output_w, err: output_w
-        )
-        input_r.close
-        output_w.close
-        output = +"".b
-        input = launch.stdin.to_s.b
-        input_offset = 0
-        input_closed = input.empty?
-        input_w.close if input_closed
-        output_eof = false
-        status = nil
-        deadline = monotonic_now + @timeout_sec
-        post_exit_deadline = nil
-        loop do
-          output_eof = drain_output(output_r, output) || output_eof
-          if output.bytesize > MAX_OUTPUT_BYTES
-            terminate(pid)
-            return execution_result(output, status: nil, too_large: true)
-          end
-          input_offset, input_closed = write_input(input_w, input, input_offset) unless input_closed
-          status ||= wait_nonblock(pid)
+      def normalize_model(value)
+        candidate = value.to_s
+        return if %w[default inherit].include?(candidate)
 
-          if status && output_eof && input_closed
-            terminate(pid) if process_group_alive?(pid)
-            return execution_result(output, status: status)
-          end
-          if cancellation&.cancelled? || monotonic_now >= deadline
-            terminate(pid)
-            return execution_result(output, status: nil, timed_out: true)
-          end
-          if status && post_exit_deadline.nil?
-            signal_group("TERM", pid)
-            post_exit_deadline = [ deadline, monotonic_now + KILL_GRACE_SEC ].min
-          elsif post_exit_deadline && monotonic_now >= post_exit_deadline
-            terminate(pid)
-            output_eof = drain_output(output_r, output) || output_eof
-            return execution_result(output, status: status)
-          end
-
-          readers = output_eof ? [] : [ output_r ]
-          writers = input_closed ? [] : [ input_w ]
-          wait_until = [ deadline, post_exit_deadline ].compact.min
-          wait_for = [ wait_until - monotonic_now, 0.05 ].min
-          IO.select(readers, writers, nil, wait_for) if wait_for.positive?
-        end
-      ensure
-        input_r&.close unless input_r&.closed?
-        input_w&.close unless input_w&.closed?
-        output_r&.close unless output_r&.closed?
-        output_w&.close unless output_w&.closed?
+        candidate if candidate.match?(MODEL_RE)
       end
 
-      def drain_output(io, output)
-        loop do
-          chunk = io.read_nonblock(65_536, exception: false)
-          case chunk
-          when :wait_readable then return false
-          when nil then return true
-          else output << chunk
-          end
-        end
-      rescue IOError
-        true
-      end
-
-      def write_input(io, input, offset)
-        written = io.write_nonblock(input.byteslice(offset, input.bytesize - offset), exception: false)
-        return [ offset, false ] if written == :wait_writable
-
-        offset += written
-        if offset >= input.bytesize
-          io.close
-          [ offset, true ]
-        else
-          [ offset, false ]
-        end
-      rescue Errno::EPIPE, IOError
-        io.close unless io.closed?
-        [ input.bytesize, true ]
-      end
-
-      def wait_nonblock(pid)
-        Process.waitpid2(pid, Process::WNOHANG)&.last
-      rescue Errno::ECHILD
-        nil
-      end
-
-      def terminate(pid)
-        Hive::BrainstormSuggestions::ProcessCapture.terminate(pid)
-      end
-
-      def process_group_alive?(pid)
-        Process.kill(0, -pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
-      end
-
-      def signal_group(signal, pid)
-        Process.kill(signal, -pid)
-      rescue Errno::ESRCH
-        nil
-      end
-
-      def execution_result(output, status:, timed_out: false, too_large: false)
-        Execution.new(
-          stdout: output.byteslice(0, MAX_OUTPUT_BYTES).to_s.force_encoding(Encoding::UTF_8).scrub,
-          exit_code: status&.exitstatus,
-          timed_out: timed_out,
-          too_large: too_large
-        )
-      end
-
-      def resolve_executable(profile)
-        command = profile.bin.to_s
-        return File.realpath(command) if command.include?(File::SEPARATOR)
-
-        ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
-          candidate = File.join(directory, command)
-          return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
-        end
-        nil
+      def normalize_effort(value)
+        candidate = value.to_s
+        candidate unless candidate.empty? || %w[default inherit].include?(candidate)
       end
 
       def unavailable_result
         {
           "state" => "unavailable", "text" => nil, "rationale" => nil,
           "provenance" => [],
-          "safe_reason" => "The configured suggestion route cannot enforce Hive's data-only sandbox.",
+          "safe_reason" => "The configured suggestion route cannot enforce Hive's data-only transport.",
           "retryable" => true, "dismissed" => false, "error_code" => "isolation_unavailable"
         }
       end
@@ -434,10 +355,6 @@ module Hive
           "safe_reason" => "Suggestion generation failed; manual answering remains available.",
           "retryable" => true, "dismissed" => false, "error_code" => code
         }
-      end
-
-      def monotonic_now
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
     end
   end

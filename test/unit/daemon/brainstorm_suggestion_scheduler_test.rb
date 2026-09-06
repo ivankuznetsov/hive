@@ -550,6 +550,24 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     scheduler&.shutdown
   end
 
+  def test_runner_factory_resolves_explicit_model_and_effort_for_controller_transport
+    scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new
+    config = suggestion_config
+    config.dig("brainstorm", "suggestions").merge!(
+      "model" => "claude-sonnet-configured", "effort" => "high"
+    )
+
+    with_env("ANTHROPIC_API_KEY" => "sk-ant-fixture-not-real") do
+      runner = scheduler.send(:build_runner, config, "/tmp")
+
+      assert runner.available?
+      assert_equal "claude-sonnet-configured", runner.instance_variable_get(:@model)
+      assert_equal "high", runner.instance_variable_get(:@effort)
+    end
+  ensure
+    scheduler&.shutdown
+  end
+
   def test_prune_envelope_and_post_publish_failure_paths_are_bounded
     with_project do |_project, folder|
       scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new

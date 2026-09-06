@@ -666,18 +666,35 @@ module Hive
         File.directory?(task_root) && File.basename(File.dirname(task_root)) == STAGE
       end
 
-      def build_runner(cfg, _project_root)
+      def build_runner(cfg, project_root)
         suggestion_cfg = cfg.dig("brainstorm", "suggestions")
         profile = Hive::AgentProfiles.lookup(suggestion_cfg.fetch("agent"), cfg: cfg)
+        current = Hive::Stages::Base.model_routing_current(suggestion_cfg)
         routing = Hive::Stages::Base.model_routing_arguments(
           cfg, "brainstorm_suggestion", profile,
-          current: Hive::Stages::Base.model_routing_current(suggestion_cfg)
+          current: current
         )
         Hive::BrainstormSuggestions::Runner.new(
           profile: profile,
-          model_arguments: routing ? routing.native_arguments : [],
+          model: suggestion_route_model(routing, current, profile, cfg, project_root),
+          effort: suggestion_route_value(routing, current, :effort),
           timeout_sec: suggestion_cfg.fetch("timeout_sec")
         )
+      end
+
+      def suggestion_route_model(routing, current, profile, cfg, project_root)
+        suggestion_route_value(routing, current, :model) ||
+          profile.concrete_default_model(cfg: cfg, project_root: project_root)
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError
+        nil
+      end
+
+      def suggestion_route_value(routing, current, field)
+        value = routing&.public_send(field) || current[field]
+        value = value.to_s
+        return if value.empty? || %w[default inherit].include?(value)
+
+        value
       end
 
       def hide_fresh_when_route_unavailable(row, cfg, now:)
@@ -696,7 +713,7 @@ module Hive
               record.merge!(
                 "state" => "unavailable", "text" => nil, "rationale" => nil,
                 "provenance" => [],
-                "safe_reason" => "The configured suggestion route cannot enforce Hive's data-only sandbox.",
+                "safe_reason" => "The configured suggestion route cannot enforce Hive's data-only transport.",
                 "retryable" => true, "updated_at" => now.utc.iso8601(6),
                 "error_code" => "isolation_unavailable"
               )

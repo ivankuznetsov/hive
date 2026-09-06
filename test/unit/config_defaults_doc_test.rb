@@ -99,7 +99,7 @@ class ConfigDefaultsDocTest < Minitest::Test
 
     rendered = Hive::ConfigDefaultsDoc.render(valid_page, defaults:)
 
-    %w[first array one deep second].each { |entry| assert_includes rendered, %Q{"#{entry}"} }
+    %w[first array one deep second].each { |entry| assert_includes rendered, %Q("#{entry}") }
     assert_includes rendered, '"deep" => 2'
     assert_includes rendered, '"second" => false'
   end
@@ -219,5 +219,4 @@ class ConfigDefaultsDocTest < Minitest::Test
   ensure
     $stdout = original
   end
-
 end

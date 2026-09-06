@@ -6,9 +6,9 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 8436
+final_inventory_lines: 8464
 outside_inventory_net_lines: -8148
-final_lines: 288
+final_lines: 316
 final_paths:
 - path: lib/hive/betterleaks.rb
   lines: 26
@@ -49,13 +49,13 @@ final_paths:
 - path: lib/hive/runtime_control_plane/cutover_manifest.rb
   lines: 114
 - path: lib/hive/runtime_control_plane/database.rb
-  lines: 366
+  lines: 395
 - path: lib/hive/runtime_control_plane/dispatch_repository.rb
   lines: 773
 - path: lib/hive/runtime_control_plane/maintenance.rb
   lines: 113
 - path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
-  lines: 283
+  lines: 282
 - path: lib/hive/runtime_control_plane/operational_repository.rb
   lines: 63
 - path: lib/hive/runtime_control_plane/payload_store.rb

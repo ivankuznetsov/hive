@@ -74,6 +74,56 @@ class BrainstormSuggestionAuthorityTest < Minitest::Test
     end
   end
 
+  def test_tracked_input_change_suppresses_cached_json_and_tui_text_without_authority
+    with_tmp_global_config do
+      with_tmp_git_repo do |project|
+        source = File.join(project, "suggestion_scheduler.rb")
+        File.write(source, "class SuggestionScheduler; TASK_LOCAL = true; end\n")
+        run!("git", "-C", project, "add", "suggestion_scheduler.rb")
+        run!("git", "-C", project, "commit", "-m", "add scheduler evidence", "--quiet")
+        folder = task_at_brainstorm(project)
+        brainstorm = File.join(folder, "brainstorm.md")
+        baseline = authority_snapshot(folder)
+        executor = lambda do |_launch|
+          Hive::BrainstormSuggestions::Runner::Execution.new(
+            stdout: JSON.generate("structured_output" => {
+              "disposition" => "suggestion",
+              "text" => CANDIDATE,
+              "rationale" => "The tracked scheduler owns the task-local seam.",
+              "provenance" => [ "repository" ]
+            }),
+            exit_code: 0,
+            timed_out: false
+          )
+        end
+        scheduler = scheduler_for(project, executor)
+        scheduler.tick(rows: [ waiting_row(project, folder) ], now: fixture_time)
+
+        initial = Hive::Commands::Answer.inventory(
+          File.basename(folder), project: File.basename(project)
+        ).fetch("slots").first.fetch("suggestion")
+        assert_equal "fresh", initial.fetch("state")
+        assert_equal CANDIDATE, initial.fetch("text")
+
+        File.write(source, "class SuggestionScheduler; TASK_LOCAL = false; end\n")
+        changed = Hive::Commands::Answer.inventory(
+          File.basename(folder), project: File.basename(project)
+        ).fetch("slots").first.fetch("suggestion")
+        lease = Hive::Tui::BrainstormSuggestions.project!(task_root: folder, path: brainstorm)
+
+        assert_equal "stale", changed.fetch("state")
+        assert_nil changed.fetch("text")
+        assert_nil changed.fetch("rationale")
+        assert_empty changed.fetch("provenance")
+        assert_empty lease.regions
+        refute_includes File.read(brainstorm), "hive-suggestion:v1"
+        assert_equal baseline, authority_snapshot(folder)
+      ensure
+        scheduler&.shutdown
+      end
+    end
+  end
+
   private
 
   def task_at_brainstorm(project)

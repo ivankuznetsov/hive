@@ -7,6 +7,14 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
   Question = Data.define(:text, :answer) do
     def answered? = !answer.nil?
   end
+  FIXTURE_IDENTITY_FACTORY = lambda do |document, records, _deadline|
+    Hive::BrainstormSuggestions::Binding.digest(
+      "generation" => document.slice(
+        "task_incarnation", "task_generation", "brainstorm_generation", "recipe_version"
+      ),
+      "records" => records
+    )
+  end
 
   def setup
     Hive::BrainstormSuggestions::Projection.clear_cache!
@@ -201,6 +209,59 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
+  def test_warm_cache_is_rechecked_before_exposing_text
+    with_task do |root|
+      write_document(root, [ fresh_record(1) ])
+      calls = 0
+      identities = %w[a a a b]
+      observer = lambda do |records:, **|
+        calls += 1
+        Hive::BrainstormSuggestions::Projection::Observation.new(
+          bindings: { 1 => records.first.fetch("input_binding") }, error_code: nil
+        )
+      end
+      cache = Hive::BrainstormSuggestions::Projection::Cache.new
+      build = lambda do
+        current_projection(
+          root, questions: questions.first(1), observer: observer, cache: cache,
+          identity_factory: ->(*) { identities.shift || flunk("unexpected identity probe") }
+        )
+      end
+
+      assert_equal "fresh", build.call.call.dig(1, "state")
+      raced = build.call.call.fetch(1)
+
+      assert_equal 1, calls
+      assert_equal "stale", raced.fetch("state")
+      assert_nil raced.fetch("text")
+    end
+  end
+
+  def test_drift_during_a_cache_miss_is_not_cached
+    with_task do |root|
+      write_document(root, [ fresh_record(1) ])
+      calls = 0
+      identities = %w[a b a a]
+      observer = lambda do |records:, **|
+        calls += 1
+        Hive::BrainstormSuggestions::Projection::Observation.new(
+          bindings: { 1 => records.first.fetch("input_binding") }, error_code: nil
+        )
+      end
+      cache = Hive::BrainstormSuggestions::Projection::Cache.new
+      build = lambda do
+        current_projection(
+          root, questions: questions.first(1), observer: observer, cache: cache,
+          identity_factory: ->(*) { identities.shift || flunk("unexpected identity probe") }
+        )
+      end
+
+      assert_equal "stale", build.call.call.dig(1, "state")
+      assert_equal "fresh", build.call.call.dig(1, "state")
+      assert_equal 2, calls
+    end
+  end
+
   def test_cache_coalesces_concurrent_consumers
     cache = Hive::BrainstormSuggestions::Projection::Cache.new
     started = Queue.new
@@ -256,6 +317,84 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
       assert_equal "failed", first.fetch("state")
       assert_equal "fresh", second.fetch("state")
       assert_equal 2, calls
+    end
+  end
+
+  def test_default_identity_hides_cached_text_immediately_after_a_tracked_edit
+    with_task do |root|
+      source = File.join(root, "adapter.rb")
+      File.write(source, "class Adapter; end\n")
+      initialize_repository(root, "adapter.rb")
+      bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
+        project_root: root, task_root: root, question_ordinal: 1
+      )
+      record = fresh_record(1)
+      binding = Hive::BrainstormSuggestions::Binding.input(
+        task_incarnation: "incarnation", task_generation: 0,
+        brainstorm_generation: "b" * 64, question_identity: record.fetch("question_id"),
+        question_text: "First?", manifest: bundle.manifest,
+        settled_answers: bundle.settled_answers
+      )
+      record["input_binding"] = binding
+      record["input_epoch"] = binding
+      write_document(root, [ record ])
+      cache = Hive::BrainstormSuggestions::Projection::Cache.new
+
+      first = default_projection(root, cache: cache).call.fetch(1)
+      unchanged = default_projection(root, cache: cache).call.fetch(1)
+      File.write(source, "class Adapter; def changed = true; end; end\n")
+      changed = default_projection(root, cache: cache).call.fetch(1)
+
+      assert_equal "fresh", first.fetch("state")
+      assert_equal "Suggested answer", unchanged.fetch("text")
+      assert_equal "stale", changed.fetch("state")
+      assert_nil changed.fetch("text")
+      assert_nil changed.fetch("rationale")
+      assert_empty changed.fetch("provenance")
+    end
+  end
+
+  def test_external_identity_ignores_untracked_files_and_head_only_commits
+    with_task do |root|
+      File.write(File.join(root, "adapter.rb"), "class Adapter; end\n")
+      initialize_repository(root, "adapter.rb")
+      projection = build_projection(root, identity_factory: nil)
+      document = { "task_incarnation" => "incarnation" }
+      records = [ fresh_record(1) ]
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      original = projection.send(:observation_identity, document, records, deadline)
+
+      File.write(File.join(root, "untracked.tmp"), "ignored input\n")
+      git(root, "commit", "--allow-empty", "-qm", "empty")
+      current = projection.send(
+        :observation_identity, document, records,
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      )
+
+      assert_equal original, current
+    end
+  end
+
+  def test_main_wiki_identity_is_tracked_only_and_invalidates_on_tracked_edits
+    with_task do |root|
+      wiki = File.join(root, "shared-wiki")
+      FileUtils.mkdir_p([ File.join(root, ".llm-wiki"), wiki ])
+      File.write(File.join(root, ".llm-wiki", "config.json"), JSON.generate("main_wiki_path" => "shared-wiki"))
+      File.write(File.join(wiki, "adapter.md"), "adapter evidence\n")
+      initialize_repository(wiki, "adapter.md")
+      projection = build_projection(root, identity_factory: nil)
+      identity = -> {
+        projection.send(
+          :main_wiki_identity, Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+        )
+      }
+
+      original = identity.call
+      File.write(File.join(wiki, "untracked.md"), "not eligible\n")
+      assert_equal original, identity.call
+
+      File.write(File.join(wiki, "adapter.md"), "changed adapter evidence\n")
+      refute_equal original, identity.call
     end
   end
 
@@ -390,8 +529,20 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
       observer: observer,
       cache: cache
     }
-    arguments[:identity_factory] = identity_factory if identity_factory
+    arguments[:identity_factory] = identity_factory || FIXTURE_IDENTITY_FACTORY
     Hive::BrainstormSuggestions::Projection.new(**arguments)
+  end
+
+  def initialize_repository(root, *paths)
+    git(root, "init", "-q")
+    git(root, "config", "user.email", "test@example.com")
+    git(root, "config", "user.name", "Hive Test")
+    git(root, "add", *paths)
+    git(root, "commit", "-qm", "initial")
+  end
+
+  def git(root, *arguments)
+    system("git", "-C", root, *arguments, exception: true)
   end
 
   def write_document(root, records)

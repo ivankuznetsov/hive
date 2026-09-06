@@ -13,6 +13,8 @@ class ConfigDefaultsDocTest < Minitest::Test
   ALTERED_MARKER_PAIR = "<!-- BEGIN GENERATED Config::DEFAULTS -->\n" \
                         "stale duplicate\n" \
                         "<!-- END GENERATED Config::DEFAULTS -->\n"
+  WRAPPED_BEGIN_MARKER = "<!-- BEGIN GENERATED:\nConfig::DEFAULTS -->\n"
+  WRAPPED_END_MARKER = "<!-- END GENERATED:\nConfig::DEFAULTS -->\n"
   SAMPLE_DEFAULTS = {
     "zeta" => {
       "nested_second" => [ "first", "second" ],
@@ -43,6 +45,10 @@ class ConfigDefaultsDocTest < Minitest::Test
     altered: "<!-- BEGIN GENERATED Config::DEFAULTS -->\nbody\n<!-- END GENERATED Config::DEFAULTS -->\n",
     altered_after_valid: "#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n#{ALTERED_MARKER_PAIR}",
     altered_before_valid: "#{ALTERED_MARKER_PAIR}#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n",
+    wrapped_begin_after_valid: "#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n#{WRAPPED_BEGIN_MARKER}",
+    wrapped_begin_before_valid: "#{WRAPPED_BEGIN_MARKER}#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n",
+    wrapped_end_after_valid: "#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n#{WRAPPED_END_MARKER}",
+    wrapped_end_before_valid: "#{WRAPPED_END_MARKER}#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n",
     crlf_marker_lines: "#{BEGIN_MARKER}\r\nbody\r\n#{END_MARKER}\r\n",
     unterminated_end_line: "#{BEGIN_MARKER}\nbody\n#{END_MARKER}"
   }.freeze
@@ -180,6 +186,14 @@ class ConfigDefaultsDocTest < Minitest::Test
       [ ALTERED_MARKER_PAIR + current, current + ALTERED_MARKER_PAIR ].each do |malformed|
         assert_raises(Hive::ConfigDefaultsDoc::InvalidRegionError) do
           Hive::ConfigDefaultsDoc.render(malformed, defaults: SAMPLE_DEFAULTS)
+        end
+      end
+      %i[
+        wrapped_begin_after_valid wrapped_begin_before_valid
+        wrapped_end_after_valid wrapped_end_before_valid
+      ].each do |name|
+        assert_raises(Hive::ConfigDefaultsDoc::InvalidRegionError, name.to_s) do
+          Hive::ConfigDefaultsDoc.render(MALFORMED_PAGES.fetch(name), defaults: SAMPLE_DEFAULTS)
         end
       end
     end

@@ -11,8 +11,8 @@ module Hive
     WIKI_PAGE = File.join("wiki", "modules", "config.md")
     BEGIN_MARKER = "<!-- BEGIN GENERATED: Config::DEFAULTS -->"
     END_MARKER = "<!-- END GENERATED: Config::DEFAULTS -->"
-    BEGIN_MARKER_CANDIDATE = /<!--[^\r\n]*\bBEGIN\b[^\r\n]*\bGENERATED\b[^\r\n]*Config::DEFAULTS/i
-    END_MARKER_CANDIDATE = /<!--[^\r\n]*\bEND\b[^\r\n]*\bGENERATED\b[^\r\n]*Config::DEFAULTS/i
+    BEGIN_MARKER_CANDIDATE = /<!--(?:(?!-->).)*\bBEGIN\b(?:(?!-->).)*\bGENERATED\b(?:(?!-->).)*Config::DEFAULTS/im
+    END_MARKER_CANDIDATE = /<!--(?:(?!-->).)*\bEND\b(?:(?!-->).)*\bGENERATED\b(?:(?!-->).)*Config::DEFAULTS/im
     SERIALIZER_WIDTH = 80
 
     class InvalidRegionError < ArgumentError; end

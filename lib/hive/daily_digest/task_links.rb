@@ -1,3 +1,4 @@
+require "cgi"
 require "hive/config"
 require "hive/task_resolver"
 
@@ -32,7 +33,11 @@ module Hive
           project = projects.find { |entry| entry["project_id"] == row["project_id"] } || {
             "project_id" => row["project_id"], "name" => row["project"]
           }
-          next if destination(project, row)
+          resolved = destination(project, row)
+          if resolved
+            row["task_url"] = task_url(resolved, row)
+            next
+          end
 
           row.delete("task_url")
           row["historical"] = true
@@ -60,6 +65,17 @@ module Hive
           project: project.fetch("name"), slug: task.slug,
           source: task.stage_index == 9 ? "archive" : nil
         }
+      end
+
+      def task_url(destination, row)
+        path = "/tasks/#{url_component(destination.fetch(:project))}/" \
+               "#{url_component(destination.fetch(:slug))}"
+        path = "#{path}?source=archive" if destination[:source] == "archive"
+        row["task_url"].to_s.end_with?("#task-questions") ? "#{path}#task-questions" : path
+      end
+
+      def url_component(value)
+        CGI.escape(value.to_s).gsub("+", "%20")
       end
     end
   end

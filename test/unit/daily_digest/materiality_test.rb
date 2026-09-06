@@ -102,6 +102,20 @@ class DailyDigestMaterialityTest < Minitest::Test
     assert_equal "2026-08-30T11:00:00.000000Z", result.value.fetch("observed_at")
   end
 
+  def test_material_fact_without_event_time_uses_observation_time
+    row = activity("stage_transition", "transition" => "completed")
+    row.delete("occurred_at")
+
+    result = Hive::DailyDigest::Materiality.classify(
+      row,
+      project: { "project_id" => "project-1", "name" => "demo" },
+      observed_at: "2026-08-30T11:00:00Z"
+    )
+
+    assert_equal :fact, result.disposition
+    assert_equal "2026-08-30T10:00:01.000000Z", result.value.fetch("occurred_at")
+  end
+
   def test_invalid_record_gap_never_raises_for_scalar_nested_values
     malformed = activity("stage_transition", "transition" => "completed")
     malformed["task"] = "broken"

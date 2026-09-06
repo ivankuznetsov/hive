@@ -31,7 +31,7 @@ module Hive
           existing = read_json(base_path(date)) if File.file?(base_path(date))
           if existing && existing.fetch("lifecycle") == "closed"
             if existing.fetch("record_id") == prepared.fetch("record_id")
-              write_interval_index(interval_index.merge(date => interval_from(existing)))
+              repair_interval_index_entry(date, existing)
               return existing
             end
 
@@ -43,7 +43,7 @@ module Hive
           end
 
           write_json(base_path(date), prepared)
-          write_interval_index(interval_index.merge(date => interval_from(prepared)))
+          repair_interval_index_entry(date, prepared)
           prepared
         end
       end
@@ -62,18 +62,22 @@ module Hive
           path = amendment_path(date, prepared.fetch("amendment_id"))
           if File.file?(path)
             existing = read_json(path)
-            return existing if Record.canonical_json(existing) == Record.canonical_json(prepared)
+            if Record.canonical_json(existing) == Record.canonical_json(prepared)
+              repair_interval_index_entry(date, base)
+              return existing
+            end
 
             raise Conflict, "conflicting digest amendment #{prepared.fetch('amendment_id').inspect}"
           end
           write_json(path, prepared)
+          repair_interval_index_entry(date, base)
           prepared
         end
       end
 
       def read(local_date)
         date = normalize_date(local_date)
-        synchronize(shared: true) do
+        synchronize_read do
           if tombstone_exists?(date)
             return read_json(tombstone_path(date)).merge("lifecycle" => "pruned")
           end
@@ -97,6 +101,7 @@ module Hive
           current = effective(base, amendments, read_json(frontier_path(date)))
                     .fetch("effective_source_frontiers")
           merged = merge_frontiers(current, source_frontiers)
+          repair_interval_index_entry(date, base)
           return merged if Record.canonical_json(current) == Record.canonical_json(merged)
 
           write_json(frontier_path(date), merged)
@@ -109,7 +114,7 @@ module Hive
         synchronize do
           if tombstone_exists?(date)
             tombstone = read_json(tombstone_path(date))
-            write_interval_index(interval_index.merge(date => tombstone.fetch("interval")))
+            repair_interval_index_entry(date, tombstone.fetch("interval"))
             remove_projection(date)
             return tombstone
           end
@@ -141,7 +146,7 @@ module Hive
           }
           payload["receipt_id"] = Record.content_id(payload)
           write_json(tombstone_path(date), payload)
-          write_interval_index(interval_index.merge(date => payload.fetch("interval")))
+          repair_interval_index_entry(date, payload.fetch("interval"))
           remove_projection(date)
           payload
         end
@@ -156,6 +161,7 @@ module Hive
           tombstone = read_json(tombstone_path(date))
           raise MissingRecord, "digest #{date} has no prune tombstone" unless tombstone
 
+          before = Record.canonical_json(tombstone)
           existing = Array(tombstone["discards"])
           normalized = Array(entries).map do |entry|
             normalize_discard(entry, discarded_at: discarded_at)
@@ -168,12 +174,21 @@ module Hive
             end
             known[entry.fetch("discard_id")] ||= entry
           end
+          repair_interval_index_entry(date, tombstone.fetch("interval"))
           tombstone["discards"] = known.values.sort_by do |entry|
             [ entry.fetch("discarded_at"), entry.fetch("discard_id") ]
           end
           tombstone["source_frontiers"] = merge_frontiers(
             tombstone.fetch("source_frontiers", {}), source_frontiers
           )
+          resolved_gap_ids = normalized.filter_map do |entry|
+            entry.fetch("identity") if entry.fetch("kind") == "gap_resolution"
+          end.to_h { |gap_id| [ gap_id, true ] }
+          tombstone["effective_gaps"] = Array(tombstone["effective_gaps"]).reject do |gap|
+            resolved_gap_ids[gap.fetch("gap_id")]
+          end
+          return tombstone if before == Record.canonical_json(tombstone)
+
           write_json(tombstone_path(date), tombstone)
           tombstone
         end
@@ -184,8 +199,8 @@ module Hive
       end
 
       def intervals
-        synchronize do
-          interval_index.values.sort_by do |interval|
+        synchronize_read do
+          read_interval_index.values.sort_by do |interval|
             [ interval["sequence"] || Float::INFINITY, interval.fetch("starts_at") ]
           end.freeze
         end
@@ -218,6 +233,19 @@ module Hive
         persisted = read_json(interval_index_path)
         return persisted if valid_interval_index?(persisted)
 
+        rebuilt = rebuild_interval_index
+        write_interval_index(rebuilt)
+        rebuilt
+      end
+
+      def read_interval_index
+        persisted = read_json(interval_index_path)
+        return persisted if valid_interval_index?(persisted)
+
+        rebuild_interval_index
+      end
+
+      def rebuild_interval_index
         rebuilt = {}
         Dir.glob(File.join(records_root, "????-??-??", "base.json")).sort.each do |path|
           base = read_json(path)
@@ -228,7 +256,15 @@ module Hive
           interval = tombstone["interval"]
           rebuilt[interval.fetch("local_date")] = interval_from(interval) if interval.is_a?(Hash)
         end
-        write_interval_index(rebuilt)
+        rebuilt
+      end
+
+      def repair_interval_index_entry(date, interval)
+        current = interval_index
+        prepared = interval_from(interval)
+        return current if current[date] == prepared
+
+        write_interval_index(current.merge(date => prepared))
       end
 
       def valid_interval_index?(value)
@@ -381,6 +417,30 @@ module Hive
           yield
         ensure
           lock&.flock(File::LOCK_UN)
+        end
+      rescue Errno::ELOOP
+        raise UnsafePath, "digest store lock cannot be a symlink"
+      end
+
+      def synchronize_read
+        return yield unless File.directory?(root)
+
+        lock_path = File.join(root, ".store.lock")
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        lock = begin
+          File.open(lock_path, flags)
+        rescue Errno::ENOENT
+          return yield
+        end
+        begin
+          raise UnsafePath, "digest store lock is not a regular file" unless lock.stat.file?
+
+          lock.flock(File::LOCK_SH)
+          yield
+        ensure
+          lock.flock(File::LOCK_UN)
+          lock.close
         end
       rescue Errno::ELOOP
         raise UnsafePath, "digest store lock cannot be a symlink"

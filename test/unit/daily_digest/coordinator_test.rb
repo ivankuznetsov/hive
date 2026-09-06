@@ -96,6 +96,50 @@ class DailyDigestCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_retained_attention_age_tracks_each_open_and_closing_boundary
+    with_tmp_dir do |dir|
+      interval = config.fetch("first_interval")
+      frontier = {
+        "project-1" => {
+          "source" => "task_journal",
+          "fingerprints" => { "task/journal.jsonl" => { "size" => 1 } }
+        }
+      }
+      waiting = {
+        "attention_id" => "attention:waiting", "kind" => "unanswered",
+        "project_id" => "project-1", "project" => "demo", "task_slug" => "task",
+        "waiting_since" => "2026-08-30T10:00:00.000000Z", "waiting_age_seconds" => 7_200
+      }
+      initial = batch([]).with(attention: [ waiting ], frontiers: frontier)
+      unchanged = batch([]).with(frontiers: frontier)
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(
+        Hive::DailyDigest::Projector.new(clock: -> { Time.iso8601("2026-08-30T12:00:00Z") })
+                                    .base(interval: interval, batch: initial, lifecycle: "open")
+      )
+      membership = Struct.new(:projects, :gaps).new([ project ], [])
+      coverage = Object.new
+      coverage.define_singleton_method(:projects_for) { |**| membership }
+      coordinator = Hive::DailyDigest::Coordinator.new(
+        store: store, collector_factory: ->(**) { FakeCollector.new(unchanged) }
+      )
+
+      coordinator.send(
+        :materialize, interval, config: config, coverage: coverage,
+        now: Time.iso8601("2026-08-30T18:00:00Z")
+      )
+      assert_equal 28_800, store.read("2026-08-30").dig("attention", 0, "waiting_age_seconds")
+
+      coordinator.send(
+        :materialize, interval, config: config, coverage: coverage,
+        now: Time.iso8601("2026-08-31T12:00:00Z")
+      )
+      closed = store.read("2026-08-30")
+      assert_equal "closed", closed.fetch("lifecycle")
+      assert_equal 50_400, closed.dig("attention", 0, "waiting_age_seconds")
+    end
+  end
+
   def test_gap_requires_positive_scoped_recovery_evidence
     coordinator = Hive::DailyDigest::Coordinator.new
     gap = {
@@ -325,6 +369,30 @@ class DailyDigestCoordinatorTest < Minitest::Test
     assert_equal [ "gap:github" ], discards.map { |row| row.fetch("identity") }
   end
 
+  def test_pruned_materialization_enters_the_mutation_path_without_new_evidence
+    now = Time.iso8601("2026-08-31T12:00:00Z")
+    interval = config.fetch("first_interval")
+    membership = Struct.new(:projects, :gaps).new([], [])
+    coverage = Object.new
+    coverage.define_singleton_method(:projects_for) { |**| membership }
+    store = Object.new
+    store.define_singleton_method(:read) do |_date|
+      { "lifecycle" => "pruned", "effective_gaps" => [], "source_frontiers" => {} }
+    end
+    mutation = nil
+    store.define_singleton_method(:discard_pruned) do |_date, entries:, source_frontiers:, **|
+      mutation = [ entries, source_frontiers ]
+    end
+    coordinator = Hive::DailyDigest::Coordinator.new(
+      store: store,
+      collector_factory: ->(**) { FakeCollector.new(batch([]).with(frontiers: {})) }
+    )
+
+    coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now)
+
+    assert_equal [ [], {} ], mutation
+  end
+
   def test_automatic_refresh_rechecks_closed_and_pruned_intervals_for_late_observations
     now = Time.iso8601("2026-09-01T12:00:00Z")
     intervals = (0..2).map do |offset|
@@ -384,6 +452,61 @@ class DailyDigestCoordinatorTest < Minitest::Test
 
     assert_equal [ [ "gap:github", "gap_resolution" ] ],
                  discards.map { |row| [ row.fetch("identity"), row.fetch("kind") ] }
+  end
+
+  def test_pruned_recovery_consumes_retained_frontiers_and_is_acknowledged_once
+    with_tmp_dir do |dir|
+      interval = config.fetch("first_interval")
+      old_gap = {
+        "gap_id" => "gap:github", "source" => "github", "scope" => "demo",
+        "project_id" => "project-1", "reason_code" => "offline",
+        "reason" => "offline", "observed_at" => "2026-08-30T12:00:00.000000Z"
+      }
+      frontier = {
+        "project-1" => {
+          "source" => "task_journal",
+          "fingerprints" => { "task/journal.jsonl" => { "size" => 1 } }
+        }
+      }
+      partial = batch([], gaps: [ old_gap ]).with(frontiers: frontier)
+      recovered = batch([]).with(frontiers: frontier)
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(
+        Hive::DailyDigest::Projector.new(clock: -> { Time.iso8601("2026-08-31T00:00:00Z") })
+                                    .base(interval: interval, batch: partial, lifecycle: "closed")
+      )
+      store.prune("2026-08-30", pruned_at: Time.iso8601("2026-08-31T01:00:00Z"), reason: "test")
+      membership = Struct.new(:projects, :gaps).new([ project ], [])
+      coverage = Object.new
+      coverage.define_singleton_method(:projects_for) { |**| membership }
+      prior_frontiers = []
+      coordinator = Hive::DailyDigest::Coordinator.new(
+        store: store,
+        collector_factory: lambda do |**options|
+          prior_frontiers << options.fetch(:prior_frontiers)
+          FakeCollector.new(recovered)
+        end
+      )
+
+      coordinator.send(
+        :materialize, interval, config: config, coverage: coverage,
+        now: Time.iso8601("2026-08-31T02:00:00Z")
+      )
+      first = store.read("2026-08-30")
+      first_bytes = File.binread(store.tombstone_path("2026-08-30"))
+      coordinator.send(
+        :materialize, interval, config: config, coverage: coverage,
+        now: Time.iso8601("2026-08-31T03:00:00Z")
+      )
+      replay = store.read("2026-08-30")
+
+      assert_equal [ frontier, frontier ], prior_frontiers
+      assert_empty replay.fetch("effective_gaps")
+      assert_equal [ [ "gap:github", "gap_resolution" ] ],
+                   replay.fetch("discards").map { |row| [ row.fetch("identity"), row.fetch("kind") ] }
+      assert_equal first.fetch("discards"), replay.fetch("discards")
+      assert_equal first_bytes, File.binread(store.tombstone_path("2026-08-30"))
+    end
   end
 
   private

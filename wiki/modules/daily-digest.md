@@ -51,8 +51,10 @@ are content-derived. Atomic writes use owner-private directories/files,
 same-directory rename, and directory fsync through `Hive::AtomicFile`.
 
 `intervals.json` is rebuildable navigation metadata updated with every base or
-tombstone write. CLI and Web navigation read this bounded index instead of
-opening every retained base and amendment. The record schema carries a
+tombstone mutation. Mutation owners repair missing, invalid, or valid-but-stale
+entries after interrupted publication. CLI and Web navigation use a pure,
+non-initializing read path: an absent index is rebuilt only in memory, without
+creating the store, lock, or index. The record schema carries a
 monotonic sequence and `local_date`, persisted
 zone/boundaries, lifecycle, close/materialization timestamps, projects, items,
 attention, gaps, and source frontiers. Lifecycle, completeness, and content are
@@ -86,9 +88,12 @@ legacy membership becomes a scoped gap.
 and source health. `Materiality` owns the include/exclude matrix and stable
 fingerprints. A committed source frontier includes bounded file-stat and
 content fingerprints; unchanged task journals and creation receipts are not
-read or hashed again during the next refresh. Changed and unavailable sources
-remain isolated per project, malformed journal diagnostics are aggregated per
-journal, and creation receipts have an explicit read bound. Material facts
+read or hashed again during the next refresh. Journal fingerprints retain their
+bounded scoped gaps, so an unchanged malformed or incomplete source cannot look
+healthy merely because its bytes were skipped. Activity without an event time
+uses its durable observation time. Changed and unavailable sources remain
+isolated per project, malformed journal diagnostics are aggregated per journal,
+and creation receipts have an explicit read bound. Material facts
 include task creation, durable stage/state
 changes, answers, changed holds, failures/recoveries, PR/check/review/merge
 outcomes, completion, and archive. Polls, repeated snapshots, diagnostics, log
@@ -103,8 +108,9 @@ that evidence. V1 never invokes PRDigest.
 Open-day attention may use current operational state. Closing attention is an
 as-of-boundary fact reconstructed from durable entry/exit transitions. Waiting
 age starts at the latest durable transition into the current blocked or
-unanswered state. If state or age cannot be proved, the record closes partial
-with a boundary-history gap. Waiting items use a privacy allowlist: project,
+unanswered state. Retained unchanged attention recomputes that age at each open
+observation and at the immutable closing boundary. If state or age cannot be
+proved, the record closes partial with a boundary-history gap. Waiting items use a privacy allowlist: project,
 task identity, stage/state, age, and native task URL; question text, answers,
 prompts, and bindings are absent from the record.
 
@@ -160,7 +166,9 @@ Records are retained indefinitely by default. The explicit pruner removes only
 closed digest projection bytes and leaves a permanent tombstone, delivery
 ledger, and all underlying evidence. Late input aimed at a tombstone is audited
 and its source frontier advances atomically, preventing either reconstruction
-or an endless replay loop.
+or an endless replay loop. Collection resumes from the tombstone's retained
+source frontiers; a recovered gap gets one stable discard acknowledgement and
+is then removed from the tombstone's effective gaps.
 
 Refresh/close and Telegram delivery are separate daemon children, scheduler
 states, capacity identities, and positive timeouts. The close path runs whenever
@@ -170,13 +178,20 @@ configured local hour. Its intent/outcome ledger distinguishes prepared,
 sending, sent, suppressed, failed, and ambiguous unknown outcomes. See
 [[modules/daemon]] and [[commands/digest]].
 
+A prepared attempt is owned through the exact payload and amendment frontier
+until that owner starts or suppresses the effect. Competing live preparers
+cannot rewrite it, and a stale owner is fenced. Daemon startup and delivery
+child completion reconcile every dead `sending` receipt, including dates older
+than the next scheduled recap, to terminal `unknown`.
+
 ## Output safety
 
 Normalized records contain only bounded allowlisted fields. Rails performs HTML
 escaping, terminal rendering strips control/ANSI/OSC sequences and embedded
 newlines, and Telegram strips controls then escapes dynamic text for HTML parse
 mode. Structured delivery logs never include the destination, token, or payload
-text.
+text. Validated task links are rebuilt from the resolved destination, including
+the archive query route and the native unanswered-question anchor.
 
 ## Backlinks
 

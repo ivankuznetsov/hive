@@ -216,13 +216,14 @@ module Hive
         end
         key = fingerprint_key(task_folder, File.basename(path))
         signature = file_signature(stat)
-        if unchanged_fingerprint?(key, signature)
+        if unchanged_fingerprint?(key, signature) && (cached_gaps = cached_journal_gaps(key))
           fingerprints[key] = @prior_fingerprints.fetch(key)
+          gaps.concat(cached_gaps)
           return
         end
 
         bytes = File.binread(path, MAX_JOURNAL_BYTES + 1)
-        fingerprints[key] = signature.merge("sha256" => Digest::SHA256.hexdigest(bytes))
+        journal_gaps = []
         malformed = false
         bytes.each_line.with_index(1) do |line, index|
           next if line.strip.empty?
@@ -238,6 +239,7 @@ module Hive
             next
           end
 
+          record = with_event_time(record)
           boundary_records[task_folder] << record if before_boundary?(record["occurred_at"])
           record = enrich_pr_evidence(task_folder, record)
 
@@ -247,20 +249,24 @@ module Hive
           if result.disposition == :fact
             if in_window?(result.value.fetch("occurred_at"))
               facts << with_task_url(result.value)
-              gaps << incomplete_pr_gap(record, task_folder) if incomplete_pr_evidence?(record)
+              journal_gaps << incomplete_pr_gap(record, task_folder) if incomplete_pr_evidence?(record)
             end
           elsif result.disposition == :gap
-            gaps << result.value
+            journal_gaps << result.value
           end
         rescue JSON::ParserError
           malformed = true
         end
         if malformed
-          gaps << scoped_gap(
+          journal_gaps << scoped_gap(
             "malformed_journal", "task journal contains one or more invalid rows",
             task_slug: File.basename(task_folder)
           )
         end
+        fingerprints[key] = signature.merge(
+          "sha256" => Digest::SHA256.hexdigest(bytes), "gaps" => journal_gaps
+        )
+        gaps.concat(journal_gaps)
       rescue SystemCallError, IOError
         gaps << scoped_gap("unreadable_journal", "task journal could not be read",
                            task_slug: File.basename(task_folder))
@@ -273,6 +279,14 @@ module Hive
       def valid_activity_shape?(record)
         record["payload"].is_a?(Hash) && record["task"].is_a?(Hash) &&
           (record["provenance"].nil? || record["provenance"].is_a?(Hash))
+      end
+
+      def with_event_time(record)
+        return record unless record["occurred_at"].nil? || record["occurred_at"].to_s.empty?
+
+        fallback = record["observed_at"] || record.dig("provenance", "ingested_at") ||
+          iso(observation_time)
+        record.merge("occurred_at" => fallback)
       end
 
       def enrich_pr_evidence(task_folder, record)
@@ -521,6 +535,13 @@ module Hive
           prior["mtime_ns"] == signature["mtime_ns"] &&
           prior["ctime_ns"] == signature["ctime_ns"] && prior["inode"] == signature["inode"] &&
           prior["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+      end
+
+      def cached_journal_gaps(key)
+        cached = @prior_fingerprints.dig(key, "gaps")
+        return unless cached.is_a?(Array) && cached.all? { |gap| gap.is_a?(Hash) }
+
+        cached
       end
 
       def directory_empty?(path)

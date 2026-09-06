@@ -79,6 +79,65 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
     end
   end
 
+  def test_prepared_intent_keeps_payload_ownership_until_its_sender_starts
+    with_tmp_dir do |dir|
+      root = File.join(dir, "deliveries")
+      alive = ->(pid, start) { pid == 101 && start == "start-101" }
+      first = Hive::DailyDigest::DeliveryLedger.new(
+        root: root,
+        process_identity: -> { [ 101, "start-101" ] },
+        process_alive: alive
+      )
+      second = Hive::DailyDigest::DeliveryLedger.new(
+        root: root,
+        process_identity: -> { [ 202, "start-202" ] },
+        process_alive: alive
+      )
+      original = first.prepare(**identity, now: NOW)
+
+      competing = second.prepare(
+        **identity.merge(amendment_frontier: "d" * 64, payload_hash: "e" * 64),
+        now: NOW + 1
+      )
+
+      assert_equal :in_flight, competing.action
+      assert_equal original.receipt.fetch("receipt_id"), competing.receipt.fetch("receipt_id")
+      sending = first.mark_sending(DATE, attempt: 1, now: NOW + 2)
+      assert_equal identity.fetch(:amendment_frontier), sending.fetch("amendment_frontier")
+      assert_equal identity.fetch(:payload_hash), sending.fetch("payload_hash")
+    end
+  end
+
+  def test_stale_preparer_cannot_start_after_recovery_claims_its_attempt
+    with_tmp_dir do |dir|
+      root = File.join(dir, "deliveries")
+      owner_alive = true
+      first = Hive::DailyDigest::DeliveryLedger.new(
+        root: root,
+        process_identity: -> { [ 101, "start-101" ] },
+        process_alive: ->(pid, _start) { pid == 101 && owner_alive }
+      )
+      second = Hive::DailyDigest::DeliveryLedger.new(
+        root: root,
+        process_identity: -> { [ 202, "start-202" ] },
+        process_alive: ->(pid, _start) { pid == 202 }
+      )
+      first.prepare(**identity, now: NOW)
+      owner_alive = false
+
+      recovered = second.prepare(
+        **identity.merge(amendment_frontier: "d" * 64, payload_hash: "e" * 64),
+        now: NOW + 1
+      )
+
+      assert_equal :send, recovered.action
+      assert_raises(Hive::DailyDigest::DeliveryLedger::InvalidTransition) do
+        first.mark_sending(DATE, attempt: 1, now: NOW + 2)
+      end
+      assert_equal "sending", second.mark_sending(DATE, attempt: 1, now: NOW + 3).fetch("outcome")
+    end
+  end
+
   def test_definite_failures_retry_to_a_bound_then_require_operator_intent
     with_tmp_dir do |dir|
       ledger = Hive::DailyDigest::DeliveryLedger.new(root: File.join(dir, "deliveries"))
@@ -191,6 +250,28 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
       preparation = interrupted.prepare(**identity, now: NOW + 2)
       assert_equal :unknown, preparation.action
       assert_equal "unknown", preparation.receipt.fetch("outcome")
+    end
+  end
+
+  def test_reconciles_every_interrupted_sending_receipt
+    with_tmp_dir do |dir|
+      root = File.join(dir, "deliveries")
+      ledger = Hive::DailyDigest::DeliveryLedger.new(
+        root: root,
+        process_identity: -> { [ 321, "start-321" ] },
+        process_alive: ->(_pid, _start) { false }
+      )
+      ledger.prepare(**identity, now: NOW)
+      ledger.mark_sending(DATE, attempt: 1, now: NOW + 1)
+      other_date = "2026-08-29"
+      ledger.prepare(**identity.merge(local_date: other_date), now: NOW)
+      ledger.mark_sending(other_date, attempt: 1, now: NOW + 1)
+
+      reconciled = ledger.reconcile_interrupted(now: NOW + 2)
+
+      assert_equal [ other_date, DATE ], reconciled.map { |receipt| receipt.fetch("local_date") }.sort
+      assert_equal "unknown", ledger.read(DATE).fetch("outcome")
+      assert_equal "unknown", ledger.read(other_date).fetch("outcome")
     end
   end
 

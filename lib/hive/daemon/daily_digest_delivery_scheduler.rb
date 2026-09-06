@@ -1,6 +1,7 @@
 require "time"
 require "tzinfo"
 require "hive/daemon/digest_scheduler_base"
+require "hive/daily_digest/delivery_ledger"
 require "hive/daily_digest/store"
 require "hive/paths"
 
@@ -23,7 +24,8 @@ module Hive
 
       def initialize(state_path: nil, clock: -> { Time.now.utc }, enabled: false,
                      hour: DEFAULT_HOUR, logger: nil,
-                     store: Hive::DailyDigest::Store.new)
+                     store: Hive::DailyDigest::Store.new,
+                     ledger: Hive::DailyDigest::DeliveryLedger.new)
         super(
           state_path: state_path || File.join(
             Hive::Paths.state_home, "daily_digest_delivery_state.json"
@@ -32,7 +34,9 @@ module Hive
         )
         @hour = valid_hour(hour)
         @store = store
+        @ledger = ledger
         @pending_records = {}
+        @ledger.reconcile_interrupted(now: @clock.call)
       end
 
       def reconfigure(enabled:, hour:)
@@ -65,6 +69,7 @@ module Hive
       end
 
       def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
+        @ledger.reconcile_interrupted(now: now)
         local_date = digest_date(date)
         record_id = @pending_records.delete(local_date) || record_id_for(local_date)
         pending_for(stage).delete(local_date)

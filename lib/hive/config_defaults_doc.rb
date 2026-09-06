@@ -11,6 +11,8 @@ module Hive
     WIKI_PAGE = File.join("wiki", "modules", "config.md")
     BEGIN_MARKER = "<!-- BEGIN GENERATED: Config::DEFAULTS -->"
     END_MARKER = "<!-- END GENERATED: Config::DEFAULTS -->"
+    BEGIN_MARKER_CANDIDATE = /<!--[^\r\n]*\bBEGIN\b[^\r\n]*\bGENERATED\b[^\r\n]*Config::DEFAULTS/i
+    END_MARKER_CANDIDATE = /<!--[^\r\n]*\bEND\b[^\r\n]*\bGENERATED\b[^\r\n]*Config::DEFAULTS/i
     SERIALIZER_WIDTH = 80
 
     class InvalidRegionError < ArgumentError; end
@@ -54,6 +56,8 @@ module Hive
     def validated_region(page)
       begin_line = "#{BEGIN_MARKER}\n".b
       end_line = "#{END_MARKER}\n".b
+      begin_candidates = page.scan(BEGIN_MARKER_CANDIDATE).length
+      end_candidates = page.scan(END_MARKER_CANDIDATE).length
       begin_occurrences = page.scan(BEGIN_MARKER.b).length
       end_occurrences = page.scan(END_MARKER.b).length
       begin_lines = page.each_line("\n").count { |line| line == begin_line }
@@ -61,7 +65,8 @@ module Hive
       begin_at = page.index(begin_line)
       end_at = page.index(end_line)
 
-      valid = begin_occurrences == 1 && end_occurrences == 1 &&
+      valid = begin_candidates == 1 && end_candidates == 1 &&
+              begin_occurrences == 1 && end_occurrences == 1 &&
               begin_lines == 1 && end_lines == 1 && begin_at < end_at
       unless valid
         raise InvalidRegionError,

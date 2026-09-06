@@ -984,8 +984,9 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 - `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, removed PR-digest config rejection, and answer-digest/bot validation.
 - `test/unit/config_defaults_doc_test.rb` — fixed-width defaults serialization,
-  full-page marker validation, byte-preserved prose, changed/no-op regeneration,
-  and the read-only committed-page drift guard.
+  full-page marker validation (including altered marker candidates alongside a
+  valid region), byte-preserved prose, changed/no-op regeneration, and the
+  read-only committed-page drift guard.
 - `test/unit/web/config_test.rb` — global web defaults and invalid web port rejection.
 
 ## Backlinks

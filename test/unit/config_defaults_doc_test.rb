@@ -10,6 +10,9 @@ class ConfigDefaultsDocTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
   BEGIN_MARKER = "<!-- BEGIN GENERATED: Config::DEFAULTS -->"
   END_MARKER = "<!-- END GENERATED: Config::DEFAULTS -->"
+  ALTERED_MARKER_PAIR = "<!-- BEGIN GENERATED Config::DEFAULTS -->\n" \
+                        "stale duplicate\n" \
+                        "<!-- END GENERATED Config::DEFAULTS -->\n"
   SAMPLE_DEFAULTS = {
     "zeta" => {
       "nested_second" => [ "first", "second" ],
@@ -38,6 +41,8 @@ class ConfigDefaultsDocTest < Minitest::Test
     inline: "prefix #{BEGIN_MARKER}\nbody\n#{END_MARKER}\n",
     indented: "  #{BEGIN_MARKER}\nbody\n  #{END_MARKER}\n",
     altered: "<!-- BEGIN GENERATED Config::DEFAULTS -->\nbody\n<!-- END GENERATED Config::DEFAULTS -->\n",
+    altered_after_valid: "#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n#{ALTERED_MARKER_PAIR}",
+    altered_before_valid: "#{ALTERED_MARKER_PAIR}#{BEGIN_MARKER}\nbody\n#{END_MARKER}\n",
     crlf_marker_lines: "#{BEGIN_MARKER}\r\nbody\r\n#{END_MARKER}\r\n",
     unterminated_end_line: "#{BEGIN_MARKER}\nbody\n#{END_MARKER}"
   }.freeze
@@ -171,6 +176,11 @@ class ConfigDefaultsDocTest < Minitest::Test
       refute_equal stale, Hive::ConfigDefaultsDoc.render(stale, defaults: SAMPLE_DEFAULTS)
       assert_raises(Hive::ConfigDefaultsDoc::InvalidRegionError) do
         Hive::ConfigDefaultsDoc.render(MALFORMED_PAGES.fetch(:two_complete_pairs), defaults: SAMPLE_DEFAULTS)
+      end
+      [ ALTERED_MARKER_PAIR + current, current + ALTERED_MARKER_PAIR ].each do |malformed|
+        assert_raises(Hive::ConfigDefaultsDoc::InvalidRegionError) do
+          Hive::ConfigDefaultsDoc.render(malformed, defaults: SAMPLE_DEFAULTS)
+        end
       end
     end
   end

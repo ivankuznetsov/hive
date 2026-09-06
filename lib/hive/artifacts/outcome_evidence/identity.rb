@@ -37,6 +37,9 @@ module Hive
           verify_controller_head!(head, handoff)
           git_read!(worktree, :commit_oid, oid: base)
           ancestor!(worktree, base, head)
+          base = Hive::AgentGitGate.change_base(
+            worktree, branch: pointer.fetch("base_branch"), head_oid: head
+          ) unless handoff
           merge_base = base
 
           paths = changed_paths(worktree, base, head)
@@ -58,7 +61,7 @@ module Hive
             "changed_paths" => paths,
             "changed_paths_digest" => Digest::SHA256.hexdigest(paths.join("\0"))
           }
-        rescue Hive::WorktreeError => e
+        rescue Hive::WorktreeError, Hive::AgentGitGate::Error => e
           raise ResolutionError, e.message
         end
 

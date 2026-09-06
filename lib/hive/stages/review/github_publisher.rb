@@ -3,7 +3,7 @@ require "open3"
 require "tempfile"
 require "hive/gh"
 require "hive/reviewers"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/worktree"
 
 module Hive
@@ -36,7 +36,7 @@ module Hive
 
           header = "### Reviewer: #{reviewer_name} - Pass #{format('%02d', pass)}"
           body = "#{header}\n\n#{file_body}"
-          if (hits = Hive::SecretPatterns.scan(body)).any?
+          if (hits = Hive::SecretScanner.scan(body)).any?
             warn "hive: review GitHub publish skipped for pass=#{format('%02d', pass)} reviewer=#{reviewer_name}; " \
                  "secret patterns=#{hits.map { |h| h[:name].to_s }.uniq.first(3).join(',')}"
             return :secret

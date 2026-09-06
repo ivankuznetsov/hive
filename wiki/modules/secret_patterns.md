@@ -1,93 +1,58 @@
 ---
-title: Hive::SecretPatterns
+title: Secret detection and diagnostic redaction
 type: module
-source: lib/hive/secret_patterns.rb
+source: lib/hive/secret_scanner.rb, lib/hive/secret_patterns.rb, lib/hive/betterleaks.rb
 created: 2026-04-26
-updated: 2026-08-31
-tags: [security, secrets, regex, secret-scan, redact]
+updated: 2026-09-06
+tags: [security, secrets, betterleaks, redact]
 ---
 
-**TLDR**: Shared regex set for credential / secret detection. One Hash,
-`scan(text)` returns `[{name:, snippet:}, …]`; `redact(text)` returns the string
-with each match replaced by `[REDACTED:<name>]`. It remains lower-level shared
-Hive infrastructure consumed by the Agent ABI and Agent Artifact Firewall,
-not state owned by either component. New patterns require focused tests.
+**TLDR**: Betterleaks is the sole credential detector. Hive selects exact inputs
+and maps findings into workflow decisions; it does not maintain detection regexes
+or its former Ruby password-reference classifier. `SecretPatterns` now exposes
+only in-process diagnostic redaction, never a publication approval API.
 
-## API
+## Detection
 
-```ruby
-Hive::SecretPatterns::PATTERNS    # → frozen Hash<Symbol, Regexp>
-Hive::SecretPatterns.scan(text)   # → [{name: :aws_access_key, snippet: "AKIA..."}, …]
-Hive::SecretPatterns.match?(text) # → boolean, short-circuiting on the first match
-Hive::SecretPatterns.match_diff?(diff) # → boolean for paths and added lines
-Hive::SecretPatterns.redact(text) # → String with each match replaced by "[REDACTED:<name>]"
-```
+`SecretScanner.scan(text, path:)` returns redacted finding metadata: upstream
+rule name, line/column, path, and a SHA-256 of the complete secret for exact
+existing-finding comparisons. Raw scanner reports exist only in memory.
+`match?` is the boolean wrapper. A failed command or malformed report raises
+`SecretScanner::Unavailable`; callers must not interpret it as no findings.
 
-`scan` snippets are truncated to 80 characters. Callers that only need a
-publication gate use `match?` so credential-dense input cannot allocate a match
-record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes replaced (so a binary log tail with `\xff` bytes never raises `Encoding::CompatibilityError` when gsubbed against the UTF-8 PATTERNS regexes — the failure path that previously aborted the old full status snapshot, PR #84 review finding #4).
+Git publication scans the exact base..HEAD history using Betterleaks Git mode,
+including intermediate commits and binary bytes forced through text diffs.
+Auto-commit scans exact index blobs, subtracting identical existing HEAD
+findings, without rejecting a blob because of its size. Review scans batch
+added lines by filename so upstream code-aware filters see source context.
 
-`match_diff?` is the source-aware publication gate. It scans changed paths and
-added hunk lines, not removed or unchanged base bytes. Password-shaped matches
-whose complete right-hand side is provably a Ruby runtime reference are not
-credential material. Quoted literals, shell substitutions, mixed
-reference-plus-literal expressions, unparsed source forms, and every other
-secret pattern still fail closed. Synthetic non-patch input retains the raw
-`match?` behavior.
+The same detector serves PR bodies/comments, artifact checks, workflow-package
+secret checks (both authoring lint and import lint), benchmark submission, and
+retry safety. Workflow-package behavior/permission lint is
+separate from credential detection and remains intact.
 
-## Pattern catalogue
+Hive uses the bundled upstream rules, disables network credential validation,
+and disables global path skips and inline suppression comments. An empty
+private Git view prevents task-authored config or ignore files from disabling
+the scanner. Hardened Git config and exact-OID validation remain in force.
 
-| Key | Matches | Notes |
-|-----|---------|-------|
-| `aws_access_key` | `\b(AKIA|ASIA)[0-9A-Z]{16}\b` | Long-term and temporary session tokens. |
-| `aws_secret_access_key` | `aws[_- ]secret[_- ]access[_- ]key…40-byte b64` | Case-insensitive, optional quotes. |
-| `github_token` | `gh[psou]_[A-Za-z0-9]{36,}` | PAT (`ghp`), server-to-server (`ghs`), OAuth (`gho`), user (`ghu`). |
-| `github_fine_grained_pat` | `github_pat_[A-Za-z0-9_]{20,}` | Current fine-grained GitHub personal access tokens. |
-| `generic_api_key` | `\bapi[_-]?key\b[\s:=]{0,3}['"]?…20+ chars` | Quoted or unquoted assignments. |
-| `pem_private_key` | `-----BEGIN … PRIVATE KEY-----…-----END … PRIVATE KEY-----` (`/m`) | Block form — redacts the base64 body, not just the BEGIN header. PR #84 #3. |
-| `password_assignment` | conventional names ending in `password`, `passwd`, or `pwd`, followed by `:` or `=` and 6+ chars | Catches shell / env / YAML assignment shapes such as `DB_PASSWORD=...` as well as bare `password: ...`. A whole `$NAME` or `${NAME}` reference, optionally quoted, is indirection rather than secret material; mixed reference-plus-literal values remain findings. |
-| `bearer_token` | `\bauthorization\s*[:=]\s*['"]?(Bearer|Basic|Token)\s+…8+ chars` | HTTP `Authorization:` headers across curl / log / framework formats. |
-| `session_cookie` | `(Set-)?Cookie:\s*…(session(id)?|sid|auth)…=…8+` | Cookie / Set-Cookie values containing a session-like key. |
-| `openai_api_key` | `\bsk-[A-Za-z0-9]{20,}` | OpenAI API key prefix. |
-| `anthropic_api_key` | `\bsk-ant-[A-Za-z0-9_-]{20,}` | Anthropic API key prefix. |
-| `stripe_api_key` | `\b(sk|rk|pk)_(live|test)_[A-Za-z0-9]{20,}` | Stripe keys, both live and test. |
-| `slack_token` | `\bxox[abprs]-[A-Za-z0-9-]{10,}` | All five Slack token kinds. |
-| `jwt` | `\beyJ…\.eyJ…\.[A-Za-z0-9_-]+\b` | Three base64 segments. |
+## Redaction
 
-## Used by
+`SecretPatterns.redact(text)` masks diagnostic strings without spawning a process
+inside status/log formatting. It preserves UTF-8, handles binary log tails,
+redacts complete and truncated PEM blocks, and does not mutate its input.
+The former `scan`, `match?`, `match_diff?`, and password-reference APIs are gone.
+Existing diagnostic receipts retain their numeric redaction-version metadata;
+reading them still checks their contents with the current Betterleaks detector.
 
-- `Hive::Stages::OpenPr` / `Hive::Stages::Finalize` — refuse PR body/state content containing any match (ADR-008).
-- `Hive::GithubPublication` — scans titles and bodies conservatively, and uses
-  `match_diff?` for exact Git patches so ordinary runtime password plumbing is
-  not mistaken for a committed credential.
-- `Hive::Stages::Review::GithubPublisher` — skips PR comment mirroring when a reviewer file contains a secret pattern.
-- `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default
-  scans every added line and shares the same runtime-reference classifier as
-  publication. A dot inside an unquoted non-code literal is not a lookup, and
-  shell substitutions or mixed lookup-plus-literal lines remain findings. Exact findings may be waived by
-  `[pattern_name, SHA256(full match)]`, so no path/value allowlist grows inside
-  the scanner.
-- `Hive::Stages::AutoCommit` — scans exact staged blobs before an autonomous
-  residue/fix commit through `SecretPatterns.scan`, reusing its `(name,
-  sha256)` evidence to compare the staged blob with HEAD. Test fixtures and
-  production files use the same fail-closed secret rule.
-- `Hive::TaskAction#diagnostic` — calls `SecretPatterns.redact` on the bounded summary / detail before emission to JSON consumers (TUI, bot, daemon).
-- `Hive::DiagnosisAgent#artifact_body` — calls `SecretPatterns.redact` on the agent-produced body before writing `diagnostics/red-status.md`.
-- `Hive::Stages::DraftPrHandoff` — scans the exact new commit/object range, final changed files, repair report, and projected PR title/body before any publication; quarantined reports are redacted before Hive appends its marker.
-- `Hive::ArtifactFirewall` — uses `SecretPatterns.redact` as the default
-  injectable redactor for violation labels, paths, restoration errors, and
-  report diagnostics. Redaction runs before the 512-byte diagnostic cap; a
-  custom redactor that raises fails closed as `[REDACTION_FAILED]` rather than
-  echoing the original input.
-- `Hive::AgentRuntime` — redacts bounded provider probe/compilation/result
-  diagnostics without transferring stage or artifact policy into the ABI.
+## Distribution and tests
 
-## Tests
-
-- `test/unit/secret_patterns_test.rb` — at least one positive + one negative case per pattern.
+See [[dependencies]] for pinned bundled binaries and build-time verification.
+`test/unit/secret_scanner_test.rb` exercises the real Betterleaks binary,
+large inputs, binary payloads, source context, suppression resistance, and
+failure handling. Publication/auto-commit/handoff tests cover their boundaries;
+`secret_patterns_test.rb` now tests diagnostic redaction only.
 
 ## Backlinks
 
-- [[modules/protected_files]] · [[modules/agent_profile]]
-- [[stages/open-pr]] · [[stages/finalize]] · [[stages/review]]
-- [[decisions]] (ADR-008 / ADR-020)
+- [[stages/open-pr]] · [[stages/review]] · [[dependencies]]

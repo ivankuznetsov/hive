@@ -23,6 +23,23 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_publication_range_and_digest_fail_closed_when_git_cannot_resolve_them
+    with_tmp_git_repo do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      assert_raises(Hive::AgentGitGate::CommandFailed) do
+        Hive::AgentGitGate.change_base(repo, branch: "missing", head_oid: head)
+      end
+      assert_raises(Hive::AgentGitGate::CommandFailed) do
+        Hive::AgentGitGate.diff_digest(repo, base_oid: "f" * 40, head_oid: head)
+      end
+      run!("git", "-C", repo, "checkout", "--orphan", "unrelated")
+      run!("git", "-C", repo, "commit", "--allow-empty", "-m", "Separate history")
+      assert_raises(Hive::AgentGitGate::CommandFailed) do
+        Hive::AgentGitGate.change_base(repo, branch: "unrelated", head_oid: head)
+      end
+    end
+  end
+
   def test_hardened_reads_do_not_execute_repository_selected_helpers
     with_tmp_git_repo do |repo|
       marker = File.join(repo, "fsmonitor-ran")

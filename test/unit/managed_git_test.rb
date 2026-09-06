@@ -235,6 +235,29 @@ class ManagedGitTest < Minitest::Test
     end
   end
 
+  def test_bounded_capture_preserves_overflow_when_process_already_exited
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "large.txt"), "x" * 65_536)
+      run!("git", "-C", repo, "add", "large.txt")
+      signals = []
+      missing = lambda do |signal, pid|
+        signals << [ signal, pid ]
+        raise Errno::ESRCH
+      end
+      with_replaced_singleton_method(Process, :kill, missing) do
+        out, _err, status, overflow = Hive::ManagedGit.capture3_bounded(
+          repo, "show", ":large.txt", max_stdout_bytes: 1024
+        )
+        assert_equal "x" * 1024, out
+        assert status.success?
+        assert overflow
+      end
+      assert_equal 1, signals.size
+      assert_equal "KILL", signals.first.first
+      assert_operator signals.first.last, :<, 0
+    end
+  end
+
   def test_timeout_cleanup_tolerates_completed_processes_and_failed_readers
     reader = Thread.new { raise "reader failed" }
     reader.report_on_exception = false

@@ -9,7 +9,6 @@ module Hive
     class WorktreeReceipt
       FILENAME = "patrol-fix-worktree.json".freeze
       MAX_RECEIPT_BYTES = 32 * 1024
-      MAX_DIFF_BYTES = 2 * 1024 * 1024
       DIGEST = /\A[0-9a-f]{64}\z/
       OID = /\A[0-9a-f]{40}\z/
       class InvalidWorktree < Hive::Error; end
@@ -75,10 +74,9 @@ module Hive
         invalid!("fix worktree is dirty; preserving it for recovery") unless read_git!(owner.fetch("worktree"), :status).empty?
         diff = Hive::AgentGitGate.read(
           owner.fetch("worktree"), :diff,
-          base_oid: owner.fetch("base_revision"), head_oid: head,
-          max_stdout_bytes: MAX_DIFF_BYTES
+          base_oid: owner.fetch("base_revision"), head_oid: head
         )
-        invalid!("fix diff is unavailable or exceeds #{MAX_DIFF_BYTES} bytes") unless diff.success? && !diff.overflow
+        invalid!("fix diff is unavailable") unless diff.success?
         {
           "worktree_generation" => generation, "worktree" => owner.fetch("worktree"),
           "branch" => owner.fetch("branch"), "base_revision" => owner.fetch("base_revision"),

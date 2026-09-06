@@ -50,7 +50,7 @@ module Hive
         end
 
         local = observe_local(pointer, diagnostics)
-        pr = read_pr(pointer, local, diagnostics)
+        pr = read_pr(pointer, diagnostics)
         refresh_identity = refresh_identity(pointer, local, pr, diagnostics)
         remote = if @cache && refresh_identity
           @cache.read(refresh_identity)
@@ -280,7 +280,7 @@ module Hive
         { "state" => "unavailable", "tracking_oid" => nil, "ahead" => nil, "behind" => nil }
       end
 
-      def read_pr(pointer, local, diagnostics)
+      def read_pr(pointer, diagnostics)
         path = File.join(@task.folder.to_s, "pr.md")
         return missing_pr unless File.exist?(path)
 
@@ -307,14 +307,13 @@ module Hive
         conflicts = []
         conflicts << "repository" if repository && pointer["repository"] && repository != pointer["repository"]
         conflicts << "number" if declared_number && number && declared_number != number
-        conflicts << "head" if head && local["head_oid"] && head != local["head_oid"]
         diagnostics.concat(conflicts.map { |field| diagnostic("pr_#{field}_mismatch") })
         title = frontmatter["title"].to_s.strip
         title = body[/^#\s+(.+)$/, 1].to_s.strip if title.empty?
         state = if conflicts.any?
           "conflicting"
         elsif parsed
-          result.truncated || head.nil? ? "partial" : "current"
+          result.truncated ? "partial" : "current"
         else
           "partial"
         end

@@ -288,6 +288,11 @@ the visual layer is ignored.
 
 ## Publication and artifacts
 
+The saved `pr.md` head is descriptive, not a refresh gate: an old or absent
+saved SHA does not make an otherwise verified PR identity conflicting or partial.
+Refresh uses the current owned worktree HEAD and still exposes a genuinely
+different remote head. Repository and PR-number contradictions remain blocked.
+
 The publication panel is advisory and read-only. Local facts come from the
 strict owned `worktree.yml`, bounded argv-form Git observations including
 untracked files, an independently observed current base ref, at most 50 commit

@@ -226,6 +226,41 @@ class UserServiceTransactionJournalTest < Minitest::Test
     end
   end
 
+  def test_rollback_records_the_process_identity_observed_before_manager_restore
+    journal = fake_journal(writer: ->(*) { nil })
+    document = prepared_document(journal).merge(
+      "prior_enabled" => true,
+      "prior_running" => true,
+      "prior_main_pid" => 123,
+      "prior_process_start" => "456"
+    )
+    document = journal.advance(document, phase: :backup_stored)
+    document = journal.advance(document, phase: :unit_published)
+    document = journal.advance(document, phase: :rollback_selected, direction: :rollback)
+    document = journal.advance(document, phase: :prior_file_restored)
+
+    restored = journal.record_restore_process(
+      document,
+      main_pid: 321,
+      process_start: "654"
+    )
+
+    assert_equal 321, restored.fetch("restore_from_main_pid")
+    assert_equal "654", restored.fetch("restore_from_process_start")
+    assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.record_restore_process(
+        prepared_document(journal).merge(
+          "prior_enabled" => true,
+          "prior_running" => true,
+          "prior_main_pid" => 123,
+          "prior_process_start" => "456"
+        ),
+        main_pid: 321,
+        process_start: "654"
+      )
+    end
+  end
+
   def test_read_rejects_a_committed_apply_whose_target_is_still_prior
     document = prepared_document(fake_journal(writer: ->(*) { nil })).merge(
       "phase" => "committed"

@@ -705,6 +705,84 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_filesystem_only_receipt_restarts_a_process_from_the_previous_definition
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      enabled = false
+      running = false
+      definition_current = false
+      process_start = nil
+      calls = []
+      runner = lambda do |argv|
+        calls << argv
+        case argv
+        when %w[systemctl --user daemon-reload]
+          definition_current = true
+        when %w[systemctl --user enable --now hive-test]
+          enabled = running = true
+          process_start = "process-a"
+        when %w[systemctl --user enable hive-test]
+          enabled = true
+        when %w[systemctl --user restart hive-test]
+          running = true
+          process_start = "process-b"
+        end
+        true
+      end
+      status_reader = lambda do |_argv|
+        [
+          [
+            "LoadState=#{definition_current ? 'loaded' : 'not-found'}",
+            "FragmentPath=#{definition_current ? path : ''}",
+            "NeedDaemonReload=#{definition_current ? 'no' : 'yes'}",
+            "UnitFileState=#{enabled ? 'enabled' : 'disabled'}",
+            "ActiveState=#{running ? 'active' : 'inactive'}",
+            "MainPID=#{running ? 42 : 0}",
+            "ExecMainStartTimestampMonotonic=#{process_start || 0}"
+          ].join("\n") + "\n",
+          true
+        ]
+      end
+      definition_a = service_definition(dir)
+      definition_b = Hive::UserService::Definition.new(
+        platform: :linux,
+        service_name: "hive-test",
+        target_path: path,
+        content: "desired-b\n"
+      )
+      build = lambda do |definition|
+        Hive::UserService.new(
+          definition: definition,
+          runner: runner,
+          query_available: true,
+          manager_available: true,
+          status_reader: status_reader,
+          home: dir
+        )
+      end
+
+      first = build.call(definition_a)
+      assert first.apply(first.plan(autostart: true)).success?
+      definition_current = false
+      filesystem_only = build.call(definition_b)
+      assert filesystem_only.apply(filesystem_only.plan(autostart: false, force: true)).success?
+
+      # Another unit's daemon-reload can make B look current while A's process
+      # is still running. The filesystem-only receipt cannot prove that PID's
+      # definition, so promotion must conservatively restart it.
+      definition_current = true
+      calls.clear
+      promoted = build.call(definition_b)
+      result = promoted.apply(promoted.plan(autostart: true))
+
+      assert result.success?
+      assert result.restarted
+      assert_equal "process-b", result.final_status.process_start
+      assert_includes calls, %w[systemctl --user restart hive-test]
+      refute_includes calls, %w[systemctl --user enable --now hive-test]
+    end
+  end
+
   def test_autostart_disabled_reapply_replaces_a_managed_receipt_without_manager_mutation
     with_tmp_dir do |dir|
       enabled = false
@@ -1647,6 +1725,45 @@ class UserServiceTest < Minitest::Test
       invalid_result = invalid.start
       assert_equal :failed, invalid_result.kind
       assert_includes invalid_result.diagnostics, :invalid_recovery_state
+    end
+  end
+
+  def test_apply_continues_after_recovering_an_interrupted_stop
+    with_tmp_dir do |dir|
+      running = false
+      enabled = false
+      runner = lambda do |argv|
+        case argv
+        when %w[systemctl --user is-enabled hive-test] then enabled
+        when %w[systemctl --user is-active --quiet hive-test] then running
+        when %w[systemctl --user enable --now hive-test]
+          enabled = running = true
+        when %w[systemctl --user stop hive-test]
+          running = false
+        else
+          true
+        end
+      end
+      installed = build_service(dir, runner: runner)
+      assert installed.apply(installed.plan(autostart: true)).success?
+
+      interrupted = build_service(
+        dir,
+        runner: runner,
+        event_handler: lambda do |event, _definition|
+          raise "interrupt after stop" if event == :after_lifecycle_acted
+        end
+      )
+      assert_raises(RuntimeError) { interrupted.stop }
+      refute running
+      assert_equal 1, pending_journals(dir).length
+
+      fresh = build_service(dir, runner: runner)
+      result = fresh.apply(fresh.plan(autostart: true))
+
+      assert result.success?
+      assert running
+      assert_empty pending_journals(dir)
     end
   end
 
@@ -3166,6 +3283,59 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_rollback_does_not_accept_the_desired_process_as_the_restored_process
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      document = apply_document(
+        phase: "prior_file_restored",
+        direction: "rollback",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: "restart",
+        prior_enabled: true,
+        prior_running: true,
+        prior_main_pid: 10,
+        prior_process_start: "prior"
+      )
+      desired_process = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        main_pid: 20,
+        process_start: "desired"
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| desired_process }
+      restore_calls = 0
+      manager = Object.new
+      manager.define_singleton_method(:restore) do |**_kwargs|
+        restore_calls += 1
+        Hive::UserService::Manager::Action.new(
+          ok: false,
+          restarted: false,
+          diagnostics: [ :manager_restore_failed ]
+        )
+      end
+      service.instance_variable_set(:@manager, manager)
+
+      result = service.send(
+        :rollback_apply,
+        document,
+        fake_transition_transaction(document),
+        diagnostics: []
+      )
+
+      assert_equal :failed, result.kind
+      assert_equal 1, restore_calls
+      assert_includes result.diagnostics, :recovery_pending
+      refute_includes result.diagnostics, :prior_state_restored
+    end
+  end
+
   def test_removal_replay_rejects_impossible_file_phase_combinations
     with_tmp_dir do |dir|
       path = definition_path(dir)
@@ -3609,6 +3779,91 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_restart_from_stopped_accepts_fresh_process_evidence_and_replays
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      stopped = synthetic_status(
+        dir,
+        enabled: true,
+        running: false,
+        main_pid: 0,
+        process_start: nil
+      )
+      running = synthetic_status(dir, main_pid: 43, process_start: "fresh")
+      observations = [ stopped, running, running, running, running ]
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || running }
+      manager = Object.new
+      manager.define_singleton_method(:restart) do
+        Hive::UserService::Manager::Action.new(ok: true, restarted: true, diagnostics: [])
+      end
+      service.instance_variable_set(:@manager, manager)
+      document = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        manager_intent: "restart",
+        prior_running: false
+      )
+
+      result = service.send(
+        :complete_lifecycle,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :unchanged, result.kind
+      assert result.restarted
+      assert_empty result.diagnostics - [ :recovery_resumed ]
+    end
+  end
+
+  def test_stop_retains_intent_when_manager_observation_is_lost_after_the_action
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      running = synthetic_status(dir, main_pid: 42, process_start: "prior")
+      unavailable = synthetic_status(
+        dir,
+        manager_availability: :indeterminate,
+        enabled: false,
+        running: false,
+        main_pid: 0,
+        process_start: nil
+      )
+      observations = [ running, unavailable ]
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || unavailable }
+      manager = Object.new
+      manager.define_singleton_method(:stop) do
+        Hive::UserService::Manager::Action.new(ok: false, restarted: false, diagnostics: [])
+      end
+      service.instance_variable_set(:@manager, manager)
+      document = lifecycle_document(
+        phase: "lifecycle_prepared",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        manager_intent: "stop",
+        prior_running: true,
+        prior_main_pid: 42,
+        prior_process_start: "prior"
+      )
+
+      result = service.send(
+        :complete_lifecycle,
+        document,
+        fake_transition_transaction(document),
+        replay: false
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+      assert_includes result.diagnostics, :manager_action_unverified
+    end
+  end
+
   def test_lifecycle_verification_catches_regression_after_each_phase
     with_tmp_dir do |dir|
       path = definition_path(dir)
@@ -3791,7 +4046,8 @@ class UserServiceTest < Minitest::Test
                      direction: "forward", manager_intent: "enable",
                      backup_path: nil, result_kind: "written", autostart: true,
                      prior_enabled: false, prior_running: false,
-                     prior_main_pid: 0, prior_process_start: nil)
+                     prior_main_pid: 0, prior_process_start: nil,
+                     restore_from_main_pid: nil, restore_from_process_start: nil)
     {
       "operation" => "apply",
       "direction" => direction,
@@ -3802,6 +4058,8 @@ class UserServiceTest < Minitest::Test
       "prior_running" => prior_running,
       "prior_main_pid" => prior_main_pid,
       "prior_process_start" => prior_process_start,
+      "restore_from_main_pid" => restore_from_main_pid,
+      "restore_from_process_start" => restore_from_process_start,
       "desired_digest" => desired_digest,
       "backup_path" => backup_path,
       "manager_intent" => manager_intent,
@@ -3856,6 +4114,12 @@ class UserServiceTest < Minitest::Test
     journal = Object.new
     journal.define_singleton_method(:read) { document }
     journal.define_singleton_method(:prior_content) { |candidate| candidate["prior_content"] }
+    journal.define_singleton_method(:record_restore_process) do |candidate, main_pid:, process_start:|
+      candidate.merge(
+        "restore_from_main_pid" => main_pid,
+        "restore_from_process_start" => process_start
+      )
+    end
     journal.define_singleton_method(:phase?) do |candidate, phase|
       candidate.fetch("phase") == phase.to_s
     end

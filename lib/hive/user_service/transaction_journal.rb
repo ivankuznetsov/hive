@@ -60,6 +60,7 @@ module Hive
         manager_intent result_kind autostart prior_main_pid prior_process_start
         created_at updated_at
       ].freeze
+      OPTIONAL_KEYS = %w[restore_from_main_pid restore_from_process_start].freeze
       DIGEST_PATTERN = /\A[0-9a-f]{64}\z/
       APPLY_RESULT_KINDS = %w[written upgraded unchanged].freeze
       APPLY_MANAGER_INTENTS = %w[enable restart takeover].freeze
@@ -117,6 +118,8 @@ module Hive
           "autostart" => !!autostart,
           "prior_main_pid" => prior_main_pid,
           "prior_process_start" => prior_process_start,
+          "restore_from_main_pid" => nil,
+          "restore_from_process_start" => nil,
           "created_at" => timestamp,
           "updated_at" => timestamp
         })
@@ -150,6 +153,23 @@ module Hive
         document.fetch("operation") == "apply" &&
           document.fetch("direction") == "forward" &&
           ACTIVATION_PHASES.include?(document.fetch("phase"))
+      end
+
+      def record_restore_process(document, main_pid:, process_start:)
+        validate_document!(document)
+        unless restore_process_recordable?(document)
+          raise Invalid, "transition journal cannot record restore process in this state"
+        end
+        unless document["restore_from_main_pid"].nil?
+          raise Invalid, "transition journal restore process is already recorded"
+        end
+
+        updated = document.merge(
+          "restore_from_main_pid" => main_pid,
+          "restore_from_process_start" => process_start,
+          "updated_at" => @clock.call.utc.iso8601(6)
+        )
+        write(updated, expected_document: document)
       end
 
       def phase?(document, phase)
@@ -204,7 +224,10 @@ module Hive
 
       def validate_document!(data)
         raise Invalid, "transition journal root must be an object" unless data.is_a?(Hash)
-        raise Invalid, "transition journal fields are not recognized" unless data.keys.sort == REQUIRED_KEYS.sort
+        keys = data.keys
+        unless (REQUIRED_KEYS - keys).empty? && (keys - REQUIRED_KEYS - OPTIONAL_KEYS).empty?
+          raise Invalid, "transition journal fields are not recognized"
+        end
         raise Invalid, "transition journal schema is unsupported" unless data["schema"] == SCHEMA && data["schema_version"] == VERSION
         raise Invalid, "transition journal service does not match" unless data["service_name"] == @definition.service_name
         raise Invalid, "transition journal platform does not match" unless data["platform"] == @definition.platform.to_s
@@ -219,6 +242,7 @@ module Hive
         end
         validate_prior_state!(data)
         validate_process_identity!(data)
+        validate_restore_process_identity!(data)
         validate_timestamps!(data)
         validate_operation!(data)
         data
@@ -266,6 +290,34 @@ module Hive
         if (pid.zero? && process_start) || (pid.positive? && process_start.nil?)
           raise Invalid, "transition journal prior process identity is incoherent"
         end
+      end
+
+      def validate_restore_process_identity!(data)
+        pid = data["restore_from_main_pid"]
+        process_start = data["restore_from_process_start"]
+        unless pid.nil? || (pid.is_a?(Integer) && pid >= 0)
+          raise Invalid, "transition journal restore-from main pid is invalid"
+        end
+        unless process_start.nil? || (process_start.is_a?(String) && !process_start.empty?)
+          raise Invalid, "transition journal restore-from process start is invalid"
+        end
+        if (pid.nil? && process_start) || (pid == 0 && process_start) ||
+           (pid&.positive? && process_start.nil?)
+          raise Invalid, "transition journal restore-from process identity is incoherent"
+        end
+        return if pid.nil?
+
+        unless restore_process_recordable?(data)
+          raise Invalid, "transition journal restore-from process identity is invalid in this state"
+        end
+      end
+
+      def restore_process_recordable?(data)
+        data.fetch("operation") == "apply" &&
+          data.fetch("direction") == "rollback" &&
+          data.fetch("prior_running") &&
+          APPLY_ROLLBACK_PHASES.index(data.fetch("phase")) >=
+            APPLY_ROLLBACK_PHASES.index("prior_file_restored")
       end
 
       def validate_timestamps!(data)

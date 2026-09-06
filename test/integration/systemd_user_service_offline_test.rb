@@ -193,22 +193,56 @@ class SystemdUserServiceOfflineTest < Minitest::Test
 
   def cleanup!(definition, home:)
     service = build_service(definition, home: home)
-    result = service.remove(service.plan_remove)
-    return verify_removed!(definition) if %i[removed absent].include?(result.kind)
+    removal_failure = nil
+    begin
+      result = service.remove(service.plan_remove)
+      unless %i[removed absent].include?(result.kind)
+        removal_failure = "UserService removal failed: kind=#{result.kind} " \
+          "diagnostics=#{result.diagnostics.inspect}"
+      end
+    rescue StandardError => error
+      removal_failure = "UserService removal raised #{error.class}: #{error.message}"
+    end
 
+    emergency_cleanup!(definition, service) if removal_failure
+    cleanup_failure = begin
+      verify_removed!(definition, service)
+      nil
+    rescue Minitest::Assertion => error
+      error.message
+    end
+    failures = [ removal_failure, cleanup_failure ].compact
+    flunk failures.join("; ") unless failures.empty?
+  end
+
+  def emergency_cleanup!(definition, service)
     system("systemctl", "--user", "disable", "--now", definition.service_name,
            out: File::NULL, err: File::NULL)
     FileUtils.rm_f(definition.target_path)
     system("systemctl", "--user", "daemon-reload", out: File::NULL, err: File::NULL)
-    verify_removed!(definition)
+    recovery = service.inspect_recovery
+    FileUtils.rm_f([ recovery["journal_path"], recovery["receipt_path"] ])
   end
 
-  def verify_removed!(definition)
+  def verify_removed!(definition, service)
     wait_until(5, "#{definition.service_name} survived cleanup") do
-      !active?("#{definition.service_name}.service") &&
-        integer_property("#{definition.service_name}.service", "MainPID").zero? &&
-        !File.exist?(definition.target_path)
+      status = service.inspect
+      status.manager_available? &&
+        status.content_state == :absent &&
+        !status.enabled? &&
+        !status.running? &&
+        status.main_pid.zero? &&
+        status.load_state == "not_found" &&
+        status.fragment_path.nil?
     end
+    assert_empty unit_inventory("#{definition.service_name}.service")
+    recovery = service.inspect_recovery
+    assert_equal "stable", recovery.fetch("state")
+    refute File.exist?(recovery.fetch("journal_path"))
+    refute File.exist?(recovery.fetch("receipt_path"))
+    lock_path = recovery.fetch("lock_path")
+    assert !File.exist?(lock_path) || File.zero?(lock_path),
+           "user-service lock retained holder evidence at #{lock_path}"
   end
 
   def unused_port
@@ -246,9 +280,10 @@ class SystemdUserServiceOfflineTest < Minitest::Test
       "systemctl", "--user", "show", unit_name,
       "--property=#{property}", "--value"
     )
-    return 0 unless status.success?
-
-    Integer(output.strip, exception: false) || 0
+    assert status.success?, "could not inspect #{property} for #{unit_name}"
+    value = Integer(output.strip, exception: false)
+    refute_nil value, "#{property} for #{unit_name} was not an integer"
+    value
   end
 
   def live_cgroup_pids(unit_name)

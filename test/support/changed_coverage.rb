@@ -23,6 +23,10 @@ module HiveChangedCoverage
   SOURCE_TEST_OVERRIDES = {
     "lib/hive/version.rb" => [],
     "lib/hive/errors.rb" => [],
+    "lib/hive/commands/migrate.rb" => [ "test/integration/migrate_test.rb" ],
+    "lib/hive/commands/setup.rb" => [ "test/unit/commands/setup/orchestrator_test.rb" ],
+    "lib/hive/user_service.rb" => [ "test/unit/user_service/user_service_test.rb" ],
+    "lib/hive/user_service/plan.rb" => [ "test/unit/user_service/user_service_test.rb" ],
     "lib/hive/stages/review.rb" => [
       "test/integration/run_review_test.rb",
       "test/unit/stages/review/ci_gates_test.rb",

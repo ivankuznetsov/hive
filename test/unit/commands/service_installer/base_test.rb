@@ -28,7 +28,8 @@ class ServiceInstallerBaseTest < Minitest::Test
     def render_launchd = UNIT_BODY
 
     # Expose adapter helpers for direct unit testing.
-    public :ruby_shim_dir, :build_path_line, :service_manager_available?
+    public :ruby_shim_dir, :build_path_line, :service_manager_available?,
+           :service_manager_availability
   end
 
   def build(dir, **opts)
@@ -185,6 +186,72 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  def test_linux_indeterminate_manager_probe_refuses_before_file_mutation
+    with_tmp_dir do |dir|
+      calls = []
+      installer = TestInstaller.new(
+        host_os: "linux", home: dir,
+        runner: ->(argv) { calls << argv; false }
+      )
+      installer.define_singleton_method(:systemctl_available?) { true }
+
+      result = installer.install!(autostart: true)
+
+      assert_equal :indeterminate, installer.service_manager_availability
+      assert_equal :failed, result.kind
+      refute File.exist?(installer.target_path)
+      assert installer.messages.any? { |message| message.include?("could not be inspected conclusively") }
+      assert_operator calls.length, :>=, 2
+      assert calls.all? { |argv| argv == %w[systemctl --user show-environment] }
+    end
+  end
+
+  def test_injected_manager_availability_values_are_classified_explicitly
+    with_tmp_dir do |dir|
+      assert_equal :conclusively_absent,
+                   build(dir, systemctl_available: false).service_manager_availability
+      assert_equal :indeterminate,
+                   build(dir, systemctl_available: :indeterminate).service_manager_availability
+      assert_equal :indeterminate,
+                   build(dir, systemctl_available: :unknown).service_manager_availability
+
+      invalid = Object.new
+      invalid.define_singleton_method(:to_sym) { raise TypeError }
+      assert_equal :indeterminate,
+                   build(dir, systemctl_available: invalid).service_manager_availability
+    end
+  end
+
+  def test_nonzero_systemctl_version_probe_keeps_filesystem_only_compatibility
+    with_tmp_dir do |dir|
+      calls = []
+      installer = TestInstaller.new(
+        host_os: "linux", home: dir,
+        runner: ->(argv) { calls << argv; true }
+      )
+      installer.define_singleton_method(:system) { |*| false }
+
+      result = installer.install!(autostart: true)
+
+      assert_equal :autostart_unavailable, result.kind
+      assert_equal TestInstaller::UNIT_BODY, File.read(installer.target_path)
+      assert_empty calls
+    end
+  end
+
+  def test_arbitrary_systemctl_version_probe_error_is_indeterminate
+    with_tmp_dir do |dir|
+      installer = TestInstaller.new(host_os: "linux", home: dir)
+      installer.define_singleton_method(:system) { |*| raise Errno::EACCES }
+
+      result = installer.install!(autostart: true)
+
+      assert_equal :failed, result.kind
+      refute File.exist?(installer.target_path)
+      assert installer.messages.any? { |message| message.include?("could not be inspected conclusively") }
+    end
+  end
+
   def test_service_state_macos_uses_launchctl_list
     with_tmp_dir do |dir|
       seen = []
@@ -240,27 +307,78 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
-  def test_macos_install_is_idempotent_when_unchanged_job_is_already_loaded
+  def test_macos_manager_availability_uses_path_lookup_without_an_injected_runner
+    with_tmp_dir do |dir|
+      installer = TestInstaller.new(host_os: "darwin", home: dir)
+      installer.define_singleton_method(:which) do |name|
+        name == "launchctl" ? "/bin/launchctl" : nil
+      end
+
+      assert_equal :available, installer.service_manager_availability
+    end
+  end
+
+  def test_default_runner_keeps_user_service_on_the_bounded_production_manager_path
+    with_tmp_dir do |dir|
+      production = TestInstaller.new(
+        host_os: "linux",
+        home: dir,
+        systemctl_available: false
+      )
+      production_manager = production.send(:user_service)
+        .instance_variable_get(:@manager)
+      assert_nil production_manager.instance_variable_get(:@runner)
+
+      detected = TestInstaller.new(host_os: "linux", home: dir)
+      detected.define_singleton_method(:systemctl_available?) { true }
+      detected.instance_variable_set(
+        :@runner,
+        ->(_argv) { flunk "the production availability path must not spawn an unbounded probe" }
+      )
+      assert_equal :available, detected.service_manager_availability
+
+      injected_runner = ->(_argv) { true }
+      injected = TestInstaller.new(
+        host_os: "linux",
+        home: dir,
+        systemctl_available: true,
+        runner: injected_runner
+      )
+      injected_manager = injected.send(:user_service)
+        .instance_variable_get(:@manager)
+      assert_same injected_runner, injected_manager.instance_variable_get(:@runner)
+    end
+  end
+
+  def test_macos_matching_legacy_job_reconciles_once_then_receipt_is_idempotent
     with_tmp_dir do |dir|
       calls = []
       installer = TestInstaller.new(
         host_os: "darwin", home: dir, launchctl_available: true,
         runner: lambda do |argv|
           calls << argv
-          argv == %w[launchctl list local.hive-test]
+          true
         end
       )
       FileUtils.mkdir_p(File.dirname(installer.target_path))
       File.write(installer.target_path, TestInstaller::UNIT_BODY)
 
-      outcome = installer.install!(autostart: true)
+      first = installer.install!(autostart: true)
+      mutations_after_first = calls.select { |argv| %w[load unload].include?(argv[1]) }
+      second = installer.install!(autostart: true)
 
-      assert_equal :unchanged, outcome.kind
+      assert_equal :unchanged, first.kind
+      assert first.restarted
+      assert_equal :unchanged, second.kind
+      refute second.restarted
       assert calls.any?, "planning, revalidation, and final observation must query launchd"
-      assert calls.all? { |argv| argv == %w[launchctl list local.hive-test] },
-             "an unchanged loaded plist may be observed repeatedly but must remain read-only"
-      refute calls.any? { |argv| argv[0, 2] == %w[launchctl load] },
-             "an unchanged loaded plist must not be loaded a second time"
+      assert_equal [
+        [ "launchctl", "unload", installer.target_path ],
+        [ "launchctl", "load", installer.target_path ]
+      ], mutations_after_first
+      assert_equal mutations_after_first,
+                   calls.select { |argv| %w[load unload].include?(argv[1]) },
+                   "an applied receipt must suppress a second launchd reconciliation"
     end
   end
 
@@ -276,6 +394,24 @@ class ServiceInstallerBaseTest < Minitest::Test
 
       assert state["service_enabled"], "loaded job remains enabled"
       refute state["service_running"], "loaded-but-waiting job must not be called running"
+    end
+  end
+
+  def test_macos_install_reports_written_when_job_is_loaded_but_exits_immediately
+    with_tmp_dir do |dir|
+      installer = TestInstaller.new(
+        host_os: "darwin", home: dir, launchctl_available: true,
+        runner: ->(_argv) { true },
+        status_reader: ->(_argv) { [ "state = waiting\n", true ] }
+      )
+
+      outcome = installer.install!(autostart: true)
+
+      assert_equal :written, outcome.kind
+      assert outcome.success?
+      state = installer.service_lifecycle_state
+      assert state["service_enabled"]
+      refute state["service_running"]
     end
   end
 
@@ -309,9 +445,90 @@ class ServiceInstallerBaseTest < Minitest::Test
         Hive::UserService::Result.new(:unsafe_path, diagnostics: [ :unsafe_unit_path ]),
         path: path
       )
+      installer.send(
+        :record_user_service_messages,
+        Hive::UserService::Result.new(:failed, diagnostics: [ :operation_busy ]),
+        path: path
+      )
+      installer.send(
+        :record_user_service_messages,
+        Hive::UserService::Result.new(
+          :failed,
+          diagnostics: %i[
+            legacy_takeover_failed invalid_recovery_state prior_state_restored
+            systemd_apply_failed
+          ]
+        ),
+        path: path
+      )
 
       assert installer.messages.any? { |message| message.include?("changed after it was inspected") }
       assert installer.messages.any? { |message| message.include?("refusing unsafe test unit path") }
+      assert installer.messages.any? { |message| message.include?("operation owns") && message.include?("Retry") }
+      assert installer.messages.any? { |message| message.include?("detached test service") }
+      assert installer.messages.any? { |message| message.include?("retained unverified recovery evidence") }
+      assert installer.messages.any? do |message|
+        message.include?("previous state was restored for test service")
+      end
+      assert installer.messages.any? do |message|
+        message.include?("systemctl --user could not apply hive-test")
+      end
+    end
+  end
+
+  def test_lifecycle_adapters_and_unknown_internal_outcomes_are_bounded
+    with_tmp_dir do |dir|
+      running = false
+      commands = []
+      installer = TestInstaller.new(
+        host_os: "linux",
+        home: dir,
+        systemctl_available: true,
+        runner: lambda do |argv|
+          commands << argv
+          case argv
+          when %w[systemctl --user start hive-test], %w[systemctl --user restart hive-test]
+            running = true
+          when %w[systemctl --user stop hive-test]
+            running = false
+            true
+          when %w[systemctl --user is-active --quiet hive-test]
+            running
+          else
+            true
+          end
+        end
+      )
+      FileUtils.mkdir_p(File.dirname(installer.target_path))
+      File.write(installer.target_path, TestInstaller::UNIT_BODY)
+
+      assert installer.start!
+      assert installer.stop!
+      assert installer.takeover!
+      assert_equal :failed, installer.send(:install_outcome_kind, :internal_only)
+      assert_includes commands, %w[systemctl --user start hive-test]
+      assert_includes commands, %w[systemctl --user stop hive-test]
+      assert_includes commands, %w[systemctl --user restart hive-test]
+    end
+  end
+
+  def test_lifecycle_failure_raises_the_actionable_user_service_diagnostic
+    with_tmp_dir do |dir|
+      installer = build(dir)
+      busy = Object.new
+      busy.define_singleton_method(:start) do
+        Hive::UserService::Result.new(
+          :failed,
+          operation: :start,
+          diagnostics: [ :operation_busy ]
+        )
+      end
+      installer.define_singleton_method(:user_service) { busy }
+
+      error = assert_raises(Hive::Error) { installer.start! }
+
+      assert_includes error.message, "another test service operation owns"
+      assert_includes error.message, "Retry shortly"
     end
   end
 

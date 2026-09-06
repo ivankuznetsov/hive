@@ -70,7 +70,23 @@ class DaemonServiceInstallerTest < Minitest::Test
       fake_bin = File.join(dir, "bin")
       FileUtils.mkdir_p(fake_bin)
       systemctl = File.join(fake_bin, "systemctl")
-      File.write(systemctl, "#!/bin/sh\necho systemctl-noise\nexit 0\n")
+      unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
+      File.write(
+        systemctl,
+        "#!/bin/sh\n" \
+        "if [ \"$2\" = show ]; then\n" \
+        "  echo LoadState=loaded\n" \
+        "  echo FragmentPath=#{unit}\n" \
+        "  echo NeedDaemonReload=no\n" \
+        "  echo UnitFileState=enabled\n" \
+        "  echo ActiveState=active\n" \
+        "  echo MainPID=123\n" \
+        "  echo ExecMainStartTimestampMonotonic=1\n" \
+        "else\n" \
+        "  echo systemctl-noise\n" \
+        "fi\n" \
+        "exit 0\n"
+      )
       FileUtils.chmod(0755, systemctl)
 
       with_env("PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
@@ -123,7 +139,7 @@ class DaemonServiceInstallerTest < Minitest::Test
 
       result = installer.install!(autostart: true)
       assert_equal :failed, result.kind
-      assert installer.messages.any? { |msg| msg.include?("systemctl --user enable failed") }
+      assert installer.messages.any? { |msg| msg.include?("previous state was restored") }
     end
   end
 
@@ -141,7 +157,8 @@ class DaemonServiceInstallerTest < Minitest::Test
       plist = File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
       assert File.exist?(plist)
       assert_includes File.read(plist), "<string>/opt/hive/bin/hive</string>"
-      assert_equal [ [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) }
     end
   end
 
@@ -657,7 +674,8 @@ class DaemonServiceInstallerTest < Minitest::Test
       result = installer.install!(autostart: true, force: true)
 
       assert_equal :upgraded, result.kind
-      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) }
       assert result.restarted
       assert installer.messages.any? { |msg| msg.include?("launchctl unload returned non-zero") }
     end

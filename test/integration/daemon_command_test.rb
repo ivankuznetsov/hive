@@ -18,7 +18,11 @@ class HiveDaemonCommandTest < Minitest::Test
 
   def with_isolated_hive_home(&block)
     Dir.mktmpdir("hive-daemon-test") do |home|
-      env = ENV.to_h.merge("HIVE_HOME" => home, "HOME" => home)
+      env = ENV.to_h.merge(
+        "HIVE_HOME" => home,
+        "HOME" => home,
+        "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR)
+      )
       activate_test_control_plane(home)
       prepare_runtime_project(state_home: home, name: "hive", path: home).disconnect
       block.call(home, env)
@@ -1264,6 +1268,7 @@ class HiveDaemonCommandTest < Minitest::Test
       env = ENV.to_h.merge(
         "HOME" => home,
         "HIVE_HOME" => home,
+        "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR),
         "PATH" => [ bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
       )
       block.call(home, env)
@@ -1306,23 +1311,63 @@ class HiveDaemonCommandTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(unit_path))
       File.write(unit_path, "stale-pre-existing-content\n")
 
-      File.write(File.join(home, "bin", "systemctl"), "#!/bin/sh\nexit 0\n")
+      systemctl_state = File.join(home, "systemctl-state")
+      systemctl_log = File.join(home, "systemctl.log")
+      File.write(
+        File.join(home, "bin", "systemctl"),
+        "#!/bin/sh\n" \
+        "state=#{systemctl_state}\n" \
+        "echo \"$@\" >> #{systemctl_log}\n" \
+        "if [ \"$2\" = show ]; then\n" \
+        "  if [ -f \"$state\" ]; then\n" \
+        "    echo LoadState=loaded\n" \
+        "    echo FragmentPath=#{unit_path}\n" \
+        "    echo NeedDaemonReload=no\n" \
+        "    if grep -q active \"$state\"; then\n" \
+        "      echo UnitFileState=enabled\n" \
+        "      echo ActiveState=active\n" \
+        "      echo MainPID=123\n" \
+        "      echo ExecMainStartTimestampMonotonic=1\n" \
+        "    else\n" \
+        "      echo UnitFileState=disabled\n" \
+        "      echo ActiveState=inactive\n" \
+        "      echo MainPID=0\n" \
+        "      echo ExecMainStartTimestampMonotonic=0\n" \
+        "    fi\n" \
+        "  else\n" \
+        "    echo LoadState=not-found\n" \
+        "    echo FragmentPath=\n" \
+        "    echo NeedDaemonReload=no\n" \
+        "    echo UnitFileState=disabled\n" \
+        "    echo ActiveState=inactive\n" \
+        "    echo MainPID=0\n" \
+        "    echo ExecMainStartTimestampMonotonic=0\n" \
+        "  fi\n" \
+        "elif [ \"$2\" = daemon-reload ]; then\n" \
+        "  echo reloaded > \"$state\"\n" \
+        "elif [ \"$2\" = enable ] || [ \"$2\" = restart ]; then\n" \
+        "  echo active > \"$state\"\n" \
+        "fi\n" \
+        "exit 0\n"
+      )
       FileUtils.chmod(0755, File.join(home, "bin", "systemctl"))
 
-      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
-                                         "daemon", "install", "--force", "--json")
+      out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                        "daemon", "install", "--force", "--json")
       doc = JSON.parse(out)
       errors = schema.validate(doc).map { |e| e["error"] }
       assert_empty errors,
                    "install --force envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
 
-      # The on-disk write must have happened regardless of whether the
-      # service-manager call succeeded — `atomic_write` runs BEFORE the
-      # systemctl restart, so even on exit 70 the new template is in
-      # place. Pin this contract so a future install_linux! refactor
-      # that short-circuits before atomic_write fails this assertion.
+      # A successful envelope is only valid after the durable transition has
+      # freshly verified the desired file/manager endpoint. Manager failures
+      # now restore the prior endpoint or retain replay evidence instead of
+      # accepting desired bytes as a terminal partial install.
       assert_includes File.read(unit_path), "ExecStart=",
-                      "atomic write must land the new unit before systemctl is called, regardless of exit code"
+                      "a successful upgrade must finish with the desired unit bytes; " \
+                      "status=#{status.exitstatus} envelope=#{doc.inspect} stderr=#{err.inspect} " \
+                      "systemctl=#{File.read(systemctl_log).inspect} state=#{File.exist?(systemctl_state)} " \
+                      "journals=#{Dir[File.join(home, '.local/state/hive/user-service/*.journal.json')].map { |path| File.read(path) }.inspect}"
       backups = Dir["#{unit_path}.bak-*"]
       assert_equal 1, backups.size, "force must write exactly one timestamped backup"
       assert_equal "stale-pre-existing-content\n", File.read(backups.first)

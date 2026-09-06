@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, lib/hive/babysitter/git_policy.rb, lib/hive/babysitter/gh_policy.rb, lib/hive/babysitter/passthrough_runner.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-08-13
+updated: 2026-08-30
 tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
@@ -34,10 +34,17 @@ custom `HIVE_HOME`/XDG filesystem roots but never persist provider credentials.
 `hive setup` installs this service by default, while `hive uninstall` removes
 it. When a detached babysitter is already running, install first reuses the
 ownership-aware bounded stop path before the service manager starts its
-replacement. Uninstall uses the same stop path before removing any service or
-data, and aborts without teardown when PID ownership cannot be read or verified.
+replacement under the same service lock. Uninstall uses the same stop path
+before removing any service or data, and aborts without teardown when PID
+ownership cannot be read or verified. Shared contention, replay, backup, and
+recovery behavior is owned by [[modules/user_service]].
 `install --dry-run` is rejected because installing a service is a real host
 mutation.
+
+The managed babysitter may start offline. A provider failure ends only the
+current project tick; that project retries on its next configured dispatch
+interval (600 seconds by default). An active unit therefore does not prove
+GitHub or another provider is healthy.
 
 ## Lifecycle
 

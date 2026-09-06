@@ -237,7 +237,9 @@ module Hive
     end
 
     def atomic_write(relative, content, mode: 0o600, mtime: nil,
-                     expected_digest: nil, max_existing_bytes: nil)
+                     expected_digest: nil, max_existing_bytes: nil,
+                     expected_snapshot: nil, expected_missing: false)
+      unsafe! if expected_missing && (expected_snapshot || expected_digest)
       path = absolute(relative)
       parent_components, name = target_components(relative)
       temporary_name = nil
@@ -246,6 +248,8 @@ module Hive
       with_session(create_root: true) do |session|
         session.with_directory(parent_components, create: true) do |parent|
           before = session.regular_snapshot_at(parent, name)
+          unsafe! if expected_missing && before
+          unsafe! if expected_snapshot && before != expected_snapshot
           if expected_digest
             verify_digest_at!(
               session,
@@ -356,7 +360,7 @@ module Hive
     end
 
     def unlink(relative, missing: false, expected_digest: nil,
-               max_bytes: nil)
+               max_bytes: nil, expected_snapshot: nil)
       parent_components, name = target_components(relative)
 
       result = with_session(create_root: false) do |session|
@@ -367,6 +371,7 @@ module Hive
           file, before = opened
           begin
             snapshot = regular_snapshot(before)
+            unsafe! if expected_snapshot && snapshot != expected_snapshot
             verify_open_digest!(
               file,
               before,
@@ -740,7 +745,12 @@ module Hive
 
     def regular_snapshot(stat)
       [
-        stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.ctime,
+        stat.dev,
+        stat.ino,
+        stat.mode,
+        stat.size,
+        (stat.mtime.to_i * 1_000_000_000) + stat.mtime.nsec,
+        (stat.ctime.to_i * 1_000_000_000) + stat.ctime.nsec,
         stat.nlink
       ].freeze
     end

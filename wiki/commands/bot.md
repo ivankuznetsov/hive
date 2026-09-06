@@ -33,7 +33,12 @@ hive bot install [--force] [--json]
 | `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe — `systemctl --user is-enabled` / `launchctl list`) so an agent can tell whether `hive bot install` has run without a mutating call. |
 | `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
 | `tail` | Streams `~/.local/state/hive/logs/bot.log`; exits 1 if the log does not exist. |
-| `install` | (Re)writes the platform-native unit (`~/.config/systemd/user/hive-bot.service` on Linux, `~/Library/LaunchAgents/local.hive-bot.plist` on macOS) and enables autostart. Mirrors `hive daemon install` through `Hive::UserService` inspect/plan/apply mechanics, with `Bot::ServiceInstaller` retaining templates and command policy and `ServiceInstaller::ResultPresenter` retaining output handling; it always installs with `autostart: true`. Without `--force`, refuses to overwrite a pre-existing unit that differs from the template (exit `64` USAGE, message pointing at `--force`). With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts/reloads the service so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just enables/loads, no restart). A service-manager failure exits `70` (SOFTWARE); a host with no systemd-user manager still gets the unit written but exits `0` with the `unsupported` outcome. Units point at the user-facing wrapper path when installers provide it, so `hv` invocations survive Apache Hive shadowing `hive`. `hive uninstall` tears this unit back down. With `--json`, every outcome (success and error) emits a `hive-bot-install.v1` envelope. |
+| `install` | Installs and enables the bot's platform-native per-user service. It is always autostart-enabled, preserves drift unless `--force` is supplied, uses the invoked wrapper path, and emits `hive-bot-install.v1` with `--json`. Exit `64` means unauthorized drift and exit `70` means the transition could not prove a safe endpoint; a conclusively absent manager retains the compatible `unsupported` success. `hive uninstall` removes the service. Shared locking, replay, backup, and recovery behavior is owned by [[modules/user_service]]. |
+
+The managed bot may start while offline. A transient Telegram polling failure
+stays inside the supervisor; the next poll begins after the one-second failed
+poll backoff. `active` therefore means the local bot process is alive, not that
+Telegram is reachable.
 
 ## Commands in Telegram
 
@@ -312,7 +317,8 @@ update/reinstall the binary. The full classification (`:match` /
 `hive bot install` gives the bot the same reboot-survivable per-user
 service the daemon has (`hive daemon install`), built on the shared
 `Hive::Commands::ServiceInstaller::Base` and command-side
-`ResultPresenter`. Key differences from the daemon:
+`ResultPresenter`. The authoritative transition and recovery contract is
+[[modules/user_service]]. Key differences from the daemon:
 
 - **Opt-in.** Unlike the daemon — which the Hive installer enables at
   install time as core infrastructure — the bot service is installed only

@@ -192,9 +192,9 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     supervisor = Supervisor.new(
       correlation_id: "creator-gateway", output_limit: 8_192, tail_limit: 4_096,
       # Coverage-instrumented custody children flush a sparse result before
-      # exit!, so a one-second process deadline is not stable under full-suite
-      # host contention. Production keeps the supervisor's 120-second default.
-      timeout: 5, term_grace: 0.05, kill_grace: 0.2
+      # exit!, so a short process deadline is not stable under full-suite host
+      # contention. Production keeps the supervisor's 120-second default.
+      timeout: 15, term_grace: 0.05, kill_grace: 0.2
     )
     Gateway.new(
       root:, candidate_executable: candidate, candidate_identity: identity,

@@ -109,7 +109,10 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
         command_string: %(hive run slug-a --exit-code 0 --stdout-text this-is-not-json),
         project: "p1", slug: "slug-a", stage: "6-review"
       )
-      completed = wait_for_completion(sup, max_attempts: 50)
+      # The coverage gate instruments and flushes every child process. Give
+      # this real-process case the same ten-second bound as the slower custody
+      # cases so host contention cannot be mistaken for a missing completion.
+      completed = wait_for_completion(sup, max_attempts: 200)
       assert_equal 1, completed.size
       assert_nil completed.first.json_envelope,
                  "supervisor must tolerate non-JSON stdout without crashing"

@@ -78,7 +78,7 @@ class SetupOrchestratorTest < Minitest::Test
 
   # ── installer / init fakes ───────────────────────────────────────────
 
-  FakeOutcome = Struct.new(:success, :wire) do
+  FakeOutcome = Struct.new(:success, :wire, :restarted) do
     def success?
       success
     end
@@ -91,7 +91,7 @@ class SetupOrchestratorTest < Minitest::Test
   def fake_installer(success: true, wire: "written", target_path: "/tmp/unit.service", messages: [ "note" ],
                      state: nil)
     installer = Object.new
-    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire) }
+    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire, false) }
     installer.define_singleton_method(:target_path) { target_path }
     installer.define_singleton_method(:messages) { messages }
     observed = state || {
@@ -739,8 +739,11 @@ class SetupOrchestratorTest < Minitest::Test
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     setup.instance_variable_set(:@web_bundle_refreshed, true)
     installer = fake_installer(success: true, wire: "unchanged")
-    restart_calls = 0
-    installer.define_singleton_method(:restart!) { restart_calls += 1; true }
+    install_calls = []
+    installer.define_singleton_method(:install!) do |**kwargs|
+      install_calls << kwargs
+      FakeOutcome.new(true, "unchanged", true)
+    end
     state = installer.service_state.merge(
       "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
     )
@@ -753,7 +756,11 @@ class SetupOrchestratorTest < Minitest::Test
       end
     end
 
-    assert_equal 1, restart_calls
+    assert_equal [ {
+      autostart: true,
+      force: false,
+      restart_if_running: true
+    } ], install_calls
     assert_equal true, setup.instance_variable_get(:@phases).last["restarted"]
   end
 
@@ -1025,19 +1032,15 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal [ "enabled" ], phase["messages"]
   end
 
-  def test_install_babysitter_records_a_failed_takeover_without_installing_unit
+  def test_install_babysitter_records_a_failed_owned_transition
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     installer = fake_installer
     installer.define_singleton_method(:install!) do |**|
-      raise "service install must not run after takeover failure"
+      raise Hive::Error, "ownership could not be verified"
     end
 
     with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
-      with_replaced_singleton_method(Hive::Commands::Babysit, :prepare_service_takeover!, lambda { |**|
-        raise Hive::Error, "ownership could not be verified"
-      }) do
-        setup.send(:install_babysitter)
-      end
+      setup.send(:install_babysitter)
     end
 
     phase = setup.instance_variable_get(:@phases).last

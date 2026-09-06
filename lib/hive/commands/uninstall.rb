@@ -4,17 +4,69 @@ require "securerandom"
 require "yaml"
 require "hive/config"
 require "hive/paths"
+require "hive/pid_file"
 
 module Hive
   module Commands
     class Uninstall
+      FAIL_CLOSED_SERVICE_DIAGNOSTICS = %i[
+        operation_busy recovery_pending invalid_recovery_state
+        manager_probe_indeterminate foreground_stop_failed
+      ].freeze
+
+      class DaemonRemovalTakeover
+        def initialize(pid_file:, output:)
+          @pid_file = pid_file
+          @output = output
+        end
+
+        def stop!
+          outcome = Hive::PidFile.stop(@pid_file)
+          case outcome[:status]
+          when :reused
+            @output.puts "hive: foreground daemon PID #{outcome[:pid]} appears reused " \
+                         "(start_time mismatch); refusing to signal"
+          when :unverified
+            @output.puts "hive: cannot verify PID #{outcome[:pid]} is the hive daemon; refusing to signal"
+          end
+          true
+        end
+      end
+
+      class BotRemovalTakeover
+        def initialize(pid_file:, output:)
+          @pid_file = pid_file
+          @output = output
+        end
+
+        def stop!
+          payload = YAML.safe_load(File.read(@pid_file))
+          return true unless payload.is_a?(Hash)
+
+          pid = payload["pid"].to_i
+          return true if pid.zero?
+
+          Process.kill("TERM", pid)
+          true
+        rescue Errno::EPERM
+          @output.puts "hive: warning: bot pid #{pid} is alive but could not be signalled (EPERM); " \
+                       "it may still be running after uninstall"
+          true
+        rescue Errno::ESRCH, Errno::ENOENT, Psych::Exception
+          true
+        end
+      end
+
       def initialize(purge: false, force_purge_state: false, input: $stdin, output: $stdout, runner: nil,
                      host_os: RbConfig::CONFIG["host_os"])
         @purge = purge
         @force_purge_state = force_purge_state
         @input = input
         @output = output
-        @runner = runner || ->(argv) { system(*argv) }
+        # Keep nil as the production path so UserService owns bounded manager
+        # execution and rich observations. A supplied runner remains the
+        # explicit test/embedding seam.
+        @runner = runner
         @host_os = host_os
       end
 
@@ -47,24 +99,34 @@ module Hive
       end
 
       def deregister_daemon
-        stop_foreground_daemon
         require "hive/commands/daemon/service_installer"
-        deregister_unit(Hive::Commands::Daemon::ServiceInstaller.new(**service_installer_options))
+        deregister_unit(
+          Hive::Commands::Daemon::ServiceInstaller.new(
+            **service_installer_options,
+            removal_takeover: daemon_removal_takeover
+          )
+        )
       end
 
       # Mirror of deregister_daemon for the opt-in bot autostart service
       # (installed by `hive bot install`).
       def deregister_bot
-        stop_foreground_bot
         require "hive/commands/bot/service_installer"
-        deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(**service_installer_options))
+        deregister_unit(
+          Hive::Commands::Bot::ServiceInstaller.new(
+            **service_installer_options,
+            removal_takeover: bot_removal_takeover
+          )
+        )
       end
 
       def deregister_babysitter
-        stop_foreground_babysitter
         require "hive/commands/babysit/service_installer"
         deregister_unit(
-          Hive::Commands::Babysit::ServiceInstaller.new(**service_installer_options)
+          Hive::Commands::Babysit::ServiceInstaller.new(
+            **service_installer_options,
+            removal_takeover: babysitter_removal_takeover
+          )
         )
       end
 
@@ -75,7 +137,10 @@ module Hive
         # aborting teardown before the unit can be deregistered and the later
         # config/cache/data cleanup can run.
         deregister_unit(
-          Hive::Commands::Web::ServiceInstaller.new(config: {}, **service_installer_options)
+          Hive::Commands::Web::ServiceInstaller.new(
+            config: Hive::Config::DEFAULTS.fetch("web"),
+            **service_installer_options
+          )
         )
       end
 
@@ -85,7 +150,20 @@ module Hive
         path = installer.target_path
         return unless path
 
-        result = installer.remove!
+        result = installer.remove!(inspect_absent_manager: false)
+        retained = result.diagnostics & FAIL_CLOSED_SERVICE_DIAGNOSTICS
+        unless retained.empty?
+          @output.puts "hive: could not safely remove #{path}; preserving UserService " \
+                       "coordination evidence and stopping uninstall (#{retained.join(', ')})"
+          if retained.include?(:foreground_stop_failed)
+            raise Hive::Error,
+                  "hive uninstall: could not safely stop foreground service; " \
+                  "no services or data were removed"
+          end
+          raise Hive::Error,
+                "hive uninstall: service removal is busy or unverified; repair the service " \
+                "manager and retry without deleting UserService recovery evidence"
+        end
         if result.diagnostics.include?(:unsafe_unit_path)
           @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
         elsif result.diagnostics.include?(:manager_disable_failed)
@@ -114,42 +192,11 @@ module Hive
       end
 
       def stop_foreground_bot
-        pid_file = File.join(Hive::Paths.state_home, ".bot.pid")
-        return unless File.exist?(pid_file)
-
-        # The bot's pid file is a YAML Hash payload ({pid:, started_at:}),
-        # like the daemon's .daemon.pid payload. Guard is_a?(Hash)
-        # before indexing: a corrupt/legacy bare scalar is still valid YAML
-        # (e.g. "12345" parses to an Integer), and Integer#[] would raise an
-        # unrescued TypeError that aborts the entire uninstall after only the
-        # daemon was deregistered. Mirror Bot#pid_file_payload's guard, and
-        # rescue Psych::Exception (covers SyntaxError AND DisallowedClass for
-        # a stray Date/Symbol scalar) so a malformed file degrades to a no-op.
-        payload = YAML.safe_load(File.read(pid_file))
-        return unless payload.is_a?(Hash)
-
-        pid = payload["pid"].to_i
-        return if pid.zero?
-
-        Process.kill("TERM", pid)
-      rescue Errno::EPERM
-        # The process is alive but owned by another uid, so we can't TERM
-        # it. Don't abort the destructive uninstall, but the operator's bot
-        # may keep running against state we're about to delete — so unlike
-        # the corrupt-pid / dead-pid cases this gets an explicit warning
-        # rather than a silent no-op.
-        @output.puts "hive: warning: bot pid #{pid} is alive but could not be signalled (EPERM); it may still be running after uninstall"
-      rescue Errno::ESRCH, Errno::ENOENT, Psych::Exception
-        nil
+        bot_removal_takeover.stop!
       end
 
       def stop_foreground_babysitter
-        require "hive/commands/babysit"
-        Hive::Commands::Babysit.new(
-          "stop",
-          hive_home: Hive::Paths.state_home,
-          quiet: true
-        ).call
+        babysitter_removal_takeover.stop!
       rescue Hive::Error, SystemCallError, IOError, Psych::Exception => e
         raise Hive::Error,
               "hive uninstall: could not safely stop babysitter (#{e.class}: #{e.message}); " \
@@ -310,16 +357,28 @@ module Hive
       # no longer matches may belong to an unrelated process — reused and
       # unverified identities are refused, mirroring `hive daemon stop`.
       def stop_foreground_daemon
-        outcome = Hive::PidFile.stop(
-          File.join(Hive::Paths.state_home, ".daemon.pid")
+        daemon_removal_takeover.stop!
+      end
+
+      def daemon_removal_takeover
+        DaemonRemovalTakeover.new(
+          pid_file: File.join(Hive::Paths.state_home, ".daemon.pid"),
+          output: @output
         )
-        case outcome[:status]
-        when :reused
-          @output.puts "hive: foreground daemon PID #{outcome[:pid]} appears reused " \
-                       "(start_time mismatch); refusing to signal"
-        when :unverified
-          @output.puts "hive: cannot verify PID #{outcome[:pid]} is the hive daemon; refusing to signal"
-        end
+      end
+
+      def bot_removal_takeover
+        BotRemovalTakeover.new(
+          pid_file: File.join(Hive::Paths.state_home, ".bot.pid"),
+          output: @output
+        )
+      end
+
+      def babysitter_removal_takeover
+        require "hive/commands/babysit/service_installer"
+        Hive::Commands::Babysit::ServiceInstaller::LegacyTakeover.new(
+          hive_home: Hive::Paths.state_home
+        )
       end
 
       def prompt_yes?(message)

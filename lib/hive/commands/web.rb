@@ -361,14 +361,12 @@ module Hive
           environment: @environment,
           config: config
         )
-        was_running = Hive::Web::ServiceStatus.lifecycle_state(installer)["service_running"]
-        outcome = installer.install!(autostart: true, force: @force)
-        restarted = outcome.restarted
-        if bundle_refreshed && was_running && outcome.success? && !restarted
-          installer.restart!
-          restarted = true
-        end
-        envelope = service_envelope(installer, outcome, config: config, restarted: restarted)
+        outcome = installer.install!(
+          autostart: true,
+          force: @force,
+          restart_if_running: bundle_refreshed
+        )
+        envelope = service_envelope(installer, outcome, config: config)
         if @json
           emit_install_json(envelope)
         else
@@ -385,30 +383,17 @@ module Hive
       end
 
       def start_service
-        run_service_action(launchctl: "load", systemctl: "start", verb: "start")
+        run_service_action(:start)
       end
 
       def stop_service
-        run_service_action(launchctl: "unload", systemctl: "stop", verb: "stop")
+        run_service_action(:stop)
       end
 
-      # start/stop differ only in the launchctl (load/unload) and systemctl
-      # (start/stop) verbs, so the platform branch lives here once.
-      def run_service_action(launchctl:, systemctl:, verb:)
+      def run_service_action(verb)
         require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new
-        argv =
-          if installer.envelope_platform == "macos"
-            [ "launchctl", launchctl, installer.target_path ]
-          else
-            # A unit written while systemd-user was unavailable stays invisible
-            # until a daemon-reload, so `start` would fail with "unit not found".
-            # Reload before starting so a freshly written unit is picked up.
-            system("systemctl", "--user", "daemon-reload") if verb == "start"
-            [ "systemctl", "--user", systemctl, installer.service_name ]
-          end
-        ok = system(*argv)
-        raise Hive::Error, "hive web: could not #{verb} managed service" unless ok
+        installer.public_send("#{verb}!")
       end
 
       def status_service

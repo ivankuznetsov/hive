@@ -6,6 +6,11 @@ class TestHelperIsolationTest < Minitest::Test
 
   USER_ENV_OVERRIDES = %w[
     HIVE_HOME
+    HIVE_CLAUDE_BIN
+    HIVE_CODEX_BIN
+    HIVE_PI_BIN
+    HIVE_GROK_BIN
+    HIVE_OPENCODE_BIN
     XDG_CONFIG_HOME
     XDG_DATA_HOME
     XDG_STATE_HOME

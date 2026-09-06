@@ -3,8 +3,8 @@
 
 [Unit]
 Description=Hive PR babysitter
-After=network-online.target
-Wants=network-online.target
+# Do not order a user unit on system-manager network targets. Connectivity
+# failures stay inside the babysitter's application-owned dispatch retries.
 StartLimitBurst=3
 StartLimitIntervalSec=300
 

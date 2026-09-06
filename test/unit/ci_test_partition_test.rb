@@ -14,6 +14,7 @@ class CiTestPartitionTest < Minitest::Test
   RAKEFILE_CONSTANTS = %i[
     HIVE_CI_GATE_TESTS
     HIVE_CI_GATE_TEST_OPTIONS
+    HIVE_SYSTEMD_USER_GATE_TESTS
     HIVE_DEFAULT_TEST_FILES
     HIVE_COVERAGE_SHARD_COUNT
     HIVE_COVERAGE_SHARDS
@@ -46,6 +47,17 @@ class CiTestPartitionTest < Minitest::Test
       assert gate_tests.keys.all? { |name|
         Rake::Task[name].prerequisites == [ "test:require_nonempty_ci_gate" ]
       }
+
+      systemd_gate_files = Object.const_get(:HIVE_SYSTEMD_USER_GATE_TESTS)
+      assert systemd_gate_files.all? { |file| default_files.include?(file) },
+             "portable systemd gate tests must still enter the default coverage shards"
+      systemd_gate_files.each { |file| assert_path_exists File.join(ROOT, file) }
+      assert_equal [ "test:enable_systemd_user_gate" ],
+                   Rake::Task["test:systemd_user_service"].prerequisites
+      assert_equal [ "test:require_nonempty_ci_gate" ],
+                   Rake::Task["test:enable_systemd_user_gate"].prerequisites
+      assert_empty Rake::Task["test:hive"].prerequisites,
+                   "the R8 diagnostic task must bypass component prerequisites"
     end
   end
 
@@ -160,20 +172,25 @@ class CiTestPartitionTest < Minitest::Test
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")
       assert_equal "rake test (Ruby 3.4)", required_gate.fetch("name")
       assert_equal "${{ always() }}", required_gate.fetch("if")
-      assert_equal %w[test expensive-test-gates e2e], required_gate.fetch("needs")
+      assert_equal %w[test expensive-test-gates e2e systemd-user-gate], required_gate.fetch("needs")
 
-      required_step = required_gate.fetch("steps").find { |step| step["name"] == "Require coverage, functional e2e, and expensive proof gates" }
+      required_step = required_gate.fetch("steps").find do |step|
+        step["name"] == "Require coverage, functional e2e, systemd user, and expensive proof gates"
+      end
       assert_equal "${{ needs.test.result }}",
                    required_step.fetch("env").fetch("HIVE_COVERAGE_RESULT")
       assert_equal "${{ needs.expensive-test-gates.result }}",
                    required_step.fetch("env").fetch("HIVE_EXPENSIVE_GATES_RESULT")
       assert_equal "${{ needs.e2e.result }}",
                    required_step.fetch("env").fetch("HIVE_E2E_RESULT")
+      assert_equal "${{ needs.systemd-user-gate.result }}",
+                   required_step.fetch("env").fetch("HIVE_SYSTEMD_USER_RESULT")
       assert_equal "bash", required_step.fetch("shell")
       assert_equal <<~SHELL, required_step.fetch("run")
         test "$HIVE_COVERAGE_RESULT" = "success"
         test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
         test "$HIVE_E2E_RESULT" = "success"
+        test "$HIVE_SYSTEMD_USER_RESULT" = "success"
       SHELL
     end
   end
@@ -183,7 +200,7 @@ class CiTestPartitionTest < Minitest::Test
     jobs = workflow.fetch("jobs")
 
     refute jobs.key?("changes"), "required CI must not classify broad path groups as proof-free"
-    %w[coverage-shards expensive-test-gates e2e web-tests].each do |job_name|
+    %w[coverage-shards expensive-test-gates systemd-user-gate e2e web-tests].each do |job_name|
       job = jobs.fetch(job_name)
       refute_equal "changes", job["needs"]
       refute_includes job.fetch("if", ""), "needs.changes"
@@ -198,7 +215,7 @@ class CiTestPartitionTest < Minitest::Test
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")
 
-    %w[coverage-shards expensive-test-gates tui-reactivity-latency e2e launchd-macos].each do |job_name|
+    %w[coverage-shards expensive-test-gates systemd-user-gate tui-reactivity-latency e2e launchd-macos].each do |job_name|
       upload = jobs.fetch(job_name).fetch("steps").find do |step|
         step["uses"] == UPLOAD_ARTIFACT_ACTION &&
           step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")
@@ -210,6 +227,31 @@ class CiTestPartitionTest < Minitest::Test
         assert_includes %w[failure() always()], upload.fetch("if")
       end
       assert_equal "warn", upload.dig("with", "if-no-files-found")
+    end
+  end
+
+  def test_systemd_user_gate_provisions_a_required_non_skipping_session
+    with_loaded_rakefile do
+      gate_files = Object.const_get(:HIVE_SYSTEMD_USER_GATE_TESTS)
+      shards = Object.const_get(:HIVE_COVERAGE_SHARDS)
+      offline_test = "test/integration/systemd_user_service_offline_test.rb"
+
+      assert_includes gate_files, offline_test
+      assert_equal 1, shards.flatten.count(offline_test)
+
+      workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+      job = workflow.fetch("jobs").fetch("systemd-user-gate")
+      provision = job.fetch("steps").find { |step| step["name"] == "Provision a functional user manager" }
+      run = job.fetch("steps").find { |step| step["name"] == "Verify templates and offline reconnect" }
+      cleanup = job.fetch("steps").find { |step| step["name"] == "Disable test-session linger" }
+
+      assert_equal "systemd user offline reconnect", job.fetch("name")
+      assert_includes provision.fetch("run"), "loginctl enable-linger"
+      assert_includes provision.fetch("run"), "user@$(id -u).service"
+      assert_includes provision.fetch("run"), "XDG_RUNTIME_DIR"
+      assert_equal "bundle exec rake test:systemd_user_service", run.fetch("run")
+      assert_equal "${{ always() }}", cleanup.fetch("if")
+      assert_includes cleanup.fetch("run"), "loginctl disable-linger"
     end
   end
 
@@ -445,7 +487,10 @@ class CiTestPartitionTest < Minitest::Test
 
   def test_ci_gate_tasks_fail_when_no_non_skipped_asserting_test_runs
     output, status = Open3.capture2e(
-      { "HIVE_REQUIRE_TEST_RUNS" => "1" },
+      {
+        "HIVE_REQUIRE_TEST_RUNS" => "1",
+        "GEM_PATH" => Gem.path.join(File::PATH_SEPARATOR)
+      },
       RbConfig.ruby,
       "-I#{File.join(ROOT, "test")}",
       "-I#{File.join(ROOT, "lib")}",

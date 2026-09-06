@@ -7,8 +7,8 @@ counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
 final_inventory_lines: 9161
-outside_inventory_net_lines: -7211
-final_lines: 1950
+outside_inventory_net_lines: -7521
+final_lines: 1640
 final_paths:
 - path: lib/hive/betterleaks.rb
   lines: 26

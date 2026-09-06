@@ -9,6 +9,69 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   NOW = Time.utc(2026, 8, 10, 12, 0, 0)
   CAPABILITY = "c" * 64
 
+  def test_explicit_request_provenance_upgrade_preserves_rows_and_finalization
+    with_repository do |store|
+      terminal = terminal_attempt(store)
+      subject = maintenance(store)
+      prepare_all(subject, terminal)
+      database = store.database
+      database.transaction do |db|
+        db[:token_usage].insert(id: "usage-1", attempt_id: terminal.attempt_id,
+                               agent: "codex", started_at: NOW.iso8601(6), input: 123)
+        db[:payload_references].insert(payload_id: "upgrade-proof", attempt_id: terminal.attempt_id,
+                                      kind: "test", relative_path: "proof", state: "open",
+                                      created_at: NOW.iso8601(6))
+      end
+      before = database.read { |db| db.tables.to_h { |table| [ table, db[table].all ] } }
+      path = database.path
+      database.disconnect
+      legacy = Sequel.sqlite(path)
+      # Recreate the exact deployed constraint without changing any stored rows.
+      definition = legacy[:sqlite_master].where(name: "attempts").get(:sql).sub(
+        "`request_id` varchar(255),",
+        "`request_id` varchar(255) REFERENCES `dispatch_requests`(`request_id`) ON DELETE SET NULL ON UPDATE CASCADE,"
+      )
+      indexes = legacy[:sqlite_master].where(type: "index", tbl_name: "attempts").exclude(sql: nil).select_map(:sql)
+      legacy.run("PRAGMA foreign_keys = OFF")
+      legacy.transaction do
+        legacy.run("CREATE TEMP TABLE saved_attempts AS SELECT * FROM attempts")
+        legacy.drop_table(:attempts)
+        legacy.run(definition)
+        indexes.each { |sql| legacy.run(sql) }
+        legacy.run("INSERT INTO attempts SELECT * FROM saved_attempts")
+        legacy.run("DROP TABLE saved_attempts")
+      end
+      assert database.send(:exact_schema?, legacy,
+                           expected: Hive::RuntimeControlPlane::Database::REQUEST_FOREIGN_KEY_SCHEMA)
+      legacy.disconnect
+      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }
+
+      original_verification = database.method(:exact_schema?)
+      rejected_upgrade = lambda do |connection, **options|
+        options.empty? ? false : original_verification.call(connection, **options)
+      end
+      with_replaced_singleton_method(database, :exact_schema?, rejected_upgrade) do
+        assert_raises(Hive::RuntimeControlPlane::IntegrityError) { database.migrate! }
+      end
+      assert database.send(:exact_schema?, legacy,
+                           expected: Hive::RuntimeControlPlane::Database::REQUEST_FOREIGN_KEY_SCHEMA)
+      assert_equal before, legacy.tables.to_h { |table| [ table, legacy[table].all ] }
+      legacy.disconnect
+
+      database.migrate!
+      assert_equal before, database.read { |db| db.tables.to_h { |table| [ table, db[table].all ] } }
+      assert_equal 1, database.read { |db| db.fetch("PRAGMA foreign_keys").first.values.first }
+      assert_equal :ok, database.diagnostics.status
+      database.migrate! # Explicit retries are harmless.
+      assert Hive::RuntimeControlPlane::DispatchRepository.new(database: database).remove(terminal["request_id"])
+      assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
+      assert subject.promote(terminal)
+      assert_nil store.fetch_hot(terminal.attempt_id)
+    ensure
+      legacy&.disconnect
+    end
+  end
+
   def test_partial_acknowledgements_resume_and_publish_terminal_payloads_once
     with_repository do |store|
       terminal = terminal_attempt(store)

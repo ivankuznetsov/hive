@@ -32,7 +32,7 @@ completion authority.
 1. Resolve the immutable implementation base/head and the exact sorted changed
    paths. The controller re-resolves this identity after every agent role so a
    role cannot change the source behind the evidence. It also materializes the
-   bounded exact binary diff once under the immutable generation and supplies
+   exact binary diff once under the immutable generation and supplies
    its path, size, and SHA-256 receipt to both read-only semantic roles; neither
    role needs shell or Git authority.
 2. Launch a fresh read-only **inference** context. It reads `task.md`, `plan.md`,

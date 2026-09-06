@@ -8,7 +8,7 @@ require "hive/agent_git_gate"
 require "hive/gh"
 require "hive/git_ref"
 require "hive/managed_directory"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   # Lower-level, deterministic branch and pull-request publication. Product
@@ -22,7 +22,6 @@ module Hive
     MAX_RECORDS = 5_000
     MAX_TITLE_BYTES = 512
     MAX_BODY_BYTES = 32 * 1024
-    MAX_DIFF_BYTES = 4 * 1024 * 1024
     MAX_INVENTORY_BYTES = 16 * 1024 * 1024
     OID = /\A[0-9a-f]{40}\z/
     DIGEST = /\A[0-9a-f]{64}\z/
@@ -41,11 +40,11 @@ module Hive
     Request = Data.define(
       :worktree_path, :host, :repository, :base_branch,
       :creation_base_oid, :branch, :head_oid, :diff_digest,
-      :title, :body, :diff, :draft
+      :title, :body, :draft, :scan_base_oid
     ) do
       def initialize(worktree_path:, host:, repository:, base_branch:,
                      creation_base_oid:, branch:, head_oid:, diff_digest:,
-                     title:, body:, diff: "", draft: true)
+                     title:, body:, diff: nil, draft: true, scan_base_oid: creation_base_oid)
         worktree = File.expand_path(bounded_string(worktree_path, "worktree path", 4_096))
         normalized_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
         normalized_repository = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
@@ -58,8 +57,7 @@ module Hive
         normalized_diff_digest = digest(diff_digest, "diff digest")
         normalized_title = bounded_utf8(title, "title", MAX_TITLE_BYTES, control_free: true)
         normalized_body = bounded_utf8(body, "body", MAX_BODY_BYTES)
-        normalized_diff = bounded_utf8(diff, "diff", MAX_DIFF_BYTES, allow_empty: true)
-        unless Digest::SHA256.hexdigest(normalized_diff) == normalized_diff_digest
+        if diff && Digest::SHA256.hexdigest(diff) != normalized_diff_digest
           raise ArgumentError, "diff digest does not match publication bytes"
         end
         unless draft == true || draft == false
@@ -71,7 +69,8 @@ module Hive
           creation_base_oid: base_oid.freeze, branch: normalized_branch.freeze,
           head_oid: normalized_head.freeze, diff_digest: normalized_diff_digest.freeze,
           title: normalized_title.freeze, body: normalized_body.freeze,
-          diff: normalized_diff.freeze, draft: draft
+          draft: draft,
+          scan_base_oid: oid(scan_base_oid, "scan base OID").freeze
         )
       end
 
@@ -314,6 +313,10 @@ module Hive
         @clock = clock
       end
 
+      def creation_base_oid
+        read_state&.fetch("creation_base_oid")
+      end
+
       def publish!(request, revalidate:)
         unless request.is_a?(Request) && revalidate.respond_to?(:call)
           raise ArgumentError, "publication requires a strict request and revalidator"
@@ -464,7 +467,7 @@ module Hive
         %w[host repository base_branch creation_base_oid branch draft].all? do |key|
           state[key] == expected[key]
         end && state.fetch("title_digest") == request.title_digest &&
-          state.fetch("head_oid") != request.head_oid
+          (state.fetch("head_oid") != request.head_oid || state.fetch("diff_digest") != request.diff_digest)
       end
 
       def revision_pull_request(request, state)
@@ -765,11 +768,17 @@ module Hive
 
       def ensure_secret_free!(request)
         fields = { "title" => request.title, "body" => request.published_body }
-        detected = fields.keys.select { |key| Hive::SecretPatterns.match?(fields.fetch(key)) }
-        detected << "diff" if Hive::SecretPatterns.match_diff?(request.diff)
+        detected = fields.keys.select { |key| Hive::SecretScanner.match?(fields.fetch(key)) }
+        if Hive::SecretScanner.git_match?(
+          request.worktree_path, base_oid: request.scan_base_oid, head_oid: request.head_oid
+        )
+          detected << "commits"
+        end
         return if detected.empty?
 
         blocked!("secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes")
+      rescue Hive::SecretScanner::Unavailable => e
+        blocked!("secret_scan_unavailable", e.message)
       end
 
       def revalidate!(callable, phase)

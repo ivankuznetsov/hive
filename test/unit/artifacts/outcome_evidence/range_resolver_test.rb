@@ -58,6 +58,22 @@ class OutcomeEvidenceRangeResolverTest < Minitest::Test
     end
   end
 
+  def test_rebased_task_evidence_excludes_upstream_changes
+    with_repository do |task, worktree, original_base, root|
+      commit_path(worktree, "lib/feature.rb", "FEATURE = true\n")
+      write_pointer(task, worktree, base_oid: original_base)
+      commit_path(task.project_root, "upstream.md", "unrelated change\n")
+      current_base = run!("git", "-C", task.project_root, "rev-parse", "HEAD").strip
+      run!("git", "-C", worktree, "rebase", "master", "--quiet")
+
+      identity = resolver(task, root).resolve
+
+      assert_equal current_base, identity.fetch("implementation_base")
+      assert_equal current_base, identity.fetch("merge_base")
+      assert_equal [ "lib/feature.rb" ], identity.fetch("changed_paths")
+    end
+  end
+
   def test_rejects_controller_head_drift_symlinks_and_unsafe_paths
     with_repository do |task, worktree, base, root|
       commit_path(worktree, "lib/feature.rb", "FEATURE = true\n")

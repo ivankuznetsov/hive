@@ -479,7 +479,7 @@ class ReviewGithubPublisherTest < Minitest::Test
     with_tmp_dir do |dir|
       task = make_task(dir)
       body = File.join(task.reviews_dir, "codex-01.md")
-      File.write(body, "- [ ] leaked key: sk-ant-#{'a' * 30}\n")
+      File.write(body, "- [ ] leaked key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
 
       _out, err = capture_io do
         result = publish_review!(

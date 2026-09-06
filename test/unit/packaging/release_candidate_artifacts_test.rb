@@ -256,6 +256,8 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
     managed = File.expand_path("../../../packaging/managed_web_archive.rb", __dir__)
     builder_digest << "packaging/managed_web_archive.rb\0" << File.binread(managed) << "\0"
+    betterleaks = File.expand_path("../../../packaging/betterleaks.rb", __dir__)
+    builder_digest << "packaging/betterleaks.rb\0" << File.binread(betterleaks) << "\0"
     manifest = {
       "schema" => HiveReleaseCandidate::Artifacts::MANIFEST_SCHEMA,
       "schema_version" => 1,
@@ -277,6 +279,8 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     FileUtils.rm_rf(stage)
     managed = File.expand_path("../../../packaging/managed_web_archive.rb", __dir__)
     source_bytes = builder_bytes.merge("packaging/managed_web_archive.rb" => File.binread(managed))
+    betterleaks = File.expand_path("../../../packaging/betterleaks.rb", __dir__)
+    source_bytes["packaging/betterleaks.rb"] = File.binread(betterleaks)
     source_bytes.each do |relative, bytes|
       next if mutation[:missing] == relative
       path = File.join(stage, relative)

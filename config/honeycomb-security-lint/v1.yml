@@ -3,7 +3,7 @@ version: v1
 upstream_commit: ada805d0d8c94dc236a0673a22232a0440843cf0
 upstream_policy_sha256: abb0d43bf30e683413e38060f5416e9ece370b98eba9c836a7c56ebbcdd765fa
 fixture_corpus_sha256: bfc864815663dd61f75043da7c24e954364220c9d7eeb85ba73b298d824c268d
-expected_output_sha256: 549ca5ec602fbc7ee7618a0c44f2ef48b10b3bb57f91aee3b7c73b21f1d63fb6
+expected_output_sha256: 8bb95129d00f42f92a81cdac2ef6290a2a689a0b7dd875dc5a2d7592421ff704
 baseline_network_hosts:
   - api.github.com
   - github.com
@@ -48,14 +48,5 @@ known_rules:
   - policy.scanner-error
   - policy.total-limit
   - policy.unknown-rule
-  - secret.anthropic-key
-  - secret.aws-access-key
-  - secret.bearer
-  - secret.generic-assignment
-  - secret.github-token
-  - secret.google-api-key
-  - secret.jwt
-  - secret.openai-key
-  - secret.private-key
-  - secret.slack-token
+  - secret.detected
   - suppression.orphaned-request

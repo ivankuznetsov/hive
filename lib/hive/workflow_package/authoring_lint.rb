@@ -1,4 +1,5 @@
 require "digest"
+require "hive/secret_scanner"
 require "find"
 require "ipaddr"
 require "psych"
@@ -49,18 +50,6 @@ module Hive
       Observation = Data.define(:host, :dynamic, :path, :line, :column, :raw)
       class UnsafeYAML < StandardError; end
 
-      SECRET_PATTERNS = [
-        [ "secret.private-key", /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/, "Private key material detected" ],
-        [ "secret.github-token", /\bgh[pousr]_[A-Za-z0-9]{20,}\b/, "GitHub credential detected" ],
-        [ "secret.openai-key", /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/, "OpenAI credential detected" ],
-        [ "secret.anthropic-key", /\bsk-ant-[A-Za-z0-9_-]{20,}\b/, "Anthropic credential detected" ],
-        [ "secret.aws-access-key", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/, "AWS access key detected" ],
-        [ "secret.slack-token", /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/, "Slack credential detected" ],
-        [ "secret.google-api-key", /\bAIza[0-9A-Za-z_-]{30,}\b/, "Google API credential detected" ],
-        [ "secret.jwt", /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/, "JWT-shaped credential detected" ],
-        [ "secret.bearer", /\bBearer\s+[A-Za-z0-9._~+\/-]{20,}={0,2}\b/i, "Bearer credential detected" ]
-      ].freeze
-      GENERIC_SECRET = /\b(?:api[_-]?key|client[_-]?secret|password|token)\b\s*[:=]\s*["']([^"'\s]{16,})["']/i
       PAYMENT_CARD = /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/
       HEX_SHA256 = /(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])/i
       PII_PATTERNS = [
@@ -206,21 +195,11 @@ module Hive
       end
 
       def scan_patterns(entry)
+        Hive::SecretScanner.scan(entry.bytes, path: entry.path).each do |hit|
+          add("secret.detected", :error, entry.path, hit.fetch(:line), hit.fetch(:column),
+              "Credential detected by Betterleaks", evidence: hit.fetch(:sha256))
+        end
         entry.text.each_line.with_index(1) do |line, line_number|
-          SECRET_PATTERNS.each do |rule, regex, message|
-            each_match(line, regex) do |match|
-              add(rule, :error, entry.path, line_number, match.begin(0) + 1, message, evidence: match[0])
-            end
-          end
-          each_match(line, GENERIC_SECRET) do |match|
-            next unless entropy(match[1].to_s) >= 3.2
-
-            add(
-              "secret.generic-assignment", :error, entry.path, line_number, match.begin(0) + 1,
-              "High-entropy credential assignment detected", evidence: match[0]
-            )
-          end
-
           payment_card_matches = []
           each_match(line, PAYMENT_CARD) { |match| payment_card_matches << match }
           unless payment_card_matches.empty?
@@ -815,15 +794,6 @@ module Hive
           "policy.unknown-rule", :error, "manifest.yml", nil, nil,
           "lint emitted an unknown rule and failed closed"
         )
-      end
-
-      def entropy(value)
-        return 0.0 if value.empty?
-
-        value.each_char.tally.values.sum do |count|
-          probability = count.fdiv(value.length)
-          -probability * Math.log2(probability)
-        end
       end
 
       def luhn_valid?(value)

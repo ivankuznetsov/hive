@@ -3,6 +3,7 @@ require "fileutils"
 require "hive/config"
 require "hive/git_ops"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Stages
@@ -18,7 +19,6 @@ module Hive
       AutoCommitScopeViolation = Data.define(:path, :reason, :recovery_path)
       AutoCommitSafetyViolation = Data.define(:path, :reason, :recovery_path)
       AUTO_COMMIT_OP_TIMEOUT_SEC = 300
-      AUTO_COMMIT_BLOB_SCAN_MAX_BYTES = 1024 * 1024
       AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
         /gpg/i,
         /pinentry/i,
@@ -175,7 +175,7 @@ module Hive
         return head_objects unless head_objects[:success]
 
         violations = entries[:entries].filter_map do |entry|
-          if !head_objects[:object_ids].key?(entry[:path]) && Hive::SecretPatterns.match?(entry[:path])
+          if !head_objects[:object_ids].key?(entry[:path]) && Hive::SecretScanner.match?(entry[:path])
             next AutoCommitSafetyViolation.new(
               path: diagnostic_path(entry[:path]),
               reason: "new staged path matches secret detectors",
@@ -195,9 +195,9 @@ module Hive
           )
         end
 
-        secrets = staged_blob_secret_violations(
-          worktree_path, entries[:entries], head_objects[:object_ids]
-        )
+        return { success: true, violations: violations.uniq } unless violations.empty?
+
+        secrets = staged_secret_violations(worktree_path, entries[:entries], head_objects[:object_ids])
         return secrets unless secrets[:success]
 
         { success: true, violations: (violations + secrets[:violations]).uniq }
@@ -250,81 +250,19 @@ module Hive
         { success: true, object_ids: object_ids }
       end
 
-      # Scan each exact staged regular-file blob. Diff-line scanning misses
-      # binary blobs entirely, so the safety boundary reads the index object
-      # itself and refuses oversized blobs that cannot be boundedly inspected.
-      # For tracked files, subtract exact secret matches already committed at
-      # HEAD so an unrelated edit does not make legacy detector fixtures
-      # impossible to auto-commit. Diagnostics contain only path and detector
-      # names, never blob bytes or fingerprints.
-      def staged_blob_secret_violations(worktree_path, entries, head_object_ids)
-        violations = entries.filter_map do |entry|
-          next unless %w[100644 100755].include?(entry[:mode])
-
-          blob = bounded_blob(worktree_path, entry[:object_id])
-          return blob unless blob[:success]
-          if blob[:oversized]
-            next AutoCommitSafetyViolation.new(
-              path: diagnostic_path(entry[:path]),
-              reason: "staged blob exceeds the #{AUTO_COMMIT_BLOB_SCAN_MAX_BYTES}-byte safety scan limit",
-              recovery_path: entry[:path]
-            )
-          end
-
-          introduced = introduced_secret_names(
-            worktree_path,
-            Hive::SecretPatterns.scan(blob[:stdout]).map { |hit| [ hit[:name], hit[:sha256] ] },
-            head_object_ids[entry[:path]]
-          )
-          return introduced unless introduced[:success]
-          names = introduced[:names]
-          next if names.empty?
-
+      # Scan exact index blobs, including binary content, without a size cap.
+      def staged_secret_violations(worktree_path, entries, head_objects)
+        violations = Hive::SecretScanner.staged_findings(
+          worktree_path, entries: entries, head_objects: head_objects
+        ).map do |hit|
           AutoCommitSafetyViolation.new(
-            path: diagnostic_path(entry[:path]),
-            reason: "staged content matches secret detectors: #{names.join(', ')}",
-            recovery_path: entry[:path]
+            path: diagnostic_path(hit.fetch(:path)), recovery_path: hit.fetch(:path),
+            reason: "staged content matches secret detectors: #{hit.fetch(:name)}"
           )
         end
         { success: true, violations: violations.uniq }
-      end
-
-      def introduced_secret_names(worktree_path, staged_hits, head_object_id)
-        return { success: true, names: staged_hits.map(&:first).uniq } unless head_object_id
-
-        head_blob = bounded_blob(worktree_path, head_object_id)
-        return head_blob unless head_blob[:success]
-        return { success: true, names: staged_hits.map(&:first).uniq } if head_blob[:oversized]
-
-        baseline = Hive::SecretPatterns.scan(head_blob[:stdout])
-          .map { |hit| [ hit[:name], hit[:sha256] ] }.tally
-        introduced = staged_hits.filter_map do |hit|
-          if baseline.fetch(hit, 0).positive?
-            baseline[hit] -= 1
-            next
-          end
-          hit.first
-        end
-        { success: true, names: introduced.uniq }
-      end
-
-      def bounded_blob(worktree_path, object_id)
-        size = capture_git_with_timeout(
-          [ "git", "-C", worktree_path, "cat-file", "-s", object_id ],
-          label: "git cat-file -s"
-        )
-        return size unless size[:success]
-
-        bytes = Integer(size[:stdout].to_s.strip, exception: false)
-        return { success: true, oversized: true } unless bytes && bytes <= AUTO_COMMIT_BLOB_SCAN_MAX_BYTES
-
-        blob = capture_git_with_timeout(
-          [ "git", "-C", worktree_path, "cat-file", "blob", object_id ],
-          label: "git cat-file blob"
-        )
-        return blob unless blob[:success]
-
-        { success: true, oversized: false, stdout: blob[:stdout] }
+      rescue Hive::SecretScanner::Unavailable => e
+        { success: false, message: e.message }
       end
 
       def diagnostic_path(path)

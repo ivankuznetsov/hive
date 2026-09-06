@@ -254,6 +254,7 @@ module Hive
       PATROL_FIX_REJECTED = "patrol_fix_rejected".freeze
       PATROL_FIX_BLOCKED  = "patrol_fix_blocked".freeze
       PATROL_FIX_ESCALATED = "patrol_fix_escalated".freeze
+      PATROL_FIX_PUBLICATION_BLOCKED = "patrol_fix_publication_blocked".freeze
       ERROR               = "error".freeze
       ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze

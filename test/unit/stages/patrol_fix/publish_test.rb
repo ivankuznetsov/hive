@@ -105,6 +105,18 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_publication_rework_defaults_to_review_when_no_specific_source_is_secret
+    snapshot = {
+      "manifest" => { "sources" => [ { "engine" => "git", "identity" => "commit", "evidence" => [ "clean" ] } ] },
+      "validation" => { "payload" => { "commands" => [ { "identity" => "bundle exec rake test" } ] } },
+      "review" => { "payload" => { "rationale" => "Reviewed cleanly.", "evidence" => [ "focused tests pass" ] } }
+    }
+
+    assert_equal "review", Hive::Stages::PatrolFix::Publish.send(
+      :publication_rework_stage, snapshot, []
+    )
+  end
+
   def test_existing_exact_owned_pr_is_imported_without_push_or_create
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new
@@ -217,17 +229,54 @@ class PatrolFixPublishStageTest < Minitest::Test
   def test_secret_in_review_body_blocks_before_push_without_leaking_diagnostic
     with_publish_task(review_rationale: "token ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}") do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new
-      error = assert_raises(Hive::GithubPublication::Blocked) do
-        Hive::Stages::PatrolFix::Publish.run!(
-          task, config, git_gateway: git, github_gateway: FakeGithub.new,
+      github = FakeGithub.new
+      result = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: git, github_gateway: github,
+        worktree_root: worktree_root, cleanup: ->(*) { true }
+      )
+
+      assert_equal :parked, result.fetch(:status)
+      block = result.fetch(:receipt)
+      assert_equal "publication_block", block.fetch("kind")
+      assert_equal "secret_detected", block.dig("payload", "code")
+      assert_equal "operator", block.dig("payload", "owner")
+      assert_equal [ "body" ], block.dig("payload", "blocked_fields")
+      assert_equal "review", block.dig("payload", "rework_stage")
+      refute_includes JSON.generate(block), "ghp_"
+      assert_equal 0, git.pushes
+      assert_equal 0, github.creates
+      refute publication_receipt(task)
+      projection = Hive::PatrolFix::Projection.new(
+        task_folder: task.folder, stage: "5-publish"
+      ).to_h
+      assert_equal "publication_blocked", projection.dig("outcome", "kind")
+      assert_equal "operator", projection.fetch("blocker_owner")
+      assert_equal "parked", projection.dig("action", "kind")
+
+      replay = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: Object.new, github_gateway: Object.new,
+        worktree_root: worktree_root, cleanup: ->(*) { flunk "park replay must not clean up" }
+      )
+      assert_equal block, replay.fetch(:receipt)
+    end
+  end
+
+  def test_secret_rework_stage_uses_the_earliest_authority_that_can_change_the_bytes
+    token = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
+    [
+      [ { source_evidence: "evidence #{token}" }, "inbox", [ "body" ] ],
+      [ { fixed_contents: "puts '#{token}'\n" }, "fix", [ "diff" ] ]
+    ].each do |options, expected_stage, expected_fields|
+      with_publish_task(**options) do |task, worktree_root, _manifest, _review, _remote|
+        result = Hive::Stages::PatrolFix::Publish.run!(
+          task, config, git_gateway: LocalGit.new, github_gateway: FakeGithub.new,
           worktree_root: worktree_root, cleanup: ->(*) { true }
         )
-      end
 
-      assert_equal "secret_detected", error.code
-      refute_includes error.message, "ghp_"
-      assert_equal 0, git.pushes
-      refute publication_receipt(task)
+        assert_equal expected_stage, result.dig(:receipt, "payload", "rework_stage")
+        assert_equal expected_fields, result.dig(:receipt, "payload", "blocked_fields")
+        refute_includes JSON.generate(result.fetch(:receipt)), token
+      end
     end
   end
 
@@ -516,8 +565,11 @@ class PatrolFixPublishStageTest < Minitest::Test
     File.write(path, yield(rows).map { |row| JSON.generate(row) }.join("\n") + "\n")
   end
 
-  def with_publish_task(review_rationale: "Independent review approved the exact patch.")
-    PatrolFixStageFixture.with_task(stage: "5-publish") do |task, root, manifest|
+  def with_publish_task(review_rationale: "Independent review approved the exact patch.",
+                        source_evidence: "bug", fixed_contents: "puts :fixed\n")
+    PatrolFixStageFixture.with_task(
+      stage: "5-publish", source_evidence: source_evidence
+    ) do |task, root, manifest|
       remote = File.join(root, "remote.git")
       capture("git", "init", "--bare", remote)
       PatrolFixStageFixture.git(task.project_root, "remote", "add", "origin", remote)
@@ -533,7 +585,7 @@ class PatrolFixPublishStageTest < Minitest::Test
         generation: 1, evidence_digest: "a" * 64,
         base_revision: manifest.fetch("target_revision")
       )
-      File.write(File.join(owner.fetch("worktree"), "app.rb"), "puts :fixed\n")
+      File.write(File.join(owner.fetch("worktree"), "app.rb"), fixed_contents)
       PatrolFixStageFixture.git(owner.fetch("worktree"), "add", "app.rb")
       PatrolFixStageFixture.git(owner.fetch("worktree"), "commit", "-m", "fix")
       fix_payload = custody.capture!(generation: 1, evidence_digest: "a" * 64)

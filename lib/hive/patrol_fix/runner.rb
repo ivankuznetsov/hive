@@ -17,7 +17,14 @@ module Hive
 
       def run!(task, cfg = nil, **kwargs)
         require "hive/patrol_fix/transition"
-        Hive::PatrolFix::Transition.new(task).reconcile!
+        recovered = Hive::PatrolFix::Transition.new(task).reconcile!
+        if recovered.is_a?(Hash) && recovered[:task_folder] &&
+           task.respond_to?(:folder) && recovered[:task_folder] != task.folder
+          return {
+            status: :complete, commit: nil,
+            moved_task_folder: recovered.fetch(:task_folder)
+          }
+        end
         handler = load_handler(task.stage_name)
         unless handler
           raise Hive::StageError,

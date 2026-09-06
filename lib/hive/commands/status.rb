@@ -869,6 +869,7 @@ module Hive
           "condition_task_generation" => row.dig(:projection_data, "identity", "task_generation"),
           "commit_generation" => row.dig(:projection_data, "identity", "commit_generation"),
           "current_attempt" => row.dig(:projection_data, "identity", "attempt_id"),
+          "action_receipt_id" => row.dig(:patrol_fix, "outcome", "receipt_id"),
           "conditions" => row.dig(:projection_data, "conditions", "current") || [],
           "condition_history" => row.dig(:projection_data, "conditions", "history") || [],
           "evidence" => row.dig(:projection_data, "evidence") || [],

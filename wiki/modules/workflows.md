@@ -307,6 +307,13 @@ is decision evidence only. There is no local-base fallback, while rework keeps
 the already-owned checkout and base. A same-generation retry also reuses that
 custody without refetching a moving remote branch.
 
+Publish secret-policy failures are projected as a distinct operator park, not
+as a recoverable failed attempt. Their sanitized append-only receipt is the
+freshness authority for `patrol_fix.rework_publication`, which advances a new
+generation to the earliest controller stage able to change the blocked bytes.
+The ordinary daemon never dispatches that action and `workflow.retry` cannot
+clear it.
+
 ## Durable human stages
 
 `Hive::Workflow::Stage` accepts `kind: :human` plus immutable named

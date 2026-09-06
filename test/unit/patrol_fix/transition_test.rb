@@ -1,8 +1,13 @@
 require "test_helper"
 require "hive/patrol_fix/transition"
+require "hive/patrol_fix/publication_block_receipt"
+require "hive/operational_action"
+require "hive/stages/patrol_fix/review"
 require_relative "../stages/patrol_fix/fix_test"
 
 class PatrolFixTransitionTest < Minitest::Test
+  include HiveTestHelper
+
   def test_rework_persists_intent_advances_generation_rotates_custody_and_moves_same_task
     with_review_task(route: "rework") do |task, worktree_root, decision|
       commits = []
@@ -225,6 +230,149 @@ class PatrolFixTransitionTest < Minitest::Test
       refute File.exist?(File.join(
         task.hive_state_path, "patrol-fix", "transitions", task.slug, "route-intent.json"
       ))
+    end
+  end
+
+  def test_publication_block_rework_advances_generation_and_returns_to_review_with_exact_evidence
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = publication_block(manifest, decision)
+      store.append!(block)
+      publish_folder = File.join(task.hive_state_path, "stages", "5-publish", task.slug)
+      FileUtils.mkdir_p(File.dirname(publish_folder))
+      File.rename(task.folder, publish_folder)
+      publish_task = Hive::Task.new(publish_folder)
+      commits = []
+
+      result = Hive::PatrolFix::Transition.new(
+        publish_task, worktree_root: worktree_root,
+        commit: ->(**values) { commits << values }
+      ).apply_publication_block!(block)
+
+      review_folder = File.join(task.hive_state_path, "stages", "4-review", task.slug)
+      assert_equal review_folder, result.fetch(:task_folder)
+      current_manifest = Hive::PatrolFix::TaskManifest.new(task_folder: review_folder).read
+      assert_equal 2, current_manifest.dig("task", "generation")
+      receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: review_folder).read_all
+      reopen = receipts.find do |row|
+        row["kind"] == "reopen" && row.dig("task", "generation") == 2
+      end
+      assert_equal "publish", reopen.fetch("stage")
+      assert_equal block.fetch("receipt_id"), reopen.dig("payload", "outcome_receipt_id")
+      assert_equal %w[fix-1 validation-1], reopen.dig("payload", "carried_receipts")
+      assert_equal "publication policy rework", commits.fetch(0).fetch(:action)
+      projection = Hive::PatrolFix::Projection.new(
+        task_folder: review_folder, stage: "4-review"
+      ).to_h
+      assert_nil projection.fetch("outcome")
+      assert_equal "ready", projection.dig("action", "kind")
+      assert_equal 1, projection.dig("timing", "rework_count")
+      evidence = Hive::Stages::PatrolFix::Review.send(
+        :review_evidence,
+        Hive::PatrolFix::ReceiptStore.new(task_folder: review_folder), current_manifest
+      )
+      assert_equal %w[fix-1 validation-1], evidence.map { |row| row.fetch("receipt_id") }
+    end
+  end
+
+  def test_publication_block_rework_to_fix_carries_no_review_evidence
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = publication_block(manifest, decision, rework_stage: "fix")
+      store.append!(block)
+      publish_folder = File.join(task.hive_state_path, "stages", "5-publish", task.slug)
+      FileUtils.mkdir_p(File.dirname(publish_folder))
+      File.rename(task.folder, publish_folder)
+
+      result = Hive::PatrolFix::Transition.new(
+        Hive::Task.new(publish_folder), worktree_root: worktree_root, commit: ->(**) { }
+      ).apply_publication_block!(block)
+
+      assert_equal File.join(task.hive_state_path, "stages", "2-fix", task.slug), result.fetch(:task_folder)
+    end
+  end
+
+  def test_operator_publication_rework_releases_the_exact_task_lock_after_the_move
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = publication_block(manifest, decision)
+      store.append!(block)
+      publish_folder = File.join(task.hive_state_path, "stages", "5-publish", task.slug)
+      FileUtils.mkdir_p(File.dirname(publish_folder))
+      File.rename(task.folder, publish_folder)
+      publish_task = Hive::Task.new(publish_folder)
+      transition = Hive::PatrolFix::Transition.new(
+        publish_task, worktree_root: worktree_root, commit: ->(**) { :committed }
+      )
+      executor = Hive::OperationalAction::Executor.new
+
+      with_replaced_singleton_method(
+        Hive::OperationalAction, :assert_current!, ->(*) { {} }
+      ) do
+        with_replaced_singleton_method(
+          Hive::PatrolFix::Transition, :new, ->(*) { transition }
+        ) do
+          executor.send(
+            :execute_publication_rework, publish_task,
+            project_name: "demo", target: "demo:#{task.slug}",
+            observation_token: "receipt-bound-token"
+          )
+        end
+      end
+
+      review_folder = File.join(task.hive_state_path, "stages", "4-review", task.slug)
+      assert_nil Hive::Lock.read_task_lock(review_folder)
+    end
+  end
+
+  def test_publication_rework_rejects_a_receipt_that_is_not_exactly_current
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = publication_block(manifest, decision)
+      error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        Hive::PatrolFix::Transition.new(
+          task, worktree_root: worktree_root, commit: ->(**) { flunk "must not commit" }
+        ).apply_publication_block!(block)
+      end
+      assert_includes error.message, "exact current block"
+    end
+  end
+
+  def test_publication_rework_rejects_an_exact_stored_block_without_payload
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = Marshal.load(Marshal.dump(publication_block(manifest, decision)))
+      block.delete("payload")
+      store = Object.new
+      store.define_singleton_method(:read_all) { [ block ] }
+      transition = Hive::PatrolFix::Transition.new(
+        task, worktree_root: worktree_root, commit: ->(**) { flunk "must not commit" }
+      )
+
+      with_replaced_singleton_method(Hive::PatrolFix::ReceiptStore, :new, ->(**) { store }) do
+        error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+          transition.apply_publication_block!(block)
+        end
+        assert_includes error.message, "exact current block"
+      end
+    end
+  end
+
+  def test_publication_rework_revalidates_the_receipt_evidence_chain
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      block = publication_block(manifest, decision, fix_receipt_id: "missing-fix")
+      Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).append!(block)
+
+      error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        Hive::PatrolFix::Transition.new(
+          task, worktree_root: worktree_root, commit: ->(**) { flunk "must not commit" }
+        ).apply_publication_block!(block)
+      end
+      assert_includes error.message, "exact evidence chain"
     end
   end
 
@@ -456,5 +604,18 @@ class PatrolFixTransitionTest < Minitest::Test
       "operator" => "controller:review", "carried_receipts" => [],
       "recorded_at" => "2026-08-20T12:00:00Z"
     }
+  end
+
+
+  def publication_block(manifest, decision, fix_receipt_id: "fix-1", rework_stage: "review")
+    Hive::PatrolFix::PublicationBlockReceipt.build(
+      task: manifest.fetch("task"), evidence_revision: manifest.fetch("evidence_revision"),
+      blocked_fields: [ "body" ], rework_stage: rework_stage,
+      review_receipt_id: decision.fetch("receipt_id"), fix_receipt_id: fix_receipt_id,
+      validation_receipt_id: "validation-1",
+      head_revision: decision.dig("payload", "head_revision"),
+      diff_digest: decision.dig("payload", "diff_digest"),
+      recorded_at: Time.utc(2026, 8, 20, 12, 1)
+    )
   end
 end

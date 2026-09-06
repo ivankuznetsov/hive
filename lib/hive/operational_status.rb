@@ -25,6 +25,7 @@ module Hive
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
+    PATROL_FIX_PUBLICATION_BLOCKED_ACTION = "patrol_fix_publication_blocked".freeze
     PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
@@ -398,8 +399,12 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
+      daemon_actions = [
+        Hive::OperationalAction::RETRY_ACTION_ID,
+        Hive::OperationalAction::PATROL_FIX_PUBLICATION_REWORK_ACTION_ID
+      ]
       if daemon_enabled?(project.fetch("name")) &&
-         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
+         action && !daemon_actions.include?(action.fetch("action_id"))
         action = nil
       end
       {
@@ -617,6 +622,9 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      if row["action"] == PATROL_FIX_PUBLICATION_BLOCKED_ACTION
+        return [ "waiting_on_you", "operator" ]
+      end
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
@@ -940,6 +948,12 @@ module Hive
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
+      elsif row["action"] == PATROL_FIX_PUBLICATION_BLOCKED_ACTION
+        reasons << reason(
+          "secret_detected",
+          "Publication was blocked by the secret policy before any remote effect.",
+          "patrol_fix"
+        )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]

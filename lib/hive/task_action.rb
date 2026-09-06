@@ -245,6 +245,11 @@ module Hive
         label: "Escalated (parked)",
         command: nil
       },
+      patrol_fix_publication_blocked: {
+        key: Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED,
+        label: "Publication blocked by secret policy",
+        command: nil
+      },
       agent_running: {
         # Marker is `:agent_working` — a `hive run` is in flight. Surfacing
         # a workflow command here would send the user (or an agent loop)
@@ -436,6 +441,7 @@ module Hive
       end
       return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
 
+      return ACTIONS.fetch(:patrol_fix_publication_blocked) if outcome == "publication_blocked"
       return ACTIONS.fetch(:patrol_fix_blocked) if outcome == "blocked"
 
       ACTIONS.fetch(:generic_ready_to_run)

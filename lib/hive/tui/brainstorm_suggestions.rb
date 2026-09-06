@@ -101,6 +101,7 @@ module Hive
               elsif envelope_unchanged?(content, region)
                 outcome[:untouched] += 1
               else
+                content = remove_binding(content, region.binding)
                 record["dismissed"] = true
                 record["updated_at"] = Time.now.utc.iso8601(6)
                 changed_store = true
@@ -169,16 +170,10 @@ module Hive
 
       def envelope_unchanged?(content, lease_region)
         Hive::BrainstormSuggestions::Envelope.regions(content).any? do |current|
-          current.binding == lease_region.binding &&
-            normalize_editor_text(current.text) == normalize_editor_text(lease_region.text)
+          current.binding == lease_region.binding && current.source == lease_region.source
         end
       end
       private_class_method :envelope_unchanged?
-
-      def normalize_editor_text(value)
-        value.to_s.gsub("\r\n", "\n").lines.map { |line| line.rstrip }.join("\n").rstrip
-      end
-      private_class_method :normalize_editor_text
 
       def insert_records(content, records)
         lines = content.lines

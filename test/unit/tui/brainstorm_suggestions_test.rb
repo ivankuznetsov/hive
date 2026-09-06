@@ -82,6 +82,42 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
     end
   end
 
+  def test_whitespace_edit_inside_delimiters_dismisses_and_removes_the_envelope
+    with_task do |task, path, store|
+      lease = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
+      region = lease.regions.first
+      edited = region.source.sub("Use the daemon scheduler seam.", "Use the daemon scheduler seam.  ")
+      File.write(path, File.read(path).sub(region.source, edited))
+
+      result = Hive::Tui::BrainstormSuggestions.reconcile_editor_exit!(
+        task_root: task, path: path, lease: lease
+      )
+
+      assert_equal 1, result.dismissed
+      assert store.read.dig("records", 0, "dismissed")
+      assert_nil Hive::BrainstormParser.parse(path).first.answer
+      refute_includes File.read(path), "hive-suggestion:v1"
+      refute_includes File.read(path), "Use the daemon scheduler seam."
+    end
+  end
+
+  def test_line_ending_edit_inside_delimiters_is_not_treated_as_untouched
+    with_task do |task, path, store|
+      lease = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
+      region = lease.regions.first
+      File.binwrite(path, File.binread(path).sub(region.source, region.source.gsub("\n", "\r\n")))
+
+      result = Hive::Tui::BrainstormSuggestions.reconcile_editor_exit!(
+        task_root: task, path: path, lease: lease
+      )
+
+      assert_equal 1, result.dismissed
+      assert store.read.dig("records", 0, "dismissed")
+      assert_nil Hive::BrainstormParser.parse(path).first.answer
+      refute_includes File.binread(path), "hive-suggestion:v1"
+    end
+  end
+
   def test_newer_sidecar_candidate_is_never_inserted_into_old_saved_buffer
     with_task do |task, path, store|
       lease = Hive::Tui::BrainstormSuggestions.project!(task_root: task, path: path)
@@ -198,7 +234,10 @@ class HiveTuiBrainstormSuggestionsTest < Minitest::Test
         path,
         "## Round 1\n\n### Q1. #{question}\n### A1.\n\n<!-- WAITING -->\n"
       )
-      seed_task_projection(task, state_file: path)
+      Hive::TaskMeta.write(
+        task, id: 1, slug: "task-1", display_name: "Task 1", workflow: "coding"
+      )
+      prepare_test_task_lease_repository(task)
       task_object = Hive::Task.new(task)
       parsed = Hive::BrainstormParser.parse(path)
       bundle = Hive::BrainstormSuggestions::ContextBundle.capture(

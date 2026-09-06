@@ -156,6 +156,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       captured.fetch(:config)
     )
     assert_equal true, captured.fetch(:dry_run)
+    assert_equal true, captured.fetch(:patrol_discovery_async)
     assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api

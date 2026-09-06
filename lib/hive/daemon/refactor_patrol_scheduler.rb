@@ -198,8 +198,22 @@ module Hive
       end
 
       def reserve(candidate, now: Time.now)
-        entry = candidate.fetch(:entry)
+        observed_entry = candidate.fetch(:entry)
         phase = candidate.fetch(:action_phase, :discovery).to_sym
+        entry = begin
+          current_candidate_entry(observed_entry)
+        rescue ReservationBlocked => error
+          if error.reason == "repository_registration_missing" &&
+             !%i[classification post_merge].include?(phase)
+            stale_store = store_for(observed_entry)
+            stale_aggregate = stale_store.read_job(candidate.fetch(:job_id))
+            block(
+              observed_entry, stale_aggregate, reason: error.reason,
+              evidence: error.evidence, now: now, phase: phase
+            )
+          end
+          raise
+        end
         store = %i[classification post_merge].include?(phase) ? nil : store_for(entry)
         aggregate = store&.read_job(candidate.fetch(:job_id))
         cfg = begin
@@ -904,6 +918,8 @@ module Hive
           pr_number: aggregate.dig("source", "number"), pr_url: aggregate.dig("source", "url"),
           reason: reason, evidence: evidence
         }
+      rescue Hive::RefactorPatrol::JobStore::StaleClaim
+        nil
       rescue Hive::RefactorPatrol::JobStore::Error => e
         @events << { status: :blocked, project: entry.fetch("name"), reason: reason, error: e.message }
       end
@@ -947,6 +963,36 @@ module Hive
         entry = Array(@registry.call).find { |candidate| candidate.fetch("name") == registration }
         raise Hive::RefactorPatrol::JobStore::RecordNotFound, "claimed refactor patrol job registration not found" unless entry
         entry
+      end
+
+      def current_candidate_entry(observed)
+        current = Array(@registry.call).find do |entry|
+          entry.fetch("name") == observed.fetch("name")
+        end
+        unless current
+          raise ReservationBlocked.new(
+            "repository_registration_missing",
+            "name" => observed["name"].to_s
+          )
+        end
+        matches = %w[project_id registration_id].all? do |key|
+          observed[key].to_s == current[key].to_s
+        end && %w[path hive_state_path].all? do |key|
+          File.expand_path(observed.fetch(key)) ==
+            File.expand_path(current.fetch(key))
+        end
+        return current if matches
+
+        evidence = {
+          "name" => observed["name"].to_s,
+          "project_id" => observed["project_id"].to_s,
+          "registration_id" => observed["registration_id"].to_s
+        }
+        raise ReservationBlocked.new("registration_identity_changed", evidence)
+      rescue KeyError, TypeError => error
+        raise ReservationBlocked.new(
+          "registration_identity_changed", "error" => error.message
+        )
       end
 
       def completion_failure_reason(exit_code, envelope)

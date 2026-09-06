@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/attempts/reconciler"
 require "hive/attempts/finalization_maintenance"
 require "fileutils"
+require "thread"
 require "tmpdir"
 require "hive/markers"
 require "hive/task_meta"
@@ -347,6 +348,30 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class BlockingPatrolArbiter < FakePatrolArbiter
+    attr_reader :calls, :started
+
+    def initialize(items)
+      super
+      @calls = 0
+      @started = Queue.new
+      @release = Queue.new
+    end
+
+    def candidates(now:)
+      @calls += 1
+      return [] unless @calls == 1
+
+      @started << now
+      @release.pop
+      items
+    end
+
+    def release
+      @release << true
+    end
+  end
+
   class FakeAnswerDigestScheduler
     attr_accessor :next_dispatches
     attr_reader :completed
@@ -560,7 +585,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
-                      dispatch_repository: nil)
+                      dispatch_repository: nil, patrol_discovery_async: false)
     dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
     config = {
       "daemon" => {
@@ -617,7 +642,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
-      clock: clock
+      clock: clock,
+      patrol_discovery_async: patrol_discovery_async
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # Bypass the Hive::Config.find_project / Config.load lookup chain
@@ -627,6 +653,136 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler
     ]
+  end
+
+  def test_async_patrol_discovery_keeps_authoritative_ticks_responsive
+    candidate = {
+      project: "p1", patrol_kind: :ordinary, slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = BlockingPatrolArbiter.new([ candidate ])
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(
+      rows: [], with_patrol_scheduler: true, patrol_arbiter: arbiter,
+      operational_snapshot: snapshot, patrol_discovery_async: true
+    )
+
+    tick_thread = Thread.new { dispatcher.tick(now: T0) }
+    assert_equal T0, arbiter.started.pop
+    begin
+      assert tick_thread.join(0.5),
+             "authoritative tick must not wait for a slow Patrol registry scan"
+      fresh_payload = {
+        "schema" => "hive-status", "schema_version" => 7,
+        "generated_at" => (T0 + 30).iso8601
+      }
+      dispatcher.instance_variable_get(:@status_consumer).next_result =
+        Hive::Daemon::StatusConsumer::Result.new(
+          ok: true, rows: [], status_payload: fresh_payload
+        )
+      dispatcher.tick(now: T0 + 30)
+      assert_equal 1, arbiter.calls,
+                   "a later scheduler tick must not start an overlapping discovery scan"
+      completions = snapshot.calls.select { |method, _attributes| method == :complete }
+      assert_equal 2, completions.length,
+                   "scheduler authority must refresh while Patrol discovery is still running"
+      assert_equal fresh_payload, completions.last.fetch(1).fetch(:status_payload),
+                   "the repeated publication must carry the newly fetched task source"
+    ensure
+      arbiter.release
+      tick_thread.join(1)
+    end
+    assert_equal :complete, snapshot.calls.last.first
+    assert_empty supervisor.spawned
+
+    discovery = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert discovery.join(1), "released Patrol discovery should finish"
+    dispatcher.tick(now: T0 + 60)
+    next_discovery = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert next_discovery.join(1), "the next Patrol scan should start after harvest"
+
+    assert_equal 2, arbiter.calls,
+                 "a completed batch is harvested before the next scan starts"
+    assert_equal [ "hive patrol p1 --json" ], supervisor.spawned.map { |item| item.fetch(:command) }
+  ensure
+    arbiter&.release if tick_thread&.alive?
+    tick_thread&.join(1)
+    dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+  end
+
+  def test_async_patrol_discovery_reports_one_stall_and_recovers
+    clock_now = T0
+    arbiter = BlockingPatrolArbiter.new([])
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], patrol_arbiter: arbiter, patrol_discovery_async: true,
+      clock: -> { clock_now }
+    )
+
+    dispatcher.tick(now: T0)
+    assert_equal T0, arbiter.started.pop
+    clock_now = T0 + 90
+    dispatcher.tick(now: clock_now)
+    clock_now = T0 + 120
+    dispatcher.tick(now: clock_now)
+
+    stalls = logger.events.select do |name, attributes|
+      name == :fatal && attributes[:message].include?("patrol discovery is stalled")
+    end
+    assert_equal 1, stalls.length
+    assert_equal 90.0, stalls.fetch(0).last.fetch(:elapsed_sec)
+
+    arbiter.release
+    discovery = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert discovery.join(1)
+    clock_now = T0 + 121
+    dispatcher.tick(now: clock_now)
+    replacement = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert replacement.join(1)
+    assert_equal 2, arbiter.calls
+  ensure
+    arbiter&.release if dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.alive?
+    dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+  end
+
+  def test_async_patrol_discovery_surfaces_worker_errors_on_harvest_and_restarts
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.candidate_error = IOError.new("registry unavailable")
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [], patrol_arbiter: arbiter, patrol_discovery_async: true
+    )
+
+    dispatcher.tick(now: T0)
+    first = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert first.join(1)
+    arbiter.candidate_error = nil
+    dispatcher.tick(now: T0 + 30)
+    replacement = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert replacement.join(1)
+
+    error = logger.events.find do |name, attributes|
+      name == :fatal && attributes[:message].include?("registry unavailable")
+    end
+    refute_nil error
+    assert_empty supervisor.spawned
+  ensure
+    dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+  end
+
+  def test_async_mode_without_an_arbiter_keeps_legacy_reservation_on_the_caller
+    dispatcher, _supervisor, _controller, _logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true, patrol_discovery_async: true
+    )
+    tick_threads = []
+    patrol.define_singleton_method(:tick) do |now:|
+      tick_threads << Thread.current.object_id
+      []
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ Thread.current.object_id ], tick_threads
+    assert_nil dispatcher.instance_variable_get(:@patrol_discovery_thread)
   end
 
   def test_patrol_fix_admission_scheduler_has_an_independent_dispatcher_tick
@@ -4698,6 +4854,36 @@ def test_shutdown_acknowledgement_records_closed_admission_and_child_inventory
   assert_equal true, payload.fetch(:admission_closed)
   assert_equal true, payload.fetch(:drained)
   assert_equal [ 88 ], payload.fetch(:child_inventory).map { |entry| entry.fetch(:pid) }
+end
+
+def test_shutdown_acknowledgement_is_not_drained_while_patrol_discovery_is_alive
+  snapshot = FakeOperationalSnapshot.new
+  arbiter = BlockingPatrolArbiter.new([])
+  dispatcher, supervisor, _controller, logger = make_dispatcher(
+    rows: [], patrol_arbiter: arbiter, patrol_discovery_async: true,
+    operational_snapshot: snapshot
+  )
+  original_tick = dispatcher.method(:tick)
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+  dispatcher.define_singleton_method(:tick) do |now:|
+    original_tick.call(now: now)
+    request_shutdown!
+  end
+
+  dispatcher.run_forever
+
+  method, payload = snapshot.calls.last
+  assert_equal :shutdown, method
+  assert_equal true, payload.fetch(:admission_closed)
+  assert_equal false, payload.fetch(:drained)
+  assert_empty supervisor.spawned
+  assert logger.events.any? { |name, attributes|
+    name == :fatal && attributes[:message].include?("did not stop before daemon shutdown")
+  }
+ensure
+  arbiter&.release
+  dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
 end
 
 def test_run_forever_routes_shutdown_child_exit_through_architecture_completion

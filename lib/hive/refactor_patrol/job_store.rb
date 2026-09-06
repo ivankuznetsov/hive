@@ -301,11 +301,17 @@ module Hive
           next false unless %w[queued blocked].include?(aggregate.fetch("state"))
           next false if aggregate.fetch("actions").any?
 
-          deadline = aggregate.fetch("attempts").reverse_each.filter_map { |attempt| attempt["next_eligible_at"] }.first
-          deadline.nil? || Time.iso8601(deadline) <= now
+          discovery_retry_eligible?(aggregate, now)
         end
       end
-      private :eligible_from
+
+      def discovery_retry_eligible?(aggregate, now)
+        deadline = aggregate.fetch("attempts").reverse_each.filter_map do |attempt|
+          attempt["next_eligible_at"]
+        end.first
+        deadline.nil? || Time.iso8601(deadline) <= now
+      end
+      private :eligible_from, :discovery_retry_eligible?
 
       # Includes an expired analyzing claim, plus an unexpired claim whose
       # recorded process identity is already provably gone, so a restarted
@@ -431,6 +437,7 @@ module Hive
           return nil if aggregate.fetch("actions").any?
 
           active = active_discovery_attempt(aggregate)
+          return nil unless active || discovery_retry_eligible?(aggregate, now)
           if active
             expired = Time.iso8601(active.fetch("expires_at")) <= now
             return nil unless expired || allow_unexpired_recovery
@@ -559,9 +566,15 @@ module Hive
       # and retry throttling; otherwise the daemon would repeat shell/network
       # probes and identical log lines on every fast tick.
       def block_discovery!(job_id, reason:, evidence: {}, now: Time.now,
-                           backoff_sec: 60, episode: nil, transition: nil)
-        mutate_job(job_id) do |aggregate, _path|
+                           backoff_sec: 60, episode: nil, transition: nil,
+                           expected_record: nil)
+        mutate_job(job_id) do |aggregate, path|
           next aggregate if aggregate.fetch("complete")
+          if expected_record && aggregate != expected_record
+            raise StaleClaim.new(
+              "refactor patrol discovery observation is stale", path: path
+            )
+          end
 
           timestamp = now.utc.iso8601
           generation = diagnostic_episode!(

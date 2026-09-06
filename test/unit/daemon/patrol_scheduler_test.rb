@@ -152,6 +152,47 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reservation_rechecks_patrol_enablement
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { cfg },
+        git: FakeGit.new,
+        database: runtime_database(entry)
+      )
+      candidate = sched.candidates(now: T0).fetch(0)
+      cfg = enabled_cfg("patrol" => { "enabled" => false })
+
+      assert_nil sched.reserve(candidate, now: T0)
+      refute sched.pending?(entry.fetch("name"))
+    end
+  end
+
+  def test_reservation_rejects_a_replaced_registration
+    with_tmp_dir do |dir|
+      original = project_entry(File.join(dir, "original"))
+      replacement = project_entry(File.join(dir, "replacement")).merge(
+        "project_id" => "replacement-id"
+      )
+      FileUtils.mkdir_p(original.fetch("path"))
+      FileUtils.mkdir_p(replacement.fetch("path"))
+      registrations = [ original ]
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { registrations },
+        config_loader: ->(_path) { enabled_cfg },
+        git: FakeGit.new,
+        database: runtime_database(original)
+      )
+      candidate = sched.candidates(now: T0).fetch(0)
+      registrations = [ replacement ]
+
+      assert_nil sched.reserve(candidate, now: T0)
+      refute sched.pending?(original.fetch("name"))
+    end
+  end
+
   def test_timer_mode_honors_interval
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {
@@ -198,6 +239,20 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       assert_equal 1, sched.candidates(now: T0).size
       assert_equal 1, sched.candidates(now: T0 + 1).size
+    end
+  end
+
+  def test_reservation_rejects_a_candidate_that_entered_failure_backoff_during_discovery
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      sched = scheduler(entry, enabled_cfg)
+      stale_candidate = sched.candidates(now: T0).fetch(0)
+      reserved = sched.reserve(stale_candidate, now: T0)
+      sched.complete(project: "p1", exit_code: 1, now: T0)
+
+      assert_nil sched.reserve(reserved.merge(entry: entry), now: T0 + 1),
+                 "a discovery hint must not bypass a newer completion backoff"
+      refute sched.pending?("p1")
     end
   end
 
@@ -494,8 +549,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     with_tmp_dir do |dir|
       entry = project_entry(dir)
       sched = Hive::Daemon::PatrolScheduler.new(
-        registry: -> { [] }, config_loader: ->(*) { enabled_cfg },
-        state_store_factory: ->(*) { raise "store unavailable" }
+        registry: -> { [ entry ] }, config_loader: ->(*) { enabled_cfg },
+        state_store_factory: ->(*) { raise "store unavailable" },
+        database: runtime_database(entry)
       )
       sched.instance_variable_get(:@events) << { status: :blocked }
       assert_equal [ { status: :blocked } ], sched.drain_events

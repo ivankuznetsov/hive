@@ -22,6 +22,10 @@ completion authority.
    `hive artifacts` as a workflow verb.
 2. The controller-owned task worktree pointer and optional draft-PR receipt must
    agree on the implementation branch, base, worktree, and saved head.
+   Legacy pointers without saved base metadata resolve their comparison base
+   from the repository's default branch through the shared Git change-base
+   resolver. Missing historical metadata alone is not a blocker; contradictory
+   saved identities and non-ancestor saved bases remain errors.
 3. The implementation worktree must be clean. Evidence covers only the committed
    `base..HEAD` range; staged, unstaged, untracked, or symlink changes fail closed.
 4. The durable attempt must own the current task generation and `7-artifacts`

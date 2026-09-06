@@ -13,6 +13,14 @@ tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, m
 
 ## Managed Honeycomb boundary
 
+Package installation and publication run full security scanning. Reads of an
+already installed generation (workflow loading, manifest inspection, integrity
+verification, and configuration reconstruction) do not launch Betterleaks or
+repeat package security lint. They still check the pinned manifest digest, file
+inventory and hashes, filesystem shape, descriptor, and runtime policy. Changed
+installed bytes fail integrity verification rather than being silently rescanned
+and accepted. This keeps package admission work out of routine status scans.
+
 An unchanged `honeycomb-manifest/v1` package normalizes to a one-workflow,
 hook-free `Hive::ModulePackage` with the same immutable identity, mappings,
 inputs, and disclosure. That compatibility relationship does not make this

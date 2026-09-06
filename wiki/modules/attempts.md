@@ -43,6 +43,21 @@ attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
 changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
 live capacity or unresolved-loss recovery. There are no cohort counters or probes.
 
+`request_id` is immutable provenance, not a foreign key to the disposable
+dispatch queue. Completing or pruning a request must not change an attempt
+snapshot or prevent same-tick finalization. The unique request index still
+prevents duplicate admission. Finalization retains its full-record equality
+checks; mismatches are not ignored or retried inside the tick.
+
+For the preceding SQLite layout only, explicit `Database#migrate!` recognizes
+the exact old schema fingerprint and atomically rebuilds the attempts table
+without that foreign key. It preserves rows, indexes and CHECK constraints,
+validates the new schema and foreign keys before committing, and rolls back
+on failure. Other tables, token history and payload references are retained.
+Normal open/startup rejects the old schema and does not upgrade it. Stop all
+writers and take an external SQLite backup before invoking the migration.
+Previously nulled request IDs cannot be reconstructed by this schema change.
+
 SQL columns own lifecycle and identity values. `details_json` contains only
 execution details absent from those columns; `subject_json` holds the structured
 subject and `terminal_receipt_json` holds the receipt once. `Record.from_row`

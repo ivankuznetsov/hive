@@ -617,6 +617,22 @@ and channel-test pinned as well. Channel coverage also forces adapter
 registration to finish after teardown and proves the late handler removes
 itself, then forces deferred registration to raise and proves the lease releases
 before the transport reconnects.
+The application fence now owns pending cancellation and registered cleanup
+across `stream_from`, `stop_stream_from`, and `stop_all_streams`, with the same
+real-channel contract passing on Async and Solid Cable. Framework handoff is
+still an explicit gap: no exact upstream PR, merge commit, official release,
+first containing gem, lock resolution, and released-source comparison has been
+recorded. Until that complete provenance packet exists and the unchanged
+verification matrix passes without the fence, the released Rails gem is not
+accepted as lifecycle owner.
+
+The Web golden-path E2E is not fully agent-isolated on the current baseline.
+Its stage fixture puts only a fake `claude` on `PATH`, while mandatory plan
+review defaults to the real Codex route. Two 2026-08-30 acceptance attempts
+therefore remained live in `3-plan` beyond the test's 90-second transition
+bound. The fixture and route are unchanged from `origin/main`; a separate
+harness repair must fake or otherwise deterministically contain plan review
+before this gate can be treated as reproducible local Action Cable evidence.
 An isolated four-tab profile against the real 15-project registry confirms one
 shared poller and no idle DOM/HTTP loop. Real multi-worker Puma convergence and
 live-Docker evidence remain open; last-subscriber shutdown also retains an

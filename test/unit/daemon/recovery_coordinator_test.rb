@@ -1064,6 +1064,45 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_artifact_recovery_runs_before_admission_and_fails_closed
+    calls = []
+    recovery = lambda do |task:, marker:, intended_stage:|
+      calls << [ task, marker, intended_stage ]
+    end
+    artifacts_resolver = lambda do |task, _dir|
+      ->(**_kwargs) { task.with(stage_index: 7, stage_name: "artifacts") }
+    end
+    with_fixture(runtime_residue_recovery: recovery, task_resolver_builder: artifacts_resolver) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row.with(stage: "7-artifacts"), requestor: "web",
+        request_id: "recover-artifacts", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      assert_equal [ [ row.folder, :error, "7-artifacts" ] ],
+                   calls.map { |task, marker, stage| [ task.folder, marker.name, stage ] }
+      assert Q.fetch("recover-artifacts", state_home:).recovery
+    end
+
+    failing_recovery = lambda do |**_kwargs|
+      raise Hive::Artifacts::RuntimeResidueRecovery::RecoveryError, "quarantine failed"
+    end
+    with_fixture(
+      runtime_residue_recovery: failing_recovery,
+      task_resolver_builder: artifacts_resolver
+    ) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row.with(stage: "7-artifacts"), requestor: "web",
+        request_id: "recover-artifacts-failure", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "runtime_residue_recovery_failed", receipt.reason
+      assert_equal "quarantine failed", receipt.remediation
+      assert_empty Q.pending(state_home:)
+    end
+  end
+
   def test_live_task_owner_returns_running_and_safety_failure_returns_blocked
     with_fixture do |coordinator, row, state_home|
       lock = Hive::Lock.acquire_task_lock(row.folder, "attempt_id" => "attempt-live")
@@ -2430,7 +2469,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def with_fixture(marker_attrs: nil, marker_name: "ERROR", mtime: NOW - 3600,
                    safety: nil, task_resolver_builder: nil, task_id: 817,
-                   generation_resolver: nil, attempt_store: nil)
+                   generation_resolver: nil, attempt_store: nil,
+                   runtime_residue_recovery: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       project_root = File.join(dir, "project")
       folder = File.join(
@@ -2470,6 +2510,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         attempt_store: attempt_store,
         task_resolver: task_resolver,
         safety: safety || ->(_row) { [ true, "safe" ] },
+        runtime_residue_recovery:,
         generation_resolver: generation_resolver || lambda do |resolved_task, project:, intended_stage:, state_file_content:|
           progress = Digest::SHA256.hexdigest(
             [ resolved_task.state_file, state_file_content ].join("\0")

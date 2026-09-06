@@ -228,7 +228,8 @@ module Hive
         result
       rescue Hive::ConcurrentRunError
         result.merge("status" => "lock_busy", "reason" => "task_lock_busy")
-      rescue SystemCallError, IOError, Hive::BrainstormSuggestions::Error => e
+      rescue SystemCallError, IOError, Hive::BrainstormSuggestions::Error,
+             Hive::RuntimeControlPlane::IdentityError => e
         result.merge("status" => "unsafe", "reason" => e.class.name.split("::").last)
       end
 

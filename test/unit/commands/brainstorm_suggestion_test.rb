@@ -10,8 +10,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_cleanup_is_idempotent_and_preserves_parser_visible_answers
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       binding = "d" * 64
       path = File.join(task, "brainstorm.md")
       File.write(path, <<~MARKDOWN)
@@ -48,11 +47,10 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_cleanup_reports_lock_contention_as_unsafe
     Dir.mktmpdir do |root|
-      task = File.join(root, "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       File.write(File.join(task, "brainstorm.md"), "## Round 1\n")
 
-      receipt = Hive::Lock.with_task_lock(task, op: "test") do
+      receipt = while_task_locked(task) do
         Hive::Commands::BrainstormSuggestion.new(
           "cleanup", task_roots: [ task ], json: true, output: StringIO.new
         ).call
@@ -65,8 +63,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_cleanup_restores_the_exact_pre_feature_parser_view
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       baseline = <<~MARKDOWN
         ## Round 1
         ### Q1. Unanswered?
@@ -101,8 +98,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_binding_checked_dismiss_restore_and_retry_are_advisory_only
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       brainstorm = File.join(task, "brainstorm.md")
       File.write(brainstorm, "## Round 1\n### Q1. Choose?\n### A1.\n<!-- WAITING -->\n")
       before = Hive::BrainstormParser.parse(brainstorm).map(&:answer)
@@ -129,8 +125,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_candidate_action_rejects_stale_binding_without_mutation
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       File.write(File.join(task, "brainstorm.md"), "## Round 1\n### Q1. Choose?\n### A1.\n")
       store = Hive::BrainstormSuggestions::Store.new(task)
       store.write("records" => [ fresh_record ])
@@ -146,8 +141,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_retry_accepts_the_input_binding_when_no_candidate_binding_exists
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       File.write(File.join(task, "brainstorm.md"), "### Q1. Choose?\n### A1.\n")
       record = fresh_record.merge(
         "state" => "failed", "suggestion_binding" => nil, "text" => nil,
@@ -205,8 +199,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_invalid_state_plain_output_and_candidate_lock_contention_are_advisory
     Dir.mktmpdir do |root|
-      task = File.join(root, "2-brainstorm", "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       File.write(File.join(task, "brainstorm.md"), "### Q1. Choose?\n### A1.\n")
       store = Hive::BrainstormSuggestions::Store.new(task)
       store.write("records" => [ fresh_record.merge("dismissed" => true) ])
@@ -222,7 +215,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
       assert_equal "updated", restored.fetch("status")
       assert_includes output.string, "suggestion restore: updated"
 
-      busy = Hive::Lock.with_task_lock(task, op: "operator") do
+      busy = while_task_locked(task) do
         action("retry", task, binding: "b" * 64)
       end
       assert_equal "lock_busy", busy.fetch("status")
@@ -231,8 +224,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_cleanup_without_brainstorm_has_plain_receipt_and_sidecar_unlink_is_idempotent
     Dir.mktmpdir do |root|
-      task = File.join(root, "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       store = Hive::BrainstormSuggestions::Store.new(task)
       store.write("records" => [])
       output = StringIO.new
@@ -281,8 +273,7 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
 
   def test_cleanup_reports_an_unsafe_brainstorm_target
     Dir.mktmpdir do |root|
-      task = File.join(root, "task-1")
-      FileUtils.mkdir_p(task)
+      task = task_fixture(root)
       target = File.join(root, "outside.md")
       File.write(target, "## Round 1\n")
       File.symlink(target, File.join(task, "brainstorm.md"))
@@ -296,7 +287,46 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
     end
   end
 
+  def test_cleanup_reports_missing_task_identity_without_aborting_the_receipt
+    Dir.mktmpdir do |root|
+      task = File.join(root, ".hive-state", "stages", "2-brainstorm", "legacy-task")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "brainstorm.md"), "## Round 1\n")
+
+      receipt = Hive::Commands::BrainstormSuggestion.new(
+        "cleanup", task_roots: [ task ], json: true, output: StringIO.new
+      ).call
+
+      refute receipt.fetch("safe_to_disable")
+      assert_equal "unsafe", receipt.dig("tasks", 0, "status")
+      assert_equal "IdentityError", receipt.dig("tasks", 0, "reason")
+    end
+  end
+
   private
+
+  def task_fixture(root)
+    task = File.join(root, ".hive-state", "stages", "2-brainstorm", "task-1")
+    FileUtils.mkdir_p(task)
+    prepare_test_task_lease_repository(task)
+    task
+  end
+
+  def while_task_locked(task)
+    ready = Queue.new
+    release = Queue.new
+    holder = Thread.new do
+      Hive::Lock.with_task_lock(task, op: "competing_operator") do
+        ready << true
+        release.pop
+      end
+    end
+    ready.pop
+    yield
+  ensure
+    release&.push(true)
+    holder&.join
+  end
 
   def action(name, task, binding:)
     Hive::Commands::BrainstormSuggestion.new(

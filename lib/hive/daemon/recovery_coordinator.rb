@@ -330,7 +330,7 @@ module Hive
             )
           end
 
-          if value(row, :stage) == "7-artifacts"
+          if value(row, :stage) == "7-artifacts" # coding-scoped: runtime residue recovery owns coding artifacts cleanup
             begin
               @runtime_residue_recovery.call(
                 task: locked_task, marker: current,

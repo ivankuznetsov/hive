@@ -301,13 +301,13 @@ class HiveStagesCleanExitTest < Minitest::Test
       FileUtils.mkdir_p(File.join(worktree, "test", "integration"))
       content = "@operator.password = \"password\"\n"
       File.write(File.join(worktree, "test", "integration", "login_test.rb"), content)
-      hit = Hive::SecretPatterns.scan(content).find do |candidate|
-        candidate[:name] == :password_assignment
+      hit = Hive::SecretScanner.scan(content, path: "test/integration/login_test.rb").find do |candidate|
+        candidate[:name] == "generic-password"
       end
       cfg = deep_dup_default_cfg
       cfg["review"]["fix"]["guardrail"] = { "waivers" => [
         {
-          "pattern" => "secrets_pattern_match.password_assignment",
+          "pattern" => "secrets_pattern_match.generic-password",
           "sha256" => hit.fetch(:sha256)
         }
       ] }

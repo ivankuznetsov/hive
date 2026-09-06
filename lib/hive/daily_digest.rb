@@ -6,8 +6,14 @@ module Hive
   # cross-project day record and its append-only history.
   module DailyDigest
     class Error < Hive::Error; end
-    class InvalidRecord < Error; end
-    class MissingRecord < Error; end
-    class PrunedRecord < Error; end
+    class InvalidRecord < Error
+      def exit_code = Hive::ExitCodes::USAGE
+    end
+    class MissingRecord < Error
+      def exit_code = Hive::ExitCodes::UNAVAILABLE
+    end
+    class PrunedRecord < Error
+      def exit_code = Hive::ExitCodes::UNAVAILABLE
+    end
   end
 end

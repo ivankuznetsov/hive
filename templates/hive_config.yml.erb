@@ -81,6 +81,11 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   enabled: false
 #   materialization_interval_sec: 300
 #   freshness_budget_sec: 900
+#   # Migration-owned identity; `hive migrate --all` writes these atomically.
+#   time_zone: Europe/London
+#   coverage_started_at: 2026-08-30T12:00:00.000000Z
+#   initial_membership: []
+#   first_interval: {} # persisted interval identity and UTC boundaries
 #   telegram:
 #     enabled: false
 #     hour: 9

@@ -8,16 +8,36 @@ module Hive
     # Missing or malformed history is represented as data, never silently
     # replaced with today's registry.
     class Coverage
-      Result = Data.define(:projects, :gaps)
+      Result = Data.define(:projects, :gaps, :recovery_scopes)
       class PreCoverage < DailyDigest::MissingRecord; end
 
       def initialize(daily_config:, membership_history:, observed_at: -> { Time.now.utc })
         @config = stringify(daily_config)
-        @history = Array(membership_history)
         @observed_at = observed_at
+        @history_errors = []
+        @history_recovery_scopes = []
+        begin
+          coverage_started_at = utc(@config.fetch("coverage_started_at"))
+          @events = Array(membership_history).filter_map.with_index do |raw, index|
+            begin
+              event = normalize_event(raw)
+              @history_recovery_scopes << "registry:#{index}"
+              @history_recovery_scopes << "registry:#{event.fetch('event_id')}"
+              event if event.fetch("occurred_at") >= coverage_started_at
+            rescue ArgumentError, KeyError, TypeError
+              @history_errors << index
+              nil
+            end
+          end.sort_by { |event| [ event.fetch("occurred_at"), event.fetch("event_id") ] }.freeze
+        rescue KeyError, ArgumentError, TypeError => error
+          @initialization_error = error
+          @events = [].freeze
+        end
       end
 
       def projects_for(starts_at:, ends_at:)
+        raise @initialization_error if @initialization_error
+
         starts_at = utc(starts_at)
         ends_at = utc(ends_at)
         coverage_started_at = utc(@config.fetch("coverage_started_at"))
@@ -26,28 +46,23 @@ module Hive
         end
 
         gaps = []
+        @history_errors.each do |index|
+          gaps << registry_gap(
+            "registry_history_invalid", "project membership history contains an invalid entry",
+            discriminator: index
+          )
+        end
         state = {}
+        snapshot_valid = true
         Array(@config.fetch("initial_membership")).each do |project|
           normalized = normalize_project(project)
           state[membership_key(normalized)] = normalized
         rescue ArgumentError, KeyError, TypeError
+          snapshot_valid = false
           gaps << registry_gap("registry_snapshot_invalid", "initial membership snapshot is invalid")
         end
 
-        events = @history.filter_map.with_index do |raw, index|
-          begin
-            event = normalize_event(raw)
-            next if event.fetch("occurred_at") < coverage_started_at
-
-            event
-          rescue ArgumentError, KeyError, TypeError
-            gaps << registry_gap(
-              "registry_history_invalid", "project membership history contains an invalid entry",
-              discriminator: index
-            )
-            nil
-          end
-        end.sort_by { |event| [ event.fetch("occurred_at"), event.fetch("event_id") ] }
+        events = @events
 
         events.take_while { |event| event.fetch("occurred_at") <= starts_at }.each do |event|
           apply_event!(state, event, gaps)
@@ -62,8 +77,13 @@ module Hive
 
         projects = overlapping.compact.uniq { |project| membership_key(project) }
                               .sort_by { |project| [ project.fetch("name"), membership_key(project) ] }
-        Result.new(projects: projects.freeze,
-                   gaps: gaps.uniq { |gap| gap.fetch("gap_id") }.freeze)
+        scopes = @history_recovery_scopes.dup
+        scopes << "registry" if snapshot_valid
+        Result.new(
+          projects: projects.freeze,
+          gaps: gaps.uniq { |gap| gap.fetch("gap_id") }.freeze,
+          recovery_scopes: scopes.uniq.freeze
+        )
       rescue KeyError, ArgumentError, TypeError => error
         raise DailyDigest::InvalidRecord, "daily digest coverage is not initialized: #{error.message}"
       end

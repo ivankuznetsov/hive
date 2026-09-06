@@ -114,6 +114,45 @@ class DailyDigestReaderTest < Minitest::Test
     assert_empty filtered.fetch("amendments")
   end
 
+  def test_project_filter_recomputes_complete_empty_view_axes
+    value = record.merge(
+      "items" => [ item("two") ], "attention" => [],
+      "gaps" => [ gap("two", "two") ], "effective_gaps" => [ gap("two", "two") ]
+    )
+    store = Object.new
+    store.define_singleton_method(:read) { |_date| value }
+    store.define_singleton_method(:intervals) { [] }
+
+    filtered = Hive::DailyDigest::Reader.new(
+      store: store, config_loader: -> { config },
+      clock: -> { Time.iso8601("2026-08-30T10:00:30Z") }
+    ).read(date: "2026-08-30", project: "one")
+
+    assert_equal "complete", filtered.fetch("effective_completeness")
+    assert_equal "empty", filtered.fetch("effective_content")
+    assert_empty filtered.fetch("items")
+    assert_empty filtered.fetch("effective_gaps")
+  end
+
+  def test_stale_empty_open_record_has_unknown_view_content
+    value = record.merge(
+      "items" => [], "attention" => [], "gaps" => [], "effective_gaps" => [],
+      "content" => "empty", "effective_content" => "empty"
+    )
+    store = Object.new
+    store.define_singleton_method(:read) { |_date| value }
+    store.define_singleton_method(:intervals) { [] }
+
+    stale = Hive::DailyDigest::Reader.new(
+      store: store, config_loader: -> { config },
+      clock: -> { Time.iso8601("2026-08-30T12:00:00Z") }
+    ).read(date: "2026-08-30")
+
+    assert_equal true, stale.fetch("stale")
+    assert_equal "partial", stale.fetch("view_completeness")
+    assert_equal "unknown", stale.fetch("view_content")
+  end
+
   def test_missing_current_interval_keeps_nearest_persisted_navigation
     store = Object.new
     store.define_singleton_method(:intervals) do
@@ -144,6 +183,11 @@ class DailyDigestReaderTest < Minitest::Test
     store.define_singleton_method(:intervals) { [] }
     reader = Hive::DailyDigest::Reader.new(store: store, config_loader: -> { {} })
     assert_equal "missing", reader.read.fetch("reader_status")
+  end
+
+  def test_unknown_project_has_a_stable_usage_exit
+    assert_equal Hive::ExitCodes::USAGE,
+                 Hive::DailyDigest::Reader::UnknownProject.new.exit_code
   end
 
   private

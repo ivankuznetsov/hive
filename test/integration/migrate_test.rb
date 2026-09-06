@@ -113,6 +113,23 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_daily_digest_initialization_failure_is_advisory_to_project_migration
+    command = Hive::Commands::Migrate.new("/tmp/project")
+    command.define_singleton_method(:ensure_active_control_plane!) { true }
+    failure = Hive::DailyDigest::Migration::InitializationError.new("zone unavailable")
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(
+        Hive::Commands::Migrate, :migrate_global_state!, -> { raise failure }
+      ) do
+        assert_nil command.send(:default_global_migration)
+      end
+    end
+
+    assert_includes err, "daily digest remains disabled"
+    assert_includes err, "zone unavailable"
+  end
+
   def test_class_restart_entrypoint_delegates_to_the_instance_boundary
     called = false
     instance = Object.new

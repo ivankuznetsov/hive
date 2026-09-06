@@ -9,11 +9,11 @@ module Hive
       PROJECT_KEYS = %w[project_id registration_id name repository_identity historical].freeze
       FACT_KEYS = %w[
         fact_id kind category summary project_id project task_id task_slug stage state
-        occurred_at observed_at source task_url
+        occurred_at observed_at source task_url historical
       ].freeze
       ATTENTION_KEYS = %w[
         attention_id kind project_id project task_id task_slug stage state
-        waiting_since waiting_age_seconds task_url
+        waiting_since waiting_age_seconds task_url historical
       ].freeze
       GAP_KEYS = %w[
         gap_id source scope reason_code reason observed_at freshness_at
@@ -73,6 +73,52 @@ module Hive
 
       def cutover(value)
         value.is_a?(Hash) ? pick(value, CUTOVER_KEYS) : nil
+      end
+
+      def state(record)
+        status = record.fetch("reader_status", "ok")
+        lifecycle = status == "missing" ? "missing" : record.fetch("lifecycle", status)
+        terminal_unknown = %w[missing pruned].include?(lifecycle)
+        {
+          "lifecycle" => lifecycle,
+          "completeness" => terminal_unknown ? "unknown" :
+            (record["view_completeness"] || record["effective_completeness"] ||
+             record["completeness"] || "unknown"),
+          "content" => terminal_unknown ? "unknown" :
+            (record["view_content"] || record["effective_content"] || record["content"] || "unknown")
+        }
+      end
+
+      def ordered_items(record)
+        order = Array(record["projects"]).each_with_index.to_h do |project, index|
+          [ project["project_id"], index ]
+        end
+        Array(record["items"]).sort_by do |row|
+          [ order.fetch(row["project_id"], order.length), row["project"].to_s,
+            row["occurred_at"].to_s, row["fact_id"].to_s ]
+        end
+      end
+
+      def grouped_items(record)
+        ordered_items(record).group_by { |row| row["project_id"] }.map do |project_id, rows|
+          [ project_id, rows ]
+        end
+      end
+
+      def outcome_label(row)
+        details = row["details"].is_a?(Hash) ? row["details"] : {}
+        value = case row["kind"]
+        when "stage_transition"
+          target = details["to_stage"]
+          return "to #{target.to_s.tr('_', ' ')}" unless target.to_s.empty?
+
+          details["transition"] || details["marker"]
+        when "check_observed" then details["conclusion"] || details["check_state"]
+        when "review_observed" then details["review_state"] || details["pr_state"]
+        when "pr_observed" then details["pr_state"]
+        when "merge_observed" then details["merge_state"] || details["pr_state"]
+        end
+        value.to_s.empty? ? nil : value.to_s.tr("_", " ")
       end
 
       def rows(values, sanitizer)

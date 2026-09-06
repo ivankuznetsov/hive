@@ -18,7 +18,7 @@ class DailyDigestProjectorTest < Minitest::Test
     recovered = batch(gaps: [], facts: [ fact("first"), fact("late") ])
     amendment = projector.amendment(existing: base.merge(
       "effective_gaps" => base.fetch("gaps"), "amendments" => []
-    ), batch: recovered)
+    ), batch: recovered, attempted_gap_ids: [ "gap:one" ])
 
     assert_equal [ "fact:late" ], amendment.fetch("items").map { |item| item.fetch("fact_id") }
     assert_equal [ "gap:one" ], amendment.fetch("resolved_gap_ids")
@@ -27,7 +27,7 @@ class DailyDigestProjectorTest < Minitest::Test
     assert_equal amendment.fetch("amendment_id"),
                  projector.amendment(existing: base.merge(
                    "effective_gaps" => base.fetch("gaps"), "amendments" => []
-                 ), batch: recovered).fetch("amendment_id")
+                 ), batch: recovered, attempted_gap_ids: [ "gap:one" ]).fetch("amendment_id")
   end
 
   def test_recovery_resolves_only_the_gap_ids_that_were_attempted

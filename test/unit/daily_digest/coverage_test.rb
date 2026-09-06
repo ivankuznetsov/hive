@@ -24,6 +24,9 @@ class DailyDigestCoverageTest < Minitest::Test
 
     assert_equal %w[/new /old], result.projects.map { |row| row.fetch("path") }.sort
     assert_empty result.gaps
+    assert_includes result.recovery_scopes, "registry"
+    assert_includes result.recovery_scopes, "registry:0"
+    assert_includes result.recovery_scopes, "registry:event-2026-08-30T12:00:00Z"
   end
 
   def test_malformed_history_returns_a_gap_instead_of_claiming_completeness
@@ -42,6 +45,7 @@ class DailyDigestCoverageTest < Minitest::Test
     )
 
     assert_equal [ "registry_history_invalid" ], result.gaps.map { |gap| gap.fetch("reason_code") }
+    refute_includes result.recovery_scopes, "registry:0"
   end
 
   def test_precoverage_interval_is_typed_missing

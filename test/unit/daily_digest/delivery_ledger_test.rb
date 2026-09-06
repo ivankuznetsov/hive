@@ -73,7 +73,7 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
       resumed = ledger.prepare(**identity, now: NOW + 1)
 
       assert_equal :send, resumed.action
-      assert_equal first.receipt.fetch("receipt_id"), resumed.receipt.fetch("receipt_id")
+      refute_equal first.receipt.fetch("receipt_id"), resumed.receipt.fetch("receipt_id")
       assert_equal 1, resumed.receipt.fetch("attempt")
       assert_equal 1, resumed.receipt.fetch("history").length
     end
@@ -199,7 +199,7 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
     with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(pid) { pid != 10 }) do
       with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "start-20" }) do
         refute ledger.send(:matching_process_alive?, 10, nil)
-        assert ledger.send(:matching_process_alive?, 20, nil)
+        refute ledger.send(:matching_process_alive?, 20, nil)
         assert ledger.send(:matching_process_alive?, 20, "start-20")
         refute ledger.send(:matching_process_alive?, 20, "different-start")
       end

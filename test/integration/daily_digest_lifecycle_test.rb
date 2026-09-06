@@ -88,7 +88,14 @@ class DailyDigestLifecycleTest < Minitest::Test
   def batch(facts:, gaps:)
     Hive::DailyDigest::Collector::Result.new(
       projects: [ project ], facts: facts, attention: [], gaps: gaps,
-      frontiers: { "project-1" => { "source" => "task_journal", "fingerprints" => facts.map { |row| row["fact_id"] } } },
+      frontiers: {
+        "project-1" => {
+          "source" => "task_journal",
+          "fingerprints" => {
+            "4-execute/task/task-journal.jsonl" => { "sha256" => "a" * 64 }
+          }
+        }
+      },
       completeness: gaps.empty? ? "complete" : "partial",
       content: facts.empty? ? (gaps.empty? ? "empty" : "unknown") : "non_empty"
     )

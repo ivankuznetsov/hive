@@ -17,7 +17,7 @@ module Hive
         project: PROJECT,
         stage: STAGE,
         command: "hive digest refresh",
-        failure_event: :daily_digest_close_failure_backoff,
+        failure_event: :daily_digest_scheduler_failure_backoff,
         state_unreadable_event: :daily_digest_close_state_unreadable
       }.freeze
 
@@ -33,8 +33,8 @@ module Hive
         @store = store
         @config_loader = config_loader
         @date_resolver = date_resolver || method(:resolve_date)
-        @pending = { REFRESH_STAGE => {}, STAGE => {} }
-        @failures = {}
+        pending_for(REFRESH_STAGE)
+        pending_for(STAGE)
       end
 
       def reconfigure(enabled:, interval_sec:)
@@ -72,26 +72,10 @@ module Hive
           "updated_at" => now.utc.iso8601(6)
         )
         write_state(state)
-        @failures.delete(stage)
+        clear_stage_failure(stage)
       rescue StandardError
         record_stage_failure(stage || STAGE, now)
         raise
-      end
-
-      def cancel(date:, stage: nil)
-        local_date = digest_date(date)
-        if stage
-          pending_for(stage).delete(local_date)
-        else
-          @pending.each_value { |dates| dates.delete(local_date) }
-        end
-      end
-
-      def pending?(date, stage: nil)
-        local_date = digest_date(date)
-        return pending_for(stage).key?(local_date) if stage
-
-        @pending.any? { |_identity, dates| dates.key?(local_date) }
       end
 
       private
@@ -134,10 +118,6 @@ module Hive
         nil
       end
 
-      def pending_for(stage)
-        @pending.fetch(normalize_stage(stage))
-      end
-
       def normalize_stage(stage)
         value = stage.to_s
         return value if [ REFRESH_STAGE, STAGE ].include?(value)
@@ -163,23 +143,6 @@ module Hive
         stage == REFRESH_STAGE ? "last_refresh_record_date" : "last_close_record_date"
       end
 
-      def stage_backed_off?(stage, now)
-        failure = @failures[stage]
-        failure && now < failure.fetch(:next_eligible_at)
-      end
-
-      def record_stage_failure(stage, now)
-        stage = normalize_stage(stage)
-        count = @failures.dig(stage, :count).to_i + 1
-        intervals = DigestSchedulerBase::FAILURE_BACKOFF_SCHEDULE
-        delay = intervals[[ count - 1, intervals.length - 1 ].min]
-        @failures[stage] = { count: count, next_eligible_at: now + delay }
-        @logger&.event(
-          :daily_digest_scheduler_failure_backoff, stage: stage, failures: count,
-          retry_after_sec: delay, next_eligible_at: (now + delay).utc.iso8601
-        )
-      end
-
       def positive_interval(value)
         number = Integer(value)
         raise ArgumentError unless number.positive?
@@ -190,6 +153,8 @@ module Hive
       end
 
       def scheduler_contract = SCHEDULER_CONTRACT
+
+      def stage_identity(stage) = normalize_stage(stage || STAGE)
     end
   end
 end

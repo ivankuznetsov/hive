@@ -62,7 +62,7 @@ module Hive
         "review_observed" => [ "instrumented", "lib/hive/task_workspace/publication_activity.rb" ],
         "merge_observed" => [ "instrumented", "lib/hive/stages/open_pr.rb" ],
         "activity_gap" => [ "instrumented", "lib/hive/task_activity.rb" ],
-        "hold_recorded" => [ "unsupported_legacy", nil ],
+        "hold_recorded" => [ "instrumented", "lib/hive/daily_digest/hold_observer.rb" ],
         "commit_observed" => [ "unsupported_legacy", nil ],
         "push_observed" => [ "unsupported_legacy", nil ],
         "operator_action" => [ "unsupported_legacy", nil ],
@@ -72,7 +72,7 @@ module Hive
       DETAIL_KEYS = {
         "stage_transition" => %w[transition marker to_stage],
         "question_asked" => %w[question_id],
-        "answer_recorded" => %w[question_id answer_id],
+        "answer_recorded" => %w[question_id],
         "approval_recorded" => %w[approval decision],
         "rejection_recorded" => %w[decision],
         "decision_recorded" => %w[decision],
@@ -83,7 +83,7 @@ module Hive
         "commit_observed" => %w[commit_oid branch],
         "push_observed" => %w[commit_oid branch],
         "pr_observed" => %w[pr_number pr_state pr_url commit_oid head_oid draft],
-        "check_observed" => %w[pr_number check_state conclusion commit_oid head_oid],
+        "check_observed" => %w[pr_number pr_state pr_url draft check_state conclusion commit_oid head_oid],
         "review_observed" => %w[pr_number review_state pr_state pr_url commit_oid head_oid draft],
         "merge_observed" => %w[pr_number merge_state pr_state pr_url commit_oid head_oid merge_oid merged_at],
         "operator_action" => %w[action outcome],
@@ -219,13 +219,14 @@ module Hive
       private_class_method :gap
 
       def invalid_record_gap(record, project, observed_at: nil)
-        row = stringify(record || {})
-        project = stringify(project || {})
+        row = record.is_a?(Hash) ? stringify(record) : {}
+        project = project.is_a?(Hash) ? stringify(project) : {}
+        task = row["task"].is_a?(Hash) ? row["task"] : {}
         build_gap(
           source: "task_journal", scope: project["name"] || "project",
           reason_code: "malformed_activity", reason: "activity record could not be normalized",
           observed_at: safe_observation_time(row, observed_at),
-          project_id: project["project_id"], task_slug: row.dig("task", "slug")
+          project_id: project["project_id"], task_slug: task["slug"]
         )
       end
       private_class_method :invalid_record_gap

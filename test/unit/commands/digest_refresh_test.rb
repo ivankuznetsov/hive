@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/digest_refresh"
 
 class DigestRefreshCommandTest < Minitest::Test
@@ -16,7 +17,9 @@ class DigestRefreshCommandTest < Minitest::Test
     ).call!
 
     assert_equal [ { date: "2026-08-30" } ], calls
-    assert_equal result, JSON.parse(output.string)
+    emitted = JSON.parse(output.string)
+    assert_equal result, emitted
+    assert_empty refresh_schema.validate(emitted).to_a
   end
 
   def test_json_errors_use_the_refresh_contract
@@ -36,6 +39,7 @@ class DigestRefreshCommandTest < Minitest::Test
     assert_equal "hive-digest-refresh", payload.fetch("schema")
     assert_equal false, payload.fetch("ok")
     assert_equal "disabled", payload.fetch("error_kind")
+    assert_empty refresh_schema.validate(payload).to_a
   end
 
   def test_text_output_and_unexpected_json_errors_are_bounded
@@ -76,5 +80,14 @@ class DigestRefreshCommandTest < Minitest::Test
     broken = Hive::Commands::DigestRefresh.new(stdout: output)
     broken.send(:emit_error, Hive::ConfigError.new("config"))
     assert_equal true, broken.instance_variable_get(:@emitted)
+  end
+
+
+  private
+
+  def refresh_schema
+    @refresh_schema ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-digest-refresh")))
+    )
   end
 end

@@ -48,7 +48,13 @@ module Hive
               current = promote_sending_unlocked(current, now: now)
             end
             action = preparation_action(current, retry_requested: retry_requested)
-            return Preparation.new(action: :send, receipt: current) if action == :resume
+            if action == :resume
+              current = refresh_prepared_unlocked(
+                current, amendment_frontier: amendment_frontier,
+                payload_hash: payload_hash, now: now
+              )
+              return Preparation.new(action: :send, receipt: current)
+            end
             return Preparation.new(action: action, receipt: current) unless action == :send
           end
 
@@ -148,6 +154,17 @@ module Hive
         )
       end
 
+      def refresh_prepared_unlocked(receipt, amendment_frontier:, payload_hash:, now:)
+        timestamp = normalize_time(now)
+        updated = receipt.merge(
+          "amendment_frontier" => normalize_digest(amendment_frontier, "amendment frontier"),
+          "payload_hash" => normalize_digest(payload_hash, "payload hash"),
+          "prepared_at" => timestamp,
+          "updated_at" => timestamp
+        )
+        write_unlocked(receipt.fetch("local_date"), updated)
+      end
+
       def transition(local_date, attempt:, from:, to:, now:, reason_code: nil, additions: {})
         date = normalize_date(local_date)
         synchronize do
@@ -203,7 +220,7 @@ module Hive
 
       def matching_process_alive?(pid, recorded_start)
         return false unless Hive::ProcessKill.pid_alive?(pid)
-        return true if recorded_start.to_s.empty?
+        return false if recorded_start.to_s.empty?
 
         Hive::Lock.process_start_time(pid).to_s == recorded_start.to_s
       end

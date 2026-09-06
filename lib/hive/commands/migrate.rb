@@ -105,6 +105,9 @@ module Hive
       def default_global_migration
         ensure_active_control_plane!
         self.class.migrate_global_state!
+      rescue Hive::DailyDigest::Migration::InitializationError => error
+        warn("hive migrate: daily digest remains disabled: #{error.message}")
+        nil
       end
 
       def call

@@ -36,4 +36,31 @@ class DailyDigestPublicViewTest < Minitest::Test
     refute_includes JSON.generate(sanitized), "secret"
     refute sanitized.dig("items", 0, "pr").key?("title")
   end
+
+  def test_shared_ordering_follows_project_registration_then_time_and_identity
+    record = {
+      "projects" => [
+        { "project_id" => "two", "name" => "Zulu" },
+        { "project_id" => "one", "name" => "Alpha" }
+      ],
+      "items" => [
+        { "fact_id" => "fact:b", "project_id" => "one", "occurred_at" => "2026-08-30T09:00:00Z" },
+        { "fact_id" => "fact:z", "project_id" => "two", "occurred_at" => "2026-08-30T10:00:00Z" },
+        { "fact_id" => "fact:a", "project_id" => "two", "occurred_at" => "2026-08-30T10:00:00Z" }
+      ]
+    }
+
+    assert_equal %w[fact:a fact:z fact:b],
+                 Hive::DailyDigest::PublicView.ordered_items(record).map { |row| row.fetch("fact_id") }
+    assert_equal %w[two one],
+                 Hive::DailyDigest::PublicView.grouped_items(record).map(&:first)
+  end
+
+  def test_outcome_labels_expose_bounded_transition_and_pr_results
+    transition = { "kind" => "stage_transition", "details" => { "to_stage" => "6-review" } }
+    check = { "kind" => "check_observed", "details" => { "check_state" => "passing" } }
+
+    assert_equal "to 6-review", Hive::DailyDigest::PublicView.outcome_label(transition)
+    assert_equal "passing", Hive::DailyDigest::PublicView.outcome_label(check)
+  end
 end

@@ -1,6 +1,7 @@
 require "json"
 require "hive/daily_digest/public_view"
 require "hive/daily_digest/reader"
+require "hive/daily_digest/task_links"
 require "hive/pr"
 require "hive/task_resolver"
 
@@ -27,6 +28,9 @@ class DailyDigest
     @current_projects = Array(current_projects)
     @link_resolver = link_resolver || method(:resolve_task_destination)
     @destination_cache = {}
+    @task_links = Hive::DailyDigest::TaskLinks.new(
+      current_projects: @current_projects, resolver: @link_resolver
+    )
     @attributes = Hive::DailyDigest::PublicView.sanitize_nested(deep_copy(attributes))
     sanitize_attention!
   end
@@ -42,14 +46,13 @@ class DailyDigest
   def completeness
     return "unknown" if missing? || pruned?
 
-    attributes["view_completeness"] || attributes["effective_completeness"] ||
-      attributes["completeness"] || "unknown"
+    Hive::DailyDigest::PublicView.state(attributes).fetch("completeness")
   end
 
   def content
     return "unknown" if missing? || pruned?
 
-    attributes["effective_content"] || attributes["content"] || "unknown"
+    Hive::DailyDigest::PublicView.state(attributes).fetch("content")
   end
 
   def selected_project = attributes["selected_project"]
@@ -68,10 +71,7 @@ class DailyDigest
   end
 
   def grouped_items
-    order = projects.each_with_index.to_h { |project, index| [ project.fetch("project_id"), index ] }
-    items.group_by { |item| item["project_id"] }
-         .sort_by { |project_id, _| [ order.fetch(project_id, order.length), project_id.to_s ] }
-         .map do |project_id, rows|
+    Hive::DailyDigest::PublicView.grouped_items(attributes).map do |project_id, rows|
       [ project_for(project_id, rows.first && rows.first["project"]), rows ]
     end
   end
@@ -91,7 +91,7 @@ class DailyDigest
     return @destination_cache[key] if @destination_cache.key?(key)
 
     project = project_for(row["project_id"], row["project"])
-    @destination_cache[key] = @link_resolver.call(project, row)
+    @destination_cache[key] = @task_links.destination(project, row)
   rescue Hive::Error, SystemCallError, IOError
     @destination_cache[key] = nil
   end
@@ -104,6 +104,8 @@ class DailyDigest
   def pr_number(row)
     row.dig("pr", "number") || Hive::Pr.number(pr_url(row))&.delete_prefix("#")
   end
+
+  def outcome_label(row) = Hive::DailyDigest::PublicView.outcome_label(row)
 
   private
 

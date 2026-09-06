@@ -42,7 +42,7 @@ module Hive
 
       def tick(now: @clock.call)
         return [] unless @enabled
-        return [] if @pending.any? || backed_off?(now)
+        return [] if pending_any? || backed_off?(now)
 
         target = preceding_closed_record(now)
         return [] unless target
@@ -53,21 +53,21 @@ module Hive
         return [] if state["last_record_id"] == record.fetch("record_id")
 
         date = record.fetch("local_date")
-        @pending[date] = true
+        pending_for(nil)[date] = true
         @pending_records[date] = record.fetch("record_id")
         [ dispatch_for(Date.iso8601(date)) ]
       end
 
-      def cancel(date:)
+      def cancel(date:, stage: nil)
         key = digest_date(date)
         @pending_records.delete(key)
-        super
+        super(date: date, stage: stage)
       end
 
       def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
         local_date = digest_date(date)
         record_id = @pending_records.delete(local_date) || record_id_for(local_date)
-        @pending.delete(local_date)
+        pending_for(stage).delete(local_date)
         unless exit_code && exit_code.to_i.zero?
           record_failure(now)
           return
@@ -79,7 +79,7 @@ module Hive
           "last_outcome" => envelope&.fetch("outcome", nil),
           "updated_at" => now.utc.iso8601(6)
         )
-        @failure = nil
+        clear_stage_failure(stage)
       rescue StandardError
         record_failure(now)
         raise

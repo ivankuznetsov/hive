@@ -92,11 +92,16 @@ module Hive
       end
 
       def emit_error(error)
-        emit(
-          Hive::Schemas::ErrorEnvelope.build(
-            schema: SCHEMA, error: error, error_kind: error_kind(error)
-          )
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: SCHEMA, error: error, error_kind: error_kind(error)
         )
+        payload["remediation"] = if error.is_a?(Hive::DailyDigest::Delivery::NotClosed)
+          "hive digest refresh --date #{@date}"
+        end
+        payload["automatic_retry_limit"] = if error.is_a?(Hive::DailyDigest::Delivery::DeliveryFailed)
+          Hive::DailyDigest::DeliveryLedger::MAX_AUTOMATIC_ATTEMPTS
+        end
+        emit(payload)
       end
 
       def error_kind(error)

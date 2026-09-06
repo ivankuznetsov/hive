@@ -2077,8 +2077,17 @@ module Hive
         JSON.generate(canonical_membership_value(event))
       )
       data["project_membership_history"] = Array(data["project_membership_history"])
-      data["project_membership_history"] << event unless
-        data["project_membership_history"].any? { |row| row.is_a?(Hash) && row["event_id"] == event["event_id"] }
+      ids = data["project_membership_event_ids"]
+      unless ids.is_a?(Hash)
+        ids = data["project_membership_history"].each_with_object({}) do |row, index|
+          index[row["event_id"]] = true if row.is_a?(Hash) && row["event_id"].is_a?(String)
+        end
+      end
+      unless ids[event["event_id"]]
+        data["project_membership_history"] << event
+        ids[event["event_id"]] = true
+      end
+      data["project_membership_event_ids"] = ids
       event
     end
 

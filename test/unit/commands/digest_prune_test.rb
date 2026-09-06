@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/digest_prune"
 
 class DigestPruneCommandTest < Minitest::Test
@@ -21,6 +22,7 @@ class DigestPruneCommandTest < Minitest::Test
     ).call!
     assert_equal({ before: "2026-08-30", dry_run: true, confirm: false }, calls.last)
     assert_equal payload, JSON.parse(output.string)
+    assert_empty prune_schema.validate(JSON.parse(output.string)).to_a
 
     Hive::Commands::DigestPrune.new(
       before: "2026-08-30", dry_run: false, confirm: true,
@@ -61,6 +63,7 @@ class DigestPruneCommandTest < Minitest::Test
     assert_equal false, payload.fetch("ok")
     assert_equal "usage", payload.fetch("error_kind")
     assert_equal error.message, payload.fetch("message")
+    assert_empty prune_schema.validate(payload).to_a
   end
 
   def test_unexpected_json_error_is_wrapped
@@ -96,5 +99,14 @@ class DigestPruneCommandTest < Minitest::Test
     )
     broken.send(:emit_error, Hive::ConfigError.new("config"))
     assert_equal true, broken.instance_variable_get(:@emitted)
+  end
+
+
+  private
+
+  def prune_schema
+    @prune_schema ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-digest-prune")))
+    )
   end
 end

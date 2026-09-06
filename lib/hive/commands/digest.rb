@@ -4,6 +4,7 @@ require "uri"
 require "hive/config"
 require "hive/daily_digest/public_view"
 require "hive/daily_digest/reader"
+require "hive/daily_digest/task_links"
 require "hive/tui/text"
 
 module Hive
@@ -19,7 +20,7 @@ module Hive
       def initialize(date: nil, project: nil, json: false, open_web: false,
                      reader: DailyDigest::Reader.new,
                      web_config_loader: Hive::Config.method(:load_global_web),
-                     browser_opener: nil, stdout: $stdout)
+                     browser_opener: nil, task_links: nil, stdout: $stdout)
         @date = date
         @project = project
         @json = json
@@ -28,6 +29,7 @@ module Hive
         @web_config_loader = web_config_loader
         @browser_opener = browser_opener || method(:open_browser)
         @stdout = stdout
+        @task_links = task_links || DailyDigest::TaskLinks.new
         @emitted = false
       end
 
@@ -68,21 +70,13 @@ module Hive
       def public_payload(view)
         interval = view["interval"].is_a?(Hash) ? view.fetch("interval") : view
         status = view.fetch("reader_status", "ok")
-        lifecycle = status == "missing" ? "missing" : view.fetch("lifecycle", status)
-        completeness = if %w[missing pruned].include?(lifecycle)
-          "unknown"
-        else
-          view["view_completeness"] || view["effective_completeness"] ||
-            view["completeness"] || "unknown"
-        end
-        content = if %w[missing pruned].include?(lifecycle)
-          "unknown"
-        else
-          view["effective_content"] || view["content"] || "unknown"
-        end
+        state = DailyDigest::PublicView.state(view)
+        lifecycle = state.fetch("lifecycle")
+        completeness = state.fetch("completeness")
+        content = state.fetch("content")
         local_date = view["local_date"] || interval["local_date"] || normalized_requested_date
 
-        {
+        @task_links.validate_rows!({
           "schema" => SCHEMA,
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(SCHEMA),
           "ok" => true,
@@ -125,7 +119,7 @@ module Hive
           "precoverage" => view.fetch("precoverage", false) == true,
           "pruned_at" => view["pruned_at"],
           "web_url" => web_url(local_date, @project || view["selected_project"])
-        }
+        })
       end
 
       def normalized_requested_date
@@ -219,14 +213,16 @@ module Hive
       def render_items(rows)
         @stdout.puts("\nProject activity (#{rows.length})")
         rows.group_by { |row| row["project"] || "Historical project" }
-            .sort_by { |project, _| project.to_s }
             .each do |project, items|
           @stdout.puts("#{safe(project)}")
           items.sort_by { |row| [ row["occurred_at"].to_s, row["fact_id"].to_s ] }.each do |row|
             task = row["task_slug"] ? " · #{safe(row['task_slug'])}" : ""
             link = item_link(row)
+            outcome = DailyDigest::PublicView.outcome_label(row)
+            outcome = outcome ? " · #{safe(outcome)}" : ""
             @stdout.puts(
-              "- #{safe(short_time(row['occurred_at']))} #{safe(row['summary'] || row['kind'])}#{task}#{link}"
+              "- #{safe(short_time(row['occurred_at']))} #{safe(row['summary'] || row['kind'])}" \
+              "#{outcome}#{task}#{link}"
             )
           end
         end

@@ -23,6 +23,7 @@ require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/daily_digest_close_scheduler"
 require "hive/daemon/daily_digest_delivery_scheduler"
+require "hive/daily_digest/hold_observer"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_fix_admission_scheduler"
@@ -93,6 +94,7 @@ module Hive
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
+                     digest_hold_observer: Hive::DailyDigest::HoldObserver.new,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      runtime_ready_callback: nil,
@@ -111,6 +113,7 @@ module Hive
         @answer_digest_scheduler = answer_digest_scheduler
         @daily_digest_close_scheduler = daily_digest_close_scheduler
         @daily_digest_delivery_scheduler = daily_digest_delivery_scheduler
+        @digest_hold_observer = digest_hold_observer
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
         @attempt_reconciler = attempt_reconciler
@@ -1920,6 +1923,9 @@ module Hive
       end
 
       def observe_operational_disposition(row, decision:, owner:, reason:, **details)
+        @digest_hold_observer&.record(
+          row, decision: decision, owner: owner, reason: reason, **details
+        )
         return unless @operational_snapshot
 
         @operational_snapshot.observe(

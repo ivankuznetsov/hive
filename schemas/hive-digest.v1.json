@@ -105,6 +105,7 @@
         "observed_at": { "type": ["string", "null"] },
         "source": { "type": ["string", "null"] },
         "task_url": { "type": ["string", "null"] },
+        "historical": { "type": ["boolean", "null"] },
         "details": { "$ref": "#/$defs/FactDetails" },
         "pr": { "anyOf": [{ "$ref": "#/$defs/PullRequest" }, { "type": "null" }] }
       }
@@ -123,7 +124,8 @@
         "state": { "type": ["string", "null"] },
         "waiting_since": { "type": ["string", "null"] },
         "waiting_age_seconds": { "type": ["integer", "null"], "minimum": 0 },
-        "task_url": { "type": ["string", "null"] }
+        "task_url": { "type": ["string", "null"] },
+        "historical": { "type": ["boolean", "null"] }
       }
     },
     "Gap": {
@@ -168,7 +170,6 @@
         "marker": { "$ref": "#/$defs/DetailValue" },
         "to_stage": { "$ref": "#/$defs/DetailValue" },
         "question_id": { "$ref": "#/$defs/DetailValue" },
-        "answer_id": { "$ref": "#/$defs/DetailValue" },
         "approval": { "$ref": "#/$defs/DetailValue" },
         "decision": { "$ref": "#/$defs/DetailValue" },
         "outcome": { "$ref": "#/$defs/DetailValue" },

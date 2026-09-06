@@ -76,7 +76,22 @@ class DigestSendCommandTest < Minitest::Test
       delivery: FakeDelivery.new(nil, failure, [])
     )
     assert_raises(Hive::DailyDigest::Delivery::NotClosed) { command.call }
-    assert_equal "not_closed", JSON.parse(output.string).fetch("error_kind")
+    not_closed = JSON.parse(output.string)
+    assert_equal "not_closed", not_closed.fetch("error_kind")
+    assert_equal "hive digest refresh --date 2026-08-30", not_closed.fetch("remediation")
+    assert_empty schema.validate(not_closed).to_a
+
+    output = StringIO.new
+    failure = Hive::DailyDigest::Delivery::DeliveryFailed.new("failed")
+    command = Hive::Commands::DigestSend.new(
+      date: "2026-08-30", json: true, output: output,
+      delivery: FakeDelivery.new(nil, failure, [])
+    )
+    assert_raises(Hive::DailyDigest::Delivery::DeliveryFailed) { command.call }
+    failed = JSON.parse(output.string)
+    assert_equal Hive::DailyDigest::DeliveryLedger::MAX_AUTOMATIC_ATTEMPTS,
+                 failed.fetch("automatic_retry_limit")
+    assert_empty schema.validate(failed).to_a
   end
 
   def test_invalid_date_and_unexpected_error_are_typed

@@ -78,6 +78,10 @@ not be proven. Malformed, absent, unreadable, or oversized metadata does not
 hide a live task; the row falls back to its bounded folder identity and reports
 `metadata_status`.
 
+The compact producer loads the task-lease repository directly before deriving
+its lock payload limit, so isolated `hive status --json` loads do not depend on
+another command having initialized that repository first.
+
 Every returned task has `status: "running"`, `action: "agent_running"`, and
 `liveness.running: true`; `liveness.source` says which process observation
 proved it. V1 deliberately emits `marker: null` rather than reading state

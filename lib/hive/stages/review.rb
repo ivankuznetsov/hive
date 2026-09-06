@@ -351,7 +351,7 @@ module Hive
                        status: :review_error }
             end
 
-            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
+            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches, cfg: cfg)
               if worktree_dirty?(worktree_path)
                 Hive::Markers.set(task.state_file, :review_error,
                                   phase: :resume, reason: "approval_dirty_worktree", pass: pass)
@@ -2497,7 +2497,8 @@ module Hive
       end
 
       # U5 — check whether reviews/fix-guardrail-NN.md has been
-      # user-approved for the given pass. Approved = every checkbox
+      # ready to resume for the given pass. Active findings require approval;
+      # the retired default lockfile rule does not. Approved = every active checkbox
       # line is `[x]` AND (when `expected_matches:` is supplied) the
       # checkbox count matches what the runner originally wrote.
       # Returns false for: file absent, header-only file (zero
@@ -2523,7 +2524,7 @@ module Hive
       # `:review_waiting reason=fix_guardrail` for the same pass. The
       # helper itself does not check the marker — it is a pure file
       # inspector. The orchestrator guards the call site.
-      def fix_guardrail_approved?(ctx, expected_matches: nil)
+      def fix_guardrail_approved?(ctx, expected_matches: nil, cfg: {})
         path = File.join(
           ctx.task_folder,
           "reviews",
@@ -2533,9 +2534,11 @@ module Hive
 
         checkbox_re = /^\s*-\s+\[([ xX])\]\s+/
         checked_count = 0
+        lockfile_rule = FixGuardrail.resolve_patterns(cfg).key?(:dependency_lockfile_change)
         File.foreach(path) do |line|
           next unless (m = line.match(checkbox_re))
-          return false if m[1] == " "
+          retired_lockfile = !lockfile_rule && line[m.end(0)..].start_with?("dependency_lockfile_change:")
+          return false if m[1] == " " && !retired_lockfile
 
           checked_count += 1
         end

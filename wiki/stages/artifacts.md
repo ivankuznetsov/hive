@@ -16,6 +16,13 @@ rework, or blocks every claim and supported exclusion. Legacy
 Hivebox screenshots and recordings remain visible diagnostics but never establish
 completion authority.
 
+Codex capture resolves its filesystem runtime root through the shared managed
+executable provenance probe, not by scanning PATH for native-looking binaries.
+The npm launcher can execute a vendor binary outside PATH; admitting a different
+installation prevents its sandbox helper from starting and leaves the producer
+unable to capture any evidence. Empty evidence remains invalid, not a successful
+capture or an approval request.
+
 ## Preconditions
 
 1. The task arrives from `6-review` with `REVIEW_COMPLETE` when using

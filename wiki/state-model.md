@@ -606,13 +606,20 @@ its referenced Fix receipt as the progress baseline. An unchanged diff and
 unchanged validation-command plan cannot produce a new Fix receipt, while a
 patch change or validation-plan correction can. A completed route intent remains
 replayable so a crash after the folder move is reconciled from either the old
-caller path or the new location. Parked outcomes expose no custom operational
+caller path or the new location. Blocked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.
 
-`reject`, `blocked`, and `escalate` are parked non-terminal outcomes. Escalation
+`blocked` remains parked and non-terminal. `reject` and `escalate` dispatch the
+normal receipt-gated `approve` transition directly to `6-done`, retaining
+`rejected` or `escalated` as the archived outcome rather than implying publication.
+Existing parked rejections and escalations become eligible on the next status
+scan; no fresh agent decision or separate cleanup queue is needed. Escalation
 uses a stable source fingerprint to capture one ordinary coding task and stores
 reciprocal controller-owned relations on both tasks. A crash after capture but
-before either link is repaired reuses the same successor. No issue record or
+before either link is repaired reuses the same successor. Before archiving, the
+transition completes that idempotent handoff for the exact current decision;
+handoff failure leaves the origin active for retry. Only the successor remains
+active after the move. No issue record or
 GitHub mutation is part of this state machine.
 
 Publish is a deterministic stage after an exact current Review `publish`
@@ -638,8 +645,10 @@ branch advancement does not rewrite the immutable creation-base commit.
 
 The stage writes `pr.md` and one strict canonical publication receipt before
 `StageTransition` may move the task from `5-publish` to `6-done`. Done projects
-as current and archived only when that receipt matches the current task and
-evidence generation. Worktree cleanup follows receipt durability; failure is a
+as current and archived when that receipt matches the current task and
+evidence generation, or an exact current rejection, linked escalation, or valid
+evidence closure authorizes terminal entry. Worktree cleanup follows publication
+receipt durability; failure is a
 bounded diagnostic and cannot revoke completion. Publication performs no LLM,
 issue, edit, close, ready, or merge operation.
 

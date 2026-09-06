@@ -58,19 +58,47 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
-The default fast loop for implementation is `bundle exec rake coverage:changed` (or the
-equivalent focused files via `bin/test`). It maps git-diff-touched `lib/`
-sources to their mirrored test files, runs only those, and enforces exact
-line coverage on the changed sources; the global 100% gate stays CI's job.
-Mapping accepts only mirrored paths or the explicit override table in
-`test/support/changed_coverage.rb`; an unmapped or ambiguous basename fails
-loudly instead of running a plausibly unrelated test. `HIVE_COVERAGE_BASE`
-overrides the merge base.
+Use `bin/test --changed --list` to inspect selection, then `bin/test --changed`
+for the implementation loop. Selection includes branch changes against the merge
+base, staged/unstaged edits, untracked files, and deletions. Changed test files
+run directly. Ruby sources use mirrored tests, exact require references, or
+nearest owning facade tests; unmapped sources fall back visibly to the root
+suite. Shared infrastructure selects the offline root, component, and Rails
+suites. Documentation-only changes select no tests. Rails and component tests
+run in separate processes with their own loaders; Rails uses its own bundle.
+This is focused feedback, not proof of complete transitive dependency coverage.
+The full CI gate remains mandatory.
 
 ```bash
-bundle exec rake coverage:changed                         # locked bundle + focused exact coverage
-bin/test test/unit/a_test.rb test/integration/b_test.rb   # every named file, with a plain-Ruby fallback
+bin/test --changed --list                    # inspect files, commands, fallback reasons
+bin/test --changed --base origin/main        # run selected tests
+bin/test test/unit/a_test.rb test/integration/b_test.rb
+bin/test --all                              # full local suite, two worker processes
+HIVE_TEST_WORKERS=4 bin/test --all           # explicit maximum of four workers
+bundle exec rake coverage:changed           # exact coverage on changed lib sources
 ```
+
+`bin/test --all` invokes `rake test:parallel`, preserving the default root
+manifest and the standalone Agent CLI Runtime suite. Workers have separate
+processes and short private temporary directories outside Git checkouts, so
+Unix sockets and disposable repository discovery behave normally. A per-user
+advisory lock serializes these
+parallel suite invocations across worktrees; it does not constrain unrelated
+Ruby commands or serial coverage runs. Worker logs and Minitest summaries live
+under `tmp/test-parallel-*`, alongside PID-bound result receipts. A zero exit
+without a receipt fails; filtered workers may be empty only if the aggregate
+contains actual tests and assertions. Interrupts terminate owned process groups,
+including descendants that ignore SIGTERM. Workers
+are bounded to 1–4 (`HIVE_TEST_WORKERS`, default 2). `TESTOPTS` forwards Minitest
+options. `rake test` remains the serial compatibility/debugging command.
+
+`coverage:changed` reports only selected `lib/` sources, disables full-catalog
+preloading and automatic child reports, and merges subprocess evidence once.
+Unloaded selected sources and corrupt resultsets still fail. Reports use unique
+`coverage/changed-*.json` names. It does not replace the general changed-test
+selector for test-only, component, or Rails work. `HIVE_COVERAGE_BASE` overrides
+the comparison base. Global CI coverage retains the complete source catalog and
+its exact 100% threshold.
 
 The plain-Ruby fallback clears inherited Bundler activation before
 launching the `ruby` selected by `PATH`. That matters when `bin/test` is itself
@@ -182,9 +210,11 @@ as named gates. Exhaustive coverage is collected by six deterministic
 test-file shards and merged once by the exact coverage gate. The first shard
 preloads the complete `lib/` catalog so never-required source files remain
 visible as unloaded, while the other five stay lazy to avoid redundant
-coverage state in forked subprocesses. Shard membership is a greedy
-byte-balanced partition of the test-file list, so editing the size of any test
-file can move unrelated files between shards. A test therefore has to require
+coverage state in forked subprocesses. Shard membership uses deterministic
+longest-runtime-first assignment from `test/support/shard_timings.json`. Unknown
+files use the measured median; a missing or invalid timing table falls back to
+file bytes. A timing refresh or changed manifest can move files between shards.
+A test therefore has to require
 every production file it depends on rather than relying on a co-running file to
 load it: requiring only a nested file such as
 `hive/commands/babysit/service_installer` opens `Hive::Commands::Babysit` as a
@@ -396,9 +426,12 @@ Ruby version, shard index/count, exact test-file partition, and complete list
 of process-result files. Shard zero also runs the Agent CLI Runtime
 component suite and loads every source file, which preserves unloaded-file
 detection without repeating that fixed catalog cost in every collector. The
-partition begins with four source-byte-balanced groups, then splits the third
-and fourth groups after hosted measurements identified them as the two long
-poles; the first two groups remain stable. The downstream `coverage:report`
+partition uses the same runtime partitioner as the local parallel runner.
+The checked-in timing table is a reviewed snapshot of nightly three-seed means;
+`script/flake_sweep_report.rb` emits replacement `shard-timings.json` artifacts.
+Refresh the table deliberately and revalidate all six partitions; required CI
+never downloads a moving timing table. Nightly checkout fetches full history and
+tags because historical-baseline tests need both. The downstream `coverage:report`
 job retains each artifact in its own `coverage-shard-N` directory, rejects
 missing, duplicate, foreign, empty, corrupt, or unlisted inputs, merges only
 the manifest-listed results, and applies the same exact 100% gate. The

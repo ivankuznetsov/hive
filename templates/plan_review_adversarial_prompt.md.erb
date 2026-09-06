@@ -104,3 +104,8 @@ coverage row for every requested item; statuses are `requested`, `completed`,
 `failed`, `unsupported`, or `waived`. Outcomes are `success`,
 `partial_coverage`, `unsupported`, `provider_limit`, `timeout`,
 `retryable_failure`, or `terminal_failure`.
+`selected_lenses` contains only identifier strings matching
+`[a-z][a-z0-9_]{0,63}`; convert natural names to snake_case. Set
+`residual_evidence` to `[]` for this adversarial review. Typed residual rows are
+reserved for the later disposition-verification request; general observations
+do not belong in that field.

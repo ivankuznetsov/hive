@@ -131,9 +131,16 @@ module Hive
           SCRUBBED_CHILD_ENV
         end
       end
+      support = Hive::AgentSupport.for(@profile)
+      controller_environment_scrub = if support&.respond_to?(:controller_environment_scrub)
+        support.controller_environment_scrub
+      else
+        {}
+      end
       @child_environment = @child_environment
         .merge(@launch_environment)
         .merge(@profile.subscription_environment)
+        .merge(controller_environment_scrub)
         .freeze
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =

@@ -10,6 +10,33 @@ require "hive/task_meta"
 module Hive
   module Stages
     module Plan
+      DURABLE_CHECKPOINT = <<~MARKDOWN.freeze
+        # Plan checkpoint
+
+        > Hive created this non-terminal checkpoint before starting the planner.
+        > Replace the placeholders with the researched plan as work progresses.
+
+        ## Overview
+
+        _Planner checkpoint: pending._
+
+        ## Requirements Trace
+
+        _Planner checkpoint: pending._
+
+        ## Scope Boundaries
+
+        _Planner checkpoint: pending._
+
+        ## Implementation Units
+
+        _Planner checkpoint: pending._
+
+        ## Risks
+
+        _Planner checkpoint: pending._
+      MARKDOWN
+
       module_function
 
       def run!(task, cfg)
@@ -31,6 +58,7 @@ module Hive
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
+        ensure_durable_checkpoint!(task)
         result = spawn_plan_agent(task, cfg, prompt, profile)
         marker = Hive::Markers.current(task.state_file)
         adopt_plan_dependency!(task, marker)
@@ -41,6 +69,14 @@ module Hive
           commit: action_for(marker.name), status: marker.name,
           plan_review: review&.summary
         }
+      end
+
+      # Seed before Agent.run! appends AGENT_WORKING. Provider errors then
+      # replace only that trailing marker, so the next autonomous attempt sees
+      # a structured artifact instead of another empty file. Existing plan or
+      # feedback bytes always win; this helper is deliberately idempotent.
+      def ensure_durable_checkpoint!(task)
+        Hive::Markers.seed_body_if_empty(task.state_file, DURABLE_CHECKPOINT)
       end
 
       # A plan that declares `depends_on` in its frontmatter is stating a real

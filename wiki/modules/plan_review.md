@@ -84,6 +84,21 @@ ambient OpenCode configuration does not contain the plugin. Provider selection
 therefore cannot pass configuration and runtime probing only to fail later
 because the review skill contract omitted or ignored that supported host.
 
+Primary and adversarial result prompts spell out the machine-only fields that
+are easy for a natural-language reviewer to misread: `selected_lenses` uses
+snake_case identifiers and `residual_evidence` stays empty until disposition
+verification. A malformed reviewer result is retryable within the existing
+bounded attempt budget; plan or snapshot mutation remains terminal. The
+adapter-contract version participates in the policy fingerprint, so shipping a
+corrected prompt/parser contract gives an unchanged plan a fresh review instead
+of replaying a verdict Hive never successfully parsed.
+
+The disposable revision workspace starts with a controller-owned, non-terminal
+copy of the immutable input plan. Long-form planners edit that checkpoint in
+place instead of holding a replacement document until their first full write.
+Only a candidate ending in `<!-- COMPLETE -->` is accepted or salvaged, so the
+seed can preserve useful progress without authorizing an unchanged revision.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok
@@ -126,8 +141,9 @@ adversarial route with the exact old selected-lens diagnostic is classified as
 runnable and receives one versioned recovery reset; the daemon can therefore
 rerun each affected initial reviewer leg automatically after upgrade. Missing
 diagnostic provenance is accepted only for historical records. Current adapter
-receipts distinguish parser failures from reviewer- or runner-authored
-diagnostics, so a reviewer cannot request this migration retry by copying the
+receipts distinguish parser failures, including retryable malformed reviewer
+output, from reviewer- or runner-authored diagnostics, so a reviewer cannot
+request this migration retry by copying the
 old text. The reset is one-time, so a genuinely malformed current-contract
 result remains terminal instead of looping. Verification output uses the new
 grammar but is not eligible for the legacy reset, preserving the existing

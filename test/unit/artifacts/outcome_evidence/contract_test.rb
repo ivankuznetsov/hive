@@ -216,6 +216,52 @@ class OutcomeEvidenceContractTest < Minitest::Test
     assert_match(/cannot accept a claim without admitted proof/, error.message)
   end
 
+  def test_wrong_proof_kind_can_be_durably_revised_but_never_accepted
+    requirement = Contract.requirement!(
+      implementation: { "changed_paths" => %w[app/checkout.rb] },
+      claims: [
+        claim(
+          "claim-flow", "A buyer can finish checkout and see confirmation.",
+          "video", %w[app/checkout.rb]
+        )
+      ],
+      exclusions: [],
+      inference: { "context_id" => "inference-1", "agent" => "claude" }
+    )
+    evidence = [
+      {
+        "kind" => "screenshot", "claims" => [ "claim-flow" ],
+        "representations" => [ { "sha256" => "a" * 64 } ]
+      }
+    ]
+    actors = {
+      producer: { "context_id" => "producer-1", "agent" => "pi" },
+      reviewer: { "context_id" => "reviewer-1", "agent" => "pi" }
+    }
+    output = {
+      "review_scope_hashes" => [ "a" * 64 ],
+      "verdicts" => [
+        {
+          "target_id" => "claim-flow", "verdict" => "revise",
+          "reason" => "The screenshot cannot prove the required temporal checkout transition."
+        }
+      ]
+    }
+
+    review = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "revise", review.fetch("status")
+
+    output.fetch("verdicts").first["verdict"] = "accepted"
+    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+      Contract.review!(
+        requirement: requirement, evidence: evidence, **actors, output: output
+      )
+    end
+    assert_match(/requires video proof, not screenshot/, error.message)
+  end
+
   def test_rejects_secret_shaped_semantic_claims_exclusions_and_verdicts
     secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     input = {

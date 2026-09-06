@@ -63,6 +63,7 @@ module Hive
       end
 
       def support_for(profile) = Hive::AgentSupport.for(profile)
+      def default_evidence_producer = lookup(:codex)
 
       def logged_in?(name, home: nil)
         # Probe the specific credential artifact each CLI writes on a

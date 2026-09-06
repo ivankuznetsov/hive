@@ -90,6 +90,47 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
   end
 
+  def test_project_server_gateway_is_controller_owned_and_attempt_scoped
+    toolkit = Hive::Artifacts::CaptureToolkit.new
+    proxy = Struct.new(:app_port) do
+      def close = true
+    end.new(45_678)
+    server = Object.new
+    starts = []
+    closed = []
+    server.define_singleton_method(:start!) do |argv|
+      starts << argv
+      {
+        "driver" => "hive-project-server", "status" => "ready",
+        "app_port" => 45_678, "app_endpoint" => "http://127.0.0.1:45678"
+      }
+    end
+    server.define_singleton_method(:close) { closed << true }
+    factory_args = nil
+    factory = lambda do |source_root:, port:, runtime_overlay_root:|
+      factory_args = [ source_root, port, runtime_overlay_root ]
+      server
+    end
+    toolkit.instance_variable_set(:@source_root, Dir.pwd)
+    toolkit.instance_variable_set(:@capture_proxy, proxy)
+
+    response = with_replaced_singleton_method(
+      Hive::Artifacts::ManagedProjectServer, :new, factory
+    ) do
+      toolkit.send(
+        :handle_capture_request,
+        "operation" => "server", "argv" => [ "bin/rails", "server" ]
+      )
+    end
+
+    assert_equal true, response.fetch("ok")
+    assert_equal "ready", response.dig("payload", "status")
+    assert_equal [ Dir.pwd, 45_678, nil ], factory_args
+    assert_equal [ [ "bin/rails", "server" ] ], starts
+    toolkit.close
+    assert_equal [ true ], closed
+  end
+
   def test_visual_receipt_uses_only_managed_agent_browser_and_media_preflight
     Dir.mktmpdir("hive-capture-toolkit-generic") do |root|
     entry = FakeBrowser.new(
@@ -107,11 +148,19 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       "tesseract" => "/usr/bin/tesseract", "env" => "/usr/bin/env"
     }
     browser_commands = []
+    browser_preflight_response = nil
     toolkit = Hive::Artifacts::CaptureToolkit.new(
       browser_bundle: bundle, tool_resolver: ->(name) { tools[name] },
       hive_executable: "/opt/hive/bin/hive",
       runtime_resolver: method(:fake_codex_runtime),
-      browser_command_runner: ->(environment, argv) { browser_commands << [ environment, argv ] }
+      browser_command_runner: lambda do |environment, argv|
+        browser_commands << [ environment, argv ]
+        if argv[-2] == "open"
+          browser_preflight_response = proxy_request(
+            environment.fetch("AGENT_BROWSER_PROXY"), argv.last
+          )
+        end
+      end
     )
 
     receipt = toolkit.prepare!(
@@ -166,7 +215,13 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
                  toolkit.launch_environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")
     refute toolkit.launch_environment.key?("HOME")
     refute toolkit.launch_environment.key?("AGENT_BROWSER_EXECUTABLE_PATH")
-    assert_equal %w[snapshot -i], browser_commands.first.last.last(2)
+    assert_equal "open", browser_commands.first.last[-2]
+    assert_equal receipt.dig("web", "origin"), browser_commands.first.last.last
+    assert_includes browser_preflight_response, "200 OK"
+    assert browser_preflight_response.end_with?("<!doctype html>")
+    app_endpoint = URI(receipt.dig("web", "app_endpoint"))
+    released_port = TCPServer.new(app_endpoint.host, app_endpoint.port)
+    released_port.close
     toolkit.close
     refute File.exist?(socket_root)
     refute File.exist?(mailbox_root)
@@ -308,13 +363,28 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
   end
 
+  # Bubblewrap is absent on some supported hosts (CI included), so the receipt
+  # plumbing is proven against the injected sandbox seam here and the read-only
+  # source boundary -- the guarantee only bubblewrap can enforce -- is proven by
+  # the bubblewrap-gated test below.
   def test_terminal_capture_is_controller_executed_and_receipted
     Dir.mktmpdir("hive-capture-toolkit-terminal") do |root|
       source = File.join(root, "source")
       work = File.join(root, "work")
       FileUtils.mkdir_p(source)
+      sandbox_arguments = nil
+      sandbox_closed = false
+      sandbox = Object.new
+      sandbox.define_singleton_method(:command_argv) do |_argv|
+        [ RbConfig.ruby, "-e", "puts 'captured'" ]
+      end
+      sandbox.define_singleton_method(:close) { sandbox_closed = true }
       toolkit = Hive::Artifacts::CaptureToolkit.new(
-        runtime_resolver: method(:fake_codex_runtime)
+        runtime_resolver: method(:fake_codex_runtime),
+        project_sandbox_factory: lambda do |**attributes|
+          sandbox_arguments = attributes
+          sandbox
+        end
       )
       toolkit.prepare!(
         kinds: [ "terminal" ], task_root: root, source_root: source,
@@ -324,11 +394,14 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       out, = capture_io do
         Hive::Commands::Evidence.new(
           "terminal", "proof", json: true,
-          command: [ RbConfig.ruby, "-e", "puts 'captured'" ],
+          command: [ "/bin/sh", "-c", "echo captured" ],
           environment: toolkit.launch_environment
         ).call
       end
       payload = JSON.parse(out)
+      assert_equal 0, payload.fetch("exit_status")
+      assert_equal source, sandbox_arguments.fetch(:source_root)
+      assert sandbox_closed
       candidate = [
         {
           "kind" => "terminal", "representations" => payload.fetch("representations")
@@ -342,6 +415,43 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
         toolkit.verify_captures!(candidate)
       end
+    ensure
+      toolkit&.close
+    end
+  end
+
+  def test_terminal_capture_denies_source_mutation_inside_the_sandbox
+    skip "bubblewrap is unavailable" unless Hive::InvokedBinary.which("bwrap")
+
+    Dir.mktmpdir("hive-capture-toolkit-terminal-sandbox") do |root|
+      source = File.join(root, "source")
+      work = File.join(root, "work")
+      FileUtils.mkdir_p(source)
+      toolkit = Hive::Artifacts::CaptureToolkit.new(
+        legacy_runtime_resolver: method(:fake_codex_runtime)
+      )
+      toolkit.prepare!(
+        kinds: [ "terminal" ], task_root: root, source_root: source,
+        source_sha: "a" * 40, writable_root: work
+      )
+
+      out, = capture_io do
+        Hive::Commands::Evidence.new(
+          "terminal", "proof", json: true,
+          command: [
+            "/bin/sh", "-c",
+            "(echo forbidden > mutation.txt) 2>/dev/null || true; echo captured"
+          ],
+          environment: toolkit.launch_environment
+        ).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal 0, payload.fetch("exit_status")
+      refute_path_exists File.join(source, "mutation.txt")
+      assert toolkit.verify_captures!(
+        [ { "kind" => "terminal", "representations" => payload.fetch("representations") } ]
+      )
     ensure
       toolkit&.close
     end
@@ -465,6 +575,77 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     app_thread&.join(1)
   end
 
+  def test_capture_proxy_maps_issued_request_origin_metadata_to_the_loopback_app
+    proxy = Hive::Artifacts::CaptureProxy.new
+    app = TCPServer.new("127.0.0.1", proxy.app_port)
+    requests = Queue.new
+    app_thread = Thread.new do
+      2.times do
+        socket = app.accept
+        requests << socket.readpartial(4096)
+        socket.write("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        socket.close
+      end
+    end
+
+    proxy_request(
+      proxy.proxy_url, "#{proxy.origin}/session",
+      method: "POST",
+      headers: "Origin: #{proxy.origin}\r\nReferer: #{proxy.origin}/session/new?step=1\r\n" \
+               "Connection: close\r\n"
+    )
+    proxy_request(
+      proxy.proxy_url, "#{proxy.origin}/session",
+      method: "POST",
+      headers: "Origin: https://accounts.example.test\r\n" \
+               "Referer: not a uri\r\nConnection: close\r\n"
+    )
+
+    forwarded = requests.pop
+    assert_includes forwarded, "Origin: http://127.0.0.1:#{proxy.app_port}\r\n"
+    assert_includes forwarded,
+                    "Referer: http://127.0.0.1:#{proxy.app_port}/session/new?step=1\r\n"
+    refute_includes forwarded, "Origin: #{proxy.origin}\r\n"
+
+    foreign = requests.pop
+    assert_includes foreign, "Origin: https://accounts.example.test\r\n"
+    assert_includes foreign, "Referer: not a uri\r\n"
+  ensure
+    proxy&.close
+    app&.close
+    app_thread&.join(1)
+  end
+
+  def test_capture_proxy_rewrites_only_the_issued_app_redirect_to_the_browser_origin
+    proxy = Hive::Artifacts::CaptureProxy.new
+    app = TCPServer.new("127.0.0.1", proxy.app_port)
+    app_thread = Thread.new do
+      [
+        "http://127.0.0.1:#{proxy.app_port}/setup/operator?step=1",
+        "https://accounts.example.test/login"
+      ].each do |location|
+        socket = app.accept
+        socket.readpartial(4096)
+        socket.write(
+          "HTTP/1.1 302 Found\r\nLocation: #{location}\r\n" \
+          "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        socket.close
+      end
+    end
+
+    response = proxy_request(proxy.proxy_url, "#{proxy.origin}/")
+    foreign = proxy_request(proxy.proxy_url, "#{proxy.origin}/login")
+
+    assert_includes response, "Location: #{proxy.origin}/setup/operator?step=1\r\n"
+    refute_includes response, "Location: http://127.0.0.1:#{proxy.app_port}"
+    assert_includes foreign, "Location: https://accounts.example.test/login\r\n"
+  ensure
+    proxy&.close
+    app&.close
+    app_thread&.join(1)
+  end
+
   private
 
   def fake_codex_runtime(profile)
@@ -472,10 +653,10 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     [ "/managed/codex-runtime" ]
   end
 
-  def proxy_request(proxy_url, target, headers: "Connection: close\r\n")
+  def proxy_request(proxy_url, target, headers: "Connection: close\r\n", method: "GET")
     proxy_uri = URI.parse(proxy_url)
     socket = TCPSocket.new(proxy_uri.host, proxy_uri.port)
-    socket.write("GET #{target} HTTP/1.1\r\nHost: ignored\r\n#{headers}\r\n")
+    socket.write("#{method} #{target} HTTP/1.1\r\nHost: ignored\r\n#{headers}\r\n")
     socket.read
   ensure
     socket&.close

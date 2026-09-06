@@ -136,6 +136,23 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_pi_child_environment_cannot_reach_controller_credential_transports
+    with_tmp_dir do |dir|
+      with_env(
+        "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/run/user/1000/bus",
+        "SSH_AUTH_SOCK" => "/run/user/1000/keyring/ssh"
+      ) do
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: nil,
+          timeout_sec: 5, profile: Hive::AgentProfiles.lookup(:pi)
+        )
+
+        assert_nil agent.child_environment.fetch("DBUS_SESSION_BUS_ADDRESS")
+        assert_nil agent.child_environment.fetch("SSH_AUTH_SOCK")
+      end
+    end
+  end
+
   def test_isolated_child_environment_excludes_ambient_secrets_and_keeps_desktop_context
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -2568,7 +2585,12 @@ class AgentTest < Minitest::Test
 
       with_env(
         "HIVE_PI_BIN" => FAKE_BIN,
-        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event),
+        # Keep the fixture alive after it emits the terminal provider event.
+        # Hive deliberately terminates work once the model says its output was
+        # truncated; without the hang, natural exit and TERM race and make the
+        # asserted process status scheduler-dependent.
+        "HIVE_FAKE_CLAUDE_HANG" => "10"
       ) do
         result = Hive::Agent.new(
           task: task,
@@ -2580,10 +2602,7 @@ class AgentTest < Minitest::Test
           expected_output: output
         ).run!
 
-        # The reader may terminate the process as soon as Pi reports the
-        # output limit, before the fixture reaches its natural zero exit.
-        assert_includes [ 0, -Signal.list.fetch("TERM") ], result[:exit_code]
-        refute result[:timed_out]
+        assert_equal(-Signal.list.fetch("TERM"), result[:exit_code])
         assert_equal :error, result[:status]
         assert_equal "model_output_limit", result[:error_reason]
         assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)

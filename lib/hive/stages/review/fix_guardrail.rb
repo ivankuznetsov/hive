@@ -24,6 +24,16 @@ module Hive
           :pattern_name, :file, :line, :snippet, :severity, :match_sha256
         )
         WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
+        PASSWORD_ASSIGNMENT_PREFIX = /\A.*?\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i
+        DYNAMIC_PASSWORD_LOOKUP = /\A
+          (?=[^\r\n]*(?:\[|\())
+          [A-Za-z_$][A-Za-z0-9_$]*
+          (?:
+            \.[A-Za-z_$][A-Za-z0-9_$]*
+            | \[[^\]\r\n]+\]
+            | \([^\)\r\n]*\)
+          )+
+        \z/x
         module_function
 
         def run!(cfg:, ctx:, base_sha:, head_sha:)

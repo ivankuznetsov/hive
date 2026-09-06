@@ -6,9 +6,9 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 8464
-outside_inventory_net_lines: -8148
-final_lines: 316
+final_inventory_lines: 9189
+outside_inventory_net_lines: -7517
+final_lines: 1672
 final_paths:
 - path: lib/hive/betterleaks.rb
   lines: 26
@@ -16,6 +16,12 @@ final_paths:
   lines: 114
 - path: packaging/betterleaks.rb
   lines: 36
+- path: lib/hive/artifacts/managed_project_server.rb
+  lines: 203
+- path: lib/hive/artifacts/project_command_sandbox.rb
+  lines: 219
+- path: lib/hive/artifacts/runtime_residue_recovery.rb
+  lines: 267
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 96
 - path: lib/hive/attempts/coordination.rb
@@ -64,6 +70,8 @@ final_paths:
   lines: 168
 - path: lib/hive/runtime_control_plane/task_lease_repository.rb
   lines: 307
+- path: lib/hive/stages/review/guardrail_waivers.rb
+  lines: 36
 - path: lib/hive/task_counter.rb
   lines: 44
 - path: lib/hive/task_journal.rb

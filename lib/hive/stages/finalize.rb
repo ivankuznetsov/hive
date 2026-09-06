@@ -305,10 +305,10 @@ module Hive
           end
         end
 
-        return nil if pushed?(worktree_path, branch)
+        return nil if pushed?(worktree_path, branch, cfg: cfg)
 
         push_result = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg)
-        return nil if push_result.success? && pushed?(worktree_path, branch)
+        return nil if push_result.success? && pushed?(worktree_path, branch, cfg: cfg)
 
         # A remote-side auto-rebase (the PR branch rebased onto an advanced
         # base while this worktree stayed on the old base) leaves HEAD
@@ -332,7 +332,7 @@ module Hive
         forced = nil
         if head_supersedes_upstream?(worktree_path, branch)
           forced = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg, force: true)
-          return nil if forced.success? && pushed?(worktree_path, branch)
+          return nil if forced.success? && pushed?(worktree_path, branch, cfg: cfg)
         end
 
         Hive::Markers.set(task.state_file, :error,
@@ -477,10 +477,19 @@ module Hive
         nil
       end
 
-      def pushed?(worktree_path, branch)
-        head, = capture_git(worktree_path, "rev-parse", "HEAD")
-        upstream, = capture_git(worktree_path, "rev-parse", "#{branch}@{u}")
-        !head.to_s.empty? && head == upstream
+      # Managed clones may deliberately fetch only the default branch. In
+      # that layout Git refuses `branch@{u}` for a feature branch even when
+      # the branch config and its old remote-tracking ref both exist. Observe
+      # the exact remote ref instead; finalize cares whether HEAD is published,
+      # not whether the clone's fetch refspec maps that branch locally.
+      def pushed?(worktree_path, branch, cfg:)
+        head, status = capture_git(worktree_path, "rev-parse", "HEAD")
+        return false unless status.success? && !head.to_s.empty?
+
+        remote = Hive::Gh.remote_branch_oid(worktree_path, branch, cfg: cfg)
+        head.casecmp?(remote.to_s)
+      rescue Hive::GhError
+        false
       end
 
       def capture_git(worktree_path, *args)

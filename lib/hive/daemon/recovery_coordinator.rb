@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "time"
 require "hive/agent_limit"
+require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
 require "hive/attempts/repository"
@@ -142,9 +143,9 @@ module Hive
                      safety: Hive::Daemon::AutoRetrySafety.method(:safe_to_retry?),
                      generation_resolver: nil, attempt_store: nil,
                      attempt_store_factory: nil,
-                     runtime_digest: Hive::RuntimeIdentity.source_digest)
+                     runtime_digest: Hive::RuntimeIdentity.source_digest,
+                      runtime_residue_recovery: nil)
         @state_home = state_home
-        @request_queue = dispatch_repository
         @task_resolver = task_resolver || method(:resolve_task)
         @safety = safety.respond_to?(:call) ? safety : safety.method(:safe_to_retry?)
         @generation_resolver = generation_resolver || method(:resolve_generation)
@@ -156,6 +157,9 @@ module Hive
         unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
           raise ArgumentError, "recovery runtime digest is invalid"
         end
+        @request_queue = dispatch_repository
+        @runtime_residue_recovery = runtime_residue_recovery ||
+          Hive::Artifacts::RuntimeResidueRecovery.new.method(:recover)
       end
 
       # The single retry ladder. Every retry in Hive is paced by this, so
@@ -189,7 +193,7 @@ module Hive
       end
 
       def assessment(row, now: Time.now.utc, retry_count: nil)
-        retry_count = durable_retry_count(row) if retry_count.nil?
+        retry_count = retry_count_for_failure(row, marker_attrs(row)) if retry_count.nil?
         observed_at = value(row, :state_file_mtime)
         eligible_at = observed_at && observed_at + retry_delay_sec(retry_count)
         safe, safety_reason = @safety.call(row)
@@ -218,7 +222,7 @@ module Hive
             remediation: value(row, :suggested_command)
           )
         end
-        retry_count = durable_retry_count(row)
+        retry_count = retry_count_for_failure(row, marker_attrs(row))
         assessment = assessment(row, now: now, retry_count: retry_count)
         operator_request = OPERATOR_REQUESTORS.include?(requestor.to_s)
         unless assessment[:retry_at]
@@ -324,6 +328,22 @@ module Hive
               remediation: "take a fresh operational snapshot and retry its action",
               retry_count: retry_count, provider_hint: provider_hint(row)
             )
+          end
+
+          if value(row, :stage) == "7-artifacts" # coding-scoped: runtime residue recovery owns coding artifacts cleanup
+            begin
+              @runtime_residue_recovery.call(
+                task: locked_task, marker: current,
+                intended_stage: value(row, :stage)
+              )
+            rescue Hive::Artifacts::RuntimeResidueRecovery::RecoveryError => e
+              return receipt(
+                "blocked", failure_origin: failure_origin, owner: "hive",
+                reason: "runtime_residue_recovery_failed",
+                remediation: e.message, retry_count: retry_count,
+                provider_hint: provider_hint(row)
+              )
+            end
           end
 
           existing = request_queue.find_recovery(
@@ -1126,6 +1146,21 @@ module Hive
         )
       end
 
+      def retry_count_for_failure(row, attrs)
+        durable = durable_retry_count(row)
+        return durable unless @request_queue
+
+        previous = request_queue.latest_terminal_recovery(
+          project: value(row, :project), slug: value(row, :slug),
+          expected_stage: value(row, :stage), state_home: @state_home
+        )
+        previous_fingerprint = previous&.recovery&.fetch("failure_fingerprint", nil).to_s
+        return durable if previous_fingerprint.empty?
+        return durable if previous_fingerprint == failure_fingerprint(row, attrs)
+
+        0
+      end
+
       def failure_evidence_for(row, retry_count:, marker_attrs:)
         fingerprint = failure_fingerprint(row, marker_attrs)
         previous = request_queue.latest_terminal_recovery(
@@ -1159,7 +1194,8 @@ module Hive
           "provider" => (attrs["provider"] || attrs["provider_account_id"] ||
             value(row, :provider)).to_s,
           "status_code" => (attrs["status_code"] || attrs["status"]).to_s,
-          "message_digest" => Digest::SHA256.hexdigest(normalized_message)
+          "message_digest" => Digest::SHA256.hexdigest(normalized_message),
+          "progress_revision" => dirty_progress_revision(row, attrs)
         ))
       end
 
@@ -1210,6 +1246,27 @@ module Hive
           except_request_id: retry_request_id, state_home: @state_home
         )
         request_queue.fetch(retry_request_id, state_home: @state_home) || request
+      end
+
+      # A dirty-worktree stop is a clean Pi handoff, not proof that the same
+      # work failed again. Bind that failure class to Hive's observed commit
+      # evidence so a newly committed checkpoint starts the short retry ladder
+      # again, while repeated stops at the same revision still converge on the
+      # deterministic-failure park.
+      def dirty_progress_revision(row, attrs)
+        return "" unless attrs["reason"].to_s == "dirty_worktree"
+
+        Array(value(row, :evidence)).reverse_each do |item|
+          next unless item.is_a?(Hash)
+          next unless (item["type"] || item[:type]).to_s == "commit"
+          next unless (item["observation"] || item[:observation]).to_s ==
+                      "dirty_worktree"
+
+          sha = (item["sha"] || item[:sha]).to_s
+          return sha.downcase if sha.match?(/\A[0-9a-f]{40,64}\z/i)
+        end
+
+        ""
       end
 
       def source_receipt_for(marker:, task:, project:)

@@ -506,6 +506,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "queued", receipt.status
       request = Q.fetch("changed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
       assert_equal 1, request.recovery.fetch("identical_failure_count")
       refute_equal "f" * 64, request.recovery.fetch("failure_fingerprint")
     end
@@ -536,6 +538,79 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal Hive::RuntimeIdentity.source_digest, recovery.fetch("runtime_digest")
       assert_equal 1, recovery.fetch("identical_failure_count")
       assert_equal [ "attempt-3" ], recovery.fetch("failure_attempt_history")
+    end
+  end
+
+  def test_dirty_worktree_progress_starts_a_fresh_failure_series
+    attrs = {
+      "reason" => "dirty_worktree", "marker_id" => "marker-progress",
+      "provider" => "pi", "message" => "agent left uncommitted changes",
+      "attempt_id" => "attempt-current"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 6) do |coordinator, row, state_home|
+      old_row = row.to_h.merge("evidence" => [ dirty_commit_evidence("a" * 40) ])
+      old_fingerprint = coordinator.send(:failure_fingerprint, old_row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: 4,
+        failure_fingerprint: old_fingerprint, identical_failure_count: 4,
+        failure_attempt_history: %w[attempt-1 attempt-2 attempt-3 attempt-4]
+      )
+      progressed_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("b" * 40) ]
+      )
+      invalid_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("not-a-revision") ]
+      )
+
+      assessment = coordinator.assessment(progressed_row, now: NOW)
+
+      assert_equal "", coordinator.send(:dirty_progress_revision, invalid_row, attrs)
+      receipt = coordinator.request(
+        row: progressed_row, requestor: "healer", request_id: "progressed", now: NOW
+      )
+
+      assert assessment.fetch(:due)
+      assert_equal NOW - 1, assessment.fetch(:retry_at)
+      assert_equal "queued", receipt.status
+      request = Q.fetch("progressed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
+      assert_equal 1, request.recovery.fetch("identical_failure_count")
+      assert_equal [ "attempt-current" ],
+                   request.recovery.fetch("failure_attempt_history")
+      refute_equal old_fingerprint, request.recovery.fetch("failure_fingerprint")
+    end
+  end
+
+  def test_dirty_worktree_without_progress_remains_an_identical_failure
+    attrs = {
+      "reason" => "dirty_worktree", "marker_id" => "marker-same",
+      "provider" => "pi", "message" => "agent left uncommitted changes",
+      "attempt_id" => "attempt-current"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      observed_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("a" * 40) ]
+      )
+      fingerprint = coordinator.send(:failure_fingerprint, observed_row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: 2,
+        failure_fingerprint: fingerprint, identical_failure_count: 1,
+        failure_attempt_history: [ "attempt-previous" ]
+      )
+
+      receipt = coordinator.request(
+        row: observed_row, requestor: "healer", request_id: "unchanged", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      request = Q.fetch("unchanged", state_home: state_home)
+      assert_equal 3, receipt.retry_count
+      assert_equal 3, request.recovery.fetch("retry_count")
+      assert_equal 2, request.recovery.fetch("identical_failure_count")
+      assert_equal %w[attempt-previous attempt-current],
+                   request.recovery.fetch("failure_attempt_history")
+      assert_equal fingerprint, request.recovery.fetch("failure_fingerprint")
     end
   end
 
@@ -2138,6 +2213,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
 
   private
+
+  def dirty_commit_evidence(sha)
+    { "type" => "commit", "observation" => "dirty_worktree", "sha" => sha }
+  end
 
   def request_for_helpers(recovery: nil)
     Q::Request.new(

@@ -18,8 +18,9 @@ module Hive
     # it advances a separate epoch and leaves ordinary workflow.retry admission
     # to the existing status/action boundary.
     class Evidence
-      SUBCOMMANDS = %w[browser recover rework terminal].freeze
+      SUBCOMMANDS = %w[browser recover rework server terminal].freeze
       GATEWAY_TIMEOUT_SECONDS = 65
+      SERVER_GATEWAY_TIMEOUT_SECONDS = 95
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
 
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
@@ -46,6 +47,7 @@ module Hive
         validate_arguments!
         return capture_terminal if @subcommand == "terminal"
         return run_browser if @subcommand == "browser"
+        return start_server if @subcommand == "server"
 
         task = resolve_task
         project = task.respond_to?(:project_name) ? task.project_name.to_s : @project_filter.to_s
@@ -75,7 +77,7 @@ module Hive
         unless SUBCOMMANDS.include?(@subcommand)
           raise Hive::UsageError,
                 "unknown evidence subcommand #{@subcommand.inspect} " \
-                "(expected: browser, recover, rework, or terminal)"
+                "(expected: browser, recover, rework, server, or terminal)"
         end
         if @subcommand == "browser"
           raise Hive::UsageError, "hive evidence browser requires COMMAND" if @target.empty?
@@ -86,6 +88,10 @@ module Hive
             raise Hive::UsageError, "hive evidence terminal requires a safe capture NAME"
           end
           raise Hive::UsageError, "hive evidence terminal requires COMMAND after --" if @command.empty?
+          return
+        end
+        if @subcommand == "server"
+          raise Hive::UsageError, "hive evidence server requires COMMAND after --" if @target.empty?
           return
         end
         verb = @subcommand == "rework" ? "rework" : "recover"
@@ -127,6 +133,19 @@ module Hive
         raise Hive::UsageError, "browser gateway is unavailable: #{e.message}"
       end
 
+      def start_server
+        response = gateway_request(
+          "operation" => "server", "argv" => [ @target, *@command ]
+        )
+        payload = response.fetch("payload")
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts "hive: project evidence server ready at #{payload.fetch('app_endpoint')}"
+        end
+        payload
+      end
+
       def gateway_request(payload)
         root = @environment["HIVE_EVIDENCE_CAPTURE_MAILBOX"].to_s
         unless File.absolute_path?(root) && File.directory?(root)
@@ -156,7 +175,8 @@ module Hive
           end
           write_gateway_request(writer, source)
         end
-        response = read_gateway_response(reader)
+        timeout = @subcommand == "server" ? SERVER_GATEWAY_TIMEOUT_SECONDS : GATEWAY_TIMEOUT_SECONDS
+        response = read_gateway_response(reader, timeout_seconds: timeout)
         unless response.fetch("ok")
           detail = response["error"] || response["stderr"] || "capture gateway command failed"
           raise Hive::UsageError, detail
@@ -188,8 +208,8 @@ module Hive
         end
       end
 
-      def read_gateway_response(reader)
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + GATEWAY_TIMEOUT_SECONDS
+      def read_gateway_response(reader, timeout_seconds: GATEWAY_TIMEOUT_SECONDS)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
         buffer = +"".b
         loop do
           remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)

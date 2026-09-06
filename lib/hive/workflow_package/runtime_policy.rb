@@ -532,7 +532,7 @@ module Hive
         nil
       end
 
-      def self.sandbox_parent_dirs(paths, excluded:)
+      def self.sandbox_parent_dirs(paths, excluded: [])
         paths.flat_map do |path|
           parents = []
           cursor = File.dirname(path)

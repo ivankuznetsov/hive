@@ -9,7 +9,9 @@ require "timeout"
 require "hive/artifacts/browser_gateway"
 require "hive/artifacts/capture_mailbox"
 require "hive/artifacts/capture_proxy"
+require "hive/artifacts/managed_project_server"
 require "hive/artifacts/managed_web_server"
+require "hive/artifacts/project_command_sandbox"
 require "hive/artifacts/outcome_evidence/proof"
 require "hive/artifacts/terminal_recorder"
 require "hive/config"
@@ -36,7 +38,8 @@ module Hive
 
       def initialize(browser_bundle: nil, tool_resolver: nil, hive_executable: nil,
                      web_server_factory: nil, browser_command_runner: nil,
-                     runtime_resolver: nil)
+                     runtime_resolver: nil, legacy_runtime_resolver: nil,
+                     project_sandbox_factory: nil)
         @browser_bundle = browser_bundle || Hive::Web::BrowserBundle.new
         @tool_resolver = tool_resolver || ->(name) { Hive::InvokedBinary.which(name) }
         @hive_executable = File.expand_path(
@@ -44,7 +47,10 @@ module Hive
         )
         @web_server_factory = web_server_factory
         @browser_command_runner = browser_command_runner || method(:run_browser_command)
-        @runtime_resolver = runtime_resolver
+        @runtime_resolver = runtime_resolver || legacy_runtime_resolver
+        @project_sandbox_factory = project_sandbox_factory || lambda do |**attributes|
+          Hive::Artifacts::ProjectCommandSandbox.new(**attributes)
+        end
         @launch_environment = {}
         @producer_add_dirs = []
         @producer_permission_arguments = nil
@@ -53,6 +59,7 @@ module Hive
         @browser_daemon = nil
         @browser_socket_root = nil
         @browser_state_root = nil
+        @browser_preflight = nil
         @capture_receipts = {}
       end
 
@@ -93,7 +100,7 @@ module Hive
           } : nil,
           "media" => {}
         }
-        producer_profile ||= Hive::AgentProfiles.lookup(:codex)
+        producer_profile ||= Hive::AgentProfiles.default_evidence_producer
         managed = required & CAPTURE_KINDS
         support = Hive::AgentSupport.for(producer_profile)
         capture_interface = support&.respond_to?(:capture_interface_required?) &&
@@ -115,8 +122,14 @@ module Hive
             source_root: source_root, source_sha: source_sha,
             writable_root: writable_root
           )
+          @browser_preflight = start_browser_preflight unless server
+          if !server && support&.respond_to?(:requires_project_runtime_root?) &&
+             support.requires_project_runtime_root?
+            prepare_project_runtime_root
+          end
           @capture_proxy = Hive::Artifacts::CaptureProxy.new(
-            app_port: server&.fetch("app_port", nil)
+            app_port: server&.fetch("app_port", nil) ||
+              @browser_preflight&.fetch(:app_port)
           )
           @launch_environment.merge!(
             "HIVE_EVIDENCE_APP_PORT" => @capture_proxy.app_port.to_s,
@@ -162,14 +175,13 @@ module Hive
           @browser_gateway = Hive::Artifacts::BrowserGateway.new(
             environment: browser_environment, argv_prefix: browser_argv,
             writable_root: writable_root, origin: @capture_proxy.origin,
-            on_publish: method(:record_capture!)
+            on_publish: method(:record_capture!),
+            ffprobe_path: media.fetch("ffprobe")
           ).start!
-          bootstrap_command = if server
-            [ "open", @capture_proxy.origin ]
-          else
-            [ "snapshot", "-i" ]
-          end
-          @browser_command_runner.call(browser_environment, browser_argv + bootstrap_command)
+          @browser_command_runner.call(
+            browser_environment, browser_argv + [ "open", @capture_proxy.origin ]
+          )
+          close_browser_preflight
           receipt["web"] = browser_receipt(entry, server, writable_root)
           receipt["media"] = media
         end
@@ -181,7 +193,7 @@ module Hive
         @producer_add_dirs = [ @capture_mailbox.root ]
         unless support&.respond_to?(:prepare_capture)
           raise Hive::ConfigError,
-                "managed capture evidence does not support producer #{producer_profile.name.inspect}"
+                "managed capture evidence does not support producer #{producer_profile&.name.inspect}"
         end
         browser = (required & VISUAL_KINDS).any?
         preparation = support.prepare_capture(
@@ -267,19 +279,29 @@ module Hive
               begin
                 @managed_web_server&.close
               ensure
-                @capture_proxy&.close
-                remove_browser_state_root
-                @capture_proxy = nil
-                @managed_web_server = nil
-                @browser_gateway = nil
-                @capture_mailbox = nil
-                @browser_close = nil
-                @browser_daemon = nil
-                @browser_socket_root = nil
-                @producer_add_dirs = []
-                @producer_permission_arguments = nil
-                @producer_runtime_policy&.cleanup!
-                @producer_runtime_policy = nil
+                begin
+                  @managed_project_server&.close
+                ensure
+                  begin
+                    close_browser_preflight
+                  ensure
+                    @capture_proxy&.close
+                    remove_browser_state_root
+                    remove_project_runtime_root
+                    @capture_proxy = nil
+                    @managed_web_server = nil
+                    @managed_project_server = nil
+                    @browser_gateway = nil
+                    @capture_mailbox = nil
+                    @browser_close = nil
+                    @browser_daemon = nil
+                    @browser_socket_root = nil
+                    @producer_add_dirs = []
+                    @producer_permission_arguments = nil
+                    @producer_runtime_policy&.cleanup!
+                    @producer_runtime_policy = nil
+                  end
+                end
               end
             end
           end
@@ -306,6 +328,67 @@ module Hive
         @managed_web_server.start!
       rescue Hive::Artifacts::ManagedWebServer::ServerError => e
         raise Hive::ConfigError, "managed Hive Web capture is unavailable: #{e.message}"
+      end
+
+      # A non-Hive web project starts its own application server inside the
+      # producer sandbox. The browser session still has to be proven usable
+      # before that producer is launched. Serve one controller-owned readiness
+      # page on the issued application port for the preflight navigation, then
+      # release the port so the producer can bind the real application.
+      def start_browser_preflight
+        server = TCPServer.new("127.0.0.1", 0)
+        server.listen(8)
+        thread = Thread.new do
+          loop do
+            socket = server.accept
+            serve_browser_preflight(socket)
+          end
+        rescue IOError, Errno::EBADF
+          nil
+        end
+        thread.report_on_exception = false
+        {
+          server: server, thread: thread,
+          app_port: server.local_address.ip_port
+        }
+      rescue SystemCallError
+        server&.close
+        raise
+      end
+
+      def serve_browser_preflight(socket)
+        request = +"".b
+        until request.include?("\r\n\r\n") || request.bytesize >= 64 * 1024
+          break unless IO.select([ socket ], nil, nil, 1)
+
+          chunk = socket.read_nonblock(8192, exception: false)
+          break if chunk.nil?
+          next if chunk == :wait_readable
+
+          request << chunk
+        end
+        socket.write(
+          "HTTP/1.1 200 OK\r\n" \
+          "Content-Type: text/html; charset=utf-8\r\n" \
+          "Content-Length: 15\r\n" \
+          "Connection: close\r\n\r\n" \
+          "<!doctype html>"
+        )
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      def close_browser_preflight
+        return unless @browser_preflight
+
+        @browser_preflight.fetch(:server).close
+        @browser_preflight.fetch(:thread).join(1)
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        @browser_preflight = nil
       end
 
       def hive_web_source?(source_root)
@@ -355,7 +438,7 @@ module Hive
             "open <issued-origin-url>", "snapshot [-i|-c]",
             "click/fill/type/select/wait/get/is/find",
             "screenshot <name>.png [--full|--annotate]",
-            "record start <name>.webm", "record stop"
+            "record start <name>.webm", "record stop within 30 seconds"
           ],
           "media_names" => [ "<name>.png", "<name>.webm" ],
           "origin" => @capture_proxy.origin,
@@ -377,13 +460,29 @@ module Hive
           @browser_gateway.call(request.fetch("argv"))
         when "terminal"
           capture_terminal(request.fetch("name"), request.fetch("argv"))
+        when "server"
+          start_project_server(request.fetch("argv"))
         else
           { "ok" => false, "status" => 64, "error" => "capture operation is not admitted" }
         end
       rescue KeyError, TypeError => e
         { "ok" => false, "status" => 64, "error" => "capture request is invalid: #{e.message}" }
-      rescue Hive::Artifacts::TerminalRecorder::CaptureError, Hive::ConfigError => e
+      rescue Hive::Artifacts::ManagedProjectServer::ServerError,
+             Hive::Artifacts::ProjectCommandSandbox::SandboxError,
+             Hive::Artifacts::TerminalRecorder::CaptureError, Hive::ConfigError => e
         { "ok" => false, "status" => 64, "error" => e.message }
+      end
+
+      def start_project_server(argv)
+        raise Hive::ConfigError, "project evidence server is unavailable" unless
+          @capture_proxy && !@managed_web_server
+
+        @managed_project_server ||= Hive::Artifacts::ManagedProjectServer.new(
+          source_root: @source_root, port: @capture_proxy.app_port,
+          runtime_overlay_root: @project_runtime_root
+        )
+        receipt = @managed_project_server.start!(argv)
+        { "ok" => true, "status" => 0, "payload" => receipt }
       end
 
       def capture_terminal(name, argv)
@@ -397,8 +496,13 @@ module Hive
         ambient = %w[PATH LANG LC_ALL LC_CTYPE TERM COLORTERM TZ].to_h do |key|
           [ key, ENV[key] ]
         end.compact
+        sandbox = @project_sandbox_factory.call(
+          source_root: @source_root, environment: ambient,
+          runtime_overlay_root: @project_runtime_root
+        )
         result = Hive::Artifacts::TerminalRecorder.new(
-          argv: argv, cwd: @source_root, cast_path: cast, review_path: review,
+          argv: sandbox.command_argv(argv), display_argv: argv,
+          cwd: @source_root, cast_path: cast, review_path: review,
           environment: ambient
         ).record!
         result.fetch("representations").each { |representation| record_capture!(representation) }
@@ -409,6 +513,28 @@ module Hive
           "ok" => true, "status" => 0,
           "payload" => { "status" => "captured" }.merge(result)
         }
+      ensure
+        sandbox&.close
+      end
+
+      def prepare_project_runtime_root
+        @project_runtime_root = Dir.mktmpdir("hive-project-runtime-")
+        File.chmod(0o700, @project_runtime_root)
+      end
+
+      def remove_project_runtime_root
+        return unless @project_runtime_root
+
+        stat = File.lstat(@project_runtime_root)
+        unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+          raise Hive::ConfigError, "managed project runtime ownership changed"
+        end
+
+        FileUtils.remove_entry_secure(@project_runtime_root)
+      rescue Errno::ENOENT
+        nil
+      ensure
+        @project_runtime_root = nil
       end
 
       def verify_project_provider!(entry)

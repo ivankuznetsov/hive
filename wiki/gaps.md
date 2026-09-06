@@ -1363,6 +1363,14 @@ installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
 
+## Benchmark egress preflight awaits a live Docker bypass canary (2026-08-27)
+
+Focused tests inject Docker network metadata and prove that strict topology is
+checked before the parallel campaign matrix starts. They do not start a real
+internal network with the packaged CONNECT proxy and attempt direct HTTPS from
+a candidate. Keep this gap open until the packaged CI gate proves direct egress
+fails while the allowlisted proxy route still succeeds end to end.
+
 ## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
 
 Backward `hive approve --to` now rearms descriptor-owned state files across the

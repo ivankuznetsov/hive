@@ -208,7 +208,17 @@ an explicit `HB_HIVE_BIN` override still takes precedence and fails closed.
 Generate and judge quota markers likewise load `Hive::Markers` (and the judge
 cooldown helper) from the campaign's immutable `source/lib`, so a scrubbed
 stage-agent shell cannot silently fall back to an older installed hive-cli gem
-with a different marker API.
+with a different marker API. `HiveBench::CampaignContract` owns the validation
+and argv mapping those two stages share. It resolves a relative `source`
+against the benchmark project root before either stage changes directory,
+requires the marker runtime before generation, and compiles the same Codex
+provider route for initial generation and judge backfill. Judge validation is
+limited to the durable fields it consumes, so a paid historical campaign does
+not become invalid when the current corpus or candidate catalog changes.
+Generate's OpenRouter preflight covers selected Pi and OpenCode candidates, so
+a missing key parks the campaign before any cell starts. A strict campaign also
+inspects its internal Docker network once before launching the parallel matrix;
+only the named CONNECT proxy may already be attached at that boundary.
 
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.

@@ -192,6 +192,7 @@ class WebPackagedBootstrapTest < Minitest::Test
         def failed? = false
         def drifted? = false
         def wire_outcome = "written"
+        def restarted = false
       end
 
       class PackagedSetupInstaller

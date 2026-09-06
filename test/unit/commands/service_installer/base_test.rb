@@ -397,6 +397,24 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  def test_macos_install_reports_written_when_job_is_loaded_but_exits_immediately
+    with_tmp_dir do |dir|
+      installer = TestInstaller.new(
+        host_os: "darwin", home: dir, launchctl_available: true,
+        runner: ->(_argv) { true },
+        status_reader: ->(_argv) { [ "state = waiting\n", true ] }
+      )
+
+      outcome = installer.install!(autostart: true)
+
+      assert_equal :written, outcome.kind
+      assert outcome.success?
+      state = installer.service_lifecycle_state
+      assert state["service_enabled"]
+      refute state["service_running"]
+    end
+  end
+
   def test_service_state_unsupported_platform
     installer = TestInstaller.new(host_os: "sunos", runner: ->(_argv) { true })
 

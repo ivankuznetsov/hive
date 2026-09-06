@@ -778,7 +778,7 @@ failure, and feeds the functional job result into the protected
 duplicate metadata/results, and invalid durations as functional failures. A
 separate `continue-on-error` job downloads the retained report and runs only
 the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
-incidents at or above eleven seconds (including sandbox bootstrap) or a group
+incidents at or above sixteen seconds (including sandbox bootstrap) or a group
 total at or above thirty seconds without blocking the merge. The #9771
 dependency-gate and repository-routing incidents are enabled; four
 sibling-gated fixtures remain pending. The incident index and activation rules

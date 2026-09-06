@@ -31,6 +31,11 @@ selection is not used to skip tests. The local task-capture profile took 16.7s
 versus a nightly 178s mean, so no timeout reductions were made from that mismatch.
 Focused source-to-test mapping cannot establish every transitive consumer;
 shared infrastructure falls back broadly and the full coverage gate remains.
+The incident advisory's sixteen-second per-scenario ceiling is supported by
+two hosted `incident_provider_limit_retry` samples (13.424s and 14.031s) and
+one 15.871s local sample after Git-isolation setup landed. It retains the
+below-thirty-second aggregate cap, but needs a wider hosted sample before it
+can be treated as a stable p95 rather than bounded headroom.
 
 ## Ten-table runtime deployment proof
 
